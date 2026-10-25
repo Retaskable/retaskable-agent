@@ -19,7 +19,7 @@ Built (slice 1). What was `agent/src/claude.ts` is now `agent/src/engines/`, and
   | `prepare(spec)` | nothing | writes the lane's allowlist (section 6) |
   | `reader(spec, id)` | one per session: `line(ev)` gives `rate_limit_event` → usage, `summarize` → events, `result` → the result from `structured_output`; `noResult(code, stderr)` when it exits without one | section 8, with the result extracted from the final message (section 5) |
   | `summarize(ev)` | `summarize.ts`, for reading a run back | section 8 |
-  | `can` | `{ schema: true, cost: true, usage: true, budgetCap: true, sandbox: true, local: true }` | all `false` |
+  | `can` | `{ schema: true, cost: true, usage: true, budgetCap: true, sandbox: true, local: true }` | all `false` (`usage` is a 5-hour window reading, which Cursor never gives; its tokens are on `SessionResult.tokens`, section 7) |
 
 - `SessionSpec` has `engine?: EngineId` (missing means `"claude"`; `EngineId` in `shared/types.ts` is `"claude" | "cursor"`). `Session` and the run's `retaskable_meta` line record it beside the model, so a transcript read back later is parsed by the engine that wrote it (`readTranscripts`) and a resume knows where it started (`startedOn` returns `{ engine, model }`).
 - **Slice 1 changes no behaviour.** The Claude Code engine is the old code moved, and every existing test passes unchanged (their imports point at `engines/index.ts`); `engines/claude.test.ts` tests the Claude Code reader. No config, route or UI change; the only State change is `engine: "claude"` on each session.

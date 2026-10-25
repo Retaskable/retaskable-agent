@@ -39,3 +39,5 @@ Specs about the cloud, the store, the app or the site stay in Retaskable.com. Wh
 Synced with Retaskable.com PR #1848 at commit 844314cf172b71774ab5cff10229f6f10fdcdbbf (engine per lane).
 
 Synced with Retaskable.com PR #1850 at commit c825f06e15c8ce4025715208a57666ecc84f0220 (lanes are the computer's, shared by all its projects).
+
+Synced with Retaskable.com PR #1860 at commit 8a682e8c8ea5f8badc1289933563e43eba926540 (Cursor's token use on the Usage card).
