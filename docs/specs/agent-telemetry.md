@@ -102,6 +102,16 @@ When an anomaly starts the agent prints one line to its console, e.g. `[watchdog
 
 - `State.orchestrator.anomalies`: the open anomalies, oldest first (`Anomaly` in `shared/types.ts`). The agent only sends them; the Expo app words and places them (the Agents screen's "What looks wrong" list, a warning line on an item's page).
 
+### 4.2 Cursor's tokens on the Usage card
+
+Cursor reports no limit or amount left, only each session's tokens, so the computer keeps a total of its own and reports it as a derived result (never a transcript) beside Claude Code's meters, in the snapshot's `usage.cursor` (`CursorUse` in `shared/types.ts`; `MachineStore.cursorUse`, `agent/src/store.ts`):
+
+- `todayTokens`: input plus output tokens of the Cursor sessions that ended today, the same local day as the daily spend (`today()`), every project on the computer together.
+- `weekInputTokens` and `weekOutputTokens`: the same over a **rolling 7 local days**, today included. Claude Code's weekly window comes from its `rate_limit_event` and has a reset time; Cursor gives none, so there is no window to follow.
+- `limitHitAt`: when a Cursor session last hit Cursor's usage limit (ISO), kept until the next hit.
+- Missing until a Cursor session has reported tokens; the card then reads "Usage not reported".
+- Cache read and write counts aren't added, and none of it touches Claude Code's meters, cost or auto concurrency.
+
 ## 5. Reading it back
 
 The first two commands read `.retaskable/projects/*/events/*.jsonl` only (`agent/src/telemetry/report.ts`, run by `scripts/why.ts` and `scripts/agent-report.ts`). `--project <id>` keeps to one project.
