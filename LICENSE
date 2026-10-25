@@ -1,6 +1,8 @@
 Retaskable Agent Source-Available License
 
-Copyright (c) 2026 Retaskable. All rights reserved.
+Copyright (c) 2026 Retaskable Inc. All rights reserved.
+
+Retaskable Inc. ("Retaskable") is a corporation registered federally in Canada and headquartered in British Columbia.
 
 This repository is public so that anyone can see exactly what the Retaskable agent does on their computer and what
 it sends to Retaskable's servers. Publishing the source does not make it open source.
@@ -25,4 +27,7 @@ it sends to Retaskable's servers. Publishing the source does not make it open so
 
 6. Termination. Any use outside these terms ends your permission under this licence automatically.
 
-For any other use, contact Retaskable.
+7. Governing law. This licence is governed by the laws of the Province of British Columbia and the federal laws of
+   Canada that apply there. The courts of British Columbia have exclusive jurisdiction over any dispute about it.
+
+For any other use, contact Retaskable Inc.
