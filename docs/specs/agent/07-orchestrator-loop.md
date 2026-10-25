@@ -1,0 +1,113 @@
+## 7. Orchestrator loop
+
+```
+every pollIntervalSec (default 10):
+  if no config: skip (status "setup")
+  if paused: skip
+  kill any session that's been silent for 20 minutes (watchdog)
+  about once a minute: git fetch, then tell the store what it sees (new spec items and landed items, backlog.md section 15)
+  advance every non-terminal item one step (non-blocking; sessions are child processes)
+  while activeSessions < concurrency and a lane is free:
+      ask the store for the next item or chore (`claim_next`, section 6.7),
+      and start what it hands back
+```
+
+- **Do next (priority):** the store orders the work ([backlog.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/backlog.md) section 6.6), not the agent. An item the human marked "do next" comes back from `claim_next` first, and the agent runs it ahead of everything else: it takes the next free lane, and its sessions (implementer, scouts, final review) don't wait for a concurrency or model slot, like asks. It keeps the priority for later slices until it's done. Its dependencies still apply. Where its spec stands in the queue of spec drafts is the store's too ([spec-queue.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-queue.md)); the agent drafts what it is handed.
+- Only one step per item runs at a time, and only one slice of an item is in flight at a time.
+- Items merge one at a time, and on a shared backlog one computer at a time: the store hands out the merge turn and lock (Retaskable's merge queue, [github-workflow.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/github-workflow.md) section 4.4), and the computer holding it merges through the code host. **The one PR merging** is brought up to date (a merge of the base pushed with no session, section 5) and checked again whenever origin/<base> has moved since its checks ran, holding the turn and lock so nothing else lands meanwhile (two PRs that passed CI apart once merged side by side and broke main together). Open PRs aren't touched by a push to the base, so CI runs once per merge, not once per open PR, and a base that hasn't moved costs only a fetch. Changes waiting behind it are checked together with it in one CI run rather than one after another, and the item holding the turn is asked every 15 seconds while it waits on CI. A project with no CI checks them together in a lane the same way; the turn goes first come, first served, and the item holding it gets the next free lane. It is also brought up to date when it conflicts, or when the code host refuses the merge because the branch rules want it up to date. A base that a merge leaves red is still the fix-main chore's. Only a conflict git can't resolve goes back to `implementing`. The repo's CI cancels a run a newer push to the same PR made out of date, and a PR that only changes docs and Markdown gets the checks that read the docs, not the whole suite. The agent counts a Woodpecker pipeline that runs on pull requests as the repo's CI, as it does a GitHub workflow (`readWoodpecker` and `ciCoverage` in `agent/src/ciCoverage.ts`). Its step has no git credentials, so the changed files come from `CI_PIPELINE_FILES`, not a fetch.
+- The fetch runs about once a minute (`FETCH_EVERY_MS` in `orchestrator.ts`), **while paused** too, at startup, and at once when the agent's own work asks for it (a spec draft approved or discarded, a shoot or Play on phone giving the base checkout back). There is no button for it and no `sync` command ([backlog.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/backlog.md) section 11). A failed fetch puts its error in the snapshot, as the computer's sync state, until the next good one; how the screens show it is the app's ([sync-stays-in-view.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/sync-stays-in-view.md)).
+- **Several projects** (build order several-projects): the loop runs for every project, with lanes per project and one shared pool of sessions, the daily budget and the usage limit, a free slot going round robin between projects with work; Pause stays per project ([projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md) section 5). In `agent/src/pool.ts`: one `Orchestrator` per project over one `Pool` that owns the slots, the session runner, the usage reading, auto concurrency, the local model's check, the daily budget and the restart.
+- **Changing settings** for the same repo applies in place, and running work carries on. Switching to another repo is refused while anything is running.
+- **A new setup starts paused** (the first one, or a switch to another repo). The first sync still runs, so you can check the roadmap, then press Resume.
+- On restart, a session that was running while its process died is resumed by `sessionId` with the prompt "You were interrupted; continue." Spec drafts resume the same way, and an ask that was still thinking is asked again.
+- **Watchdog:** a session that prints nothing for 20 minutes (its project's `tuning.sessionQuietMinutes`) is killed. Its step treats that like an interruption and resumes it, up to 3 times in a row before it goes to a human. A Cursor session is also killed after its own project's `budget.cursorMaxMinutes` (an hour when it isn't set), even while it is still printing, and resumed the same way ([engines.md](../engines.md) section 4).
+- **Event log and stuck-work watchdog** ([agent-telemetry.md](../agent-telemetry.md)): each project appends what the agent does (item state changes, lanes, sessions, checks, reviews, CI, merges, store failures, leases, restarts, a summary each minute) to `.retaskable/projects/<id>/events/<day>.jsonl`, kept 14 days, with no transcript text, prompts or secrets. Every minute plain-code rules look for what looks wrong (a lease held with nothing running, an item in two lanes, idle lanes with work waiting, the same error again and again, an item with no progress, a long restart wait, store writes failing, a step started twice) and report it in the snapshot. `npm run why -- <item>` and `npm run agent-report` read the log back.
+- A session that's **killed without a result** (a restart, a crash) is an interruption, not a failure: the step retries in a minute and resumes it.
+- An item that needs a human **before it has a PR** but has a session has its work pushed to its branch like any waiting item, and **Continue** resumes the session in whichever lane is free.
+- If `claude.exe` can't even start (for example while Claude Code is updating), the step is retried after a minute, up to 3 times, before it goes to `needs_human`.
+- **Usage, not dollars.** On a subscription, what matters is how much of the 5-hour window and the weekly limit is used, and when each resets. The agent reads it from Claude Code (the percentage used when Claude Code reports it, otherwise which side of its warning line, the reset time, and the weekly limit when reported) and puts it in the snapshot; the app shows it ([expo.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/expo.md)). Nothing shows dollar figures.
+- The per-session `budget.*Usd` values are runaway guards (`--max-budget-usd`, in dollar-equivalent), not spending limits.
+- An optional `budget.dailyUsd` cap (0, the default, means none) stops new Claude sessions once it is reached, and the header shows it as paused with the reason. Steps that don't use a model (CI polling, checks, merging) carry on. Cost comes from `total_cost_usd` in each session's result event. A Cursor session reports none, so it isn't added and the cap doesn't stop it ([engines.md](../engines.md) section 7).
+
+### 7.1 Model tiers
+
+Before every `claude -p` call (new or resumed), the orchestrator picks the model from the share of the 5-hour usage limit still left. `local` is the local model (section 7.2), which scouts and chores also use whenever its slot is free; with it off or its server down, the choice in brackets applies:
+
+| 5-hour limit left | Implementer (`<tier>`) | Scouts (`<scoutTier>`) | Drafter, triager (`<midTier>`) | Planner, final reviewer (`<topTier>`) |
+|---|---|---|---|---|
+| ≥ `models.opusAbovePct` (default 50%) | `opus` | `sonnet` | `sonnet` | `opus` |
+| ≥ `models.sonnetAbovePct` (default 20%) | `sonnet` | `sonnet` | `sonnet` | `opus` |
+| ≥ `models.pauseBelowPct` (default 5%) | `local` (`sonnet`) | `local` (`sonnet`) | `local` (`sonnet`) | `opus` |
+| below `models.pauseBelowPct`, or `rejected` | `local` (wait for the reset) | `local` (wait) | `local` (wait) | `local` (wait) |
+
+`<midTier>` is `<tier>` but never Opus (`midTier` in `agent/src/tiers.ts`, 2026-10-22): the drafter and the triager write and read, and Opus is kept for the planner and the final review.
+
+A role on Cursor is not held by that wait: its sessions keep starting, and the Waiting for limit tooltip says "Cursor roles carry on" when any role is on Cursor ([engines.md](../engines.md) section 3.2). Cursor's own usage limit retries after 30 minutes instead, and asks a human after 3 in a row.
+
+**First tries are written on Sonnet** (2026-10-22, `implementerModel` in `agent/src/orchestratorHelpers.ts`): where the table says `opus`, a roadmap item's implementer runs on `sonnet` on its first try. A retry (`attempt` over 1), an item a try-out reopened, or one of size L or XL keeps `opus`, and a tier already below Opus is kept. The final review stays on Opus, so a change written on Sonnet is still read by Opus before it merges. Until then only a fix, a tweak or a size S started on Sonnet, and Opus implementers were about two thirds of October's tokens.
+
+Scouts never run on Opus: their job is to do the reading cheaply so Opus doesn't have to. Near the limit the planner and final reviewer stay on Opus; at the limit they run locally, or wait for the reset without the fallback. Asks use the implementer's tier.
+
+Haiku isn't a tier: Claude Code runs Haiku sessions in `default` permission mode even when asked for `auto` (seen with Claude Code 2.1.283, and again 2026-10-22), and in `claude -p` that refuses edits and most commands. So it runs only read-only sessions that write text from what they're given: release notes, ideas and vetting suggestions (`writerModel` in `agent/src/orchestratorHelpers.ts`), on `haiku` at any tier but `local` (which keeps the local model). Haiku has no slot cap of its own (`modelConcurrency` has no `haiku`), only `concurrency`, and a Cursor role maps it to its model as it does `sonnet`. Subagents a session starts run on `sonnet` (`haiku` in a Haiku session): `CLAUDE_CODE_SUBAGENT_MODEL`, section 6.2.
+
+**Auto concurrency** (`autoConcurrency`, on by default) makes the most of the subscription. Every 5 minutes it compares the recent burn rate of the 5-hour window (the change in its `utilization` over the last half hour, within the current window) with the rate that would reach `targetPct` (default 75%; 95% until 2026-10-22, which left no room for the people using the same subscription by hand) exactly at the reset:
+
+- **Behind pace** (below 85% of the needed rate) and work is waiting for a slot: allow one more session, up to `max` (default 8).
+- **Ahead of pace** (above 115%): allow one fewer, down to `min` (default 1).
+- **The week comes first:** if the weekly limit is more than 10% (`weekMarginPct`) ahead of an even pace through the week, allow one fewer, whatever the window says, but never fewer than 2 (`weekFloor`; or `max`, if lower). Ahead on the week it throttles rather than stalls.
+- **A new window** (the reading's `resetsAt` has moved on since the last pace) goes straight back to `concurrency` (within `min` and `max`), without waiting for the 5-minute step, rather than climbing back one session at a time from where the last window ended. The usual pacing then lowers it if that burns too fast.
+- With no burn rate yet (a fresh window), it leans in one step at a time while work is waiting. Once the target is reached it drops to `min`.
+
+The per-model caps (`modelConcurrency`) still apply on top, and the snapshot carries the reason for the current number.
+
+- **Where the number comes from:** every session's stream-json output starts with a `rate_limit_event`: `{"rate_limit_info": {"status": "allowed", "resetsAt": <epoch s>, "rateLimitType": "five_hour", ...}}`. The latest one is kept in `state.usage`. If there's no reading yet, or the window has reset since the last one, the window is treated as full (`opus`).
+- **Newer Claude Code builds** also report every window under `rate_limit_info.unifiedWindows` (`five_hour` and `seven_day`, each with `utilization` 0–1 and `resetsAt`). When they're there, the 5-hour percentage drives the tiers and the weekly one is reported in the snapshot. Claude Code 2.1.126 doesn't send them. When the weekly limit is what turned a session away (`status: rejected` on `seven_day`), the usage record's reset time is the week's, so nothing is retried at the 5-hour reset into the same wall. A session ended by the limit sends its item back to the shared backlog's queue (shown queued, not building) when nothing was pushed for it; an item with a PR waits, shown paused until the reset. At 95% (`weekCutoffPct`) of the weekly limit used, nothing new starts (a hard cutoff, whatever the 5-hour window says) until the week resets.
+- **It doesn't always carry a percentage.** When it has one (`utilization`), the thresholds above apply. When it only has a status, the tiers go by the status:
+
+  | Status | Implementer | Scouts |
+  |---|---|---|
+  | `allowed` | `opus` | `sonnet` |
+  | `allowed_warning` | `sonnet` | `local` (`sonnet`) |
+  | `rejected` | as below `pauseBelowPct` | |
+- **Waiting near the limit** (without the local fallback) is its own status, `waiting_for_limit`, separate from a manual pause. It resumes by itself at the window's reset time. Running sessions are left to finish.
+- A session that hits the limit mid-run and exits is treated like an interrupted session: the orchestrator resumes it once the window resets (and never sooner than 10 minutes, in case it was a different limit), on the tier picked then. It doesn't move to the local fallback. If a scout hits the limit, the whole review re-runs after the reset, rather than Opus approving without that scout.
+- The tier is picked when a session actually starts (after it gets its slot), not when it's queued. A reading with no reset time expires after 5 hours.
+- **A resumed session stays on the backend it started on** (the model in its transcript's first line). An Anthropic session whose tier is now `local` resumes on `sonnet`, or at the limit waits for the reset; a local session stays local while local is on and up, and otherwise resumes on its Anthropic tier (a local conversation fits there easily, and Claude Code resumes it fine). An Anthropic conversation won't fit the local context.
+- Each session records the model it ran on. It's in the snapshot and the transcript.
+
+### 7.2 Local model
+
+Optionally, a local server that speaks the Anthropic Messages API (`<baseUrl>/v1/messages`), such as llama.cpp, adds capacity that doesn't use the subscription:
+
+- **Extra capacity, at any usage level.** Review scouts and chore implementers (not a playtest fix) take the local slot whenever it's free, beside the Anthropic sessions, and otherwise run on their tier. Each asks when it's granted a slot, so the first to ask gets it and the rest don't wait for it. Both suit a small context: a scout reads only its share of the diff, and a chore is small. Roadmap implementers, the planner, the final reviewer and drafts don't, above the limit.
+- **Fallback.** Near the limit implementers and scouts run on it, and every session does at the limit instead of waiting (the tier table in section 7.1). The first target is Tiel-Coder-35B served by llama.cpp at `http://localhost:11436` as `tiel-coder-35b`.
+
+Retaskable still runs `claude -p` with the same arguments; only a local session's environment changes. There's no SDK, proxy or second runner. Config (section 10):
+
+```json
+"local": { "enabled": false, "baseUrl": "http://localhost:11436", "model": "" }
+```
+
+Missing means off. The computer's settings take it as a toggle plus the URL and model name, and refuse a URL that isn't `http(s)://` or an empty model name when it's on. Changing it applies in place like any settings change (section 7).
+
+- **Is it up?** While it's on, the orchestrator checks `GET <baseUrl>/v1/models` every minute (plain HTTP, 5-second timeout). While that fails, the tiers act as if the fallback were off, and the snapshot says "local down".
+- **Environment.** A local session gets, on top of Retaskable's own environment: `ANTHROPIC_BASE_URL=<baseUrl>`, `ANTHROPIC_AUTH_TOKEN=local`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `<model>` in `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`. It's started with `--model sonnet`, which that environment maps onto the local model. Other sessions get none of it, and a local session doesn't get theirs (section 6.2) but `ENABLE_CLAUDEAI_MCP_SERVERS=false`.
+- **Permissions don't change.** Local sessions run with `--permission-mode auto`, never `--dangerously-skip-permissions` or `bypassPermissions`. Auto mode works against the local server; its classifier requests go there too, so the local model judges its own actions.
+- **One local session at a time.** The server has a single slot (llama.cpp `-np 1`), so the `local` tier is capped at 1 and even priority items and asks wait for it. Local sessions don't count toward `concurrency`, and auto concurrency (section 7.1) ignores them when it judges whether work is waiting, since they don't use the subscription; Anthropic sessions keep running beside one.
+- **No dollar caps.** `--max-budget-usd` isn't passed to local sessions. Claude Code still reports a `total_cost_usd` priced at Anthropic's rates; it's recorded as 0, so local sessions add nothing to today's spend.
+- **No usage limit.** A local session reports no usage, and one that ends with a 429 isn't treated as a limit hit.
+- **Context.** The first server has a 32k context window, so a long implementer session may not fit. Sessions that ran on Anthropic are never resumed locally (section 7.1).
+
+### 7.3 Retaskable's own failures
+
+"Needs help" only ever means a person is really needed. A fault of the agent's own goes back to the queue, and the computer that has it restarts itself (2026-10-22: six items went to Needs help with `Error: Prompt variable {{codeLimits}} not provided`, from an agent running older code than its prompts).
+
+- **An error before any work.** A step that throws while starting a slice, before any session ran (`implementing`, no `implSessionId`, no PR: `beforeWork` in `agent/src/steps.ts`), isn't the person's problem (`ownFailure`, from `runStep`'s catch in `orchestrator.ts`). The error itself goes in the item's timeline.
+  - The item is given back to the queue (`HostedWork.giveBack`), noted "This computer hit a problem of its own before starting, so it handed the item back.", for a healthy computer to claim.
+  - **Then that computer claims nothing new for 30 minutes** (`CLAIM_PAUSE_MS`, `pool.claimPausedUntil`, checked before `claim_next` in `startNext`), so it doesn't take the same item straight back. A restart clears it. Items it already holds carry on.
+  - An error once a session has run still goes to `needs_human` with its error, as before: that session's work may need a person.
+- **Code that changed under a running agent restarts it.** An agent running from a checkout (not a release build) reads the git trees of `agent/`, `shared/` and `prompts/` at `HEAD` as it starts (`rememberCode`, `agent/src/selfUpdate.ts`). After each fetch (about once a minute) it reads them again (`restartIfCodeChanged`), and if they differ (a `git pull`, a branch switch, a commit, or an update it didn't restart for) it asks for a restart with reason `update`. Changes not yet committed don't count.
+- **Claude's sign-in running out is the computer's, not the item's** ([claude-signed-out.md](../claude-signed-out.md), built). A Claude session that ends with Claude Code's own sign-in error (`signedOut`) sets `Pool.claudeSignedOut`: no Claude session starts on that computer, the item waits for the sign-in (`signInWait`, holding no lane) or, with nothing pushed, is given back, and a check once a minute carries everything on once it's signed in again, items left at Needs help for it included.
+- **No new work while an update's restart waits.** `canStartSession` refuses new implementer work while an `update` restart is pending, as for Quit when idle, so nothing starts on the old code. Other restarts let an implementer start, as before (section 4.2).
+- **Triage never leaves "continue with nothing to continue from".** When the triager decides `continue` but there's no PR and no session's pushed work to carry on from (`nothingToContinue`, `agent/src/triage.ts`), the item starts over instead (`retry`, with the triager's instructions as notes), noted "Started over by Claude: there was nothing to continue from".
+- **Every button works from any computer.** An item that needs help and that no session worked on is parked in the shared backlog (`parkFor`), so another computer can take it over. Which computer may press what is the store's and hub's to decide ([claim-while-working.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/claim-while-working.md) section 3.3.4).

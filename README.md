@@ -1,8 +1,8 @@
 # retaskable-agent
 
 The Retaskable agent, rewritten in Rust. It will replace the TypeScript agent in
-[Retaskable.com's `agent/`](https://github.com/Retaskable/Retaskable.com/tree/main/agent). It follows the same spec,
-[docs/specs/agent.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/agent.md), and is ported piece
+[Retaskable.com's `agent/`](https://github.com/Retaskable/Retaskable.com/tree/main/agent). It follows the same spec, trimmed to what belongs on the agent:
+[docs/specs/agent.md](docs/specs/agent.md). Those specs are a snapshot of [Retaskable.com's](https://github.com/Retaskable/Retaskable.com/tree/main/docs/specs), which stays the source until this agent replaces the TypeScript one ([docs/specs/README.md](docs/specs/README.md)). It is ported piece
 by piece.
 
 ## What it does so far

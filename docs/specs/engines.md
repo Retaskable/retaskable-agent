@@ -1,0 +1,61 @@
+# Engines: Claude Code, Cursor and pi — Spec
+
+Status: v0.2, draft (2026-10-01). Builds on [agent.md](agent.md) sections 2, 4, 6 and 7 (sessions, the orchestrator and model tiers) and section 9 (the Agents tab and Setup). Also builds on [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md) (per-project settings) and [estimates.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/estimates.md) / [spec-map.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-map.md) section 4 (the recorded cost).
+
+Theme: Orchestration
+
+Kind: change
+
+This spec is split: each section below is its own file in [engines/](engines/). Read this index, then only the sections you need.
+
+## 1. What it is
+
+- [engines/01-what-it-is.md](engines/01-what-it-is.md)
+
+## 2. The engine layer
+
+- [engines/02-the-engine-layer.md](engines/02-the-engine-layer.md)
+
+## 3. Choosing the engine
+
+- [engines/03-choosing-the-engine.md](engines/03-choosing-the-engine.md): 3.1 Per computer and per role · 3.2 Models and the usage limit · 3.3 Resuming · 3.4 Cursor model names
+
+## 4. Running `cursor-agent`
+
+- [engines/04-running-cursor-agent.md](engines/04-running-cursor-agent.md)
+
+## 5. Structured results from the final message
+
+- [engines/05-structured-results-from-the-final.md](engines/05-structured-results-from-the-final.md)
+
+## 6. Permissions: the allowlist
+
+- [engines/06-permissions-the-allowlist.md](engines/06-permissions-the-allowlist.md): 6.1 Where it lives · 6.2 What it allows · 6.3 The rules · 6.4 Extra allow entries
+
+## 7. Unknown cost
+
+- [engines/07-unknown-cost.md](engines/07-unknown-cost.md)
+
+## 8. Live transcripts
+
+- [engines/08-live-transcripts.md](engines/08-live-transcripts.md)
+
+## 9. Setup
+
+- [engines/09-setup.md](engines/09-setup.md)
+
+## 10. Build order
+
+- [engines/10-build-order.md](engines/10-build-order.md)
+
+## 11. Acceptance
+
+- [engines/11-acceptance.md](engines/11-acceptance.md)
+
+## 12. Open questions
+
+- [engines/12-open-questions.md](engines/12-open-questions.md)
+
+## 13. The pi engine
+
+- [engines/13-the-pi-engine.md](engines/13-the-pi-engine.md)
