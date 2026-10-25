@@ -13,21 +13,24 @@ it sends to Retaskable's servers. Publishing the source does not make it open so
 2. Use with Retaskable only. You may run this software, from an official build or one you built from this source,
    only to use the Retaskable service (retaskable.com) under its terms.
 
-3. Not permitted. Except as section 2 allows, you may not:
+3. Contributing. You may fork this repository and modify your fork, only to prepare and send contributions back to
+   it (such as a pull request), and run your modified build only to test those contributions with Retaskable.
+
+4. Not permitted. Except as sections 1 to 3 allow, you may not:
    - use this software, or any part of it, with any service other than Retaskable;
    - copy, modify, merge or adapt it, or include it in other software;
    - distribute, sublicense, sell, host or otherwise make it available to others;
    - use it to build a product or service that competes with Retaskable.
 
-4. Contributions. If you send a contribution (such as a pull request), you grant Retaskable a perpetual, worldwide,
+5. Contributions. If you send a contribution (such as a pull request), you grant Retaskable a perpetual, worldwide,
    royalty-free, irrevocable licence to use, modify and distribute it as part of this software under any terms.
 
-5. No warranty. This software is provided "as is", without warranty of any kind, express or implied. In no event
+6. No warranty. This software is provided "as is", without warranty of any kind, express or implied. In no event
    shall Retaskable be liable for any claim, damages or other liability arising from the software or its use.
 
-6. Termination. Any use outside these terms ends your permission under this licence automatically.
+7. Termination. Any use outside these terms ends your permission under this licence automatically.
 
-7. Governing law. This licence is governed by the laws of the Province of British Columbia and the federal laws of
+8. Governing law. This licence is governed by the laws of the Province of British Columbia and the federal laws of
    Canada that apply there. The courts of British Columbia have exclusive jurisdiction over any dispute about it.
 
 For any other use, contact Retaskable Inc.
