@@ -1,0 +1,28 @@
+Retaskable Agent Source-Available License
+
+Copyright (c) 2026 Retaskable. All rights reserved.
+
+This repository is public so that anyone can see exactly what the Retaskable agent does on their computer and what
+it sends to Retaskable's servers. Publishing the source does not make it open source.
+
+1. Viewing. You may read, download and inspect this source code, and build it yourself to check that a build matches
+   it.
+
+2. Use with Retaskable only. You may run this software, from an official build or one you built from this source,
+   only to use the Retaskable service (retaskable.com) under its terms.
+
+3. Not permitted. Except as section 2 allows, you may not:
+   - use this software, or any part of it, with any service other than Retaskable;
+   - copy, modify, merge or adapt it, or include it in other software;
+   - distribute, sublicense, sell, host or otherwise make it available to others;
+   - use it to build a product or service that competes with Retaskable.
+
+4. Contributions. If you send a contribution (such as a pull request), you grant Retaskable a perpetual, worldwide,
+   royalty-free, irrevocable licence to use, modify and distribute it as part of this software under any terms.
+
+5. No warranty. This software is provided "as is", without warranty of any kind, express or implied. In no event
+   shall Retaskable be liable for any claim, damages or other liability arising from the software or its use.
+
+6. Termination. Any use outside these terms ends your permission under this licence automatically.
+
+For any other use, contact Retaskable.
