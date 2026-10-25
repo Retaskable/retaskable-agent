@@ -32,6 +32,5 @@ CI runs these on Windows, Linux and macOS.
 
 ## Licence
 
-The source is public so you can see what you're installing and what it sends to Retaskable's servers. There are no
-secrets in it. It is not open source: you may read and build it, and run it only to use Retaskable. See
-[LICENSE](LICENSE).
+[Apache-2.0](LICENSE). The source is public so you can see what you're installing and what it sends to Retaskable's
+servers, and there are no secrets in it. The licence doesn't cover the Retaskable name: see [NOTICE](NOTICE).
