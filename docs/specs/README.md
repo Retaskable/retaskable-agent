@@ -35,3 +35,5 @@ Specs about the cloud, the store, the app or the site stay in Retaskable.com. Wh
 - The port binds `127.0.0.1` and never takes a command.
 - Claude runs with `--permission-mode auto`.
 - Every project has a shared backlog. There is no local mode, and the agent fails closed when it can't reach it.
+
+Synced with Retaskable.com PR #1848 at commit 844314cf172b71774ab5cff10229f6f10fdcdbbf (engine per lane).
