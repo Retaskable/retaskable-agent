@@ -1,0 +1,7 @@
+## 7. Unknown cost
+
+Built. Claude Code reports `total_cost_usd` on each session's result; Cursor doesn't. A Cursor session's cost is **unknown**, which isn't the same as $0 (the local model's, agent.md section 7.2). `reportedCost` in `agent/src/engines/runner.ts` keeps a Cursor session's cost null, including when the process is killed or fails to start.
+
+- `SessionResult.costUsd` and `Session.costUsd` are `number | null`, `null` meaning unknown. The agent reports each session's cost as `null` when unknown; the store sums the known costs and counts the unknown ones ([spec-map.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-map.md) section 4.1, `unknownCostSessions`). The agent keeps no per-item totals.
+- **Daily budget.** `budget.dailyUsd` counts known costs only (`addSpend` skips a null cost; a finished Cursor session increments `spend.cursorSessions`). It doesn't stop Cursor sessions (`cursorMayStart` ignores the cap). The computer's settings page says "Claude Code sessions only" beside the daily cap once any role is on Cursor (`projectUsesCursor`). Reaching the cap still pauses Claude Code.
+- **Showing it.** A Cursor session's cost is never shown as $0: the Expo app writes "cost not reported", and "$4.20 + 3 Cursor sessions" for a day's spend and the numbers, from the sessions' `costUsd: null` and `spend.cursorSessions`. The agent only reports them. Estimates ([estimates.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/estimates.md)) use time only, so they don't change.

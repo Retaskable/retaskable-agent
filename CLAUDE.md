@@ -1,7 +1,6 @@
 # retaskable-agent
 
-A Rust port of the Retaskable agent. The source of truth is the spec in the Retaskable.com repo:
-[docs/specs/agent.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/agent.md). Match the
+A Rust port of the Retaskable agent. The spec is [docs/specs/agent.md](docs/specs/agent.md) in this repo: a snapshot of the Retaskable.com specs, trimmed to what belongs on the agent ([docs/specs/README.md](docs/specs/README.md), [docs/specs/TRIMMED.md](docs/specs/TRIMMED.md)). Retaskable.com's [docs/specs](https://github.com/Retaskable/Retaskable.com/tree/main/docs/specs) stays the source of truth until this agent replaces the TypeScript one, so change behaviour there first and copy it here. Match the
 TypeScript agent (`agent/` there) behaviour for behaviour, and port one piece at a time with its tests.
 
 ## Rules
