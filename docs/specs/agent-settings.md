@@ -55,6 +55,7 @@ The Agents page on the site (one card per computer, which settings are editable 
 ### 3.1 Their values
 
 - **Port**: a whole number from 1024 to 65535. Changes once the agent restarts.
+- **Lanes**: a whole number from 1 to 64, 2 until set: how many items the computer works on at once, across all its projects (the projects share them: lane k is one lane, and a project can't start work in one another holds). `MACHINE_KEYS` has it, at the top of `config.json`. A config whose projects still have their own `lanes` (or `migrated.lanes`) reads the computer's as the largest of them; those keys are then ignored, noted once on startup (`retiredKeysNote`) and dropped by the next save. The engine of each lane is `engines.lanes` below, and the page shows that many selects.
 - **Local model**: on or off; its model's name (up to 100 letters, digits and `. _ : / -`); its address, `http` or `https`, with no user or password in it.
 - **How often it checks**: 2 to 3600 seconds.
 - **Tags**: [computer-tags.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/computer-tags.md)'s rules. A list typed in is saved as your changes to the found tags (`added`, `removed`), as before. Which work a computer with these tags takes is the store's to decide.
@@ -71,6 +72,7 @@ For a computer with no screen, each can be set by a variable, read through `envV
 | `RETASKABLE_PORT` | the port |
 | `RETASKABLE_LOCAL_MODEL` | the local model on, with this model; `off`, `false`, `0` or `no` turns it off |
 | `RETASKABLE_LOCAL_URL` | the local model's address |
+| `RETASKABLE_LANES` | the lanes, a whole number from 1 to 64 |
 | `RETASKABLE_POLL_SEC` | how often it checks |
 | `RETASKABLE_TAGS` | the tags, comma between, instead of the found ones and your changes |
 | `RETASKABLE_CURSOR_MODELS` | one model for every tier (`gpt-5`), or each by name (`top=gpt-5,implementer=sonnet,scout=gpt-5-mini`) |
