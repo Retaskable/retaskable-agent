@@ -8,6 +8,7 @@ pub mod config;
 pub mod lanes;
 pub mod phone;
 pub mod session;
+pub mod settings_server;
 pub mod setup_check;
 pub mod store;
 pub mod tags;
