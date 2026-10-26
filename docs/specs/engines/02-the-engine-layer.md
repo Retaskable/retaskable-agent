@@ -14,9 +14,9 @@ Built (slice 1). What was `agent/src/claude.ts` is now `agent/src/engines/`, and
   | `id` | `"claude"` | `"cursor"` |
   | `binary()` | today's `resolveClaude()` (`claude.exe` behind the npm shim, `RETASKABLE_CLAUDE`) | `cursor-agent` on `PATH`, or `RETASKABLE_CURSOR` |
   | `args(spec)` | today's `buildArgs` | section 4 |
-  | `env(spec)` | today's `sessionEnv` (the local model) | nothing extra |
+  | `env(spec)` | today's `sessionEnv` (the local model) | `CLAUDE_CONFIG_DIR` for the lane isolate (section 4) |
   | `prompt(spec)` | the rendered prompt as is | the prompt plus the result instructions (section 5) |
-  | `prepare(spec)` | nothing | writes the lane's allowlist (section 6) |
+  | `prepare(spec)` | nothing | writes the lane's allowlist and the isolate config dirs (sections 4 and 6) |
   | `reader(spec, id)` | one per session: `line(ev)` gives `rate_limit_event` → usage, `summarize` → events, `result` → the result from `structured_output`; `noResult(code, stderr)` when it exits without one | section 8, with the result extracted from the final message (section 5) |
   | `summarize(ev)` | `summarize.ts`, for reading a run back | section 8 |
   | `can` | `{ schema: true, cost: true, usage: true, budgetCap: true, sandbox: true, local: true }` | all `false` (`usage` is a 5-hour window reading, which Cursor never gives; its tokens are on `SessionResult.tokens`, section 7) |

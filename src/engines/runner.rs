@@ -219,6 +219,9 @@ mod tests {
             fn reader(&self, spec: &SessionSpec) -> Box<dyn super::super::engine::EngineReader> {
                 Box::new(SessionReader::new(spec.model == "local"))
             }
+            fn summarize(&self, _event: &serde_json::Value, _at: i64) -> Vec<super::super::engine::SessionEvent> {
+                unreachable!("not exercised by run_session")
+            }
         }
         let engine = StubEngine { args };
         let spec = SessionSpec {

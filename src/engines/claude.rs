@@ -13,7 +13,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::engine::{
-    Engine, EngineId, EngineReader, SessionResult, SessionSpec, SessionStart, is_signed_out, signed_out_text,
+    Engine, EngineId, EngineReader, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
+    signed_out_text,
 };
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
@@ -341,6 +342,10 @@ impl Engine for ClaudeEngine {
 
     fn reader(&self, spec: &SessionSpec) -> Box<dyn EngineReader> {
         Box::new(SessionReader::new(spec.model == "local"))
+    }
+
+    fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent> {
+        super::summarize::summarize(event, at)
     }
 }
 
