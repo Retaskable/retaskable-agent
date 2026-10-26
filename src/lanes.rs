@@ -85,10 +85,10 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
     {
         let _guard = GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         fetch(repo_path, true)?;
-        run(git(&dir).args(["reset", "--hard"]))?;
-        run(git(&dir).args(["clean", "-fd"]))?;
+        run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
+        run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
         let start_point = format!("origin/{base_branch}");
-        run(git(&dir).args(["checkout", "-B", branch, &start_point]))?;
+        run(git_in_worktree(&dir).args(["checkout", "-B", branch, &start_point]))?;
     }
     // After clean: junctions created before it are gone; put them back for this item.
     link_outside_deps(repo_path, worktrees_dir, &dir)?;
@@ -163,7 +163,7 @@ fn link_outside_deps(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Resu
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| worktrees.clone());
-    let listed = git_output(
+    let listed = git_output_in_worktree(
         dir,
         &[
             "ls-files",
@@ -311,6 +311,16 @@ fn git(repo_path: &Path) -> Command {
     cmd
 }
 
+/// A git call inside `<worktreesDir>` (a lane, in this module). These worktrees share the
+/// project's object store, which keeps its own upkeep, so the agent's own calls here skip
+/// `maintenance run --auto` (section 4.1.1: "one more process each time, to decide there's
+/// nothing to do").
+fn git_in_worktree(dir: &Path) -> Command {
+    let mut cmd = git(dir);
+    cmd.args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"]);
+    cmd
+}
+
 fn run(cmd: &mut Command) -> Result<()> {
     let output = cmd.output().context("running git")?;
     if !output.status.success() {
@@ -319,8 +329,8 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn git_output(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = git(cwd).args(args).output().context("running git")?;
+fn git_output_in_worktree(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = git_in_worktree(dir).args(args).output().context("running git")?;
     if !output.status.success() {
         bail!("git failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -340,7 +350,7 @@ fn path_eq_values(manifest: &str) -> Vec<String> {
     let bytes = manifest.as_bytes();
     let mut i = 0;
     while i + 4 <= bytes.len() {
-        if &manifest[i..i + 4] == "path" && word_boundary_before(bytes, i) {
+        if &bytes[i..i + 4] == b"path" && word_boundary_before(bytes, i) {
             let after = skip_ws(&manifest[i + 4..]);
             if let Some(after) = after.strip_prefix('=') {
                 let after = skip_ws(after);
@@ -386,18 +396,12 @@ fn quoted_string(s: &str) -> Option<&str> {
 }
 
 fn processes_in(dir: &Path) -> Result<Vec<u32>> {
-    let root = {
-        let resolved = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-        let mut s = norm_path(&resolved);
-        if !s.ends_with(std::path::MAIN_SEPARATOR) {
-            s.push(std::path::MAIN_SEPARATOR);
-        }
-        #[cfg(windows)]
-        {
-            s = s.to_lowercase();
-        }
-        s
-    };
+    // Command lines may use either the path as given or its resolved form: on macOS, /var and
+    // /tmp are symlinks to /private/..., so a process started as `/var/folders/.../lane-1/...`
+    // never matches a root resolved to `/private/var/folders/.../lane-1/`.
+    let given = root_str(dir);
+    let resolved_root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let resolved = root_str(&resolved_root);
     let self_pid = std::process::id();
     let stdout = list_processes()?;
     let mut pids = Vec::new();
@@ -428,11 +432,26 @@ fn processes_in(dir: &Path) -> Result<Vec<u32>> {
                 rest.to_string()
             }
         };
-        if hay.contains(&root) {
+        if hay.contains(&given) || hay.contains(&resolved) {
             pids.push(pid);
         }
     }
     Ok(pids)
+}
+
+/// Normalizes `path` to compare against a `ps`/CIM command line: drops a Windows `\\?\` prefix,
+/// adds a trailing separator so `lane-1` doesn't match `lane-10`, and lowercases on Windows
+/// (case-insensitive paths).
+fn root_str(path: &Path) -> String {
+    let mut s = norm_path(path);
+    if !s.ends_with(std::path::MAIN_SEPARATOR) {
+        s.push(std::path::MAIN_SEPARATOR);
+    }
+    #[cfg(windows)]
+    {
+        s = s.to_lowercase();
+    }
+    s
 }
 
 fn list_processes() -> Result<String> {
@@ -469,9 +488,45 @@ fn kill_tree(pid: u32) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
+        // `kill` alone only stops the matched pid: a child (e.g. a `node` worker started with
+        // relative args) rarely carries the lane path on its own command line, so walk the
+        // process tree and stop its descendants too, to match `taskkill /T` on Windows.
+        for p in std::iter::once(pid).chain(descendants_of(pid)) {
+            let _ = Command::new("kill").args(["-TERM", &p.to_string()]).output();
+        }
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn descendants_of(pid: u32) -> Vec<u32> {
+    let output = match Command::new("ps").args(["-axo", "pid=,ppid="]).output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in stdout.lines() {
+        let mut parts = line.trim().split_whitespace();
+        let (Some(child), Some(parent)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(child), Ok(parent)) = (child.parse::<u32>(), parent.parse::<u32>()) else {
+            continue;
+        };
+        children.entry(parent).or_default().push(child);
+    }
+    let mut out = Vec::new();
+    let mut queue = vec![pid];
+    while let Some(current) = queue.pop() {
+        if let Some(kids) = children.get(&current) {
+            for &kid in kids {
+                out.push(kid);
+                queue.push(kid);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -513,7 +568,7 @@ mod tests {
     }
 
     fn branch_of(dir: &Path) -> String {
-        git_output(dir, &["branch", "--show-current"])
+        git_output_in_worktree(dir, &["branch", "--show-current"])
             .unwrap()
             .trim()
             .to_string()
@@ -614,6 +669,10 @@ mod tests {
         let pkg =
             r#"{"dependencies": {"a": "file:../lib-a", "b": "link:../../b", "c": "^1.0.0", "d": "file:./inside"}}"#;
         assert_eq!(outside_paths(pkg), vec!["../lib-a", "../../b"]);
+        // A multi-byte character before the dependency must not panic (byte vs. char indexing).
+        let non_ascii =
+            "[package]\nauthors = [\"José 🚀\"]\n\n[dependencies]\nvoid_engine = { path = \"../void-engine\" }\n";
+        assert_eq!(outside_paths(non_ascii), vec!["../void-engine"]);
     }
 
     #[test]
