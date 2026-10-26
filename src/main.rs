@@ -2,8 +2,10 @@
 //! answers `GET /api/health` on 127.0.0.1.
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use retaskable_agent::settings::server::SettingsState;
 use retaskable_agent::{api, config, lanes, network, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -128,7 +130,8 @@ async fn main() -> Result<()> {
     } else {
         Ipv4Addr::LOCALHOST
     };
-    let addr = SocketAddr::from((host, config::port(&cfg, env)));
+    let port = config::port(&cfg, env);
+    let addr = SocketAddr::from((host, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
@@ -142,9 +145,17 @@ async fn main() -> Result<()> {
         let checks = setup_check::run_setup_checks(env).await;
         println!("{}", setup_check::setup_check_report(&checks));
     });
-    axum::serve(listener, api::router(VERSION))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    // The settings page's `POST /api/settings/restart` (agent-settings.md section 4) triggers the
+    // same graceful shutdown as Ctrl+C; whatever restarts this process (the tray, a service
+    // manager) is expected to start it again.
+    let restart = Arc::new(tokio::sync::Notify::new());
+    let settings = SettingsState::new(dir, env, found, port, network_access.enabled, restart.clone());
+    axum::serve(
+        listener,
+        api::router(VERSION, settings).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown(restart))
+    .await?;
     Ok(())
 }
 
@@ -152,7 +163,10 @@ fn filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_env("RETASKABLE_LOG").unwrap_or_else(|_| "info".into())
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+async fn shutdown(restart: Arc<tokio::sync::Notify>) {
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = restart.notified() => {}
+    }
     tracing::info!("Stopping");
 }

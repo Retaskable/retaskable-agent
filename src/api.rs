@@ -1,6 +1,6 @@
 //! The agent's port (Retaskable.com docs/specs/agent.md section 8): `GET /api/health`, so a script or a person can
-//! ask whether the agent is running. retaskable.com is the screen for everything else, and never a command here:
-//! every other path is a 404.
+//! ask whether the agent is running, and the settings page (agent-settings.md section 4; `settings::server`).
+//! retaskable.com is the screen for everything else, and never a command here: every other path is a 404.
 use axum::{
     Json, Router,
     http::{Method, StatusCode, Uri},
@@ -8,13 +8,16 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-pub fn router(version: &'static str) -> Router {
+use crate::settings::server::SettingsState;
+
+pub fn router(version: &'static str, settings: SettingsState) -> Router {
     Router::new()
         .route(
             "/api/health",
             // Any other method is a 404 too, not axum's empty 405.
             get(move || async move { Json(json!({ "ok": true, "version": version })) }).fallback(not_found),
         )
+        .merge(crate::settings::server::router(settings))
         .fallback(not_found)
 }
 
@@ -30,9 +33,25 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn settings_state() -> SettingsState {
+        let dir = tempfile::tempdir().unwrap();
+        SettingsState::new(
+            dir.path().to_path_buf(),
+            no_env,
+            Vec::new(),
+            0,
+            false,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+    }
+
     async fn call(method: &str, path: &str) -> (StatusCode, Value) {
         let req = Request::builder().method(method).uri(path).body(Body::empty()).unwrap();
-        let res = router("1.2.3").oneshot(req).await.unwrap();
+        let res = router("1.2.3", settings_state()).oneshot(req).await.unwrap();
         let status = res.status();
         let body = res.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())

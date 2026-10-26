@@ -16,10 +16,14 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 pub use machine::{
-    CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, cursor_models, engine_choice, lanes,
-    local_model, poll_interval_sec, port,
+    CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig, cursor_models,
+    cursor_models_locked, engine_choice, engines_locked, lanes, lanes_locked, local_model, local_model_locked,
+    local_url_locked, poll_interval_sec, poll_interval_sec_locked, port, port_locked,
 };
+pub(crate) use machine::{lanes_of, valid_cursor_model_name, valid_local_url};
 pub use project::ProjectConfig;
+
+pub mod save;
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
 #[derive(Debug, Clone, Default, PartialEq)]

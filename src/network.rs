@@ -52,6 +52,11 @@ pub fn network_access(stored: Option<&NetworkAccess>, env: impl Fn(&str) -> Opti
     stored.cloned().unwrap_or_default()
 }
 
+/// Whether `RETASKABLE_NETWORK_PASSWORD` is network access right now.
+pub fn network_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_NETWORK_PASSWORD").is_some_and(|p| p.encode_utf16().count() >= MIN_PASSWORD_LEN)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

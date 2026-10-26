@@ -159,7 +159,7 @@ impl fmt::Display for Engine {
     }
 }
 
-fn parse_engine(s: &str) -> Option<Engine> {
+pub(crate) fn parse_engine(s: &str) -> Option<Engine> {
     match s.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(Engine::Claude),
         "cursor" => Some(Engine::Cursor),
@@ -289,7 +289,7 @@ pub struct CursorConfig {
 
 /// "A name is one or more of letters, digits, `_`, `.`, `:`, `/` and `-`, not starting with `-`"
 /// (engines.md section 3.4, so `--force` can't be slipped in as a model).
-fn valid_cursor_model_name(s: &str) -> bool {
+pub(crate) fn valid_cursor_model_name(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
         && s.chars()
@@ -317,6 +317,14 @@ pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
+/// Whether `RETASKABLE_PORT` is the port right now (agent-settings.md section 3.2): the settings
+/// page greys the field out and refuses a change to it when this is true.
+pub fn port_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_PORT")
+        .and_then(|p| p.parse::<u16>().ok())
+        .is_some_and(in_range)
+}
+
 // agent-settings.md section 3.2 (`withEnvSettings`): each computer-only setting's environment
 // variable wins over config.json. "A value that doesn't read ... is left out": an env value
 // outside the documented range (or unparseable) falls through to the file's, unvalidated here,
@@ -330,12 +338,26 @@ pub fn poll_interval_sec(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>)
         .unwrap_or(cfg.machine.poll_interval_sec)
 }
 
+/// Whether `RETASKABLE_POLL_SEC` is the poll interval right now.
+pub fn poll_interval_sec_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_POLL_SEC")
+        .and_then(|v| v.parse::<u32>().ok())
+        .is_some_and(|n| (2..=3600).contains(&n))
+}
+
 /// "Lanes": `RETASKABLE_LANES`, a whole number from 1 to 64.
 pub fn lanes(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
     env("RETASKABLE_LANES")
         .and_then(|v| v.parse().ok())
         .filter(|&n| (1..=64).contains(&n))
         .unwrap_or(cfg.machine.lanes)
+}
+
+/// Whether `RETASKABLE_LANES` is the lane count right now.
+pub fn lanes_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_LANES")
+        .and_then(|v| v.parse::<u32>().ok())
+        .is_some_and(|n| (1..=64).contains(&n))
 }
 
 /// "Local model": `RETASKABLE_LOCAL_MODEL` turns it on with that model's name, or off with
@@ -359,6 +381,16 @@ pub fn local_model(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Lo
     result
 }
 
+/// Whether `RETASKABLE_LOCAL_MODEL` is the local-model switch right now.
+pub fn local_model_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_LOCAL_MODEL").is_some_and(|raw| is_local_model_off(&raw) || valid_model_name(&raw))
+}
+
+/// Whether `RETASKABLE_LOCAL_URL` is the local model's address right now.
+pub fn local_url_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_LOCAL_URL").is_some_and(|url| valid_local_url(&url))
+}
+
 fn is_local_model_off(raw: &str) -> bool {
     matches!(raw.to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no")
 }
@@ -371,7 +403,7 @@ fn valid_model_name(s: &str) -> bool {
 }
 
 /// `http` or `https`, with no user or password in it (an `@` before the path means userinfo).
-fn valid_local_url(s: &str) -> bool {
+pub(crate) fn valid_local_url(s: &str) -> bool {
     let Some(authority_and_path) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) else {
         return false;
     };
@@ -394,6 +426,13 @@ pub fn engine_choice(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> 
         }
         None => cfg.machine.engine_choice.clone(),
     }
+}
+
+/// Whether `RETASKABLE_ENGINES` is the engine choice right now: unlike the other locks, any
+/// value at all locks it, since the variable replaces the whole `engineChoice` rather than being
+/// validated field by field.
+pub fn engines_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_ENGINES").is_some()
 }
 
 fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
@@ -434,7 +473,7 @@ fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
 /// — a half-read list would put later lanes on the wrong engines. A single empty entry (an empty
 /// string split on `+`, or `lanes=` with nothing after it) is a real empty list, not an invalid
 /// one. Used for `lanes` read from both the environment and the file.
-fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
+pub(crate) fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
     if entries.len() == 1 && entries[0].trim().is_empty() {
         return Some(Vec::new());
     }
@@ -457,6 +496,12 @@ pub fn cursor_models(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> 
         apply_cursor_models_env(&mut result, &raw);
     }
     result
+}
+
+/// Whether `RETASKABLE_CURSOR_MODELS` is Cursor's models right now: like `engines_locked`, any
+/// value at all locks it.
+pub fn cursor_models_locked(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("RETASKABLE_CURSOR_MODELS").is_some()
 }
 
 fn apply_cursor_models_env(result: &mut CursorModels, raw: &str) {

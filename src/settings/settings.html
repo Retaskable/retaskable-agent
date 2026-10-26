@@ -1,0 +1,214 @@
+<!doctype html>
+<!-- This computer's settings (docs/specs/agent-settings.md section 4): served by the agent at /settings, with no app
+     code and nothing from elsewhere. {{nonce}} is filled in on each answer, for the page's CSP. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retaskable settings</title>
+<style nonce="{{nonce}}">
+  :root { --bg: #fff; --fg: #1b1b1f; --muted: #60606a; --line: #dcdce2; --accent: #3b5bdb; --bad: #c92a2a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #16161a; --fg: #ececf1; --muted: #a0a0ab; --line: #34343c; --accent: #748ffc; --bad: #ff8787; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  p.note { color: var(--muted); margin: 0 0 16px; }
+  label { display: block; margin: 10px 0 4px; }
+  input[type=text], input[type=number], input[type=password] { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+  input:disabled { color: var(--muted); }
+  .check { display: flex; gap: 8px; align-items: center; margin: 10px 0 4px; }
+  .by { color: var(--muted); font-size: 13px; }
+  button { margin-top: 20px; padding: 8px 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  #msg { margin-top: 16px; }
+  #msg.bad { color: var(--bad); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>This computer's settings</h1>
+  <p class="note">Only this computer changes these. The daily budget, sessions at once and models are on retaskable.com.</p>
+
+  <form id="signin" hidden>
+    <p id="signin-why"></p>
+    <div id="password-box"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password"><button type="submit">Sign in</button></div>
+  </form>
+
+  <form id="form" hidden>
+    <h2>Work</h2>
+    <label for="lanes">Lanes (items worked on at once, across all projects)</label>
+    <input id="lanes" type="number" min="1" max="64">
+    <div class="by" data-by="lanes"></div>
+    <label for="pollIntervalSec">How often it checks for work (seconds)</label>
+    <input id="pollIntervalSec" type="number" min="2" max="3600">
+    <div class="by" data-by="pollIntervalSec"></div>
+    <label for="tags">Tags (comma between)</label>
+    <input id="tags" type="text">
+    <div class="by" data-by="tags"></div>
+
+    <h2>Local model</h2>
+    <div class="check"><input id="localEnabled" type="checkbox"><label for="localEnabled">Use a local model</label></div>
+    <label for="localModel">Model</label>
+    <input id="localModel" type="text">
+    <div class="by" data-by="local"></div>
+    <label for="localUrl">Address</label>
+    <input id="localUrl" type="text">
+    <div class="by" data-by="localUrl"></div>
+
+    <h2>Engines</h2>
+    <label for="engineDefault">Default</label>
+    <select id="engineDefault"></select>
+    <div id="engineRoles"></div>
+    <h3>Engine per lane</h3>
+    <p class="hint">Which engine builds in each lane. Default follows the Implementer above. Lane 1 is the first.</p>
+    <div id="engineLanes"></div>
+    <div class="by" data-by="engines"></div>
+
+    <h2>Cursor's models</h2>
+    <label for="cursorTop">Planning and review</label>
+    <input id="cursorTop" type="text" placeholder="auto">
+    <label for="cursorImplementer">Building</label>
+    <input id="cursorImplementer" type="text" placeholder="auto">
+    <label for="cursorScout">Scouts and small jobs</label>
+    <input id="cursorScout" type="text" placeholder="auto">
+    <div class="by" data-by="cursorModels"></div>
+
+    <h2>This page</h2>
+    <label for="port">Port</label>
+    <input id="port" type="number" min="1024" max="65535">
+    <div class="by" data-by="port"></div>
+    <div class="check"><input id="networkEnabled" type="checkbox"><label for="networkEnabled">Open this page from other devices on my network</label></div>
+    <label for="networkPassword">Password (at least 8 characters; empty keeps the one set)</label>
+    <input id="networkPassword" type="password" autocomplete="new-password">
+    <div class="by" data-by="network"></div>
+
+    <button type="submit">Save</button>
+    <button type="button" id="restart" hidden>Restart now</button>
+  </form>
+  <p id="msg" role="status"></p>
+</main>
+<script nonce="{{nonce}}">
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let csrf = "";
+  let setBy = {};
+  const say = (text, bad) => { $("msg").textContent = text; $("msg").className = bad ? "bad" : ""; };
+  const call = async (path, body) => {
+    const res = await fetch(path, body === undefined ? { credentials: "same-origin" } : { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify(body) });
+    return { status: res.status, json: await res.json().catch(() => ({})) };
+  };
+  const PICKS = [["claude", "Claude Code"], ["cursor", "Cursor"], ["local", "Local model"]];
+  const GROUPS = [["planner", "Planner"], ["implementer", "Implementer"], ["review", "Review"], ["drafter", "Spec drafts"], ["chat", "Chat"], ["writer", "Release notes"]];
+  const option = ([value, label]) => { const o = document.createElement("option"); o.value = value; o.textContent = label; return o; };
+  const fillEngines = (engines) => {
+    $("engineDefault").replaceChildren(...PICKS.map(option));
+    $("engineDefault").value = engines.default;
+    $("engineRoles").replaceChildren();
+    for (const [group, title] of GROUPS) {
+      const label = document.createElement("label");
+      label.htmlFor = `engine-${group}`;
+      label.textContent = title;
+      const select = document.createElement("select");
+      select.id = `engine-${group}`;
+      select.dataset.group = group;
+      select.replaceChildren(...[["default", "Default"], ...PICKS].map(option));
+      select.value = engines.roles[group];
+      $("engineRoles").append(label, select);
+    }
+  };
+  const LANE_PICKS = [["default", "Default"], ["claude", "Claude Code"], ["cursor", "Cursor"]];
+  let laneCount = 0;
+  const fillLanes = (lanes) => {
+    laneCount = lanes.length;
+    $("engineLanes").replaceChildren();
+    lanes.forEach((pick, i) => {
+      const label = document.createElement("label");
+      label.htmlFor = `engine-lane-${i + 1}`;
+      label.textContent = `Lane ${i + 1}`;
+      const select = document.createElement("select");
+      select.id = `engine-lane-${i + 1}`;
+      select.replaceChildren(...LANE_PICKS.map(option));
+      select.value = pick;
+      $("engineLanes").append(label, select);
+    });
+  };
+  const engineIds = () => ["engineDefault", ...GROUPS.map(([g]) => `engine-${g}`), ...Array.from({ length: laneCount }, (_, i) => `engine-lane-${i + 1}`)];
+  const show = (view) => {
+    const s = view.settings;
+    setBy = view.setBy || {};
+    $("lanes").value = s.lanes;
+    $("pollIntervalSec").value = s.pollIntervalSec;
+    $("tags").value = s.tags.join(", ");
+    $("localEnabled").checked = s.local.enabled;
+    $("localModel").value = s.local.model;
+    $("localUrl").value = s.local.baseUrl;
+    $("cursorTop").value = s.cursorModels.top;
+    $("cursorImplementer").value = s.cursorModels.implementer;
+    $("cursorScout").value = s.cursorModels.scout;
+    fillEngines(s.engines);
+    fillLanes(s.engines.lanes || []);
+    $("port").value = s.port;
+    $("networkEnabled").checked = s.network.enabled;
+    $("networkPassword").value = "";
+    const fields = { lanes: ["lanes"], pollIntervalSec: ["pollIntervalSec"], tags: ["tags"], local: ["localEnabled", "localModel"], localUrl: ["localUrl"], cursorModels: ["cursorTop", "cursorImplementer", "cursorScout"], engines: engineIds(), port: ["port"], network: ["networkEnabled", "networkPassword"] };
+    for (const [key, ids] of Object.entries(fields)) {
+      for (const id of ids) $(id).disabled = !!setBy[key];
+      document.querySelector(`[data-by="${key}"]`).textContent = setBy[key] ? `Set by ${setBy[key]}: change it there.` : "";
+    }
+    $("restart").hidden = !view.restartNeeded;
+    $("signin").hidden = true;
+    $("form").hidden = false;
+  };
+  const load = async () => {
+    const r = await call("/api/settings");
+    if (r.status === 200) {
+      csrf = r.json.csrf;
+      return show(r.json);
+    }
+    $("form").hidden = true;
+    $("signin").hidden = false;
+    const tray = r.json.signIn !== "password";
+    $("signin-why").textContent = tray ? "Open this page from the tray's Settings… on this computer." : "Sign in with the password set for this computer.";
+    $("password-box").hidden = tray;
+  };
+  const signIn = async (body) => {
+    const r = await call("/api/settings/session", body);
+    if (r.status !== 200) say(r.json.error || "Couldn't sign in.", true);
+    else say("");
+    await load();
+  };
+  $("signin").addEventListener("submit", (e) => { e.preventDefault(); void signIn({ password: $("password").value }); });
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const change = {};
+    const num = (id) => Number($(id).value);
+    if (!setBy.lanes) change.lanes = num("lanes");
+    if (!setBy.pollIntervalSec) change.pollIntervalSec = num("pollIntervalSec");
+    if (!setBy.tags) change.tags = $("tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+    const local = {};
+    if (!setBy.local) Object.assign(local, { enabled: $("localEnabled").checked, model: $("localModel").value.trim() });
+    if (!setBy.localUrl) local.baseUrl = $("localUrl").value.trim();
+    change.local = local;
+    if (!setBy.cursorModels) change.cursorModels = { top: $("cursorTop").value.trim(), implementer: $("cursorImplementer").value.trim(), scout: $("cursorScout").value.trim() };
+    if (!setBy.engines) change.engines = { default: $("engineDefault").value, roles: Object.fromEntries(GROUPS.map(([g]) => [g, $(`engine-${g}`).value])), lanes: Array.from({ length: laneCount }, (_, i) => $(`engine-lane-${i + 1}`).value) };
+    if (!setBy.port) change.port = num("port");
+    if (!setBy.network) change.network = { enabled: $("networkEnabled").checked, ...($("networkPassword").value ? { password: $("networkPassword").value } : {}) };
+    const r = await call("/api/settings", change);
+    if (r.status !== 200) return say(r.json.error || "Couldn't save.", true);
+    show(r.json);
+    say(r.json.restartNeeded ? "Saved. The port and network access change once Retaskable restarts." : "Saved.");
+  });
+  $("restart").addEventListener("click", async () => {
+    const r = await call("/api/settings/restart", {});
+    say(r.status === 200 ? "Restarting. Open Settings… from the tray again in a moment." : r.json.error || "Couldn't restart.", r.status !== 200);
+  });
+  const token = location.hash.slice(1);
+  if (token) {
+    history.replaceState(null, "", location.pathname);
+    void signIn({ token });
+  } else void load();
+})();
+</script>
+</body>
+</html>

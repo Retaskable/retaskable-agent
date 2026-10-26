@@ -78,7 +78,7 @@ fn parse(hash: &str) -> Option<ParsedHash> {
 
 /// Compares two byte strings without branching on where they first differ. Different lengths are
 /// never equal, but that's public shape (the stored key length), not the secret being compared.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

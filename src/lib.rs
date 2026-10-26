@@ -10,6 +10,7 @@ pub mod lanes;
 pub mod network;
 pub mod password;
 pub mod phone;
+pub mod settings;
 pub mod setup_check;
 pub mod store;
 pub mod tags;

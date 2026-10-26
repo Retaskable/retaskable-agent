@@ -47,8 +47,6 @@ impl MachineStore {
     }
 
     /// Sets the tag overrides and writes the file (keeping other keys as they are).
-    /// Used by setup and the settings page once those land; kept for their tests today.
-    #[allow(dead_code)]
     pub fn set_tags(&mut self, tags: TagOverrides) -> Result<()> {
         self.data.insert("tags".to_string(), tags.to_value());
         self.save()
@@ -59,9 +57,7 @@ impl MachineStore {
         self.data.get("network").and_then(NetworkAccess::from_value)
     }
 
-    /// Sets network access and writes the file (keeping other keys as they are). Used by setup
-    /// and the settings page once those land; kept for their tests today.
-    #[allow(dead_code)]
+    /// Sets network access and writes the file (keeping other keys as they are).
     pub fn set_network(&mut self, network: NetworkAccess) -> Result<()> {
         self.data.insert("network".to_string(), network.to_value());
         self.save()
@@ -75,7 +71,6 @@ impl MachineStore {
 
     /// Writes the file atomically, compact. If setup wrote `tags` or `network` meanwhile and this
     /// process hasn't changed them since load, the file's values win.
-    #[allow(dead_code)]
     pub fn save(&mut self) -> Result<()> {
         if let Ok(text) = std::fs::read_to_string(&self.file)
             && let Ok(disk) = parse_object(&text)
