@@ -24,6 +24,19 @@ async fn main() -> Result<()> {
             tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
         }
     }
+    // agent-settings.md section 3.2: each computer-only setting's environment variable, read
+    // here so it's logged the same way whether it came from the file or the environment.
+    let lanes = config::lanes(&cfg, env);
+    let poll_interval_sec = config::poll_interval_sec(&cfg, env);
+    let local_model = config::local_model(&cfg, env);
+    tracing::info!(
+        "Settings: {lanes} lane(s), checking every {poll_interval_sec}s, local model {}",
+        if local_model.enabled {
+            format!("{} at {}", local_model.model, local_model.base_url)
+        } else {
+            "off".to_string()
+        }
+    );
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config::port(&cfg, env)));
     let listener = tokio::net::TcpListener::bind(addr)
