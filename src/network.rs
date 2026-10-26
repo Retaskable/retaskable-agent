@@ -42,7 +42,7 @@ impl NetworkAccess {
 /// same as any other setting's variable outside its documented range.
 pub fn network_access(stored: Option<&NetworkAccess>, env: impl Fn(&str) -> Option<String>) -> NetworkAccess {
     if let Some(password) = env("RETASKABLE_NETWORK_PASSWORD")
-        && password.chars().count() >= MIN_PASSWORD_LEN
+        && password.encode_utf16().count() >= MIN_PASSWORD_LEN
     {
         return NetworkAccess {
             enabled: true,

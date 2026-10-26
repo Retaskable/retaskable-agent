@@ -1,14 +1,17 @@
 //! The settings page's network-access password (agent-settings.md section 3.1): kept as
-//! `scrypt$N$r$p$salt$hash`, hex for the salt and the hash, and compared in constant time.
-//! `N`, `r` and `p` are Node's own `crypto.scrypt` defaults (16384, 8, 1) with a 64-byte key, so a
-//! hash made by either agent reads the same way.
+//! `scrypt$N$r$p$salt$hash`, base64 (standard, with padding) for the salt and the hash, and
+//! compared in constant time. `N`, `r`, `p` and the 32-byte key match the TypeScript agent's
+//! `hashPassword` (`agent/src/machineSettings.ts`, Node's `scryptSync` with `{N:16384,r:8,p:1}`),
+//! so a hash made by either agent reads the same way.
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as base64;
 use rand::RngExt;
 use scrypt::Params;
 
 const LOG_N: u8 = 14; // N = 2^14 = 16384.
 const R: u32 = 8;
 const P: u32 = 1;
-const KEY_LEN: usize = 64;
+const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 
 /// Hashes `password` with a fresh random salt, as `scrypt$16384$8$1$<salt>$<hash>`.
@@ -21,8 +24,8 @@ pub fn hash_password(password: &str) -> String {
         1u32 << LOG_N,
         R,
         P,
-        hex_encode(&salt),
-        hex_encode(&hash)
+        base64.encode(salt),
+        base64.encode(hash)
     )
 }
 
@@ -65,26 +68,12 @@ fn parse(hash: &str) -> Option<ParsedHash> {
     let n: u32 = parts.next()?.parse().ok()?;
     let r: u32 = parts.next()?.parse().ok()?;
     let p: u32 = parts.next()?.parse().ok()?;
-    let salt = hex_decode(parts.next()?)?;
-    let key = hex_decode(parts.next()?)?;
+    let salt = base64.decode(parts.next()?).ok()?;
+    let key = base64.decode(parts.next()?).ok()?;
     if parts.next().is_some() || !n.is_power_of_two() {
         return None;
     }
     Some(ParsedHash { n, r, p, salt, key })
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
 }
 
 /// Compares two byte strings without branching on where they first differ. Different lengths are
@@ -113,8 +102,8 @@ mod tests {
         assert_eq!(fields[1], "16384");
         assert_eq!(fields[2], "8");
         assert_eq!(fields[3], "1");
-        assert_eq!(fields[4].len(), SALT_LEN * 2);
-        assert_eq!(fields[5].len(), KEY_LEN * 2);
+        assert_eq!(fields[4].len(), base64.encode([0u8; SALT_LEN]).len());
+        assert_eq!(fields[5].len(), base64.encode([0u8; KEY_LEN]).len());
     }
 
     #[test]
@@ -132,6 +121,16 @@ mod tests {
     #[test]
     fn two_hashes_of_the_same_password_differ_by_salt() {
         assert_ne!(hash_password("same"), hash_password("same"));
+    }
+
+    #[test]
+    fn a_hash_made_by_the_typescript_agent_verifies() {
+        // From Node's `hashPassword` (agent/src/machineSettings.ts) for "correct horse battery
+        // staple" with salt 0123456789abcdef0123456789abcdef (hex): proof the two agents' hashes
+        // are interchangeable, not just internally consistent.
+        let hash = "scrypt$16384$8$1$ASNFZ4mrze8BI0VniavN7w==$M+OVA7qtmUR3CHE87sPzm7h2MpJU1PXNk9qSpl2YPwE=";
+        assert!(verify_password("correct horse battery staple", hash));
+        assert!(!verify_password("wrong", hash));
     }
 
     #[test]
