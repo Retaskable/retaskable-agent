@@ -1,0 +1,4 @@
+cloud-link: Prefer Linux kernel keyring before file credentials
+
+On Linux, probe Secret Service then keyutils before credentials.json,
+matching docker.md and the TypeScript agent. Retry unreachable device-token polls until the code expires.

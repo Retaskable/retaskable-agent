@@ -1,0 +1,9 @@
+tree 32743650dcbe3451da618bbf3546a7656db8c734
+parent 12ab4da736fc4ab364ce91d318b6675759fa2ea3
+author James Coles-Nash <mail@jcnash.com> 1793018097 -0700
+committer James Coles-Nash <mail@jcnash.com> 1793018097 -0700
+
+cloud-link: Prefer Linux kernel keyring before file credentials
+
+On Linux, probe Secret Service then keyutils before credentials.json,
+matching docker.md and the TypeScript agent. Retry unreachable device-token polls until the code expires.

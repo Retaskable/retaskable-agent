@@ -34,6 +34,10 @@ pub struct MachineConfig {
     pub port: u16,
     #[serde(default)]
     pub budget: MachineBudget,
+    /// cloud/09-environments.md: "The agent's cloud URL is a setting, `cloud.url` in
+    /// `.retaskable/config.json`", `RETASKABLE_CLOUD_URL` overriding it (`cloud::url`).
+    #[serde(default)]
+    pub cloud: CloudConfig,
 }
 
 impl Default for MachineConfig {
@@ -49,8 +53,16 @@ impl Default for MachineConfig {
             cursor: None,
             port: default_port(),
             budget: MachineBudget::default(),
+            cloud: CloudConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudConfig {
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 fn default_lanes() -> u32 {
