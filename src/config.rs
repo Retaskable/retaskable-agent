@@ -406,6 +406,14 @@ pub struct ProjectConfig {
     pub engines: Option<Value>,
 }
 
+impl ProjectConfig {
+    /// This project's id: the one it was given, or, for an old file that predates the field
+    /// (version 1), the one derived from its `repoPath` the same way `load` fills it in.
+    pub fn id_or_derived(&self) -> String {
+        self.id.clone().unwrap_or_else(|| project_id(&self.repo_path))
+    }
+}
+
 fn default_max_review_rounds() -> u32 {
     3
 }
