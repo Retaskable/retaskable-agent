@@ -279,17 +279,23 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn run_session_dispatches_through_the_engine_it_is_given() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.jsonl");
+    /// A command that prints one successful `result` event, and an `ArgsEngine` built to run it
+    /// — the shared fixture both "`run_session` ran a successful session" tests below start from.
+    fn success_session(dir: &Path) -> (PathBuf, ArgsEngine) {
+        let out = dir.join("out.jsonl");
         std::fs::write(
             &out,
             r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened"},"session_id":"sess-1"}"#,
         )
         .unwrap();
         let (bin, args) = print_file_command(&out);
-        let engine = ArgsEngine { args };
+        (bin, ArgsEngine { args })
+    }
+
+    #[tokio::test]
+    async fn run_session_dispatches_through_the_engine_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, engine) = success_session(dir.path());
         let spec = SessionSpec {
             engine: None,
             model: "sonnet".to_string(),
@@ -355,14 +361,7 @@ mod tests {
     #[tokio::test]
     async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_started_on_and_read_transcripts() {
         let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.jsonl");
-        std::fs::write(
-            &out,
-            r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened"},"session_id":"sess-1"}"#,
-        )
-        .unwrap();
-        let (bin, args) = print_file_command(&out);
-        let engine = ArgsEngine { args };
+        let (bin, engine) = success_session(dir.path());
         let data_dir = tempfile::tempdir().unwrap();
         let sink = TranscriptSink {
             path: crate::paths::run_dir(data_dir.path(), "proj", "A1").join("sess-1.jsonl"),
