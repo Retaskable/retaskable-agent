@@ -30,11 +30,17 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
     }
 }
 
+// agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535." Anything below
+// that (0 included) is as invalid as an unparseable value and falls through the same way.
+fn in_range(p: u16) -> bool {
+    p >= 1024
+}
+
 pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
     env("RETASKABLE_PORT")
         .and_then(|p| p.parse().ok())
-        .filter(|&p| p != 0)
-        .or(cfg.port.filter(|&p| p != 0))
+        .filter(|&p| in_range(p))
+        .or(cfg.port.filter(|&p| in_range(p)))
         .unwrap_or(DEFAULT_PORT)
 }
 
@@ -70,6 +76,17 @@ mod tests {
         // Binding port 0 asks the OS for a random ephemeral port, not the documented
         // fallback, so a zero in config.json is as invalid as a zero env value.
         assert_eq!(port(&ConfigFile { port: Some(0) }, no_env), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn a_privileged_port_below_1024_is_not_used_either() {
+        // agent-settings.md section 3.1: the documented valid range is 1024 to 65535,
+        // so a sub-1024 port (env or file) is as invalid as zero and falls through too.
+        let low_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "80".to_string());
+        assert_eq!(port(&ConfigFile { port: Some(4900) }, low_env), 4900);
+        assert_eq!(port(&ConfigFile::default(), low_env), DEFAULT_PORT);
+        assert_eq!(port(&ConfigFile { port: Some(80) }, no_env), DEFAULT_PORT);
+        assert_eq!(port(&ConfigFile { port: Some(1024) }, no_env), 1024);
     }
 
     #[test]
