@@ -44,9 +44,13 @@ fn is_unset(cfg: &EngineChoiceConfig) -> bool {
 /// than failing). Per-lane engines aren't part of this older shape, so a stray `lanes` in it is
 /// never looked at: `engine_for` only reads lanes off the computer's own `engineChoice`.
 fn legacy_choice(project_engines: Option<&Value>) -> EngineChoiceConfig {
-    project_engines
+    let parsed = project_engines
         .and_then(|v| serde_json::from_value::<EngineChoiceConfig>(v.clone()).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    EngineChoiceConfig {
+        lanes: Vec::new(),
+        ..parsed
+    }
 }
 
 /// `laneEngine`: lane `lane`'s own engine (1-based, lane 1 first) from `engineChoice.lanes`,
@@ -165,6 +169,16 @@ mod tests {
         let legacy = serde_json::json!({ "default": "pi" });
         assert_eq!(engine_for(&cfg, Some(&legacy), Role::Writer, None), Engine::Claude);
         assert_eq!(engine_for(&cfg, Some(&legacy), Role::Implementer, None), Engine::Cursor);
+    }
+
+    #[test]
+    fn a_legacy_lanes_list_is_never_read() {
+        let cfg = EngineChoiceConfig::default();
+        let legacy = serde_json::json!({ "lanes": ["cursor"] });
+        assert_eq!(
+            engine_for(&cfg, Some(&legacy), Role::Implementer, Some(1)),
+            Engine::Claude
+        );
     }
 
     #[test]
