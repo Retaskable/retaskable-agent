@@ -76,6 +76,24 @@ async fn main() -> Result<()> {
             "off".to_string()
         }
     );
+    // agent-settings.md section 3.1: which program runs each kind of work, and Cursor's model
+    // per tier. Not used to run a session yet (engines.md's own port), so logged for now the
+    // same way the settings above are before anything reads them.
+    let engine_choice = config::engine_choice(&cfg, env);
+    let cursor_models = config::cursor_models(&cfg, env);
+    tracing::info!(
+        "Engines: default {}, lanes [{}], Cursor models top {}, implementer {}, scout {}",
+        engine_choice.default.unwrap_or(config::Engine::Claude),
+        engine_choice
+            .lanes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        cursor_models.top.as_deref().unwrap_or("auto"),
+        cursor_models.implementer.as_deref().unwrap_or("auto"),
+        cursor_models.scout.as_deref().unwrap_or("auto"),
+    );
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config::port(&cfg, env)));
     let listener = tokio::net::TcpListener::bind(addr)
