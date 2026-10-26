@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, store};
+use retaskable_agent::{api, cloud, config, store};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -16,6 +16,13 @@ async fn main() -> Result<()> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
+
+    // cloud/04-authentication.md section 4.2: `retaskable-agent link` is how a person links this
+    // machine to a cloud, separate from the server's normal startup below.
+    if std::env::args().nth(1).as_deref() == Some("link") {
+        return run_link(&cfg, &dir, env).await;
+    }
+
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
@@ -80,4 +87,42 @@ fn filter() -> tracing_subscriber::EnvFilter {
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("Stopping");
+}
+
+/// Links this machine to a cloud and keeps the refresh token it gets (cloud/04-authentication.md
+/// section 4.2): requests a device code, shows the person where to go, polls until it's
+/// approved, then saves the refresh token under this cloud's URL.
+async fn run_link(cfg: &config::ConfigFile, dir: &Path, env: impl Fn(&str) -> Option<String>) -> Result<()> {
+    let cloud_url = cloud::url(cfg, &env);
+    let machine = cloud::link::machine_name(&env, hostname);
+    let os = cloud::link::os_name();
+
+    let client = cloud::link::Client::new(cloud_url.clone());
+    let token = cloud::link::link(&client, &machine, os, VERSION, |code| {
+        println!("Go to {} and enter {}", code.verification_uri, code.user_code);
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let keyring = cloud::credentials::OsKeyring;
+    let store = cloud::credentials::CredentialStore::detect(&keyring, dir, cfg!(target_os = "linux"));
+    store.set(&keyring, &cloud_url, &token.refresh_token)?;
+
+    println!("Linked to {cloud_url} as agent {}", token.agent_id);
+    Ok(())
+}
+
+/// This machine's name for the device-code request: `COMPUTERNAME` on Windows, else the
+/// `hostname` command's output.
+fn hostname() -> Option<String> {
+    if cfg!(target_os = "windows") {
+        return std::env::var("COMPUTERNAME").ok().filter(|v| !v.is_empty());
+    }
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
