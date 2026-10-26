@@ -62,7 +62,7 @@ The page of steps (`/start`, nine steps since setup-steps), its badges, its "Che
 - `agent/src/connector.test.ts` (built): no `checks` before the first run, and `hello` again with them once they change.
 - `agent/src/commands.test.ts` (built): `setup_check` answers the checks, before Setup too; a view-only agent refuses it.
 - `agent/src/simpleFlow.test.ts` (built): a trial draft never approves itself; one open at a time, a second answering the first's id, a new one once it's closed.
-- Rust (this agent): `src/setup_check.rs` (section 3.1's checks minus `node`, the terminal lines, and `resolve_cursor`). The connector, commands and trial-plan tests have no module yet.
+- Rust (this agent): `src/setup_check.rs` (section 3.1's checks minus `node`, the terminal lines, and `resolve_cursor`). `src/connector/` sends no `checks` in its hello, since the hub's schema asks for a `node` check this agent doesn't have. The commands and trial-plan tests have no module yet.
 
 ## 5. Acceptance
 

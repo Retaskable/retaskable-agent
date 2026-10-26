@@ -40,6 +40,9 @@ pub struct MachineConfig {
     pub port: u16,
     #[serde(default)]
     pub budget: MachineBudget,
+    /// The cloud this agent links to (`link::cloud_url`): `cloud.url`, retaskable.com when missing.
+    #[serde(default)]
+    pub cloud: CloudConfig,
 }
 
 impl Default for MachineConfig {
@@ -56,6 +59,7 @@ impl Default for MachineConfig {
             cursor: CursorConfig::default(),
             port: default_port(),
             budget: MachineBudget::default(),
+            cloud: CloudConfig::default(),
         }
     }
 }
@@ -294,6 +298,13 @@ fn valid_cursor_model_name(s: &str) -> bool {
         && !s.starts_with('-')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
+}
+
+/// `cloud`: only its `url` is read here (`link::cloud_url`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CloudConfig {
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
