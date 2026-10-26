@@ -51,6 +51,25 @@ pub struct SessionSpec {
     /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check.
     pub budget_usd: f64,
     pub start: SessionStart,
+    /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist.
+    /// Claude Code's own permission mode doesn't change on this (that's a later slice).
+    pub readonly: bool,
+    /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
+    pub cursor: Option<CursorOptions>,
+}
+
+/// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
+#[derive(Debug, Clone, Default)]
+pub struct CursorOptions {
+    /// Cursor's own model name (e.g. "gpt-5", "sonnet-4.5"); empty or missing means "auto".
+    pub model: Option<String>,
+    /// Extra allow entries for a writing session, beyond the fixed list (a project's checks,
+    /// galleries and `engines.allow`).
+    pub allow: Vec<String>,
+    /// The code host's CLI program to allow (`"gh"`, `"glab"`), or `None` for a project with no
+    /// remote. Only meaningful when this `CursorOptions` itself is present — a `SessionSpec` with
+    /// no `cursor` at all defaults to `"gh"` (`cursor.rs`'s `allowlist`/`prepare_cursor`).
+    pub cli: Option<String>,
 }
 
 /// How this session begins, following docs/specs/agent/06.2-implementer.md: a fresh invocation
@@ -98,7 +117,10 @@ pub struct SessionResult {
     pub subtype: String,
     pub structured: Option<Value>,
     pub error: Option<String>,
-    pub cost_usd: f64,
+    /// `None` means unknown, not free — Cursor never reports a cost (`can.cost: false`), so this
+    /// is never `0.0` standing in for "didn't say."  Claude Code always knows its own (`Some`,
+    /// `0.0` for a local model, which really does cost nothing).
+    pub cost_usd: Option<f64>,
     pub session_id: String,
     /// The session ended because the usage limit was hit (`limitHit` in `claude.ts`).
     pub limit_hit: bool,
@@ -109,13 +131,24 @@ pub struct SessionResult {
     /// The latest `rate_limit_info` the stream reported (07-orchestrator-loop.md section 7.1),
     /// kept whole and ready to save as `state.usage`. `None` when the stream never sent one.
     pub usage: Option<Value>,
+    /// A result's own token counts (`tokensOf` in `cursor.ts`): Cursor's stand-in for a cost,
+    /// since it never reports one. `None` when the engine doesn't report tokens, or reported none.
+    pub tokens: Option<Tokens>,
+}
+
+/// One result's token counts (`tokensOf` in `cursor.ts`). Cache tokens are left out — they're not
+/// part of what the session was billed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tokens {
+    pub input: u64,
+    pub output: u64,
 }
 
 /// "hit its $5 budget", "found Claude signed out on this computer (…)", "ended with …"
 /// (`describeFailure` in `engine.ts`).
 pub fn describe_failure(r: &SessionResult, budget_usd: f64) -> String {
     if r.subtype == "error_max_budget_usd" {
-        let spent = format!("${:.2}", r.cost_usd);
+        let spent = format!("${:.2}", r.cost_usd.unwrap_or(0.0));
         return format!("hit its ${budget_usd} budget (spent {spent})");
     }
     if r.limit_hit {
@@ -181,6 +214,11 @@ pub trait Engine: Send + Sync {
     /// The prompt as sent to this engine (as is for Claude Code; Cursor appends its own result
     /// instructions, section 5).
     fn prompt(&self, spec: &SessionSpec) -> String;
+    /// Readies anything a session needs before it's spawned (Claude Code: nothing; Cursor: the
+    /// lane's allowlist and isolate config dirs, sections 4 and 6).
+    fn prepare(&self, _spec: &SessionSpec) -> Result<()> {
+        Ok(())
+    }
     /// A fresh reader for one session.
     fn reader(&self, spec: &SessionSpec) -> Box<dyn EngineReader>;
     /// Turns one stored transcript line back into events, for reading a run back
@@ -209,12 +247,13 @@ mod tests {
             subtype: "error".to_string(),
             structured: None,
             error: Some("Not logged in".to_string()),
-            cost_usd: 0.0,
+            cost_usd: Some(0.0),
             session_id: "s".to_string(),
             limit_hit: false,
             signed_out: true,
             context_tokens: None,
             usage: None,
+            tokens: None,
         };
         assert_eq!(
             describe_failure(&signed, 5.0),
@@ -231,7 +270,7 @@ mod tests {
 
         let budget = SessionResult {
             subtype: "error_max_budget_usd".to_string(),
-            cost_usd: 4.2,
+            cost_usd: Some(4.2),
             limit_hit: false,
             signed_out: false,
             error: None,

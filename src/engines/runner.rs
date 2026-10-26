@@ -10,14 +10,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::claude::ClaudeEngine;
+use super::cursor::CursorEngine;
 use super::engine::{Engine, EngineId, SessionResult, SessionSpec};
 
 /// `engineOf(id)`: the `Engine` a session's `SessionSpec.engine` names; missing means Claude Code.
-/// A Cursor engine is a later item — asking for it fails clearly instead of silently falling back.
 pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
     match id.unwrap_or(EngineId::Claude) {
         EngineId::Claude => Ok(Box::new(ClaudeEngine)),
-        EngineId::Cursor => anyhow::bail!("the cursor engine isn't built yet"),
+        EngineId::Cursor => Ok(Box::new(CursorEngine)),
     }
 }
 
@@ -81,6 +81,7 @@ pub async fn run_session(
     spec: &SessionSpec,
     known_session_id: &str,
 ) -> Result<SessionResult> {
+    engine.prepare(spec)?;
     spawn_and_read(
         bin,
         &engine.args(spec),
@@ -150,7 +151,7 @@ mod tests {
         assert!(result.ok);
         assert_eq!(result.subtype, "success");
         assert_eq!(result.structured, Some(json!({"status": "pr_opened"})));
-        assert_eq!(result.cost_usd, 1.25);
+        assert_eq!(result.cost_usd, Some(1.25));
         assert_eq!(result.session_id, "sess-1");
         assert!(!result.signed_out);
         assert!(!result.limit_hit);
@@ -175,9 +176,8 @@ mod tests {
     }
 
     #[test]
-    fn engine_of_names_the_cursor_engine_as_not_built_yet() {
-        let err = engine_of(Some(EngineId::Cursor)).map(|_| ()).unwrap_err();
-        assert!(err.to_string().contains("cursor"));
+    fn engine_of_resolves_the_cursor_engine_by_id() {
+        assert_eq!(engine_of(Some(EngineId::Cursor)).unwrap().id(), EngineId::Cursor);
     }
 
     #[tokio::test]
@@ -233,6 +233,8 @@ mod tests {
             max_turns: None,
             budget_usd: 0.0,
             start: SessionStart::Ephemeral,
+            readonly: false,
+            cursor: None,
         };
         let result = run_session(&engine, &bin, &spec, "known").await.unwrap();
         assert!(result.ok);
