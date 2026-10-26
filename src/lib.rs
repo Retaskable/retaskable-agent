@@ -5,6 +5,7 @@
 pub mod api;
 pub mod backlog;
 pub mod config;
+pub mod release_notes;
 pub mod session;
 pub mod store;
 pub mod tags;

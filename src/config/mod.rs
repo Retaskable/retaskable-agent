@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 pub use machine::{MachineConfig, lanes, local_model, poll_interval_sec, port};
-pub use project::ProjectConfig;
+pub use project::{ProjectConfig, ProjectType};
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
 #[derive(Debug, Clone, Default, PartialEq)]
