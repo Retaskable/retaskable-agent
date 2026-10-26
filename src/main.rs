@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, cloud, config, store};
+use retaskable_agent::{api, cloud, config, store, tags};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -61,6 +61,21 @@ async fn main() -> Result<()> {
             }
         }
     }
+    // agent-settings.md section 3 / computer-tags.md section 3.1: tags from the machine, with
+    // machine.json's overrides and RETASKABLE_TAGS over them. Missing is fine; broken is fatal,
+    // the same as config.json.
+    let machine = store::MachineStore::load(&dir)?;
+    let found = tags::found_tags(&tags::machine_facts(env));
+    let overrides = machine.tags();
+    let tag_list = tags::effective_tags(&found, overrides.as_ref(), env);
+    tracing::info!(
+        "Tags: {}",
+        if tag_list.is_empty() {
+            "none".to_string()
+        } else {
+            tag_list.join(", ")
+        }
+    );
     let poll_interval_sec = config::poll_interval_sec(&cfg, env);
     let local_model = config::local_model(&cfg, env);
     tracing::info!(

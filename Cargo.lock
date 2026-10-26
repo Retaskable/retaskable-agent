@@ -1367,6 +1367,7 @@ dependencies = [
  "axum",
  "http-body-util",
  "keyring",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
