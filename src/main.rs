@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, store, tags};
+use retaskable_agent::{api, config, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -26,6 +26,11 @@ async fn main() -> Result<()> {
         if let Err(e) = store::Store::load(&project_dir) {
             tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
         }
+        // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
+        // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
+        // Nothing calls `EventLog::add` yet — that needs the orchestrator loop, sessions and the
+        // backlog client wired in first, none of which this agent runs yet.
+        telemetry::EventLog::new().open(&project_dir.join("events"));
         // Keeps this project's lane pool at lane_count worktrees (04-architecture.md section
         // 4.1); not fatal, since a project not yet pointed at a real repo and worktrees folder
         // shouldn't keep the health check from coming up either.
