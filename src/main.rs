@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, store, tags};
+use retaskable_agent::{api, config, network, store, tags};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -94,11 +94,21 @@ async fn main() -> Result<()> {
         cursor_models.implementer.as_deref().unwrap_or("auto"),
         cursor_models.scout.as_deref().unwrap_or("auto"),
     );
-    // Only this computer: the agent never listens on a public port (agent.md section 8).
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config::port(&cfg, env)));
+    // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
+    // address instead, so another computer on the local network can reach the settings page.
+    let network_access = network::network_access(machine.network().as_ref(), env);
+    let host = if network_access.enabled {
+        Ipv4Addr::UNSPECIFIED
+    } else {
+        Ipv4Addr::LOCALHOST
+    };
+    let addr = SocketAddr::from((host, config::port(&cfg, env)));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
+    if network_access.enabled {
+        tracing::info!("The settings page is open on the network, at http://{addr}");
+    }
     tracing::info!("Retaskable agent {VERSION} on http://{addr}");
     axum::serve(listener, api::router(VERSION))
         .with_graceful_shutdown(shutdown())

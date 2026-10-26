@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use super::write_json_atomic;
+use crate::network::NetworkAccess;
 use crate::tags::TagOverrides;
 
 const MACHINE_FILE: &str = "machine.json";
@@ -50,6 +51,19 @@ impl MachineStore {
     #[allow(dead_code)]
     pub fn set_tags(&mut self, tags: TagOverrides) -> Result<()> {
         self.data.insert("tags".to_string(), tags.to_value());
+        self.save()
+    }
+
+    /// Network access to the settings page, and its password's hash.
+    pub fn network(&self) -> Option<NetworkAccess> {
+        self.data.get("network").and_then(NetworkAccess::from_value)
+    }
+
+    /// Sets network access and writes the file (keeping other keys as they are). Used by setup
+    /// and the settings page once those land; kept for their tests today.
+    #[allow(dead_code)]
+    pub fn set_network(&mut self, network: NetworkAccess) -> Result<()> {
+        self.data.insert("network".to_string(), network.to_value());
         self.save()
     }
 
@@ -169,6 +183,38 @@ mod tests {
         assert_eq!(saved["tags"]["added"], serde_json::json!(["from-setup"]));
         assert_eq!(saved["tags"]["removed"], serde_json::json!(["gpu"]));
         assert_eq!(saved["usage"], Value::from(2));
+    }
+
+    #[test]
+    fn network_round_trips_and_a_running_save_keeps_what_setup_wrote_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert!(store.network().is_none());
+        store
+            .set_network(NetworkAccess {
+                enabled: true,
+                password_hash: Some("scrypt$16384$8$1$aa$bb".to_string()),
+            })
+            .unwrap();
+        assert_eq!(
+            store.network().unwrap(),
+            NetworkAccess {
+                enabled: true,
+                password_hash: Some("scrypt$16384$8$1$aa$bb".to_string()),
+            }
+        );
+        // Setup turns it off while the agent is running (keeping the hash); the agent's next save
+        // of a different key must not overwrite that with its older, still-on copy.
+        std::fs::write(
+            dir.path().join(MACHINE_FILE),
+            r#"{"network":{"enabled":false,"passwordHash":"scrypt$16384$8$1$aa$bb"},"tags":{}}"#,
+        )
+        .unwrap();
+        store.set_raw("usage", Value::from(1));
+        store.save().unwrap();
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(saved["network"]["enabled"], Value::Bool(false));
+        assert_eq!(saved["usage"], Value::from(1));
     }
 
     #[test]
