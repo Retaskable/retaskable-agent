@@ -241,6 +241,26 @@ pub trait Engine: Send + Sync {
     fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent>;
 }
 
+/// A `SessionSpec` test fixture shared by every engine module's tests: cloud, ephemeral, no
+/// Cursor or local target. Callers override `prompt`, and whatever else their test needs, on the
+/// result.
+#[cfg(test)]
+pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
+    SessionSpec {
+        engine: None,
+        model: "sonnet".to_string(),
+        prompt: prompt.to_string(),
+        schema: serde_json::json!({"type": "object"}),
+        cwd: cwd.to_path_buf(),
+        max_turns: None,
+        budget_usd: 0.0,
+        start: SessionStart::Ephemeral,
+        readonly: false,
+        cursor: None,
+        local: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

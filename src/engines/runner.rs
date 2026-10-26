@@ -385,18 +385,6 @@ mod tests {
     }
 
     fn base_spec(cwd: &Path) -> SessionSpec {
-        SessionSpec {
-            engine: None,
-            model: "sonnet".to_string(),
-            prompt: "hi".to_string(),
-            schema: json!({"type": "object"}),
-            cwd: cwd.to_path_buf(),
-            max_turns: None,
-            budget_usd: 0.0,
-            start: SessionStart::Ephemeral,
-            readonly: false,
-            cursor: None,
-            local: None,
-        }
+        crate::engines::engine::test_spec(cwd, "hi")
     }
 }
