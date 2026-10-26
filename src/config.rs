@@ -34,7 +34,7 @@ pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
     env("RETASKABLE_PORT")
         .and_then(|p| p.parse().ok())
         .filter(|&p| p != 0)
-        .or(cfg.port)
+        .or(cfg.port.filter(|&p| p != 0))
         .unwrap_or(DEFAULT_PORT)
 }
 
@@ -63,6 +63,13 @@ mod tests {
         let zero = |k: &str| (k == "RETASKABLE_PORT").then(|| "0".to_string());
         assert_eq!(port(&ConfigFile { port: Some(4900) }, zero), 4900);
         assert_eq!(port(&ConfigFile::default(), zero), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn a_zero_port_in_the_file_is_not_used_either() {
+        // Binding port 0 asks the OS for a random ephemeral port, not the documented
+        // fallback, so a zero in config.json is as invalid as a zero env value.
+        assert_eq!(port(&ConfigFile { port: Some(0) }, no_env), DEFAULT_PORT);
     }
 
     #[test]
