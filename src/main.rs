@@ -1,19 +1,24 @@
 //! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it only
 //! answers `GET /api/health` on 127.0.0.1.
-mod lanes;
-
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, network, store, tags};
+use retaskable_agent::{api, config, lanes, network, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(filter()).init();
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
+    // checks and exit without starting the server.
+    if std::env::args().nth(1).as_deref() == Some("check") {
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
+        std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
+    }
+    tracing_subscriber::fmt().with_env_filter(filter()).init();
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
@@ -26,6 +31,11 @@ async fn main() -> Result<()> {
         if let Err(e) = store::Store::load(&project_dir) {
             tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
         }
+        // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
+        // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
+        // Nothing calls `EventLog::add` yet — that needs the orchestrator loop, sessions and the
+        // backlog client wired in first, none of which this agent runs yet.
+        telemetry::EventLog::new().open(&project_dir.join("events"));
         // Keeps this project's lane pool at lane_count worktrees (04-architecture.md section
         // 4.1); not fatal, since a project not yet pointed at a real repo and worktrees folder
         // shouldn't keep the health check from coming up either.
@@ -48,6 +58,22 @@ async fn main() -> Result<()> {
                     project.id_or_derived(),
                     worktrees_dir.display()
                 ),
+            }
+        }
+        // play-on-phone.md section 3: while this project has a `phone` section, watch for a
+        // plugged-in, authorised Android phone. Only adb is looked up at start; re-finding it
+        // when Setup is saved needs the settings server, not yet ported.
+        if project.phone.is_some() {
+            match phone::find_adb_on_path(env) {
+                Some(adb) => {
+                    tracing::info!(
+                        "{}: watching for an Android phone with {}",
+                        project.id_or_derived(),
+                        adb.display()
+                    );
+                    tokio::spawn(phone::watch(adb));
+                }
+                None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
             }
         }
     }
@@ -110,6 +136,12 @@ async fn main() -> Result<()> {
         tracing::info!("The settings page is open on the network, at http://{addr}");
     }
     tracing::info!("Retaskable agent {VERSION} on http://{addr}");
+    // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
+    // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
+    tokio::spawn(async move {
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
+    });
     axum::serve(listener, api::router(VERSION))
         .with_graceful_shutdown(shutdown())
         .await?;
