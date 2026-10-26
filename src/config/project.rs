@@ -293,6 +293,10 @@ pub(super) fn project_id(repo_path: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+    kebab_case(&name)
+}
+
+fn kebab_case(name: &str) -> String {
     let kebab: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -313,13 +317,16 @@ mod tests {
     #[test]
     fn a_relative_repo_path_resolves_against_the_current_directory_first() {
         // TypeScript's projectId runs path.basename(path.resolve(repoPath)): a relative repoPath such as
-        // "." or ".." gives the resolved folder's name, not the literal segment's.
-        let expected = std::env::current_dir()
+        // "." or ".." gives the resolved folder's name, not the literal segment's. The expected id still
+        // goes through the same kebab-casing as project_id itself, since the folder name (e.g. a worktree
+        // like "_planner") isn't guaranteed to already be kebab-case.
+        let current_dir_name = std::env::current_dir()
             .unwrap()
             .file_name()
             .unwrap()
             .to_string_lossy()
             .to_lowercase();
+        let expected = kebab_case(&current_dir_name);
         assert_eq!(project_id("."), expected);
     }
 }
