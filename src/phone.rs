@@ -187,7 +187,7 @@ pub fn find_adb(
 }
 
 /// `find_adb`, reading `PATH`, `LOCALAPPDATA` and the home directory itself the way the real
-/// agent does, the same pattern as `session::resolve_claude_on_path`.
+/// agent does, the same pattern as `engines::resolve_claude_on_path`.
 pub fn find_adb_on_path(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     let windows = cfg!(windows);
     let exe_name = if windows { "adb.exe" } else { "adb" };
