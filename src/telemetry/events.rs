@@ -23,9 +23,8 @@ static TOKEN_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|glpat-[A-Za-z0-9_-]{16,})")
         .expect("token secret pattern")
 });
-static BEARER_SECRET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}").expect("bearer secret pattern")
-});
+static BEARER_SECRET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}").expect("bearer secret pattern"));
 static KEY_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)\b((?:access_?|refresh_?)?token|secret|password|passwd|api[_-]?key|authorization)(["']?\s*[:=]\s*["']?)[^\s"',;&]+"#)
         .expect("key secret pattern")
@@ -40,7 +39,9 @@ pub fn scrub(text: &str, max: usize) -> String {
         .replace_all(&t, |caps: &regex::Captures| format!("{} [redacted]", &caps[1]))
         .into_owned();
     t = KEY_SECRET
-        .replace_all(&t, |caps: &regex::Captures| format!("{}{}[redacted]", &caps[1], &caps[2]))
+        .replace_all(&t, |caps: &regex::Captures| {
+            format!("{}{}[redacted]", &caps[1], &caps[2])
+        })
         .into_owned();
     t = WHITESPACE.replace_all(&t, " ").trim().to_string();
     if t.len() > max {
@@ -124,11 +125,7 @@ pub fn read_events(dir: &Path, since: i64, until: i64) -> Vec<Value> {
         Err(_) => return Vec::new(),
     };
     names.sort();
-    let first = if since > 0 {
-        iso_utc_day(since)
-    } else {
-        String::new()
-    };
+    let first = if since > 0 { iso_utc_day(since) } else { String::new() };
     // Match TypeScript's `until = Infinity` → last day name "9999".
     let last = if until >= i64::MAX / 2 {
         "9999".to_string()
@@ -215,15 +212,14 @@ impl EventLog {
         let _ = std::fs::create_dir_all(dir);
         self.prune_daily();
         let since = (self.now)() - RECENT_MS;
-        let known: std::collections::HashSet<String> =
-            self.recent.iter().filter_map(|e| serde_json::to_string(e).ok()).collect();
+        let known: std::collections::HashSet<String> = self
+            .recent
+            .iter()
+            .filter_map(|e| serde_json::to_string(e).ok())
+            .collect();
         let back: Vec<Value> = read_events(dir, since, i64::MAX)
             .into_iter()
-            .filter(|e| {
-                serde_json::to_string(e)
-                    .map(|s| !known.contains(&s))
-                    .unwrap_or(true)
-            })
+            .filter(|e| serde_json::to_string(e).map(|s| !known.contains(&s)).unwrap_or(true))
             .collect();
         for e in &back {
             for f in &mut self.listeners {
@@ -450,10 +446,7 @@ mod tests {
             })
         );
         let now_ms = *now.lock().unwrap();
-        assert_eq!(
-            day_file(dir.path(), now_ms).file_name().unwrap(),
-            "2026-10-16.jsonl"
-        );
+        assert_eq!(day_file(dir.path(), now_ms).file_name().unwrap(), "2026-10-16.jsonl");
         let day2: Value =
             serde_json::from_str(&std::fs::read_to_string(day_file(dir.path(), now_ms)).unwrap()).unwrap();
         assert_eq!(
@@ -471,7 +464,11 @@ mod tests {
             .iter()
             .map(|e| e.get("kind").and_then(|v| v.as_str()).unwrap())
             .collect();
-        assert_eq!(kinds, ["before_open", "item_state", "tick"], "all kept in memory for the watchdog");
+        assert_eq!(
+            kinds,
+            ["before_open", "item_state", "tick"],
+            "all kept in memory for the watchdog"
+        );
     }
 
     #[test]
@@ -602,7 +599,11 @@ mod tests {
             .map(|e| e.get("kind").and_then(|v| v.as_str()).unwrap().to_string())
             .collect();
         assert_eq!(kinds, ["late", "a", "b"], "the last 24 hours");
-        assert_eq!(*heard.lock().unwrap(), ["late", "a", "b"], "listeners hear what's read back too");
+        assert_eq!(
+            *heard.lock().unwrap(),
+            ["late", "a", "b"],
+            "listeners hear what's read back too"
+        );
     }
 
     #[test]
