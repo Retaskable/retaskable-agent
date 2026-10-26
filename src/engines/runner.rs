@@ -16,12 +16,14 @@ use tokio::process::Command;
 use super::claude::ClaudeEngine;
 use super::cursor::CursorEngine;
 use super::engine::{Engine, EngineId, SessionResult, SessionSpec};
+use super::pi::PiEngine;
 
 /// `engineOf(id)`: the `Engine` a session's `SessionSpec.engine` names; missing means Claude Code.
 pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
     match id.unwrap_or(EngineId::Claude) {
         EngineId::Claude => Ok(Box::new(ClaudeEngine)),
         EngineId::Cursor => Ok(Box::new(CursorEngine)),
+        EngineId::Pi => Ok(Box::new(PiEngine)),
     }
 }
 
@@ -243,6 +245,11 @@ mod tests {
     #[test]
     fn engine_of_resolves_the_cursor_engine_by_id() {
         assert_eq!(engine_of(Some(EngineId::Cursor)).unwrap().id(), EngineId::Cursor);
+    }
+
+    #[test]
+    fn engine_of_resolves_the_pi_engine_by_id() {
+        assert_eq!(engine_of(Some(EngineId::Pi)).unwrap().id(), EngineId::Pi);
     }
 
     /// Stands in for an engine's own `args`/`env`/`prompt`/`reader`: whatever `args` it's given is
