@@ -507,7 +507,7 @@ fn descendants_of(pid: u32) -> Vec<u32> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for line in stdout.lines() {
-        let mut parts = line.trim().split_whitespace();
+        let mut parts = line.split_whitespace();
         let (Some(child), Some(parent)) = (parts.next(), parts.next()) else {
             continue;
         };

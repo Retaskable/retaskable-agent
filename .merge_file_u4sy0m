@@ -1,0 +1,6 @@
+tree 12597779f5e5abadfefd277dd11c64866bc108cd
+parent 3620b62bc7a74490a1dbf687ddb53e3f60b2f184
+author James Coles-Nash <mail@jcnash.com> 1793015460 -0700
+committer James Coles-Nash <mail@jcnash.com> 1793015460 -0700
+
+Fix clippy trim_split_whitespace in lanes.rs for CI
