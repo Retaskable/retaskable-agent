@@ -178,11 +178,35 @@ pub async fn link(
             return Err(LinkError::Expired);
         }
         tokio::time::sleep(interval).await;
-        match client.poll_token(&code.device_code).await? {
-            PollOutcome::Approved(token) => return Ok(token),
-            PollOutcome::Pending => {}
-            PollOutcome::SlowDown => interval += Duration::from_secs(5),
+        // A dropped poll (`Unreachable`) is retried until the deadline: the code may still be
+        // valid, and a single blip shouldn't end the attempt. Denied / expired / other OAuth
+        // errors still stop immediately.
+        match after_poll(client.poll_token(&code.device_code).await, interval) {
+            AfterPoll::Approved(token) => return Ok(token),
+            AfterPoll::Continue { new_interval } => interval = new_interval,
+            AfterPoll::Fail(err) => return Err(err),
         }
+    }
+}
+
+/// What to do after one `/api/device/token` poll (kept separate so the Unreachable-retry rule is
+/// unit-tested without standing up a flaky HTTP server).
+#[derive(Debug)]
+enum AfterPoll {
+    Approved(DeviceToken),
+    Continue { new_interval: Duration },
+    Fail(LinkError),
+}
+
+fn after_poll(result: Result<PollOutcome, LinkError>, interval: Duration) -> AfterPoll {
+    match result {
+        Ok(PollOutcome::Approved(token)) => AfterPoll::Approved(token),
+        Ok(PollOutcome::Pending) => AfterPoll::Continue { new_interval: interval },
+        Ok(PollOutcome::SlowDown) => AfterPoll::Continue {
+            new_interval: interval + Duration::from_secs(5),
+        },
+        Err(LinkError::Unreachable(_)) => AfterPoll::Continue { new_interval: interval },
+        Err(err) => AfterPoll::Fail(err),
     }
 }
 
@@ -393,5 +417,18 @@ mod tests {
     #[test]
     fn os_name_is_never_empty() {
         assert!(!os_name().is_empty());
+    }
+
+    #[test]
+    fn unreachable_during_poll_is_retried_not_a_hard_fail() {
+        let interval = Duration::from_secs(5);
+        match after_poll(Err(LinkError::Unreachable("connection reset".into())), interval) {
+            AfterPoll::Continue { new_interval } => assert_eq!(new_interval, interval),
+            other => panic!("expected Continue, got a hard stop: {other:?}"),
+        }
+        match after_poll(Err(LinkError::Denied), interval) {
+            AfterPoll::Fail(LinkError::Denied) => {}
+            other => panic!("denied must still stop the link: {other:?}"),
+        }
     }
 }

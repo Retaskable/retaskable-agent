@@ -12,14 +12,9 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8"
-# keyring's v1 module on Linux uses only Secret Service (not keyutils); headless boxes without
-# it fall back to credentials.json — see src/cloud/credentials.rs.
-keyring = { version = "4.2.0", default-features = false, features = [
-    "v1",
-    "windows-native-keyring-store",
-    "apple-native-keyring-store",
-    "zbus-secret-service-keyring-store",
-] }
+# OS credential stores through keyring-core (docker.md section 4; cloud/04). On Linux we pick
+# Secret Service then the kernel keyring ourselves — see src/cloud/credentials.rs.
+keyring-core = "1.0.1"
 regex = "1.13.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -27,6 +22,16 @@ serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "process", "io-util", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store = "1.0.0"
+zbus-secret-service-keyring-store = { version = "1.0.1", default-features = false, features = ["crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"

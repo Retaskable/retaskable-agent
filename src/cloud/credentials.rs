@@ -4,10 +4,11 @@
 //! credential store at all (a Docker container)". docs/specs/docker.md section 4 is the fallback's
 //! spec: on Linux, probe once; if that throws, every secret (not just this one) goes in
 //! `.retaskable/credentials.json`, mode 0600, by service and account as the OS store keeps them.
-//! Windows and macOS always use the OS store. On Linux the `keyring` crate's `v1` module uses only
-//! the Secret Service (not the kernel keyring), so a headless box without Secret Service takes the
-//! same file fallback a container does.
+//! Windows and macOS always use the OS store. On Linux the probe tries the Secret Service first,
+//! then the kernel keyring (same order as `@napi-rs/keyring` / TypeScript `credentials.ts`); the
+//! file is used only when neither store can be opened.
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
@@ -22,28 +23,108 @@ const PROBE_ACCOUNT: &str = "probe";
 pub const SERVICE: &str = "retaskable";
 
 /// The OS credential store, behind a trait so a test can stand in for it instead of touching the
-/// real Windows Credential Manager, macOS Keychain or Linux Secret Service.
+/// real Windows Credential Manager, macOS Keychain or Linux Secret Service / keyutils.
 pub trait Keyring {
     fn get(&self, service: &str, account: &str) -> Result<Option<String>>;
     fn set(&self, service: &str, account: &str, secret: &str) -> Result<()>;
 }
 
-/// The real OS credential store, through the `keyring` crate.
+/// Tries openers in Secret Service → kernel keyring order (docker.md section 4 /
+/// `@napi-rs/keyring`). The first `Ok` wins; used by [`OsKeyring`] on Linux and tested without
+/// talking to D-Bus or keyutils.
+pub(crate) fn choose_linux_os_store<T, E>(
+    try_secret_service: impl FnOnce() -> std::result::Result<T, E>,
+    try_keyutils: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    match try_secret_service() {
+        Ok(v) => Ok(v),
+        Err(_) => try_keyutils(),
+    }
+}
+
+/// The real OS credential store, through keyring-core and the platform stores.
 pub struct OsKeyring;
 
 impl Keyring for OsKeyring {
     fn get(&self, service: &str, account: &str) -> Result<Option<String>> {
-        let entry = keyring::Entry::new(service, account)?;
+        let entry = os_entry(service, account)?;
         match entry.get_password() {
             Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
     fn set(&self, service: &str, account: &str, secret: &str) -> Result<()> {
-        keyring::Entry::new(service, account)?.set_password(secret)?;
+        os_entry(service, account)?.set_password(secret)?;
         Ok(())
+    }
+}
+
+fn os_entry(service: &str, account: &str) -> Result<keyring_core::Entry> {
+    let store = platform_store()?;
+    store
+        .build(service, account, None)
+        .with_context(|| format!("opening OS credential entry {service}/{account}"))
+}
+
+fn platform_store() -> Result<&'static Arc<keyring_core::CredentialStore>> {
+    static STORE: OnceLock<std::result::Result<Arc<keyring_core::CredentialStore>, String>> = OnceLock::new();
+    match STORE.get_or_init(open_platform_store) {
+        Ok(store) => Ok(store),
+        Err(msg) => bail!("{msg}"),
+    }
+}
+
+fn open_platform_store() -> std::result::Result<Arc<keyring_core::CredentialStore>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_native_keyring_store::Store::new()
+            .map(|store| -> Arc<keyring_core::CredentialStore> { store })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        apple_native_keyring_store::keychain::Store::new()
+            .map(|store| -> Arc<keyring_core::CredentialStore> { store })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        open_linux_store()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        Err("no OS credential store on this platform".to_string())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_linux_store() -> std::result::Result<Arc<keyring_core::CredentialStore>, String> {
+    choose_linux_os_store(
+        || -> std::result::Result<Arc<keyring_core::CredentialStore>, String> {
+            let store = zbus_secret_service_keyring_store::Store::new().map_err(|e| e.to_string())?;
+            probe_store(store.as_ref())?;
+            Ok(store)
+        },
+        || -> std::result::Result<Arc<keyring_core::CredentialStore>, String> {
+            let store = linux_keyutils_keyring_store::Store::new().map_err(|e| e.to_string())?;
+            probe_store(store.as_ref())?;
+            Ok(store)
+        },
+    )
+}
+
+/// A store "works" when a probe read returns a value or NoEntry — any other error means this
+/// store can't be used (docker.md section 4: Docker's seccomp refusing keyutils, or no D-Bus).
+#[cfg(target_os = "linux")]
+fn probe_store(store: &keyring_core::CredentialStore) -> std::result::Result<(), String> {
+    let entry = store
+        .build(PROBE_SERVICE, PROBE_ACCOUNT, None)
+        .map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(_) | Err(keyring_core::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -63,6 +144,8 @@ impl CredentialStore {
     /// parameter rather than read from `cfg!`, so a test can exercise the fallback on any
     /// platform (`session.rs`'s `resolve_claude` does the same for its `windows` parameter):
     /// docker.md section 4 says only Linux ever lacks one; Windows and macOS always have it.
+    /// On Linux the real [`OsKeyring`] probe already walked Secret Service → keyutils; this
+    /// call's `keyring.get` is that same probe, and the file is used only when it fails.
     pub fn detect(keyring: &dyn Keyring, dir: &Path, is_linux: bool) -> Self {
         if is_linux && keyring.get(PROBE_SERVICE, PROBE_ACCOUNT).is_err() {
             let path = dir.join("credentials.json");
@@ -176,6 +259,7 @@ fn write_new_0600(path: &Path, contents: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -211,6 +295,35 @@ mod tests {
                 .insert((service.to_string(), account.to_string()), secret.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn linux_store_order_prefers_secret_service_then_keyutils() {
+        let keyutils_calls = Cell::new(0);
+        assert_eq!(
+            choose_linux_os_store::<&str, &str>(
+                || Ok("secret-service"),
+                || {
+                    keyutils_calls.set(keyutils_calls.get() + 1);
+                    Ok("keyutils")
+                }
+            )
+            .unwrap(),
+            "secret-service"
+        );
+        assert_eq!(
+            keyutils_calls.get(),
+            0,
+            "keyutils must not be tried when Secret Service works"
+        );
+
+        assert_eq!(
+            choose_linux_os_store::<&str, &str>(|| Err("no dbus"), || Ok("keyutils")).unwrap(),
+            "keyutils"
+        );
+
+        let err = choose_linux_os_store::<&str, &str>(|| Err("no dbus"), || Err("no keyutils")).unwrap_err();
+        assert_eq!(err, "no keyutils");
     }
 
     #[test]
