@@ -183,11 +183,11 @@ impl SessionReader {
             .unwrap_or(known_session_id)
             .to_string();
         // Claude Code prices local tokens at Anthropic's rates; they cost nothing.
-        let cost_usd = if self.local {
+        let cost_usd = Some(if self.local {
             0.0
         } else {
             event.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0)
-        };
+        });
 
         // `claude.ts`: ok needs subtype "success", and an is_error+success pair becomes subtype "error".
         let ok = raw_subtype == "success" && !is_error && structured.is_some();
@@ -235,6 +235,7 @@ impl SessionReader {
             signed_out,
             context_tokens: self.context_tokens,
             usage: self.usage.clone(),
+            tokens: None,
         }
     }
 }
@@ -284,12 +285,13 @@ impl EngineReader for SessionReader {
             subtype: "exited".to_string(),
             structured: None,
             error: Some(error),
-            cost_usd: 0.0,
+            cost_usd: Some(0.0),
             session_id: known_session_id.to_string(),
             limit_hit,
             signed_out,
             context_tokens: self.context_tokens,
             usage: self.usage.clone(),
+            tokens: None,
         }
     }
 }
@@ -367,6 +369,8 @@ mod tests {
             max_turns: None,
             budget_usd: 0.0,
             start: SessionStart::Ephemeral,
+            readonly: false,
+            cursor: None,
         }
     }
 
@@ -580,7 +584,7 @@ mod tests {
         assert!(result.ok);
         assert_eq!(result.subtype, "success");
         assert_eq!(result.structured, Some(json!({"status": "pr_opened"})));
-        assert_eq!(result.cost_usd, 2.5);
+        assert_eq!(result.cost_usd, Some(2.5));
         assert_eq!(result.session_id, "abc");
         assert_eq!(result.error, None);
     }

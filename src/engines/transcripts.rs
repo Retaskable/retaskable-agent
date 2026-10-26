@@ -1,8 +1,8 @@
 //! Reads a run's transcripts back from disk, each with the engine that wrote it, following
 //! `agent/src/engines/transcripts.ts` in Retaskable.com and docs/specs/engines/02-the-engine-layer.md.
-//! Nothing in this crate writes a run's `.jsonl` files yet — that lands with the orchestrator/pool
-//! that owns a session's lifecycle — but the format is already fixed, so reading it back doesn't
-//! need to wait.
+//! `runner::run_session` writes this same format, given a [`super::runner::TranscriptSink`] — but
+//! nothing yet calls it with a real project's paths; that lands with the orchestrator/pool that
+//! owns a session's lifecycle.
 use std::io::Read as _;
 use std::path::Path;
 
