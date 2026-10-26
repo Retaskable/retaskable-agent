@@ -26,6 +26,15 @@ impl std::fmt::Display for EngineId {
     }
 }
 
+/// `engineOf`'s id lookup, for a value read back from disk rather than a live `SessionSpec`:
+/// missing or unrecognized both mean Claude Code (`engines[id ?? "claude"] ?? claude`).
+pub fn engine_id_from_str(id: Option<&str>) -> EngineId {
+    match id {
+        Some("cursor") => EngineId::Cursor,
+        _ => EngineId::Claude,
+    }
+}
+
 /// What a session is asked to do, following `engine.ts`'s `SessionSpec`.
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
@@ -137,6 +146,24 @@ pub trait EngineReader: Send {
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult;
 }
 
+/// One line of a transcript, boiled down for a UI drawer to show (`shared/types.ts`'s
+/// `SessionEvent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    Tool,
+    Text,
+    Result,
+}
+
+/// `shared/types.ts`'s `SessionEvent`: one readable line from a transcript, at the time it
+/// happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionEvent {
+    pub at: i64,
+    pub kind: EventKind,
+    pub text: String,
+}
+
 /// What differs per AI tool a session can run on, following `engine.ts`'s `Engine` interface.
 /// Everything else — spawning the process, teeing its lines to the run's `.jsonl`, the watchdog,
 /// killing — stays in `runner.rs`, the same whichever engine this is.
@@ -156,6 +183,9 @@ pub trait Engine: Send + Sync {
     fn prompt(&self, spec: &SessionSpec) -> String;
     /// A fresh reader for one session.
     fn reader(&self, spec: &SessionSpec) -> Box<dyn EngineReader>;
+    /// Turns one stored transcript line back into events, for reading a run back
+    /// (`summarize(ev, at)` in `engine.ts`; `readTranscripts`).
+    fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent>;
 }
 
 #[cfg(test)]

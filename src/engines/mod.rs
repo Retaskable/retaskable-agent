@@ -7,10 +7,13 @@
 pub mod claude;
 pub mod engine;
 pub mod runner;
+pub mod summarize;
+pub mod transcripts;
 
 pub use claude::{resolve_claude, resolve_claude_on_path};
 pub use engine::{
-    Engine, EngineId, EngineReader, SessionResult, SessionSpec, SessionStart, describe_failure, is_signed_out,
-    signed_out_text,
+    Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart,
+    describe_failure, engine_id_from_str, is_signed_out, signed_out_text,
 };
 pub use runner::{engine_of, run_session};
+pub use transcripts::{StartedOn, Transcript, read_transcripts, started_on};
