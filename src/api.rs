@@ -45,20 +45,8 @@ mod tests {
 
     use super::*;
 
-    fn test_settings() -> (Arc<SettingsServer>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let settings = Arc::new(SettingsServer::new(
-            dir.path().to_path_buf(),
-            4700,
-            |_: &str| None,
-            || 1_700_000_000,
-            |_: i32| {},
-        ));
-        (settings, dir)
-    }
-
     async fn call(method: &str, path: &str) -> (StatusCode, Value) {
-        let (settings, _dir) = test_settings();
+        let (settings, _dir) = settings_server::test_server();
         let req = Request::builder().method(method).uri(path).body(Body::empty()).unwrap();
         let res = router("1.2.3", settings).oneshot(req).await.unwrap();
         let status = res.status();
@@ -76,7 +64,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_settings_page_is_merged_in_alongside_health() {
-        let (settings, _dir) = test_settings();
+        let (settings, _dir) = settings_server::test_server();
         let req = Request::builder()
             .method("GET")
             .uri("/settings")
