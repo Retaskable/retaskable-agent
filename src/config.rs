@@ -420,8 +420,11 @@ fn default_max_slices_per_item() -> u32 {
 }
 
 /// A project's id, made once from its repo folder's name in kebab case (`retaskable.com` gives `retaskable-com`).
+/// Resolved against the current directory first, as `path.resolve` does in the TypeScript agent's `projectId`,
+/// so a relative `repoPath` (`.`, `..`) gives the folder's own name rather than the relative segment's.
 fn project_id(repo_path: &str) -> String {
-    let name = Path::new(repo_path)
+    let resolved = std::path::absolute(repo_path).unwrap_or_else(|_| PathBuf::from(repo_path));
+    let name = resolved
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
@@ -460,12 +463,20 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
 /// (agent/10-config-retaskable-config-json.md).
 fn parse(text: &str) -> Result<ConfigFile> {
     let raw: Value = serde_json::from_str(text)?;
-    let machine: MachineConfig = serde_json::from_value(raw.clone())?;
+    let mut machine: MachineConfig = serde_json::from_value(raw.clone())?;
     if raw.get("version").and_then(Value::as_u64) == Some(2) {
-        let projects = match raw.get("projects") {
-            Some(v) => serde_json::from_value(v.clone())?,
-            None => Vec::new(),
+        // TypeScript's migrateConfig treats a `projects` that isn't an array as `[]`.
+        let projects_raw: Vec<Value> = match raw.get("projects") {
+            Some(Value::Array(arr)) => arr.clone(),
+            _ => Vec::new(),
         };
+        if raw.get("lanes").is_none() {
+            machine.lanes = fallback_lanes(&projects_raw);
+        }
+        let projects = projects_raw
+            .into_iter()
+            .map(|v| serde_json::from_value(merge_migrated(v)))
+            .collect::<std::result::Result<Vec<ProjectConfig>, _>>()?;
         return Ok(ConfigFile { machine, projects });
     }
     let mut project: ProjectConfig = serde_json::from_value(raw)?;
@@ -476,6 +487,35 @@ fn parse(text: &str) -> Result<ConfigFile> {
         machine,
         projects: vec![project],
     })
+}
+
+/// A version 2 project block whose settings have moved to the shared backlog keeps only the computer's own
+/// fields; everything else sits under `migrated` (shared/configTypes.ts `ProjectConfig`). Read it merged, the
+/// block's own keys over the migrated ones, as `projectConfig` in agent/src/config.ts does.
+fn merge_migrated(mut value: Value) -> Value {
+    let Value::Object(obj) = &mut value else {
+        return value;
+    };
+    let Some(Value::Object(migrated)) = obj.remove("migrated") else {
+        return value;
+    };
+    let mut merged = migrated;
+    merged.extend(obj.iter().map(|(k, v)| (k.clone(), v.clone())));
+    Value::Object(merged)
+}
+
+/// agent-settings.md section 3.1 (TypeScript's `projectLanes`): when the top-level `lanes` is missing, the
+/// computer's lanes is the largest whole number of 1 or more found in any project's own `lanes` or
+/// `migrated.lanes`, and the default only when there is none.
+fn fallback_lanes(projects: &[Value]) -> u32 {
+    projects
+        .iter()
+        .flat_map(|p| [p.get("lanes"), p.get("migrated").and_then(|m| m.get("lanes"))])
+        .filter_map(|v| v.and_then(Value::as_u64))
+        .filter(|&n| n >= 1)
+        .max()
+        .map(|n| n as u32)
+        .unwrap_or_else(default_lanes)
 }
 
 // agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535." Anything below
@@ -595,6 +635,95 @@ mod tests {
     }
 
     #[test]
+    fn a_migrated_project_block_reads_its_settings_from_migrated() {
+        // Once a project's settings move to the shared backlog, its `projects[]` block keeps only the
+        // computer's own fields; everything else (baseBranch, checks, ...) sits under `migrated`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "version": 2,
+                "projects": [
+                    { "id": "x", "repoPath": "C:/code/x",
+                      "migrated": { "baseBranch": "main", "checks": [{ "name": "test", "command": "cargo test" }] } }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let cfg = load(dir.path()).unwrap();
+        let p = &cfg.projects[0];
+        assert_eq!(p.base_branch, "main");
+        assert_eq!(p.checks.len(), 1);
+        assert_eq!(p.checks[0].command, "cargo test");
+    }
+
+    #[test]
+    fn a_project_blocks_own_key_wins_over_its_migrated_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "version": 2,
+                "projects": [
+                    { "id": "x", "repoPath": "C:/code/x", "baseBranch": "develop",
+                      "migrated": { "baseBranch": "main" } }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.projects[0].base_branch, "develop");
+    }
+
+    #[test]
+    fn the_machines_lanes_falls_back_to_the_largest_a_project_or_its_migrated_block_had() {
+        // agent-settings.md section 3.1: no top-level `lanes` means the computer's lanes is the largest
+        // whole number of 1 or more found in any project's own `lanes` or `migrated.lanes`.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "version": 2,
+                "projects": [
+                    { "id": "a", "repoPath": "C:/code/a", "lanes": 3 },
+                    { "id": "b", "repoPath": "C:/code/b", "migrated": { "lanes": 5 } }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(load(dir.path()).unwrap().machine.lanes, 5);
+    }
+
+    #[test]
+    fn the_machines_lanes_is_the_default_when_no_project_has_one_either() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"version": 2, "projects": [{ "id": "a", "repoPath": "C:/code/a" }]}"#,
+        )
+        .unwrap();
+        assert_eq!(load(dir.path()).unwrap().machine.lanes, 2);
+    }
+
+    #[test]
+    fn a_version_2_files_top_level_lanes_is_not_overridden_by_a_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"version": 2, "lanes": 7, "projects": [{ "id": "a", "repoPath": "C:/code/a", "lanes": 3 }]}"#,
+        )
+        .unwrap();
+        assert_eq!(load(dir.path()).unwrap().machine.lanes, 7);
+    }
+
+    #[test]
+    fn a_non_array_projects_in_a_version_2_file_reads_as_no_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), r#"{"version": 2, "projects": null}"#).unwrap();
+        assert!(load(dir.path()).unwrap().projects.is_empty());
+    }
+
+    #[test]
     fn a_version_1_file_is_read_as_one_project_with_an_id_from_its_repo_path() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -655,6 +784,19 @@ mod tests {
             load(dir.path()).unwrap().projects[0].id,
             Some("already-named".to_string())
         );
+    }
+
+    #[test]
+    fn a_relative_repo_path_resolves_against_the_current_directory_first() {
+        // TypeScript's projectId runs path.basename(path.resolve(repoPath)): a relative repoPath such as
+        // "." or ".." gives the resolved folder's name, not the literal segment's.
+        let expected = std::env::current_dir()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase();
+        assert_eq!(project_id("."), expected);
     }
 
     #[test]
