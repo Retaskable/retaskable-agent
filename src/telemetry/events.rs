@@ -173,13 +173,16 @@ pub fn read_events(dir: &Path, since: i64, until: i64) -> Vec<Value> {
     out
 }
 
+/// Callback for every event (including those read back when the log opens).
+type EventListener = Box<dyn FnMut(&Value) + Send>;
+
 /// One project's log: events kept in memory for the watchdog, and appended to the day's file once it's open.
 pub struct EventLog {
     /// The last `RECENT_MS` of events, oldest first.
     recent: Vec<Value>,
     dir: Option<PathBuf>,
     pruned_day: String,
-    listeners: Vec<Box<dyn FnMut(&Value) + Send>>,
+    listeners: Vec<EventListener>,
     now: Box<dyn Fn() -> i64 + Send + Sync>,
 }
 
