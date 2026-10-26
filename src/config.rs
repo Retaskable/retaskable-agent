@@ -54,6 +54,15 @@ mod tests {
         assert_eq!(port(&ConfigFile::default(), no_env), DEFAULT_PORT);
         let bad = |k: &str| (k == "RETASKABLE_PORT").then(|| "nope".to_string());
         assert_eq!(port(&ConfigFile::default(), bad), DEFAULT_PORT);
+        // An unparseable env value falls through to the file, not straight to 4700.
+        assert_eq!(port(&ConfigFile { port: Some(4900) }, bad), 4900);
+    }
+
+    #[test]
+    fn a_zero_env_port_is_not_used_either() {
+        let zero = |k: &str| (k == "RETASKABLE_PORT").then(|| "0".to_string());
+        assert_eq!(port(&ConfigFile { port: Some(4900) }, zero), 4900);
+        assert_eq!(port(&ConfigFile::default(), zero), DEFAULT_PORT);
     }
 
     #[test]
