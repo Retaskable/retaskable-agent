@@ -90,7 +90,8 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
         let start_point = format!("origin/{base_branch}");
         run(git_in_worktree(&dir).args(["checkout", "-B", branch, &start_point]))?;
     }
-    // After clean: junctions created before it are gone; put them back for this item.
+    // Every junction lives in worktrees_dir, outside the lane, so clean -fd never touches them;
+    // this is run again because the new base branch may add dependencies the old one didn't have.
     link_outside_deps(repo_path, worktrees_dir, &dir)?;
     Ok(dir)
 }
@@ -161,6 +162,11 @@ fn link_outside_deps(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Resu
     let root = PathBuf::from(norm_path(
         &std::fs::canonicalize(worktrees_dir).unwrap_or_else(|_| worktrees_dir.to_path_buf()),
     ));
+    // Canonicalized so it matches `root` on macOS, where /var is a symlink to /private/var: an
+    // uncanonicalized lane dir would never compare as under a canonicalized root.
+    let lane_dir = PathBuf::from(norm_path(
+        &std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()),
+    ));
     let listed = git_output_in_worktree(
         dir,
         &[
@@ -191,10 +197,11 @@ fn link_outside_deps(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Resu
             if target == repo || is_under(&target, &repo) || !target.exists() {
                 continue;
             }
-            let link = PathBuf::from(norm_path(
-                &std::path::absolute(dir.join(file_dir).join(&rel)).unwrap_or_else(|_| dir.join(file_dir).join(&rel)),
-            ));
-            if !is_under(&link, &root) || link.exists() {
+            // The link's own leaf doesn't exist yet (that's what's being created), so it can't be
+            // canonicalized like `target`; fold `..`/`.` lexically instead of relying on
+            // `std::path::absolute`, which leaves `..` components unresolved on POSIX.
+            let link = lexically_normalize(&lane_dir.join(file_dir).join(&rel));
+            if !is_under(&link, &root) || std::fs::symlink_metadata(&link).is_ok() {
                 continue;
             }
             if let Some(parent) = link.parent() {
@@ -204,6 +211,27 @@ fn link_outside_deps(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Resu
         }
     }
     Ok(())
+}
+
+/// Resolves `.` and `..` components syntactically, with no filesystem access: unlike
+/// `std::fs::canonicalize` this works on a path whose leaf doesn't exist yet, and unlike
+/// `std::path::absolute` it actually pops on `..` (which `absolute` leaves in place on POSIX).
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut stack: Vec<std::path::Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(stack.last(), Some(std::path::Component::Normal(_))) {
+                    stack.pop();
+                } else {
+                    stack.push(component);
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.into_iter().collect()
 }
 
 fn is_under(path: &Path, root: &Path) -> bool {
@@ -671,6 +699,25 @@ mod tests {
         let non_ascii =
             "[package]\nauthors = [\"José 🚀\"]\n\n[dependencies]\nvoid_engine = { path = \"../void-engine\" }\n";
         assert_eq!(outside_paths(non_ascii), vec!["../void-engine"]);
+    }
+
+    #[test]
+    fn lexically_normalize_folds_parent_dir_components_with_no_filesystem_access() {
+        // The POSIX bug this guards against: `std::path::absolute` leaves `..` in place, so a
+        // path through a lane that climbs out must be folded by hand instead.
+        assert_eq!(
+            lexically_normalize(Path::new("/worktrees/lane-1/../void-engine")),
+            Path::new("/worktrees/void-engine")
+        );
+        assert_eq!(
+            lexically_normalize(Path::new("/worktrees/lane-1/../../too-far")),
+            Path::new("/too-far")
+        );
+        // `.` components are dropped, and a leaf that doesn't exist on disk is still folded.
+        assert_eq!(
+            lexically_normalize(Path::new("/a/./b/../c/does-not-exist")),
+            Path::new("/a/c/does-not-exist")
+        );
     }
 
     #[test]
