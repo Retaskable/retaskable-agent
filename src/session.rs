@@ -1,10 +1,12 @@
 //! Running a Claude Code session and reading back what it did, following
-//! docs/specs/agent/06.2-implementer.md, docs/specs/agent/04-architecture.md, and
+//! docs/specs/agent/06.2-implementer.md, docs/specs/agent/04-architecture.md,
+//! docs/specs/agent/07-orchestrator-loop.md section 7.1, and
 //! `agent/src/engines/claude.ts` / `engine.ts` / `noDeploy.ts` in Retaskable.com (the ground truth
 //! this is porting). Milestone 2 of docs/specs/agent/11-build-milestones.md: spawn `claude -p` with
-//! `--output-format stream-json`, parse the events, and capture the final structured result.
-//! Resuming a session and reading the 5-hour usage limit into `state.usage` are later slices;
-//! nothing calls `run_session` yet, since that's the orchestrator's job (a later milestone).
+//! `--output-format stream-json`, parse the events, capture the final structured result, resume a
+//! session that already has history, and read the 5-hour usage limit out of the stream. Nothing
+//! calls `run_session` yet, or saves its usage reading to `state.json` (`store::Store::set_usage`),
+//! since wiring it into a real orchestrator loop is a later milestone.
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -33,9 +35,7 @@ const NO_DEPLOY_TOOLS: [&str; 8] = [
 /// `claude.ts` `COMPACT_AT`: how many tokens of context Claude Code is told to auto-compact at.
 const COMPACT_AT: &str = "200000";
 
-/// What a session is asked to do, following `engine.ts`'s `SessionSpec`. The resume case
-/// (`session_id: Some(id)` on a session that already has history) is accepted by `build_args` but
-/// not exercised end to end yet: nothing threads a prior session's id through.
+/// What a session is asked to do, following `engine.ts`'s `SessionSpec`.
 #[derive(Debug, Clone)]
 pub struct SessionSpec {
     /// "opus" | "sonnet" | "haiku". The "local" tier (sessionEnv pointing a local model's base
@@ -47,8 +47,21 @@ pub struct SessionSpec {
     pub max_turns: Option<u32>,
     /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check.
     pub budget_usd: f64,
-    /// `Some(id)` resumes that session; `None` starts a fresh one with no persistence.
-    pub session_id: Option<String>,
+    pub start: SessionStart,
+}
+
+/// How this session begins, following docs/specs/agent/06.2-implementer.md: a fresh invocation
+/// names its own id up front (`--session-id <uuid>`) so a later follow-up can resume it
+/// (`claude -p "<follow-up>" --resume <sessionId> ...same flags...`); one that will never be
+/// resumed (e.g. a scout) skips persistence entirely.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionStart {
+    /// `--no-session-persistence`: no transcript is kept, so there's nothing to resume later.
+    Ephemeral,
+    /// `--session-id <id>`: a brand new session, started under a known id.
+    Fresh(String),
+    /// `--resume <id>`: a follow-up that continues a session that already has history.
+    Resume(String),
 }
 
 /// What a session did, following `engine.ts`'s `SessionResult`. `signedOut`/`describeFailure`
@@ -66,6 +79,9 @@ pub struct SessionResult {
     pub session_id: String,
     /// The last turn's own context size (prompt + cache), not counting subagents' turns.
     pub context_tokens: Option<u64>,
+    /// The latest `rate_limit_info` the stream reported (07-orchestrator-loop.md section 7.1),
+    /// kept whole and ready to save as `state.usage`. `None` when the stream never sent one.
+    pub usage: Option<Value>,
 }
 
 /// `resolveClaude()`: finds the real `claude` binary to run, following docs/specs/agent/
@@ -139,12 +155,16 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
     }
     args.push("--setting-sources".to_string());
     args.push("project".to_string());
-    match &spec.session_id {
-        Some(id) => {
+    match &spec.start {
+        SessionStart::Ephemeral => args.push("--no-session-persistence".to_string()),
+        SessionStart::Fresh(id) => {
             args.push("--session-id".to_string());
             args.push(id.clone());
         }
-        None => args.push("--no-session-persistence".to_string()),
+        SessionStart::Resume(id) => {
+            args.push("--resume".to_string());
+            args.push(id.clone());
+        }
     }
     args.push("--disallowedTools".to_string());
     for tool in NO_DEPLOY_TOOLS {
@@ -173,6 +193,9 @@ fn session_env(model: &str) -> Vec<(String, String)> {
 #[derive(Default)]
 struct SessionReader {
     context_tokens: Option<u64>,
+    /// The latest `rate_limit_info` seen so far (section 7.1: "the latest one is kept"); a
+    /// session can report it more than once, one per turn.
+    usage: Option<Value>,
 }
 
 impl SessionReader {
@@ -191,6 +214,14 @@ impl SessionReader {
             "assistant" if event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
                 if let Some(c) = context_of(&event) {
                     self.context_tokens = Some(c);
+                }
+                None
+            }
+            // section 7.1: every session's stream starts with one of these, and a later turn can
+            // send another; the latest replaces whatever came before.
+            "rate_limit_event" => {
+                if let Some(info) = event.get("rate_limit_info").filter(|v| !v.is_null()).cloned() {
+                    self.usage = Some(info);
                 }
                 None
             }
@@ -251,6 +282,7 @@ impl SessionReader {
             cost_usd,
             session_id,
             context_tokens: self.context_tokens,
+            usage: self.usage.clone(),
         }
     }
 
@@ -272,6 +304,7 @@ impl SessionReader {
             cost_usd: 0.0,
             session_id: known_session_id.to_string(),
             context_tokens: self.context_tokens,
+            usage: self.usage.clone(),
         }
     }
 }
@@ -376,7 +409,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             max_turns: None,
             budget_usd: 0.0,
-            session_id: None,
+            start: SessionStart::Ephemeral,
         }
     }
 
@@ -513,14 +546,45 @@ mod tests {
     }
 
     #[test]
-    fn build_args_starts_a_named_session_instead_of_no_persistence_when_given_an_id() {
+    fn build_args_starts_a_named_session_instead_of_no_persistence_when_fresh() {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = base_spec(dir.path());
-        spec.session_id = Some("abc-123".to_string());
+        spec.start = SessionStart::Fresh("abc-123".to_string());
         let args = build_args(&spec);
         assert!(!args.contains(&"--no-session-persistence".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
         let idx = args.iter().position(|a| a == "--session-id").unwrap();
         assert_eq!(args[idx + 1], "abc-123");
+    }
+
+    #[test]
+    fn build_args_resumes_with_the_sessions_id_instead_of_no_persistence_or_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = base_spec(dir.path());
+        spec.start = SessionStart::Resume("abc-123".to_string());
+        let args = build_args(&spec);
+        assert!(!args.contains(&"--no-session-persistence".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        let idx = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[idx + 1], "abc-123");
+    }
+
+    #[test]
+    fn build_args_keeps_every_other_flag_the_same_on_a_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fresh = base_spec(dir.path());
+        fresh.start = SessionStart::Fresh("abc-123".to_string());
+        let mut resumed = base_spec(dir.path());
+        resumed.start = SessionStart::Resume("abc-123".to_string());
+        let without_start = |args: Vec<String>| -> Vec<String> {
+            let idx = args
+                .iter()
+                .position(|a| ["--session-id", "--resume", "--no-session-persistence"].contains(&a.as_str()))
+                .unwrap();
+            let skip = if args[idx] == "--no-session-persistence" { 1 } else { 2 };
+            [&args[..idx], &args[idx + skip..]].concat()
+        };
+        assert_eq!(without_start(build_args(&fresh)), without_start(build_args(&resumed)));
     }
 
     // session_env
@@ -684,6 +748,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(still_previous.context_tokens, Some(125));
+    }
+
+    #[test]
+    fn reader_keeps_the_latest_rate_limit_info_as_usage() {
+        let mut r = SessionReader::new();
+        r.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1000,"rateLimitType":"five_hour"}}"#,
+            "known",
+        );
+        r.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":2000,"rateLimitType":"five_hour"}}"#,
+            "known",
+        );
+        let result = r
+            .line(
+                r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"abc"}"#,
+                "known",
+            )
+            .unwrap();
+        assert_eq!(
+            result.usage,
+            Some(json!({"status": "allowed_warning", "resetsAt": 2000, "rateLimitType": "five_hour"}))
+        );
+    }
+
+    #[test]
+    fn reader_reports_no_usage_when_the_stream_never_sent_a_rate_limit_event() {
+        let mut r = SessionReader::new();
+        let result = r
+            .line(
+                r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"abc"}"#,
+                "known",
+            )
+            .unwrap();
+        assert_eq!(result.usage, None);
+    }
+
+    #[test]
+    fn reader_ignores_a_rate_limit_event_with_no_info() {
+        let mut r = SessionReader::new();
+        assert!(
+            r.line(r#"{"type":"rate_limit_event","rate_limit_info":null}"#, "known")
+                .is_none()
+        );
+        let result = r
+            .line(
+                r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"abc"}"#,
+                "known",
+            )
+            .unwrap();
+        assert_eq!(result.usage, None);
+    }
+
+    #[test]
+    fn no_result_still_carries_the_usage_seen_before_the_crash() {
+        let mut r = SessionReader::new();
+        r.line(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}"#,
+            "known",
+        );
+        let result = r.no_result(Some(1), "", "known");
+        assert_eq!(result.usage, Some(json!({"status": "rejected"})));
     }
 
     // SessionReader::no_result / tail
