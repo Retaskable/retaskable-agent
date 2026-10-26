@@ -4,14 +4,21 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, lanes, store, tags};
+use retaskable_agent::{api, config, lanes, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(filter()).init();
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
+    // checks and exit without starting the server.
+    if std::env::args().nth(1).as_deref() == Some("check") {
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
+        std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
+    }
+    tracing_subscriber::fmt().with_env_filter(filter()).init();
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
@@ -24,6 +31,11 @@ async fn main() -> Result<()> {
         if let Err(e) = store::Store::load(&project_dir) {
             tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
         }
+        // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
+        // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
+        // Nothing calls `EventLog::add` yet — that needs the orchestrator loop, sessions and the
+        // backlog client wired in first, none of which this agent runs yet.
+        telemetry::EventLog::new().open(&project_dir.join("events"));
         // Keeps this project's lane pool at lane_count worktrees (04-architecture.md section
         // 4.1); not fatal, since a project not yet pointed at a real repo and worktrees folder
         // shouldn't keep the health check from coming up either.
@@ -46,6 +58,22 @@ async fn main() -> Result<()> {
                     project.id_or_derived(),
                     worktrees_dir.display()
                 ),
+            }
+        }
+        // play-on-phone.md section 3: while this project has a `phone` section, watch for a
+        // plugged-in, authorised Android phone. Only adb is looked up at start; re-finding it
+        // when Setup is saved needs the settings server, not yet ported.
+        if project.phone.is_some() {
+            match phone::find_adb_on_path(env) {
+                Some(adb) => {
+                    tracing::info!(
+                        "{}: watching for an Android phone with {}",
+                        project.id_or_derived(),
+                        adb.display()
+                    );
+                    tokio::spawn(phone::watch(adb));
+                }
+                None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
             }
         }
     }
@@ -74,12 +102,36 @@ async fn main() -> Result<()> {
             "off".to_string()
         }
     );
+    // agent-settings.md section 3.1: which program runs each kind of work, and Cursor's model
+    // per tier. Not used to run a session yet (engines.md's own port), so logged for now the
+    // same way the settings above are before anything reads them.
+    let engine_choice = config::engine_choice(&cfg, env);
+    let cursor_models = config::cursor_models(&cfg, env);
+    tracing::info!(
+        "Engines: default {}, lanes [{}], Cursor models top {}, implementer {}, scout {}",
+        engine_choice.default.unwrap_or(config::Engine::Claude),
+        engine_choice
+            .lanes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        cursor_models.top.as_deref().unwrap_or("auto"),
+        cursor_models.implementer.as_deref().unwrap_or("auto"),
+        cursor_models.scout.as_deref().unwrap_or("auto"),
+    );
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config::port(&cfg, env)));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
     tracing::info!("Retaskable agent {VERSION} on http://{addr}");
+    // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
+    // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
+    tokio::spawn(async move {
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
+    });
     axum::serve(listener, api::router(VERSION))
         .with_graceful_shutdown(shutdown())
         .await?;
