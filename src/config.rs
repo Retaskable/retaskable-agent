@@ -540,6 +540,68 @@ pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
         .unwrap_or(DEFAULT_PORT)
 }
 
+// agent-settings.md section 3.2 (`withEnvSettings`): each computer-only setting's environment
+// variable wins over config.json. "A value that doesn't read ... is left out": an env value
+// outside the documented range (or unparseable) falls through to the file's, unvalidated here,
+// the same as every other field `load` reads.
+
+/// "How often it checks": `RETASKABLE_POLL_SEC`, 2 to 3600 seconds.
+pub fn poll_interval_sec(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
+    env("RETASKABLE_POLL_SEC")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| (2..=3600).contains(&n))
+        .unwrap_or(cfg.machine.poll_interval_sec)
+}
+
+/// "Lanes": `RETASKABLE_LANES`, a whole number from 1 to 64.
+pub fn lanes(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
+    env("RETASKABLE_LANES")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| (1..=64).contains(&n))
+        .unwrap_or(cfg.machine.lanes)
+}
+
+/// "Local model": `RETASKABLE_LOCAL_MODEL` turns it on with that model's name, or off with
+/// `off`, `false`, `0` or `no`; `RETASKABLE_LOCAL_URL` sets its address. Each is independent of
+/// the other and of the file's own value.
+pub fn local_model(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> LocalModelConfig {
+    let mut result = cfg.machine.local.clone();
+    if let Some(raw) = env("RETASKABLE_LOCAL_MODEL") {
+        if is_local_model_off(&raw) {
+            result.enabled = false;
+        } else if valid_model_name(&raw) {
+            result.enabled = true;
+            result.model = raw;
+        }
+    }
+    if let Some(url) = env("RETASKABLE_LOCAL_URL")
+        && valid_local_url(&url)
+    {
+        result.base_url = url;
+    }
+    result
+}
+
+fn is_local_model_off(raw: &str) -> bool {
+    matches!(raw.to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no")
+}
+
+fn valid_model_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().count() <= 100
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
+}
+
+/// `http` or `https`, with no user or password in it (an `@` before the path means userinfo).
+fn valid_local_url(s: &str) -> bool {
+    let Some(authority_and_path) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) else {
+        return false;
+    };
+    let authority = authority_and_path.split('/').next().unwrap_or("");
+    !authority.is_empty() && !authority.contains('@')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +664,111 @@ mod tests {
         let top_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "65535".to_string());
         assert_eq!(port(&ConfigFile::default(), top_env), 65535);
         assert_eq!(port(&with_port(65535), no_env), 65535);
+    }
+
+    #[test]
+    fn poll_interval_sec_prefers_the_env_then_the_file_then_the_default() {
+        let env = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "30".to_string());
+        let mut cfg = ConfigFile::default();
+        cfg.machine.poll_interval_sec = 20;
+        assert_eq!(poll_interval_sec(&cfg, env), 30);
+        assert_eq!(poll_interval_sec(&cfg, no_env), 20);
+        assert_eq!(poll_interval_sec(&ConfigFile::default(), no_env), 10);
+    }
+
+    #[test]
+    fn poll_interval_sec_outside_2_to_3600_falls_through_to_the_file() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.poll_interval_sec = 20;
+        let too_low = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "1".to_string());
+        let too_high = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "3601".to_string());
+        let not_a_number = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "soon".to_string());
+        assert_eq!(poll_interval_sec(&cfg, too_low), 20);
+        assert_eq!(poll_interval_sec(&cfg, too_high), 20);
+        assert_eq!(poll_interval_sec(&cfg, not_a_number), 20);
+        // The documented range's ends are both valid.
+        let low_end = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "2".to_string());
+        let high_end = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "3600".to_string());
+        assert_eq!(poll_interval_sec(&cfg, low_end), 2);
+        assert_eq!(poll_interval_sec(&cfg, high_end), 3600);
+    }
+
+    #[test]
+    fn lanes_prefers_the_env_then_the_file_then_the_default() {
+        let env = |k: &str| (k == "RETASKABLE_LANES").then(|| "8".to_string());
+        let mut cfg = ConfigFile::default();
+        cfg.machine.lanes = 4;
+        assert_eq!(lanes(&cfg, env), 8);
+        assert_eq!(lanes(&cfg, no_env), 4);
+        assert_eq!(lanes(&ConfigFile::default(), no_env), 2);
+    }
+
+    #[test]
+    fn lanes_outside_1_to_64_falls_through_to_the_file() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.lanes = 4;
+        let too_low = |k: &str| (k == "RETASKABLE_LANES").then(|| "0".to_string());
+        let too_high = |k: &str| (k == "RETASKABLE_LANES").then(|| "65".to_string());
+        assert_eq!(lanes(&cfg, too_low), 4);
+        assert_eq!(lanes(&cfg, too_high), 4);
+        let low_end = |k: &str| (k == "RETASKABLE_LANES").then(|| "1".to_string());
+        let high_end = |k: &str| (k == "RETASKABLE_LANES").then(|| "64".to_string());
+        assert_eq!(lanes(&cfg, low_end), 1);
+        assert_eq!(lanes(&cfg, high_end), 64);
+    }
+
+    #[test]
+    fn local_model_env_turns_it_on_with_that_models_name() {
+        let env = |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| "llama3.1".to_string());
+        let result = local_model(&ConfigFile::default(), env);
+        assert!(result.enabled);
+        assert_eq!(result.model, "llama3.1");
+        // The file's own address is kept; RETASKABLE_LOCAL_URL wasn't set.
+        assert_eq!(result.base_url, default_local_base_url());
+    }
+
+    #[test]
+    fn local_model_env_off_values_turn_it_off() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.local.enabled = true;
+        cfg.machine.local.model = "llama3.1".to_string();
+        for off in ["off", "false", "0", "no", "OFF"] {
+            let env = move |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| off.to_string());
+            assert!(!local_model(&cfg, env).enabled, "{off} should turn it off");
+        }
+    }
+
+    #[test]
+    fn local_model_env_falls_through_to_the_file_when_invalid() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.local.enabled = true;
+        cfg.machine.local.model = "llama3.1".to_string();
+        // Over 100 characters, and a character outside the documented set.
+        let too_long = "a".repeat(101);
+        let env = |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| too_long.clone());
+        let result = local_model(&cfg, env);
+        assert!(result.enabled);
+        assert_eq!(result.model, "llama3.1");
+        let bad_char = |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| "model name".to_string());
+        assert_eq!(local_model(&cfg, bad_char).model, "llama3.1");
+    }
+
+    #[test]
+    fn local_model_url_env_sets_its_address() {
+        let env = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "http://10.0.0.5:11436".to_string());
+        assert_eq!(
+            local_model(&ConfigFile::default(), env).base_url,
+            "http://10.0.0.5:11436"
+        );
+    }
+
+    #[test]
+    fn local_model_url_env_with_no_scheme_or_a_user_falls_through_to_the_file() {
+        let cfg = ConfigFile::default();
+        let no_scheme = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "10.0.0.5:11436".to_string());
+        let with_user = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "http://me:pw@10.0.0.5:11436".to_string());
+        assert_eq!(local_model(&cfg, no_scheme).base_url, default_local_base_url());
+        assert_eq!(local_model(&cfg, with_user).base_url, default_local_base_url());
     }
 
     #[test]
