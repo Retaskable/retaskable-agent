@@ -18,6 +18,61 @@ async fn main() -> Result<()> {
         println!("{}", setup_check::setup_check_report(&checks));
         std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
     }
+    // agent-telemetry.md section 5: the three commands for reading the event log and the session
+    // transcripts back. Each reads straight from the data dir and exits without starting the server.
+    if std::env::args().nth(1).as_deref() == Some("why") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let Some(item) = telemetry::find_item(&args) else {
+            eprintln!("Usage: retaskable why -- <item id> [--since <ISO time | 90m | 6h | 2d>] [--project <id>]");
+            std::process::exit(2);
+        };
+        let since = match telemetry::flag(&args, "since") {
+            Some(text) => match telemetry::parse_since(&text, telemetry::now_ms()) {
+                Some(ms) => ms,
+                None => {
+                    eprintln!("--since {text}: give an ISO time or a span such as 90m, 6h or 2d.");
+                    std::process::exit(2);
+                }
+            },
+            None => 0,
+        };
+        let dir = config::data_dir(env);
+        let events = telemetry::read_all(&dir, since, i64::MAX, telemetry::flag(&args, "project").as_deref());
+        println!("{}", telemetry::why_text(&events, &item));
+        std::process::exit(0);
+    }
+    if std::env::args().nth(1).as_deref() == Some("agent-report") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let hours = match telemetry::flag(&args, "hours") {
+            Some(text) => text.parse::<f64>().ok(),
+            None => Some(24.0),
+        };
+        let Some(hours) = hours.filter(|h| *h > 0.0) else {
+            eprintln!("Usage: retaskable agent-report -- [--hours 24] [--project <id>]");
+            std::process::exit(2);
+        };
+        let to = telemetry::now_ms();
+        let from = to - (hours * 3_600_000.0) as i64;
+        let dir = config::data_dir(env);
+        let events = telemetry::read_all(&dir, from, to, telemetry::flag(&args, "project").as_deref());
+        println!("{}", telemetry::report_text(&events, from, to));
+        std::process::exit(0);
+    }
+    if std::env::args().nth(1).as_deref() == Some("start-report") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        let sessions = match telemetry::flag(&args, "sessions") {
+            Some(text) => text.parse::<f64>().ok(),
+            None => Some(20.0),
+        };
+        let Some(sessions) = sessions.filter(|s| *s > 0.0) else {
+            eprintln!("Usage: retaskable start-report -- [--sessions 20] [--project <id>]");
+            std::process::exit(2);
+        };
+        let dir = config::data_dir(env);
+        let stats = telemetry::read_start_stats(&dir, sessions as usize, telemetry::flag(&args, "project").as_deref());
+        println!("{}", telemetry::start_stats_text(&stats));
+        std::process::exit(0);
+    }
     tracing_subscriber::fmt().with_env_filter(filter()).init();
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;

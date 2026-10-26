@@ -126,10 +126,12 @@ The first two commands read `.retaskable/projects/*/events/*.jsonl` only (`agent
   - **Anomalies**: each one in the window, its rule, item, text and how long it lasted.
 - `npm run start-report -- [--sessions 20] [--project <id>]`: how the newest fresh implementer sessions got going (agent.md section 6.2's Where to start). One line per session with its turns, calls and share of the cost before its first edit, then the medians and the share of those turns that made a single call. It reads the session transcripts (`.retaskable/projects/*/runs/<item>/*.jsonl`), not the event log, since only they keep each turn's tool calls and usage (`agent/src/telemetry/startStats.ts`, run by `scripts/start-report.ts`). Chores and the agent's own runs are left out. A turn's cost weighs its usage by price: cache writes 1.25×, cache reads 0.1×, output 5×.
 
+**Status in the Rust agent:** all three are built, as `retaskable why -- <item id>`, `retaskable agent-report` and `retaskable start-report` (`src/telemetry/report.rs`, `src/telemetry/start_stats.rs`, `src/main.rs`), same flags and output. They still only read what's on disk, so they stay accurate ahead of `EventLog::add` being wired in (section 3.3): empty until the events that feed them exist.
+
 ## 6. Tests
 
 - `agent/src/telemetry/events.test.ts` (and `src/telemetry/events.rs` here): the line format, one file per UTC day, pruning past 14 days, secrets redacted and long texts cut, dropped fields, reading back a window.
 - `agent/src/telemetry/watchdog.test.ts`: each rule fires, doesn't fire, and ends.
 - `agent/src/telemetry/telemetry.test.ts`: item state, lane and lease events from the `Store`, steps' `again`, one anomaly event per start and end.
-- `agent/src/telemetry/report.test.ts`: both readers on a fixture log.
-- `agent/src/telemetry/startStats.test.ts`: a transcript's numbers before the first edit, which sessions count, the report's medians.
+- `agent/src/telemetry/report.test.ts` (and `src/telemetry/report.rs` here): both readers on a fixture log.
+- `agent/src/telemetry/startStats.test.ts` (and `src/telemetry/start_stats.rs` here): a transcript's numbers before the first edit, which sessions count, the report's medians.
