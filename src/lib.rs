@@ -5,4 +5,5 @@
 pub mod api;
 pub mod backlog;
 pub mod config;
+pub mod lanes;
 pub mod store;
