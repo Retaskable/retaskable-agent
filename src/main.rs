@@ -6,14 +6,21 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, store, tags, telemetry};
+use retaskable_agent::{api, config, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(filter()).init();
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
+    // checks and exit without starting the server.
+    if std::env::args().nth(1).as_deref() == Some("check") {
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
+        std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
+    }
+    tracing_subscriber::fmt().with_env_filter(filter()).init();
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
@@ -105,6 +112,12 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("listening on {addr}"))?;
     tracing::info!("Retaskable agent {VERSION} on http://{addr}");
+    // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
+    // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
+    tokio::spawn(async move {
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
+    });
     axum::serve(listener, api::router(VERSION))
         .with_graceful_shutdown(shutdown())
         .await?;
