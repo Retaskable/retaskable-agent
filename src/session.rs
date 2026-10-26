@@ -186,8 +186,12 @@ impl SessionReader {
     fn line(&mut self, line: &str, known_session_id: &str) -> Option<SessionResult> {
         let event: Value = serde_json::from_str(line).ok()?;
         match event.get("type").and_then(Value::as_str)? {
-            "assistant" if event.get("parent_tool_use_id").is_none() => {
-                self.context_tokens = context_of(&event);
+            // Real stream-json main-thread turns carry `"parent_tool_use_id": null`; JS treats
+            // that as falsy (`!ev.parent_tool_use_id`), so null and missing both count.
+            "assistant" if event.get("parent_tool_use_id").is_none_or(Value::is_null) => {
+                if let Some(c) = context_of(&event) {
+                    self.context_tokens = Some(c);
+                }
                 None
             }
             "result" => Some(self.result_of(&event, known_session_id)),
@@ -197,7 +201,7 @@ impl SessionReader {
 
     fn result_of(&self, event: &Value, known_session_id: &str) -> SessionResult {
         let is_error = event.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-        let subtype = event
+        let raw_subtype = event
             .get("subtype")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
@@ -210,18 +214,33 @@ impl SessionReader {
             .to_string();
         let cost_usd = event.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
 
-        let (ok, subtype, error) = if is_error {
-            let error = event
+        // `claude.ts`: ok needs subtype "success", and an is_error+success pair becomes subtype "error".
+        let ok = raw_subtype == "success" && !is_error && structured.is_some();
+        let subtype = if is_error && raw_subtype == "success" {
+            "error".to_string()
+        } else {
+            raw_subtype.clone()
+        };
+        // Error text uses the event's own subtype (`ev.result || ev.subtype`), not the rewritten
+        // "error" label above — so is_error+success with no result string falls back to "success".
+        let error = if is_error {
+            event
                 .get("errors")
                 .and_then(Value::as_array)
                 .filter(|errors| !errors.is_empty())
                 .map(|errors| errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
-                .or_else(|| event.get("result").and_then(Value::as_str).map(str::to_string));
-            (false, subtype, error)
+                .or_else(|| {
+                    event
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
+                .or(Some(raw_subtype))
         } else if structured.is_none() {
-            (false, subtype, Some("No structured output returned".to_string()))
+            Some("No structured output returned".to_string())
         } else {
-            (true, subtype, None)
+            None
         };
 
         SessionResult {
@@ -241,7 +260,10 @@ impl SessionReader {
         let code = exit_code
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let error = format!("claude exited with code {code} and no result. {}", tail(stderr, 1000));
+        let error = format!(
+            "claude exited with code {code} and no result. {}",
+            tail(stderr.trim(), 1500)
+        );
         SessionResult {
             ok: false,
             subtype: "exited".to_string(),
@@ -255,11 +277,14 @@ impl SessionReader {
 }
 
 /// `contextOf(event)`: a turn's own context size — the tokens it was given to read, not the
-/// tokens it wrote — from an `assistant` event's usage block.
+/// tokens it wrote — from an `assistant` event's usage block. Returns `None` unless
+/// `input_tokens` is a number, matching `claude.ts` so a turn with no usage keeps the previous
+/// context size.
 fn context_of(event: &Value) -> Option<u64> {
     let usage = event.get("message")?.get("usage")?;
+    let input = usage.get("input_tokens")?.as_u64()?;
     let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
-    Some(field("input_tokens") + field("cache_read_input_tokens") + field("cache_creation_input_tokens"))
+    Some(input + field("cache_read_input_tokens") + field("cache_creation_input_tokens"))
 }
 
 /// The last (up to) `max_chars` characters of `s`, on a char boundary.
@@ -576,7 +601,37 @@ mod tests {
         let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"boom","session_id":"abc"}"#;
         let result = r.line(line, "known").unwrap();
         assert!(!result.ok);
+        assert_eq!(result.subtype, "error");
         assert_eq!(result.error, Some("boom".to_string()));
+
+        // No result string either: error text keeps the event's own subtype, while the field
+        // itself is rewritten to "error".
+        let line = r#"{"type":"result","subtype":"success","is_error":true,"session_id":"abc"}"#;
+        let result = r.line(line, "known").unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "error");
+        assert_eq!(result.error, Some("success".to_string()));
+    }
+
+    #[test]
+    fn reader_falls_back_to_the_subtype_when_a_failed_run_has_no_errors_or_result_string() {
+        let mut r = SessionReader::new();
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"abc"}"#;
+        let result = r.line(line, "known").unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "error_during_execution");
+        assert_eq!(result.error, Some("error_during_execution".to_string()));
+    }
+
+    #[test]
+    fn reader_requires_subtype_success_for_ok_even_with_structured_output() {
+        let mut r = SessionReader::new();
+        let line = r#"{"type":"result","subtype":"error_max_turns","is_error":false,"structured_output":{"status":"pr_opened"},"session_id":"abc"}"#;
+        let result = r.line(line, "known").unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "error_max_turns");
+        assert_eq!(result.structured, Some(json!({"status": "pr_opened"})));
+        assert_eq!(result.error, None);
     }
 
     #[test]
@@ -600,8 +655,9 @@ mod tests {
             .unwrap();
         assert_eq!(before_any_turn.context_tokens, None);
 
+        // Real stream-json main-thread turns carry null, not a missing field.
         r.line(
-            r#"{"type":"assistant","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5}}}"#,
             "known",
         );
         let after_a_turn = r
@@ -611,20 +667,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after_a_turn.context_tokens, Some(125));
+
+        // A later turn with no usage (or usage without input_tokens) keeps the previous value.
+        r.line(
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{}}"#,
+            "known",
+        );
+        r.line(
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"cache_read_input_tokens":50}}}"#,
+            "known",
+        );
+        let still_previous = r
+            .line(
+                r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"abc"}"#,
+                "known",
+            )
+            .unwrap();
+        assert_eq!(still_previous.context_tokens, Some(125));
     }
 
     // SessionReader::no_result / tail
 
     #[test]
-    fn no_result_names_the_exit_code_and_tails_the_stderr() {
+    fn no_result_names_the_exit_code_and_tails_the_trimmed_stderr() {
         let r = SessionReader::new();
-        let long_stderr = "x".repeat(2000);
+        let long_stderr = format!("  {}  ", "x".repeat(2000));
         let result = r.no_result(Some(1), &long_stderr, "known");
         assert!(!result.ok);
         assert_eq!(result.subtype, "exited");
         assert_eq!(result.session_id, "known");
         let err = result.error.unwrap();
         assert!(err.starts_with("claude exited with code 1 and no result."));
+        // Prefix + space + 1500 of the trimmed body; no leading/trailing spaces from stderr.
+        assert!(err.ends_with(&"x".repeat(1500)));
+        assert!(!err.contains("  x"));
         assert!(err.len() < long_stderr.len());
     }
 
