@@ -1,0 +1,3 @@
+claude-signed-out-hold: Align the spec with this Rust agent (no hold yet)
+
+The copied TypeScript spec claimed the hold was already here; this agent has no pool or signed-out classification yet.
