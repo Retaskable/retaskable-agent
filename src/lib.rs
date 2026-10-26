@@ -5,6 +5,7 @@
 pub mod api;
 pub mod backlog;
 pub mod config;
+pub mod lanes;
 pub mod phone;
 pub mod session;
 pub mod setup_check;
