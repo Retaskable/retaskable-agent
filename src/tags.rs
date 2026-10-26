@@ -137,7 +137,7 @@ pub fn found_tags(f: &MachineFacts) -> Vec<String> {
     tags
 }
 
-/// This computer's facts, looked once when first asked for.
+/// This computer's facts, looked up fresh (including an `nvidia-smi` run) on every call.
 pub fn machine_facts(env: impl Fn(&str) -> Option<String>) -> MachineFacts {
     let os = if cfg!(target_os = "windows") {
         OsKind::Windows
