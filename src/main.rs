@@ -1,12 +1,9 @@
-//! The Retaskable agent, in Rust: a port of Retaskable.com's `agent/` (TypeScript), following
-//! docs/specs/agent.md there. So far it only answers `GET /api/health` on 127.0.0.1.
-mod api;
-mod config;
-mod store;
-
+//! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it only
+//! answers `GET /api/health` on 127.0.0.1.
 use std::net::{Ipv4Addr, SocketAddr};
 
 use anyhow::{Context, Result};
+use retaskable_agent::{api, config, store};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
