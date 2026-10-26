@@ -150,19 +150,17 @@ fn ensure_worktree(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Result
 
 /// Repos often point at siblings (`path = "../void-engine"`). From a lane those relative paths
 /// land next to the lane; this adds a directory junction (Windows) or symlink (Unix) where the
-/// lane expects each one, pointing at the real folder. Links are only created under the parent of
-/// `worktrees_dir`.
+/// lane expects each one, pointing at the real folder. Links are only created under
+/// `worktrees_dir` itself (04-architecture.md section 4.1: "It only creates links under the
+/// worktrees root"), so a manifest that climbs out further than one sibling level can't place a
+/// link outside it.
 fn link_outside_deps(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Result<()> {
     let repo = PathBuf::from(norm_path(
         &std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf()),
     ));
-    let worktrees = PathBuf::from(norm_path(
+    let root = PathBuf::from(norm_path(
         &std::fs::canonicalize(worktrees_dir).unwrap_or_else(|_| worktrees_dir.to_path_buf()),
     ));
-    let root = worktrees
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| worktrees.clone());
     let listed = git_output_in_worktree(
         dir,
         &[
@@ -716,6 +714,37 @@ mod tests {
         let link = worktrees.join("void-engine");
         assert!(link.exists(), "junction/symlink at {}", link.display());
         assert!(link.join("lib.rs").exists(), "link should resolve to the real sibling");
+    }
+
+    #[test]
+    fn a_dependency_that_climbs_out_past_the_worktrees_root_gets_no_link() {
+        // "It only creates links under the worktrees root" (04-architecture.md section 4.1): a
+        // manifest that climbs out by more than one sibling level would, without that boundary,
+        // land its junction next to the worktrees root instead of inside it.
+        let outer = tempfile::tempdir().unwrap();
+        let proj = outer.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let too_far = outer.path().join("too-far-sibling");
+        std::fs::create_dir_all(&too_far).unwrap();
+        std::fs::write(too_far.join("lib.rs"), "// too far").unwrap();
+        let repo = init_repo_with_origin(&proj);
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntoo_far = { path = \"../../too-far-sibling\" }\n",
+        )
+        .unwrap();
+        run(git(&repo).args(["add", "Cargo.toml"])).unwrap();
+        run(git(&repo).args(["commit", "--quiet", "-m", "dep"])).unwrap();
+        run(git(&repo).args(["push", "--quiet", "origin", "main"])).unwrap();
+        let worktrees = proj.join("worktrees");
+
+        prepare(&repo, &worktrees, 1, "retaskable/far-s1", "main").unwrap();
+
+        assert!(
+            !proj.join("too-far-sibling").exists(),
+            "no junction should land next to the worktrees root"
+        );
+        assert!(!worktrees.join("too-far-sibling").exists());
     }
 
     #[test]
