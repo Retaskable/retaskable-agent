@@ -1,12 +1,10 @@
 //! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it only
 //! answers `GET /api/health` on 127.0.0.1.
-mod lanes;
-
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, phone, setup_check, store, tags, telemetry};
+use retaskable_agent::{api, config, lanes, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
