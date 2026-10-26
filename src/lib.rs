@@ -6,3 +6,4 @@ pub mod api;
 pub mod backlog;
 pub mod config;
 pub mod store;
+pub mod telemetry;
