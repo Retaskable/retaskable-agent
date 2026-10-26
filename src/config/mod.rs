@@ -323,6 +323,28 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_engine_in_config_json_does_not_stop_the_agent_starting() {
+        // "pi" is a real engine (ENGINE_PICKS in the TypeScript agent, engines.md section 13), and
+        // an unrecognised one ("steam") in a role or a lane must not fail the whole load either.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "engineChoice": {
+                    "default": "pi",
+                    "roles": { "implementer": "steam" },
+                    "lanes": ["claude", "steam"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.machine.engine_choice.default, Some(Engine::Pi));
+        assert_eq!(cfg.machine.engine_choice.roles.implementer, None);
+        assert!(cfg.machine.engine_choice.lanes.is_empty());
+    }
+
+    #[test]
     fn a_broken_file_is_an_error_naming_it() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.json"), "{").unwrap();

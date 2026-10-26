@@ -5,6 +5,7 @@
 use std::fmt;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::ConfigFile;
 
@@ -136,13 +137,14 @@ fn default_local_base_url() -> String {
 }
 
 /// Which program runs a kind of work: `engineChoice`'s `default` and each role in `roles`
-/// (agent-settings.md section 3.1, engines.md section 3.1). `local` is Claude Code pinned to the
-/// local model.
+/// (agent-settings.md section 3.1, engines.md section 3.1, 13). `local` is Claude Code pinned to
+/// the local model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Claude,
     Cursor,
+    Pi,
     Local,
 }
 
@@ -151,6 +153,7 @@ impl fmt::Display for Engine {
         f.write_str(match self {
             Engine::Claude => "claude",
             Engine::Cursor => "cursor",
+            Engine::Pi => "pi",
             Engine::Local => "local",
         })
     }
@@ -160,9 +163,36 @@ fn parse_engine(s: &str) -> Option<Engine> {
     match s.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(Engine::Claude),
         "cursor" => Some(Engine::Cursor),
+        "pi" => Some(Engine::Pi),
         "local" => Some(Engine::Local),
         _ => None,
     }
+}
+
+/// Reads an engine the lenient way the file allows: missing, `null`, not a string, or a name this
+/// agent doesn't know (a typo, a future engine) all read as `None` rather than failing the whole
+/// config load.
+fn deserialize_lenient_engine<'de, D>(deserializer: D) -> Result<Option<Engine>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Value::deserialize(deserializer)?;
+    Ok(raw.as_str().and_then(parse_engine))
+}
+
+/// Reads `engineChoice.lanes` the lenient way the file allows: not an array, or any entry that
+/// isn't `claude`, `cursor` or `default`, drops the whole list to empty rather than failing the
+/// whole config load (mirrors `lanes_of`, used for the same list read from the environment).
+fn deserialize_lenient_lanes<'de, D>(deserializer: D) -> Result<Vec<LaneEngine>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Value::deserialize(deserializer)?;
+    let Some(arr) = raw.as_array() else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<String> = arr.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect();
+    Ok(lanes_of(&entries).unwrap_or_default())
 }
 
 /// One entry of `engineChoice.lanes`: the implementer's engine for that lane, lane 1 first.
@@ -199,17 +229,17 @@ fn parse_lane_engine(s: &str) -> Option<LaneEngine> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleEngines {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub planner: Option<Engine>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub implementer: Option<Engine>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub review: Option<Engine>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub drafter: Option<Engine>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub chat: Option<Engine>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub writer: Option<Engine>,
 }
 
@@ -217,11 +247,11 @@ pub struct RoleEngines {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineChoiceConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
     pub default: Option<Engine>,
     #[serde(default)]
     pub roles: RoleEngines,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_lanes")]
     pub lanes: Vec<LaneEngine>,
 }
 
@@ -351,14 +381,19 @@ fn valid_local_url(s: &str) -> bool {
 
 /// "Engines": `RETASKABLE_ENGINES`, one engine for all (`local`) or `name=engine` pairs
 /// (`default=cursor,implementer=local`), `lanes` among them as `claude+claude+cursor+cursor`.
-/// Each field the environment doesn't set, or sets to something invalid, keeps the file's value;
-/// an invalid entry anywhere in `lanes` drops that whole list rather than part of it.
+/// When the variable is set it replaces the file's whole `engineChoice`, not just the fields it
+/// names, the same way the TypeScript agent's `withEnvSettings` does (`next.engineChoice =
+/// e.engines`) — even when nothing in the value parses, which leaves every field unset rather
+/// than keeping the file's.
 pub fn engine_choice(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> EngineChoiceConfig {
-    let mut result = cfg.machine.engine_choice.clone();
-    if let Some(raw) = env("RETASKABLE_ENGINES") {
-        apply_engines_env(&mut result, &raw);
+    match env("RETASKABLE_ENGINES") {
+        Some(raw) => {
+            let mut result = EngineChoiceConfig::default();
+            apply_engines_env(&mut result, &raw);
+            result
+        }
+        None => cfg.machine.engine_choice.clone(),
     }
-    result
 }
 
 fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
@@ -374,7 +409,8 @@ fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
         };
         let name = name.trim();
         if name == "lanes" {
-            if let Some(lanes) = value.split('+').map(parse_lane_engine).collect::<Option<Vec<_>>>() {
+            let entries: Vec<String> = value.split('+').map(str::to_string).collect();
+            if let Some(lanes) = lanes_of(&entries) {
                 result.lanes = lanes;
             }
             continue;
@@ -391,6 +427,25 @@ fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
             _ => {}
         }
     }
+}
+
+/// TypeScript's `lanesOf` (machineSettings.ts): a lane engine per entry (trimmed and lowercased),
+/// trailing `default` entries dropped; `None` when any entry isn't `claude`, `cursor` or `default`
+/// — a half-read list would put later lanes on the wrong engines. A single empty entry (an empty
+/// string split on `+`, or `lanes=` with nothing after it) is a real empty list, not an invalid
+/// one. Used for `lanes` read from both the environment and the file.
+fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
+    if entries.len() == 1 && entries[0].trim().is_empty() {
+        return Some(Vec::new());
+    }
+    let mut lanes = Vec::with_capacity(entries.len());
+    for entry in entries {
+        lanes.push(parse_lane_engine(entry)?);
+    }
+    while lanes.last() == Some(&LaneEngine::Default) {
+        lanes.pop();
+    }
+    Some(lanes)
 }
 
 /// "Cursor's models": `RETASKABLE_CURSOR_MODELS`, one model for every tier (`gpt-5`) or each by
@@ -622,14 +677,26 @@ mod tests {
     }
 
     #[test]
-    fn engine_choice_env_a_bare_engine_sets_only_the_default() {
+    fn engine_choice_env_a_bare_engine_replaces_the_files_whole_engine_choice() {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.roles.implementer = Some(Engine::Cursor);
         let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "local".to_string());
         let result = engine_choice(&cfg, env);
         assert_eq!(result.default, Some(Engine::Local));
-        // The file's role override is untouched: a bare value only sets the default.
-        assert_eq!(result.roles.implementer, Some(Engine::Cursor));
+        // The variable replaces the file's whole engineChoice, not just the default: the file's
+        // role override is gone (TypeScript's withEnvSettings: `next.engineChoice = e.engines`).
+        assert_eq!(result.roles.implementer, None);
+    }
+
+    #[test]
+    fn engine_choice_env_a_bare_unknown_value_still_replaces_the_file_with_empty() {
+        // `{}` is truthy in the TypeScript agent, so even a value that parses to nothing still
+        // replaces the file's engineChoice wholesale rather than leaving it alone.
+        let mut cfg = ConfigFile::default();
+        cfg.machine.engine_choice.default = Some(Engine::Cursor);
+        cfg.machine.engine_choice.roles.implementer = Some(Engine::Local);
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "steam".to_string());
+        assert_eq!(engine_choice(&cfg, env), EngineChoiceConfig::default());
     }
 
     #[test]
@@ -642,11 +709,13 @@ mod tests {
     }
 
     #[test]
-    fn engine_choice_env_an_invalid_role_value_falls_through_to_the_file() {
+    fn engine_choice_env_an_invalid_role_value_is_left_out_of_the_replacement() {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.roles.planner = Some(Engine::Cursor);
         let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "planner=steam".to_string());
-        assert_eq!(engine_choice(&cfg, env).roles.planner, Some(Engine::Cursor));
+        // The variable still replaces the file's engineChoice, so the invalid value doesn't fall
+        // through to the file's role: the whole thing ends up unset.
+        assert_eq!(engine_choice(&cfg, env).roles.planner, None);
     }
 
     #[test]
@@ -671,19 +740,34 @@ mod tests {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
         let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+steam+cursor".to_string());
-        // One bad entry drops the whole list, not just that entry: the file's lanes are kept.
+        // One bad entry drops the whole list; since the variable replaces the file's engineChoice
+        // entirely, the result is empty, not the file's lanes.
+        assert_eq!(engine_choice(&cfg, env).lanes, Vec::<LaneEngine>::new());
+    }
+
+    #[test]
+    fn engine_choice_env_lanes_with_nothing_after_it_is_an_empty_list() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=".to_string());
+        assert_eq!(engine_choice(&cfg, env).lanes, Vec::<LaneEngine>::new());
+    }
+
+    #[test]
+    fn engine_choice_env_lanes_drops_trailing_default_entries() {
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+default".to_string());
         assert_eq!(
-            engine_choice(&cfg, env).lanes,
-            vec![LaneEngine::Cursor, LaneEngine::Cursor]
+            engine_choice(&ConfigFile::default(), env).lanes,
+            vec![LaneEngine::Claude]
         );
     }
 
     #[test]
-    fn engine_choice_env_lanes_accepts_default_as_an_entry() {
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+default".to_string());
+    fn engine_choice_env_lanes_keeps_a_default_entry_that_isnt_trailing() {
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=default+claude".to_string());
         assert_eq!(
             engine_choice(&ConfigFile::default(), env).lanes,
-            vec![LaneEngine::Claude, LaneEngine::Default]
+            vec![LaneEngine::Default, LaneEngine::Claude]
         );
     }
 
@@ -701,14 +785,11 @@ mod tests {
         assert_eq!(cfg.engine_choice.default, Some(Engine::Cursor));
         assert_eq!(cfg.engine_choice.roles.implementer, Some(Engine::Local));
         assert_eq!(cfg.engine_choice.roles.planner, None);
+        // The file's lanes go through the same lenient reading as the environment's: a trailing
+        // "default" entry is dropped (lanesOf).
         assert_eq!(
             cfg.engine_choice.lanes,
-            vec![
-                LaneEngine::Claude,
-                LaneEngine::Claude,
-                LaneEngine::Cursor,
-                LaneEngine::Default
-            ]
+            vec![LaneEngine::Claude, LaneEngine::Claude, LaneEngine::Cursor]
         );
         let resolved = cursor_models(
             &ConfigFile {
@@ -721,6 +802,24 @@ mod tests {
         assert_eq!(resolved.implementer, Some("auto".to_string()));
         // An empty string is no name at all, so it reads as auto (None).
         assert_eq!(resolved.scout, None);
+    }
+
+    #[test]
+    fn an_unknown_engine_in_the_file_reads_as_none_instead_of_failing() {
+        // "pi" is a real engine (engines.md section 13): it must parse, case and all. "steam" is
+        // not an engine at all, and a lane holding one must not fail the whole config load either.
+        let json = r#"{
+            "engineChoice": {
+                "default": "PI",
+                "roles": { "implementer": "steam" },
+                "lanes": ["claude", "steam"]
+            }
+        }"#;
+        let cfg: MachineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.engine_choice.default, Some(Engine::Pi));
+        assert_eq!(cfg.engine_choice.roles.implementer, None);
+        // One bad lane entry drops the whole list rather than just that entry.
+        assert!(cfg.engine_choice.lanes.is_empty());
     }
 
     #[test]
