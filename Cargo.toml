@@ -12,12 +12,13 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8"
+# keyring's v1 module on Linux uses only Secret Service (not keyutils); headless boxes without
+# it fall back to credentials.json — see src/cloud/credentials.rs.
 keyring = { version = "4.2.0", default-features = false, features = [
     "v1",
     "windows-native-keyring-store",
     "apple-native-keyring-store",
     "zbus-secret-service-keyring-store",
-    "linux-keyutils-keyring-store",
 ] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }

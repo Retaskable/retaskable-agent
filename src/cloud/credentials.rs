@@ -4,7 +4,9 @@
 //! credential store at all (a Docker container)". docs/specs/docker.md section 4 is the fallback's
 //! spec: on Linux, probe once; if that throws, every secret (not just this one) goes in
 //! `.retaskable/credentials.json`, mode 0600, by service and account as the OS store keeps them.
-//! Windows and macOS always use the OS store.
+//! Windows and macOS always use the OS store. On Linux the `keyring` crate's `v1` module uses only
+//! the Secret Service (not the kernel keyring), so a headless box without Secret Service takes the
+//! same file fallback a container does.
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -141,22 +143,34 @@ fn write_atomic_0600(path: &Path, data: &Value) -> Result<()> {
             .to_string_lossy()
     );
     let tmp = path.with_file_name(tmp_name);
-    std::fs::write(&tmp, serde_json::to_string_pretty(data)?).with_context(|| format!("writing {}", tmp.display()))?;
-    set_mode_0600(&tmp)?;
+    // Drop a leftover temp so OpenOptions::mode applies (it only affects newly created files).
+    let _ = std::fs::remove_file(&tmp);
+    write_new_0600(&tmp, &serde_json::to_string_pretty(data)?)?;
     std::fs::rename(&tmp, path).with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
+/// Creates `path` with mode 0600 before any bytes are written, so the secret is never world-readable
+/// even briefly (unlike write-then-chmod).
 #[cfg(unix)]
-fn set_mode_0600(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("setting permissions on {}", path.display()))
+fn write_new_0600(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_mode_0600(_path: &Path) -> Result<()> {
-    Ok(())
+fn write_new_0600(path: &Path, contents: &str) -> Result<()> {
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

@@ -13,6 +13,12 @@ pub mod link;
 /// otherwise.
 pub const DEFAULT_URL: &str = "https://retaskable.com";
 
+/// Staging's cloud URL (tray/02 decision 7; environments.md section 3).
+pub const STAGING_URL: &str = "https://staging.retaskable.com";
+
+/// Local's cloud URL: `wrangler dev` (tray/02 decision 1).
+pub const LOCAL_URL: &str = "http://localhost:8787";
+
 /// The cloud this agent links to: `RETASKABLE_CLOUD_URL`, else the config file's `cloud.url`,
 /// else [`DEFAULT_URL`] (cloud/09-environments.md: "The agent's cloud URL is a setting, `cloud.url`
 /// in `.retaskable/config.json` ... with `RETASKABLE_CLOUD_URL` overriding it"). No trailing slash.
@@ -23,6 +29,29 @@ pub fn url(cfg: &crate::config::ConfigFile, env: impl Fn(&str) -> Option<String>
         .or_else(|| cfg.machine.cloud.url.clone())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     raw.trim_end_matches('/').to_string()
+}
+
+/// The URL for `retaskable-agent link [environment]` (tray/02 decision 7, tray/04):
+/// `production`, `staging` or `local`. With no environment, [`url`] (config / env / production).
+/// Any other name, or more than one argument, is refused so a token is never saved under the
+/// wrong cloud (tray/03: one connection and one token per environment).
+pub fn link_url(
+    link_args: &[String],
+    cfg: &crate::config::ConfigFile,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    match link_args {
+        [] => Ok(url(cfg, env)),
+        [name] => match name.as_str() {
+            "production" => Ok(DEFAULT_URL.to_string()),
+            "staging" => Ok(STAGING_URL.to_string()),
+            "local" => Ok(LOCAL_URL.to_string()),
+            other => Err(format!(
+                "unknown environment '{other}': use production, staging, or local"
+            )),
+        },
+        _ => Err("usage: retaskable-agent link [production|staging|local]".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -47,5 +76,37 @@ mod tests {
 
         let blank = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "   ".to_string());
         assert_eq!(url(&cfg, blank), "https://staging.retaskable.com");
+    }
+
+    #[test]
+    fn link_url_with_no_environment_uses_url() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.cloud.url = Some("https://staging.retaskable.com".to_string());
+        assert_eq!(link_url(&[], &cfg, no_env).unwrap(), STAGING_URL);
+
+        let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787".to_string());
+        assert_eq!(link_url(&[], &cfg, env).unwrap(), LOCAL_URL);
+    }
+
+    #[test]
+    fn link_url_maps_each_named_environment_and_ignores_config() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.cloud.url = Some("https://example.com".to_string());
+        let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "https://example.com".to_string());
+
+        assert_eq!(link_url(&["production".into()], &cfg, env).unwrap(), DEFAULT_URL);
+        assert_eq!(link_url(&["staging".into()], &cfg, no_env).unwrap(), STAGING_URL);
+        assert_eq!(link_url(&["local".into()], &cfg, no_env).unwrap(), LOCAL_URL);
+    }
+
+    #[test]
+    fn link_url_refuses_an_unknown_environment_or_extra_args() {
+        let cfg = ConfigFile::default();
+        let err = link_url(&["prod".into()], &cfg, no_env).unwrap_err();
+        assert!(err.contains("unknown environment 'prod'"), "{err}");
+        assert!(err.contains("production, staging, or local"), "{err}");
+
+        let err = link_url(&["staging".into(), "extra".into()], &cfg, no_env).unwrap_err();
+        assert!(err.contains("usage:"), "{err}");
     }
 }

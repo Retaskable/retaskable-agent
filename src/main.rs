@@ -17,10 +17,13 @@ async fn main() -> Result<()> {
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
 
-    // cloud/04-authentication.md section 4.2: `retaskable-agent link` is how a person links this
-    // machine to a cloud, separate from the server's normal startup below.
-    if std::env::args().nth(1).as_deref() == Some("link") {
-        return run_link(&cfg, &dir, env).await;
+    // cloud/04-authentication.md section 4.2 / tray/02 decision 7: `retaskable-agent link
+    // [environment]` links this machine to that cloud (or the config/env default), separate from
+    // the server's normal startup below.
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("link") {
+        let link_args: Vec<String> = argv.collect();
+        return run_link(&cfg, &dir, env, &link_args).await;
     }
 
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
@@ -92,8 +95,13 @@ async fn shutdown() {
 /// Links this machine to a cloud and keeps the refresh token it gets (cloud/04-authentication.md
 /// section 4.2): requests a device code, shows the person where to go, polls until it's
 /// approved, then saves the refresh token under this cloud's URL.
-async fn run_link(cfg: &config::ConfigFile, dir: &Path, env: impl Fn(&str) -> Option<String>) -> Result<()> {
-    let cloud_url = cloud::url(cfg, &env);
+async fn run_link(
+    cfg: &config::ConfigFile,
+    dir: &Path,
+    env: impl Fn(&str) -> Option<String>,
+    link_args: &[String],
+) -> Result<()> {
+    let cloud_url = cloud::link_url(link_args, cfg, &env).map_err(anyhow::Error::msg)?;
     let machine = cloud::link::machine_name(&env, hostname);
     let os = cloud::link::os_name();
 
