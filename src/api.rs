@@ -51,6 +51,9 @@ mod tests {
         for (method, path) in [
             ("GET", "/api/state"),
             ("POST", "/api/health"),
+            ("PUT", "/api/health"),
+            ("DELETE", "/api/health"),
+            ("OPTIONS", "/api/health"),
             ("POST", "/api/items/4/skip"),
             ("GET", "/"),
             ("GET", "/board"),
