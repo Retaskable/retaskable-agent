@@ -37,7 +37,7 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 
 ## 3. The event log
 
-`agent/src/telemetry/events.ts` (`EventLog`).
+`agent/src/telemetry/events.ts` (`EventLog`); in this Rust agent, `src/telemetry/events.rs`.
 
 ### 3.1 Files
 
@@ -50,8 +50,8 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 ### 3.2 What goes in, and what never does
 
 - Ids, states, lane numbers, durations (`ms`), counts, costs, model and engine names, session ids, PR numbers, store error codes.
-- Short texts only: a timeline note or an error message is cut to 300 characters (`MAX_TEXT`), and anything that looks like a token or a secret (GitHub tokens `gh?_…` and `github_pat_…`, `sk-…` keys, Slack `xox?-…`, `Bearer …`, `token=`, `password=`, `secret=`, `api_key=`, `authorization:` values) is replaced with `[redacted]` first.
-- Never a prompt, a transcript line, a follow-up message, a review's text or a session's output. Fields named `prompt`, `followUp`, `transcript`, `message`, `body` or `token` are dropped whatever they hold.
+- Short texts only: a timeline note or an error message is cut to 300 characters (`MAX_TEXT`), and anything that looks like a token or a secret (GitHub tokens `gh[pousr]_…` and `github_pat_…`, GitLab `glpat-…`, `sk-…` keys, Slack `xox[abprs]-…`, `Bearer`/`Basic …`, `token=`/`password=`/`secret=`/`api_key=`/`authorization:` values) is replaced with `[redacted]` first.
+- Never a prompt, a transcript line, a follow-up message, a review's text or a session's output. Fields named `prompt`, `followUp`, `transcript`, `message`, `body`, `token` or `lease` are dropped whatever they hold.
 
 ### 3.3 Events
 
@@ -126,7 +126,7 @@ The first two commands read `.retaskable/projects/*/events/*.jsonl` only (`agent
 
 ## 6. Tests
 
-- `agent/src/telemetry/events.test.ts`: the line format, one file per UTC day, pruning past 14 days, secrets redacted and long texts cut, dropped fields, reading back a window.
+- `agent/src/telemetry/events.test.ts` (and `src/telemetry/events.rs` here): the line format, one file per UTC day, pruning past 14 days, secrets redacted and long texts cut, dropped fields, reading back a window.
 - `agent/src/telemetry/watchdog.test.ts`: each rule fires, doesn't fire, and ends.
 - `agent/src/telemetry/telemetry.test.ts`: item state, lane and lease events from the `Store`, steps' `again`, one anomaly event per start and end.
 - `agent/src/telemetry/report.test.ts`: both readers on a fixture log.
