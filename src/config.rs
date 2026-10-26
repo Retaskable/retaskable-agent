@@ -90,6 +90,15 @@ mod tests {
     }
 
     #[test]
+    fn a_port_at_the_top_of_the_documented_range_is_used() {
+        // agent-settings.md section 3.1: the documented valid range runs up to 65535,
+        // so the top of the range is as valid as the bottom (already covered at 1024).
+        let top_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "65535".to_string());
+        assert_eq!(port(&ConfigFile::default(), top_env), 65535);
+        assert_eq!(port(&ConfigFile { port: Some(65535) }, no_env), 65535);
+    }
+
+    #[test]
     fn a_missing_file_is_the_defaults_and_other_keys_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap().port, None);
