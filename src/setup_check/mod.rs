@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::session::resolve_claude_on_path;
+use crate::engines::resolve_claude_on_path;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
