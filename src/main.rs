@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, lanes, network, phone, setup_check, store, tags, telemetry};
+use retaskable_agent::{api, config, lanes, local_model, network, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -102,6 +102,13 @@ async fn main() -> Result<()> {
             "off".to_string()
         }
     );
+    // 07-orchestrator-loop.md section 7.2: while local is on, watch whether it's up, once per
+    // computer (not per project) — a local session running against it is a later slice, since no
+    // orchestrator exists yet to start one.
+    if local_model.enabled {
+        tracing::info!("Watching the local model at {}", local_model.base_url);
+        tokio::spawn(local_model::watch(local_model.base_url.clone()));
+    }
     // agent-settings.md section 3.1: which program runs each kind of work, and Cursor's model
     // per tier. Not used to run a session yet (engines.md's own port), so logged for now the
     // same way the settings above are before anything reads them.

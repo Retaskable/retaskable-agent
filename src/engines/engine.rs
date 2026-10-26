@@ -41,8 +41,8 @@ pub struct SessionSpec {
     /// Missing means `EngineId::Claude` (`engineOf`, `runner.rs`).
     pub engine: Option<EngineId>,
     /// "opus" | "sonnet" | "haiku", or "local" (a local server has no sign-in or usage limit, and
-    /// its tokens cost nothing). Pointing a session's environment at a local model's base URL is
-    /// still a later slice.
+    /// its tokens cost nothing). A local session's `local` field below carries where that server
+    /// is and which model it's running (07-orchestrator-loop.md section 7.2).
     pub model: String,
     pub prompt: String,
     pub schema: Value,
@@ -56,6 +56,11 @@ pub struct SessionSpec {
     pub readonly: bool,
     /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
     pub cursor: Option<CursorOptions>,
+    /// Set when this session runs on the computer's local model server instead of the cloud
+    /// (07-orchestrator-loop.md section 7.2). `None` for an ordinary cloud session, even one whose
+    /// `model` happens to be `"local"` — picking a tier and choosing to run it locally is the
+    /// orchestrator's job, not this struct's.
+    pub local: Option<LocalTarget>,
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
@@ -70,6 +75,16 @@ pub struct CursorOptions {
     /// remote. Only meaningful when this `CursorOptions` itself is present — a `SessionSpec` with
     /// no `cursor` at all defaults to `"gh"` (`cursor.rs`'s `allowlist`/`prepare_cursor`).
     pub cli: Option<String>,
+}
+
+/// Where a local session's server is and which model it's running
+/// (07-orchestrator-loop.md section 7.2's `local` config).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTarget {
+    /// `http://` or `https://` (the computer's settings refuse anything else when local is on).
+    pub base_url: String,
+    /// The local server's model name, mapped onto Claude Code's own model env vars.
+    pub model: String,
 }
 
 /// How this session begins, following docs/specs/agent/06.2-implementer.md: a fresh invocation

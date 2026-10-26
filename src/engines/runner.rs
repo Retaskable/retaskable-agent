@@ -307,6 +307,7 @@ mod tests {
             start: SessionStart::Ephemeral,
             readonly: false,
             cursor: None,
+            local: None,
         };
         let result = run_session(&engine, &bin, &spec, "known", None).await.unwrap();
         assert!(result.ok);
@@ -395,6 +396,7 @@ mod tests {
             start: SessionStart::Ephemeral,
             readonly: false,
             cursor: None,
+            local: None,
         }
     }
 }
