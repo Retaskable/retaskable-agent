@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-pub use machine::{MachineConfig, lanes, local_model, poll_interval_sec, port};
+pub use machine::{
+    CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, cursor_models, engine_choice, lanes,
+    local_model, poll_interval_sec, port,
+};
 pub use project::ProjectConfig;
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.

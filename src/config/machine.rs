@@ -1,8 +1,10 @@
 //! The machine's own settings (`MACHINE_KEYS` in the TypeScript agent): at the top of `config.json` in both
-//! versions (docs/specs/agent-settings.md). `port`, `poll_interval_sec`, `lanes` and `local_model` read each
-//! computer-only setting's environment variable over the file (section 3.2, `withEnvSettings`).
+//! versions (docs/specs/agent-settings.md). `port`, `poll_interval_sec`, `lanes`, `local_model`, `engine_choice`
+//! and `cursor_models` read each computer-only setting's environment variable over the file (section 3.2,
+//! `withEnvSettings`).
+use std::fmt;
+
 use serde::Deserialize;
-use serde_json::Value;
 
 use super::ConfigFile;
 
@@ -27,9 +29,12 @@ pub struct MachineConfig {
     pub models: ModelsConfig,
     #[serde(default)]
     pub local: LocalModelConfig,
-    /// The Cursor model per tier, `auto` when missing (engines.md section 3.2): kept as written.
+    /// Which program runs each kind of work (section 3.1 below).
     #[serde(default)]
-    pub cursor: Option<Value>,
+    pub engine_choice: EngineChoiceConfig,
+    /// The Cursor model per tier, `auto` when missing or invalid (section 3.1 below, engines.md section 3.4).
+    #[serde(default)]
+    pub cursor: CursorConfig,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default)]
@@ -46,7 +51,8 @@ impl Default for MachineConfig {
             max_turns: default_max_turns(),
             models: ModelsConfig::default(),
             local: LocalModelConfig::default(),
-            cursor: None,
+            engine_choice: EngineChoiceConfig::default(),
+            cursor: CursorConfig::default(),
             port: default_port(),
             budget: MachineBudget::default(),
         }
@@ -127,6 +133,137 @@ impl Default for LocalModelConfig {
 
 fn default_local_base_url() -> String {
     "http://localhost:11436".to_string()
+}
+
+/// Which program runs a kind of work: `engineChoice`'s `default` and each role in `roles`
+/// (agent-settings.md section 3.1, engines.md section 3.1). `local` is Claude Code pinned to the
+/// local model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    Claude,
+    Cursor,
+    Local,
+}
+
+impl fmt::Display for Engine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Engine::Claude => "claude",
+            Engine::Cursor => "cursor",
+            Engine::Local => "local",
+        })
+    }
+}
+
+fn parse_engine(s: &str) -> Option<Engine> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "claude" => Some(Engine::Claude),
+        "cursor" => Some(Engine::Cursor),
+        "local" => Some(Engine::Local),
+        _ => None,
+    }
+}
+
+/// One entry of `engineChoice.lanes`: the implementer's engine for that lane, lane 1 first.
+/// `Default` follows the implementer's own engine (`default` above, or its role override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaneEngine {
+    Claude,
+    Cursor,
+    Default,
+}
+
+impl fmt::Display for LaneEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LaneEngine::Claude => "claude",
+            LaneEngine::Cursor => "cursor",
+            LaneEngine::Default => "default",
+        })
+    }
+}
+
+fn parse_lane_engine(s: &str) -> Option<LaneEngine> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "claude" => Some(LaneEngine::Claude),
+        "cursor" => Some(LaneEngine::Cursor),
+        "default" => Some(LaneEngine::Default),
+        _ => None,
+    }
+}
+
+/// `engineChoice.roles`: the default's override per group of roles (engines.md section 3.1).
+/// Missing (`None`) follows `default`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleEngines {
+    #[serde(default)]
+    pub planner: Option<Engine>,
+    #[serde(default)]
+    pub implementer: Option<Engine>,
+    #[serde(default)]
+    pub review: Option<Engine>,
+    #[serde(default)]
+    pub drafter: Option<Engine>,
+    #[serde(default)]
+    pub chat: Option<Engine>,
+    #[serde(default)]
+    pub writer: Option<Engine>,
+}
+
+/// `engineChoice` (agent-settings.md section 3.1): missing means everything on Claude Code.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineChoiceConfig {
+    #[serde(default)]
+    pub default: Option<Engine>,
+    #[serde(default)]
+    pub roles: RoleEngines,
+    #[serde(default)]
+    pub lanes: Vec<LaneEngine>,
+}
+
+/// `cursor.models`: the Cursor model name per tier, `None` meaning `auto`, Cursor's own pick
+/// (engines.md section 3.4). A name read from the file that isn't a valid model name is dropped
+/// to `auto` the same way an invalid one from the environment is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorModels {
+    #[serde(default)]
+    pub top: Option<String>,
+    #[serde(default)]
+    pub implementer: Option<String>,
+    #[serde(default)]
+    pub scout: Option<String>,
+}
+
+/// A name read with `top`/`implementer`/`scout` empty or invalid, however it got there (a
+/// hand-edited file, or the struct built directly), reads as `auto`.
+fn sanitize_cursor_models(models: &CursorModels) -> CursorModels {
+    let clean = |name: &Option<String>| name.clone().filter(|s| valid_cursor_model_name(s));
+    CursorModels {
+        top: clean(&models.top),
+        implementer: clean(&models.implementer),
+        scout: clean(&models.scout),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorConfig {
+    #[serde(default)]
+    pub models: CursorModels,
+}
+
+/// "A name is one or more of letters, digits, `_`, `.`, `:`, `/` and `-`, not starting with `-`"
+/// (engines.md section 3.4, so `--force` can't be slipped in as a model).
+fn valid_cursor_model_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -210,6 +347,89 @@ fn valid_local_url(s: &str) -> bool {
     };
     let authority = authority_and_path.split('/').next().unwrap_or("");
     !authority.is_empty() && !authority.contains('@')
+}
+
+/// "Engines": `RETASKABLE_ENGINES`, one engine for all (`local`) or `name=engine` pairs
+/// (`default=cursor,implementer=local`), `lanes` among them as `claude+claude+cursor+cursor`.
+/// Each field the environment doesn't set, or sets to something invalid, keeps the file's value;
+/// an invalid entry anywhere in `lanes` drops that whole list rather than part of it.
+pub fn engine_choice(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> EngineChoiceConfig {
+    let mut result = cfg.machine.engine_choice.clone();
+    if let Some(raw) = env("RETASKABLE_ENGINES") {
+        apply_engines_env(&mut result, &raw);
+    }
+    result
+}
+
+fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
+    if !raw.contains('=') {
+        if let Some(engine) = parse_engine(raw) {
+            result.default = Some(engine);
+        }
+        return;
+    }
+    for part in raw.split(',') {
+        let Some((name, value)) = part.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name == "lanes" {
+            if let Some(lanes) = value.split('+').map(parse_lane_engine).collect::<Option<Vec<_>>>() {
+                result.lanes = lanes;
+            }
+            continue;
+        }
+        let Some(engine) = parse_engine(value) else { continue };
+        match name {
+            "default" => result.default = Some(engine),
+            "planner" => result.roles.planner = Some(engine),
+            "implementer" => result.roles.implementer = Some(engine),
+            "review" => result.roles.review = Some(engine),
+            "drafter" => result.roles.drafter = Some(engine),
+            "chat" => result.roles.chat = Some(engine),
+            "writer" => result.roles.writer = Some(engine),
+            _ => {}
+        }
+    }
+}
+
+/// "Cursor's models": `RETASKABLE_CURSOR_MODELS`, one model for every tier (`gpt-5`) or each by
+/// name (`top=gpt-5,implementer=sonnet,scout=gpt-5-mini`). A name that isn't valid is left out,
+/// keeping the file's value (already `auto` if that one wasn't valid either).
+pub fn cursor_models(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> CursorModels {
+    let mut result = sanitize_cursor_models(&cfg.machine.cursor.models);
+    if let Some(raw) = env("RETASKABLE_CURSOR_MODELS") {
+        apply_cursor_models_env(&mut result, &raw);
+    }
+    result
+}
+
+fn apply_cursor_models_env(result: &mut CursorModels, raw: &str) {
+    if !raw.contains('=') {
+        let name = raw.trim();
+        if valid_cursor_model_name(name) {
+            let name = Some(name.to_string());
+            result.top = name.clone();
+            result.implementer = name.clone();
+            result.scout = name;
+        }
+        return;
+    }
+    for part in raw.split(',') {
+        let Some((name, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if !valid_cursor_model_name(value) {
+            continue;
+        }
+        match name.trim() {
+            "top" => result.top = Some(value.to_string()),
+            "implementer" => result.implementer = Some(value.to_string()),
+            "scout" => result.scout = Some(value.to_string()),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +599,172 @@ mod tests {
         let with_user = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "http://me:pw@10.0.0.5:11436".to_string());
         assert_eq!(local_model(&cfg, no_scheme).base_url, default_local_base_url());
         assert_eq!(local_model(&cfg, with_user).base_url, default_local_base_url());
+    }
+
+    #[test]
+    fn engine_choice_missing_is_empty() {
+        let result = engine_choice(&ConfigFile::default(), no_env);
+        assert_eq!(result.default, None);
+        assert_eq!(result.roles, RoleEngines::default());
+        assert!(result.lanes.is_empty());
+    }
+
+    #[test]
+    fn engine_choice_file_values_are_used_with_no_env() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.engine_choice.default = Some(Engine::Claude);
+        cfg.machine.engine_choice.roles.implementer = Some(Engine::Local);
+        cfg.machine.engine_choice.lanes = vec![LaneEngine::Claude, LaneEngine::Cursor];
+        let result = engine_choice(&cfg, no_env);
+        assert_eq!(result.default, Some(Engine::Claude));
+        assert_eq!(result.roles.implementer, Some(Engine::Local));
+        assert_eq!(result.lanes, vec![LaneEngine::Claude, LaneEngine::Cursor]);
+    }
+
+    #[test]
+    fn engine_choice_env_a_bare_engine_sets_only_the_default() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.engine_choice.roles.implementer = Some(Engine::Cursor);
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "local".to_string());
+        let result = engine_choice(&cfg, env);
+        assert_eq!(result.default, Some(Engine::Local));
+        // The file's role override is untouched: a bare value only sets the default.
+        assert_eq!(result.roles.implementer, Some(Engine::Cursor));
+    }
+
+    #[test]
+    fn engine_choice_env_pairs_set_default_and_roles() {
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "default=cursor,implementer=local".to_string());
+        let result = engine_choice(&ConfigFile::default(), env);
+        assert_eq!(result.default, Some(Engine::Cursor));
+        assert_eq!(result.roles.implementer, Some(Engine::Local));
+        assert_eq!(result.roles.planner, None);
+    }
+
+    #[test]
+    fn engine_choice_env_an_invalid_role_value_falls_through_to_the_file() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.engine_choice.roles.planner = Some(Engine::Cursor);
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "planner=steam".to_string());
+        assert_eq!(engine_choice(&cfg, env).roles.planner, Some(Engine::Cursor));
+    }
+
+    #[test]
+    fn engine_choice_env_lanes_sets_them_in_order() {
+        let env = |k: &str| {
+            (k == "RETASKABLE_ENGINES").then(|| "default=claude,lanes=claude+claude+cursor+cursor".to_string())
+        };
+        let result = engine_choice(&ConfigFile::default(), env);
+        assert_eq!(
+            result.lanes,
+            vec![
+                LaneEngine::Claude,
+                LaneEngine::Claude,
+                LaneEngine::Cursor,
+                LaneEngine::Cursor
+            ]
+        );
+    }
+
+    #[test]
+    fn engine_choice_env_lanes_with_any_invalid_entry_is_left_out_whole() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+steam+cursor".to_string());
+        // One bad entry drops the whole list, not just that entry: the file's lanes are kept.
+        assert_eq!(
+            engine_choice(&cfg, env).lanes,
+            vec![LaneEngine::Cursor, LaneEngine::Cursor]
+        );
+    }
+
+    #[test]
+    fn engine_choice_env_lanes_accepts_default_as_an_entry() {
+        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+default".to_string());
+        assert_eq!(
+            engine_choice(&ConfigFile::default(), env).lanes,
+            vec![LaneEngine::Claude, LaneEngine::Default]
+        );
+    }
+
+    #[test]
+    fn engine_choice_and_cursor_models_read_from_json_the_way_the_file_spells_them() {
+        let json = r#"{
+            "engineChoice": {
+                "default": "cursor",
+                "roles": { "implementer": "local" },
+                "lanes": ["claude", "claude", "cursor", "default"]
+            },
+            "cursor": { "models": { "top": "gpt-5", "implementer": "auto", "scout": "" } }
+        }"#;
+        let cfg: MachineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.engine_choice.default, Some(Engine::Cursor));
+        assert_eq!(cfg.engine_choice.roles.implementer, Some(Engine::Local));
+        assert_eq!(cfg.engine_choice.roles.planner, None);
+        assert_eq!(
+            cfg.engine_choice.lanes,
+            vec![
+                LaneEngine::Claude,
+                LaneEngine::Claude,
+                LaneEngine::Cursor,
+                LaneEngine::Default
+            ]
+        );
+        let resolved = cursor_models(
+            &ConfigFile {
+                machine: cfg,
+                ..ConfigFile::default()
+            },
+            no_env,
+        );
+        assert_eq!(resolved.top, Some("gpt-5".to_string()));
+        assert_eq!(resolved.implementer, Some("auto".to_string()));
+        // An empty string is no name at all, so it reads as auto (None).
+        assert_eq!(resolved.scout, None);
+    }
+
+    #[test]
+    fn cursor_models_missing_is_auto() {
+        let result = cursor_models(&ConfigFile::default(), no_env);
+        assert_eq!(result.top, None);
+        assert_eq!(result.implementer, None);
+        assert_eq!(result.scout, None);
+    }
+
+    #[test]
+    fn cursor_models_a_bad_name_in_the_file_reads_as_auto() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.cursor.models.top = Some("--force".to_string());
+        assert_eq!(cursor_models(&cfg, no_env).top, None);
+    }
+
+    #[test]
+    fn cursor_models_env_a_bare_name_sets_every_tier() {
+        let env = |k: &str| (k == "RETASKABLE_CURSOR_MODELS").then(|| "gpt-5".to_string());
+        let result = cursor_models(&ConfigFile::default(), env);
+        assert_eq!(result.top, Some("gpt-5".to_string()));
+        assert_eq!(result.implementer, Some("gpt-5".to_string()));
+        assert_eq!(result.scout, Some("gpt-5".to_string()));
+    }
+
+    #[test]
+    fn cursor_models_env_pairs_set_each_tier_by_name() {
+        let env = |k: &str| {
+            (k == "RETASKABLE_CURSOR_MODELS").then(|| "top=gpt-5,implementer=sonnet,scout=gpt-5-mini".to_string())
+        };
+        let result = cursor_models(&ConfigFile::default(), env);
+        assert_eq!(result.top, Some("gpt-5".to_string()));
+        assert_eq!(result.implementer, Some("sonnet".to_string()));
+        assert_eq!(result.scout, Some("gpt-5-mini".to_string()));
+    }
+
+    #[test]
+    fn cursor_models_env_an_invalid_name_falls_through_to_the_file() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.cursor.models.top = Some("sonnet".to_string());
+        let bare = |k: &str| (k == "RETASKABLE_CURSOR_MODELS").then(|| "a b".to_string());
+        assert_eq!(cursor_models(&cfg, bare).top, Some("sonnet".to_string()));
+        let pair = |k: &str| (k == "RETASKABLE_CURSOR_MODELS").then(|| "top=--force".to_string());
+        assert_eq!(cursor_models(&cfg, pair).top, Some("sonnet".to_string()));
     }
 }
