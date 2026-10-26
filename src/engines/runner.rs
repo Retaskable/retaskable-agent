@@ -120,6 +120,23 @@ mod tests {
         (PathBuf::from("cat"), vec![file.to_string_lossy().into_owned()])
     }
 
+    /// Runs `spawn_and_read` against a command that prints `out`'s contents, the shared shape
+    /// both "a session printed this" tests below spawn.
+    async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
+        let (bin, args) = print_file_command(out);
+        spawn_and_read(
+            &bin,
+            &args,
+            &[],
+            dir,
+            "hi",
+            "known",
+            Box::new(SessionReader::new(false)),
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn spawn_and_read_returns_the_result_event_a_session_printed() {
         let dir = tempfile::tempdir().unwrap();
@@ -129,18 +146,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened"},"total_cost_usd":1.25,"session_id":"sess-1"}"#,
         )
         .unwrap();
-        let (bin, args) = print_file_command(&out);
-        let result = spawn_and_read(
-            &bin,
-            &args,
-            &[],
-            dir.path(),
-            "hi",
-            "known",
-            Box::new(SessionReader::new(false)),
-        )
-        .await
-        .unwrap();
+        let result = read_printed_file(dir.path(), &out).await;
         assert!(result.ok);
         assert_eq!(result.subtype, "success");
         assert_eq!(result.structured, Some(json!({"status": "pr_opened"})));
@@ -155,18 +161,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("empty.jsonl");
         std::fs::write(&out, "").unwrap();
-        let (bin, args) = print_file_command(&out);
-        let result = spawn_and_read(
-            &bin,
-            &args,
-            &[],
-            dir.path(),
-            "hi",
-            "known",
-            Box::new(SessionReader::new(false)),
-        )
-        .await
-        .unwrap();
+        let result = read_printed_file(dir.path(), &out).await;
         assert!(!result.ok);
         assert_eq!(result.subtype, "exited");
         assert_eq!(result.session_id, "known");
