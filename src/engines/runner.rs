@@ -245,6 +245,40 @@ mod tests {
         assert_eq!(engine_of(Some(EngineId::Cursor)).unwrap().id(), EngineId::Cursor);
     }
 
+    /// Stands in for an engine's own `args`/`env`/`prompt`/`reader`: whatever `args` it's given is
+    /// exactly what the runner spawns, proving `run_session` never special-cases an engine.
+    struct ArgsEngine {
+        args: Vec<String>,
+    }
+    impl Engine for ArgsEngine {
+        fn id(&self) -> EngineId {
+            EngineId::Claude
+        }
+        fn binary(
+            &self,
+            _env: &dyn Fn(&str) -> Option<String>,
+            _windows: bool,
+            _path_dirs: &[PathBuf],
+        ) -> Result<PathBuf> {
+            unreachable!("not exercised by run_session")
+        }
+        fn args(&self, _spec: &SessionSpec) -> Vec<String> {
+            self.args.clone()
+        }
+        fn env(&self, _spec: &SessionSpec) -> Vec<(String, String)> {
+            vec![]
+        }
+        fn prompt(&self, spec: &SessionSpec) -> String {
+            spec.prompt.clone()
+        }
+        fn reader(&self, spec: &SessionSpec) -> Box<dyn super::super::engine::EngineReader> {
+            Box::new(SessionReader::new(spec.model == "local"))
+        }
+        fn summarize(&self, _event: &serde_json::Value, _at: i64) -> Vec<super::super::engine::SessionEvent> {
+            unreachable!("not exercised by run_session")
+        }
+    }
+
     #[tokio::test]
     async fn run_session_dispatches_through_the_engine_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
@@ -255,40 +289,7 @@ mod tests {
         )
         .unwrap();
         let (bin, args) = print_file_command(&out);
-        // Stand in for the engine's own `args`/`env`/`prompt`: whatever it returns is exactly
-        // what the runner spawns, proving the runner never special-cases an engine.
-        struct StubEngine {
-            args: Vec<String>,
-        }
-        impl Engine for StubEngine {
-            fn id(&self) -> EngineId {
-                EngineId::Claude
-            }
-            fn binary(
-                &self,
-                _env: &dyn Fn(&str) -> Option<String>,
-                _windows: bool,
-                _path_dirs: &[PathBuf],
-            ) -> Result<PathBuf> {
-                unreachable!("not exercised by run_session")
-            }
-            fn args(&self, _spec: &SessionSpec) -> Vec<String> {
-                self.args.clone()
-            }
-            fn env(&self, _spec: &SessionSpec) -> Vec<(String, String)> {
-                vec![]
-            }
-            fn prompt(&self, spec: &SessionSpec) -> String {
-                spec.prompt.clone()
-            }
-            fn reader(&self, spec: &SessionSpec) -> Box<dyn super::super::engine::EngineReader> {
-                Box::new(SessionReader::new(spec.model == "local"))
-            }
-            fn summarize(&self, _event: &serde_json::Value, _at: i64) -> Vec<super::super::engine::SessionEvent> {
-                unreachable!("not exercised by run_session")
-            }
-        }
-        let engine = StubEngine { args };
+        let engine = ArgsEngine { args };
         let spec = SessionSpec {
             engine: None,
             model: "sonnet".to_string(),
@@ -361,38 +362,7 @@ mod tests {
         )
         .unwrap();
         let (bin, args) = print_file_command(&out);
-        struct PrintFileEngine {
-            args: Vec<String>,
-        }
-        impl Engine for PrintFileEngine {
-            fn id(&self) -> EngineId {
-                EngineId::Claude
-            }
-            fn binary(
-                &self,
-                _env: &dyn Fn(&str) -> Option<String>,
-                _windows: bool,
-                _path_dirs: &[PathBuf],
-            ) -> Result<PathBuf> {
-                unreachable!("not exercised by run_session")
-            }
-            fn args(&self, _spec: &SessionSpec) -> Vec<String> {
-                self.args.clone()
-            }
-            fn env(&self, _spec: &SessionSpec) -> Vec<(String, String)> {
-                vec![]
-            }
-            fn prompt(&self, spec: &SessionSpec) -> String {
-                spec.prompt.clone()
-            }
-            fn reader(&self, _spec: &SessionSpec) -> Box<dyn super::super::engine::EngineReader> {
-                Box::new(SessionReader::new(false))
-            }
-            fn summarize(&self, _event: &serde_json::Value, _at: i64) -> Vec<super::super::engine::SessionEvent> {
-                unreachable!("not exercised by run_session")
-            }
-        }
-        let engine = PrintFileEngine { args };
+        let engine = ArgsEngine { args };
         let data_dir = tempfile::tempdir().unwrap();
         let sink = TranscriptSink {
             path: crate::paths::run_dir(data_dir.path(), "proj", "A1").join("sess-1.jsonl"),
