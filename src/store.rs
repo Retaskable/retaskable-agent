@@ -60,6 +60,14 @@ impl Store {
     pub fn save(&self) -> Result<()> {
         write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)
     }
+
+    /// Replaces `state.usage` with a session's latest 5-hour usage reading
+    /// (docs/specs/agent/07-orchestrator-loop.md section 7.1: "The latest one is kept in
+    /// `state.usage`"). Doesn't save on its own; call `save` after, as every other change here
+    /// does.
+    pub fn set_usage(&mut self, usage: Value) {
+        self.data.insert("usage".to_string(), usage);
+    }
 }
 
 fn parse_object(text: &str) -> Result<Map<String, Value>> {
@@ -163,6 +171,27 @@ mod tests {
         Store::load(dir.path()).unwrap();
         // Not re-saved (compacted or otherwise): trimming found nothing to change.
         assert_eq!(read(dir.path()), original);
+    }
+
+    #[test]
+    fn set_usage_replaces_the_usage_key_once_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        store.set_usage(serde_json::json!({"status": "allowed", "resetsAt": 1000}));
+        store.save().unwrap();
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"usage": {"status": "allowed", "resetsAt": 1000}})
+        );
+
+        store.set_usage(serde_json::json!({"status": "rejected", "resetsAt": 2000}));
+        store.save().unwrap();
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({"usage": {"status": "rejected", "resetsAt": 2000}})
+        );
     }
 
     #[test]
