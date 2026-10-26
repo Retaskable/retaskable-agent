@@ -16,5 +16,5 @@ pub use engine::{
     Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart,
     describe_failure, engine_id_from_str, is_signed_out, signed_out_text,
 };
-pub use runner::{engine_of, run_session};
+pub use runner::{TranscriptSink, engine_of, run_session};
 pub use transcripts::{StartedOn, Transcript, read_transcripts, started_on};
