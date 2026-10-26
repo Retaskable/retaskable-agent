@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, setup_check, store, tags, telemetry};
+use retaskable_agent::{api, config, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -60,6 +60,22 @@ async fn main() -> Result<()> {
                     project.id_or_derived(),
                     worktrees_dir.display()
                 ),
+            }
+        }
+        // play-on-phone.md section 3: while this project has a `phone` section, watch for a
+        // plugged-in, authorised Android phone. Only adb is looked up at start; re-finding it
+        // when Setup is saved needs the settings server, not yet ported.
+        if project.phone.is_some() {
+            match phone::find_adb_on_path(env) {
+                Some(adb) => {
+                    tracing::info!(
+                        "{}: watching for an Android phone with {}",
+                        project.id_or_derived(),
+                        adb.display()
+                    );
+                    tokio::spawn(phone::watch(adb));
+                }
+                None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
             }
         }
     }
