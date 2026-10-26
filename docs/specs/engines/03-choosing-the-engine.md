@@ -10,7 +10,7 @@ Built. The choice is the computer's, not the server's: a team can mix Claude Cod
   "engineChoice": { "default": "claude", "roles": { "implementer": "local" } }
   ```
 
-  Missing means everything on Claude Code, as today. An engine is `claude`, `cursor` or `local`. `local` is Claude Code with the model pinned to the local model (`Orchestrator.pinnedModel`): it falls back to the role's tier when the local model is off or down, waits for the local slot when busy, and a resumed session stays on the backend it started on. `roles` overrides `default` for these groups of roles (section 9):
+  Missing means everything on Claude Code, as today. An engine is `claude`, `cursor`, `pi` (section 13) or `local`. `local` is Claude Code with the model pinned to the local model (`Orchestrator.pinnedModel`): it falls back to the role's tier when the local model is off or down, waits for the local slot when busy, and a resumed session stays on the backend it started on. `roles` overrides `default` for these groups of roles (section 9):
 
   | Group | Roles (`Role` in `shared/types.ts`) |
   |---|---|
