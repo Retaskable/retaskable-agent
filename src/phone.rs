@@ -1,11 +1,13 @@
-//! Play on phone (docs/specs/play-on-phone.md section 3): finding `adb` and watching for a
-//! plugged-in Android phone. This is slice 1 of the play-on-phone item — the warning, the button,
-//! the install command and reporting to retaskable.com (sections 4 to 6) are later slices; for now
-//! a found phone is only logged.
+//! Play on phone (docs/specs/play-on-phone.md sections 3 and 4): finding `adb`, watching for a
+//! plugged-in Android phone, and the first-install warning. The button's build-and-install command
+//! (section 5) and reporting to retaskable.com (section 6) are later slices; for now a found phone
+//! is only logged, and nothing here is wired to a command yet.
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use anyhow::Result;
+use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -19,9 +21,9 @@ pub const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 pub const NO_ADB: &str =
     "adb wasn't found. Install Android's SDK Platform-Tools and set ANDROID_HOME, or put adb on your PATH.";
 
-/// One line of `adb devices -l`: `{ serial, model, state }`. `warned` (section 4, whether the
-/// install warning was already accepted for this serial) isn't tracked yet — that's the slice
-/// that adds the warning dialog.
+/// One line of `adb devices -l`: `{ serial, model, state }`. Whether a serial was warned (section
+/// 4) lives in `.retaskable/phones.json` (`warned_serials`), not on this struct — the same split
+/// as the TypeScript agent's `Device` versus `Phone`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phone {
     pub serial: String,
@@ -58,6 +60,97 @@ fn parse_line(line: &str) -> Option<Phone> {
         .map(|m| m.replace('_', " "))
         .unwrap_or_else(|| serial.clone());
     Some(Phone { serial, model, state })
+}
+
+/// Section 4's warning, before the first install to a phone (shared with the Expo app's dialog;
+/// `installWarning` in `shared/phone.ts`). The work-in-progress line only shows while the app's
+/// `itemId` isn't done.
+pub fn install_warning(app_id: &str, wip: bool) -> Vec<String> {
+    let mut lines = vec![
+        "This is a debug build, signed with this computer's debug key, not the Play Store's.".to_string(),
+        format!(
+            "If the phone already has {app_id} signed with a different key (from the Play Store, or \
+             another computer), Android won't install over it. Retaskable will offer to uninstall it \
+             first, which deletes the app's data on the phone (you'll be signed out, and its \
+             notification settings are lost). It never does that without asking."
+        ),
+        "USB debugging gives this computer broad access to the phone: it can install apps, read \
+         files and run commands on it. Turn it off in the phone's Developer options when you're \
+         done, and only accept the \"Allow USB debugging?\" prompt for computers you trust."
+            .to_string(),
+    ];
+    if wip {
+        lines.push("The app is work in progress: parts of it may not work yet.".to_string());
+    }
+    lines
+}
+
+/// When the phone already has the app signed with a different key (section 4's "A different
+/// signature"), before offering **Uninstall and install**.
+pub fn uninstall_warning(app_id: &str, model: &str) -> String {
+    format!(
+        "{model} already has {app_id} signed with a different key, so Android won't install over \
+         it. Uninstalling it first deletes the app's data on the phone: you'll be signed out, and \
+         its notification settings are lost."
+    )
+}
+
+/// `.retaskable/phones.json`'s `warned` list (section 4): the serials that no longer need the
+/// install warning. Missing, unreadable or broken reads as none — the same recovery the spec
+/// names for a deleted file, never a crash. A non-string entry in the list is skipped rather than
+/// failing the whole read.
+pub fn warned_serials(file: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    parsed
+        .get("warned")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Remembers `serial` as warned (the dialog's **Install** was confirmed), so later requests for
+/// the same phone go straight to installing.
+pub fn mark_warned(file: &Path, serial: &str) -> Result<()> {
+    let mut warned = warned_serials(file);
+    if warned.iter().any(|s| s == serial) {
+        return Ok(());
+    }
+    warned.push(serial.to_string());
+    crate::store::write_json_atomic(file, &serde_json::json!({ "warned": warned }), false)
+}
+
+/// Whether a `phone_play` request for `serial` may proceed (section 4): `serial` must be one of
+/// `devices` in the `device` state, a request with `uninstall_first` must be `confirmed`, and a
+/// first request for a phone not yet in `warned` is refused with the warning dialog's own text.
+/// The agent checks a `phone_play` command the same way once it arrives over the cloud link
+/// (section 6, not wired up yet). Returns the phone to install to, or the message to refuse with.
+pub fn check_play(
+    devices: &[Phone],
+    warned: &[String],
+    serial: &str,
+    confirmed: bool,
+    uninstall_first: bool,
+    app_id: &str,
+    wip: bool,
+) -> Result<Phone, String> {
+    let phone = devices
+        .iter()
+        .find(|d| d.serial == serial && offerable(&d.state))
+        .ok_or_else(|| "That phone isn't connected with USB debugging allowed.".to_string())?;
+    if uninstall_first && !confirmed {
+        return Err("Uninstalling needs confirmed: true.".to_string());
+    }
+    if !confirmed && !warned.iter().any(|s| s == serial) {
+        let mut lines = vec![format!("Install on {}?", phone.model)];
+        lines.extend(install_warning(app_id, wip));
+        return Err(lines.join("\n"));
+    }
+    Ok(phone.clone())
 }
 
 /// Finding adb, in order (section 3): `$ANDROID_HOME/platform-tools/adb`, then
@@ -301,5 +394,116 @@ mod tests {
         let env = move |k: &str| (k == "ANDROID_SDK_ROOT").then(|| sdk_root.clone());
 
         assert_eq!(find_adb_on_path(env), Some(platform_tools.join(exe_name)));
+    }
+
+    // install_warning / uninstall_warning
+
+    #[test]
+    fn install_warning_has_the_fixed_lines_plus_a_wip_line_only_while_the_app_isnt_done() {
+        let done = install_warning("com.retaskable.app", false);
+        assert_eq!(done.len(), 3);
+        assert!(done[0].contains("debug build"));
+        assert!(done[1].contains("com.retaskable.app"));
+        assert!(done[2].contains("USB debugging"));
+
+        let wip = install_warning("com.retaskable.app", true);
+        assert_eq!(wip.len(), 4);
+        assert!(wip[3].contains("work in progress"));
+    }
+
+    #[test]
+    fn uninstall_warning_names_the_model_and_the_app_and_says_data_is_lost() {
+        let text = uninstall_warning("com.retaskable.app", "Pixel 8");
+        assert!(text.starts_with("Pixel 8 already has com.retaskable.app"));
+        assert!(text.contains("signed out"));
+    }
+
+    // warned_serials / mark_warned
+
+    #[test]
+    fn warned_serials_is_the_files_list_or_none_when_missing_or_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("phones.json");
+        assert_eq!(warned_serials(&file), Vec::<String>::new());
+
+        std::fs::write(&file, r#"{"warned": ["R58M12ABCDE", 3]}"#).unwrap();
+        assert_eq!(warned_serials(&file), vec!["R58M12ABCDE".to_string()]);
+
+        std::fs::write(&file, "{").unwrap();
+        assert_eq!(warned_serials(&file), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mark_warned_adds_the_serial_once_and_keeps_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("phones.json");
+
+        mark_warned(&file, "AAA").unwrap();
+        assert_eq!(warned_serials(&file), vec!["AAA".to_string()]);
+
+        mark_warned(&file, "BBB").unwrap();
+        assert_eq!(warned_serials(&file), vec!["AAA".to_string(), "BBB".to_string()]);
+
+        // Already warned: no duplicate.
+        mark_warned(&file, "AAA").unwrap();
+        assert_eq!(warned_serials(&file), vec!["AAA".to_string(), "BBB".to_string()]);
+    }
+
+    // check_play
+
+    fn a_phone() -> Phone {
+        Phone {
+            serial: "AAA".to_string(),
+            model: "Pixel 8".to_string(),
+            state: "device".to_string(),
+        }
+    }
+
+    #[test]
+    fn check_play_refuses_a_serial_that_isnt_a_currently_authorised_phone() {
+        let err = check_play(&[], &[], "AAA", true, false, "com.retaskable.app", false).unwrap_err();
+        assert_eq!(err, "That phone isn't connected with USB debugging allowed.");
+
+        let unauthorized = Phone {
+            state: "unauthorized".to_string(),
+            ..a_phone()
+        };
+        let err = check_play(&[unauthorized], &[], "AAA", true, false, "com.retaskable.app", false).unwrap_err();
+        assert_eq!(err, "That phone isn't connected with USB debugging allowed.");
+    }
+
+    #[test]
+    fn check_play_refuses_an_unconfirmed_uninstall() {
+        let err = check_play(&[a_phone()], &[], "AAA", false, true, "com.retaskable.app", false).unwrap_err();
+        assert_eq!(err, "Uninstalling needs confirmed: true.");
+    }
+
+    #[test]
+    fn check_play_refuses_an_unconfirmed_first_install_with_the_warnings_text() {
+        let err = check_play(&[a_phone()], &[], "AAA", false, false, "com.retaskable.app", true).unwrap_err();
+        let mut expected = vec!["Install on Pixel 8?".to_string()];
+        expected.extend(install_warning("com.retaskable.app", true));
+        assert_eq!(err, expected.join("\n"));
+    }
+
+    #[test]
+    fn check_play_allows_a_confirmed_request() {
+        let phone = check_play(&[a_phone()], &[], "AAA", true, false, "com.retaskable.app", false).unwrap();
+        assert_eq!(phone, a_phone());
+    }
+
+    #[test]
+    fn check_play_allows_an_unconfirmed_request_for_an_already_warned_phone() {
+        let phone = check_play(
+            &[a_phone()],
+            &["AAA".to_string()],
+            "AAA",
+            false,
+            false,
+            "com.retaskable.app",
+            false,
+        )
+        .unwrap();
+        assert_eq!(phone, a_phone());
     }
 }
