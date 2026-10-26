@@ -1,13 +1,12 @@
-//! The Retaskable agent, in Rust: a port of Retaskable.com's `agent/` (TypeScript), following
-//! docs/specs/agent.md there. So far it only answers `GET /api/health` on 127.0.0.1.
-mod api;
-mod config;
-mod store;
-mod tags;
+//! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it only
+//! answers `GET /api/health` on 127.0.0.1.
+mod lanes;
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 
 use anyhow::{Context, Result};
+use retaskable_agent::{api, config, store, tags};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -17,12 +16,39 @@ async fn main() -> Result<()> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
-    // Trims each project's own state.json on startup (local-state-diet.md); not fatal, since
-    // a broken file there shouldn't keep the health check from coming up.
+    // agent-settings.md section 3.2: each computer-only setting's environment variable, read
+    // here so it's logged the same way whether it came from the file or the environment.
+    let lane_count = config::lanes(&cfg, env);
     for project in &cfg.projects {
+        // Trims each project's own state.json on startup (local-state-diet.md); not fatal, since
+        // a broken file there shouldn't keep the health check from coming up.
         let project_dir = dir.join("projects").join(project.id_or_derived());
         if let Err(e) = store::Store::load(&project_dir) {
             tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
+        }
+        // Keeps this project's lane pool at lane_count worktrees (04-architecture.md section
+        // 4.1); not fatal, since a project not yet pointed at a real repo and worktrees folder
+        // shouldn't keep the health check from coming up either.
+        if !project.repo_path.is_empty() && !project.worktrees_dir.is_empty() {
+            let repo_path = Path::new(&project.repo_path);
+            let worktrees_dir = Path::new(&project.worktrees_dir);
+            match lanes::ensure(repo_path, worktrees_dir, lane_count) {
+                Ok(r) if !r.created.is_empty() || !r.removed.is_empty() => {
+                    tracing::info!(
+                        "{}: lane pool at {} (created {:?}, removed {:?})",
+                        project.id_or_derived(),
+                        worktrees_dir.display(),
+                        r.created,
+                        r.removed
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    "{}: lane pool at {}: {e:#}",
+                    project.id_or_derived(),
+                    worktrees_dir.display()
+                ),
+            }
         }
     }
     // agent-settings.md section 3 / computer-tags.md section 3.1: tags from the machine, with
@@ -40,13 +66,10 @@ async fn main() -> Result<()> {
             tag_list.join(", ")
         }
     );
-    // agent-settings.md section 3.2: each computer-only setting's environment variable, read
-    // here so it's logged the same way whether it came from the file or the environment.
-    let lanes = config::lanes(&cfg, env);
     let poll_interval_sec = config::poll_interval_sec(&cfg, env);
     let local_model = config::local_model(&cfg, env);
     tracing::info!(
-        "Settings: {lanes} lane(s), checking every {poll_interval_sec}s, local model {}",
+        "Settings: {lane_count} lane(s), checking every {poll_interval_sec}s, local model {}",
         if local_model.enabled {
             format!("{} at {}", local_model.model, local_model.base_url)
         } else {
