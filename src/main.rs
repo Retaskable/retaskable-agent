@@ -3,6 +3,7 @@
 mod api;
 mod config;
 mod store;
+mod tags;
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -24,6 +25,21 @@ async fn main() -> Result<()> {
             tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
         }
     }
+    // agent-settings.md section 3 / computer-tags.md section 3.1: tags from the machine, with
+    // machine.json's overrides and RETASKABLE_TAGS over them. Missing is fine; broken is fatal,
+    // the same as config.json.
+    let machine = store::MachineStore::load(&dir)?;
+    let found = tags::found_tags(&tags::machine_facts(env));
+    let overrides = machine.tags();
+    let tag_list = tags::effective_tags(&found, overrides.as_ref(), env);
+    tracing::info!(
+        "Tags: {}",
+        if tag_list.is_empty() {
+            "none".to_string()
+        } else {
+            tag_list.join(", ")
+        }
+    );
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lanes = config::lanes(&cfg, env);
