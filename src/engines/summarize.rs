@@ -5,6 +5,7 @@
 use serde_json::Value;
 
 use super::engine::{EventKind, SessionEvent};
+use super::text::clip;
 
 const TOOL_ARG_KEYS: [&str; 8] = [
     "command",
@@ -16,18 +17,6 @@ const TOOL_ARG_KEYS: [&str; 8] = [
     "description",
     "prompt",
 ];
-
-/// `s`, cut to at most `n` chars, with a trailing `…` when it was longer (`clip` in
-/// `shared/text.ts`).
-fn clip(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= n {
-        return s.to_string();
-    }
-    let mut out: String = chars[..n.saturating_sub(1)].iter().collect();
-    out.push('…');
-    out
-}
 
 /// `toolText(name, input)`: the tool name plus its first argument that matches (in
 /// `TOOL_ARG_KEYS` order), collapsed to single spaces and clipped to 160 characters.

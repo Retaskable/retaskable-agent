@@ -13,29 +13,7 @@ use serde_json::{Value, json};
 
 use super::engine::{Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec};
 use super::json_result::{check_schema, extract_json};
-
-/// `s`, cut to at most `n` chars, with a trailing `…` when it was longer (`clip` in
-/// `shared/text.ts`). Duplicated from `cursor::result`, which stays Cursor-only.
-fn clip(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= n {
-        return s.to_string();
-    }
-    let mut out: String = chars[..n.saturating_sub(1)].iter().collect();
-    out.push('…');
-    out
-}
-
-/// The last (up to) `max_chars` characters of `s`, on a char boundary (`tail` in
-/// `shared/text.ts`).
-fn tail(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        chars[chars.len() - max_chars..].iter().collect()
-    }
-}
+use super::text::{clip, tail};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
