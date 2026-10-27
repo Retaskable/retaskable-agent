@@ -72,8 +72,7 @@ pub fn resolve_claude(env: impl Fn(&str) -> Option<String>, windows: bool, path_
 
 /// `resolve_claude`, reading PATH itself the way the real agent does.
 pub fn resolve_claude_on_path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     resolve_claude(env, cfg!(windows), &dirs)
 }
 

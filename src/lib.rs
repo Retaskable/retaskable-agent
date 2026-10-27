@@ -6,6 +6,7 @@ pub mod api;
 pub mod backlog;
 pub mod config;
 pub mod engines;
+pub mod env_path;
 pub mod lanes;
 pub mod network;
 pub mod password;
