@@ -15,6 +15,7 @@ use serde_json::Value;
 pub enum EngineId {
     Claude,
     Cursor,
+    Pi,
 }
 
 impl std::fmt::Display for EngineId {
@@ -22,6 +23,7 @@ impl std::fmt::Display for EngineId {
         f.write_str(match self {
             EngineId::Claude => "claude",
             EngineId::Cursor => "cursor",
+            EngineId::Pi => "pi",
         })
     }
 }
@@ -31,6 +33,7 @@ impl std::fmt::Display for EngineId {
 pub fn engine_id_from_str(id: Option<&str>) -> EngineId {
     match id {
         Some("cursor") => EngineId::Cursor,
+        Some("pi") => EngineId::Pi,
         _ => EngineId::Claude,
     }
 }
@@ -330,5 +333,14 @@ mod tests {
     fn engine_id_displays_its_lowercase_name() {
         assert_eq!(EngineId::Claude.to_string(), "claude");
         assert_eq!(EngineId::Cursor.to_string(), "cursor");
+        assert_eq!(EngineId::Pi.to_string(), "pi");
+    }
+
+    #[test]
+    fn engine_id_from_str_reads_pi_and_falls_back_to_claude() {
+        assert_eq!(engine_id_from_str(Some("pi")), EngineId::Pi);
+        assert_eq!(engine_id_from_str(Some("cursor")), EngineId::Cursor);
+        assert_eq!(engine_id_from_str(Some("steam")), EngineId::Claude);
+        assert_eq!(engine_id_from_str(None), EngineId::Claude);
     }
 }
