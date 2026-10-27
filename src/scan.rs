@@ -4,7 +4,7 @@
 //! `agent/src/setup.ts`. Pure and synchronous: it only reads files already checked out, runs
 //! nothing, and whatever calls it (the Setup screen's own suggestion, a later piece) decides
 //! whether to use what it finds. Nothing in this crate calls it yet.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -41,7 +41,7 @@ pub fn detect_project_type(repo: &Path) -> ProjectType {
     {
         return ProjectType::Server;
     }
-    if pkgs.iter().any(|p| p.bin.is_some()) || BIN_CRATE.is_match(&cargo) {
+    if pkgs.iter().any(|p| !p.bin.is_null()) || BIN_CRATE.is_match(&cargo) {
         return ProjectType::Cli;
     }
     ProjectType::Other
@@ -72,18 +72,18 @@ pub fn detect_checks(repo: &Path) -> DetectedChecks {
         return DetectedChecks::default();
     };
     let mut checks = Vec::new();
-    if pkg.scripts.contains_key("typecheck") {
+    if has_script(&pkg, "typecheck") {
         checks.push(check("typecheck", "npm run typecheck", true, 600));
     }
-    if pkg.scripts.contains_key("test") {
+    if has_script(&pkg, "test") {
         checks.push(check("test", "npm test", true, 1200));
     }
-    if pkg.scripts.contains_key("lint") {
+    if has_script(&pkg, "lint") {
         checks.push(check("lint", "npm run lint", false, 600));
     }
-    let play_command = if pkg.scripts.contains_key("launch") {
+    let play_command = if has_script(&pkg, "launch") {
         "npm run launch".to_string()
-    } else if pkg.scripts.contains_key("start") {
+    } else if has_script(&pkg, "start") {
         "npm start".to_string()
     } else {
         String::new()
@@ -104,19 +104,22 @@ fn read_repo_file(repo: &Path, name: &str) -> String {
     std::fs::read_to_string(repo.join(name)).unwrap_or_default()
 }
 
-/// A root `package.json`'s shape, read only for the fields the scan looks at.
+/// A root `package.json`'s shape, read only for the fields the scan looks at. Every field is a raw
+/// `Value` rather than a typed map: an unexpected shape (`"dependencies": null`, a non-string
+/// script) then reads as empty/absent for that field alone, the same as the TS original, rather
+/// than failing to parse the whole package and losing its other fields.
 #[derive(Debug, Deserialize, Default)]
 struct PackageJson {
     #[serde(default)]
-    dependencies: HashMap<String, String>,
+    dependencies: Value,
     #[serde(default, rename = "devDependencies")]
-    dev_dependencies: HashMap<String, String>,
+    dev_dependencies: Value,
     #[serde(default)]
-    bin: Option<Value>,
+    bin: Value,
     #[serde(default)]
-    workspaces: Option<Value>,
+    workspaces: Value,
     #[serde(default)]
-    scripts: HashMap<String, String>,
+    scripts: Value,
 }
 
 /// `dir`'s `package.json`, or `None` when it's missing or isn't valid JSON (read, not guessed past).
@@ -125,7 +128,15 @@ fn load_package(dir: &Path) -> Option<PackageJson> {
     serde_json::from_str(&text).ok()
 }
 
-/// A `workspaces` array of strings, or (object form) its `packages` array; anything else is none.
+/// An object's own key names, or none when it isn't an object.
+fn keys_of(v: &Value) -> Vec<String> {
+    match v {
+        Value::Object(map) => map.keys().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A JSON value's strings, when it's an array of them; anything else is none.
 fn strings_in(v: &Value) -> Vec<String> {
     match v {
         Value::Array(arr) => arr.iter().filter_map(|s| s.as_str().map(String::from)).collect(),
@@ -133,11 +144,24 @@ fn strings_in(v: &Value) -> Vec<String> {
     }
 }
 
+/// The npm `workspaces` field's entries: a plain array of them, or (the object form) its
+/// `packages` array; anything else is none.
 fn workspace_entries(pkg: &PackageJson) -> Vec<String> {
-    match pkg.workspaces.as_ref() {
-        Some(v @ Value::Array(_)) => strings_in(v),
-        Some(Value::Object(obj)) => obj.get("packages").map(strings_in).unwrap_or_default(),
+    match &pkg.workspaces {
+        v @ Value::Array(_) => strings_in(v),
+        Value::Object(obj) => obj.get("packages").map(strings_in).unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+/// Whether `pkg.scripts[name]` is set to something truthy, the loose JS truthiness `detectChecks`
+/// tests (`if (scripts.typecheck)`): missing, `null`, `false` or an empty string don't count.
+fn has_script(pkg: &PackageJson, name: &str) -> bool {
+    match pkg.scripts.get(name) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
     }
 }
 
@@ -171,8 +195,7 @@ fn package_jsons(repo: &Path) -> Vec<PackageJson> {
 /// Every dependency and devDependency name across a set of `package.json`s.
 fn deps_of(pkgs: &[PackageJson]) -> HashSet<String> {
     pkgs.iter()
-        .flat_map(|p| p.dependencies.keys().chain(p.dev_dependencies.keys()))
-        .cloned()
+        .flat_map(|p| keys_of(&p.dependencies).into_iter().chain(keys_of(&p.dev_dependencies)))
         .collect()
 }
 
@@ -337,5 +360,28 @@ mod tests {
     fn a_repo_with_no_manifest_suggests_nothing() {
         let dir = repo(&[("README.md", "")]);
         assert_eq!(detect_checks(dir.path()), DetectedChecks::default());
+    }
+
+    #[test]
+    fn a_script_set_to_an_empty_string_suggests_nothing() {
+        let dir = repo(&[("package.json", &pkg(r#"{"scripts":{"lint":"","launch":""}}"#))]);
+        let found = detect_checks(dir.path());
+        assert_eq!(found.checks, Vec::new());
+        assert_eq!(found.play_command, "");
+    }
+
+    #[test]
+    fn an_unexpected_shape_on_one_field_doesnt_lose_a_packages_other_fields() {
+        // A malformed `dependencies` (null, not an object) still leaves `bin` and `workspaces` readable.
+        let dir = repo(&[(
+            "package.json",
+            &pkg(r#"{"dependencies":null,"bin":{"x":"x.js"},"scripts":{"test":123}}"#),
+        )]);
+        assert_eq!(detect_project_type(dir.path()), ProjectType::Cli);
+        // A non-string, non-null, non-false script value is still truthy, like a JS object/number is.
+        assert_eq!(
+            detect_checks(dir.path()).checks,
+            vec![check("test", "npm test", true, 1200)]
+        );
     }
 }
