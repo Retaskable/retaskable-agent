@@ -1,6 +1,6 @@
 //! Each project's own settings (version 2's `projects[]`, or version 1's whole file, read as the one project),
 //! and the types that make it up.
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -289,11 +289,31 @@ fn default_max_slices_per_item() -> u32 {
 /// so a relative `repoPath` (`.`, `..`) gives the folder's own name rather than the relative segment's.
 pub(super) fn project_id(repo_path: &str) -> String {
     let resolved = std::path::absolute(repo_path).unwrap_or_else(|_| PathBuf::from(repo_path));
-    let name = resolved
+    let normalized = resolve_lexically(&resolved);
+    let name = normalized
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     kebab_case(&name)
+}
+
+/// `std::path::absolute` resolves `..` on Windows but, per its own docs, "keeps `..` components"
+/// on POSIX. A `repoPath` of `..` would then leave the resolved path ending in `..`, whose
+/// `file_name()` is `None` on every platform — silently falling back to the id "project" on
+/// Linux/macOS instead of naming the parent directory the way Windows (and the TypeScript
+/// agent's `path.resolve`) does. Collapse `.` and `..` components ourselves so both platforms agree.
+fn resolve_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn kebab_case(name: &str) -> String {
@@ -328,6 +348,35 @@ mod tests {
             .to_lowercase();
         let expected = kebab_case(&current_dir_name);
         assert_eq!(project_id("."), expected);
+    }
+
+    #[test]
+    fn resolve_lexically_collapses_a_trailing_parent_dir_component() {
+        // std::path::absolute keeps `..` on POSIX instead of resolving it (see its own docs),
+        // which is exactly the shape a repoPath of ".." produces. Without this collapsing step,
+        // file_name() on a path ending in ".." returns None on every platform.
+        assert_eq!(resolve_lexically(Path::new("/foo/bar/..")), Path::new("/foo"));
+    }
+
+    #[test]
+    fn resolve_lexically_clamps_at_the_root_instead_of_going_above_it() {
+        assert_eq!(resolve_lexically(Path::new("/foo/../..")), Path::new("/"));
+    }
+
+    #[test]
+    fn project_id_of_a_parent_directory_repo_path_names_the_parent_not_project() {
+        // Exercises the exact ".." example the doc comment on project_id promises, through a
+        // path shape (trailing "..") that std::path::absolute leaves unresolved on POSIX.
+        let parent_name = std::env::current_dir()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase();
+        let expected = kebab_case(&parent_name);
+        assert_eq!(project_id(".."), expected);
     }
 
     #[test]
