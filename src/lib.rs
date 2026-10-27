@@ -4,6 +4,7 @@
 //! API, not dead code just because `main` doesn't reach it yet.
 pub mod api;
 pub mod backlog;
+pub mod ci_coverage;
 pub mod config;
 pub mod engines;
 pub mod lanes;

@@ -3,7 +3,9 @@
 //! sections 2 and 5), ported from `detectProjectType` and `detectChecks` in Retaskable.com's
 //! `agent/src/setup.ts`. Pure and synchronous: it only reads files already checked out, runs
 //! nothing, and whatever calls it (the Setup screen's own suggestion, a later piece) decides
-//! whether to use what it finds. Nothing in this crate calls it yet.
+//! whether to use what it finds. Nothing in this crate calls it yet. Whether the picked base
+//! branch's workflows cover it (`hasWorkflows`'s other half, team-branch.md section 3.2) is
+//! `crate::ci_coverage` instead: that reads a specific git ref, not the checked-out files here.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -89,6 +91,19 @@ pub fn detect_checks(repo: &Path) -> DetectedChecks {
         String::new()
     };
     DetectedChecks { checks, play_command }
+}
+
+/// Whether the repo's checkout has any GitHub Actions workflow file (`suggest`'s `hasWorkflows`,
+/// docs/specs/agent/09-web-ui.md section 9.1, "The scan").
+pub fn has_workflows(repo: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(repo.join(".github").join("workflows")) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
+    })
 }
 
 fn check(name: &str, command: &str, blocking: bool, timeout_sec: u64) -> CheckConfig {
@@ -368,6 +383,24 @@ mod tests {
         let found = detect_checks(dir.path());
         assert_eq!(found.checks, Vec::new());
         assert_eq!(found.play_command, "");
+    }
+
+    #[test]
+    fn a_repo_with_a_github_workflow_file_has_workflows() {
+        let dir = repo(&[(".github/workflows/ci.yml", "on: push\n")]);
+        assert!(has_workflows(dir.path()));
+    }
+
+    #[test]
+    fn a_repo_with_no_workflows_dir_does_not_have_workflows() {
+        let dir = repo(&[("README.md", "")]);
+        assert!(!has_workflows(dir.path()));
+    }
+
+    #[test]
+    fn a_workflows_dir_with_only_non_yaml_files_does_not_have_workflows() {
+        let dir = repo(&[(".github/workflows/README.md", "")]);
+        assert!(!has_workflows(dir.path()));
     }
 
     #[test]
