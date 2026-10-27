@@ -329,4 +329,87 @@ mod tests {
         let expected = kebab_case(&current_dir_name);
         assert_eq!(project_id("."), expected);
     }
+
+    #[test]
+    fn kebab_case_turns_dots_into_the_dash_the_doc_comment_promises() {
+        // The doc comment above project_id spells out this exact example.
+        assert_eq!(kebab_case("retaskable.com"), "retaskable-com");
+    }
+
+    #[test]
+    fn kebab_case_leaves_an_already_kebab_name_alone() {
+        assert_eq!(kebab_case("retaskable-agent"), "retaskable-agent");
+    }
+
+    #[test]
+    fn kebab_case_collapses_runs_of_non_alphanumeric_characters() {
+        assert_eq!(kebab_case("my_cool   game!!"), "my-cool-game");
+    }
+
+    #[test]
+    fn kebab_case_trims_leading_and_trailing_separators() {
+        assert_eq!(kebab_case("--retaskable--"), "retaskable");
+    }
+
+    #[test]
+    fn kebab_case_of_an_empty_string_is_project() {
+        assert_eq!(kebab_case(""), "project");
+    }
+
+    #[test]
+    fn kebab_case_of_only_separators_is_project() {
+        assert_eq!(kebab_case("..."), "project");
+    }
+
+    #[test]
+    fn id_or_derived_keeps_an_explicit_id_without_deriving_one() {
+        let config = ProjectConfig {
+            id: Some("explicit-id".to_string()),
+            ..empty_config()
+        };
+        assert_eq!(config.id_or_derived(), "explicit-id");
+    }
+
+    #[test]
+    fn id_or_derived_falls_back_to_project_id_when_none_was_given() {
+        let config = ProjectConfig {
+            id: None,
+            repo_path: ".".to_string(),
+            ..empty_config()
+        };
+        assert_eq!(config.id_or_derived(), project_id("."));
+    }
+
+    fn empty_config() -> ProjectConfig {
+        ProjectConfig {
+            id: None,
+            repo_path: String::new(),
+            project_type: ProjectType::default(),
+            github_repo: String::new(),
+            backlog_path: String::new(),
+            base_branch: String::new(),
+            github: None,
+            require_ci: false,
+            ci_covers_checks: false,
+            ci_when_ready: false,
+            sandbox: SandboxMode::default(),
+            worktrees_dir: String::new(),
+            checks: Vec::new(),
+            play_command: String::new(),
+            galleries: default_galleries(),
+            playtests: Playtests::default(),
+            chores: OnOff::default(),
+            triage: OnOff::default(),
+            max_review_rounds: default_max_review_rounds(),
+            max_conflict_rounds: default_max_conflict_rounds(),
+            max_check_rounds: default_max_check_rounds(),
+            max_slices_per_item: default_max_slices_per_item(),
+            review: ReviewConfig::default(),
+            code_gates: CodeGates::default(),
+            budget: ProjectBudget::default(),
+            deploy: DeployConfig::default(),
+            phone: None,
+            engines: None,
+        }
+    }
 }
