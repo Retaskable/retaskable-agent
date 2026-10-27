@@ -13,6 +13,7 @@ mod json_result;
 pub mod pi;
 pub mod runner;
 pub mod summarize;
+mod text;
 pub mod transcripts;
 
 pub use choose::{Role, engine_for, has_lane_engines, lane_engine};

@@ -16,6 +16,7 @@ use super::engine::{
     Engine, EngineId, EngineReader, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
     signed_out_text,
 };
+use super::text::tail;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.
@@ -305,16 +306,6 @@ fn context_of(event: &Value) -> Option<u64> {
     let input = usage.get("input_tokens")?.as_u64()?;
     let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
     Some(input + field("cache_read_input_tokens") + field("cache_creation_input_tokens"))
-}
-
-/// The last (up to) `max_chars` characters of `s`, on a char boundary.
-fn tail(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        chars[chars.len() - max_chars..].iter().collect()
-    }
 }
 
 /// The Claude Code engine: `resolveClaude`, `buildArgs`, `sessionEnv` and the `stream-json` reader
@@ -789,12 +780,6 @@ mod tests {
         assert!(err.ends_with(&"x".repeat(1500)));
         assert!(!err.contains("  x"));
         assert!(err.len() < long_stderr.len());
-    }
-
-    #[test]
-    fn tail_keeps_only_the_last_n_characters() {
-        assert_eq!(tail("hello world", 5), "world");
-        assert_eq!(tail("hi", 10), "hi");
     }
 
     // signed_out / describe_failure (claude-signed-out.md section 3.1)
