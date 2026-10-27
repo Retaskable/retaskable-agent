@@ -59,10 +59,10 @@ pub struct SessionSpec {
     pub readonly: bool,
     /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
     pub cursor: Option<CursorOptions>,
-    /// Set when this session runs on the computer's local model server instead of the cloud
-    /// (07-orchestrator-loop.md section 7.2). `None` for an ordinary cloud session, even one whose
-    /// `model` happens to be `"local"` — picking a tier and choosing to run it locally is the
-    /// orchestrator's job, not this struct's.
+    /// Where this session's local server is, set alongside `model == "local"`
+    /// (07-orchestrator-loop.md section 7.2). `claude.rs`'s `local_target(spec)` is the one place
+    /// that reads `model` and `local` together to decide whether a session is actually local, so
+    /// the args, the environment and the reader can't disagree about it.
     pub local: Option<LocalTarget>,
 }
 

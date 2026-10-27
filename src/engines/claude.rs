@@ -12,10 +12,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-#[cfg(test)]
-use super::engine::LocalTarget;
 use super::engine::{
-    Engine, EngineId, EngineReader, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
+    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
     signed_out_text,
 };
 use super::text::tail;
@@ -79,12 +77,20 @@ pub fn resolve_claude_on_path(env: impl Fn(&str) -> Option<String>) -> Result<Pa
     resolve_claude(env, cfg!(windows), &dirs)
 }
 
+/// `spec.model == "local"` with `spec.local` actually naming a server: the one check the args,
+/// the environment and the reader all share, following `claude.ts`, so they can't disagree about
+/// which session is local (07-orchestrator-loop.md section 7.2).
+fn local_target(spec: &SessionSpec) -> Option<&LocalTarget> {
+    (spec.model == "local").then_some(spec.local.as_ref()).flatten()
+}
+
 /// `buildArgs(spec)`: the full `claude -p` argument list for one session. The prompt itself isn't
 /// here — docs/specs/agent/04-architecture.md says it goes in on stdin, to stay clear of Windows's
 /// command-line length limit.
 fn build_args(spec: &SessionSpec) -> Vec<String> {
+    let local = local_target(spec);
     // section 7.2: a local session still starts with `--model sonnet`; its environment remaps that.
-    let model = if spec.local.is_some() {
+    let model = if local.is_some() {
         "sonnet".to_string()
     } else {
         spec.model.clone()
@@ -101,7 +107,9 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
         "--json-schema".to_string(),
         spec.schema.to_string(),
     ];
-    if spec.budget_usd > 0.0 {
+    // section 7.2: "no dollar caps" — a local session's tokens are free, so the budget cap never
+    // applies to it.
+    if spec.budget_usd > 0.0 && local.is_none() {
         args.push("--max-budget-usd".to_string());
         args.push(spec.budget_usd.to_string());
     }
@@ -145,7 +153,7 @@ fn session_env(spec: &SessionSpec) -> Vec<(String, String)> {
         ("CLOUDFLARE_API_TOKEN".to_string(), NO_DEPLOY_TOKEN.to_string()),
         ("CF_API_TOKEN".to_string(), NO_DEPLOY_TOKEN.to_string()),
     ];
-    match &spec.local {
+    match local_target(spec) {
         Some(local) => {
             env.push(("ANTHROPIC_BASE_URL".to_string(), local.base_url.clone()));
             env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), "local".to_string()));
@@ -174,7 +182,8 @@ fn session_env(spec: &SessionSpec) -> Vec<(String, String)> {
 /// `parent_tool_use_id`, don't count), and turns the final `result` event into a `SessionResult`.
 #[derive(Default)]
 pub struct SessionReader {
-    /// `spec.model === "local"`: a local server signs nothing in and has no Anthropic usage limit.
+    /// `local_target(spec).is_some()`: a local server signs nothing in and has no Anthropic usage
+    /// limit.
     local: bool,
     context_tokens: Option<u64>,
     /// The latest `rate_limit_info` seen so far (section 7.1: "the latest one is kept"); a
@@ -362,7 +371,7 @@ impl Engine for ClaudeEngine {
     }
 
     fn reader(&self, spec: &SessionSpec) -> Box<dyn EngineReader> {
-        Box::new(SessionReader::new(spec.model == "local"))
+        Box::new(SessionReader::new(local_target(spec).is_some()))
     }
 
     fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent> {

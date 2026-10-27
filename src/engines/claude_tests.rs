@@ -120,6 +120,14 @@ fn build_args_adds_the_budget_cap_only_when_positive() {
 }
 
 #[test]
+fn build_args_never_caps_a_local_sessions_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = local_spec(dir.path());
+    spec.budget_usd = 5.0;
+    assert!(!build_args(&spec).contains(&"--max-budget-usd".to_string()));
+}
+
+#[test]
 fn build_args_adds_max_turns_when_set() {
     let dir = tempfile::tempdir().unwrap();
     let mut spec = base_spec(dir.path());
@@ -233,6 +241,21 @@ fn local_spec(dir: &Path) -> SessionSpec {
         model: "tiel-coder-35b".to_string(),
     });
     spec
+}
+
+#[test]
+fn local_target_only_agrees_the_session_is_local_when_both_signals_do() {
+    let dir = tempfile::tempdir().unwrap();
+    // A `local` target carried over onto a session whose model isn't actually "local": not local.
+    let mut mismatched_model = local_spec(dir.path());
+    mismatched_model.model = "opus".to_string();
+    assert!(local_target(&mismatched_model).is_none());
+    // `model == "local"` with no server configured: not local either, since there's nowhere
+    // for the session's environment to actually point.
+    let mut no_target = local_spec(dir.path());
+    no_target.local = None;
+    assert!(local_target(&no_target).is_none());
+    assert!(local_target(&local_spec(dir.path())).is_some());
 }
 
 #[test]
