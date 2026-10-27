@@ -7,6 +7,7 @@ pub mod backlog;
 pub mod config;
 pub mod engines;
 pub mod lanes;
+pub mod local_model;
 pub mod network;
 pub mod password;
 pub mod paths;

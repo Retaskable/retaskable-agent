@@ -168,6 +168,7 @@ fn base_spec(cwd: &Path) -> SessionSpec {
         start: SessionStart::Ephemeral,
         readonly: true,
         cursor: None,
+        local: None,
     }
 }
 
