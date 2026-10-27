@@ -11,6 +11,7 @@ pub mod network;
 pub mod password;
 pub mod paths;
 pub mod phone;
+pub mod scan;
 pub mod setup_check;
 pub mod store;
 pub mod tags;
