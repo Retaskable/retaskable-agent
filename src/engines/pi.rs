@@ -306,19 +306,7 @@ impl Engine for PiEngine {
 
 #[cfg(test)]
 fn base_spec(cwd: &std::path::Path) -> SessionSpec {
-    use super::engine::SessionStart;
-    SessionSpec {
-        engine: Some(EngineId::Pi),
-        model: "sonnet".to_string(),
-        prompt: "plan the board".to_string(),
-        schema: json!({"type": "object"}),
-        cwd: cwd.to_path_buf(),
-        max_turns: None,
-        budget_usd: 0.0,
-        start: SessionStart::Ephemeral,
-        readonly: true,
-        cursor: None,
-    }
+    super::engine::test_spec(cwd, "plan the board")
 }
 
 #[cfg(test)]
@@ -365,6 +353,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = base_spec(dir.path());
         spec.start = SessionStart::Resume("ignored".to_string());
+        spec.readonly = true;
         let args = pi_args(&spec);
         assert_eq!(
             args,

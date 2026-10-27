@@ -44,8 +44,8 @@ pub struct SessionSpec {
     /// Missing means `EngineId::Claude` (`engineOf`, `runner.rs`).
     pub engine: Option<EngineId>,
     /// "opus" | "sonnet" | "haiku", or "local" (a local server has no sign-in or usage limit, and
-    /// its tokens cost nothing). Pointing a session's environment at a local model's base URL is
-    /// still a later slice.
+    /// its tokens cost nothing). A local session's `local` field below carries where that server
+    /// is and which model it's running (07-orchestrator-loop.md section 7.2).
     pub model: String,
     pub prompt: String,
     pub schema: Value,
@@ -59,6 +59,11 @@ pub struct SessionSpec {
     pub readonly: bool,
     /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
     pub cursor: Option<CursorOptions>,
+    /// Where this session's local server is, set alongside `model == "local"`
+    /// (07-orchestrator-loop.md section 7.2). `claude.rs`'s `local_target(spec)` is the one place
+    /// that reads `model` and `local` together to decide whether a session is actually local, so
+    /// the args, the environment and the reader can't disagree about it.
+    pub local: Option<LocalTarget>,
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
@@ -73,6 +78,16 @@ pub struct CursorOptions {
     /// remote. Only meaningful when this `CursorOptions` itself is present — a `SessionSpec` with
     /// no `cursor` at all defaults to `"gh"` (`cursor.rs`'s `allowlist`/`prepare_cursor`).
     pub cli: Option<String>,
+}
+
+/// Where a local session's server is and which model it's running
+/// (07-orchestrator-loop.md section 7.2's `local` config).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTarget {
+    /// `http://` or `https://` (the computer's settings refuse anything else when local is on).
+    pub base_url: String,
+    /// The local server's model name, mapped onto Claude Code's own model env vars.
+    pub model: String,
 }
 
 /// How this session begins, following docs/specs/agent/06.2-implementer.md: a fresh invocation
@@ -227,6 +242,26 @@ pub trait Engine: Send + Sync {
     /// Turns one stored transcript line back into events, for reading a run back
     /// (`summarize(ev, at)` in `engine.ts`; `readTranscripts`).
     fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent>;
+}
+
+/// A `SessionSpec` test fixture shared by every engine module's tests: cloud, ephemeral, no
+/// Cursor or local target. Callers override `prompt`, and whatever else their test needs, on the
+/// result.
+#[cfg(test)]
+pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
+    SessionSpec {
+        engine: None,
+        model: "sonnet".to_string(),
+        prompt: prompt.to_string(),
+        schema: serde_json::json!({"type": "object"}),
+        cwd: cwd.to_path_buf(),
+        max_turns: None,
+        budget_usd: 0.0,
+        start: SessionStart::Ephemeral,
+        readonly: false,
+        cursor: None,
+        local: None,
+    }
 }
 
 #[cfg(test)]
