@@ -289,16 +289,16 @@ pub fn shoot(
     let out_dir = safe_out_dir(&gallery.out_dir).expect("checked by shoot_refusal");
     lock(&SHOOTING).insert(project.to_string(), gallery.name.clone());
     set_status(project, slug, GalleryStatus::Shooting);
-    let result = run_shoot(
+    let result = run_shoot(&ShootContext {
         gallery,
-        &out_dir,
+        out_dir: &out_dir,
         repo_path,
         worktrees_dir,
         base_branch,
         slug,
         project,
         gallery_dest,
-    );
+    });
     lock(&SHOOTING).remove(project);
     match &result {
         Ok(_) => set_status(project, slug, GalleryStatus::Idle),
@@ -307,34 +307,36 @@ pub fn shoot(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_shoot(
-    gallery: &GalleryConfig,
-    out_dir: &str,
-    repo_path: &Path,
-    worktrees_dir: &Path,
-    base_branch: &str,
-    slug: &str,
-    project: &str,
-    gallery_dest: &Path,
-) -> Result<GalleryIndex> {
-    let dir =
-        lanes::prepare_base_checkout(repo_path, worktrees_dir, base_branch).context("preparing the base checkout")?;
+/// Everything [`run_shoot`] needs, bundled so it takes one argument instead of eight.
+struct ShootContext<'a> {
+    gallery: &'a GalleryConfig,
+    out_dir: &'a str,
+    repo_path: &'a Path,
+    worktrees_dir: &'a Path,
+    base_branch: &'a str,
+    slug: &'a str,
+    project: &'a str,
+    gallery_dest: &'a Path,
+}
+
+fn run_shoot(ctx: &ShootContext) -> Result<GalleryIndex> {
+    let dir = lanes::prepare_base_checkout(ctx.repo_path, ctx.worktrees_dir, ctx.base_branch)
+        .context("preparing the base checkout")?;
     let sha = lanes::head_sha(&dir).context("reading the base checkout's commit")?;
-    let out = dir.join(out_dir);
+    let out = dir.join(ctx.out_dir);
     let _ = std::fs::remove_dir_all(&out);
     npm_install_if_needed(&dir)?;
-    let (code, output, timed_out) = run_command(&gallery.command, &dir)?;
+    let (code, output, timed_out) = run_command(&ctx.gallery.command, &dir)?;
     if code != 0 || timed_out {
         let what = if timed_out {
             "timed out".to_string()
         } else {
             format!("failed ({code})")
         };
-        bail!("`{}` {what}:\n{}", gallery.command, tail_lines(&output, TAIL_LINES));
+        bail!("`{}` {what}:\n{}", ctx.gallery.command, tail_lines(&output, TAIL_LINES));
     }
-    set_status(project, slug, GalleryStatus::Converting);
-    convert(&out, &gallery.name, &sha, gallery_dest)
+    set_status(ctx.project, ctx.slug, GalleryStatus::Converting);
+    convert(&out, &ctx.gallery.name, &sha, ctx.gallery_dest)
 }
 
 /// Installs a JS-based game's dependencies first when they're missing or stale (06.8 bullet 9),
