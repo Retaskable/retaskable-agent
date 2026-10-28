@@ -24,6 +24,23 @@ async fn json_body(res: Response) -> Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+/// Signs in and `GET /api/settings`, for a test that only cares what comes back.
+async fn signed_in_settings(settings: &Arc<SettingsServer>) -> Value {
+    let app = app(settings.clone());
+    let (cookie, _csrf) = sign_in(&app, settings).await;
+    let res = app
+        .oneshot(
+            request("GET", "/api/settings")
+                .header("Cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    json_body(res).await
+}
+
 fn mint_token(settings: &SettingsServer, good_for_secs: u64) -> String {
     let token = random_hex(16);
     let expires_at = (settings.now)() + good_for_secs;
@@ -247,19 +264,7 @@ async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
         || 1_700_000_000,
         |_| {},
     ));
-    let app = app(settings.clone());
-    let (cookie, _csrf) = sign_in(&app, &settings).await;
-    let res = app
-        .oneshot(
-            request("GET", "/api/settings")
-                .header("Cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = json_body(res).await;
+    let body = signed_in_settings(&settings).await;
     assert_eq!(body["tags"]["effective"], json!(["linux"]));
     assert_eq!(body["envVars"]["RETASKABLE_TAGS"], json!(true));
     assert_eq!(body["envVars"]["RETASKABLE_PORT"], json!(false));
@@ -583,18 +588,7 @@ async fn restart_waiting_also_reflects_a_saved_network_access_change() {
             password_hash: Some(password::hash_password("a good enough password")),
         }),
     );
-    let app = app(settings.clone());
-    let (cookie, _csrf) = sign_in(&app, &settings).await;
-    let res = app
-        .oneshot(
-            request("GET", "/api/settings")
-                .header("Cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = json_body(res).await;
+    let body = signed_in_settings(&settings).await;
     assert_eq!(body["restartWaiting"], json!(true));
     assert_eq!(body["network"], json!({ "enabled": true, "hasPassword": true }));
 }
