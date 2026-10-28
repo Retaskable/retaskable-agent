@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 pub use machine::{
-    CloudConfig, CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines, cursor_models,
-    engine_choice, lanes, local_model, poll_interval_sec, port,
+    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines,
+    cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
 };
 pub(crate) use machine::{
     lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
@@ -136,7 +136,6 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::machine::DEFAULT_PORT;
     use super::project::{Playtests, ProjectType, SandboxMode};
     use super::*;
 
@@ -148,7 +147,9 @@ mod tests {
     fn a_missing_file_is_the_defaults_and_no_projects() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, DEFAULT_PORT);
+        // No "port" key at all: the file says nothing, so `port()` falls back to the caller's
+        // own default rather than a value baked into the file's own defaults.
+        assert_eq!(cfg.machine.port, None);
         assert!(cfg.projects.is_empty());
     }
 
@@ -169,7 +170,7 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, 4711);
+        assert_eq!(cfg.machine.port, Some(4711));
         assert_eq!(cfg.machine.lanes, 4);
         assert_eq!(cfg.projects.len(), 1);
         let p = &cfg.projects[0];
@@ -303,7 +304,7 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, 4700);
+        assert_eq!(cfg.machine.port, Some(4700));
         assert_eq!(cfg.machine.lanes, 2);
         assert_eq!(cfg.machine.concurrency, 1);
         assert_eq!(cfg.projects.len(), 1);
@@ -388,7 +389,7 @@ mod tests {
         })
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, 4800);
+        assert_eq!(cfg.machine.port, Some(4800));
         assert!(cfg.projects.is_empty());
     }
 

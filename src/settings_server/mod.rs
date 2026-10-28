@@ -79,6 +79,10 @@ pub struct SettingsServer {
     /// The port the agent is actually answering on, to say whether a restart is waiting and to
     /// check a request's Host (section 4.3).
     port: u16,
+    /// This build's own default port (installers/03-the-bundle-agent-bundle.md section 3.13: a
+    /// Staging release build's own 4701), used once neither `RETASKABLE_PORT` nor the config's
+    /// own `port` says a valid one, so a config re-read agrees with how `port` above was found.
+    default_port: u16,
     /// Whether network access was on (so the port listens on every address) when the agent
     /// started, to say whether a restart is waiting the same way `port` does.
     network_enabled: bool,
@@ -96,6 +100,7 @@ impl SettingsServer {
     pub fn new(
         dir: PathBuf,
         port: u16,
+        default_port: u16,
         network_enabled: bool,
         env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
         now: impl Fn() -> u64 + Send + Sync + 'static,
@@ -105,6 +110,7 @@ impl SettingsServer {
         Self {
             dir,
             port,
+            default_port,
             network_enabled,
             env_network_access,
             env: Box::new(env),
@@ -247,7 +253,7 @@ impl SettingsServer {
         let local = config::local_model(&cfg, env);
         let engine_choice = config::engine_choice(&cfg, env);
         let cursor = config::cursor_models(&cfg, env);
-        let port = config::port(&cfg, env);
+        let port = config::port(&cfg, env, self.default_port);
         let lanes = config::lanes(&cfg, env);
         let net = self
             .env_network_access
@@ -908,6 +914,7 @@ pub(crate) fn test_server() -> (Arc<SettingsServer>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
+        4700,
         4700,
         false,
         |_: &str| None,
