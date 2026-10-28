@@ -308,10 +308,13 @@ impl ReleaseUpdater {
             ready.version,
             ready.file.display()
         ));
+        // Stored before `on_ready` runs: it asks `main.rs` for a restart, whose exit reads
+        // `ready()` back through `install_now` — on another thread, but not so late that this
+        // copy's own write can be assumed to have landed first.
+        *self.ready.lock().unwrap() = Some(ready.clone());
         if let Some(on_ready) = &self.deps.on_ready {
             on_ready(&ready);
         }
-        *self.ready.lock().unwrap() = Some(ready.clone());
         Ok(Some(ready))
     }
 

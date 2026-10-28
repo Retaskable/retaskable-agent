@@ -1,7 +1,9 @@
 //! `installerFor(build)` (installers/03-the-bundle-agent-bundle.md section 3.12), following
 //! `agent/src/releaseInstall.ts`: the three concrete [`crate::release_update::Installer`]s that
 //! let a release build replace itself once `release_update` has downloaded and checked a newer
-//! one, one per OS the bundle ships for (section 3.12's table).
+//! one, one per OS the bundle ships for (section 3.12's table). [`relaunch_with_same_args`] and
+//! [`relaunch_target`] are the plain relaunch section 3.8 describes, which `main.rs` falls back to
+//! when nothing was ready to install or the install failed ("it relaunches itself as before").
 #[cfg(test)]
 mod tests;
 
@@ -56,13 +58,31 @@ pub fn installer_for(exe_path: &Path) -> Arc<dyn Installer> {
     installer
 }
 
-/// Starts `exe` with this process's own arguments (not waited on), the way macOS and Linux's
-/// `install` restarts into what they just put in place.
-#[cfg(unix)]
-fn relaunch_with_same_args(exe: &Path) -> Result<bool, String> {
-    Command::new(exe)
-        .args(std::env::args().skip(1))
-        .spawn()
+/// `exe_path` (the running copy), or, on Linux, `$APPIMAGE` when it's running as one: what
+/// `main.rs` relaunches into when nothing was ready to install, or the install failed (section
+/// 3.8's plain relaunch, the fallback section 3.12's "it relaunches itself as before" asks for).
+pub fn relaunch_target(exe_path: &Path) -> PathBuf {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        return PathBuf::from(appimage);
+    }
+    exe_path.to_path_buf()
+}
+
+/// Starts `exe` with this process's own arguments (not waited on), detached with no window: the
+/// way macOS and Linux's `install` restarts into what they just put in place, and `main.rs`'s
+/// fallback when there's nothing to install.
+pub fn relaunch_with_same_args(exe: &Path) -> Result<bool, String> {
+    let mut cmd = Command::new(exe);
+    cmd.args(std::env::args().skip(1));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+    cmd.spawn()
         .map(|_| true)
         .map_err(|e| format!("starting {}: {e}", exe.display()))
 }
@@ -113,12 +133,14 @@ impl Installer for WindowsInstaller {
 /// right refusal (or none).
 #[cfg(target_os = "windows")]
 fn authenticode_signature(path: &Path) -> Result<Signature, String> {
-    let script = format!(
-        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; Write-Output $s.Status; Write-Output $s.SignerCertificate.Subject",
-        path.display().to_string().replace('\'', "''")
-    );
+    // The path travels in an environment variable, not spliced into the script: PowerShell also
+    // treats the typographic quotes '\u{2018}', '\u{2019}', '\u{201a}' and '\u{201b}' as single-quote
+    // delimiters, which a path containing one could use to break out of a quoted string literal.
+    const SCRIPT: &str = "$s = Get-AuthenticodeSignature -LiteralPath $env:RETASKABLE_SIG_PATH; \
+        Write-Output $s.Status; Write-Output $s.SignerCertificate.Subject";
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("RETASKABLE_SIG_PATH", path)
         .output()
         .map_err(|e| format!("running powershell: {e}"))?;
     Ok(parse_authenticode_signature(&String::from_utf8_lossy(&output.stdout)))

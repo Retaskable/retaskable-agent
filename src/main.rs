@@ -165,6 +165,8 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         port,
         listener,
     } = args;
+    // Owned, not borrowed: the restart fallback below needs it in a thread that outlives `args`.
+    let exe_path = exe_path.map(Path::to_path_buf);
     let is_release = build.is_some();
     // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
     // project on it. Unlinked clouds wait quietly for `retaskable link`.
@@ -230,21 +232,37 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     // Shared by the settings page's own restart button and, below, a newer build asking for one:
     // the one place code 75's exit installs whatever `release_update` has ready first
     // (installers/03-the-bundle-agent-bundle.md section 3.12 — `ReleaseUpdater.installNow` runs
-    // "instead of relaunch", so this is also the only relaunch this port has).
+    // "instead of relaunch"). When it doesn't install anything (nothing ready, or the install
+    // failed), a release build falls back to the plain relaunch section 3.8 describes; a checkout
+    // has none to fall back to, since nothing here supervises it the way a release build's own
+    // exit does.
     let updater_slot: Arc<Mutex<Option<Arc<release_update::ReleaseUpdater>>>> = Arc::new(Mutex::new(None));
     let exit_fn = {
         let updater_slot = updater_slot.clone();
+        let exe_path = exe_path.clone();
         move |code: i32| {
             let updater_slot = updater_slot.clone();
+            let exe_path = exe_path.clone();
             // Restarting answers the request first: the process exit happens on another thread, a
             // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
             // none in flight on its own HTTP thread, but the response still deserves to flush).
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                if code == 75
-                    && let Some(updater) = updater_slot.lock().unwrap().clone()
-                {
-                    updater.install_now();
+                let installed = code == 75
+                    && updater_slot
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .is_some_and(|updater| updater.install_now());
+                if code == 75 && is_release && !installed {
+                    if let Some(exe) = &exe_path {
+                        let target = release_install::relaunch_target(exe);
+                        if let Err(e) = release_install::relaunch_with_same_args(&target) {
+                            tracing::error!("starting the next copy ({e}), so this copy stays down.");
+                        }
+                    } else {
+                        tracing::error!("nothing to restart into (no executable path), so this copy stays down.");
+                    }
                 }
                 std::process::exit(code);
             });
@@ -261,7 +279,9 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             cloud_url: link::cloud_url(cfg, env, build)?,
             data_dir: dir.to_path_buf(),
             http: http.clone(),
-            installer: exe_path.map(|p| release_install::installer_for(p) as Arc<dyn release_update::Installer>),
+            installer: exe_path
+                .as_deref()
+                .map(|p| release_install::installer_for(p) as Arc<dyn release_update::Installer>),
             on_ready: Some(Box::new(move |_ready| on_ready_exit(75))),
             log: None,
             fetch: None,
