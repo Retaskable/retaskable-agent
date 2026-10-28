@@ -18,6 +18,7 @@ pub mod password;
 pub mod paths;
 pub mod phone;
 pub mod release;
+pub mod release_install;
 pub mod release_update;
 pub mod repo;
 pub mod scan;

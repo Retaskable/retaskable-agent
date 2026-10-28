@@ -5,7 +5,8 @@
 //! into the data folder's `updates/<version>/`, and kept only once its SHA-256 is the feed's: a wrong
 //! one is deleted and refused. Readying a downloaded build for install (a signature check unlike the
 //! running app's refused too) and actually swapping it in on a restart are section 3.12
-//! (`releaseInstall.ts`), not ported yet — [`Installer`] is only the seam this module calls through.
+//! (`releaseInstall.ts`, ported as [`crate::release_install`]) — [`Installer`] is the seam between
+//! the two.
 #[cfg(test)]
 mod tests;
 
@@ -307,10 +308,13 @@ impl ReleaseUpdater {
             ready.version,
             ready.file.display()
         ));
+        // Stored before `on_ready` runs: it asks `main.rs` for a restart, whose exit reads
+        // `ready()` back through `install_now` — on another thread, but not so late that this
+        // copy's own write can be assumed to have landed first.
+        *self.ready.lock().unwrap() = Some(ready.clone());
         if let Some(on_ready) = &self.deps.on_ready {
             on_ready(&ready);
         }
-        *self.ready.lock().unwrap() = Some(ready.clone());
         Ok(Some(ready))
     }
 

@@ -383,6 +383,36 @@ async fn a_ready_build_asks_for_the_restart_and_the_restarts_exit_installs_it() 
     assert!(joined(&h.logs).contains("installing 1.4.3"));
 }
 
+/// `main.rs`'s `on_ready` triggers a restart whose exit reads `ready()` back through
+/// `install_now`, on another thread with nothing but a sleep between the two: `ready` has to be
+/// stored before `on_ready` runs, not after, or that read is a race. This checks the order
+/// directly, by having `on_ready` itself read `ready()` back through a handle to the same updater.
+#[tokio::test]
+async fn ready_is_stored_before_on_ready_runs() {
+    let data_dir = TempDir::new().unwrap();
+    let (base, fetch, _state) = fake_cloud_with_1_4_3(BYTES);
+    let slot: Arc<Mutex<Option<Arc<ReleaseUpdater>>>> = Arc::new(Mutex::new(None));
+    let slot_in_on_ready = slot.clone();
+    let seen_ready_during_on_ready = Arc::new(Mutex::new(None));
+    let seen = seen_ready_during_on_ready.clone();
+    let updater = Arc::new(ReleaseUpdater::new(ReleaseUpdateDeps {
+        build: build(),
+        cloud_url: base,
+        data_dir: data_dir.path().to_path_buf(),
+        http: reqwest::Client::new(),
+        installer: Some(Arc::new(TestInstaller::new()) as Arc<dyn Installer>),
+        on_ready: Some(Box::new(move |_r: &ReadyUpdate| {
+            let updater = slot_in_on_ready.lock().unwrap().clone().unwrap();
+            *seen.lock().unwrap() = Some(updater.ready().is_some());
+        })),
+        log: None,
+        fetch: Some(fetch),
+    }));
+    *slot.lock().unwrap() = Some(updater.clone());
+    updater.check().await;
+    assert_eq!(*seen_ready_during_on_ready.lock().unwrap(), Some(true));
+}
+
 #[tokio::test]
 async fn a_failed_install_isnt_tried_again_after_a_restart() {
     let data_dir = TempDir::new().unwrap();

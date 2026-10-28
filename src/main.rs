@@ -2,14 +2,14 @@
 //! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
 use retaskable_agent::{
-    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_update,
-    setup_check, store, tags, telemetry,
+    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_install,
+    release_update, setup_check, store, tags, telemetry,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     let default_port = release::default_port(build.as_ref());
     let port = config::port(&cfg, env, default_port);
     let addr = SocketAddr::from((host, port));
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = bind_with_retry(addr, BIND_RETRY_INTERVAL, BIND_RETRY_TIMEOUT)
         .await
         .with_context(|| format!("listening on {addr}"))?;
     if network_access.enabled {
@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
             cfg: &cfg,
             version: &version,
             build: build.as_ref(),
+            exe_path: exe_path.as_deref(),
             tag_list,
             network_enabled: network_access.enabled,
             port,
@@ -140,6 +141,32 @@ async fn main() -> Result<()> {
     .await
 }
 
+/// How often [`bind_with_retry`] tries again, and how long it keeps trying before it fails.
+const BIND_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const BIND_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// `TcpListener::bind`, retrying while it fails with `AddrInUse`: installers/03-the-bundle-agent-
+/// bundle.md section 3.8 says a relaunched copy "waits for the port as after any restart", since
+/// the copy it replaces starts it before giving up its own listening socket (the macOS/Linux
+/// installers' restart and this binary's own relaunch fallback both spawn the next copy first,
+/// then exit). Any other error fails at once, as before.
+async fn bind_with_retry(
+    addr: SocketAddr,
+    retry_every: Duration,
+    give_up_after: Duration,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let started = std::time::Instant::now();
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && started.elapsed() < give_up_after => {
+                tokio::time::sleep(retry_every).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// What [`serve`] needs to run the server, bundled so the function stays under clippy's
 /// argument-count limit.
 struct ServeArgs<'a> {
@@ -147,6 +174,7 @@ struct ServeArgs<'a> {
     cfg: &'a config::ConfigFile,
     version: &'a str,
     build: Option<&'a release::Build>,
+    exe_path: Option<&'a Path>,
     tag_list: Vec<String>,
     network_enabled: bool,
     port: u16,
@@ -162,12 +190,15 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         cfg,
         version,
         build,
+        exe_path,
         tag_list,
         network_enabled,
         port,
         default_port,
         listener,
     } = args;
+    // Owned, not borrowed: the restart fallback below needs it in a thread that outlives `args`.
+    let exe_path = exe_path.map(Path::to_path_buf);
     let is_release = build.is_some();
     // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
     // project on it. Unlinked clouds wait quietly for `retaskable link`.
@@ -230,22 +261,64 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             println!("{report}");
         }
     });
-    // installers/03-the-bundle-agent-bundle.md section 3.11: a release build has no checkout to move
-    // forward, so it asks its own environment's release feed for a newer build and downloads it.
-    // Readying it for install and actually swapping it in on a restart are section 3.12, not ported
-    // yet, so `installer`/`on_ready` are left unwired: a newer build is downloaded and kept, never
-    // installed.
+    // Shared by the settings page's own restart button and, below, a newer build asking for one:
+    // the one place code 75's exit installs whatever `release_update` has ready first
+    // (installers/03-the-bundle-agent-bundle.md section 3.12 — `ReleaseUpdater.installNow` runs
+    // "instead of relaunch"). When it doesn't install anything (nothing ready, or the install
+    // failed), a release build falls back to the plain relaunch section 3.8 describes; a checkout
+    // has none to fall back to, since nothing here supervises it the way a release build's own
+    // exit does.
+    let updater_slot: Arc<Mutex<Option<Arc<release_update::ReleaseUpdater>>>> = Arc::new(Mutex::new(None));
+    let exit_fn = {
+        let updater_slot = updater_slot.clone();
+        let exe_path = exe_path.clone();
+        move |code: i32| {
+            let updater_slot = updater_slot.clone();
+            let exe_path = exe_path.clone();
+            // Restarting answers the request first: the process exit happens on another thread, a
+            // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
+            // none in flight on its own HTTP thread, but the response still deserves to flush).
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let installed = code == 75
+                    && updater_slot
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .is_some_and(|updater| updater.install_now());
+                if code == 75 && is_release && !installed {
+                    if let Some(exe) = &exe_path {
+                        let target = release_install::relaunch_target(exe);
+                        if let Err(e) = release_install::relaunch_with_same_args(&target) {
+                            tracing::error!("starting the next copy ({e}), so this copy stays down.");
+                        }
+                    } else {
+                        tracing::error!("nothing to restart into (no executable path), so this copy stays down.");
+                    }
+                }
+                std::process::exit(code);
+            });
+        }
+    };
+    // installers/03-the-bundle-agent-bundle.md section 3.11/3.12: a release build has no checkout
+    // to move forward, so it asks its own environment's release feed for a newer build, downloads
+    // and readies it, then asks for the same restart the settings page's own button does once
+    // it's ready to install.
     if let Some(b) = build {
+        let on_ready_exit = exit_fn.clone();
         let updater = Arc::new(release_update::ReleaseUpdater::new(release_update::ReleaseUpdateDeps {
             build: b.clone(),
             cloud_url: link::cloud_url(cfg, env, build)?,
             data_dir: dir.to_path_buf(),
             http: http.clone(),
-            installer: None,
-            on_ready: None,
+            installer: exe_path
+                .as_deref()
+                .map(|p| release_install::installer_for(p) as Arc<dyn release_update::Installer>),
+            on_ready: Some(Box::new(move |_ready| on_ready_exit(75))),
             log: None,
             fetch: None,
         }));
+        *updater_slot.lock().unwrap() = Some(updater.clone());
         tokio::spawn(release_update::watch(updater));
     }
     let settings = Arc::new(SettingsServer::new(
@@ -255,15 +328,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         network_enabled,
         env,
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        // Restarting answers the request first: the process exit happens on another thread, a
-        // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
-        // none in flight on its own HTTP thread, but the response still deserves to flush).
-        |code: i32| {
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                std::process::exit(code);
-            });
-        },
+        exit_fn,
     ));
     axum::serve(
         listener,
@@ -540,4 +605,32 @@ fn filter() -> tracing_subscriber::EnvFilter {
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("Stopping");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_with_retry_succeeds_once_the_port_frees_up() {
+        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let retry =
+            tokio::spawn(async move { bind_with_retry(addr, Duration::from_millis(20), Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(holder);
+        let listener = retry.await.unwrap().expect("bind should succeed once the port is free");
+        assert_eq!(listener.local_addr().unwrap(), addr);
+    }
+
+    #[tokio::test]
+    async fn bind_with_retry_gives_up_once_the_timeout_passes() {
+        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let err = bind_with_retry(addr, Duration::from_millis(10), Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(holder);
+    }
 }
