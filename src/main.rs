@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     let port = config::port(&cfg, env);
     let addr = SocketAddr::from((host, port));
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = bind_with_retry(addr, BIND_RETRY_INTERVAL, BIND_RETRY_TIMEOUT)
         .await
         .with_context(|| format!("listening on {addr}"))?;
     if network_access.enabled {
@@ -135,6 +135,32 @@ async fn main() -> Result<()> {
         env,
     )
     .await
+}
+
+/// How often [`bind_with_retry`] tries again, and how long it keeps trying before it fails.
+const BIND_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const BIND_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// `TcpListener::bind`, retrying while it fails with `AddrInUse`: installers/03-the-bundle-agent-
+/// bundle.md section 3.8 says a relaunched copy "waits for the port as after any restart", since
+/// the copy it replaces starts it before giving up its own listening socket (the macOS/Linux
+/// installers' restart and this binary's own relaunch fallback both spawn the next copy first,
+/// then exit). Any other error fails at once, as before.
+async fn bind_with_retry(
+    addr: SocketAddr,
+    retry_every: Duration,
+    give_up_after: Duration,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let started = std::time::Instant::now();
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && started.elapsed() < give_up_after => {
+                tokio::time::sleep(retry_every).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// What [`serve`] needs to run the server, bundled so the function stays under clippy's
@@ -572,4 +598,32 @@ fn filter() -> tracing_subscriber::EnvFilter {
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("Stopping");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_with_retry_succeeds_once_the_port_frees_up() {
+        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let retry =
+            tokio::spawn(async move { bind_with_retry(addr, Duration::from_millis(20), Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(holder);
+        let listener = retry.await.unwrap().expect("bind should succeed once the port is free");
+        assert_eq!(listener.local_addr().unwrap(), addr);
+    }
+
+    #[tokio::test]
+    async fn bind_with_retry_gives_up_once_the_timeout_passes() {
+        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let err = bind_with_retry(addr, Duration::from_millis(10), Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        drop(holder);
+    }
 }
