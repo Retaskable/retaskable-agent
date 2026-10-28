@@ -23,6 +23,7 @@ pub mod scan;
 pub mod settings_server;
 pub mod setup_check;
 pub mod store;
+mod sync;
 pub mod tags;
 pub mod telemetry;
 #[cfg(test)]
