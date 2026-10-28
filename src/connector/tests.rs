@@ -102,6 +102,9 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
             })
             .collect(),
         version: "9.9.9".into(),
+        lanes: 2,
+        chore_lane: Some(2),
+        lane_sizes: LaneSizes::default(),
     })
 }
 
@@ -175,6 +178,32 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
 
     // A quiet spell: it says it's alive.
     assert_eq!(read(&mut first).await, json!({ "type": "alive" }));
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_changes() {
+    let (url, _, mut rx) = cloud().await;
+    let (_dir, store) = linked(&url);
+    let view = view(&["one"]);
+    let c = Connector::start(&url, store, reqwest::Client::new(), view.clone(), timing());
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let lanes = read(&mut first).await["state"]["lanes"].clone();
+    assert_eq!(
+        lanes,
+        json!([
+            { "k": 1, "diskGb": 0.0, "playing": false },
+            { "k": 2, "diskGb": 0.0, "playing": false, "note": CHORE_LANE_NOTE },
+        ])
+    );
+    view.lane_sizes.set("one", std::collections::BTreeMap::from([(1, 3.3)]));
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["lanes"][0]["diskGb"], 3.3);
     c.stop(Duration::from_secs(1)).await;
 }
 
