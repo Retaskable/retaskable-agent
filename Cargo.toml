@@ -15,6 +15,7 @@ axum = "0.8"
 base64 = "0.22.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 gethostname = { version = "1.1.0", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = "4"
 rand = "0.10.3"
 regex = "1.13.1"
@@ -22,6 +23,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 scrypt = { version = "0.12.0", default-features = false, features = ["kdf"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+time = { version = "0.3", default-features = false, features = ["formatting", "std"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "process", "io-util", "sync", "time"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1.44"

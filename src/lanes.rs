@@ -96,6 +96,38 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
     Ok(dir)
 }
 
+/// `<worktrees_dir>/_planner`: the project's shared base checkout (docs/specs/agent/06.1
+/// "Planner (retired)"), detached at `origin/<base_branch>`. Shoot (06.8) is its first user here;
+/// the baseline, Play main, phone builds and main syncs take the same checkout one at a time once
+/// they're ported, so a caller of [`prepare_base_checkout`] holds it alone until a lock shared
+/// across those is ported too.
+pub fn base_checkout_path(worktrees_dir: &Path) -> PathBuf {
+    worktrees_dir.join("_planner")
+}
+
+/// Resets the base checkout ([`base_checkout_path`]) onto `origin/<base_branch>`, detached, the
+/// same way [`prepare`] resets a lane onto a branch.
+pub fn prepare_base_checkout(repo_path: &Path, worktrees_dir: &Path, base_branch: &str) -> Result<PathBuf> {
+    let dir = base_checkout_path(worktrees_dir);
+    ensure_worktree(repo_path, worktrees_dir, &dir)?;
+    kill_processes_in(&dir)?;
+    {
+        let _guard = GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fetch(repo_path, true)?;
+        run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
+        run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
+        let start_point = format!("origin/{base_branch}");
+        run(git_in_worktree(&dir).args(["checkout", "--detach", &start_point]))?;
+    }
+    link_outside_deps(repo_path, worktrees_dir, &dir)?;
+    Ok(dir)
+}
+
+/// The base checkout's current commit (`git rev-parse HEAD`), trimmed.
+pub fn head_sha(dir: &Path) -> Result<String> {
+    Ok(git_output_in_worktree(dir, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
 /// Something just changed origin without a fetch here (a PR merged on GitHub): the next lane
 /// fetches again.
 pub fn fetch_is_stale(repo_path: &Path) {
