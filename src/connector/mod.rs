@@ -81,6 +81,9 @@ pub struct AgentView {
     pub tags: Vec<String>,
     /// The projects, the first first; none before Setup.
     pub projects: Vec<ProjectView>,
+    /// This crate's version in a checkout, or a release build's `build.json` one
+    /// (installers/03-the-bundle-agent-bundle.md section 3.7).
+    pub version: String,
 }
 
 /// A project as its hub knows it.
@@ -120,7 +123,7 @@ impl AgentView {
             .find(|p| p.id == project && !p.github_repo.is_empty());
         json!({
             "type": "hello",
-            "agentVersion": truncate(env!("CARGO_PKG_VERSION"), 50),
+            "agentVersion": truncate(&self.version, 50),
             "os": platform(),
             "machine": truncate(&self.machine, 200),
             "capabilities": [],

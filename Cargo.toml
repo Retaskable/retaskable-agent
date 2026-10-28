@@ -9,6 +9,12 @@ publish = false
 name = "retaskable_agent"
 path = "src/lib.rs"
 
+# `retaskable.exe`/`retaskable` (installers/03-the-bundle-agent-bundle.md section 3.1), not the
+# package's own `retaskable-agent`.
+[[bin]]
+name = "retaskable"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8"

@@ -105,8 +105,9 @@ pub fn machine_name(env: impl Fn(&str) -> Option<String>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// What the `/link` page shows about this machine.
-pub fn machine_info(env: impl Fn(&str) -> Option<String>) -> Value {
+/// What the `/link` page shows about this machine. `version` is this crate's own in a checkout,
+/// or a release build's `build.json` one.
+pub fn machine_info(env: impl Fn(&str) -> Option<String>, version: &str) -> Value {
     let os = match std::env::consts::OS {
         "windows" => "Windows",
         "macos" => "macOS",
@@ -116,7 +117,7 @@ pub fn machine_info(env: impl Fn(&str) -> Option<String>) -> Value {
     json!({
         "machine": truncate(&machine_name(env), 100),
         "os": os,
-        "agentVersion": env!("CARGO_PKG_VERSION"),
+        "agentVersion": version,
     })
 }
 

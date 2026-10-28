@@ -14,12 +14,16 @@ use serde_json::json;
 
 use crate::settings_server::{self, SettingsServer};
 
-pub fn router(version: &'static str, settings: Arc<SettingsServer>) -> Router {
+pub fn router(version: String, settings: Arc<SettingsServer>) -> Router {
     Router::new()
         .route(
             "/api/health",
             // Any other method is a 404 too, not axum's empty 405.
-            get(move || async move { Json(json!({ "ok": true, "version": version })) }).fallback(not_found),
+            get(move || {
+                let version = version.clone();
+                async move { Json(json!({ "ok": true, "version": version })) }
+            })
+            .fallback(not_found),
         )
         .merge(settings_server::router(settings))
         .fallback(not_found)
@@ -48,7 +52,7 @@ mod tests {
     async fn call(method: &str, path: &str) -> (StatusCode, Value) {
         let (settings, _dir) = settings_server::test_server();
         let req = Request::builder().method(method).uri(path).body(Body::empty()).unwrap();
-        let res = router("1.2.3", settings).oneshot(req).await.unwrap();
+        let res = router("1.2.3".to_string(), settings).oneshot(req).await.unwrap();
         let status = res.status();
         let body = res.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&body).unwrap())
@@ -71,7 +75,7 @@ mod tests {
             .header("Host", "127.0.0.1:4700")
             .body(Body::empty())
             .unwrap();
-        let res = router("1.2.3", settings).oneshot(req).await.unwrap();
+        let res = router("1.2.3".to_string(), settings).oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 
