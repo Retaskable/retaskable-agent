@@ -6,7 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use retaskable_agent::app_menu;
 use retaskable_agent::settings_server::SettingsServer;
+#[cfg(target_os = "linux")]
+use retaskable_agent::start_at_login;
 use retaskable_agent::{
     api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_install,
     release_update, setup_check, store, tags, telemetry,
@@ -320,6 +324,37 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         }));
         *updater_slot.lock().unwrap() = Some(updater.clone());
         tokio::spawn(release_update::watch(updater));
+    }
+    // installers/03-the-bundle-agent-bundle.md sections 3.14 and 3.17: a Linux release build adds
+    // itself to the login items on every start, and, when it's running as an AppImage, to the
+    // desktop's app menu. macOS and Windows's own start-at-login are the desktop app's
+    // (desktop-app.md) and the installer's, not this agent's (06-macos-and-linux.md section 6.1).
+    #[cfg(target_os = "linux")]
+    if let (Some(b), Some(exe)) = (build, exe_path.as_deref()) {
+        let home = env("HOME").unwrap_or_default();
+        let appimage = env("APPIMAGE");
+        let (file, text) = start_at_login::login_entry(
+            b,
+            env("XDG_CONFIG_HOME").as_deref(),
+            appimage.as_deref(),
+            &home,
+            &exe.to_string_lossy(),
+        );
+        if let Err(e) = start_at_login::StartAtLogin::new(file, text).at_start(dir) {
+            tracing::warn!("setting up start at login: {e:#}");
+        }
+        if let Some(entry) = app_menu::menu_entry(
+            b,
+            appimage.as_deref(),
+            env("APPDIR").as_deref(),
+            env("XDG_DATA_HOME").as_deref(),
+            &home,
+            exe,
+        ) {
+            if let Err(e) = app_menu::add_to_app_menu(&entry, dir) {
+                tracing::warn!("adding to the app menu: {e:#}");
+            }
+        }
     }
     let settings = Arc::new(SettingsServer::new(
         dir.to_path_buf(),
