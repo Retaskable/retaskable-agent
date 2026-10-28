@@ -177,3 +177,12 @@ fn target_slug_names_the_four_built_platforms_and_nothing_else() {
     assert_eq!(target_slug("linux", "aarch64"), None);
     assert_eq!(target_slug("freebsd", "x86_64"), None);
 }
+
+#[test]
+fn target_triple_names_a_cargo_target_for_each_slug_and_nothing_else() {
+    assert_eq!(target_triple("win-x64"), Some("x86_64-pc-windows-msvc"));
+    assert_eq!(target_triple("mac-arm64"), Some("aarch64-apple-darwin"));
+    assert_eq!(target_triple("mac-x64"), Some("x86_64-apple-darwin"));
+    assert_eq!(target_triple("linux-x64"), Some("x86_64-unknown-linux-gnu"));
+    assert_eq!(target_triple("linux-arm64"), None);
+}

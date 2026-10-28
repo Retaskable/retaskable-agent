@@ -119,6 +119,18 @@ pub fn target_slug(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
+/// The `rustc`/`cargo --target` triple for one of `target_slug`'s four slugs, or `None` for
+/// anything else (section 3.9: `bundle` cross-builds only these).
+pub fn target_triple(slug: &str) -> Option<&'static str> {
+    match slug {
+        "win-x64" => Some("x86_64-pc-windows-msvc"),
+        "mac-arm64" => Some("aarch64-apple-darwin"),
+        "mac-x64" => Some("x86_64-apple-darwin"),
+        "linux-x64" => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
 /// The line `releaseStart.ts` logs first, naming the build: "Retaskable Staging 1.4.2 (abc1234)
 /// on win-x64" (section 3.7).
 pub fn build_line(build: &Build) -> String {
