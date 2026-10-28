@@ -20,3 +20,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # installers/03-the-bundle-agent-bundle.md section 3.10: builds this machine's own target and runs
+  # its start check, on each of the three OSes (cross-building the other three isn't ported yet).
+  bundle:
+    needs: check
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release --bin bundle
