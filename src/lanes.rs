@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::sync::lock;
+
 /// How recently a fetch of a repo must have begun for the next lane's prepare to skip its own
 /// (section 4.1: every lane shares the one object store).
 const FRESH_FETCH: Duration = Duration::from_secs(15);
@@ -83,7 +85,7 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
     ensure_worktree(repo_path, worktrees_dir, &dir)?;
     kill_processes_in(&dir)?;
     {
-        let _guard = GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock(&GIT_LOCK);
         fetch(repo_path, true)?;
         run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
         run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
@@ -112,7 +114,7 @@ pub fn prepare_base_checkout(repo_path: &Path, worktrees_dir: &Path, base_branch
     ensure_worktree(repo_path, worktrees_dir, &dir)?;
     kill_processes_in(&dir)?;
     {
-        let _guard = GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock(&GIT_LOCK);
         fetch(repo_path, true)?;
         run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
         run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
@@ -132,7 +134,7 @@ pub fn head_sha(dir: &Path) -> Result<String> {
 /// fetches again.
 pub fn fetch_is_stale(repo_path: &Path) {
     let key = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-    FETCHED_AT.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    lock(&FETCHED_AT).remove(&key);
 }
 
 /// Stops every process whose program or command line is inside `dir`, with its children. A session
@@ -321,7 +323,7 @@ fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
 fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
     let key = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     if unless_fresh {
-        let map = FETCHED_AT.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock(&FETCHED_AT);
         if let Some(at) = map.get(&key)
             && at.elapsed() < FRESH_FETCH
         {
@@ -330,10 +332,7 @@ fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
     }
     let started = Instant::now();
     run(git(repo_path).args(["fetch", "--prune", "origin"]))?;
-    FETCHED_AT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, started);
+    lock(&FETCHED_AT).insert(key, started);
     Ok(true)
 }
 
