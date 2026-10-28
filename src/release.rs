@@ -95,6 +95,18 @@ fn names(environment: Environment) -> (&'static str, &'static str) {
     }
 }
 
+/// installers/03-the-bundle-agent-bundle.md section 3.13: the port a release build's health
+/// check falls back to once neither `RETASKABLE_PORT` nor the config's own `port` says a valid
+/// one — a Staging release build's own is 4701, so it never collides with a Production or
+/// checkout agent on the same machine; every other build (`None` is a checkout) keeps
+/// `config::DEFAULT_PORT` (4700).
+pub fn default_port(build: Option<&Build>) -> u16 {
+    match build.map(|b| b.environment) {
+        Some(Environment::Staging) => 4701,
+        _ => crate::config::DEFAULT_PORT,
+    }
+}
+
 fn local_app_data(env: &impl Fn(&str) -> Option<String>) -> PathBuf {
     PathBuf::from(env("LOCALAPPDATA").unwrap_or_default())
 }

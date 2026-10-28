@@ -36,8 +36,11 @@ pub struct MachineConfig {
     /// The Cursor model per tier, `auto` when missing or invalid (section 3.1 below, engines.md section 3.4).
     #[serde(default)]
     pub cursor: CursorConfig,
-    #[serde(default = "default_port")]
-    pub port: u16,
+    /// `None` when the file sets no port at all, kept apart from an explicit value so [`port`]
+    /// can fall back to this build's own default (installers/03-the-bundle-agent-bundle.md
+    /// section 3.13: 4701 for a Staging release build) rather than one baked in here.
+    #[serde(default)]
+    pub port: Option<u16>,
     #[serde(default)]
     pub budget: MachineBudget,
     /// The cloud this agent links to (`link::cloud_url`): `cloud.url`, retaskable.com when missing.
@@ -57,7 +60,7 @@ impl Default for MachineConfig {
             local: LocalModelConfig::default(),
             engine_choice: EngineChoiceConfig::default(),
             cursor: CursorConfig::default(),
-            port: default_port(),
+            port: None,
             budget: MachineBudget::default(),
             cloud: CloudConfig::default(),
         }
@@ -78,9 +81,6 @@ fn default_max_resume_context_tokens() -> u32 {
 }
 fn default_max_turns() -> u32 {
     300
-}
-fn default_port() -> u16 {
-    DEFAULT_PORT
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -320,12 +320,16 @@ pub(crate) fn port_in_range(p: u16) -> bool {
     p >= 1024
 }
 
-pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
+/// `default` is this build's own fallback (installers/03-the-bundle-agent-bundle.md section
+/// 3.13: a Staging release build's own 4701, [`DEFAULT_PORT`] otherwise, from
+/// `release::default_port`), used only once neither `RETASKABLE_PORT` nor the file's own `port`
+/// says a valid one.
+pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>, default: u16) -> u16 {
     env("RETASKABLE_PORT")
         .and_then(|p| p.parse().ok())
         .filter(|&p| port_in_range(p))
-        .or_else(|| Some(cfg.machine.port).filter(|&p| port_in_range(p)))
-        .unwrap_or(DEFAULT_PORT)
+        .or_else(|| cfg.machine.port.filter(|&p| port_in_range(p)))
+        .unwrap_or(default)
 }
 
 /// "How often it checks": 2 to 3600 seconds (agent-settings.md section 3.1), the settings page's
@@ -515,7 +519,7 @@ mod tests {
     fn with_port(port: u16) -> ConfigFile {
         ConfigFile {
             machine: MachineConfig {
-                port,
+                port: Some(port),
                 ..MachineConfig::default()
             },
             ..ConfigFile::default()
@@ -523,29 +527,36 @@ mod tests {
     }
 
     #[test]
-    fn port_prefers_the_env_then_the_file_then_4700() {
+    fn port_prefers_the_env_then_the_file_then_the_callers_default() {
         let env = |k: &str| (k == "RETASKABLE_PORT").then(|| "4800".to_string());
-        assert_eq!(port(&with_port(4900), env), 4800);
-        assert_eq!(port(&with_port(4900), no_env), 4900);
-        assert_eq!(port(&ConfigFile::default(), no_env), DEFAULT_PORT);
+        assert_eq!(port(&with_port(4900), env, DEFAULT_PORT), 4800);
+        assert_eq!(port(&with_port(4900), no_env, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), no_env, DEFAULT_PORT), DEFAULT_PORT);
         let bad = |k: &str| (k == "RETASKABLE_PORT").then(|| "nope".to_string());
-        assert_eq!(port(&ConfigFile::default(), bad), DEFAULT_PORT);
-        // An unparseable env value falls through to the file, not straight to 4700.
-        assert_eq!(port(&with_port(4900), bad), 4900);
+        assert_eq!(port(&ConfigFile::default(), bad, DEFAULT_PORT), DEFAULT_PORT);
+        // An unparseable env value falls through to the file, not straight to the default.
+        assert_eq!(port(&with_port(4900), bad, DEFAULT_PORT), 4900);
+    }
+
+    #[test]
+    fn with_no_port_in_the_file_either_it_falls_back_to_the_callers_default() {
+        // installers/03-the-bundle-agent-bundle.md section 3.13: the final fallback is this
+        // build's own default (a Staging release build's 4701), not a hardcoded 4700.
+        assert_eq!(port(&ConfigFile::default(), no_env, 4701), 4701);
     }
 
     #[test]
     fn a_zero_env_port_is_not_used_either() {
         let zero = |k: &str| (k == "RETASKABLE_PORT").then(|| "0".to_string());
-        assert_eq!(port(&with_port(4900), zero), 4900);
-        assert_eq!(port(&ConfigFile::default(), zero), DEFAULT_PORT);
+        assert_eq!(port(&with_port(4900), zero, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), zero, DEFAULT_PORT), DEFAULT_PORT);
     }
 
     #[test]
     fn a_zero_port_in_the_file_is_not_used_either() {
         // Binding port 0 asks the OS for a random ephemeral port, not the documented
         // fallback, so a zero in config.json is as invalid as a zero env value.
-        assert_eq!(port(&with_port(0), no_env), DEFAULT_PORT);
+        assert_eq!(port(&with_port(0), no_env, DEFAULT_PORT), DEFAULT_PORT);
     }
 
     #[test]
@@ -553,10 +564,10 @@ mod tests {
         // agent-settings.md section 3.1: the documented valid range is 1024 to 65535,
         // so a sub-1024 port (env or file) is as invalid as zero and falls through too.
         let low_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "80".to_string());
-        assert_eq!(port(&with_port(4900), low_env), 4900);
-        assert_eq!(port(&ConfigFile::default(), low_env), DEFAULT_PORT);
-        assert_eq!(port(&with_port(80), no_env), DEFAULT_PORT);
-        assert_eq!(port(&with_port(1024), no_env), 1024);
+        assert_eq!(port(&with_port(4900), low_env, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), low_env, DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(80), no_env, DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(1024), no_env, DEFAULT_PORT), 1024);
     }
 
     #[test]
@@ -564,8 +575,8 @@ mod tests {
         // agent-settings.md section 3.1: the documented valid range runs up to 65535,
         // so the top of the range is as valid as the bottom (already covered at 1024).
         let top_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "65535".to_string());
-        assert_eq!(port(&ConfigFile::default(), top_env), 65535);
-        assert_eq!(port(&with_port(65535), no_env), 65535);
+        assert_eq!(port(&ConfigFile::default(), top_env, DEFAULT_PORT), 65535);
+        assert_eq!(port(&with_port(65535), no_env, DEFAULT_PORT), 65535);
     }
 
     #[test]
