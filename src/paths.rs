@@ -11,3 +11,8 @@ pub fn project_dir(data_dir: &Path, project: &str) -> PathBuf {
 pub fn run_dir(data_dir: &Path, project: &str, item_id: &str) -> PathBuf {
     project_dir(data_dir, project).join("runs").join(item_id)
 }
+
+/// Where a gallery's converted pictures and `index.json` live (`galleryDir`, spec section 6.8).
+pub fn gallery_dir(data_dir: &Path, project: &str, slug: &str) -> PathBuf {
+    project_dir(data_dir, project).join("galleries").join(slug)
+}

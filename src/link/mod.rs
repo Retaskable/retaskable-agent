@@ -60,11 +60,39 @@ pub fn cloud_url(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Resu
                 .map(String::from)
         })
         .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string());
-    let parsed = Url::parse(&url).with_context(|| format!("The cloud URL isn't an address: {url}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("The cloud URL must be http or https: {url}");
-    }
+    valid_http_url(&url, "cloud")?;
     Ok(url.trim_end_matches('/').to_string())
+}
+
+/// Parses `url` as an address and requires http or https, before anything is sent to it (link.ts `httpUrl`).
+pub(crate) fn valid_http_url(url: &str, what: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("The {what} URL isn't an address: {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("The {what} URL must be http or https: {url}");
+    }
+    Ok(())
+}
+
+/// Opens `url` in the default browser, without a shell, as the TypeScript agent's `openUrl` does
+/// (tray.md section 4.4): `rundll32 url.dll,FileProtocolHandler` on Windows, `open` on macOS, `xdg-open` on
+/// Linux. Only `http(s)` addresses; spawned, not waited on.
+pub fn open_url(url: &str) -> Result<()> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        bail!("not an http(s) URL: {url}");
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url);
+    cmd.spawn().with_context(|| format!("opening {url}"))?;
+    Ok(())
 }
 
 /// Every cloud this agent connects to (environments.md section 3.4): the three environments, then the agent's own
@@ -93,6 +121,13 @@ pub const CLOUD_TARGET: LinkTarget = LinkTarget {
     name: "cloud",
     device_path: "/api/device",
     setting: "cloud.url or RETASKABLE_CLOUD_URL",
+};
+
+/// The shared backlog store's device endpoints are under `/v1/device` (backlog.md section 4.2).
+pub const BACKLOG_TARGET: LinkTarget = LinkTarget {
+    name: "backlog store",
+    device_path: "/v1/device",
+    setting: "RETASKABLE_BACKLOG_URL",
 };
 
 /// The name this machine goes by on retaskable.com: `RETASKABLE_MACHINE` when set (a container's hostname is a random

@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
 use retaskable_agent::{
-    api, config, connector, engines, lanes, link, local_model, network, phone, release, setup_check, store, tags,
-    telemetry,
+    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, setup_check, store,
+    tags, telemetry,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -227,6 +227,16 @@ async fn main() -> Result<()> {
             )
         })
         .collect();
+    // installers/04-every-agent-on-the-shared-backlog-shared.md: once this computer already holds a
+    // retaskable.com link, the shared backlog's device flow starts by itself too, opening its own
+    // `/link` page. Fire-and-forget so a slow or unreachable store doesn't delay serving `/api/health`;
+    // it isn't tried again this run (a failed or expired code waits for the next start).
+    if link::cloud_urls(&cfg, env)
+        .iter()
+        .any(|url| matches!(keychain.get(url), Ok(Some(_))))
+    {
+        tokio::spawn(auto_link_backlog(keychain.clone(), http.clone(), env, version.clone()));
+    }
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
     // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
     tokio::spawn(async move {
@@ -261,7 +271,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// `retaskable link [production|staging|local]`: the device flow in the terminal. The exit code.
+/// `retaskable link [production|staging|local]`, or `retaskable link backlog`
+/// (installers/04-every-agent-on-the-shared-backlog-shared.md, `npm run link -- backlog`): the device
+/// flow in the terminal. The exit code.
 async fn link_command(
     args: &[String],
     cfg: &config::ConfigFile,
@@ -269,6 +281,22 @@ async fn link_command(
     env: impl Fn(&str) -> Option<String> + Copy,
     version: &str,
 ) -> i32 {
+    if args == [String::from("backlog")] {
+        let keychain = link::keychain(dir, env);
+        let url = backlog::url(env);
+        return match run_link_in_terminal(&keychain, &url, link::BACKLOG_TARGET, env, version).await {
+            Ok(id) => {
+                println!(
+                    "Linked to the shared backlog as agent {id}. The refresh token is in this machine's credential store."
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
     let url = match args {
         [] => link::cloud_url(cfg, env).map_err(|e| format!("{e:#}")),
         [name] => link::environment_url(name).map(String::from).ok_or_else(String::new),
@@ -280,12 +308,35 @@ async fn link_command(
             if !e.is_empty() {
                 eprintln!("{e}");
             }
-            eprintln!("Usage: retaskable link [production|staging|local]");
+            eprintln!("Usage: retaskable link [production|staging|local] | backlog");
             return 2;
         }
     };
     let keychain = link::keychain(dir, env);
-    if matches!(keychain.get(&url), Ok(Some(_))) {
+    match run_link_in_terminal(&keychain, &url, link::CLOUD_TARGET, env, version).await {
+        Ok(id) => {
+            println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
+            // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
+            // approval comes right after this one, opened by the agent itself.
+            auto_link_backlog(keychain.clone(), reqwest::Client::new(), env, version.to_string()).await;
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// Runs one device-flow link against `target` at `url` in the terminal, storing the refresh token.
+async fn run_link_in_terminal(
+    keychain: &Arc<dyn link::TokenStore>,
+    url: &str,
+    target: link::LinkTarget,
+    env: impl Fn(&str) -> Option<String> + Copy,
+    version: &str,
+) -> Result<u64, String> {
+    if matches!(keychain.get(url), Ok(Some(_))) {
         println!("Already linked to {url}. Linking again replaces that link.");
     }
     println!("Linking to {url}…");
@@ -293,7 +344,7 @@ async fn link_command(
         http: reqwest::Client::new(),
         store: keychain.as_ref(),
         machine: link::machine_info(env, version),
-        target: link::CLOUD_TARGET,
+        target,
         second: Duration::from_secs(1),
     };
     let shown = |code: &link::DeviceCode| {
@@ -306,15 +357,28 @@ async fn link_command(
             code.expires_in.div_ceil(60)
         );
     };
-    match flow.run(&url, shown).await {
-        Ok(id) => {
-            println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
-            0
+    flow.run(url, shown).await.map_err(|e| format!("{e:#}"))
+}
+
+/// installers/04-every-agent-on-the-shared-backlog-shared.md: starts the shared backlog's device flow by
+/// itself, printing and opening its `/link` page the moment a code is ready. Logs the outcome instead of
+/// failing the caller — a failed or expired code waits for the next start, or `retaskable link backlog`.
+async fn auto_link_backlog(
+    keychain: Arc<dyn link::TokenStore>,
+    http: reqwest::Client,
+    env: impl Fn(&str) -> Option<String> + Copy,
+    version: String,
+) {
+    let shown = |code: &link::DeviceCode| {
+        println!("Approve the shared backlog: {}", code.verification_uri_complete);
+        if let Err(e) = link::open_url(&code.verification_uri_complete) {
+            tracing::warn!("couldn't open the shared backlog's link page: {e:#}");
         }
-        Err(e) => {
-            eprintln!("{e:#}");
-            1
-        }
+    };
+    match backlog::auto_link(keychain, http, env, &version, shown).await {
+        Ok(Some(id)) => tracing::info!("Linked to the shared backlog as agent {id}."),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("Couldn't link to the shared backlog: {e:#}"),
     }
 }
 

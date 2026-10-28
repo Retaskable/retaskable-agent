@@ -355,43 +355,7 @@ pub fn repo_problems(check: &RepoCheck, base_branch: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-
-    fn git(dir: &Path) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.current_dir(dir);
-        cmd
-    }
-
-    fn run(cmd: &mut Command) {
-        let status = cmd.status().unwrap();
-        assert!(status.success());
-    }
-
-    fn init_repo(dir: &Path, branch: &str) {
-        run(git(dir).args(["init", "--quiet"]));
-        run(git(dir).args(["config", "user.email", "test@example.com"]));
-        run(git(dir).args(["config", "user.name", "Test"]));
-        run(git(dir).args(["checkout", "-b", branch]));
-        std::fs::write(dir.join("README.md"), "hello").unwrap();
-        run(git(dir).args(["add", "README.md"]));
-        run(git(dir).args(["commit", "--quiet", "-m", "initial"]));
-    }
-
-    /// A repo with an `origin` remote, both on `main`.
-    fn repo_with_origin(root: &Path) -> PathBuf {
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        init_repo(&repo, "main");
-        let origin = root.join("origin.git");
-        run(Command::new("git")
-            .args(["clone", "--bare", "--quiet"])
-            .arg(&repo)
-            .arg(&origin));
-        run(git(&repo).args(["remote", "add", "origin"]).arg(&origin));
-        run(git(&repo).args(["push", "-u", "--quiet", "origin", "main"]));
-        repo
-    }
+    use crate::test_support::{git, repo_with_origin, run};
 
     #[test]
     fn remote_repo_reads_an_https_url() {

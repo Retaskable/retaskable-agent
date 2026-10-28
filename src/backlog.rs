@@ -1,15 +1,20 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
 //! never falls back to a local list."): `list`, read over `POST <store>/v1/repos/<repo id>/ops`
-//! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2). A repo's numeric GitHub id and
-//! this machine's access token come from elsewhere (device linking isn't ported here yet); every
-//! way this can fail — no address, no network, a refused or unreadable answer — comes back as a
-//! `BacklogError` and never as a guessed or empty list, so a caller can't mistake "couldn't ask" for
-//! "nothing to do".
+//! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2), and `auto_link`, this machine's
+//! own link to the store (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A
+//! repo's numeric GitHub id, and wiring a linked access token into `list`, come from elsewhere (the
+//! orchestrator isn't built yet); every way `list` can fail — no address, no network, a refused or
+//! unreadable answer — comes back as a `BacklogError` and never as a guessed or empty list, so a
+//! caller can't mistake "couldn't ask" for "nothing to do".
+use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::link::{self, DeviceCode, TokenStore};
 
 /// Every environment and agent uses the one production store (backlog.md section 3.1): no per-project
 /// override, only this default and `RETASKABLE_BACKLOG_URL`.
@@ -24,6 +29,37 @@ pub fn url(env: impl Fn(&str) -> Option<String>) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     raw.trim_end_matches('/').to_string()
+}
+
+/// Every agent on the shared backlog (installers/04-every-agent-on-the-shared-backlog-shared.md): starts the
+/// store's device flow by itself, the same way `link::Link` links this machine to a cloud, only when its URL
+/// is good and this machine holds no link to it yet. Called once at this agent's start when it already holds
+/// a retaskable.com link, and once right after a retaskable.com link is approved — never on a timer, so a
+/// failed or expired code waits for the next start rather than looping. `Ok(None)` when there was nothing to
+/// start (already linked, or a bad URL); the agent id once approved.
+pub async fn auto_link(
+    store: Arc<dyn TokenStore>,
+    http: reqwest::Client,
+    env: impl Fn(&str) -> Option<String>,
+    version: &str,
+    on_code: impl FnOnce(&DeviceCode),
+) -> Result<Option<u64>> {
+    let backlog_url = url(&env);
+    if let Err(e) = link::valid_http_url(&backlog_url, "backlog store") {
+        tracing::warn!("backlog store URL isn't valid: {e:#}");
+        return Ok(None);
+    }
+    if matches!(store.get(&backlog_url), Ok(Some(_))) {
+        return Ok(None); // already linked
+    }
+    let flow = link::Link {
+        http,
+        store: store.as_ref(),
+        machine: link::machine_info(&env, version),
+        target: link::BACKLOG_TARGET,
+        second: Duration::from_secs(1),
+    };
+    flow.run(&backlog_url, on_code).await.map(Some)
 }
 
 /// backlog/06.1-an-item.md: an item's status in the store.
@@ -290,5 +326,99 @@ mod tests {
             matches!(err, BacklogError::BadAnswer { status: 200, .. }),
             "expected BadAnswer, got {err:?}"
         );
+    }
+
+    fn file_store() -> (tempfile::TempDir, Arc<dyn TokenStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::link::FileStore::new(
+            dir.path().join("credentials.json"),
+            "retaskable",
+        ));
+        (dir, store)
+    }
+
+    /// Starts a fake store answering the device flow on `/v1/device/code` and `/v1/device/token`, and gives
+    /// its base URL.
+    async fn fake_device_store(code: Value, tokens: Vec<Value>) -> String {
+        use std::sync::Mutex as StdMutex;
+        struct Fake {
+            code: Value,
+            tokens: StdMutex<std::collections::VecDeque<Value>>,
+        }
+        let fake = Arc::new(Fake {
+            code,
+            tokens: StdMutex::new(tokens.into()),
+        });
+        async fn code_route(axum::extract::State(f): axum::extract::State<Arc<Fake>>) -> Json<Value> {
+            Json(f.code.clone())
+        }
+        async fn token_route(axum::extract::State(f): axum::extract::State<Arc<Fake>>) -> Json<Value> {
+            Json(f.tokens.lock().unwrap().pop_front().expect("an answer for /token"))
+        }
+        let app = Router::new()
+            .route("/v1/device/code", post(code_route))
+            .route("/v1/device/token", post(token_route))
+            .with_state(fake);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn auto_link_starts_the_device_flow_against_v1_device_and_stores_the_refresh_token() {
+        let base = fake_device_store(
+            json!({ "device_code": "dc", "user_code": "WXYZ-2345", "verification_uri": "https://x/link",
+                    "verification_uri_complete": "https://x/link?code=WXYZ-2345", "interval": 1, "expires_in": 900 }),
+            vec![json!({ "refresh_token": "r1", "agent_id": 9 })],
+        )
+        .await;
+        let env = {
+            let base = base.clone();
+            move |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| base.clone())
+        };
+        let (_dir, store) = file_store();
+        let mut shown = None;
+        let id = auto_link(store.clone(), reqwest::Client::new(), env, "9.9.9", |c| {
+            shown = Some(c.clone())
+        })
+        .await
+        .unwrap();
+        assert_eq!(id, Some(9));
+        assert_eq!(shown.unwrap().user_code, "WXYZ-2345");
+        assert_eq!(store.get(&base).unwrap().as_deref(), Some("r1"));
+    }
+
+    #[tokio::test]
+    async fn auto_link_does_nothing_when_already_linked() {
+        // An address nothing listens on: a request here would fail, proving none was sent.
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let base = format!("http://{addr}");
+        let env = {
+            let base = base.clone();
+            move |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| base.clone())
+        };
+        let (_dir, store) = file_store();
+        store.set(&base, "already-linked").unwrap();
+        let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
+            panic!("no code expected")
+        })
+        .await
+        .unwrap();
+        assert_eq!(id, None);
+    }
+
+    #[tokio::test]
+    async fn auto_link_does_nothing_for_a_bad_backlog_url() {
+        let env = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "not a url".to_string());
+        let (_dir, store) = file_store();
+        let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
+            panic!("no code expected")
+        })
+        .await
+        .unwrap();
+        assert_eq!(id, None);
     }
 }
