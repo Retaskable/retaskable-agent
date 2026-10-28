@@ -98,6 +98,7 @@ fn start_check(file: &Path, build: &release::Build) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    #[allow(unused_mut)]
     let mut child = cmd.spawn().map_err(|e| format!("running {}: {e}", file.display()))?;
 
     let health = wait_for_health(port, &build.version);
