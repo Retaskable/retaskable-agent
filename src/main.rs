@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
 use retaskable_agent::{
-    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, setup_check, store,
-    tags, telemetry,
+    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_update,
+    setup_check, store, tags, telemetry,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -224,6 +224,24 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             println!("{report}");
         }
     });
+    // installers/03-the-bundle-agent-bundle.md section 3.11: a release build has no checkout to move
+    // forward, so it asks its own environment's release feed for a newer build and downloads it.
+    // Readying it for install and actually swapping it in on a restart are section 3.12, not ported
+    // yet, so `installer`/`on_ready` are left unwired: a newer build is downloaded and kept, never
+    // installed.
+    if let Some(b) = build {
+        let updater = Arc::new(release_update::ReleaseUpdater::new(release_update::ReleaseUpdateDeps {
+            build: b.clone(),
+            cloud_url: link::cloud_url(cfg, env, build)?,
+            data_dir: dir.to_path_buf(),
+            http: http.clone(),
+            installer: None,
+            on_ready: None,
+            log: None,
+            fetch: None,
+        }));
+        tokio::spawn(release_update::watch(updater));
+    }
     let settings = Arc::new(SettingsServer::new(
         dir.to_path_buf(),
         port,
