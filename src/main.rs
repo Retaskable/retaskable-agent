@@ -2,8 +2,11 @@
 //! answers `GET /api/health` on 127.0.0.1.
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use retaskable_agent::settings_server::SettingsServer;
 use retaskable_agent::{api, config, engines, lanes, local_model, network, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -153,7 +156,9 @@ async fn main() -> Result<()> {
     } else {
         Ipv4Addr::LOCALHOST
     };
-    let addr = SocketAddr::from((host, config::port(&cfg, env)));
+    // Only this computer: the agent never listens on a public port (agent.md section 8).
+    let port = config::port(&cfg, env);
+    let addr = SocketAddr::from((host, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
@@ -167,9 +172,27 @@ async fn main() -> Result<()> {
         let checks = setup_check::run_setup_checks(env).await;
         println!("{}", setup_check::setup_check_report(&checks));
     });
-    axum::serve(listener, api::router(VERSION))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    let settings = Arc::new(SettingsServer::new(
+        dir.clone(),
+        port,
+        env,
+        || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        // Restarting answers the request first: the process exit happens on another thread, a
+        // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
+        // none in flight on its own HTTP thread, but the response still deserves to flush).
+        |code: i32| {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::process::exit(code);
+            });
+        },
+    ));
+    axum::serve(
+        listener,
+        api::router(VERSION, settings).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     Ok(())
 }
 
