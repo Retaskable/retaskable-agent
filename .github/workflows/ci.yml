@@ -37,3 +37,9 @@ jobs:
       - run: cargo run --release --bin bundle
       - run: cargo run --release --bin bundle -- --target mac-x64
         if: matrix.os == 'macos-latest'
+      # installers/03-the-bundle-agent-bundle.md section 3.15: the Linux package needs
+      # squashfs-tools' mksquashfs, so it's only built (and start-checked) on the Linux runner.
+      - run: sudo apt-get update && sudo apt-get install -y squashfs-tools
+        if: matrix.os == 'ubuntu-latest'
+      - run: cargo run --release --bin package
+        if: matrix.os == 'ubuntu-latest'

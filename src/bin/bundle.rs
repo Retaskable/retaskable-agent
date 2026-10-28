@@ -17,22 +17,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use retaskable_agent::release::{self, Environment};
+use retaskable_agent::release;
+use retaskable_agent::release_check::{self, arg, free_port, wait_for_health};
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
+    release_check::run_main(run);
 }
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let environment = match arg(&args, "--environment").as_deref() {
-        None | Some("staging") => Environment::Staging,
-        Some("production") => Environment::Production,
-        Some(other) => return Err(format!("--environment must be staging or production, not {other}")),
-    };
+    let environment = release_check::environment_arg(&args)?;
     let host_target = release::target_slug(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
         format!(
             "this machine ({}-{}) isn't one of the bundle's targets yet",
@@ -171,135 +165,31 @@ fn buildable_here(host: &str, requested: &str) -> bool {
 /// by sharing its credential store instead). Fails unless, within 60 seconds, `GET /api/health` answers
 /// `build`'s version, the log has the `Links:` line saying not linked, and nothing reached the terminal.
 fn start_check(placed: &Path, build: &release::Build) -> Result<(), String> {
-    let scratch = std::env::temp_dir().join(format!(
-        "retaskable-bundle-check-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("creating {}: {e}", scratch.display()))?;
-    let cleanup = |result: Result<(), String>| {
-        let _ = std::fs::remove_dir_all(&scratch);
-        result
-    };
-    let port = match free_port() {
-        Ok(port) => port,
-        Err(e) => return cleanup(Err(format!("finding a free port for the start check: {e}"))),
-    };
+    let scratch = release_check::ScratchDir::new("retaskable-bundle-check")?;
+    let port = free_port().map_err(|e| format!("finding a free port for the start check: {e}"))?;
 
-    let mut child = match Command::new(placed)
-        .env("HOME", &scratch)
-        .env("USERPROFILE", &scratch)
-        .env("LOCALAPPDATA", &scratch)
-        .env("XDG_DATA_HOME", &scratch)
-        .env("XDG_STATE_HOME", &scratch)
+    let mut child = Command::new(placed)
+        .env("HOME", scratch.path())
+        .env("USERPROFILE", scratch.path())
+        .env("LOCALAPPDATA", scratch.path())
+        .env("XDG_DATA_HOME", scratch.path())
+        .env("XDG_STATE_HOME", scratch.path())
         .env("RETASKABLE_PORT", port.to_string())
-        .env("RETASKABLE_CREDENTIALS_FILE", scratch.join("credentials.json"))
+        .env("RETASKABLE_CREDENTIALS_FILE", scratch.path().join("credentials.json"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => return cleanup(Err(format!("running {}: {e}", placed.display()))),
-    };
+        .map_err(|e| format!("running {}: {e}", placed.display()))?;
 
     let health = wait_for_health(port, &build.version);
     let _ = child.kill();
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(e) => return cleanup(Err(format!("waiting for {}: {e}", placed.display()))),
-    };
-    if let Err(e) = health {
-        return cleanup(Err(e));
-    }
-    if !output.stdout.is_empty() || !output.stderr.is_empty() {
-        return cleanup(Err(format!(
-            "{} wrote to its terminal during the start check (a release build must only log to its file):\nstdout: {}\nstderr: {}",
-            placed.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    let scratch_env = {
-        let scratch = scratch.clone();
-        move |k: &str| {
-            matches!(
-                k,
-                "HOME" | "USERPROFILE" | "LOCALAPPDATA" | "XDG_DATA_HOME" | "XDG_STATE_HOME"
-            )
-            .then(|| scratch.to_string_lossy().to_string())
-        }
-    };
-    let log_path = release::logs_dir(build, scratch_env).join("retaskable.log");
-    let log = match std::fs::read_to_string(&log_path) {
-        Ok(log) => log,
-        Err(e) => return cleanup(Err(format!("reading {}: {e}", log_path.display()))),
-    };
-    if !log.lines().any(|l| l.contains("Links:") && l.contains("not linked")) {
-        return cleanup(Err(format!(
-            "{} has no Links: line saying it isn't linked:\n{log}",
-            log_path.display()
-        )));
-    }
-
-    cleanup(Ok(()))
-}
-
-/// Polls `GET /api/health` on `port` until it answers `version`, up to 60 seconds.
-fn wait_for_health(port: u16, version: &str) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let mut last_err = "no attempt reached it".to_string();
-    while std::time::Instant::now() < deadline {
-        match http_get(port, "/api/health") {
-            Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                Ok(answer) if answer.get("version").and_then(|v| v.as_str()) == Some(version) => return Ok(()),
-                Ok(answer) => last_err = format!("GET /api/health answered {answer}, not version {version:?}"),
-                Err(e) => last_err = format!("GET /api/health answered JSON that didn't parse ({e}): {body}"),
-            },
-            Err(e) => last_err = e,
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    Err(format!(
-        "127.0.0.1:{port} didn't answer its health within 60 seconds: {last_err}"
-    ))
-}
-
-/// A bare GET over a plain socket: the start check has no need for `reqwest`'s TLS or redirects.
-fn http_get(port: u16, path: &str) -> Result<String, String> {
-    use std::io::{Read, Write};
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connecting: {e}"))?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .map_err(|e| format!("setting a read timeout: {e}"))?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-    )
-    .map_err(|e| format!("writing the request: {e}"))?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| format!("reading the response: {e}"))?;
-    Ok(response.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
-}
-
-/// A port nothing is listening on right now, for the start check's own agent (connector/tests.rs's pattern).
-fn free_port() -> std::io::Result<u16> {
-    std::net::TcpListener::bind("127.0.0.1:0")?
-        .local_addr()
-        .map(|a| a.port())
-}
-
-fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting for {}: {e}", placed.display()))?;
+    health?;
+    release_check::check_silent_terminal(placed, &output)?;
+    release_check::check_not_linked_log(build, scratch.path())
 }
 
 fn git_short_head(dir: &std::path::Path) -> Result<String, String> {
