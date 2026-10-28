@@ -339,3 +339,27 @@ fn the_machine_is_named_by_retaskable_machine_else_the_hostname() {
     assert_eq!(info["machine"].as_str().unwrap().len(), 100);
     assert_eq!(info["agentVersion"], "9.9.9");
 }
+
+#[test]
+fn the_links_line_names_every_cloud_and_the_backlog_store_by_host() {
+    let urls = ["https://staging.retaskable.com".to_string()];
+    assert_eq!(
+        links_line(&urls, "https://backlog.retaskable.com", |_| false),
+        "Links: staging.retaskable.com not linked, backlog store backlog.retaskable.com not linked"
+    );
+}
+
+#[test]
+fn the_links_line_says_linked_only_for_a_stored_url() {
+    let urls = [
+        "https://retaskable.com".to_string(),
+        "https://staging.retaskable.com".to_string(),
+    ];
+    let line = links_line(&urls, "https://backlog.retaskable.com", |url| {
+        url == "https://staging.retaskable.com"
+    });
+    assert_eq!(
+        line,
+        "Links: retaskable.com not linked, staging.retaskable.com linked, backlog store backlog.retaskable.com not linked"
+    );
+}
