@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
 use retaskable_agent::{
-    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, setup_check, store, tags,
-    telemetry,
+    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, setup_check, store,
+    tags, telemetry,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -17,6 +17,27 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[tokio::main]
 async fn main() -> Result<()> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    // installers/03-the-bundle-agent-bundle.md section 3.7: a release build's own `build.json`,
+    // beside the executable, read before anything else so a bad one (section 3.8) stops it here
+    // rather than it guessing at its own identity. A checkout has none, and runs as always.
+    let exe_path = std::env::current_exe().ok();
+    let build = match exe_path.as_deref().map(release::load_build) {
+        Some(Err(problem)) => {
+            eprintln!("Retaskable couldn't start: {problem}.");
+            std::process::exit(1);
+        }
+        Some(Ok(build)) => build,
+        None => None,
+    };
+    let version = build
+        .as_ref()
+        .map(|b| b.version.clone())
+        .unwrap_or_else(|| VERSION.to_string());
+    // `retaskable --version` (release.ts): a release build's own version, else this crate's.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{version}");
+        return Ok(());
+    }
     // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
     // checks and exit without starting the server.
     if std::env::args().nth(1).as_deref() == Some("check") {
@@ -25,13 +46,19 @@ async fn main() -> Result<()> {
         std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
     }
     tracing_subscriber::fmt().with_env_filter(filter()).init();
-    let dir = config::data_dir(env);
+    // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
+    // the OS's own place, not the `.retaskable` a checkout uses, unless `RETASKABLE_DATA_DIR`
+    // says otherwise.
+    let dir = match &build {
+        Some(b) if env("RETASKABLE_DATA_DIR").is_none() => release::data_dir(b, env),
+        _ => config::data_dir(env),
+    };
     let cfg = config::load(&dir)?;
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
     // cloud in the terminal, then exit. A running agent picks the token up within a minute.
     if std::env::args().nth(1).as_deref() == Some("link") {
         let args: Vec<String> = std::env::args().skip(2).collect();
-        std::process::exit(link_command(&args, &cfg, &dir, env).await);
+        std::process::exit(link_command(&args, &cfg, &dir, env, &version).await);
     }
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
@@ -174,7 +201,7 @@ async fn main() -> Result<()> {
     if network_access.enabled {
         tracing::info!("The settings page is open on the network, at http://{addr}");
     }
-    tracing::info!("Retaskable agent {VERSION} on http://{addr}");
+    tracing::info!("Retaskable agent {version} on http://{addr}");
     // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
     // project on it. Unlinked clouds wait quietly for `retaskable link`.
     let keychain = link::keychain(&dir, env);
@@ -185,6 +212,7 @@ async fn main() -> Result<()> {
         machine: link::machine_name(env),
         tags: tag_list,
         projects: cfg.projects.iter().map(connector::ProjectView::from).collect(),
+        version: version.clone(),
     });
     let http = reqwest::Client::new();
     let connectors: Vec<_> = link::cloud_urls(&cfg, env)
@@ -207,7 +235,7 @@ async fn main() -> Result<()> {
         .iter()
         .any(|url| matches!(keychain.get(url), Ok(Some(_))))
     {
-        tokio::spawn(auto_link_backlog(keychain.clone(), http.clone(), env));
+        tokio::spawn(auto_link_backlog(keychain.clone(), http.clone(), env, version.clone()));
     }
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
     // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
@@ -233,7 +261,7 @@ async fn main() -> Result<()> {
     ));
     axum::serve(
         listener,
-        api::router(VERSION, settings).into_make_service_with_connect_info::<SocketAddr>(),
+        api::router(version.clone(), settings).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown())
     .await?;
@@ -251,11 +279,12 @@ async fn link_command(
     cfg: &config::ConfigFile,
     dir: &Path,
     env: impl Fn(&str) -> Option<String> + Copy,
+    version: &str,
 ) -> i32 {
     if args == [String::from("backlog")] {
         let keychain = link::keychain(dir, env);
         let url = backlog::url(env);
-        return match run_link_in_terminal(&keychain, &url, link::BACKLOG_TARGET, env).await {
+        return match run_link_in_terminal(&keychain, &url, link::BACKLOG_TARGET, env, version).await {
             Ok(id) => {
                 println!(
                     "Linked to the shared backlog as agent {id}. The refresh token is in this machine's credential store."
@@ -284,12 +313,12 @@ async fn link_command(
         }
     };
     let keychain = link::keychain(dir, env);
-    match run_link_in_terminal(&keychain, &url, link::CLOUD_TARGET, env).await {
+    match run_link_in_terminal(&keychain, &url, link::CLOUD_TARGET, env, version).await {
         Ok(id) => {
             println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
             // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
             // approval comes right after this one, opened by the agent itself.
-            auto_link_backlog(keychain.clone(), reqwest::Client::new(), env).await;
+            auto_link_backlog(keychain.clone(), reqwest::Client::new(), env, version.to_string()).await;
             0
         }
         Err(e) => {
@@ -305,6 +334,7 @@ async fn run_link_in_terminal(
     url: &str,
     target: link::LinkTarget,
     env: impl Fn(&str) -> Option<String> + Copy,
+    version: &str,
 ) -> Result<u64, String> {
     if matches!(keychain.get(url), Ok(Some(_))) {
         println!("Already linked to {url}. Linking again replaces that link.");
@@ -313,7 +343,7 @@ async fn run_link_in_terminal(
     let flow = link::Link {
         http: reqwest::Client::new(),
         store: keychain.as_ref(),
-        machine: link::machine_info(env),
+        machine: link::machine_info(env, version),
         target,
         second: Duration::from_secs(1),
     };
@@ -337,6 +367,7 @@ async fn auto_link_backlog(
     keychain: Arc<dyn link::TokenStore>,
     http: reqwest::Client,
     env: impl Fn(&str) -> Option<String> + Copy,
+    version: String,
 ) {
     let shown = |code: &link::DeviceCode| {
         println!("Approve the shared backlog: {}", code.verification_uri_complete);
@@ -344,7 +375,7 @@ async fn auto_link_backlog(
             tracing::warn!("couldn't open the shared backlog's link page: {e:#}");
         }
     };
-    match backlog::auto_link(keychain, http, env, shown).await {
+    match backlog::auto_link(keychain, http, env, &version, shown).await {
         Ok(Some(id)) => tracing::info!("Linked to the shared backlog as agent {id}."),
         Ok(None) => {}
         Err(e) => tracing::warn!("Couldn't link to the shared backlog: {e:#}"),
