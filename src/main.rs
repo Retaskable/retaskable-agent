@@ -350,10 +350,9 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             env("XDG_DATA_HOME").as_deref(),
             &home,
             exe,
-        ) {
-            if let Err(e) = app_menu::add_to_app_menu(&entry, dir) {
-                tracing::warn!("adding to the app menu: {e:#}");
-            }
+        ) && let Err(e) = app_menu::add_to_app_menu(&entry, dir)
+        {
+            tracing::warn!("adding to the app menu: {e:#}");
         }
     }
     let settings = Arc::new(SettingsServer::new(
