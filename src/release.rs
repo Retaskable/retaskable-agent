@@ -5,9 +5,13 @@
 #[cfg(test)]
 mod tests;
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
+use tracing_subscriber::fmt::writer::MakeWriter;
 
 /// `build.json`'s `environment`: which cloud a release build is fixed to (tray.md decision 7).
 /// Any other value fails to parse, so a bad one is `BUILD_PROBLEM`, not a silent guess.
@@ -16,6 +20,16 @@ use serde::Deserialize;
 pub enum Environment {
     Production,
     Staging,
+}
+
+impl Environment {
+    /// `build.json`'s own spelling: `"production"` or `"staging"` (also `link::environment_url`'s name).
+    pub fn name(self) -> &'static str {
+        match self {
+            Environment::Production => "production",
+            Environment::Staging => "staging",
+        }
+    }
 }
 
 /// `build.json`, beside the executable: `{ os, environment, version, commit }` (section 3.1).
@@ -103,4 +117,101 @@ pub fn target_slug(os: &str, arch: &str) -> Option<&'static str> {
         ("linux", "x86_64") => Some("linux-x64"),
         _ => None,
     }
+}
+
+/// The line `releaseStart.ts` logs first, naming the build: "Retaskable Staging 1.4.2 (abc1234)
+/// on win-x64" (section 3.7).
+pub fn build_line(build: &Build) -> String {
+    let (title, _) = names(build.environment);
+    format!("{title} {} ({}) on {}", build.version, build.commit, build.os)
+}
+
+/// Section 3.7: a release build's log file, rotated at 10 MB with 3 old ones kept (`.1` to
+/// `.3`), since there's no terminal to read `console.log` from. A checkout logs to its terminal
+/// instead, as before.
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const KEPT_LOGS: u32 = 3;
+
+struct RotatingLogInner {
+    path: PathBuf,
+    file: File,
+    len: u64,
+    max_bytes: u64,
+}
+
+/// A clonable handle `tracing_subscriber` can hand a fresh `Write` from for each event.
+#[derive(Clone)]
+pub struct RotatingLog(Arc<Mutex<RotatingLogInner>>);
+
+impl RotatingLog {
+    /// Opens (or creates and appends to) `dir`'s `retaskable.log`.
+    pub fn open(dir: &Path) -> std::io::Result<Self> {
+        Self::open_with_max(dir, MAX_LOG_BYTES)
+    }
+
+    /// `open`, with the rotation size picked by the caller (a test, so it doesn't have to write
+    /// real megabytes to see a rotation happen).
+    fn open_with_max(dir: &Path, max_bytes: u64) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("retaskable.log");
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let len = file.metadata()?.len();
+        Ok(Self(Arc::new(Mutex::new(RotatingLogInner {
+            path,
+            file,
+            len,
+            max_bytes,
+        }))))
+    }
+}
+
+impl<'a> MakeWriter<'a> for RotatingLog {
+    type Writer = RotatingLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RotatingLogWriter(self.0.clone())
+    }
+}
+
+pub struct RotatingLogWriter(Arc<Mutex<RotatingLogInner>>);
+
+impl Write for RotatingLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut inner = self.0.lock().unwrap();
+        if inner.len >= inner.max_bytes {
+            rotate(&mut inner)?;
+        }
+        let n = inner.file.write(buf)?;
+        inner.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().file.flush()
+    }
+}
+
+/// Shifts `.1` to `.2`, `.2` to `.3` (dropping the old `.3`), moves the current file to `.1`, and
+/// starts a fresh one.
+fn rotate(inner: &mut RotatingLogInner) -> std::io::Result<()> {
+    for n in (1..KEPT_LOGS).rev() {
+        let from = numbered(&inner.path, n);
+        if from.exists() {
+            std::fs::rename(&from, numbered(&inner.path, n + 1))?;
+        }
+    }
+    std::fs::rename(&inner.path, numbered(&inner.path, 1))?;
+    inner.file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&inner.path)?;
+    inner.len = 0;
+    Ok(())
+}
+
+fn numbered(path: &Path, n: u32) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{n}"));
+    PathBuf::from(name)
 }

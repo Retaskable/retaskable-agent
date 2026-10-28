@@ -45,7 +45,34 @@ async fn main() -> Result<()> {
         println!("{}", setup_check::setup_check_report(&checks));
         std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
     }
-    tracing_subscriber::fmt().with_env_filter(filter()).init();
+    // installers/03-the-bundle-agent-bundle.md section 3.7: a release build has no terminal, so
+    // `console.log`/`info`/`debug`/`warn`/`error` go to `retaskable.log` in its log folder
+    // instead, rotated at 10 MB with 3 old ones kept; a checkout logs to its terminal as before.
+    // The first line names the build, and an uncaught panic is logged with its stack.
+    match &build {
+        Some(b) => {
+            let logs_dir = release::logs_dir(b, env);
+            match release::RotatingLog::open(&logs_dir) {
+                Ok(log) => tracing_subscriber::fmt()
+                    .with_env_filter(filter())
+                    .with_ansi(false)
+                    .with_writer(log)
+                    .init(),
+                Err(e) => {
+                    tracing_subscriber::fmt().with_env_filter(filter()).init();
+                    tracing::warn!("couldn't open {}: {e}", logs_dir.join("retaskable.log").display());
+                }
+            }
+            tracing::info!("{}", release::build_line(b));
+            std::panic::set_hook(Box::new(|info| {
+                tracing::error!(
+                    "Retaskable crashed: {info}\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }));
+        }
+        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+    }
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
     // the OS's own place, not the `.retaskable` a checkout uses, unless `RETASKABLE_DATA_DIR`
     // says otherwise.
@@ -58,7 +85,7 @@ async fn main() -> Result<()> {
     // cloud in the terminal, then exit. A running agent picks the token up within a minute.
     if std::env::args().nth(1).as_deref() == Some("link") {
         let args: Vec<String> = std::env::args().skip(2).collect();
-        std::process::exit(link_command(&args, &cfg, &dir, env, &version).await);
+        std::process::exit(link_command(&args, &cfg, &dir, env, &version, build.as_ref()).await);
     }
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
@@ -98,6 +125,7 @@ async fn main() -> Result<()> {
             dir: &dir,
             cfg: &cfg,
             version: &version,
+            build: build.as_ref(),
             tag_list,
             network_enabled: network_access.enabled,
             port,
@@ -114,6 +142,7 @@ struct ServeArgs<'a> {
     dir: &'a Path,
     cfg: &'a config::ConfigFile,
     version: &'a str,
+    build: Option<&'a release::Build>,
     tag_list: Vec<String>,
     network_enabled: bool,
     port: u16,
@@ -127,11 +156,13 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         dir,
         cfg,
         version,
+        build,
         tag_list,
         network_enabled,
         port,
         listener,
     } = args;
+    let is_release = build.is_some();
     // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
     // project on it. Unlinked clouds wait quietly for `retaskable link`.
     let keychain = link::keychain(dir, env);
@@ -145,7 +176,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         version: version.to_string(),
     });
     let http = reqwest::Client::new();
-    let connectors: Vec<_> = link::cloud_urls(cfg, env)
+    let connectors: Vec<_> = link::cloud_urls(cfg, env, build)
         .iter()
         .map(|url| {
             connector::Connector::start(
@@ -161,7 +192,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     // retaskable.com link, the shared backlog's device flow starts by itself too, opening its own
     // `/link` page. Fire-and-forget so a slow or unreachable store doesn't delay serving `/api/health`;
     // it isn't tried again this run (a failed or expired code waits for the next start).
-    if link::cloud_urls(cfg, env)
+    if link::cloud_urls(cfg, env, build)
         .iter()
         .any(|url| matches!(keychain.get(url), Ok(Some(_))))
     {
@@ -173,10 +204,16 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         ));
     }
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
-    // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
+    // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`. A
+    // release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
     tokio::spawn(async move {
         let checks = setup_check::run_setup_checks(env).await;
-        println!("{}", setup_check::setup_check_report(&checks));
+        let report = setup_check::setup_check_report(&checks);
+        if is_release {
+            tracing::info!("{report}");
+        } else {
+            println!("{report}");
+        }
     });
     let settings = Arc::new(SettingsServer::new(
         dir.to_path_buf(),
@@ -351,6 +388,7 @@ async fn link_command(
     dir: &Path,
     env: impl Fn(&str) -> Option<String> + Copy,
     version: &str,
+    build: Option<&release::Build>,
 ) -> i32 {
     if args == [String::from("backlog")] {
         let keychain = link::keychain(dir, env);
@@ -368,9 +406,17 @@ async fn link_command(
             }
         };
     }
+    // Section 3.8 "One environment": a release build is fixed to `build.json`'s cloud, so linking
+    // to any other is refused rather than silently ignored.
     let url = match args {
-        [] => link::cloud_url(cfg, env).map_err(|e| format!("{e:#}")),
-        [name] => link::environment_url(name).map(String::from).ok_or_else(String::new),
+        [] => link::cloud_url(cfg, env, build).map_err(|e| format!("{e:#}")),
+        [name] => match build {
+            Some(b) if b.environment.name() != name => Err(format!(
+                "This release build is fixed to {}, so it refuses to link to {name}.",
+                b.environment.name()
+            )),
+            _ => link::environment_url(name).map(String::from).ok_or_else(String::new),
+        },
         _ => Err(String::new()),
     };
     let url = match url {
