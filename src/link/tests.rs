@@ -256,18 +256,18 @@ fn cfg(url: Option<&str>) -> ConfigFile {
 #[test]
 fn the_cloud_url_is_the_env_then_the_config_then_production() {
     let none = |_: &str| None;
-    assert_eq!(cloud_url(&cfg(None), none).unwrap(), "https://retaskable.com");
+    assert_eq!(cloud_url(&cfg(None), none, None).unwrap(), "https://retaskable.com");
     assert_eq!(
-        cloud_url(&cfg(Some(" https://a.example/ ")), none).unwrap(),
+        cloud_url(&cfg(Some(" https://a.example/ ")), none, None).unwrap(),
         "https://a.example"
     );
     let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787/".to_string());
     assert_eq!(
-        cloud_url(&cfg(Some("https://a.example")), env).unwrap(),
+        cloud_url(&cfg(Some("https://a.example")), env, None).unwrap(),
         "http://localhost:8787"
     );
-    assert!(cloud_url(&cfg(Some("ftp://a.example")), none).is_err());
-    assert!(cloud_url(&cfg(Some("not a url")), none).is_err());
+    assert!(cloud_url(&cfg(Some("ftp://a.example")), none, None).is_err());
+    assert!(cloud_url(&cfg(Some("not a url")), none, None).is_err());
 }
 
 #[test]
@@ -278,17 +278,55 @@ fn every_environment_is_a_cloud_and_a_custom_url_is_added_last() {
         "https://staging.retaskable.com",
         "http://localhost:8787",
     ];
-    assert_eq!(cloud_urls(&cfg(None), none), three);
-    assert_eq!(cloud_urls(&cfg(Some("https://staging.retaskable.com")), none), three);
-    assert_eq!(cloud_urls(&cfg(Some("bad")), none), three);
+    assert_eq!(cloud_urls(&cfg(None), none, None), three);
     assert_eq!(
-        cloud_urls(&cfg(Some("https://a.example")), none)[3],
+        cloud_urls(&cfg(Some("https://staging.retaskable.com")), none, None),
+        three
+    );
+    assert_eq!(cloud_urls(&cfg(Some("bad")), none, None), three);
+    assert_eq!(
+        cloud_urls(&cfg(Some("https://a.example")), none, None)[3],
         "https://a.example"
     );
     assert_eq!(environment_name("http://localhost:8787/"), "Local");
     assert_eq!(environment_name("https://a.example"), "Custom");
     assert_eq!(environment_url("staging"), Some("https://staging.retaskable.com"));
     assert_eq!(environment_url("backlog"), None);
+}
+
+fn build(environment: crate::release::Environment) -> crate::release::Build {
+    crate::release::Build {
+        os: "win-x64".into(),
+        environment,
+        version: "1.4.2".into(),
+        commit: "abc1234".into(),
+    }
+}
+
+#[test]
+fn a_release_build_s_cloud_is_fixed_to_build_json_s_environment() {
+    use crate::release::Environment;
+    let none = |_: &str| None;
+    let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787/".to_string());
+    let staging = build(Environment::Staging);
+    // Ignores cloud.url and RETASKABLE_CLOUD_URL entirely.
+    assert_eq!(
+        cloud_url(&cfg(Some("https://a.example")), env, Some(&staging)).unwrap(),
+        "https://staging.retaskable.com"
+    );
+    assert_eq!(
+        cloud_urls(&cfg(Some("https://a.example")), none, Some(&staging)),
+        ["https://staging.retaskable.com"]
+    );
+    let production = build(Environment::Production);
+    assert_eq!(
+        cloud_url(&cfg(None), none, Some(&production)).unwrap(),
+        "https://retaskable.com"
+    );
+    assert_eq!(
+        cloud_urls(&cfg(None), none, Some(&production)),
+        ["https://retaskable.com"]
+    );
 }
 
 #[test]

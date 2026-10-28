@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use super::*;
 
 fn exe_path(dir: &std::path::Path) -> std::path::PathBuf {
@@ -118,6 +120,52 @@ fn linux_uses_xdg_dirs_or_falls_back_under_home() {
         logs_dir(&build(Environment::Production), home),
         std::path::PathBuf::from("/home/j/.local/state/retaskable/logs")
     );
+}
+
+#[test]
+fn the_build_line_names_the_build() {
+    assert_eq!(
+        build_line(&build(Environment::Staging)),
+        "Retaskable Staging 1.4.2 (abc1234) on win-x64"
+    );
+    assert_eq!(
+        build_line(&build(Environment::Production)),
+        "Retaskable 1.4.2 (abc1234) on win-x64"
+    );
+}
+
+#[test]
+fn a_rotating_log_appends_across_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = RotatingLog::open(dir.path()).unwrap();
+    log.make_writer().write_all(b"one\n").unwrap();
+    drop(log);
+    let log = RotatingLog::open(dir.path()).unwrap();
+    log.make_writer().write_all(b"two\n").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("retaskable.log")).unwrap(),
+        "one\ntwo\n"
+    );
+}
+
+#[test]
+fn a_rotating_log_rotates_past_its_limit_and_keeps_three_old_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = RotatingLog::open_with_max(dir.path(), 10).unwrap();
+    for n in 0..5 {
+        log.make_writer()
+            .write_all(format!("{n}123456789\n").as_bytes())
+            .unwrap();
+    }
+    let read = |n: u32| std::fs::read_to_string(numbered(&dir.path().join("retaskable.log"), n)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("retaskable.log")).unwrap(),
+        "4123456789\n"
+    );
+    assert_eq!(read(1), "3123456789\n");
+    assert_eq!(read(2), "2123456789\n");
+    assert_eq!(read(3), "1123456789\n");
+    assert!(!numbered(&dir.path().join("retaskable.log"), 4).exists());
 }
 
 #[test]

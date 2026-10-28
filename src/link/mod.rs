@@ -44,9 +44,24 @@ pub fn environment_name(url: &str) -> &'static str {
     }
 }
 
-/// The cloud this agent links to: `RETASKABLE_CLOUD_URL`, else `cloud.url`, else retaskable.com. No trailing slash.
-/// Errors on an address that isn't http or https, before anything is sent.
-pub fn cloud_url(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Result<String> {
+/// installers/03-the-bundle-agent-bundle.md section 3.8 "One environment" (tray.md decision 7): a release
+/// build's own cloud, ignoring `cloud.url` and `RETASKABLE_CLOUD_URL` entirely, so `cloud_url`/`cloud_urls`
+/// answer only it.
+fn fixed_environment_url(build: Option<&crate::release::Build>) -> Option<&'static str> {
+    environment_url(build?.environment.name())
+}
+
+/// The cloud this agent links to: `build.json`'s environment in a release build (section 3.8), else
+/// `RETASKABLE_CLOUD_URL`, else `cloud.url`, else retaskable.com. No trailing slash. Errors on an address
+/// that isn't http or https, before anything is sent.
+pub fn cloud_url(
+    cfg: &ConfigFile,
+    env: impl Fn(&str) -> Option<String>,
+    build: Option<&crate::release::Build>,
+) -> Result<String> {
+    if let Some(fixed) = fixed_environment_url(build) {
+        return Ok(fixed.to_string());
+    }
     let url = env("RETASKABLE_CLOUD_URL")
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
@@ -96,11 +111,18 @@ pub fn open_url(url: &str) -> Result<()> {
 }
 
 /// Every cloud this agent connects to (environments.md section 3.4): the three environments, then the agent's own
-/// cloud URL when it's none of them, the Custom one. A bad `cloud.url` is logged, and the three still connect. Every
-/// agent is a development build until installers exist (tray.md decision 7), so this is never just one.
-pub fn cloud_urls(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+/// cloud URL when it's none of them, the Custom one. A bad `cloud.url` is logged, and the three still connect. A
+/// release build (section 3.8) has only its one, fixed environment, never the other two or a Custom one.
+pub fn cloud_urls(
+    cfg: &ConfigFile,
+    env: impl Fn(&str) -> Option<String>,
+    build: Option<&crate::release::Build>,
+) -> Vec<String> {
+    if let Some(fixed) = fixed_environment_url(build) {
+        return vec![fixed.to_string()];
+    }
     let mut urls: Vec<String> = ENVIRONMENTS.iter().map(|(_, url)| url.to_string()).collect();
-    match cloud_url(cfg, env) {
+    match cloud_url(cfg, env, None) {
         Ok(own) if !urls.contains(&own) => urls.push(own),
         Ok(_) => {}
         Err(e) => tracing::warn!("cloud.url isn't a valid address: {e:#}"),
