@@ -111,7 +111,10 @@ async fn main() -> Result<()> {
         Ipv4Addr::LOCALHOST
     };
     // Only this computer: the agent never listens on a public port (agent.md section 8).
-    let port = config::port(&cfg, env);
+    // installers/03-the-bundle-agent-bundle.md section 3.13: a Staging release build's own
+    // default differs from Production's and a checkout's.
+    let default_port = release::default_port(build.as_ref());
+    let port = config::port(&cfg, env, default_port);
     let addr = SocketAddr::from((host, port));
     let listener = bind_with_retry(addr, BIND_RETRY_INTERVAL, BIND_RETRY_TIMEOUT)
         .await
@@ -130,6 +133,7 @@ async fn main() -> Result<()> {
             tag_list,
             network_enabled: network_access.enabled,
             port,
+            default_port,
             listener,
         },
         env,
@@ -174,6 +178,7 @@ struct ServeArgs<'a> {
     tag_list: Vec<String>,
     network_enabled: bool,
     port: u16,
+    default_port: u16,
     listener: tokio::net::TcpListener,
 }
 
@@ -189,6 +194,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         tag_list,
         network_enabled,
         port,
+        default_port,
         listener,
     } = args;
     // Owned, not borrowed: the restart fallback below needs it in a thread that outlives `args`.
@@ -318,6 +324,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     let settings = Arc::new(SettingsServer::new(
         dir.to_path_buf(),
         port,
+        default_port,
         network_enabled,
         env,
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),

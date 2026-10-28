@@ -248,6 +248,24 @@ fn convert_fails_when_the_command_wrote_no_pngs() {
 }
 
 #[test]
+fn swap_in_keeps_the_old_set_when_the_final_rename_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = root.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("old.jpg"), "old").unwrap();
+    // Never created, so the rename into `dest` below is guaranteed to fail.
+    let tmp = root.path().join("dest.new");
+
+    let err = swap_in(&tmp, &dest).unwrap_err();
+
+    assert!(err.to_string().contains("renaming"), "{err}");
+    assert!(
+        dest.join("old.jpg").exists(),
+        "the old set must survive a failed swap, not be deleted before the swap is attempted"
+    );
+}
+
+#[test]
 fn valid_gallery_slug_accepts_word_chars_and_dashes_only() {
     assert!(valid_gallery_slug("models"));
     assert!(valid_gallery_slug("my_gallery-2"));

@@ -72,33 +72,38 @@ fn open_sink(sink: &TranscriptSink, spec: &SessionSpec) -> Result<std::fs::File>
     Ok(file)
 }
 
-/// Spawns `bin` with `args`, feeds `prompt` in on stdin, and reads the engine's output from stdout
-/// line by line until the process exits — not knowing or caring which engine wrote any of it. Each
-/// raw line is teed to `sink` first, when there is one, so a crash partway still leaves everything
-/// read so far on disk.
-#[allow(clippy::too_many_arguments)]
+/// What [`spawn_and_read`] needs to start the process and feed it its prompt, bundled so the
+/// function takes one argument instead of six.
+struct SpawnSpec<'a> {
+    bin: &'a Path,
+    args: &'a [String],
+    envs: &'a [(String, String)],
+    cwd: &'a Path,
+    prompt: &'a str,
+    known_session_id: &'a str,
+}
+
+/// Spawns `spec.bin` with `spec.args`, feeds `spec.prompt` in on stdin, and reads the engine's
+/// output from stdout line by line until the process exits — not knowing or caring which engine
+/// wrote any of it. Each raw line is teed to `sink` first, when there is one, so a crash partway
+/// still leaves everything read so far on disk.
 async fn spawn_and_read(
-    bin: &Path,
-    args: &[String],
-    envs: &[(String, String)],
-    cwd: &Path,
-    prompt: &str,
-    known_session_id: &str,
+    spec: SpawnSpec<'_>,
     mut reader: Box<dyn super::engine::EngineReader>,
     mut sink: Option<std::fs::File>,
 ) -> Result<SessionResult> {
-    let mut child = Command::new(bin)
-        .args(args)
-        .current_dir(cwd)
-        .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+    let mut child = Command::new(spec.bin)
+        .args(spec.args)
+        .current_dir(spec.cwd)
+        .envs(spec.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("starting {}", bin.display()))?;
+        .with_context(|| format!("starting {}", spec.bin.display()))?;
 
     let mut stdin = child.stdin.take().context("session has no stdin")?;
-    let prompt = prompt.to_string();
+    let prompt = spec.prompt.to_string();
     let write_prompt = tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
     });
@@ -118,7 +123,7 @@ async fn spawn_and_read(
             use std::io::Write as _;
             let _ = writeln!(file, "{line}");
         }
-        if let Some(r) = reader.line(&line, known_session_id) {
+        if let Some(r) = reader.line(&line, spec.known_session_id) {
             result = Some(r);
         }
     }
@@ -127,7 +132,7 @@ async fn spawn_and_read(
     let stderr_text = drain_stderr.await.unwrap_or_default();
     let status = child.wait().await.context("waiting for the session to exit")?;
 
-    Ok(result.unwrap_or_else(|| reader.no_result(status.code(), &stderr_text, known_session_id)))
+    Ok(result.unwrap_or_else(|| reader.no_result(status.code(), &stderr_text, spec.known_session_id)))
 }
 
 /// Runs one session end to end on `engine`: builds its invocation for `spec`, runs it, and reads
@@ -148,12 +153,14 @@ pub async fn run_session(
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;
     spawn_and_read(
-        bin,
-        &engine.args(spec),
-        &engine.env(spec),
-        &spec.cwd,
-        &engine.prompt(spec),
-        known_session_id,
+        SpawnSpec {
+            bin,
+            args: &engine.args(spec),
+            envs: &engine.env(spec),
+            cwd: &spec.cwd,
+            prompt: &engine.prompt(spec),
+            known_session_id,
+        },
         engine.reader(spec),
         file,
     )
@@ -192,12 +199,14 @@ mod tests {
     async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
         let (bin, args) = print_file_command(out);
         spawn_and_read(
-            &bin,
-            &args,
-            &[],
-            dir,
-            "hi",
-            "known",
+            SpawnSpec {
+                bin: &bin,
+                args: &args,
+                envs: &[],
+                cwd: dir,
+                prompt: "hi",
+                known_session_id: "known",
+            },
             Box::new(SessionReader::new(false)),
             None,
         )
@@ -342,12 +351,14 @@ mod tests {
         .unwrap();
 
         spawn_and_read(
-            &bin,
-            &args,
-            &[],
-            dir.path(),
-            "hi",
-            "known",
+            SpawnSpec {
+                bin: &bin,
+                args: &args,
+                envs: &[],
+                cwd: dir.path(),
+                prompt: "hi",
+                known_session_id: "known",
+            },
             Box::new(SessionReader::new(false)),
             Some(file),
         )

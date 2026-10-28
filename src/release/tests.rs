@@ -68,6 +68,19 @@ fn build(environment: Environment) -> Build {
 }
 
 #[test]
+fn a_staging_release_builds_default_port_is_4701() {
+    // installers/03-the-bundle-agent-bundle.md section 3.13: Staging's own default port, so it
+    // never collides with a Production or checkout agent's 4700 on the same machine.
+    assert_eq!(default_port(Some(&build(Environment::Staging))), 4701);
+}
+
+#[test]
+fn a_production_release_build_and_a_checkout_default_to_4700() {
+    assert_eq!(default_port(Some(&build(Environment::Production))), 4700);
+    assert_eq!(default_port(None), 4700);
+}
+
+#[test]
 #[cfg(windows)]
 fn windows_keeps_data_and_logs_under_local_app_data() {
     let env = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/j/AppData/Local".to_string());
