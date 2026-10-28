@@ -25,7 +25,7 @@ The settings themselves, who may change them and what the screens show are the s
 
 ### 9.2 What the computer reports
 
-All of it goes into the snapshot over the cloud link; the app draws it.
+Most of it goes into the snapshot over the cloud link; the app draws it. Two bullets below are local-only routes instead, read by the settings page and the tray, never sent to the cloud.
 
 - **Sessions.** Per active session: the role (planner, implementer, scout, reviewer or writer), the model, the lane, the item, the elapsed time, the cost so far, and the last ~20 streamed events as readable lines (`Bash: cargo test`, `Edit: src/foo.rs`, assistant text). A Cursor session reports no cost ([engines.md](../engines.md) section 7). The live events of a session the site is watching go out over the same link, and a session's transcript is never stored in the cloud.
 - **Usage.** The 5-hour and weekly windows as section 7.1 reads them, the reset times, "local down" while the local server isn't answering, and the reason for the current concurrency when auto concurrency is on.
@@ -33,9 +33,9 @@ All of it goes into the snapshot over the cloud link; the app draws it.
 - **What looks wrong** ([agent-telemetry.md](../agent-telemetry.md) section 4.1). The watchdog's warning lines, each with since when, and the one that names an item.
 - **A gallery.** Its picture count, when and from which commit it was taken, the command, and a failed shoot's last output.
 - **Restart progress** ([restart-progress.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/restart-progress.md)). Who asked and when, what it finishes first ("finishing a merge first"), and for 10 minutes after it is back, when it restarted.
-- **The computer's link state.** Whether it is linked to retaskable.com and to the shared backlog, as the tray's menu shows it ([tray.md](../tray.md) section 4).
 - **Rust (this agent).** `src/link/` links in the terminal (`retaskable link [production|staging|local]`, the device flow of `agent/src/link.ts`) and keeps one access token per cloud, the refresh token in the OS credential store or, with none, `credentials.json` in the data folder. `src/connector/` connects to each of the three environments' clouds and a custom `cloud.url`, one socket per project (the agent's own hub before Setup), and sends hello, a snapshot and `alive`. Its snapshot holds the machine and empty lists, with the orchestrator in Setup before the first project and paused after, since this agent runs no work yet. It refuses every command with a `nack`.
-- **Who the agent works as.** There is no sign-in of its own: it works as whoever `gh` is signed in as on this machine (section 3.1), read with `gh api user` (`login`, `name`, `avatar_url`, kept only if `https://`) and asked again on a fresh read so a `gh auth switch` shows up without a restart. A failed read says why ("gh isn't signed in: run `gh auth login`").
+- **The computer's link state — local only.** Whether it is linked to retaskable.com and to the shared backlog, as the tray's menu and the Profile dialog show it ([tray.md](../tray.md) section 4): `GET /api/link` (`LinkView`) and `GET /api/backlog/link`. It's a plain route, not in the State: it is never sent to the cloud (not in the snapshot, no command carries it).
+- **Who the agent works as — local only.** There is no sign-in of its own: it works as whoever `gh` is signed in as on this machine (section 3.1), read with `gh api user` (`login`, `name`, `avatar_url`, kept only if `https://`) behind `GET /api/profile`, asked again on a fresh read (`?fresh=1`) so a `gh auth switch` shows up without a restart. A failed read says why ("gh isn't signed in: run `gh auth login`"). Like the link state above, it's a plain route: never sent to the cloud (not in the snapshot, no command carries it).
 
 ### 9.3 What the computer does when a command asks
 
