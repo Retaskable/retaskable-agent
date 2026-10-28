@@ -23,8 +23,8 @@
 
 <div id="signedOut">
   <p>
-    Open this page again from the tray's "Settings&hellip;" link to sign in, or wait for an
-    agent restart if this link has already been used.
+    This link has already been used. Open the tray's "Settings&hellip;" link again for a fresh
+    one.
   </p>
 </div>
 
@@ -103,8 +103,7 @@
     var hash = window.location.hash.replace(/^#/, "");
     if (!hash) return;
     history.replaceState(null, "", window.location.pathname + window.location.search);
-    var params = new URLSearchParams(hash);
-    var token = params.get("token");
+    var token = hash;
     if (!token) return;
     api("/api/settings/session", {
       method: "POST",

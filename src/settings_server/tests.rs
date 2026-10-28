@@ -473,15 +473,19 @@ async fn a_wait_still_in_force_doubles_the_next_one() {
         .unwrap();
     assert_eq!(first_block.headers().get(header::RETRY_AFTER).unwrap(), "60");
 
-    // Waiting out the first block and failing again, still without ever succeeding,
-    // doubles the wait rather than starting back at a minute.
+    // Waiting out the first block resets the failure count and its window (so a wrong try
+    // right after doesn't immediately double the wait again), but keeps the wait length
+    // itself: five more wrong tries, still without ever succeeding, double it rather than
+    // starting back at a minute.
     *now.lock().unwrap() += 60;
-    let sixth_failure = app
-        .clone()
-        .oneshot(post_body("/api/settings/session", r#"{"token":"nope"}"#))
-        .await
-        .unwrap();
-    assert_eq!(sixth_failure.status(), StatusCode::UNAUTHORIZED);
+    for _ in 0..5 {
+        let res = app
+            .clone()
+            .oneshot(post_body("/api/settings/session", r#"{"token":"nope"}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
     let second_block = app
         .clone()
         .oneshot(post_body("/api/settings/session", r#"{"token":"nope"}"#))

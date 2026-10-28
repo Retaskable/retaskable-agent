@@ -7,9 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
-use retaskable_agent::{
-    api, config, engines, lanes, local_model, network, phone, setup_check, store, tags, telemetry,
-};
+use retaskable_agent::{api, config, engines, lanes, local_model, network, phone, setup_check, store, tags, telemetry};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 

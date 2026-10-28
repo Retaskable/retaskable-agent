@@ -170,7 +170,7 @@ impl SettingsServer {
             blocked_until: 0,
             wait_secs: 0,
         });
-        if entry.wait_secs == 0 && now.saturating_sub(entry.window_start) > 60 {
+        if now.saturating_sub(entry.window_start) > 60 {
             entry.count = 0;
             entry.window_start = now;
         }
@@ -182,6 +182,8 @@ impl SettingsServer {
                 (entry.wait_secs * 2).min(MAX_WAIT_SECS)
             };
             entry.blocked_until = now + entry.wait_secs;
+            entry.count = 0;
+            entry.window_start = now;
         }
     }
 
