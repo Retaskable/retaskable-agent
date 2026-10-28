@@ -1,13 +1,15 @@
-//! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it only
-//! answers `GET /api/health` on 127.0.0.1.
+//! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it
+//! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
-use retaskable_agent::{api, config, engines, lanes, local_model, network, phone, setup_check, store, tags, telemetry};
+use retaskable_agent::{
+    api, config, connector, engines, lanes, link, local_model, network, phone, setup_check, store, tags, telemetry,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -24,6 +26,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter()).init();
     let dir = config::data_dir(env);
     let cfg = config::load(&dir)?;
+    // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
+    // cloud in the terminal, then exit. A running agent picks the token up within a minute.
+    if std::env::args().nth(1).as_deref() == Some("link") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(link_command(&args, &cfg, &dir, env).await);
+    }
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
@@ -166,6 +174,30 @@ async fn main() -> Result<()> {
         tracing::info!("The settings page is open on the network, at http://{addr}");
     }
     tracing::info!("Retaskable agent {VERSION} on http://{addr}");
+    // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
+    // project on it. Unlinked clouds wait quietly for `retaskable link`.
+    let keychain = link::keychain(&dir, env);
+    if let Some(note) = link::credential_file_note(&dir, env) {
+        tracing::info!("{note}");
+    }
+    let view = Arc::new(connector::AgentView {
+        machine: link::machine_name(env),
+        tags: tag_list,
+        projects: cfg.projects.iter().map(connector::ProjectView::from).collect(),
+    });
+    let http = reqwest::Client::new();
+    let connectors: Vec<_> = link::cloud_urls(&cfg, env)
+        .iter()
+        .map(|url| {
+            connector::Connector::start(
+                url,
+                keychain.clone(),
+                http.clone(),
+                view.clone(),
+                connector::Timing::default(),
+            )
+        })
+        .collect();
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
     // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`.
     tokio::spawn(async move {
@@ -194,7 +226,66 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(shutdown())
     .await?;
+    for c in connectors {
+        c.stop(Duration::from_secs(10)).await;
+    }
     Ok(())
+}
+
+/// `retaskable link [production|staging|local]`: the device flow in the terminal. The exit code.
+async fn link_command(
+    args: &[String],
+    cfg: &config::ConfigFile,
+    dir: &Path,
+    env: impl Fn(&str) -> Option<String> + Copy,
+) -> i32 {
+    let url = match args {
+        [] => link::cloud_url(cfg, env).map_err(|e| format!("{e:#}")),
+        [name] => link::environment_url(name).map(String::from).ok_or_else(String::new),
+        _ => Err(String::new()),
+    };
+    let url = match url {
+        Ok(url) => url,
+        Err(e) => {
+            if !e.is_empty() {
+                eprintln!("{e}");
+            }
+            eprintln!("Usage: retaskable link [production|staging|local]");
+            return 2;
+        }
+    };
+    let keychain = link::keychain(dir, env);
+    if matches!(keychain.get(&url), Ok(Some(_))) {
+        println!("Already linked to {url}. Linking again replaces that link.");
+    }
+    println!("Linking to {url}…");
+    let flow = link::Link {
+        http: reqwest::Client::new(),
+        store: keychain.as_ref(),
+        machine: link::machine_info(env),
+        target: link::CLOUD_TARGET,
+        second: Duration::from_secs(1),
+    };
+    let shown = |code: &link::DeviceCode| {
+        println!("Go to {} and enter {}", code.verification_uri, code.user_code);
+        if !code.verification_uri_complete.is_empty() {
+            println!("(or open {})", code.verification_uri_complete);
+        }
+        println!(
+            "The code works for {} minutes. Waiting for approval…",
+            code.expires_in.div_ceil(60)
+        );
+    };
+    match flow.run(&url, shown).await {
+        Ok(id) => {
+            println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
+            0
+        }
+        Err(e) => {
+            eprintln!("{e:#}");
+            1
+        }
+    }
 }
 
 fn filter() -> tracing_subscriber::EnvFilter {
