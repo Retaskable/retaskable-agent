@@ -15,6 +15,7 @@ pub mod paths;
 pub mod phone;
 pub mod repo;
 pub mod scan;
+pub mod settings_server;
 pub mod setup_check;
 pub mod store;
 pub mod tags;

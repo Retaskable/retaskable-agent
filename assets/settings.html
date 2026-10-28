@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Retaskable settings</title>
+<style nonce="{{NONCE}}">
+  body { font: 14px system-ui, sans-serif; margin: 2em; max-width: 36em; color: #222; }
+  h1 { font-size: 1.2em; }
+  label { display: block; margin-top: 1em; font-weight: 600; }
+  textarea, input[type=text] { width: 100%; box-sizing: border-box; font: inherit; padding: 0.4em; }
+  textarea { height: 4em; }
+  button { margin-top: 1em; padding: 0.5em 1em; font: inherit; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 0.2em 1em; }
+  dt { font-weight: 600; }
+  #status { margin-top: 1em; }
+  #status.error { color: #a00; }
+  #app[hidden], #signedOut[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>Retaskable settings</h1>
+
+<div id="signedOut">
+  <p>
+    This link has already been used. Open the tray's "Settings&hellip;" link again for a fresh
+    one.
+  </p>
+</div>
+
+<div id="app" hidden>
+  <p id="restartWaiting" hidden>
+    A saved change needs a restart before it takes effect.
+    <button type="button" id="restart">Restart now</button>
+  </p>
+
+  <label for="tags">Tags</label>
+  <textarea id="tags" placeholder="one tag per line"></textarea>
+  <button type="button" id="saveTags">Save tags</button>
+
+  <h2>Other settings</h2>
+  <p>Changing these isn't supported from this page yet; set them with an environment variable or
+     ask in the chat.</p>
+  <dl id="otherSettings"></dl>
+</div>
+
+<p id="status"></p>
+
+<script nonce="{{NONCE}}">
+(function () {
+  "use strict";
+  var statusEl = document.getElementById("status");
+  var csrfToken = null;
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message || "";
+    statusEl.className = isError ? "error" : "";
+  }
+
+  function api(path, options) {
+    options = options || {};
+    options.headers = options.headers || {};
+    if (csrfToken) options.headers["X-CSRF-Token"] = csrfToken;
+    return fetch(path, options).then(function (res) {
+      return res.json().then(function (body) {
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        return body;
+      });
+    });
+  }
+
+  function renderSettings(s) {
+    document.getElementById("tags").value = s.tags.effective.join("\n");
+    document.getElementById("restartWaiting").hidden = !s.restartWaiting;
+    var dl = document.getElementById("otherSettings");
+    dl.innerHTML = "";
+    var rows = [
+      ["Port", s.port],
+      ["Checks every", s.pollIntervalSec + "s"],
+      ["Local model", s.local.enabled ? s.local.model + " at " + s.local.baseUrl : "off"],
+      ["Engine", s.engineChoice.default || "default"],
+    ];
+    rows.forEach(function (row) {
+      var dt = document.createElement("dt");
+      dt.textContent = row[0];
+      var dd = document.createElement("dd");
+      dd.textContent = row[1];
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+  }
+
+  function loadSettings() {
+    return api("/api/settings").then(renderSettings);
+  }
+
+  function showApp() {
+    document.getElementById("signedOut").hidden = true;
+    document.getElementById("app").hidden = false;
+  }
+
+  function signIn() {
+    var hash = window.location.hash.replace(/^#/, "");
+    if (!hash) return;
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    var token = hash;
+    if (!token) return;
+    api("/api/settings/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: token }),
+    })
+      .then(function (body) {
+        csrfToken = body.csrfToken;
+        showApp();
+        return loadSettings();
+      })
+      .catch(function (e) {
+        setStatus("Couldn't sign in: " + e.message, true);
+      });
+  }
+
+  document.getElementById("saveTags").addEventListener("click", function () {
+    var typed = document
+      .getElementById("tags")
+      .value.split("\n")
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean);
+    setStatus("Saving…");
+    api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: typed }),
+    })
+      .then(function () {
+        setStatus("Saved.");
+        return loadSettings();
+      })
+      .catch(function (e) {
+        setStatus("Couldn't save: " + e.message, true);
+      });
+  });
+
+  document.getElementById("restart").addEventListener("click", function () {
+    setStatus("Restarting…");
+    api("/api/settings/restart", { method: "POST" }).catch(function (e) {
+      setStatus("Couldn't restart: " + e.message, true);
+    });
+  });
+
+  signIn();
+})();
+</script>
+</body>
+</html>
