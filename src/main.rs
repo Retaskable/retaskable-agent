@@ -245,7 +245,8 @@ async fn main() -> Result<()> {
         version: version.clone(),
     });
     let http = reqwest::Client::new();
-    let connectors: Vec<_> = link::cloud_urls(&cfg, env, build.as_ref())
+    let cloud_urls = link::cloud_urls(&cfg, env, build.as_ref());
+    let connectors: Vec<_> = cloud_urls
         .iter()
         .map(|url| {
             connector::Connector::start(
@@ -257,14 +258,22 @@ async fn main() -> Result<()> {
             )
         })
         .collect();
+    // installers/03-the-bundle-agent-bundle.md section 3.10: named once, after the connections above
+    // start, so the log says whether this build is linked — the start check greps for it, and a
+    // release build has no other way to tell.
+    let backlog_url = backlog::url(env);
+    tracing::info!(
+        "{}",
+        link::links_line(&cloud_urls, &backlog_url, |url| matches!(
+            keychain.get(url),
+            Ok(Some(_))
+        ))
+    );
     // installers/04-every-agent-on-the-shared-backlog-shared.md: once this computer already holds a
     // retaskable.com link, the shared backlog's device flow starts by itself too, opening its own
     // `/link` page. Fire-and-forget so a slow or unreachable store doesn't delay serving `/api/health`;
     // it isn't tried again this run (a failed or expired code waits for the next start).
-    if link::cloud_urls(&cfg, env, build.as_ref())
-        .iter()
-        .any(|url| matches!(keychain.get(url), Ok(Some(_))))
-    {
+    if cloud_urls.iter().any(|url| matches!(keychain.get(url), Ok(Some(_)))) {
         tokio::spawn(auto_link_backlog(keychain.clone(), http.clone(), env, version.clone()));
     }
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.

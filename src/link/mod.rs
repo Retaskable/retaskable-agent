@@ -301,6 +301,31 @@ pub(crate) fn cause(err: &(dyn std::error::Error + 'static)) -> String {
     inner.to_string()
 }
 
+/// installers/03-the-bundle-agent-bundle.md section 3.10: logged once at start, after the connections start, naming
+/// every cloud and the shared backlog store and whether each is linked — a checkout or release build alike (the
+/// release build's start check greps for it), the same words `linksLine`/`computerView.ts` uses for This computer's
+/// settings. For example: "Links: staging.retaskable.com not linked, backlog store backlog.retaskable.com not linked".
+pub fn links_line(cloud_urls: &[String], backlog_url: &str, linked: impl Fn(&str) -> bool) -> String {
+    let mut parts: Vec<String> = cloud_urls
+        .iter()
+        .map(|url| format!("{} {}", strip_scheme(url), state(linked(url))))
+        .collect();
+    parts.push(format!(
+        "backlog store {} {}",
+        strip_scheme(backlog_url),
+        state(linked(backlog_url))
+    ));
+    format!("Links: {}", parts.join(", "))
+}
+
+fn strip_scheme(url: &str) -> &str {
+    url.trim_start_matches("https://").trim_start_matches("http://")
+}
+
+fn state(linked: bool) -> &'static str {
+    if linked { "linked" } else { "not linked" }
+}
+
 /// An access token for one cloud, or why there's none.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenAnswer {
