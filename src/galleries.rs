@@ -5,16 +5,27 @@
 //! kept at `<dataDir>/projects/<project>/galleries/<slug>/`, replacing the old set only once the
 //! new one is all written.
 //!
+//! Before the command runs, a JS-based game's `node_modules` is installed if it's missing or
+//! `package-lock.json` is newer than it, and every `node_modules/.bin` already on `PATH` is
+//! dropped so the checkout's own comes first (06.8, bullets 9-10).
+//!
+//! This also answers `gallery_index`/`gallery_image` (tray.md 5.3.2) by reading a gallery's last
+//! shoot straight off disk: `gallery_image` shrinks a picture further and caches the result in
+//! memory when its base64 would otherwise be over 768 KiB. Per tray.md 5.3.1, reading the machine
+//! like this is really the fallback for a gallery not yet uploaded to the backlog store (a
+//! `/demo` environment); the primary path, the store serving a shot gallery once it's uploaded,
+//! needs that upload, which doesn't exist yet. Neither is wired to the hub either way, since that
+//! needs the command-dispatch layer this agent doesn't have for any command yet.
+//!
 //! This is the shoot-and-shrink pipeline on its own: it runs the command, converts its pictures,
 //! and tracks a gallery's status in memory. Still to come, once there's something to wire it to:
-//! answering `gallery_index`/`gallery_image` from the hub (including the further shrink a picture
-//! over 768 KiB needs before it's sent), keeping a shot gallery's set in the backlog store,
-//! refusing a shoot while the baseline, Play main or a sync holds the base checkout (none of
-//! which exist yet either), and the settings page that lets someone set a gallery's command.
+//! uploading a shot gallery's set to the backlog store, refusing a shoot while the baseline, Play
+//! main or a sync holds the base checkout (none of which exist yet either), and the settings page
+//! that lets someone set a gallery's command.
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,11 +33,14 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as base64;
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
 
 use crate::config::GalleryConfig;
 use crate::lanes;
+use crate::paths;
 
 const SHOOT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const JPEG_QUALITY: u8 = 82;
@@ -34,6 +48,16 @@ const MAX_WIDTH: u32 = 1920;
 /// How much of a failed or timed-out command's combined output is kept, and shown on failure.
 const OUTPUT_CAP: usize = 20_000;
 const TAIL_LINES: usize = 40;
+/// How long `npm ci`/`npm install` is given before it's treated as failed (06.8 bullet 9).
+const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// A picture sent as-is above this many base64 bytes is re-encoded smaller instead (tray.md
+/// 5.3.2: "768 KiB").
+const MAX_PICTURE_BASE64: usize = 768 * 1024;
+/// Narrower widths tried in order until a picture's base64 fits under [`MAX_PICTURE_BASE64`].
+const RESEND_WIDTHS: [u32; 2] = [1280, 960];
+const RESEND_QUALITY: u8 = 75;
+/// How many re-encoded pictures are kept in memory at once, oldest evicted first.
+const MAX_CACHED_PICTURES: usize = 50;
 
 /// One picture in a gallery, as the game's own manifest names it or, failing that, its file name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +77,18 @@ pub struct GalleryIndex {
     pub shot_at: String,
     pub sha: String,
     pub images: Vec<GalleryImage>,
+}
+
+/// A `gallery_image` answer (tray.md 5.3.2): passed through, never kept beyond the in-memory
+/// cache of re-encoded pictures.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureAnswer {
+    pub file: String,
+    pub shot_at: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub data: String,
 }
 
 /// A gallery's `status` (tray.md section 5.3.3): `shooting`, then `converting`, then `idle` with
@@ -85,6 +121,31 @@ static STATUS: LazyLock<Mutex<HashMap<GalleryKey, GalleryStatus>>> = LazyLock::n
 /// The gallery each project is shooting, if any: only one shoot holds a project's base checkout
 /// at a time (06.8: "Only one gallery shoots at a time").
 static SHOOTING: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Project, slug, file and the gallery's `shotAt` when it was re-encoded, so a reshoot of the
+/// same file name naturally misses the cache instead of serving a stale picture.
+type PictureKey = (String, String, String, String);
+/// Re-encoded pictures only (tray.md 5.3.2): one that already fits isn't worth caching. Oldest
+/// evicted first once there are more than [`MAX_CACHED_PICTURES`].
+static PICTURE_CACHE: LazyLock<Mutex<VecDeque<(PictureKey, String)>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
+
+fn cached_picture(key: &PictureKey) -> Option<String> {
+    PICTURE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, data)| data.clone())
+}
+
+fn cache_picture(key: PictureKey, data: String) {
+    let mut cache = PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|(k, _)| k != &key);
+    cache.push_back((key, data));
+    while cache.len() > MAX_CACHED_PICTURES {
+        cache.pop_front();
+    }
+}
 
 fn set_status(project: &str, slug: &str, status: GalleryStatus) {
     STATUS
@@ -125,6 +186,95 @@ pub fn shoot_refusal(project: &str, gallery: &GalleryConfig) -> Option<String> {
         return Some("Already shooting.".to_string());
     }
     None
+}
+
+/// A gallery slug, as the hub sends it: `/^[\w-]+$/`.
+fn valid_gallery_slug(slug: &str) -> bool {
+    !slug.is_empty() && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// A picture file name, as the hub sends it (tray.md 5.3.2, `PICTURE_FILE`):
+/// `/^[\w.-]{1,100}\.jpg$/i`. No `/` or `\` can match, so joining it to a gallery's directory can
+/// never leave it.
+fn valid_picture_file(file: &str) -> bool {
+    let len = file.chars().count();
+    (1..=100).contains(&len)
+        && file.to_ascii_lowercase().ends_with(".jpg")
+        && file
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
+/// `gallery_index { gallery }` (tray.md 5.3.2): the gallery's last shoot, read straight off disk.
+pub fn gallery_index(data_dir: &Path, project: &str, slug: &str) -> Result<GalleryIndex, String> {
+    if !valid_gallery_slug(slug) {
+        return Err(format!("No gallery called {slug}."));
+    }
+    let index_path = paths::gallery_dir(data_dir, project, slug).join("index.json");
+    let text = std::fs::read_to_string(&index_path).map_err(|_| format!("No gallery called {slug}."))?;
+    serde_json::from_str(&text).map_err(|_| format!("No gallery called {slug}."))
+}
+
+/// `gallery_image { gallery, file }` (tray.md 5.3.2): one picture from the gallery's last shoot,
+/// base64-encoded, re-encoded smaller and cached in memory first if it would otherwise be over
+/// [`MAX_PICTURE_BASE64`].
+pub fn gallery_image(data_dir: &Path, project: &str, slug: &str, file: &str) -> Result<PictureAnswer, String> {
+    if !valid_picture_file(file) {
+        return Err(format!("No picture {file} in that gallery."));
+    }
+    let idx = gallery_index(data_dir, project, slug)?;
+    if !idx.images.iter().any(|img| img.file == file) {
+        return Err(format!("No picture {file} in that gallery."));
+    }
+    let key: PictureKey = (
+        project.to_string(),
+        slug.to_string(),
+        file.to_string(),
+        idx.shot_at.clone(),
+    );
+    if let Some(data) = cached_picture(&key) {
+        return Ok(PictureAnswer {
+            file: file.to_string(),
+            shot_at: idx.shot_at,
+            kind: "image/jpeg",
+            data,
+        });
+    }
+    let path = paths::gallery_dir(data_dir, project, slug).join(file);
+    let bytes = std::fs::read(&path).map_err(|_| format!("No picture {file} in that gallery."))?;
+    // Base64 inflates length to `ceil(n / 3) * 4`, checked before actually encoding.
+    let base64_len = bytes.len().div_ceil(3) * 4;
+    if base64_len <= MAX_PICTURE_BASE64 {
+        return Ok(PictureAnswer {
+            file: file.to_string(),
+            shot_at: idx.shot_at,
+            kind: "image/jpeg",
+            data: base64.encode(&bytes),
+        });
+    }
+    let decoded = image::load_from_memory(&bytes).map_err(|_| "Too big to send from the machine.".to_string())?;
+    for width in RESEND_WIDTHS {
+        let resized = shrink_to(decoded.clone(), width);
+        let data = encode_jpeg_base64(&resized, RESEND_QUALITY)
+            .map_err(|_| "Too big to send from the machine.".to_string())?;
+        if data.len() <= MAX_PICTURE_BASE64 {
+            cache_picture(key, data.clone());
+            return Ok(PictureAnswer {
+                file: file.to_string(),
+                shot_at: idx.shot_at,
+                kind: "image/jpeg",
+                data,
+            });
+        }
+    }
+    Err("Too big to send from the machine.".to_string())
+}
+
+fn encode_jpeg_base64(img: &image::DynamicImage, quality: u8) -> Result<String> {
+    let mut bytes = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut bytes, quality);
+    encoder.encode_image(&img.to_rgb8())?;
+    Ok(base64.encode(&bytes))
 }
 
 /// Runs `gallery`'s command on `project`'s base checkout and replaces its pictures at
@@ -182,6 +332,7 @@ fn run_shoot(
     let sha = lanes::head_sha(&dir).context("reading the base checkout's commit")?;
     let out = dir.join(out_dir);
     let _ = std::fs::remove_dir_all(&out);
+    npm_install_if_needed(&dir)?;
     let (code, output, timed_out) = run_command(&gallery.command, &dir)?;
     if code != 0 || timed_out {
         let what = if timed_out {
@@ -195,12 +346,76 @@ fn run_shoot(
     convert(&out, &gallery.name, &sha, gallery_dest)
 }
 
+/// Installs a JS-based game's dependencies first when they're missing or stale (06.8 bullet 9),
+/// using the real `PATH` and a real `npm` subprocess.
+fn npm_install_if_needed(dir: &Path) -> Result<()> {
+    npm_install_if_needed_with(dir, run_command_with_timeout)
+}
+
+/// [`npm_install_if_needed`] with the command runner injected, so tests don't need a real `npm`.
+fn npm_install_if_needed_with(
+    dir: &Path,
+    run: impl Fn(&str, &Path, Duration) -> Result<(i32, String, bool)>,
+) -> Result<()> {
+    if !needs_npm_install(dir) {
+        return Ok(());
+    }
+    let command = npm_install_command(dir);
+    let (code, output, timed_out) = run(command, dir, NPM_INSTALL_TIMEOUT)?;
+    if code != 0 || timed_out {
+        let what = if timed_out {
+            "timed out".to_string()
+        } else {
+            format!("failed ({code})")
+        };
+        bail!("`{command}` {what}:\n{}", tail_lines(&output, TAIL_LINES));
+    }
+    Ok(())
+}
+
+/// True when `dir` is a JS-based game whose dependencies are missing or stale: no
+/// `node_modules/`, or `package-lock.json` modified more recently than
+/// `node_modules/.package-lock.json` (06.8 bullet 9).
+fn needs_npm_install(dir: &Path) -> bool {
+    if !dir.join("package.json").exists() {
+        return false;
+    }
+    if !dir.join("node_modules").is_dir() {
+        return true;
+    }
+    let lock_mtime = std::fs::metadata(dir.join("package-lock.json")).and_then(|m| m.modified());
+    let installed_mtime =
+        std::fs::metadata(dir.join("node_modules").join(".package-lock.json")).and_then(|m| m.modified());
+    match (lock_mtime, installed_mtime) {
+        (Ok(lock), Ok(installed)) => lock > installed,
+        (Ok(_), Err(_)) => true,
+        _ => false,
+    }
+}
+
+/// `npm ci` when there's a lockfile to install exactly from, else `npm install`.
+fn npm_install_command(dir: &Path) -> &'static str {
+    if dir.join("package-lock.json").exists() {
+        "npm ci"
+    } else {
+        "npm install"
+    }
+}
+
 /// Runs `command` in a shell under `cwd`, with a window (it may need to render) and no input,
 /// for up to [`SHOOT_TIMEOUT`]. Returns its exit code (-1 if it couldn't be read), combined
 /// stdout/stderr (capped at [`OUTPUT_CAP`] bytes), and whether it was killed for running too long.
 fn run_command(command: &str, cwd: &Path) -> Result<(i32, String, bool)> {
+    run_command_with_timeout(command, cwd, SHOOT_TIMEOUT)
+}
+
+/// [`run_command`] with the timeout as a parameter, so the npm-install step can use its own
+/// (06.8 bullet 9: 10 minutes). `PATH` is scrubbed of every other checkout's `node_modules/.bin`
+/// first, with `cwd`'s own put first (06.8 bullet 10).
+fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) -> Result<(i32, String, bool)> {
     let mut child = shell_command(command)
         .current_dir(cwd)
+        .env("PATH", scrub_path(&path_env(), cwd))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -217,7 +432,7 @@ fn run_command(command: &str, cwd: &Path) -> Result<(i32, String, bool)> {
         let buf = buf.clone();
         move || capture_capped(stderr, buf)
     });
-    let deadline = Instant::now() + SHOOT_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut timed_out = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
@@ -252,6 +467,29 @@ fn shell_command(command: &str) -> Command {
     let mut c = Command::new("sh");
     c.args(["-c", command]);
     c
+}
+
+fn path_env() -> String {
+    std::env::var("PATH").unwrap_or_default()
+}
+
+/// `path` with every entry ending in `node_modules/.bin` (another checkout's, left over from a
+/// different project) dropped, and `dir`'s own `node_modules/.bin` put first (06.8 bullet 10:
+/// "applies to the install too").
+fn scrub_path(path: &str, dir: &Path) -> String {
+    let own_bin = dir.join("node_modules").join(".bin");
+    let kept = std::env::split_paths(path).filter(|p| !is_node_modules_bin(p));
+    let entries = std::iter::once(own_bin).chain(kept);
+    std::env::join_paths(entries)
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+fn is_node_modules_bin(p: &Path) -> bool {
+    p.file_name().is_some_and(|f| f == ".bin")
+        && p.parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|f| f == "node_modules")
 }
 
 /// Reads `pipe` to EOF into `buf`, kept to the last [`OUTPUT_CAP`] bytes, like the TypeScript
@@ -461,7 +699,7 @@ fn convert(out: &Path, name: &str, sha: &str, dest: &Path) -> Result<GalleryInde
         let png_name = png_for.get(&img.file).expect("every image came from a png in pngs");
         let src = out.join(png_name);
         let decoded = image::open(&src).with_context(|| format!("reading {}", src.display()))?;
-        let resized = shrink(decoded);
+        let resized = shrink_to(decoded, MAX_WIDTH);
         let dest_file = tmp.join(&img.file);
         let file = std::fs::File::create(&dest_file).with_context(|| format!("creating {}", dest_file.display()))?;
         let mut encoder = JpegEncoder::new_with_quality(file, JPEG_QUALITY);
@@ -487,15 +725,15 @@ fn convert(out: &Path, name: &str, sha: &str, dest: &Path) -> Result<GalleryInde
     Ok(idx)
 }
 
-/// Resized to at most [`MAX_WIDTH`] wide, aspect kept, never enlarged.
-fn shrink(img: image::DynamicImage) -> image::DynamicImage {
+/// Resized to at most `max_width` wide, aspect kept, never enlarged.
+fn shrink_to(img: image::DynamicImage, max_width: u32) -> image::DynamicImage {
     use image::GenericImageView;
     let (w, h) = img.dimensions();
-    if w <= MAX_WIDTH || w == 0 {
+    if w <= max_width || w == 0 {
         return img;
     }
-    let new_h = ((h as u64 * MAX_WIDTH as u64) / w as u64).max(1) as u32;
-    img.resize_exact(MAX_WIDTH, new_h, image::imageops::FilterType::Lanczos3)
+    let new_h = ((h as u64 * max_width as u64) / w as u64).max(1) as u32;
+    img.resize_exact(max_width, new_h, image::imageops::FilterType::Lanczos3)
 }
 
 fn now_iso8601() -> String {
