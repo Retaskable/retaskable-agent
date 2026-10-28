@@ -1,0 +1,38 @@
+# docs/specs/docker.md: `docker compose -f docker/agent/compose.yaml up -d --build`, with the
+# section 3.3 variables set in the shell or a `.env` file beside this one (never committed).
+services:
+  agent:
+    build:
+      context: ../..
+      dockerfile: docker/agent/Dockerfile
+    container_name: retaskable-agent
+    hostname: ${RETASKABLE_MACHINE:-retaskable-agent}
+    restart: unless-stopped
+    environment:
+      # Section 3.3: required.
+      - GH_TOKEN
+      # Section 3.3: optional.
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - RETASKABLE_WOODPECKER_TOKEN
+      - GITLAB_TOKEN
+      # Section 3.4: this container's name wherever the agent says it, instead of its random
+      # container hostname.
+      - RETASKABLE_MACHINE
+      # Section 3.2: git's identity for commits the agent makes.
+      - GIT_USER_NAME
+      - GIT_USER_EMAIL
+      # agent.md section 8: the port the health check below also uses; 4700 unset.
+      - RETASKABLE_PORT
+    volumes:
+      - work:/work
+      - claude:/home/node/.claude
+      - gh:/home/node/.config/gh
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:${RETASKABLE_PORT:-4700}/api/health"]
+      interval: 30s
+      start_period: 30s
+
+volumes:
+  work:
+  claude:
+  gh:
