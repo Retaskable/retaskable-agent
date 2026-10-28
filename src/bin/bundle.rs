@@ -316,8 +316,10 @@ fn git_short_head(dir: &std::path::Path) -> Result<String, String> {
 
 /// Section 3.16: `--version` must be dotted numbers (`n.n.n`), refused otherwise.
 fn is_dotted_version(v: &str) -> bool {
-    !v.is_empty()
-        && v.split('.')
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
             .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
@@ -347,5 +349,18 @@ mod tests {
         assert!(!buildable_here("linux-x64", "mac-x64"));
         assert!(!buildable_here("mac-arm64", "linux-x64"));
         assert!(!buildable_here("mac-arm64", "win-x64"));
+    }
+
+    #[test]
+    fn is_dotted_version_requires_exactly_three_numeric_parts() {
+        assert!(is_dotted_version("1.4.2"));
+        assert!(is_dotted_version("0.1.812"));
+        assert!(!is_dotted_version("5"));
+        assert!(!is_dotted_version("1.2"));
+        assert!(!is_dotted_version("1.2.3.4"));
+        assert!(!is_dotted_version(""));
+        assert!(!is_dotted_version("1.2.a"));
+        assert!(!is_dotted_version("1..2"));
+        assert!(!is_dotted_version("1.2."));
     }
 }
