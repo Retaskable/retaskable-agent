@@ -26,7 +26,7 @@ This spec is split: each section below is its own file in [installers/](installe
 
 ## 5. Windows
 
-- [installers/05-windows.md](installers/05-windows.md): 5.1 Production: a signed installer (windows-release) · 5.2 Staging: the same installer (staging-builds) · 5.3 Signing
+- [installers/05-windows.md](installers/05-windows.md): 5.1 Production: the desktop app's installer (windows-release) · 5.2 Staging: the same installer (windows-release) · 5.3 Signing
 
 ## 6. macOS and Linux
 
