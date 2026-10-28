@@ -9,23 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use retaskable_agent::package;
-use retaskable_agent::release::{self, Environment};
-use retaskable_agent::release_check::{free_port, wait_for_health};
+use retaskable_agent::release;
+use retaskable_agent::release_check::{self, arg, free_port, wait_for_health};
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("{e}");
-        std::process::exit(1);
-    }
+    release_check::run_main(run);
 }
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let environment = match arg(&args, "--environment").as_deref() {
-        None | Some("staging") => Environment::Staging,
-        Some("production") => Environment::Production,
-        Some(other) => return Err(format!("--environment must be staging or production, not {other}")),
-    };
+    let environment = release_check::environment_arg(&args)?;
     let target = arg(&args, "--target").unwrap_or_else(|| "linux-x64".to_string());
     if target != "linux-x64" {
         return Err(format!(
@@ -85,30 +78,15 @@ fn run() -> Result<(), String> {
 /// otherwise keep running once the runtime itself is stopped — and `APPIMAGE_EXTRACT_AND_RUN=1`
 /// when `/dev/fuse` isn't there to mount it (most CI containers).
 fn start_check(file: &Path, build: &release::Build) -> Result<(), String> {
-    let scratch = std::env::temp_dir().join(format!(
-        "retaskable-package-check-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    ));
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("creating {}: {e}", scratch.display()))?;
-    let cleanup = |result: Result<(), String>| {
-        let _ = std::fs::remove_dir_all(&scratch);
-        result
-    };
-    let port = match free_port() {
-        Ok(port) => port,
-        Err(e) => return cleanup(Err(format!("finding a free port for the start check: {e}"))),
-    };
+    let scratch = release_check::ScratchDir::new("retaskable-package-check")?;
+    let port = free_port().map_err(|e| format!("finding a free port for the start check: {e}"))?;
 
     let mut cmd = Command::new(file);
-    cmd.env("HOME", &scratch)
-        .env("XDG_DATA_HOME", &scratch)
-        .env("XDG_STATE_HOME", &scratch)
+    cmd.env("HOME", scratch.path())
+        .env("XDG_DATA_HOME", scratch.path())
+        .env("XDG_STATE_HOME", scratch.path())
         .env("RETASKABLE_PORT", port.to_string())
-        .env("RETASKABLE_CREDENTIALS_FILE", scratch.join("credentials.json"))
+        .env("RETASKABLE_CREDENTIALS_FILE", scratch.path().join("credentials.json"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -120,10 +98,7 @@ fn start_check(file: &Path, build: &release::Build) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => return cleanup(Err(format!("running {}: {e}", file.display()))),
-    };
+    let mut child = cmd.spawn().map_err(|e| format!("running {}: {e}", file.display()))?;
 
     let health = wait_for_health(port, &build.version);
     #[cfg(unix)]
@@ -136,46 +111,10 @@ fn start_check(file: &Path, build: &release::Build) -> Result<(), String> {
     {
         let _ = child.kill();
     }
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(e) => return cleanup(Err(format!("waiting for {}: {e}", file.display()))),
-    };
-    if let Err(e) = health {
-        return cleanup(Err(e));
-    }
-    if !output.stdout.is_empty() || !output.stderr.is_empty() {
-        return cleanup(Err(format!(
-            "{} wrote to its terminal during the start check (a release build must only log to its file):\nstdout: {}\nstderr: {}",
-            file.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-
-    let scratch_env = {
-        let scratch = scratch.clone();
-        move |k: &str| {
-            matches!(k, "HOME" | "XDG_DATA_HOME" | "XDG_STATE_HOME").then(|| scratch.to_string_lossy().to_string())
-        }
-    };
-    let log_path = release::logs_dir(build, scratch_env).join("retaskable.log");
-    let log = match std::fs::read_to_string(&log_path) {
-        Ok(log) => log,
-        Err(e) => return cleanup(Err(format!("reading {}: {e}", log_path.display()))),
-    };
-    if !log.lines().any(|l| l.contains("Links:") && l.contains("not linked")) {
-        return cleanup(Err(format!(
-            "{} has no Links: line saying it isn't linked:\n{log}",
-            log_path.display()
-        )));
-    }
-
-    cleanup(Ok(()))
-}
-
-fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting for {}: {e}", file.display()))?;
+    health?;
+    release_check::check_silent_terminal(file, &output)?;
+    release_check::check_not_linked_log(build, scratch.path())
 }
