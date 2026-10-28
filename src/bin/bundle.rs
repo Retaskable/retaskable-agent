@@ -47,14 +47,10 @@ fn run() -> Result<(), String> {
     let out = arg(&args, "--out").map(PathBuf::from).unwrap_or_else(|| {
         manifest_dir
             .join("dist/agent")
-            .join(format!("{}-{target}", environment_str(environment)))
+            .join(format!("{}-{target}", environment.name()))
     });
 
-    println!(
-        "Building {target} ({}) into {}…",
-        environment_str(environment),
-        out.display()
-    );
+    println!("Building {target} ({}) into {}…", environment.name(), out.display());
     let status = Command::new("cargo")
         .args(["build", "--release", "--bin", "retaskable"])
         .current_dir(&manifest_dir)
@@ -72,7 +68,7 @@ fn run() -> Result<(), String> {
 
     let build_json = serde_json::json!({
         "os": target,
-        "environment": environment_str(environment),
+        "environment": environment.name(),
         "version": version,
         "commit": commit,
     });
@@ -102,13 +98,6 @@ fn arg(args: &[String], name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
-}
-
-fn environment_str(e: Environment) -> &'static str {
-    match e {
-        Environment::Production => "production",
-        Environment::Staging => "staging",
-    }
 }
 
 fn git_short_head(dir: &std::path::Path) -> Result<String, String> {
