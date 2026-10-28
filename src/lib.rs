@@ -8,6 +8,7 @@ pub mod ci_coverage;
 pub mod config;
 pub mod connector;
 pub mod engines;
+pub mod galleries;
 pub mod lanes;
 pub mod link;
 pub mod local_model;
