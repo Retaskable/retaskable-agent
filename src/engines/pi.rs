@@ -38,8 +38,7 @@ pub fn resolve_pi(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs
 
 /// `resolve_pi`, reading `PATH` itself the way the real agent does.
 pub fn resolve_pi_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     resolve_pi(&env, cfg!(windows), &dirs)
 }
 
