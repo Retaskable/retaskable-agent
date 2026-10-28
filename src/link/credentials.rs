@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
@@ -97,6 +98,10 @@ type Saved = BTreeMap<String, BTreeMap<String, String>>;
 pub struct FileStore {
     file: PathBuf,
     service: String,
+    /// Serializes this store's read-modify-write in `set`/`delete`: several clouds share one `FileStore` (one
+    /// `Arc<dyn TokenStore>` cloned across connectors), and a refresh racing a revoke must not clobber the other's
+    /// write to the same file.
+    lock: Mutex<()>,
 }
 
 impl FileStore {
@@ -104,6 +109,7 @@ impl FileStore {
         Self {
             file,
             service: service.to_string(),
+            lock: Mutex::new(()),
         }
     }
 
@@ -126,7 +132,11 @@ impl FileStore {
             .file_name()
             .context("the credentials file has no name")?
             .to_string_lossy();
-        let tmp = self.file.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = self
+            .file
+            .with_file_name(format!("{name}.{}.{unique}.tmp", std::process::id()));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -151,6 +161,7 @@ impl TokenStore for FileStore {
             .cloned())
     }
     fn set(&self, url: &str, token: &str) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let mut saved = self.read()?;
         saved
             .entry(self.service.clone())
@@ -159,6 +170,7 @@ impl TokenStore for FileStore {
         self.write(&saved)
     }
     fn delete(&self, url: &str) -> Result<()> {
+        let _guard = self.lock.lock().unwrap();
         let mut saved = self.read()?;
         let Some(service) = saved.get_mut(&self.service) else {
             return Ok(());
@@ -206,6 +218,27 @@ mod tests {
         let file = dir.path().join("credentials.json");
         FileStore::new(file.clone(), "retaskable").set("u", "t").unwrap();
         assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn concurrent_sets_on_one_store_lose_no_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("credentials.json");
+        let store = Arc::new(FileStore::new(file.clone(), "retaskable"));
+        let urls: Vec<String> = (0..20).map(|i| format!("https://cloud-{i}.example")).collect();
+        std::thread::scope(|scope| {
+            for url in &urls {
+                let store = store.clone();
+                scope.spawn(move || store.set(url, "t").unwrap());
+            }
+        });
+        for url in &urls {
+            assert_eq!(
+                store.get(url).unwrap().as_deref(),
+                Some("t"),
+                "lost the write for {url}"
+            );
+        }
     }
 
     #[test]
