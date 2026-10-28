@@ -710,12 +710,38 @@ fn convert(out: &Path, name: &str, sha: &str, dest: &Path) -> Result<GalleryInde
     let index_json = serde_json::to_string_pretty(&idx).context("writing index.json")?;
     std::fs::write(tmp.join("index.json"), index_json).context("writing index.json")?;
 
-    let _ = std::fs::remove_dir_all(dest);
+    swap_in(&tmp, dest)?;
+    Ok(idx)
+}
+
+/// Puts `tmp` at `dest`, keeping `dest`'s previous contents in place until `tmp` has fully taken
+/// over: `dest` is moved aside rather than deleted, so a failure partway through (the rename
+/// itself, not just a crash before it) leaves the old set recoverable at `dest` instead of gone
+/// with nothing to replace it.
+fn swap_in(tmp: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    std::fs::rename(&tmp, dest).with_context(|| format!("renaming {} to {}", tmp.display(), dest.display()))?;
-    Ok(idx)
+    let mut old_name = dest.as_os_str().to_os_string();
+    old_name.push(".old");
+    let old = PathBuf::from(old_name);
+    let _ = std::fs::remove_dir_all(&old);
+    let had_old = dest.exists() && std::fs::rename(dest, &old).is_ok();
+
+    match std::fs::rename(tmp, dest) {
+        Ok(()) => {
+            if had_old {
+                let _ = std::fs::remove_dir_all(&old);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if had_old {
+                let _ = std::fs::rename(&old, dest);
+            }
+            Err(e).with_context(|| format!("renaming {} to {}", tmp.display(), dest.display()))
+        }
+    }
 }
 
 /// Resized to at most `max_width` wide, aspect kept, never enlarged.
