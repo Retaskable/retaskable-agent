@@ -159,7 +159,7 @@ impl fmt::Display for Engine {
     }
 }
 
-fn parse_engine(s: &str) -> Option<Engine> {
+pub(crate) fn parse_engine(s: &str) -> Option<Engine> {
     match s.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(Engine::Claude),
         "cursor" => Some(Engine::Cursor),
@@ -289,7 +289,7 @@ pub struct CursorConfig {
 
 /// "A name is one or more of letters, digits, `_`, `.`, `:`, `/` and `-`, not starting with `-`"
 /// (engines.md section 3.4, so `--force` can't be slipped in as a model).
-fn valid_cursor_model_name(s: &str) -> bool {
+pub(crate) fn valid_cursor_model_name(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
         && s.chars()
@@ -305,16 +305,22 @@ pub struct MachineBudget {
 
 // agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535." Anything below
 // that (0 included) is as invalid as an unparseable value and falls through the same way.
-fn in_range(p: u16) -> bool {
+pub(crate) fn port_in_range(p: u16) -> bool {
     p >= 1024
 }
 
 pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
     env("RETASKABLE_PORT")
         .and_then(|p| p.parse().ok())
-        .filter(|&p| in_range(p))
-        .or_else(|| Some(cfg.machine.port).filter(|&p| in_range(p)))
+        .filter(|&p| port_in_range(p))
+        .or_else(|| Some(cfg.machine.port).filter(|&p| port_in_range(p)))
         .unwrap_or(DEFAULT_PORT)
+}
+
+/// "How often it checks": 2 to 3600 seconds (agent-settings.md section 3.1), the settings page's
+/// save validates the same range the environment variable does.
+pub(crate) fn poll_interval_in_range(n: u32) -> bool {
+    (2..=3600).contains(&n)
 }
 
 // agent-settings.md section 3.2 (`withEnvSettings`): each computer-only setting's environment
@@ -326,7 +332,7 @@ pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
 pub fn poll_interval_sec(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
     env("RETASKABLE_POLL_SEC")
         .and_then(|v| v.parse().ok())
-        .filter(|&n| (2..=3600).contains(&n))
+        .filter(|&n| poll_interval_in_range(n))
         .unwrap_or(cfg.machine.poll_interval_sec)
 }
 
@@ -363,7 +369,7 @@ fn is_local_model_off(raw: &str) -> bool {
     matches!(raw.to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no")
 }
 
-fn valid_model_name(s: &str) -> bool {
+pub(crate) fn valid_model_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars().count() <= 100
         && s.chars()
@@ -371,7 +377,7 @@ fn valid_model_name(s: &str) -> bool {
 }
 
 /// `http` or `https`, with no user or password in it (an `@` before the path means userinfo).
-fn valid_local_url(s: &str) -> bool {
+pub(crate) fn valid_local_url(s: &str) -> bool {
     let Some(authority_and_path) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) else {
         return false;
     };
