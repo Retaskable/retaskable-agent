@@ -89,6 +89,9 @@
       <option value="pi">pi</option>
       <option value="local">local</option>
     </select>
+    <div id="engineRoles"></div>
+    <p class="hint">Per-lane engine (lane 1 first)</p>
+    <div id="engineLanes"></div>
     <p class="hint" id="engineHint" hidden></p>
     <button type="button" id="saveEngine">Save</button>
   </div>
@@ -141,6 +144,47 @@
     });
   }
 
+  // agent-settings.md section 3.1: a role's own override, or a lane's own override.
+  var ENGINE_OPTIONS = ["claude", "cursor", "pi", "local"];
+  var LANE_ENGINE_OPTIONS = ["claude", "cursor"];
+  var ROLE_FIELDS = [
+    { key: "planner", label: "Planning" },
+    { key: "implementer", label: "Implementing" },
+    { key: "review", label: "Review" },
+    { key: "drafter", label: "Drafting" },
+    { key: "chat", label: "Chat" },
+    { key: "writer", label: "Writing" },
+  ];
+
+  function engineSelectHtml(id, label, options, selected) {
+    var opts = options
+      .map(function (opt) {
+        return '<option value="' + opt + '"' + (opt === selected ? " selected" : "") + ">" + opt + "</option>";
+      })
+      .join("");
+    return '<label for="' + id + '">' + label + "</label>" + '<select id="' + id + '">' + opts + "</select>";
+  }
+
+  function renderEngineRoles(roles) {
+    document.getElementById("engineRoles").innerHTML = ROLE_FIELDS.map(function (f) {
+      return engineSelectHtml("role_" + f.key, f.label, ["default"].concat(ENGINE_OPTIONS), roles[f.key] || "default");
+    }).join("");
+  }
+
+  function renderEngineLanes(laneCount, laneOverrides) {
+    var count = Math.max(laneCount, laneOverrides.length);
+    var html = "";
+    for (var i = 0; i < count; i++) {
+      html += engineSelectHtml(
+        "lane_" + i,
+        "Lane " + (i + 1),
+        ["default"].concat(LANE_ENGINE_OPTIONS),
+        laneOverrides[i] || "default"
+      );
+    }
+    document.getElementById("engineLanes").innerHTML = html;
+  }
+
   // agent-settings.md section 3.2: a setting a variable sets is greyed out, with why.
   var ENV_GROUPS = [
     { groupId: "tagsGroup", hintId: "tagsHint", vars: ["RETASKABLE_TAGS"] },
@@ -180,6 +224,8 @@
     document.getElementById("localModel").value = s.local.model;
     document.getElementById("localBaseUrl").value = s.local.baseUrl;
     document.getElementById("engineDefault").value = s.engineChoice.default || "claude";
+    renderEngineRoles(s.engineChoice.roles);
+    renderEngineLanes(s.lanes, s.engineChoice.lanes);
     document.getElementById("cursorTop").value = s.cursorModels.top || "";
     document.getElementById("cursorImplementer").value = s.cursorModels.implementer || "";
     document.getElementById("cursorScout").value = s.cursorModels.scout || "";
@@ -279,7 +325,20 @@
   });
 
   document.getElementById("saveEngine").addEventListener("click", function () {
-    save({ engineChoice: { default: document.getElementById("engineDefault").value } });
+    var roles = {};
+    ROLE_FIELDS.forEach(function (f) {
+      roles[f.key] = document.getElementById("role_" + f.key).value;
+    });
+    var lanes = Array.prototype.map.call(document.querySelectorAll("#engineLanes select"), function (el) {
+      return el.value;
+    });
+    save({
+      engineChoice: {
+        default: document.getElementById("engineDefault").value,
+        roles: roles,
+        lanes: lanes,
+      },
+    });
   });
 
   document.getElementById("saveCursor").addEventListener("click", function () {

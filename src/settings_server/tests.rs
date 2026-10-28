@@ -749,6 +749,75 @@ async fn saving_the_engine_default_validates_it_and_round_trips() {
 }
 
 #[tokio::test]
+async fn saving_the_engines_role_overrides_validates_them_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let bad = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "claude", "roles": { "implementer": "steam" } } }),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({
+            "engineChoice": {
+                "default": "claude",
+                "roles": { "implementer": "cursor", "review": "default", "chat": "local" },
+            },
+        }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let saved = config::load(dir.path()).unwrap().machine.engine_choice.roles;
+    assert_eq!(saved.implementer, Some(config::Engine::Cursor));
+    assert_eq!(saved.review, None);
+    assert_eq!(saved.chat, Some(config::Engine::Local));
+    assert_eq!(saved.planner, None);
+}
+
+#[tokio::test]
+async fn saving_the_engines_lane_overrides_validates_them_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let bad = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "claude", "lanes": ["claude", "steam"] } }),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "claude", "lanes": ["claude", "cursor", "default"] } }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(
+        config::load(dir.path()).unwrap().machine.engine_choice.lanes,
+        vec![config::LaneEngine::Claude, config::LaneEngine::Cursor]
+    );
+
+    let settings_value = signed_in_settings(&settings).await;
+    assert_eq!(settings_value["engineChoice"]["lanes"], json!(["claude", "cursor"]));
+}
+
+#[tokio::test]
 async fn saving_cursor_models_validates_names_and_an_empty_one_is_auto() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings_with_network(dir.path(), false, None);

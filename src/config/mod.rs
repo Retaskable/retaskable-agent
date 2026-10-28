@@ -20,7 +20,8 @@ pub use machine::{
     lanes, local_model, poll_interval_sec, port,
 };
 pub(crate) use machine::{
-    parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url, valid_model_name,
+    lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
+    valid_model_name,
 };
 pub use project::{CheckConfig, ProjectConfig, ProjectType};
 

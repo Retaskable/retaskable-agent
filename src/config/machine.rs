@@ -440,7 +440,7 @@ fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
 /// — a half-read list would put later lanes on the wrong engines. A single empty entry (an empty
 /// string split on `+`, or `lanes=` with nothing after it) is a real empty list, not an invalid
 /// one. Used for `lanes` read from both the environment and the file.
-fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
+pub(crate) fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
     if entries.len() == 1 && entries[0].trim().is_empty() {
         return Some(Vec::new());
     }
