@@ -31,11 +31,24 @@ fn run() -> Result<(), String> {
             std::env::consts::ARCH
         )
     })?;
-    let version = arg(&args, "--version").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    let commit = git_short_head()?;
-    let out = arg(&args, "--out")
+    let version = match arg(&args, "--version") {
+        Some(v) if is_dotted_version(&v) => v,
+        Some(other) => return Err(format!("--version must be dotted numbers (n.n.n), not {other}")),
+        None if args.iter().any(|a| a == "--version") => {
+            return Err("--version needs a value (dotted numbers, n.n.n)".to_string());
+        }
+        None => env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let commit = git_short_head(&manifest_dir)?;
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("dist/agent").join(format!("{}-{target}", environment_str(environment))));
+        .unwrap_or_else(|_| manifest_dir.join("target"));
+    let out = arg(&args, "--out").map(PathBuf::from).unwrap_or_else(|| {
+        manifest_dir
+            .join("dist/agent")
+            .join(format!("{}-{target}", environment_str(environment)))
+    });
 
     println!(
         "Building {target} ({}) into {}…",
@@ -44,6 +57,7 @@ fn run() -> Result<(), String> {
     );
     let status = Command::new("cargo")
         .args(["build", "--release", "--bin", "retaskable"])
+        .current_dir(&manifest_dir)
         .status()
         .map_err(|e| format!("running cargo build: {e}"))?;
     if !status.success() {
@@ -52,7 +66,7 @@ fn run() -> Result<(), String> {
 
     std::fs::create_dir_all(&out).map_err(|e| format!("creating {}: {e}", out.display()))?;
     let exe_name = if cfg!(windows) { "retaskable.exe" } else { "retaskable" };
-    let built = PathBuf::from("target/release").join(exe_name);
+    let built = target_dir.join("release").join(exe_name);
     let placed = out.join(exe_name);
     std::fs::copy(&built, &placed).map_err(|e| format!("copying {} to {}: {e}", built.display(), placed.display()))?;
 
@@ -97,13 +111,21 @@ fn environment_str(e: Environment) -> &'static str {
     }
 }
 
-fn git_short_head() -> Result<String, String> {
+fn git_short_head(dir: &std::path::Path) -> Result<String, String> {
     let output = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
         .output()
         .map_err(|e| format!("running git rev-parse --short HEAD: {e}"))?;
     if !output.status.success() {
         return Err("git rev-parse --short HEAD failed".to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Section 3.16: `--version` must be dotted numbers (`n.n.n`), refused otherwise.
+fn is_dotted_version(v: &str) -> bool {
+    !v.is_empty()
+        && v.split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
