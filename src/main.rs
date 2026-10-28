@@ -175,6 +175,7 @@ async fn main() -> Result<()> {
     let settings = Arc::new(SettingsServer::new(
         dir.clone(),
         port,
+        network_access.enabled,
         env,
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         // Restarting answers the request first: the process exit happens on another thread, a

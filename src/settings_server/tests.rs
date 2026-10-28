@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use std::path::Path;
 
 use axum::body::Body;
 use axum::extract::connect_info::MockConnectInfo;
@@ -21,6 +22,23 @@ fn request(method: &str, path: &str) -> axum::http::request::Builder {
 async fn json_body(res: Response) -> Value {
     let body = res.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+/// Signs in and `GET /api/settings`, for a test that only cares what comes back.
+async fn signed_in_settings(settings: &Arc<SettingsServer>) -> Value {
+    let app = app(settings.clone());
+    let (cookie, _csrf) = sign_in(&app, settings).await;
+    let res = app
+        .oneshot(
+            request("GET", "/api/settings")
+                .header("Cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    json_body(res).await
 }
 
 fn mint_token(settings: &SettingsServer, good_for_secs: u64) -> String {
@@ -241,23 +259,12 @@ async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        false,
         env,
         || 1_700_000_000,
         |_| {},
     ));
-    let app = app(settings.clone());
-    let (cookie, _csrf) = sign_in(&app, &settings).await;
-    let res = app
-        .oneshot(
-            request("GET", "/api/settings")
-                .header("Cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = json_body(res).await;
+    let body = signed_in_settings(&settings).await;
     assert_eq!(body["tags"]["effective"], json!(["linux"]));
     assert_eq!(body["envVars"]["RETASKABLE_TAGS"], json!(true));
     assert_eq!(body["envVars"]["RETASKABLE_PORT"], json!(false));
@@ -287,6 +294,7 @@ async fn saving_a_typed_tag_list_keeps_only_what_changes_and_round_trips() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        false,
         |_: &str| None,
         || 1_700_000_000,
         |_: i32| {},
@@ -341,14 +349,14 @@ async fn an_unsupported_setting_is_refused_by_name() {
                 .header("Origin", format!("http://{HOST}"))
                 .header("Cookie", cookie)
                 .header("X-CSRF-Token", csrf)
-                .body(Body::from(r#"{"port":4800}"#))
+                .body(Body::from(r#"{"dailyUsd":5}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = json_body(res).await;
-    assert!(body["error"].as_str().unwrap().contains("port"));
+    assert!(body["error"].as_str().unwrap().contains("dailyUsd"));
 }
 
 #[tokio::test]
@@ -359,6 +367,7 @@ async fn restart_calls_exit_with_75_once_signed_in_with_csrf() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        false,
         |_: &str| None,
         || 1_700_000_000,
         move |code: i32| exits_clone.lock().unwrap().push(code),
@@ -388,6 +397,7 @@ async fn five_wrong_tries_wait_a_minute_then_longer_even_for_the_right_one() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        false,
         |_: &str| None,
         move || *now_clone.lock().unwrap(),
         |_: i32| {},
@@ -452,6 +462,7 @@ async fn a_wait_still_in_force_doubles_the_next_one() {
         let settings = Arc::new(SettingsServer::new(
             dir.path().to_path_buf(),
             4700,
+            false,
             |_: &str| None,
             move || *now_clone.lock().unwrap(),
             |_: i32| {},
@@ -503,4 +514,307 @@ async fn a_body_over_16kb_is_refused() {
         .await
         .unwrap();
     assert!(res.status().is_client_error());
+}
+
+fn settings_with_network(dir: &Path, network_enabled: bool, stored: Option<NetworkAccess>) -> Arc<SettingsServer> {
+    if let Some(network) = stored {
+        MachineStore::load(dir).unwrap().set_network(network).unwrap();
+    }
+    Arc::new(SettingsServer::new(
+        dir.to_path_buf(),
+        4700,
+        network_enabled,
+        |_: &str| None,
+        || 1_700_000_000,
+        |_: i32| {},
+    ))
+}
+
+#[tokio::test]
+async fn a_good_password_signs_in_and_a_wrong_one_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(
+        dir.path(),
+        true,
+        Some(NetworkAccess {
+            enabled: true,
+            password_hash: Some(password::hash_password("a good enough password")),
+        }),
+    );
+    let app = app(settings);
+    let wrong = app
+        .clone()
+        .oneshot(post_body(
+            "/api/settings/session",
+            &json!({ "password": "nope" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let right = app
+        .oneshot(post_body(
+            "/api/settings/session",
+            &json!({ "password": "a good enough password" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(right.status(), StatusCode::OK);
+    assert!(json_body(right).await["csrfToken"].is_string());
+}
+
+#[tokio::test]
+async fn a_right_password_is_refused_while_network_access_is_off() {
+    // agent-settings.md section 3.1: turning network access off keeps the hash (so turning it
+    // back on needs no new password), but it must not go on signing in while it's off.
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(
+        dir.path(),
+        true,
+        Some(NetworkAccess {
+            enabled: false,
+            password_hash: Some(password::hash_password("a good enough password")),
+        }),
+    );
+    let res = app(settings)
+        .oneshot(post_body(
+            "/api/settings/session",
+            &json!({ "password": "a good enough password" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_password_is_refused_when_none_is_saved_yet() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(post_body(
+            "/api/settings/session",
+            &json!({ "password": "whatever it is" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn restart_waiting_also_reflects_a_saved_network_access_change() {
+    // The agent started with network access off; the file now has it on (saved, not yet
+    // restarted into), so a restart is waiting the same way a changed port would say so.
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(
+        dir.path(),
+        false,
+        Some(NetworkAccess {
+            enabled: true,
+            password_hash: Some(password::hash_password("a good enough password")),
+        }),
+    );
+    let body = signed_in_settings(&settings).await;
+    assert_eq!(body["restartWaiting"], json!(true));
+    assert_eq!(body["network"], json!({ "enabled": true, "hasPassword": true }));
+}
+
+async fn post_setting(app: &Router, cookie: &str, csrf: &str, body: Value) -> Response {
+    app.clone()
+        .oneshot(
+            request("POST", "/api/settings")
+                .header("Origin", format!("http://{HOST}"))
+                .header("Cookie", cookie.to_string())
+                .header("X-CSRF-Token", csrf.to_string())
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn saving_the_port_validates_its_range_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let too_low = post_setting(&app, &cookie, &csrf, json!({ "port": 80 })).await;
+    assert_eq!(too_low.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(&app, &cookie, &csrf, json!({ "port": 4800 })).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.port, 4800);
+}
+
+#[tokio::test]
+async fn a_bad_field_in_a_multi_field_save_leaves_the_good_ones_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let res = post_setting(&app, &cookie, &csrf, json!({ "tags": ["games"], "port": 80 })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(MachineStore::load(dir.path()).unwrap().tags().is_none());
+}
+
+#[tokio::test]
+async fn saving_the_port_is_refused_when_set_by_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Arc::new(SettingsServer::new(
+        dir.path().to_path_buf(),
+        4700,
+        false,
+        |k: &str| (k == "RETASKABLE_PORT").then(|| "4900".to_string()),
+        || 1_700_000_000,
+        |_: i32| {},
+    ));
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let res = post_setting(&app, &cookie, &csrf, json!({ "port": 4800 })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(res).await;
+    assert!(body["error"].as_str().unwrap().contains("RETASKABLE_PORT"));
+}
+
+#[tokio::test]
+async fn saving_how_often_it_checks_validates_its_range_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let too_high = post_setting(&app, &cookie, &csrf, json!({ "pollIntervalSec": 3601 })).await;
+    assert_eq!(too_high.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(&app, &cookie, &csrf, json!({ "pollIntervalSec": 30 })).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.poll_interval_sec, 30);
+}
+
+#[tokio::test]
+async fn saving_the_local_model_validates_its_name_and_address_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let bad_name = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "local": { "enabled": true, "model": "model name", "baseUrl": "http://localhost:11436" } }),
+    )
+    .await;
+    assert_eq!(bad_name.status(), StatusCode::BAD_REQUEST);
+
+    let bad_url = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "local": { "enabled": false, "model": "", "baseUrl": "localhost:11436" } }),
+    )
+    .await;
+    assert_eq!(bad_url.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "local": { "enabled": true, "model": "llama3.1", "baseUrl": "http://10.0.0.5:11436" } }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let saved = config::load(dir.path()).unwrap().machine.local;
+    assert!(saved.enabled);
+    assert_eq!(saved.model, "llama3.1");
+    assert_eq!(saved.base_url, "http://10.0.0.5:11436");
+}
+
+#[tokio::test]
+async fn saving_the_engine_default_validates_it_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let bad = post_setting(&app, &cookie, &csrf, json!({ "engineChoice": { "default": "steam" } })).await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(&app, &cookie, &csrf, json!({ "engineChoice": { "default": "local" } })).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(
+        config::load(dir.path()).unwrap().machine.engine_choice.default,
+        Some(config::Engine::Local)
+    );
+}
+
+#[tokio::test]
+async fn saving_cursor_models_validates_names_and_an_empty_one_is_auto() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let bad = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "cursorModels": { "top": "--force", "implementer": null, "scout": null } }),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "cursorModels": { "top": "gpt-5", "implementer": "", "scout": null } }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let saved = config::load(dir.path()).unwrap().machine.cursor.models;
+    assert_eq!(saved.top, Some("gpt-5".to_string()));
+    assert_eq!(saved.implementer, None);
+    assert_eq!(saved.scout, None);
+}
+
+#[tokio::test]
+async fn saving_network_access_needs_a_long_enough_password_and_turning_it_off_keeps_the_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    // On with no password at all, and nothing saved yet to fall back to.
+    let no_password = post_setting(&app, &cookie, &csrf, json!({ "network": { "enabled": true } })).await;
+    assert_eq!(no_password.status(), StatusCode::BAD_REQUEST);
+
+    // On with a password that's too short.
+    let short = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "network": { "enabled": true, "password": "short" } }),
+    )
+    .await;
+    assert_eq!(short.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "network": { "enabled": true, "password": "a good enough password" } }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let saved = MachineStore::load(dir.path()).unwrap().network().unwrap();
+    assert!(saved.enabled);
+    let hash = saved.password_hash.clone().unwrap();
+
+    // Turning it off with no new password keeps the hash, so turning it on again needs none.
+    let off = post_setting(&app, &cookie, &csrf, json!({ "network": { "enabled": false } })).await;
+    assert_eq!(off.status(), StatusCode::OK);
+    let saved_off = MachineStore::load(dir.path()).unwrap().network().unwrap();
+    assert!(!saved_off.enabled);
+    assert_eq!(saved_off.password_hash, Some(hash));
 }

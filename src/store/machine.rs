@@ -59,8 +59,7 @@ impl MachineStore {
     }
 
     /// Sets network access and writes the file (keeping other keys as they are). Used by setup
-    /// and the settings page once those land; kept for their tests today.
-    #[allow(dead_code)]
+    /// and the settings page.
     pub fn set_network(&mut self, network: NetworkAccess) -> Result<()> {
         self.data.insert("network".to_string(), network.to_value());
         self.save()
