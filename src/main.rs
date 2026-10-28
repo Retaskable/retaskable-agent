@@ -33,9 +33,6 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|b| b.version.clone())
         .unwrap_or_else(|| VERSION.to_string());
-    // Section 3.2: a release build has no terminal, so what a checkout prints with `println!`
-    // has to go to `retaskable.log` (via `tracing`) instead once a release build's logging is up.
-    let is_release = build.is_some();
     // `retaskable --version` (release.ts): a release build's own version, else this crate's.
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!("{version}");
@@ -98,122 +95,13 @@ async fn main() -> Result<()> {
     // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
     let engine_choice = config::engine_choice(&cfg, env);
     for project in &cfg.projects {
-        // Trims each project's own state.json on startup (local-state-diet.md); not fatal, since
-        // a broken file there shouldn't keep the health check from coming up.
-        let project_dir = dir.join("projects").join(project.id_or_derived());
-        if let Err(e) = store::Store::load(&project_dir) {
-            tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
-        }
-        // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
-        // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
-        // Nothing calls `EventLog::add` yet — that needs the orchestrator loop, sessions and the
-        // backlog client wired in first, none of which this agent runs yet.
-        telemetry::EventLog::new().open(&project_dir.join("events"));
-        // Keeps this project's lane pool at lane_count worktrees (04-architecture.md section
-        // 4.1); not fatal, since a project not yet pointed at a real repo and worktrees folder
-        // shouldn't keep the health check from coming up either.
-        if !project.repo_path.is_empty() && !project.worktrees_dir.is_empty() {
-            let repo_path = Path::new(&project.repo_path);
-            let worktrees_dir = Path::new(&project.worktrees_dir);
-            match lanes::ensure(repo_path, worktrees_dir, lane_count) {
-                Ok(r) if !r.created.is_empty() || !r.removed.is_empty() => {
-                    tracing::info!(
-                        "{}: lane pool at {} (created {:?}, removed {:?})",
-                        project.id_or_derived(),
-                        worktrees_dir.display(),
-                        r.created,
-                        r.removed
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
-                    "{}: lane pool at {}: {e:#}",
-                    project.id_or_derived(),
-                    worktrees_dir.display()
-                ),
-            }
-        }
-        // play-on-phone.md section 3: while this project has a `phone` section, watch for a
-        // plugged-in, authorised Android phone. Only adb is looked up at start; re-finding it
-        // when Setup is saved needs the settings server, not yet ported.
-        if project.phone.is_some() {
-            match phone::find_adb_on_path(env) {
-                Some(adb) => {
-                    tracing::info!(
-                        "{}: watching for an Android phone with {}",
-                        project.id_or_derived(),
-                        adb.display()
-                    );
-                    tokio::spawn(phone::watch(adb));
-                }
-                None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
-            }
-        }
-        // Which program runs each kind of work in this project, once this computer's own
-        // `engineChoice` (or, until it has one, this project's older `engines.default`/`roles`)
-        // is resolved per role group. Not used to run a session yet: that needs the orchestrator
-        // loop, still a later item.
-        let legacy = project.engines.as_ref();
-        tracing::info!(
-            "{}: engines planner {}, implementer {}, review {}, drafter {}, chat {}, writer {}",
-            project.id_or_derived(),
-            engines::engine_for(&engine_choice, legacy, engines::Role::Planner, None),
-            engines::engine_for(&engine_choice, legacy, engines::Role::Implementer, None),
-            engines::engine_for(&engine_choice, legacy, engines::Role::Scout, None),
-            engines::engine_for(&engine_choice, legacy, engines::Role::Drafter, None),
-            engines::engine_for(&engine_choice, legacy, engines::Role::Assistant, None),
-            engines::engine_for(&engine_choice, legacy, engines::Role::Writer, None),
-        );
+        start_project(&dir, lane_count, &engine_choice, project, env);
     }
     // agent-settings.md section 3 / computer-tags.md section 3.1: tags from the machine, with
     // machine.json's overrides and RETASKABLE_TAGS over them. Missing is fine; broken is fatal,
     // the same as config.json.
     let machine = store::MachineStore::load(&dir)?;
-    let found = tags::found_tags(&tags::machine_facts(env));
-    let overrides = machine.tags();
-    let tag_list = tags::effective_tags(&found, overrides.as_ref(), env);
-    tracing::info!(
-        "Tags: {}",
-        if tag_list.is_empty() {
-            "none".to_string()
-        } else {
-            tag_list.join(", ")
-        }
-    );
-    let poll_interval_sec = config::poll_interval_sec(&cfg, env);
-    let local_model = config::local_model(&cfg, env);
-    tracing::info!(
-        "Settings: {lane_count} lane(s), checking every {poll_interval_sec}s, local model {}",
-        if local_model.enabled {
-            format!("{} at {}", local_model.model, local_model.base_url)
-        } else {
-            "off".to_string()
-        }
-    );
-    // 07-orchestrator-loop.md section 7.2: while local is on, watch whether it's up, once per
-    // computer (not per project) — a local session running against it is a later slice, since no
-    // orchestrator exists yet to start one.
-    if local_model.enabled {
-        tracing::info!("Watching the local model at {}", local_model.base_url);
-        tokio::spawn(local_model::watch(local_model.base_url.clone()));
-    }
-    // agent-settings.md section 3.1: the computer-wide shape of `engineChoice` (resolved per
-    // project and role group above), and Cursor's model per tier. Cursor's models aren't read by
-    // anything yet (engines.md section 3.4, a later slice), so still only logged.
-    let cursor_models = config::cursor_models(&cfg, env);
-    tracing::info!(
-        "Engines: default {}, lanes [{}], Cursor models top {}, implementer {}, scout {}",
-        engine_choice.default.unwrap_or(config::Engine::Claude),
-        engine_choice
-            .lanes
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        cursor_models.top.as_deref().unwrap_or("auto"),
-        cursor_models.implementer.as_deref().unwrap_or("auto"),
-        cursor_models.scout.as_deref().unwrap_or("auto"),
-    );
+    let tag_list = log_runtime_settings(&cfg, &machine, &engine_choice, lane_count, env);
     // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
     // address instead, so another computer on the local network can reach the settings page.
     let network_access = network::network_access(machine.network().as_ref(), env);
@@ -232,20 +120,63 @@ async fn main() -> Result<()> {
         tracing::info!("The settings page is open on the network, at http://{addr}");
     }
     tracing::info!("Retaskable agent {version} on http://{addr}");
+    serve(
+        ServeArgs {
+            dir: &dir,
+            cfg: &cfg,
+            version: &version,
+            build: build.as_ref(),
+            tag_list,
+            network_enabled: network_access.enabled,
+            port,
+            listener,
+        },
+        env,
+    )
+    .await
+}
+
+/// What [`serve`] needs to run the server, bundled so the function stays under clippy's
+/// argument-count limit.
+struct ServeArgs<'a> {
+    dir: &'a Path,
+    cfg: &'a config::ConfigFile,
+    version: &'a str,
+    build: Option<&'a release::Build>,
+    tag_list: Vec<String>,
+    network_enabled: bool,
+    port: u16,
+    listener: tokio::net::TcpListener,
+}
+
+/// Runs each cloud's outbound connector, the shared backlog's auto-link, the first-run check,
+/// and the settings/health HTTP server, until the server shuts down.
+async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy + Send + Sync + 'static) -> Result<()> {
+    let ServeArgs {
+        dir,
+        cfg,
+        version,
+        build,
+        tag_list,
+        network_enabled,
+        port,
+        listener,
+    } = args;
+    let is_release = build.is_some();
     // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
     // project on it. Unlinked clouds wait quietly for `retaskable link`.
-    let keychain = link::keychain(&dir, env);
-    if let Some(note) = link::credential_file_note(&dir, env) {
+    let keychain = link::keychain(dir, env);
+    if let Some(note) = link::credential_file_note(dir, env) {
         tracing::info!("{note}");
     }
     let view = Arc::new(connector::AgentView {
         machine: link::machine_name(env),
         tags: tag_list,
         projects: cfg.projects.iter().map(connector::ProjectView::from).collect(),
-        version: version.clone(),
+        version: version.to_string(),
     });
     let http = reqwest::Client::new();
-    let cloud_urls = link::cloud_urls(&cfg, env, build.as_ref());
+    let cloud_urls = link::cloud_urls(cfg, env, build);
     let connectors: Vec<_> = cloud_urls
         .iter()
         .map(|url| {
@@ -274,7 +205,12 @@ async fn main() -> Result<()> {
     // `/link` page. Fire-and-forget so a slow or unreachable store doesn't delay serving `/api/health`;
     // it isn't tried again this run (a failed or expired code waits for the next start).
     if cloud_urls.iter().any(|url| matches!(keychain.get(url), Ok(Some(_)))) {
-        tokio::spawn(auto_link_backlog(keychain.clone(), http.clone(), env, version.clone()));
+        tokio::spawn(auto_link_backlog(
+            keychain.clone(),
+            http.clone(),
+            env,
+            version.to_string(),
+        ));
     }
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
     // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`. A
@@ -289,9 +225,9 @@ async fn main() -> Result<()> {
         }
     });
     let settings = Arc::new(SettingsServer::new(
-        dir.clone(),
+        dir.to_path_buf(),
         port,
-        network_access.enabled,
+        network_enabled,
         env,
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         // Restarting answers the request first: the process exit happens on another thread, a
@@ -306,7 +242,7 @@ async fn main() -> Result<()> {
     ));
     axum::serve(
         listener,
-        api::router(version.clone(), settings).into_make_service_with_connect_info::<SocketAddr>(),
+        api::router(version.to_string(), settings).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown())
     .await?;
@@ -314,6 +250,142 @@ async fn main() -> Result<()> {
         c.stop(Duration::from_secs(10)).await;
     }
     Ok(())
+}
+
+/// Starts one project: trims its state, opens its event log, keeps its lane pool sized, watches
+/// for a phone if configured, and logs which engine runs each role. Nothing here is fatal — a
+/// project not yet fully set up shouldn't keep the health check from coming up.
+fn start_project(
+    dir: &Path,
+    lane_count: u32,
+    engine_choice: &config::EngineChoiceConfig,
+    project: &config::ProjectConfig,
+    env: impl Fn(&str) -> Option<String> + Copy,
+) {
+    // Trims each project's own state.json on startup (local-state-diet.md); not fatal, since
+    // a broken file there shouldn't keep the health check from coming up.
+    let project_dir = dir.join("projects").join(project.id_or_derived());
+    if let Err(e) = store::Store::load(&project_dir) {
+        tracing::warn!("loading {}: {e:#}", project_dir.join("state.json").display());
+    }
+    // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
+    // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
+    // Nothing calls `EventLog::add` yet — that needs the orchestrator loop, sessions and the
+    // backlog client wired in first, none of which this agent runs yet.
+    telemetry::EventLog::new().open(&project_dir.join("events"));
+    // Keeps this project's lane pool at lane_count worktrees (04-architecture.md section
+    // 4.1); not fatal, since a project not yet pointed at a real repo and worktrees folder
+    // shouldn't keep the health check from coming up either.
+    if !project.repo_path.is_empty() && !project.worktrees_dir.is_empty() {
+        let repo_path = Path::new(&project.repo_path);
+        let worktrees_dir = Path::new(&project.worktrees_dir);
+        match lanes::ensure(repo_path, worktrees_dir, lane_count) {
+            Ok(r) if !r.created.is_empty() || !r.removed.is_empty() => {
+                tracing::info!(
+                    "{}: lane pool at {} (created {:?}, removed {:?})",
+                    project.id_or_derived(),
+                    worktrees_dir.display(),
+                    r.created,
+                    r.removed
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                "{}: lane pool at {}: {e:#}",
+                project.id_or_derived(),
+                worktrees_dir.display()
+            ),
+        }
+    }
+    // play-on-phone.md section 3: while this project has a `phone` section, watch for a
+    // plugged-in, authorised Android phone. Only adb is looked up at start; re-finding it
+    // when Setup is saved needs the settings server, not yet ported.
+    if project.phone.is_some() {
+        match phone::find_adb_on_path(env) {
+            Some(adb) => {
+                tracing::info!(
+                    "{}: watching for an Android phone with {}",
+                    project.id_or_derived(),
+                    adb.display()
+                );
+                tokio::spawn(phone::watch(adb));
+            }
+            None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
+        }
+    }
+    // Which program runs each kind of work in this project, once this computer's own
+    // `engineChoice` (or, until it has one, this project's older `engines.default`/`roles`)
+    // is resolved per role group. Not used to run a session yet: that needs the orchestrator
+    // loop, still a later item.
+    let legacy = project.engines.as_ref();
+    tracing::info!(
+        "{}: engines planner {}, implementer {}, review {}, drafter {}, chat {}, writer {}",
+        project.id_or_derived(),
+        engines::engine_for(engine_choice, legacy, engines::Role::Planner, None),
+        engines::engine_for(engine_choice, legacy, engines::Role::Implementer, None),
+        engines::engine_for(engine_choice, legacy, engines::Role::Scout, None),
+        engines::engine_for(engine_choice, legacy, engines::Role::Drafter, None),
+        engines::engine_for(engine_choice, legacy, engines::Role::Assistant, None),
+        engines::engine_for(engine_choice, legacy, engines::Role::Writer, None),
+    );
+}
+
+/// Resolves and logs this run's settings: this computer's tags, the poll interval, the local
+/// model and Cursor's models, and watches the local model if it's on. Returns the effective tags,
+/// since [`serve`] needs them for the cloud view.
+fn log_runtime_settings(
+    cfg: &config::ConfigFile,
+    machine: &store::MachineStore,
+    engine_choice: &config::EngineChoiceConfig,
+    lane_count: u32,
+    env: impl Fn(&str) -> Option<String> + Copy,
+) -> Vec<String> {
+    let found = tags::found_tags(&tags::machine_facts(env));
+    let overrides = machine.tags();
+    let tag_list = tags::effective_tags(&found, overrides.as_ref(), env);
+    tracing::info!(
+        "Tags: {}",
+        if tag_list.is_empty() {
+            "none".to_string()
+        } else {
+            tag_list.join(", ")
+        }
+    );
+    let poll_interval_sec = config::poll_interval_sec(cfg, env);
+    let local_model = config::local_model(cfg, env);
+    tracing::info!(
+        "Settings: {lane_count} lane(s), checking every {poll_interval_sec}s, local model {}",
+        if local_model.enabled {
+            format!("{} at {}", local_model.model, local_model.base_url)
+        } else {
+            "off".to_string()
+        }
+    );
+    // 07-orchestrator-loop.md section 7.2: while local is on, watch whether it's up, once per
+    // computer (not per project) — a local session running against it is a later slice, since no
+    // orchestrator exists yet to start one.
+    if local_model.enabled {
+        tracing::info!("Watching the local model at {}", local_model.base_url);
+        tokio::spawn(local_model::watch(local_model.base_url.clone()));
+    }
+    // agent-settings.md section 3.1: the computer-wide shape of `engineChoice` (resolved per
+    // project and role group above), and Cursor's model per tier. Cursor's models aren't read by
+    // anything yet (engines.md section 3.4, a later slice), so still only logged.
+    let cursor_models = config::cursor_models(cfg, env);
+    tracing::info!(
+        "Engines: default {}, lanes [{}], Cursor models top {}, implementer {}, scout {}",
+        engine_choice.default.unwrap_or(config::Engine::Claude),
+        engine_choice
+            .lanes
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        cursor_models.top.as_deref().unwrap_or("auto"),
+        cursor_models.implementer.as_deref().unwrap_or("auto"),
+        cursor_models.scout.as_deref().unwrap_or("auto"),
+    );
+    tag_list
 }
 
 /// `retaskable link [production|staging|local]`, or `retaskable link backlog`
