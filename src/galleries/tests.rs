@@ -1,40 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
 use super::*;
-
-fn run(cmd: &mut Command) {
-    let status = cmd.status().unwrap();
-    assert!(status.success(), "{cmd:?} failed");
-}
-
-fn git(dir: &Path) -> Command {
-    let mut c = Command::new("git");
-    c.current_dir(dir);
-    c
-}
-
-/// A repo with an `origin` remote, its `main` pushed, so `prepare_base_checkout` can fetch and
-/// check out `origin/main` (mirrors lanes.rs's own test helper).
-fn init_repo_with_origin(root: &Path) -> PathBuf {
-    let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    run(git(&repo).args(["init", "--quiet"]));
-    run(git(&repo).args(["config", "user.email", "test@example.com"]));
-    run(git(&repo).args(["config", "user.name", "Test"]));
-    run(git(&repo).args(["checkout", "-b", "main"]));
-    std::fs::write(repo.join("README.md"), "hello").unwrap();
-    run(git(&repo).args(["add", "README.md"]));
-    run(git(&repo).args(["commit", "--quiet", "-m", "initial"]));
-    let origin = root.join("origin.git");
-    run(Command::new("git")
-        .args(["clone", "--bare", "--quiet"])
-        .arg(&repo)
-        .arg(&origin));
-    run(git(&repo).args(["remote", "add", "origin"]).arg(&origin));
-    run(git(&repo).args(["push", "-u", "--quiet", "origin", "main"]));
-    repo
-}
+use crate::test_support::{git, repo_with_origin, run};
 
 fn commit_and_push(repo: &Path, file: &str) {
     run(git(repo).args(["add", file]));
@@ -61,7 +28,7 @@ fn copy_fixture_command() -> String {
 #[test]
 fn shoot_runs_the_command_and_converts_its_pictures_into_the_gallery_folder() {
     let root = tempfile::tempdir().unwrap();
-    let repo = init_repo_with_origin(root.path());
+    let repo = repo_with_origin(root.path());
     write_test_png(&repo.join("fixture.png"), 3000, 20);
     commit_and_push(&repo, "fixture.png");
     let worktrees = root.path().join("worktrees");
@@ -98,7 +65,7 @@ fn shoot_runs_the_command_and_converts_its_pictures_into_the_gallery_folder() {
 #[test]
 fn shoot_marks_the_gallery_failed_when_the_command_writes_no_pictures() {
     let root = tempfile::tempdir().unwrap();
-    let repo = init_repo_with_origin(root.path());
+    let repo = repo_with_origin(root.path());
     let worktrees = root.path().join("worktrees");
     let dest = root.path().join("dest");
     let empty_command = if cfg!(windows) { "exit 0" } else { "true" };
@@ -130,7 +97,7 @@ fn shoot_marks_the_gallery_failed_when_the_command_writes_no_pictures() {
 #[test]
 fn shoot_fails_when_the_command_exits_non_zero() {
     let root = tempfile::tempdir().unwrap();
-    let repo = init_repo_with_origin(root.path());
+    let repo = repo_with_origin(root.path());
     let worktrees = root.path().join("worktrees");
     let dest = root.path().join("dest");
     let gallery = GalleryConfig {

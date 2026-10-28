@@ -23,3 +23,5 @@ pub mod setup_check;
 pub mod store;
 pub mod tags;
 pub mod telemetry;
+#[cfg(test)]
+mod test_support;
