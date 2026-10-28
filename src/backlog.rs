@@ -41,6 +41,7 @@ pub async fn auto_link(
     store: Arc<dyn TokenStore>,
     http: reqwest::Client,
     env: impl Fn(&str) -> Option<String>,
+    version: &str,
     on_code: impl FnOnce(&DeviceCode),
 ) -> Result<Option<u64>> {
     let backlog_url = url(&env);
@@ -54,7 +55,7 @@ pub async fn auto_link(
     let flow = link::Link {
         http,
         store: store.as_ref(),
-        machine: link::machine_info(&env),
+        machine: link::machine_info(&env, version),
         target: link::BACKLOG_TARGET,
         second: Duration::from_secs(1),
     };
@@ -378,9 +379,11 @@ mod tests {
         };
         let (_dir, store) = file_store();
         let mut shown = None;
-        let id = auto_link(store.clone(), reqwest::Client::new(), env, |c| shown = Some(c.clone()))
-            .await
-            .unwrap();
+        let id = auto_link(store.clone(), reqwest::Client::new(), env, "9.9.9", |c| {
+            shown = Some(c.clone())
+        })
+        .await
+        .unwrap();
         assert_eq!(id, Some(9));
         assert_eq!(shown.unwrap().user_code, "WXYZ-2345");
         assert_eq!(store.get(&base).unwrap().as_deref(), Some("r1"));
@@ -399,9 +402,11 @@ mod tests {
         };
         let (_dir, store) = file_store();
         store.set(&base, "already-linked").unwrap();
-        let id = auto_link(store, reqwest::Client::new(), env, |_| panic!("no code expected"))
-            .await
-            .unwrap();
+        let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
+            panic!("no code expected")
+        })
+        .await
+        .unwrap();
         assert_eq!(id, None);
     }
 
@@ -409,9 +414,11 @@ mod tests {
     async fn auto_link_does_nothing_for_a_bad_backlog_url() {
         let env = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "not a url".to_string());
         let (_dir, store) = file_store();
-        let id = auto_link(store, reqwest::Client::new(), env, |_| panic!("no code expected"))
-            .await
-            .unwrap();
+        let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
+            panic!("no code expected")
+        })
+        .await
+        .unwrap();
         assert_eq!(id, None);
     }
 }

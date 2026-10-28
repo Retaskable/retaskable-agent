@@ -69,4 +69,4 @@ The page of steps (`/start`, nine steps since setup-steps), its badges, its "Che
 - On a fresh machine with Claude Code installed but not signed in, `npm start` prints "✗ Claude Code isn't signed in: run `claude` …", and after linking, `/start`'s step 2 says the same, then turns **Done** within a minute of signing in and pressing **Check again**.
 - With `gh` signed out, step 1 shows the `gh auth login` fix.
 - The trial plan doesn't merge until **Approve plan** is pressed.
-- TypeScript: `npm run test:changed` and `npm run lint` pass. Rust: `cargo test setup_check` and `retaskable-agent check` on this machine print the same lines and exit code `npm run check` would.
+- TypeScript: `npm run test:changed` and `npm run lint` pass. Rust: `cargo test setup_check` and `retaskable check` on this machine print the same lines and exit code `npm run check` would.

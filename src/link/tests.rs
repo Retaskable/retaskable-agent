@@ -297,7 +297,7 @@ fn the_machine_is_named_by_retaskable_machine_else_the_hostname() {
     assert_eq!(machine_name(env), "jcnash-docker");
     assert!(!machine_name(|_| None).is_empty());
     let long = "x".repeat(150);
-    let info = machine_info(|k| (k == "RETASKABLE_MACHINE").then(|| long.clone()));
+    let info = machine_info(|k| (k == "RETASKABLE_MACHINE").then(|| long.clone()), "9.9.9");
     assert_eq!(info["machine"].as_str().unwrap().len(), 100);
-    assert_eq!(info["agentVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["agentVersion"], "9.9.9");
 }
