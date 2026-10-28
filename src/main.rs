@@ -3,10 +3,13 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use retaskable_agent::{api, config, connector, lanes, link, phone, setup_check, store, tags, telemetry};
+use retaskable_agent::settings_server::SettingsServer;
+use retaskable_agent::{
+    api, config, connector, engines, lanes, link, local_model, network, phone, setup_check, store, tags, telemetry,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -32,6 +35,10 @@ async fn main() -> Result<()> {
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
+    // agent-settings.md section 3.1: which program runs each kind of work (engines.md section
+    // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
+    // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
+    let engine_choice = config::engine_choice(&cfg, env);
     for project in &cfg.projects {
         // Trims each project's own state.json on startup (local-state-diet.md); not fatal, since
         // a broken file there shouldn't keep the health check from coming up.
@@ -84,6 +91,21 @@ async fn main() -> Result<()> {
                 None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
             }
         }
+        // Which program runs each kind of work in this project, once this computer's own
+        // `engineChoice` (or, until it has one, this project's older `engines.default`/`roles`)
+        // is resolved per role group. Not used to run a session yet: that needs the orchestrator
+        // loop, still a later item.
+        let legacy = project.engines.as_ref();
+        tracing::info!(
+            "{}: engines planner {}, implementer {}, review {}, drafter {}, chat {}, writer {}",
+            project.id_or_derived(),
+            engines::engine_for(&engine_choice, legacy, engines::Role::Planner, None),
+            engines::engine_for(&engine_choice, legacy, engines::Role::Implementer, None),
+            engines::engine_for(&engine_choice, legacy, engines::Role::Scout, None),
+            engines::engine_for(&engine_choice, legacy, engines::Role::Drafter, None),
+            engines::engine_for(&engine_choice, legacy, engines::Role::Assistant, None),
+            engines::engine_for(&engine_choice, legacy, engines::Role::Writer, None),
+        );
     }
     // agent-settings.md section 3 / computer-tags.md section 3.1: tags from the machine, with
     // machine.json's overrides and RETASKABLE_TAGS over them. Missing is fine; broken is fatal,
@@ -110,10 +132,16 @@ async fn main() -> Result<()> {
             "off".to_string()
         }
     );
-    // agent-settings.md section 3.1: which program runs each kind of work, and Cursor's model
-    // per tier. Not used to run a session yet (engines.md's own port), so logged for now the
-    // same way the settings above are before anything reads them.
-    let engine_choice = config::engine_choice(&cfg, env);
+    // 07-orchestrator-loop.md section 7.2: while local is on, watch whether it's up, once per
+    // computer (not per project) — a local session running against it is a later slice, since no
+    // orchestrator exists yet to start one.
+    if local_model.enabled {
+        tracing::info!("Watching the local model at {}", local_model.base_url);
+        tokio::spawn(local_model::watch(local_model.base_url.clone()));
+    }
+    // agent-settings.md section 3.1: the computer-wide shape of `engineChoice` (resolved per
+    // project and role group above), and Cursor's model per tier. Cursor's models aren't read by
+    // anything yet (engines.md section 3.4, a later slice), so still only logged.
     let cursor_models = config::cursor_models(&cfg, env);
     tracing::info!(
         "Engines: default {}, lanes [{}], Cursor models top {}, implementer {}, scout {}",
@@ -128,11 +156,23 @@ async fn main() -> Result<()> {
         cursor_models.implementer.as_deref().unwrap_or("auto"),
         cursor_models.scout.as_deref().unwrap_or("auto"),
     );
+    // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
+    // address instead, so another computer on the local network can reach the settings page.
+    let network_access = network::network_access(machine.network().as_ref(), env);
+    let host = if network_access.enabled {
+        Ipv4Addr::UNSPECIFIED
+    } else {
+        Ipv4Addr::LOCALHOST
+    };
     // Only this computer: the agent never listens on a public port (agent.md section 8).
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config::port(&cfg, env)));
+    let port = config::port(&cfg, env);
+    let addr = SocketAddr::from((host, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;
+    if network_access.enabled {
+        tracing::info!("The settings page is open on the network, at http://{addr}");
+    }
     tracing::info!("Retaskable agent {VERSION} on http://{addr}");
     // cloud.md section 5 / environments.md section 3.4: one outbound link to each cloud, every
     // project on it. Unlinked clouds wait quietly for `retaskable link`.
@@ -164,9 +204,28 @@ async fn main() -> Result<()> {
         let checks = setup_check::run_setup_checks(env).await;
         println!("{}", setup_check::setup_check_report(&checks));
     });
-    axum::serve(listener, api::router(VERSION))
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    let settings = Arc::new(SettingsServer::new(
+        dir.clone(),
+        port,
+        network_access.enabled,
+        env,
+        || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        // Restarting answers the request first: the process exit happens on another thread, a
+        // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
+        // none in flight on its own HTTP thread, but the response still deserves to flush).
+        |code: i32| {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::process::exit(code);
+            });
+        },
+    ));
+    axum::serve(
+        listener,
+        api::router(VERSION, settings).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }

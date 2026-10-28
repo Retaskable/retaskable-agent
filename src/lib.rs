@@ -4,12 +4,20 @@
 //! API, not dead code just because `main` doesn't reach it yet.
 pub mod api;
 pub mod backlog;
+pub mod ci_coverage;
 pub mod config;
 pub mod connector;
+pub mod engines;
 pub mod lanes;
 pub mod link;
+pub mod local_model;
+pub mod network;
+pub mod password;
+pub mod paths;
 pub mod phone;
-pub mod session;
+pub mod repo;
+pub mod scan;
+pub mod settings_server;
 pub mod setup_check;
 pub mod store;
 pub mod tags;
