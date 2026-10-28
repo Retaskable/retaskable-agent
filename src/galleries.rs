@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::GalleryConfig;
 use crate::lanes;
 use crate::paths;
+use crate::sync::lock;
 
 const SHOOT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const JPEG_QUALITY: u8 = 82;
@@ -130,16 +131,14 @@ type PictureKey = (String, String, String, String);
 static PICTURE_CACHE: LazyLock<Mutex<VecDeque<(PictureKey, String)>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 fn cached_picture(key: &PictureKey) -> Option<String> {
-    PICTURE_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    lock(&PICTURE_CACHE)
         .iter()
         .find(|(k, _)| k == key)
         .map(|(_, data)| data.clone())
 }
 
 fn cache_picture(key: PictureKey, data: String) {
-    let mut cache = PICTURE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = lock(&PICTURE_CACHE);
     cache.retain(|(k, _)| k != &key);
     cache.push_back((key, data));
     while cache.len() > MAX_CACHED_PICTURES {
@@ -148,17 +147,12 @@ fn cache_picture(key: PictureKey, data: String) {
 }
 
 fn set_status(project: &str, slug: &str, status: GalleryStatus) {
-    STATUS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert((project.to_string(), slug.to_string()), status);
+    lock(&STATUS).insert((project.to_string(), slug.to_string()), status);
 }
 
 /// A gallery's current status, `idle` before its first shoot.
 pub fn status(project: &str, slug: &str) -> GalleryStatus {
-    STATUS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    lock(&STATUS)
         .get(&(project.to_string(), slug.to_string()))
         .cloned()
         .unwrap_or_default()
@@ -166,7 +160,7 @@ pub fn status(project: &str, slug: &str) -> GalleryStatus {
 
 /// True while a shoot holds this project's base checkout.
 pub fn busy(project: &str) -> bool {
-    SHOOTING.lock().unwrap_or_else(|e| e.into_inner()).contains_key(project)
+    lock(&SHOOTING).contains_key(project)
 }
 
 /// Why Shoot can't start now, or `None` (tray.md section 5.3.3). Checked again right before the
@@ -293,10 +287,7 @@ pub fn shoot(
         bail!(reason);
     }
     let out_dir = safe_out_dir(&gallery.out_dir).expect("checked by shoot_refusal");
-    SHOOTING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(project.to_string(), gallery.name.clone());
+    lock(&SHOOTING).insert(project.to_string(), gallery.name.clone());
     set_status(project, slug, GalleryStatus::Shooting);
     let result = run_shoot(
         gallery,
@@ -308,7 +299,7 @@ pub fn shoot(
         project,
         gallery_dest,
     );
-    SHOOTING.lock().unwrap_or_else(|e| e.into_inner()).remove(project);
+    lock(&SHOOTING).remove(project);
     match &result {
         Ok(_) => set_status(project, slug, GalleryStatus::Idle),
         Err(e) => set_status(project, slug, GalleryStatus::Failed(e.to_string())),
@@ -449,7 +440,7 @@ fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) -> Res
     };
     let _ = t_out.join();
     let _ = t_err.join();
-    let output_bytes = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let output_bytes = lock(&buf).clone();
     let output = String::from_utf8_lossy(&output_bytes).into_owned();
     let code = status.and_then(|s| s.code()).unwrap_or(-1);
     Ok((code, output, timed_out))
@@ -501,7 +492,7 @@ fn capture_capped(mut pipe: impl Read, buf: std::sync::Arc<Mutex<Vec<u8>>>) {
             Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
-        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = lock(&buf);
         buf.extend_from_slice(&chunk[..n]);
         if buf.len() > OUTPUT_CAP {
             let drop = buf.len() - OUTPUT_CAP;
