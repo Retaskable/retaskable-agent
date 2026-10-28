@@ -22,7 +22,10 @@ use reader::CursorReader;
 
 /// `cursorArgs(spec)`: print mode, `stream-json` out, trusted (never asked to approve), the
 /// chosen model (or "auto"), `--mode ask` for a read-only role, and `--resume` for a session
-/// that already has an id. Never `--force`/`--yolo` — what a session may do is the allowlist's.
+/// that already has a chat (docs/specs/engines/03-choosing-the-engine.md section 3.3: a fresh
+/// session's prechosen id is never sent as `--resume` — `cursor-agent` has no way to start a
+/// chat under a caller-chosen id, so that id only becomes real once `create-chat` replaces it).
+/// Never `--force`/`--yolo` — what a session may do is the allowlist's.
 fn cursor_args(spec: &SessionSpec) -> Vec<String> {
     let model = spec
         .cursor
@@ -43,8 +46,8 @@ fn cursor_args(spec: &SessionSpec) -> Vec<String> {
         args.push("ask".to_string());
     }
     match &spec.start {
-        SessionStart::Ephemeral => {}
-        SessionStart::Fresh(id) | SessionStart::Resume(id) => {
+        SessionStart::Ephemeral | SessionStart::Fresh(_) => {}
+        SessionStart::Resume(id) => {
             args.push("--resume".to_string());
             args.push(id.clone());
         }
@@ -183,7 +186,7 @@ mod tests {
     fn cursor_args_prints_streams_asks_when_read_only_and_never_forces() {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = base_spec(dir.path());
-        spec.start = SessionStart::Fresh("chat-1".to_string());
+        spec.start = SessionStart::Resume("chat-1".to_string());
         let args = cursor_args(&spec);
         assert_eq!(
             args,
@@ -207,6 +210,18 @@ mod tests {
         writing.readonly = false;
         writing.start = SessionStart::Resume("chat-2".to_string());
         assert!(!cursor_args(&writing).contains(&"--mode".to_string()));
+    }
+
+    #[test]
+    fn cursor_args_a_fresh_start_sends_no_resume_cursor_cant_honor_a_prechosen_id() {
+        // docs/specs/engines/03-choosing-the-engine.md section 3.3: "A fresh implementer run's
+        // prechosen id is not sent as --resume: create-chat replaces it" — cursor-agent has no
+        // way to start a chat under a caller-chosen id, so sending it as --resume would try to
+        // resume a chat that was never created.
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = base_spec(dir.path());
+        spec.start = SessionStart::Fresh("prechosen-id".to_string());
+        assert!(!cursor_args(&spec).contains(&"--resume".to_string()));
     }
 
     #[test]
