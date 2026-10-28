@@ -2,8 +2,7 @@
 //! /settings`, `POST /api/settings/session`, `GET`/`POST /api/settings`, `POST
 //! /api/settings/restart`. Every request's Host must be this computer's own, a POST's Origin its
 //! own, and a change the session's CSRF token (section 4.3); signing in is by a one-time tray
-//! token today (`verify_password` always refuses, since network access and its password aren't
-//! saved by this agent yet — section 3.1).
+//! token, or, once network access is on, this computer's password (section 4.2).
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -17,10 +16,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::api::not_found_response;
 use crate::config;
+use crate::network::{self, NetworkAccess};
+use crate::password;
 use crate::store::MachineStore;
 use crate::tags;
 
@@ -32,7 +33,7 @@ const FIRST_WAIT_SECS: u64 = 60;
 const MAX_WAIT_SECS: u64 = 60 * 60;
 
 /// agent-settings.md section 3.2: the environment variables the settings page greys out.
-const AGENT_ENV_VARS: [&str; 7] = [
+const AGENT_ENV_VARS: [&str; 8] = [
     "RETASKABLE_PORT",
     "RETASKABLE_POLL_SEC",
     "RETASKABLE_TAGS",
@@ -40,6 +41,7 @@ const AGENT_ENV_VARS: [&str; 7] = [
     "RETASKABLE_LOCAL_URL",
     "RETASKABLE_ENGINES",
     "RETASKABLE_CURSOR_MODELS",
+    "RETASKABLE_NETWORK_PASSWORD",
 ];
 
 static SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
@@ -77,6 +79,9 @@ pub struct SettingsServer {
     /// The port the agent is actually answering on, to say whether a restart is waiting and to
     /// check a request's Host (section 4.3).
     port: u16,
+    /// Whether network access was on (so the port listens on every address) when the agent
+    /// started, to say whether a restart is waiting the same way `port` does.
+    network_enabled: bool,
     env: EnvFn,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
@@ -87,6 +92,7 @@ impl SettingsServer {
     pub fn new(
         dir: PathBuf,
         port: u16,
+        network_enabled: bool,
         env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
         now: impl Fn() -> u64 + Send + Sync + 'static,
         exit: impl Fn(i32) + Send + Sync + 'static,
@@ -94,6 +100,7 @@ impl SettingsServer {
         Self {
             dir,
             port,
+            network_enabled,
             env: Box::new(env),
             now: Box::new(now),
             exit: Box::new(exit),
@@ -113,10 +120,18 @@ impl SettingsServer {
         matches!(state.tokens.remove(token), Some(expires_at) if expires_at > now)
     }
 
-    /// Network access and its password aren't saved by this agent yet (section 3.1), so there is
-    /// never a password to match and every attempt is wrong.
-    fn verify_password(&self, _password: &str) -> bool {
-        false
+    /// Matches a password against this computer's network-access hash, constant time
+    /// (section 3.1), whichever set it: `RETASKABLE_NETWORK_PASSWORD` or `machine.json`.
+    fn verify_password(&self, password_attempt: &str) -> bool {
+        let env = |k: &str| self.env(k);
+        let Ok(machine) = MachineStore::load(&self.dir) else {
+            return false;
+        };
+        let access = network::network_access(machine.network().as_ref(), env);
+        access
+            .password_hash
+            .as_deref()
+            .is_some_and(|hash| password::verify_password(password_attempt, hash))
     }
 
     fn create_session(&self) -> (String, String) {
@@ -192,8 +207,9 @@ impl SettingsServer {
     }
 
     /// Its Host is this computer's own, at the port it answered on (section 4.3): no DNS
-    /// rebinding. Network access and its wider set of allowed addresses aren't ported yet, since
-    /// the port only ever binds `127.0.0.1` so far (section 4.4).
+    /// rebinding. Network access can already make the port listen on every address (section
+    /// 4.4), but this still only accepts the loopback names; widening it to the computer's own
+    /// network addresses isn't ported yet (tracked outside this change).
     fn host_is_allowed(&self, host_header: &str) -> bool {
         let (host, port) = split_host_port(host_header);
         if let Some(port) = port
@@ -219,12 +235,12 @@ impl SettingsServer {
         let engine_choice = config::engine_choice(&cfg, env);
         let cursor = config::cursor_models(&cfg, env);
         let port = config::port(&cfg, env);
+        let net = network::network_access(machine.network().as_ref(), env);
         Ok(json!({
             "port": port,
             // agent-settings.md section 4.1: whether the saved port or network access differs
-            // from what the agent runs on. Network access isn't saved yet, so only the port can
-            // make this true today.
-            "restartWaiting": port != self.port,
+            // from what the agent runs on.
+            "restartWaiting": port != self.port || net.enabled != self.network_enabled,
             "pollIntervalSec": config::poll_interval_sec(&cfg, env),
             "tags": {
                 "found": found,
@@ -245,6 +261,10 @@ impl SettingsServer {
                 "implementer": cursor.implementer,
                 "scout": cursor.scout,
             },
+            "network": {
+                "enabled": net.enabled,
+                "hasPassword": net.password_hash.is_some(),
+            },
             "envVars": Value::Object(
                 AGENT_ENV_VARS
                     .iter()
@@ -255,9 +275,7 @@ impl SettingsServer {
     }
 
     /// Saves a typed tag list as changes to the found tags (added, removed), the same as setup
-    /// will (agent-settings.md section 3.1). Port, local model, how often it checks, engines and
-    /// Cursor's models have no save path yet: `config.json` has none to write to (tracked in
-    /// `remaining`, not here).
+    /// will (agent-settings.md section 3.1).
     fn save_tags(&self, typed: &[String]) -> Result<()> {
         let env = |k: &str| self.env(k);
         let found = tags::found_tags(&tags::machine_facts(env));
@@ -268,6 +286,204 @@ impl SettingsServer {
         let mut store = MachineStore::load(&self.dir)?;
         store.set_tags(overrides)
     }
+
+    /// `Err` when `var` sets this setting (section 3.2): a save must refuse the same way the
+    /// page greys the field out.
+    fn env_gate(&self, var: &str) -> Result<(), SaveError> {
+        if self.env(var).is_some() {
+            return Err(SaveError::Invalid(format!("Set by {var}: change it there.")));
+        }
+        Ok(())
+    }
+
+    /// agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535."
+    fn save_port(&self, port: u16) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_PORT")?;
+        if !config::port_in_range(port) {
+            return Err(SaveError::Invalid("Port must be 1024 to 65535.".to_string()));
+        }
+        config::save_machine_settings(&self.dir, |obj| {
+            obj.insert("port".to_string(), json!(port));
+        })?;
+        Ok(())
+    }
+
+    /// agent-settings.md section 3.1: "How often it checks: 2 to 3600 seconds."
+    fn save_poll_interval(&self, secs: u32) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_POLL_SEC")?;
+        if !config::poll_interval_in_range(secs) {
+            return Err(SaveError::Invalid(
+                "How often it checks must be 2 to 3600 seconds.".to_string(),
+            ));
+        }
+        config::save_machine_settings(&self.dir, |obj| {
+            obj.insert("pollIntervalSec".to_string(), json!(secs));
+        })?;
+        Ok(())
+    }
+
+    /// agent-settings.md section 3.1: "Local model: on or off; its model's name ...; its
+    /// address, http or https, with no user or password in it."
+    fn save_local(&self, update: &LocalUpdate) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_LOCAL_MODEL")?;
+        self.env_gate("RETASKABLE_LOCAL_URL")?;
+        if update.enabled && !config::valid_model_name(&update.model) {
+            return Err(SaveError::Invalid(
+                "Local model's name must be 1 to 100 letters, digits, '.', '_', ':', '/' or '-'.".to_string(),
+            ));
+        }
+        if !config::valid_local_url(&update.base_url) {
+            return Err(SaveError::Invalid(
+                "Local model's address must be http or https, with no user or password in it.".to_string(),
+            ));
+        }
+        config::save_machine_settings(&self.dir, |obj| {
+            obj.insert(
+                "local".to_string(),
+                json!({
+                    "enabled": update.enabled,
+                    "model": update.model,
+                    "baseUrl": update.base_url,
+                }),
+            );
+        })?;
+        Ok(())
+    }
+
+    /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi or local) ...".
+    /// Per-role and per-lane overrides have no save path yet (tracked outside this change).
+    fn save_engine_default(&self, default: &str) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_ENGINES")?;
+        let engine = config::parse_engine(default)
+            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi or local.".to_string()))?;
+        config::save_machine_settings(&self.dir, |obj| {
+            match obj.entry("engineChoice".to_string()).or_insert_with(|| json!({})) {
+                Value::Object(engine_choice) => {
+                    engine_choice.insert("default".to_string(), json!(engine.to_string()));
+                }
+                other => *other = json!({ "default": engine.to_string() }),
+            }
+        })?;
+        Ok(())
+    }
+
+    /// agent-settings.md section 3.1: "Cursor's models: one per tier ...; empty is auto."
+    fn save_cursor_models(&self, update: &CursorModelsUpdate) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_CURSOR_MODELS")?;
+        let clean = |name: &Option<String>| -> Result<Option<String>, SaveError> {
+            match name {
+                None => Ok(None),
+                Some(s) if s.trim().is_empty() => Ok(None),
+                Some(s) if config::valid_cursor_model_name(s) => Ok(Some(s.clone())),
+                Some(_) => Err(SaveError::Invalid(
+                    "Cursor's model name must be letters, digits, '_', '.', ':', '/' or '-', not starting with '-'."
+                        .to_string(),
+                )),
+            }
+        };
+        let top = clean(&update.top)?;
+        let implementer = clean(&update.implementer)?;
+        let scout = clean(&update.scout)?;
+        config::save_machine_settings(&self.dir, |obj| {
+            let mut models = Map::new();
+            if let Some(t) = top {
+                models.insert("top".to_string(), json!(t));
+            }
+            if let Some(i) = implementer {
+                models.insert("implementer".to_string(), json!(i));
+            }
+            if let Some(s) = scout {
+                models.insert("scout".to_string(), json!(s));
+            }
+            match obj.entry("cursor".to_string()).or_insert_with(|| json!({})) {
+                Value::Object(cursor) => {
+                    cursor.insert("models".to_string(), Value::Object(models));
+                }
+                other => *other = json!({ "models": models }),
+            }
+        })?;
+        Ok(())
+    }
+
+    /// agent-settings.md section 3.1: "Network access: on or off. On needs a password of at
+    /// least 8 characters ... Turning it off keeps the hash, so turning it on again needs no new
+    /// one."
+    fn save_network(&self, update: &NetworkUpdate) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_NETWORK_PASSWORD")?;
+        let mut store = MachineStore::load(&self.dir)?;
+        let password_hash = match &update.password {
+            Some(p) if !p.is_empty() => {
+                if p.encode_utf16().count() < network::MIN_PASSWORD_LEN {
+                    return Err(SaveError::Invalid(format!(
+                        "Password must be at least {} characters.",
+                        network::MIN_PASSWORD_LEN
+                    )));
+                }
+                Some(password::hash_password(p))
+            }
+            _ => store.network().and_then(|n| n.password_hash),
+        };
+        if update.enabled && password_hash.is_none() {
+            return Err(SaveError::Invalid(
+                "Network access needs a password of at least 8 characters.".to_string(),
+            ));
+        }
+        store.set_network(NetworkAccess {
+            enabled: update.enabled,
+            password_hash,
+        })?;
+        Ok(())
+    }
+}
+
+/// A save's refusal (section 3.1's own validation, or section 3.2's env-var gate) as opposed to
+/// an unexpected I/O failure: the first answers 400, the second 500 (`save_error_response`).
+enum SaveError {
+    Invalid(String),
+    Io(anyhow::Error),
+}
+
+impl From<anyhow::Error> for SaveError {
+    fn from(e: anyhow::Error) -> Self {
+        SaveError::Io(e)
+    }
+}
+
+fn save_error_response(e: SaveError) -> Response {
+    match e {
+        SaveError::Invalid(message) => bad_request(&message),
+        SaveError::Io(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalUpdate {
+    enabled: bool,
+    model: String,
+    base_url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineChoiceUpdate {
+    default: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct CursorModelsUpdate {
+    top: Option<String>,
+    implementer: Option<String>,
+    scout: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkUpdate {
+    enabled: bool,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 /// The settings page's own routes (agent/08-http-api.md), merged into the agent's router
@@ -376,9 +592,15 @@ async fn get_settings(State(settings): State<Arc<SettingsServer>>, headers: Head
 }
 
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
 struct SettingsUpdate {
-    #[serde(default)]
     tags: Option<Vec<String>>,
+    port: Option<u16>,
+    poll_interval_sec: Option<u32>,
+    local: Option<LocalUpdate>,
+    engine_choice: Option<EngineChoiceUpdate>,
+    cursor_models: Option<CursorModelsUpdate>,
+    network: Option<NetworkUpdate>,
     #[serde(flatten)]
     unsupported: HashMap<String, Value>,
 }
@@ -407,6 +629,36 @@ async fn post_settings(
         && let Err(e) = settings.save_tags(typed)
     {
         return internal_error(&e.to_string());
+    }
+    if let Some(port) = update.port
+        && let Err(e) = settings.save_port(port)
+    {
+        return save_error_response(e);
+    }
+    if let Some(secs) = update.poll_interval_sec
+        && let Err(e) = settings.save_poll_interval(secs)
+    {
+        return save_error_response(e);
+    }
+    if let Some(local) = &update.local
+        && let Err(e) = settings.save_local(local)
+    {
+        return save_error_response(e);
+    }
+    if let Some(engine_choice) = &update.engine_choice
+        && let Err(e) = settings.save_engine_default(&engine_choice.default)
+    {
+        return save_error_response(e);
+    }
+    if let Some(cursor_models) = &update.cursor_models
+        && let Err(e) = settings.save_cursor_models(cursor_models)
+    {
+        return save_error_response(e);
+    }
+    if let Some(net_update) = &update.network
+        && let Err(e) = settings.save_network(net_update)
+    {
+        return save_error_response(e);
     }
     Json(json!({ "saved": true })).into_response()
 }
@@ -506,6 +758,7 @@ pub(crate) fn test_server() -> (Arc<SettingsServer>, tempfile::TempDir) {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        false,
         |_: &str| None,
         || 1_700_000_000,
         |_: i32| {},

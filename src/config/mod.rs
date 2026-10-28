@@ -13,11 +13,14 @@ mod project;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 pub use machine::{
     CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines, cursor_models, engine_choice,
     lanes, local_model, poll_interval_sec, port,
+};
+pub(crate) use machine::{
+    parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url, valid_model_name,
 };
 pub use project::{CheckConfig, ProjectConfig, ProjectType};
 
@@ -44,6 +47,23 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
     parse(&text).with_context(|| format!("reading {}", file.display()))
+}
+
+/// Patches `<dir>/config.json`'s top-level object (empty when there's none yet) and writes it
+/// back indented, keeping every key `patch` doesn't touch (`projects[]`, unknown fields, ...).
+/// Used by the settings page's save paths, which change only the machine's own settings.
+pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
+    let file = dir.join("config.json");
+    let mut obj = match std::fs::read_to_string(&file) {
+        Ok(text) => match serde_json::from_str(&text)? {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+    };
+    patch(&mut obj);
+    crate::store::write_json_atomic(&file, &Value::Object(obj), false)
 }
 
 /// A version 2 file as it is; a version 1 one (no `"version"` key) as one project, its id made when it has none
