@@ -2,14 +2,14 @@
 //! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use retaskable_agent::settings_server::SettingsServer;
 use retaskable_agent::{
-    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_update,
-    setup_check, store, tags, telemetry,
+    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_install,
+    release_update, setup_check, store, tags, telemetry,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
             cfg: &cfg,
             version: &version,
             build: build.as_ref(),
+            exe_path: exe_path.as_deref(),
             tag_list,
             network_enabled: network_access.enabled,
             port,
@@ -143,6 +144,7 @@ struct ServeArgs<'a> {
     cfg: &'a config::ConfigFile,
     version: &'a str,
     build: Option<&'a release::Build>,
+    exe_path: Option<&'a Path>,
     tag_list: Vec<String>,
     network_enabled: bool,
     port: u16,
@@ -157,6 +159,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         cfg,
         version,
         build,
+        exe_path,
         tag_list,
         network_enabled,
         port,
@@ -224,22 +227,46 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             println!("{report}");
         }
     });
-    // installers/03-the-bundle-agent-bundle.md section 3.11: a release build has no checkout to move
-    // forward, so it asks its own environment's release feed for a newer build and downloads it.
-    // Readying it for install and actually swapping it in on a restart are section 3.12, not ported
-    // yet, so `installer`/`on_ready` are left unwired: a newer build is downloaded and kept, never
-    // installed.
+    // Shared by the settings page's own restart button and, below, a newer build asking for one:
+    // the one place code 75's exit installs whatever `release_update` has ready first
+    // (installers/03-the-bundle-agent-bundle.md section 3.12 — `ReleaseUpdater.installNow` runs
+    // "instead of relaunch", so this is also the only relaunch this port has).
+    let updater_slot: Arc<Mutex<Option<Arc<release_update::ReleaseUpdater>>>> = Arc::new(Mutex::new(None));
+    let exit_fn = {
+        let updater_slot = updater_slot.clone();
+        move |code: i32| {
+            let updater_slot = updater_slot.clone();
+            // Restarting answers the request first: the process exit happens on another thread, a
+            // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
+            // none in flight on its own HTTP thread, but the response still deserves to flush).
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if code == 75
+                    && let Some(updater) = updater_slot.lock().unwrap().clone()
+                {
+                    updater.install_now();
+                }
+                std::process::exit(code);
+            });
+        }
+    };
+    // installers/03-the-bundle-agent-bundle.md section 3.11/3.12: a release build has no checkout
+    // to move forward, so it asks its own environment's release feed for a newer build, downloads
+    // and readies it, then asks for the same restart the settings page's own button does once
+    // it's ready to install.
     if let Some(b) = build {
+        let on_ready_exit = exit_fn.clone();
         let updater = Arc::new(release_update::ReleaseUpdater::new(release_update::ReleaseUpdateDeps {
             build: b.clone(),
             cloud_url: link::cloud_url(cfg, env, build)?,
             data_dir: dir.to_path_buf(),
             http: http.clone(),
-            installer: None,
-            on_ready: None,
+            installer: exe_path.map(|p| release_install::installer_for(p) as Arc<dyn release_update::Installer>),
+            on_ready: Some(Box::new(move |_ready| on_ready_exit(75))),
             log: None,
             fetch: None,
         }));
+        *updater_slot.lock().unwrap() = Some(updater.clone());
         tokio::spawn(release_update::watch(updater));
     }
     let settings = Arc::new(SettingsServer::new(
@@ -248,15 +275,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         network_enabled,
         env,
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-        // Restarting answers the request first: the process exit happens on another thread, a
-        // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
-        // none in flight on its own HTTP thread, but the response still deserves to flush).
-        |code: i32| {
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                std::process::exit(code);
-            });
-        },
+        exit_fn,
     ));
     axum::serve(
         listener,

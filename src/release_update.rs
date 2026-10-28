@@ -5,7 +5,8 @@
 //! into the data folder's `updates/<version>/`, and kept only once its SHA-256 is the feed's: a wrong
 //! one is deleted and refused. Readying a downloaded build for install (a signature check unlike the
 //! running app's refused too) and actually swapping it in on a restart are section 3.12
-//! (`releaseInstall.ts`), not ported yet — [`Installer`] is only the seam this module calls through.
+//! (`releaseInstall.ts`, ported as [`crate::release_install`]) — [`Installer`] is the seam between
+//! the two.
 #[cfg(test)]
 mod tests;
 
