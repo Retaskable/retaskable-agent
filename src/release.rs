@@ -95,6 +95,12 @@ fn names(environment: Environment) -> (&'static str, &'static str) {
     }
 }
 
+/// `releaseName` (release.ts): `Retaskable` or `Retaskable Staging`, used wherever a release
+/// build names itself to a person (a desktop entry's `Name=`, a login item's).
+pub fn release_name(environment: Environment) -> &'static str {
+    names(environment).0
+}
+
 /// installers/03-the-bundle-agent-bundle.md section 3.13: the port a release build's health
 /// check falls back to once neither `RETASKABLE_PORT` nor the config's own `port` says a valid
 /// one — a Staging release build's own is 4701, so it never collides with a Production or
