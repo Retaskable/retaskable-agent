@@ -82,6 +82,10 @@ pub struct SettingsServer {
     /// Whether network access was on (so the port listens on every address) when the agent
     /// started, to say whether a restart is waiting the same way `port` does.
     network_enabled: bool,
+    /// `RETASKABLE_NETWORK_PASSWORD`'s own access, hashed once here at construction rather than
+    /// on every request: scrypt is deliberately slow, and the env var can't change while this
+    /// process runs.
+    env_network_access: Option<NetworkAccess>,
     env: EnvFn,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
@@ -97,10 +101,12 @@ impl SettingsServer {
         now: impl Fn() -> u64 + Send + Sync + 'static,
         exit: impl Fn(i32) + Send + Sync + 'static,
     ) -> Self {
+        let env_network_access = network::env_network_access(|k| env(k));
         Self {
             dir,
             port,
             network_enabled,
+            env_network_access,
             env: Box::new(env),
             now: Box::new(now),
             exit: Box::new(exit),
@@ -121,17 +127,24 @@ impl SettingsServer {
     }
 
     /// Matches a password against this computer's network-access hash, constant time
-    /// (section 3.1), whichever set it: `RETASKABLE_NETWORK_PASSWORD` or `machine.json`.
+    /// (section 3.1), whichever set it: `RETASKABLE_NETWORK_PASSWORD` or `machine.json`. Only
+    /// while network access is on (section 3.1: "Turning it off keeps the hash" so it can be
+    /// turned back on, but doesn't go on signing in while it's off).
     fn verify_password(&self, password_attempt: &str) -> bool {
-        let env = |k: &str| self.env(k);
-        let Ok(machine) = MachineStore::load(&self.dir) else {
-            return false;
+        let access = match &self.env_network_access {
+            Some(access) => access.clone(),
+            None => {
+                let Ok(machine) = MachineStore::load(&self.dir) else {
+                    return false;
+                };
+                machine.network().unwrap_or_default()
+            }
         };
-        let access = network::network_access(machine.network().as_ref(), env);
-        access
-            .password_hash
-            .as_deref()
-            .is_some_and(|hash| password::verify_password(password_attempt, hash))
+        access.enabled
+            && access
+                .password_hash
+                .as_deref()
+                .is_some_and(|hash| password::verify_password(password_attempt, hash))
     }
 
     fn create_session(&self) -> (String, String) {
@@ -235,7 +248,10 @@ impl SettingsServer {
         let engine_choice = config::engine_choice(&cfg, env);
         let cursor = config::cursor_models(&cfg, env);
         let port = config::port(&cfg, env);
-        let net = network::network_access(machine.network().as_ref(), env);
+        let net = self
+            .env_network_access
+            .clone()
+            .unwrap_or_else(|| machine.network().unwrap_or_default());
         Ok(json!({
             "port": port,
             // agent-settings.md section 4.1: whether the saved port or network access differs
@@ -296,12 +312,18 @@ impl SettingsServer {
         Ok(())
     }
 
-    /// agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535."
-    fn save_port(&self, port: u16) -> Result<(), SaveError> {
+    /// agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535." No write, so a
+    /// caller can validate every field of a multi-field save before writing any of them.
+    fn validate_port(&self, port: u16) -> Result<(), SaveError> {
         self.env_gate("RETASKABLE_PORT")?;
         if !config::port_in_range(port) {
             return Err(SaveError::Invalid("Port must be 1024 to 65535.".to_string()));
         }
+        Ok(())
+    }
+
+    fn save_port(&self, port: u16) -> Result<(), SaveError> {
+        self.validate_port(port)?;
         config::save_machine_settings(&self.dir, |obj| {
             obj.insert("port".to_string(), json!(port));
         })?;
@@ -309,13 +331,18 @@ impl SettingsServer {
     }
 
     /// agent-settings.md section 3.1: "How often it checks: 2 to 3600 seconds."
-    fn save_poll_interval(&self, secs: u32) -> Result<(), SaveError> {
+    fn validate_poll_interval(&self, secs: u32) -> Result<(), SaveError> {
         self.env_gate("RETASKABLE_POLL_SEC")?;
         if !config::poll_interval_in_range(secs) {
             return Err(SaveError::Invalid(
                 "How often it checks must be 2 to 3600 seconds.".to_string(),
             ));
         }
+        Ok(())
+    }
+
+    fn save_poll_interval(&self, secs: u32) -> Result<(), SaveError> {
+        self.validate_poll_interval(secs)?;
         config::save_machine_settings(&self.dir, |obj| {
             obj.insert("pollIntervalSec".to_string(), json!(secs));
         })?;
@@ -324,7 +351,7 @@ impl SettingsServer {
 
     /// agent-settings.md section 3.1: "Local model: on or off; its model's name ...; its
     /// address, http or https, with no user or password in it."
-    fn save_local(&self, update: &LocalUpdate) -> Result<(), SaveError> {
+    fn validate_local(&self, update: &LocalUpdate) -> Result<(), SaveError> {
         self.env_gate("RETASKABLE_LOCAL_MODEL")?;
         self.env_gate("RETASKABLE_LOCAL_URL")?;
         if update.enabled && !config::valid_model_name(&update.model) {
@@ -337,6 +364,11 @@ impl SettingsServer {
                 "Local model's address must be http or https, with no user or password in it.".to_string(),
             ));
         }
+        Ok(())
+    }
+
+    fn save_local(&self, update: &LocalUpdate) -> Result<(), SaveError> {
+        self.validate_local(update)?;
         config::save_machine_settings(&self.dir, |obj| {
             obj.insert(
                 "local".to_string(),
@@ -352,10 +384,14 @@ impl SettingsServer {
 
     /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi or local) ...".
     /// Per-role and per-lane overrides have no save path yet (tracked outside this change).
-    fn save_engine_default(&self, default: &str) -> Result<(), SaveError> {
+    fn validate_engine_default(&self, default: &str) -> Result<config::Engine, SaveError> {
         self.env_gate("RETASKABLE_ENGINES")?;
-        let engine = config::parse_engine(default)
-            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi or local.".to_string()))?;
+        config::parse_engine(default)
+            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi or local.".to_string()))
+    }
+
+    fn save_engine_default(&self, default: &str) -> Result<(), SaveError> {
+        let engine = self.validate_engine_default(default)?;
         config::save_machine_settings(&self.dir, |obj| {
             match obj.entry("engineChoice".to_string()).or_insert_with(|| json!({})) {
                 Value::Object(engine_choice) => {
@@ -368,7 +404,7 @@ impl SettingsServer {
     }
 
     /// agent-settings.md section 3.1: "Cursor's models: one per tier ...; empty is auto."
-    fn save_cursor_models(&self, update: &CursorModelsUpdate) -> Result<(), SaveError> {
+    fn validate_cursor_models(&self, update: &CursorModelsUpdate) -> Result<CleanedCursorModels, SaveError> {
         self.env_gate("RETASKABLE_CURSOR_MODELS")?;
         let clean = |name: &Option<String>| -> Result<Option<String>, SaveError> {
             match name {
@@ -381,18 +417,24 @@ impl SettingsServer {
                 )),
             }
         };
-        let top = clean(&update.top)?;
-        let implementer = clean(&update.implementer)?;
-        let scout = clean(&update.scout)?;
+        Ok(CleanedCursorModels {
+            top: clean(&update.top)?,
+            implementer: clean(&update.implementer)?,
+            scout: clean(&update.scout)?,
+        })
+    }
+
+    fn save_cursor_models(&self, update: &CursorModelsUpdate) -> Result<(), SaveError> {
+        let cleaned = self.validate_cursor_models(update)?;
         config::save_machine_settings(&self.dir, |obj| {
             let mut models = Map::new();
-            if let Some(t) = top {
+            if let Some(t) = cleaned.top {
                 models.insert("top".to_string(), json!(t));
             }
-            if let Some(i) = implementer {
+            if let Some(i) = cleaned.implementer {
                 models.insert("implementer".to_string(), json!(i));
             }
-            if let Some(s) = scout {
+            if let Some(s) = cleaned.scout {
                 models.insert("scout".to_string(), json!(s));
             }
             match obj.entry("cursor".to_string()).or_insert_with(|| json!({})) {
@@ -407,11 +449,10 @@ impl SettingsServer {
 
     /// agent-settings.md section 3.1: "Network access: on or off. On needs a password of at
     /// least 8 characters ... Turning it off keeps the hash, so turning it on again needs no new
-    /// one."
-    fn save_network(&self, update: &NetworkUpdate) -> Result<(), SaveError> {
+    /// one." Reads `machine.json` when `update` needs its already-saved hash, but never writes.
+    fn validate_network(&self, update: &NetworkUpdate) -> Result<(), SaveError> {
         self.env_gate("RETASKABLE_NETWORK_PASSWORD")?;
-        let mut store = MachineStore::load(&self.dir)?;
-        let password_hash = match &update.password {
+        let has_password = match &update.password {
             Some(p) if !p.is_empty() => {
                 if p.encode_utf16().count() < network::MIN_PASSWORD_LEN {
                     return Err(SaveError::Invalid(format!(
@@ -419,15 +460,27 @@ impl SettingsServer {
                         network::MIN_PASSWORD_LEN
                     )));
                 }
-                Some(password::hash_password(p))
+                true
             }
-            _ => store.network().and_then(|n| n.password_hash),
+            _ => MachineStore::load(&self.dir)?
+                .network()
+                .is_some_and(|n| n.password_hash.is_some()),
         };
-        if update.enabled && password_hash.is_none() {
+        if update.enabled && !has_password {
             return Err(SaveError::Invalid(
                 "Network access needs a password of at least 8 characters.".to_string(),
             ));
         }
+        Ok(())
+    }
+
+    fn save_network(&self, update: &NetworkUpdate) -> Result<(), SaveError> {
+        self.validate_network(update)?;
+        let mut store = MachineStore::load(&self.dir)?;
+        let password_hash = match &update.password {
+            Some(p) if !p.is_empty() => Some(password::hash_password(p)),
+            _ => store.network().and_then(|n| n.password_hash),
+        };
         store.set_network(NetworkAccess {
             enabled: update.enabled,
             password_hash,
@@ -473,6 +526,13 @@ struct EngineChoiceUpdate {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct CursorModelsUpdate {
+    top: Option<String>,
+    implementer: Option<String>,
+    scout: Option<String>,
+}
+
+/// A `CursorModelsUpdate`'s names, validated and emptied to `None` (section 3.1: "empty is auto").
+struct CleanedCursorModels {
     top: Option<String>,
     implementer: Option<String>,
     scout: Option<String>,
@@ -625,6 +685,39 @@ async fn post_settings(
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
+    // Validate every field this body touches before writing any of them, so a body with a good
+    // field and a bad one (e.g. tags plus an out-of-range port) never leaves a half-done save.
+    if let Some(port) = update.port
+        && let Err(e) = settings.validate_port(port)
+    {
+        return save_error_response(e);
+    }
+    if let Some(secs) = update.poll_interval_sec
+        && let Err(e) = settings.validate_poll_interval(secs)
+    {
+        return save_error_response(e);
+    }
+    if let Some(local) = &update.local
+        && let Err(e) = settings.validate_local(local)
+    {
+        return save_error_response(e);
+    }
+    if let Some(engine_choice) = &update.engine_choice
+        && let Err(e) = settings.validate_engine_default(&engine_choice.default)
+    {
+        return save_error_response(e);
+    }
+    if let Some(cursor_models) = &update.cursor_models
+        && let Err(e) = settings.validate_cursor_models(cursor_models)
+    {
+        return save_error_response(e);
+    }
+    if let Some(net_update) = &update.network
+        && let Err(e) = settings.validate_network(net_update)
+    {
+        return save_error_response(e);
+    }
+
     if let Some(typed) = &update.tags
         && let Err(e) = settings.save_tags(typed)
     {

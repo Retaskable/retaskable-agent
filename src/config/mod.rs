@@ -13,7 +13,7 @@ mod project;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 pub use machine::{
     CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines, cursor_models, engine_choice,
@@ -49,9 +49,12 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
     parse(&text).with_context(|| format!("reading {}", file.display()))
 }
 
-/// Patches `<dir>/config.json`'s top-level object (empty when there's none yet) and writes it
-/// back indented, keeping every key `patch` doesn't touch (`projects[]`, unknown fields, ...).
-/// Used by the settings page's save paths, which change only the machine's own settings.
+/// Patches `<dir>/config.json`'s top-level object and writes it back indented, keeping every key
+/// `patch` doesn't touch (`projects[]`, unknown fields, ...). When there's no file yet, starts
+/// from an empty version 2 file rather than an empty object: an empty object has no `"version"`
+/// key, so `parse` would read it back as a version 1 single project with an empty `repoPath`,
+/// conjuring a phantom project out of the first setting anyone saves. Used by the settings page's
+/// save paths, which change only the machine's own settings.
 pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
     let file = dir.join("config.json");
     let mut obj = match std::fs::read_to_string(&file) {
@@ -59,7 +62,12 @@ pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Val
             Value::Object(map) => map,
             _ => Map::new(),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut obj = Map::new();
+            obj.insert("version".to_string(), json!(2));
+            obj.insert("projects".to_string(), json!([]));
+            obj
+        }
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
     patch(&mut obj);
@@ -369,6 +377,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.json"), "{").unwrap();
         assert!(format!("{:#}", load(dir.path()).unwrap_err()).contains("config.json"));
+    }
+
+    #[test]
+    fn saving_into_a_dir_with_no_config_json_yet_writes_a_version_2_file_with_no_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        save_machine_settings(dir.path(), |obj| {
+            obj.insert("port".to_string(), serde_json::json!(4800));
+        })
+        .unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.machine.port, 4800);
+        assert!(cfg.projects.is_empty());
     }
 
     #[test]

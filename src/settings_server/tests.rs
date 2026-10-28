@@ -563,6 +563,29 @@ async fn a_good_password_signs_in_and_a_wrong_one_is_refused() {
 }
 
 #[tokio::test]
+async fn a_right_password_is_refused_while_network_access_is_off() {
+    // agent-settings.md section 3.1: turning network access off keeps the hash (so turning it
+    // back on needs no new password), but it must not go on signing in while it's off.
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(
+        dir.path(),
+        true,
+        Some(NetworkAccess {
+            enabled: false,
+            password_hash: Some(password::hash_password("a good enough password")),
+        }),
+    );
+    let res = app(settings)
+        .oneshot(post_body(
+            "/api/settings/session",
+            &json!({ "password": "a good enough password" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn a_password_is_refused_when_none_is_saved_yet() {
     let (settings, _dir) = test_server();
     let res = app(settings)
@@ -620,6 +643,18 @@ async fn saving_the_port_validates_its_range_and_round_trips() {
     let ok = post_setting(&app, &cookie, &csrf, json!({ "port": 4800 })).await;
     assert_eq!(ok.status(), StatusCode::OK);
     assert_eq!(config::load(dir.path()).unwrap().machine.port, 4800);
+}
+
+#[tokio::test]
+async fn a_bad_field_in_a_multi_field_save_leaves_the_good_ones_unsaved() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let res = post_setting(&app, &cookie, &csrf, json!({ "tags": ["games"], "port": 80 })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(MachineStore::load(dir.path()).unwrap().tags().is_none());
 }
 
 #[tokio::test]
