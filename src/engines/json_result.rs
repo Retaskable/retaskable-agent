@@ -194,4 +194,32 @@ mod tests {
         let errors = check_schema(&schema, &json!({"ok": true, "extra": 1}), "");
         assert!(errors.contains(&"extra: is not allowed".to_string()));
     }
+
+    #[test]
+    fn check_schema_names_a_non_array_against_an_array_schema() {
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+        assert_eq!(
+            check_schema(&schema, &json!("not an array"), "steps"),
+            vec!["steps: must be an array".to_string()]
+        );
+    }
+
+    #[test]
+    fn check_schema_checks_each_array_item_against_its_items_schema() {
+        let schema = json!({"type": "array", "items": {"type": "string"}});
+        assert_eq!(check_schema(&schema, &json!(["a", "b"]), "steps"), Vec::<String>::new());
+        assert_eq!(
+            check_schema(&schema, &json!(["a", 2]), "steps"),
+            vec!["steps[1]: must be a string".to_string()]
+        );
+    }
+
+    #[test]
+    fn check_schema_allows_any_item_when_an_array_schema_has_no_items() {
+        let schema = json!({"type": "array"});
+        assert_eq!(
+            check_schema(&schema, &json!([1, "two", true]), "steps"),
+            Vec::<String>::new()
+        );
+    }
 }
