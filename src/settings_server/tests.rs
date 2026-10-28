@@ -516,6 +516,14 @@ async fn a_body_over_16kb_is_refused() {
     assert!(res.status().is_client_error());
 }
 
+/// Starts a signed-in session against a fresh config dir, for a test that posts a setting.
+async fn signed_in_app(dir: &Path) -> (Arc<SettingsServer>, Router, String, String) {
+    let settings = settings_with_network(dir, false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    (settings, app, cookie, csrf)
+}
+
 fn settings_with_network(dir: &Path, network_enabled: bool, stored: Option<NetworkAccess>) -> Arc<SettingsServer> {
     if let Some(network) = stored {
         MachineStore::load(dir).unwrap().set_network(network).unwrap();
@@ -746,6 +754,71 @@ async fn saving_the_engine_default_validates_it_and_round_trips() {
         config::load(dir.path()).unwrap().machine.engine_choice.default,
         Some(config::Engine::Local)
     );
+}
+
+#[tokio::test]
+async fn saving_the_engines_role_overrides_validates_them_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+
+    let bad = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "claude", "roles": { "implementer": "steam" } } }),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({
+            "engineChoice": {
+                "default": "claude",
+                "roles": { "implementer": "cursor", "review": "default", "chat": "local" },
+            },
+        }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let saved = config::load(dir.path()).unwrap().machine.engine_choice.roles;
+    assert_eq!(saved.implementer, Some(config::Engine::Cursor));
+    assert_eq!(saved.review, None);
+    assert_eq!(saved.chat, Some(config::Engine::Local));
+    assert_eq!(saved.planner, None);
+}
+
+#[tokio::test]
+async fn saving_the_engines_lane_overrides_validates_them_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+
+    let bad = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "claude", "lanes": ["claude", "steam"] } }),
+    )
+    .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "claude", "lanes": ["claude", "cursor", "default"] } }),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(
+        config::load(dir.path()).unwrap().machine.engine_choice.lanes,
+        vec![config::LaneEngine::Claude, config::LaneEngine::Cursor]
+    );
+
+    let settings_value = signed_in_settings(&settings).await;
+    assert_eq!(settings_value["engineChoice"]["lanes"], json!(["claude", "cursor"]));
 }
 
 #[tokio::test]

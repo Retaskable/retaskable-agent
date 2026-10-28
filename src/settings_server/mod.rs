@@ -248,6 +248,7 @@ impl SettingsServer {
         let engine_choice = config::engine_choice(&cfg, env);
         let cursor = config::cursor_models(&cfg, env);
         let port = config::port(&cfg, env);
+        let lanes = config::lanes(&cfg, env);
         let net = self
             .env_network_access
             .clone()
@@ -258,6 +259,7 @@ impl SettingsServer {
             // from what the agent runs on.
             "restartWaiting": port != self.port || net.enabled != self.network_enabled,
             "pollIntervalSec": config::poll_interval_sec(&cfg, env),
+            "lanes": lanes,
             "tags": {
                 "found": found,
                 "added": overrides.as_ref().map(|o| o.added.clone()).unwrap_or_default(),
@@ -269,9 +271,7 @@ impl SettingsServer {
                 "model": local.model,
                 "baseUrl": local.base_url,
             },
-            "engineChoice": {
-                "default": engine_choice.default.map(|e| e.to_string()),
-            },
+            "engineChoice": engine_choice_json(&engine_choice),
             "cursorModels": {
                 "top": cursor.top,
                 "implementer": cursor.implementer,
@@ -382,23 +382,35 @@ impl SettingsServer {
         Ok(())
     }
 
-    /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi or local) ...".
-    /// Per-role and per-lane overrides have no save path yet (tracked outside this change).
-    fn validate_engine_default(&self, default: &str) -> Result<config::Engine, SaveError> {
+    /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi or local) and, per
+    /// kind of work ..., the default or one of the four", plus the per-lane override below it.
+    /// `roles` and `lanes` entries are always present in the request (the page's one "Engines"
+    /// save sends the whole group), so this both parses and validates them.
+    fn validate_engine_choice(&self, update: &EngineChoiceUpdate) -> Result<config::EngineChoiceConfig, SaveError> {
         self.env_gate("RETASKABLE_ENGINES")?;
-        config::parse_engine(default)
-            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi or local.".to_string()))
+        let default = config::parse_engine(&update.default)
+            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi or local.".to_string()))?;
+        let roles = config::RoleEngines {
+            planner: parse_role_engine(&update.roles.planner)?,
+            implementer: parse_role_engine(&update.roles.implementer)?,
+            review: parse_role_engine(&update.roles.review)?,
+            drafter: parse_role_engine(&update.roles.drafter)?,
+            chat: parse_role_engine(&update.roles.chat)?,
+            writer: parse_role_engine(&update.roles.writer)?,
+        };
+        let lanes = config::lanes_of(&update.lanes)
+            .ok_or_else(|| SaveError::Invalid("Lanes must be claude, cursor or default.".to_string()))?;
+        Ok(config::EngineChoiceConfig {
+            default: Some(default),
+            roles,
+            lanes,
+        })
     }
 
-    fn save_engine_default(&self, default: &str) -> Result<(), SaveError> {
-        let engine = self.validate_engine_default(default)?;
+    fn save_engine_choice(&self, update: &EngineChoiceUpdate) -> Result<(), SaveError> {
+        let engine_choice = self.validate_engine_choice(update)?;
         config::save_machine_settings(&self.dir, |obj| {
-            match obj.entry("engineChoice".to_string()).or_insert_with(|| json!({})) {
-                Value::Object(engine_choice) => {
-                    engine_choice.insert("default".to_string(), json!(engine.to_string()));
-                }
-                other => *other = json!({ "default": engine.to_string() }),
-            }
+            obj.insert("engineChoice".to_string(), engine_choice_json(&engine_choice));
         })?;
         Ok(())
     }
@@ -502,6 +514,35 @@ impl From<anyhow::Error> for SaveError {
     }
 }
 
+/// `engineChoice` as both `GET /api/settings` returns it and `config.json` stores it: the same
+/// shape either way, so a save can write back exactly what a read would show.
+fn engine_choice_json(cfg: &config::EngineChoiceConfig) -> Value {
+    json!({
+        "default": cfg.default.map(|e| e.to_string()),
+        "roles": {
+            "planner": cfg.roles.planner.map(|e| e.to_string()),
+            "implementer": cfg.roles.implementer.map(|e| e.to_string()),
+            "review": cfg.roles.review.map(|e| e.to_string()),
+            "drafter": cfg.roles.drafter.map(|e| e.to_string()),
+            "chat": cfg.roles.chat.map(|e| e.to_string()),
+            "writer": cfg.roles.writer.map(|e| e.to_string()),
+        },
+        "lanes": cfg.lanes.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })
+}
+
+/// A role's own override (agent-settings.md section 3.1): empty or `default` follows the default
+/// engine (`None`), anything else must be one of the four engines.
+fn parse_role_engine(value: &str) -> Result<Option<config::Engine>, SaveError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    config::parse_engine(trimmed)
+        .map(Some)
+        .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi, local or default.".to_string()))
+}
+
 fn save_error_response(e: SaveError) -> Response {
     match e {
         SaveError::Invalid(message) => bad_request(&message),
@@ -521,6 +562,23 @@ struct LocalUpdate {
 #[serde(rename_all = "camelCase")]
 struct EngineChoiceUpdate {
     default: String,
+    #[serde(default)]
+    roles: RoleEngineUpdate,
+    #[serde(default)]
+    lanes: Vec<String>,
+}
+
+/// `engineChoice.roles`' raw request shape: each field is the role's own engine name, `default`
+/// or empty to follow the default engine (`parse_role_engine`).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct RoleEngineUpdate {
+    planner: String,
+    implementer: String,
+    review: String,
+    drafter: String,
+    chat: String,
+    writer: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -703,7 +761,7 @@ async fn post_settings(
         return save_error_response(e);
     }
     if let Some(engine_choice) = &update.engine_choice
-        && let Err(e) = settings.validate_engine_default(&engine_choice.default)
+        && let Err(e) = settings.validate_engine_choice(engine_choice)
     {
         return save_error_response(e);
     }
@@ -739,7 +797,7 @@ async fn post_settings(
         return save_error_response(e);
     }
     if let Some(engine_choice) = &update.engine_choice
-        && let Err(e) = settings.save_engine_default(&engine_choice.default)
+        && let Err(e) = settings.save_engine_choice(engine_choice)
     {
         return save_error_response(e);
     }
