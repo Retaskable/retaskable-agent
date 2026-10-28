@@ -2,6 +2,8 @@
 
 Status: v0.3. Builds on [agent.md](agent.md) sections 4.2, 8, 9 and 10. It installs a project's own Android app (a Capacitor project in its repo); Retaskable's own Capacitor app in `mobile/` is gone, so Retaskable's repo has nothing for it to install. Trimmed for the agent: the buttons, dialogs and screens are the Expo app's, and the agent takes no command on its own port, only through the cloud link.
 
+In the Rust agent, finding a phone (section 3) and the first-install warning (section 4) are this spec's standalone part and need nothing else. The rest is ported along with the code it needs: section 5 (the build and install, with its environment fix and gating) comes with the base checkout's port in the orchestrator loop ([agent/11-build-milestones.md](agent/11-build-milestones.md) milestone 4); section 6 (phone status up, `phone_play`/`phone_stop` down) comes with the cloud link's snapshot and command handling (milestone 5); section 2's no-config hint comes with [agent-settings.md](agent-settings.md)'s settings page.
+
 Theme: UI
 
 ## 1. What it is

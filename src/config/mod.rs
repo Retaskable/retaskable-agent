@@ -16,10 +16,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 pub use machine::{
-    CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, cursor_models, engine_choice, lanes,
-    local_model, poll_interval_sec, port,
+    CursorModels, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines, cursor_models, engine_choice,
+    lanes, local_model, poll_interval_sec, port,
 };
-pub use project::ProjectConfig;
+pub use project::{CheckConfig, ProjectConfig, ProjectType};
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -1,16 +1,11 @@
-use super::*;
+use std::path::Path;
+
 use serde_json::json;
 
+use super::*;
+
 fn base_spec(cwd: &Path) -> SessionSpec {
-    SessionSpec {
-        model: "sonnet".to_string(),
-        prompt: "do the thing".to_string(),
-        schema: json!({"type": "object"}),
-        cwd: cwd.to_path_buf(),
-        max_turns: None,
-        budget_usd: 0.0,
-        start: SessionStart::Ephemeral,
-    }
+    crate::engines::engine::test_spec(cwd, "do the thing")
 }
 
 // resolve_claude / resolve_claude_on_path
@@ -125,6 +120,14 @@ fn build_args_adds_the_budget_cap_only_when_positive() {
 }
 
 #[test]
+fn build_args_never_caps_a_local_sessions_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = local_spec(dir.path());
+    spec.budget_usd = 5.0;
+    assert!(!build_args(&spec).contains(&"--max-budget-usd".to_string()));
+}
+
+#[test]
 fn build_args_adds_max_turns_when_set() {
     let dir = tempfile::tempdir().unwrap();
     let mut spec = base_spec(dir.path());
@@ -189,28 +192,105 @@ fn build_args_keeps_every_other_flag_the_same_on_a_resume() {
 
 // session_env
 
+fn spec_with_model(dir: &Path, model: &str) -> SessionSpec {
+    let mut spec = base_spec(dir);
+    spec.model = model.to_string();
+    spec
+}
+
+fn subagent_model(dir: &Path, model: &str) -> String {
+    session_env(&spec_with_model(dir, model))
+        .into_iter()
+        .find(|(k, _)| k == "CLAUDE_CODE_SUBAGENT_MODEL")
+        .unwrap()
+        .1
+}
+
 #[test]
 fn session_env_runs_subagents_on_sonnet_by_default_and_haiku_for_a_haiku_session() {
-    assert!(session_env("sonnet").contains(&("CLAUDE_CODE_SUBAGENT_MODEL".to_string(), "sonnet".to_string())));
-    assert!(session_env("opus").contains(&("CLAUDE_CODE_SUBAGENT_MODEL".to_string(), "sonnet".to_string())));
-    assert!(session_env("haiku").contains(&("CLAUDE_CODE_SUBAGENT_MODEL".to_string(), "haiku".to_string())));
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(subagent_model(dir.path(), "sonnet"), "sonnet");
+    assert_eq!(subagent_model(dir.path(), "opus"), "sonnet");
+    assert_eq!(subagent_model(dir.path(), "haiku"), "haiku");
 }
 
 #[test]
 fn session_env_disables_claude_ai_connectors_and_sets_the_compact_window() {
-    let env = session_env("sonnet");
+    let dir = tempfile::tempdir().unwrap();
+    let env = session_env(&base_spec(dir.path()));
     assert!(env.contains(&("ENABLE_CLAUDEAI_MCP_SERVERS".to_string(), "false".to_string())));
     assert!(env.contains(&("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), "200000".to_string())));
 }
 
 #[test]
 fn session_env_overwrites_the_cloudflare_token_so_nothing_can_deploy() {
-    let env = session_env("sonnet");
+    let dir = tempfile::tempdir().unwrap();
+    let env = session_env(&base_spec(dir.path()));
     assert!(
         env.iter()
             .any(|(k, v)| k == "CLOUDFLARE_API_TOKEN" && v == NO_DEPLOY_TOKEN)
     );
     assert!(env.iter().any(|(k, v)| k == "CF_API_TOKEN" && v == NO_DEPLOY_TOKEN));
+}
+
+fn local_spec(dir: &Path) -> SessionSpec {
+    let mut spec = base_spec(dir);
+    spec.model = "local".to_string();
+    spec.local = Some(LocalTarget {
+        base_url: "http://localhost:11436".to_string(),
+        model: "tiel-coder-35b".to_string(),
+    });
+    spec
+}
+
+#[test]
+fn local_target_only_agrees_the_session_is_local_when_both_signals_do() {
+    let dir = tempfile::tempdir().unwrap();
+    // A `local` target carried over onto a session whose model isn't actually "local": not local.
+    let mut mismatched_model = local_spec(dir.path());
+    mismatched_model.model = "opus".to_string();
+    assert!(local_target(&mismatched_model).is_none());
+    // `model == "local"` with no server configured: not local either, since there's nowhere
+    // for the session's environment to actually point.
+    let mut no_target = local_spec(dir.path());
+    no_target.local = None;
+    assert!(local_target(&no_target).is_none());
+    assert!(local_target(&local_spec(dir.path())).is_some());
+}
+
+#[test]
+fn session_env_points_a_local_session_at_the_local_server_and_skips_cloud_only_vars() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = session_env(&local_spec(dir.path()));
+    assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "http://localhost:11436".to_string())));
+    assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "local".to_string())));
+    assert!(env.contains(&("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), "1".to_string())));
+    let model_vars = [
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ];
+    assert!(
+        model_vars
+            .iter()
+            .all(|var| env.contains(&(var.to_string(), "tiel-coder-35b".to_string())))
+    );
+    assert!(env.contains(&("ENABLE_CLAUDEAI_MCP_SERVERS".to_string(), "false".to_string())));
+    assert!(
+        env.iter()
+            .any(|(k, v)| k == "CLOUDFLARE_API_TOKEN" && v == NO_DEPLOY_TOKEN)
+    );
+    assert!(!env.iter().any(|(k, _)| k == "CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+}
+
+#[test]
+fn build_args_starts_a_local_session_with_model_sonnet() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = build_args(&local_spec(dir.path()));
+    let idx = args.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(args[idx + 1], "sonnet");
 }
 
 // SessionReader::line / result_of
@@ -223,7 +303,7 @@ fn reader_returns_the_structured_result_from_a_successful_run() {
     assert!(result.ok);
     assert_eq!(result.subtype, "success");
     assert_eq!(result.structured, Some(json!({"status": "pr_opened"})));
-    assert_eq!(result.cost_usd, 2.5);
+    assert_eq!(result.cost_usd, Some(2.5));
     assert_eq!(result.session_id, "abc");
     assert_eq!(result.error, None);
 }
@@ -435,63 +515,6 @@ fn tail_keeps_only_the_last_n_characters() {
     assert_eq!(tail("hi", 10), "hi");
 }
 
-// spawn_and_read: the engine-neutral plumbing, exercised with OS-native commands standing in
-// for `claude` so these tests don't need the real binary installed.
-
-#[cfg(windows)]
-fn print_file_command(file: &Path) -> (PathBuf, Vec<String>) {
-    (
-        PathBuf::from("cmd"),
-        vec![
-            "/C".to_string(),
-            "type".to_string(),
-            file.to_string_lossy().into_owned(),
-        ],
-    )
-}
-
-#[cfg(not(windows))]
-fn print_file_command(file: &Path) -> (PathBuf, Vec<String>) {
-    (PathBuf::from("cat"), vec![file.to_string_lossy().into_owned()])
-}
-
-#[tokio::test]
-async fn spawn_and_read_returns_the_result_event_a_session_printed() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("out.jsonl");
-    std::fs::write(
-        &out,
-        r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened"},"total_cost_usd":1.25,"session_id":"sess-1"}"#,
-    )
-    .unwrap();
-    let (bin, args) = print_file_command(&out);
-    let result = spawn_and_read(&bin, &args, &[], dir.path(), "hi", "known", false)
-        .await
-        .unwrap();
-    assert!(result.ok);
-    assert_eq!(result.subtype, "success");
-    assert_eq!(result.structured, Some(json!({"status": "pr_opened"})));
-    assert_eq!(result.cost_usd, 1.25);
-    assert_eq!(result.session_id, "sess-1");
-    assert!(!result.signed_out);
-    assert!(!result.limit_hit);
-}
-
-#[tokio::test]
-async fn spawn_and_read_reports_no_result_when_the_session_exits_without_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("empty.jsonl");
-    std::fs::write(&out, "").unwrap();
-    let (bin, args) = print_file_command(&out);
-    let result = spawn_and_read(&bin, &args, &[], dir.path(), "hi", "known", false)
-        .await
-        .unwrap();
-    assert!(!result.ok);
-    assert_eq!(result.subtype, "exited");
-    assert_eq!(result.session_id, "known");
-    assert!(result.error.unwrap().contains("exited with code 0"));
-}
-
 // signed_out / describe_failure (claude-signed-out.md section 3.1)
 
 fn error_result_line(extra: &str) -> String {
@@ -598,61 +621,15 @@ fn reader_marks_limit_hit_from_a_rejected_rate_limit_on_error() {
 }
 
 #[test]
-fn signed_out_is_only_a_failed_claude_result_never_cursor() {
-    assert!(is_signed_out(false, Some("Failed to authenticate"), Some("claude")));
-    assert!(!is_signed_out(false, Some("Failed to authenticate"), Some("cursor")));
-    assert!(!is_signed_out(true, Some("Failed to authenticate"), None));
-    assert!(signed_out_text(Some(
-        "Implementer ended with error: Failed to authenticate: OAuth session expired"
-    )));
-}
-
-#[test]
-fn describe_failure_names_signed_out_limit_budget_and_ordinary_errors() {
-    let signed = SessionResult {
-        ok: false,
-        subtype: "error".to_string(),
-        structured: None,
-        error: Some("Not logged in".to_string()),
-        cost_usd: 0.0,
-        session_id: "s".to_string(),
-        limit_hit: false,
-        signed_out: true,
-        context_tokens: None,
-        usage: None,
-    };
-    assert_eq!(
-        describe_failure(&signed, 5.0),
-        "found Claude signed out on this computer (Not logged in)"
-    );
-
-    let limit = SessionResult {
-        signed_out: false,
-        limit_hit: true,
-        error: Some("rate limited".to_string()),
-        ..signed.clone()
-    };
-    assert_eq!(describe_failure(&limit, 5.0), "hit the usage limit");
-
-    let budget = SessionResult {
-        subtype: "error_max_budget_usd".to_string(),
-        cost_usd: 4.2,
-        limit_hit: false,
-        signed_out: false,
-        error: None,
-        ..signed.clone()
-    };
-    assert_eq!(describe_failure(&budget, 5.0), "hit its $5 budget (spent $4.20)");
-
-    let ordinary = SessionResult {
-        subtype: "error_during_execution".to_string(),
-        error: Some("tool crashed".to_string()),
-        limit_hit: false,
-        signed_out: false,
-        ..signed
-    };
-    assert_eq!(
-        describe_failure(&ordinary, 5.0),
-        "ended with error_during_execution: tool crashed"
-    );
+fn claude_engine_dispatches_args_env_prompt_and_reader_through_the_trait() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = ClaudeEngine;
+    let spec = base_spec(dir.path());
+    assert_eq!(engine.id(), EngineId::Claude);
+    assert_eq!(engine.args(&spec), build_args(&spec));
+    assert_eq!(engine.env(&spec), session_env(&spec));
+    assert_eq!(engine.prompt(&spec), spec.prompt);
+    let mut reader = engine.reader(&spec);
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"abc"}"#;
+    assert!(reader.line(line, "known").unwrap().ok);
 }

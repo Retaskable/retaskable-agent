@@ -2,7 +2,7 @@
 
 Status: v0.3 (this copy keeps the agent's part; the banner, bell, card and Sample are the app's). Item claude-signed-out-hold. Builds on the computer-wide hold for Cursor's limit ([engines.md](engines.md) section 3.2), Retaskable's own failures ([agent.md](agent.md) section 7.3), the `claudeSignedIn` check ([first-run-check.md](first-run-check.md) section 3.1) and the banners under the status strip ([pause-banner.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pause-banner.md)). Section 2's **[Decided]** lines are what the human asked for; the **[Proposal]** lines fill the gaps and are the human's call. Showing the computer offline while it's held, and telling its owner, are [signed-out-offline.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/signed-out-offline.md)'s.
 
-The TypeScript agent in Retaskable.com is the ground truth for behaviour (`agent/src/…` paths below). This Rust agent ports the same behaviour as its pieces land: section 3.1's classification lives in `src/session/` (`signed_out` / `describe_failure`); the hold (3.2–3.4) still waits on the pool and orchestrator, and there is no pool, orchestrator, steps or `signedOut` module, so the computer-wide hold (sections 3.2–3.4) is not on this computer.
+The TypeScript agent in Retaskable.com is the ground truth for behaviour (`agent/src/…` paths below). This Rust agent ports the same behaviour as its pieces land: section 3.1's classification lives in `src/engines/` (`signed_out_text` / `is_signed_out` / `describe_failure`); the hold (3.2–3.4) still waits on the pool and orchestrator, and there is no pool, orchestrator, steps or `signedOut` module, so the computer-wide hold (sections 3.2–3.4) is not on this computer.
 
 Theme: Orchestration
 
@@ -32,7 +32,7 @@ What the agent does when a Claude session ends because Claude Code's sign-in on 
 
 - `signedOut(r)` in `agent/src/engines/engine.ts`, beside `describeFailure`: true when a Claude Code result (`engine` `claude`, or missing) isn't `ok` and its `error` matches `/failed to authenticate|oauth (session|token).*(expired|revoked)|not logged in|please run \/login|invalid api key|authentication_error/i` (`signedOutText`, which also reads an item's needs-help reason). The result gains `signedOut?: true` beside `limitHit`, set by the Claude reader (`agent/src/engines/claude.ts`) on a `result` line and in `noResult`, whose error carries the stderr. A usage-limit hit, a local-model session, a Cursor result and a hand-built result never are.
 - `describeFailure` gives "found Claude signed out on this computer (<the error>)" for it.
-- In this Rust agent: `signed_out_text` / `is_signed_out` / `describe_failure` and `SessionResult.signed_out` (beside `limit_hit`) in `src/session/`. The Claude reader sets `signed_out` on a `result` line and in `no_result` the same way (`api_error_status` 429 or a rejected rate-limit on an error is a limit hit and never signed out; a `local` model session never is).
+- In this Rust agent: `signed_out_text` / `is_signed_out` / `describe_failure` and `SessionResult.signed_out` (beside `limit_hit`) in `src/engines/engine.rs`. The Claude reader (`src/engines/claude.rs`) sets `signed_out` on a `result` line and in `no_result` the same way (`api_error_status` 429 or a rejected rate-limit on an error is a limit hit and never signed out; a `local` model session never is).
 
 ### 3.2 The computer holds
 
@@ -62,7 +62,7 @@ What the agent does when a Claude session ends because Claude Code's sign-in on 
 - TypeScript (Retaskable.com): `agent/src/engines/engine.ts`, `agent/src/engines/claude.ts`, `agent/src/pool.ts`, `agent/src/signedOut.ts`, `agent/src/orchestrator.ts`, `agent/src/orchestratorActions.ts`, `agent/src/steps.ts`, `agent/src/review.ts`, `agent/src/triage.ts`, `agent/src/drafts.ts`, `agent/src/assistant.ts`, `agent/src/setupCheck.ts`, `agent/src/pageShapes.ts`, `agent/src/pageView.ts`, `agent/src/store.ts`, `shared/types.ts`.
 - `agent/src/engines/claude.test.ts`: the error in the request, "not logged in", an `authentication_error` and a stderr's "Invalid API key" set `signedOut`; a usage limit, a budget hit, an ordinary error and a local session don't; a Cursor result never does; `describeFailure`'s words.
 - `agent/src/signedOut.test.ts`: a signed-out result sets the hold once; no Claude session starts while held and a Cursor one does; the item waits with `signInWait`, lets go of its lane, shows paused for the sign-in and isn't triaged; an item with no PR is given back; a passing check (once a minute, not on "couldn't tell") clears it, a failing one sets it with no session having failed and a Cursor-only computer isn't checked, the waiting item carries on and one at `needs_human` with the error is carried on; at the start a still-signed-out computer is held; **Carry on** while held waits instead of starting a session.
-- Rust (this agent): `src/session/` (section 3.1's classification and its tests). The hold (sections 3.2–3.4) has no module yet.
+- Rust (this agent): `src/engines/engine.rs` and `src/engines/claude.rs` (section 3.1's classification and its tests). The hold (sections 3.2–3.4) has no module yet.
 
 ## 4. Acceptance
 

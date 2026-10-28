@@ -75,6 +75,8 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 
 Restart events are the machine's, so they go into every project's log.
 
+**Status in the Rust agent:** the log itself, and opening it at startup, are built (`src/telemetry/events.rs`, `src/main.rs`); nothing calls `EventLog::add` yet. Each event above lands with the backlog item that does the thing it records, the same way `events.rs` was built before anything used it ([agent/11-build-milestones.md](agent/11-build-milestones.md)): `item_state`, `claim`, `lease`, `session_start`/`session_end`, `step_start`/`step_end`, `ci`, `merged` and `error` come with `item-lifecycle` and `implementer-session`; `lane_taken`/`lane_freed`, `tick` and `restart_*` come with `orchestrator-loop`.
+
 ## 4. The watchdog
 
 `agent/src/telemetry/watchdog.ts` (pure rules) and `agent/src/telemetry/telemetry.ts` (each project's state for them). Every minute the pool hands each project's `Telemetry.minute` a snapshot (`watchInput` in `agent/src/telemetry/watchInput.ts`) of what is in memory: its items, `laneItems`, what is running for each item (a step, a session, a start, a game in its lane), whether new work may start, whether there is work ready to start, the restart, and the log's recent events. No other I/O.
