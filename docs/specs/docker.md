@@ -89,6 +89,8 @@ In this Rust agent, this rule was already built for every machine (`OsStore`, `F
 4. On retaskable.com, Settings → **Link project…** for each project: it's cloned into `/work` beside Retaskable's checkout. Settings → CI → **Link** seals the Woodpecker token to the new computer, unless `RETASKABLE_WOODPECKER_TOKEN` is set.
 5. Resume the projects. The Windows computer can be unlinked on retaskable.com once the container has taken over.
 
+In this Rust agent, step 3's tray menu doesn't exist yet (section 3.5), so link the computer with `docker exec -it retaskable-agent retaskable link [production|staging|local]` instead: it runs the same device flow in the terminal, printing the code and the `/link?code=…` address to approve the same way. `retaskable link backlog` does the shared backlog's link the same way, though it also starts by itself once the computer already holds a cloud link (`auto_link_backlog`, `src/main.rs`). Step 4's **Link project…** and CI **Link** aren't wired to this port's CLI yet, on this or any other machine — that's a later item, not this one — so until then a project is added by hand, cloned under `/work` and pointed to from `/work/.retaskable/config.json` (`docker/agent/README.md`), the same on every machine running this port.
+
 ## 6. Measured
 
 On the operator's machine (2026-10-16), the full `npm test` (lint, 3,318 agent, cloud, backlog, shared and scripts tests, then 898 app tests) in a container with the checkout in a volume: **19 s**; on Windows, the same commit: **126 s**. `npm ci` 18 s against 21 s; `npm run typecheck` 12 s in the container. The image is 1.74 GB: 1 GB of it is Chromium and its libraries, 270 MB Claude Code.
