@@ -101,6 +101,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
                 backlog_path: "backlog".into(),
             })
             .collect(),
+        version: "9.9.9".into(),
     })
 }
 
@@ -154,7 +155,7 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
     let hello = read(&mut first).await;
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["machine"], "pc");
-    assert_eq!(hello["agentVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(hello["agentVersion"], "9.9.9");
     assert_eq!(
         hello["project"],
         json!({ "githubRepo": "o/one", "backlogPath": "backlog" })
