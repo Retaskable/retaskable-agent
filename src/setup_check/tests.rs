@@ -297,6 +297,8 @@ fn checks(claude: SetupCheck, claude_signed_in: SetupCheck, cursor: SetupCheck) 
         claude,
         claude_signed_in,
         cursor,
+        pi: None,
+        codex: None,
     }
 }
 
@@ -468,4 +470,20 @@ async fn run_timeout_kills_a_hung_process_once_the_budget_runs_out() {
     let result = run_timeout(&bin, &args, Duration::from_millis(100)).await;
     assert!(result.is_none());
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+// optional_engine_check
+
+#[test]
+fn optional_engine_check_passes_with_the_version_line_only_when_the_binary_ran() {
+    assert_eq!(optional_engine_check("pi", None), None);
+    assert_eq!(optional_engine_check("pi", Some(&out(1, "oops"))), None);
+    assert_eq!(
+        optional_engine_check("Codex", Some(&out(0, "codex-cli 0.5.0\n"))),
+        Some(SetupCheck::pass("codex-cli 0.5.0"))
+    );
+    assert_eq!(
+        optional_engine_check("pi", Some(&out(0, "\n"))),
+        Some(SetupCheck::pass("pi"))
+    );
 }

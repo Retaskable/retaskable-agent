@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{Datelike, NaiveDate};
 use serde_json::{Map, Value};
 
 use super::write_json_atomic;
@@ -53,6 +54,49 @@ impl MachineStore {
         self.save()
     }
 
+    /// Adds a finished Codex session's tokens to today's, dropping days older than the week.
+    /// Nothing calls this yet: this agent has no session pool to report them.
+    pub fn add_codex_tokens(&mut self, input: u64, output: u64) -> Result<()> {
+        self.add_tokens("codexTokens", input, output, chrono::Local::now().date_naive())
+    }
+
+    /// Codex's tokens today, input plus output; `None` before a Codex session reported any.
+    pub fn codex_today_tokens(&self) -> Option<u64> {
+        self.tokens_on("codexTokens", chrono::Local::now().date_naive())
+    }
+
+    /// Cursor's tokens today, the same way; `None` before a Cursor session reported any.
+    pub fn cursor_today_tokens(&self) -> Option<u64> {
+        self.tokens_on("cursorTokens", chrono::Local::now().date_naive())
+    }
+
+    fn add_tokens(&mut self, key: &str, input: u64, output: u64, today: NaiveDate) -> Result<()> {
+        let all = self
+            .data
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(all) = all.as_object_mut() else {
+            return Ok(());
+        };
+        let day = all
+            .entry(day_key(today))
+            .or_insert_with(|| serde_json::json!({ "input": 0, "output": 0 }));
+        let add = |v: &mut Value, n: u64| *v = Value::from(v.as_u64().unwrap_or(0) + n);
+        add(&mut day["input"], input);
+        add(&mut day["output"], output);
+        let keep: Vec<String> = (0..7).map(|i| day_key(today - chrono::Days::new(i))).collect();
+        all.retain(|k, _| keep.contains(k));
+        self.save()
+    }
+
+    fn tokens_on(&self, key: &str, today: NaiveDate) -> Option<u64> {
+        let all = self.data.get(key)?.as_object()?;
+        let day = all.get(&day_key(today));
+        Some(day.map_or(0, |d| {
+            d["input"].as_u64().unwrap_or(0) + d["output"].as_u64().unwrap_or(0)
+        }))
+    }
+
     /// Network access to the settings page, and its password's hash.
     pub fn network(&self) -> Option<NetworkAccess> {
         self.data.get("network").and_then(NetworkAccess::from_value)
@@ -95,6 +139,11 @@ impl MachineStore {
         self.seen = elsewhere(&self.data);
         Ok(())
     }
+}
+
+/// `dayKey`: the local date as `year-month-day`, no zero padding.
+fn day_key(d: NaiveDate) -> String {
+    format!("{}-{}-{}", d.year(), d.month(), d.day())
 }
 
 fn parse_object(text: &str) -> Result<Map<String, Value>> {
@@ -219,5 +268,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(MACHINE_FILE), "{").unwrap();
         assert!(format!("{:#}", MachineStore::load(dir.path()).unwrap_err()).contains(MACHINE_FILE));
+    }
+
+    #[test]
+    fn codex_tokens_add_up_by_local_day_and_old_days_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.codex_today_tokens(), None);
+        store.add_codex_tokens(100, 20).unwrap();
+        store.add_codex_tokens(5, 1).unwrap();
+        assert_eq!(store.codex_today_tokens(), Some(126));
+        assert_eq!(store.cursor_today_tokens(), None);
+        let day = NaiveDate::from_ymd_opt(2026, 3, 9).unwrap();
+        assert_eq!(day_key(day), "2026-3-9");
+        let old = day - chrono::Days::new(20);
+        store.add_tokens("codexTokens", 1, 1, old).unwrap();
+        store.add_tokens("codexTokens", 1, 1, day).unwrap();
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        let keys: Vec<&String> = saved["codexTokens"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["2026-3-9"]);
     }
 }

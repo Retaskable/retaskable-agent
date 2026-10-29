@@ -886,6 +886,23 @@ async fn saving_the_engines_lane_overrides_validates_them_and_round_trips() {
 
     let settings_value = signed_in_settings(&settings).await;
     assert_eq!(settings_value["engineChoice"]["lanes"], json!(["claude", "cursor"]));
+
+    // A lane can be set to Codex, and the refusal names it among the picks.
+    let codex = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "codex", "roles": { "review": "codex" }, "lanes": ["codex", "default"] } }),
+    )
+    .await;
+    assert_eq!(codex.status(), StatusCode::OK);
+    let saved = config::load(dir.path()).unwrap().machine.engine_choice;
+    assert_eq!(saved.default, Some(config::Engine::Codex));
+    assert_eq!(saved.roles.review, Some(config::Engine::Codex));
+    assert_eq!(saved.lanes, vec![config::LaneEngine::Codex]);
+    let settings_value = signed_in_settings(&settings).await;
+    assert_eq!(settings_value["engineChoice"]["default"], json!("codex"));
+    assert_eq!(settings_value["engineChoice"]["lanes"], json!(["codex"]));
 }
 
 #[tokio::test]
@@ -957,4 +974,60 @@ async fn saving_network_access_needs_a_long_enough_password_and_turning_it_off_k
     let saved_off = MachineStore::load(dir.path()).unwrap().network().unwrap();
     assert!(!saved_off.enabled);
     assert_eq!(saved_off.password_hash, Some(hash));
+}
+
+#[tokio::test]
+async fn the_status_route_needs_a_sign_in() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/api/settings/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, app, cookie, _csrf) = signed_in_app(dir.path()).await;
+    let get = |app: Router, cookie: String| async move {
+        app.oneshot(
+            request("GET", "/api/settings/status")
+                .header("Cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+    // Before the agent has handed over its view there is nothing true to say.
+    assert_eq!(
+        get(app.clone(), cookie.clone()).await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    settings.set_status_source(StatusSource {
+        view: crate::connector::AgentView {
+            machine: "pc".into(),
+            tags: vec![],
+            projects: vec![],
+            version: "1.2.3".into(),
+            lanes: 3,
+            chore_lane: None,
+            lane_sizes: Default::default(),
+            paused: Default::default(),
+        },
+        started: std::time::Instant::now(),
+        checks: Arc::new(Mutex::new(None)),
+    });
+    let res = get(app, cookie).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    assert_eq!(body["header"]["name"], "pc");
+    assert_eq!(body["header"]["version"], "1.2.3");
+    assert_eq!(
+        body["lanes"].as_array().unwrap().len(),
+        2,
+        "the config's lane count, re-read now"
+    );
+    assert_eq!(body["engines"].as_array().unwrap().len(), 5);
 }

@@ -568,7 +568,7 @@ fn list_processes() -> Result<String> {
     }
 }
 
-fn kill_tree(pid: u32) -> Result<()> {
+pub(crate) fn kill_tree(pid: u32) -> Result<()> {
     #[cfg(windows)]
     {
         let _ = Command::new("taskkill")

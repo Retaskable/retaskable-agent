@@ -22,13 +22,13 @@ pub struct LaneScaling {
 }
 
 /// The computer's settings that decide which lane is free: how many there are, the chore lane, lane scaling, and
-/// which lanes run on Cursor (those aren't held back by lane scaling, since the 5-hour window is Claude Code's).
+/// which lanes run on another engine than Claude Code (Cursor, pi or Codex: those aren't held back by lane scaling, since the 5-hour window is Claude Code's).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PoolRules {
     pub lanes: u32,
     pub chore_lane: Option<u32>,
     pub scaling: Option<LaneScaling>,
-    pub cursor_lanes: BTreeSet<u32>,
+    pub other_engine_lanes: BTreeSet<u32>,
 }
 
 /// What holds a lane: an item's running work, or a Play of the build in it.
@@ -127,7 +127,7 @@ impl LanePool {
 
     /// Whether lane scaling keeps lane `k` from new work right now (the settings page and snapshot say so).
     pub fn scaled_out(&self, k: u32) -> bool {
-        self.rules.scaling.is_some() && k > self.limit() && !self.rules.cursor_lanes.contains(&k)
+        self.rules.scaling.is_some() && k > self.limit() && !self.rules.other_engine_lanes.contains(&k)
     }
 
     /// `freeLane`: a free lane, `prefer` if it's free (an item's last lane), otherwise the first. With a chore lane,
@@ -146,11 +146,11 @@ impl LanePool {
         let kept = self.lane_for_merge(for_item);
         let open = |k: u32| !self.held.contains_key(&k) && Some(k) != kept && may(k);
         let limit = self.limit();
-        let exempt = |k: u32| r.cursor_lanes.contains(&k);
+        let exempt = |k: u32| r.other_engine_lanes.contains(&k);
         let busy =
             self.held.keys().filter(|k| !exempt(**k)).count() as u32 + u32::from(kept.is_some_and(|k| !exempt(k)));
         let full = busy >= limit;
-        if full && r.cursor_lanes.is_empty() {
+        if full && r.other_engine_lanes.is_empty() {
             return None;
         }
         let allowed = |k: u32| exempt(k) || (!full && k <= limit);

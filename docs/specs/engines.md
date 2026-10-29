@@ -1,6 +1,6 @@
-# Engines: Claude Code, Cursor and pi — Spec
+# Engines: Claude Code, Cursor, pi and Codex — Spec
 
-Status: v0.2, draft (2026-10-01). Builds on [agent.md](agent.md) sections 2, 4, 6 and 7 (sessions, the orchestrator and model tiers) and section 9 (the Agents tab and Setup). Also builds on [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md) (per-project settings) and [estimates.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/estimates.md) / [spec-map.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-map.md) section 4 (the recorded cost).
+Status: v0.3, draft (2026-10-26, section 12 only). Builds on [agent.md](agent.md) sections 2, 4, 6 and 7 (sessions, the orchestrator and model tiers) and section 9 (the Agents tab and Setup). Also builds on [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md) (per-project settings) and [estimates.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/estimates.md) / [spec-map.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-map.md) section 4 (the recorded cost).
 
 Theme: Orchestration
 
@@ -18,7 +18,7 @@ This spec is split: each section below is its own file in [engines/](engines/). 
 
 ## 3. Choosing the engine
 
-- [engines/03-choosing-the-engine.md](engines/03-choosing-the-engine.md): 3.1 Per computer and per role · 3.2 Models and the usage limit · 3.3 Resuming · 3.4 Cursor model names
+- [engines/03-choosing-the-engine.md](engines/03-choosing-the-engine.md): 3.1 Per computer and per role · 3.2 Models and the usage limit · 3.3 Resuming · 3.4 Cursor model names · 3.5 When an engine hits its limit, the other takes over
 
 ## 4. Running `cursor-agent`
 
@@ -59,3 +59,7 @@ This spec is split: each section below is its own file in [engines/](engines/). 
 ## 13. The pi engine
 
 - [engines/13-the-pi-engine.md](engines/13-the-pi-engine.md)
+
+## 14. The Codex engine
+
+- [engines/14-the-codex-engine.md](engines/14-the-codex-engine.md)

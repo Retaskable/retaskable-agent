@@ -158,6 +158,7 @@ pub enum Engine {
     Claude,
     Cursor,
     Pi,
+    Codex,
     Local,
 }
 
@@ -167,6 +168,7 @@ impl fmt::Display for Engine {
             Engine::Claude => "claude",
             Engine::Cursor => "cursor",
             Engine::Pi => "pi",
+            Engine::Codex => "codex",
             Engine::Local => "local",
         })
     }
@@ -177,6 +179,7 @@ pub(crate) fn parse_engine(s: &str) -> Option<Engine> {
         "claude" => Some(Engine::Claude),
         "cursor" => Some(Engine::Cursor),
         "pi" => Some(Engine::Pi),
+        "codex" => Some(Engine::Codex),
         "local" => Some(Engine::Local),
         _ => None,
     }
@@ -222,7 +225,7 @@ where
 }
 
 /// Reads `engineChoice.lanes` the lenient way the file allows: not an array, or any entry that
-/// isn't `claude`, `cursor` or `default`, drops the whole list to empty rather than failing the
+/// isn't `claude`, `cursor`, `codex` or `default`, drops the whole list to empty rather than failing the
 /// whole config load (mirrors `lanes_of`, used for the same list read from the environment).
 fn deserialize_lenient_lanes<'de, D>(deserializer: D) -> Result<Vec<LaneEngine>, D::Error>
 where
@@ -243,6 +246,7 @@ where
 pub enum LaneEngine {
     Claude,
     Cursor,
+    Codex,
     Default,
 }
 
@@ -251,6 +255,7 @@ impl fmt::Display for LaneEngine {
         f.write_str(match self {
             LaneEngine::Claude => "claude",
             LaneEngine::Cursor => "cursor",
+            LaneEngine::Codex => "codex",
             LaneEngine::Default => "default",
         })
     }
@@ -260,6 +265,7 @@ fn parse_lane_engine(s: &str) -> Option<LaneEngine> {
     match s.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(LaneEngine::Claude),
         "cursor" => Some(LaneEngine::Cursor),
+        "codex" => Some(LaneEngine::Codex),
         "default" => Some(LaneEngine::Default),
         _ => None,
     }
@@ -901,6 +907,25 @@ mod tests {
         assert_eq!(cfg.engine_choice.roles.implementer, None);
         // One bad lane entry drops the whole list rather than just that entry.
         assert!(cfg.engine_choice.lanes.is_empty());
+    }
+
+    #[test]
+    fn codex_is_an_engine_and_a_lane_pick() {
+        let json = r#"{
+            "engineChoice": {
+                "default": "codex",
+                "roles": { "review": "Codex" },
+                "lanes": ["claude", "codex", "default"]
+            }
+        }"#;
+        let cfg: MachineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.engine_choice.default, Some(Engine::Codex));
+        assert_eq!(cfg.engine_choice.roles.review, Some(Engine::Codex));
+        assert_eq!(cfg.engine_choice.lanes, vec![LaneEngine::Claude, LaneEngine::Codex]);
+        let env_lanes = lanes_of(&["codex".to_string(), "cursor".to_string()]);
+        assert_eq!(env_lanes, Some(vec![LaneEngine::Codex, LaneEngine::Cursor]));
+        assert_eq!(Engine::Codex.to_string(), "codex");
+        assert_eq!(lanes_of(&["claude".to_string(), "gemini".to_string()]), None);
     }
 
     #[test]

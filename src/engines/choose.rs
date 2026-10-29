@@ -2,6 +2,8 @@
 //! section 3.1), following `agent/src/engines/choose.ts` in Retaskable.com: the computer's own
 //! `engineChoice`, a project's older `engines.default`/`roles` while the computer hasn't saved its own
 //! choice yet (`legacyChoice`), and `engineChoice.lanes`' per-lane override for the implementer's work.
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::config::{Engine, EngineChoiceConfig, LaneEngine, RoleEngines};
@@ -60,6 +62,7 @@ pub fn lane_engine(cfg: &EngineChoiceConfig, lane: u32) -> Option<Engine> {
     match cfg.lanes.get(index as usize)? {
         LaneEngine::Claude => Some(Engine::Claude),
         LaneEngine::Cursor => Some(Engine::Cursor),
+        LaneEngine::Codex => Some(Engine::Codex),
         LaneEngine::Default => None,
     }
 }
@@ -89,6 +92,48 @@ pub fn engine_for(cfg: &EngineChoiceConfig, project_engines: Option<&Value>, rol
     role_override(&active.roles, role)
         .or(active.default)
         .unwrap_or(Engine::Claude)
+}
+
+/// The lanes (1-based, of `lanes`) whose implementer work runs on another engine than Claude Code:
+/// Cursor, pi or Codex (the local model is Claude Code). They aren't held back by lane scaling, nor
+/// counted against it, since the 5-hour window is Claude Code's (`exempt` in `orchestratorSchedule.ts`).
+pub fn other_engine_lanes(cfg: &EngineChoiceConfig, project_engines: Option<&Value>, lanes: u32) -> BTreeSet<u32> {
+    (1..=lanes)
+        .filter(|&k| {
+            !matches!(
+                engine_for(cfg, project_engines, Role::Implementer, Some(k)),
+                Engine::Claude | Engine::Local
+            )
+        })
+        .collect()
+}
+
+/// The kinds of work (`engineChoice.roles` keys) with the one role that stands for each, in the
+/// order the Now tab lists them (`ENGINE_GROUPS` / `GROUP_ROLE`).
+pub const GROUP_ROLES: [(&str, Role); 6] = [
+    ("planner", Role::Planner),
+    ("implementer", Role::Implementer),
+    ("review", Role::Reviewer),
+    ("drafter", Role::Drafter),
+    ("chat", Role::Assistant),
+    ("writer", Role::Writer),
+];
+
+/// `usedFor`: the kinds of work that run on `engine`, and the lanes (1-based, of `lanes`) set to
+/// it: what the Now tab says an engine is used for. Only a lane's own pick counts as its lane.
+pub fn used_for(
+    cfg: &EngineChoiceConfig,
+    project_engines: Option<&Value>,
+    engine: Engine,
+    lanes: u32,
+) -> (Vec<&'static str>, Vec<u32>) {
+    let groups = GROUP_ROLES
+        .iter()
+        .filter(|(_, role)| engine_for(cfg, project_engines, *role, None) == engine)
+        .map(|(g, _)| *g)
+        .collect();
+    let own = (1..=lanes).filter(|&k| lane_engine(cfg, k) == Some(engine)).collect();
+    (groups, own)
 }
 
 #[cfg(test)]
@@ -216,6 +261,34 @@ mod tests {
     }
 
     #[test]
+    fn lanes_on_another_engine_than_claude_code_are_the_ones_lane_scaling_leaves_alone() {
+        let mut cfg = with_default(Engine::Claude);
+        cfg.lanes = vec![
+            LaneEngine::Claude,
+            LaneEngine::Cursor,
+            LaneEngine::Codex,
+            LaneEngine::Default,
+        ];
+        assert_eq!(other_engine_lanes(&cfg, None, 4), BTreeSet::from([2, 3]));
+        cfg.roles.implementer = Some(Engine::Pi);
+        assert_eq!(other_engine_lanes(&cfg, None, 4), BTreeSet::from([2, 3, 4]));
+        cfg.roles.implementer = Some(Engine::Local);
+        assert_eq!(other_engine_lanes(&cfg, None, 4), BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn codex_is_picked_by_default_role_and_lane_and_never_falls_back_to_claude() {
+        let mut cfg = with_default(Engine::Codex);
+        assert_eq!(engine_for(&cfg, None, Role::Reviewer, None), Engine::Codex);
+        cfg.roles.planner = Some(Engine::Claude);
+        assert_eq!(engine_for(&cfg, None, Role::Planner, None), Engine::Claude);
+        let mut lanes = with_default(Engine::Claude);
+        lanes.lanes = vec![LaneEngine::Claude, LaneEngine::Codex];
+        assert_eq!(engine_for(&lanes, None, Role::Implementer, Some(2)), Engine::Codex);
+        assert_eq!(engine_for(&lanes, None, Role::Implementer, Some(1)), Engine::Claude);
+    }
+
+    #[test]
     fn lane_engine_and_has_lane_engines_read_the_list_directly() {
         let mut cfg = EngineChoiceConfig::default();
         assert!(!has_lane_engines(&cfg));
@@ -225,5 +298,24 @@ mod tests {
         assert_eq!(lane_engine(&cfg, 1), Some(Engine::Cursor));
         assert_eq!(lane_engine(&cfg, 2), None);
         assert_eq!(lane_engine(&cfg, 3), None);
+    }
+
+    #[test]
+    fn used_for_lists_the_groups_and_lanes_on_an_engine() {
+        let cfg = EngineChoiceConfig {
+            default: Some(Engine::Cursor),
+            roles: RoleEngines {
+                review: Some(Engine::Codex),
+                ..RoleEngines::default()
+            },
+            lanes: vec![LaneEngine::Codex, LaneEngine::Default, LaneEngine::Codex],
+        };
+        let (groups, lanes) = used_for(&cfg, None, Engine::Codex, 4);
+        assert_eq!(groups, vec!["review"]);
+        assert_eq!(lanes, vec![1, 3]);
+        let (groups, lanes) = used_for(&cfg, None, Engine::Cursor, 4);
+        assert_eq!(groups, vec!["planner", "implementer", "drafter", "chat", "writer"]);
+        assert!(lanes.is_empty());
+        assert_eq!(used_for(&cfg, None, Engine::Claude, 4), (vec![], vec![]));
     }
 }

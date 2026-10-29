@@ -167,14 +167,14 @@ fn running_work_keeps_a_lane_past_the_limit_and_a_cursor_lane_is_never_held_back
 
     pool.set_rules(PoolRules {
         scaling,
-        cursor_lanes: BTreeSet::from([3]),
+        other_engine_lanes: BTreeSet::from([3]),
         ..rules(3)
     });
     assert!(!pool.scaled_out(3));
     assert_eq!(
         pool.claim(&want("p", "C")),
         Some(3),
-        "the 5-hour window is Claude Code's, not Cursor's"
+        "the 5-hour window is Claude Code's, not another engine's"
     );
 }
 

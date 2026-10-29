@@ -9,7 +9,7 @@ Start with [agent.md](agent.md), an index of sections in [agent/](agent/). Read 
 Only the specs whose subject is the computer itself:
 
 - [agent.md](agent.md) and [agent/](agent/): the agent, its sessions, lanes, the orchestrator loop, its port and its config.
-- [engines.md](engines.md): Claude Code, Cursor and pi as the engines sessions run on.
+- [engines.md](engines.md): Claude Code, Cursor, pi and Codex as the engines sessions run on.
 - [agent-settings.md](agent-settings.md): the computer's own settings page.
 - [agent-telemetry.md](agent-telemetry.md): the watchdog and the metadata the agent records.
 - [tray.md](tray.md): the tray, linking the computer, the terminal menu.

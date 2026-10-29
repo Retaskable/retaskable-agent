@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use retaskable_agent::app_menu;
-use retaskable_agent::settings_server::SettingsServer;
+use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 #[cfg(target_os = "linux")]
 use retaskable_agent::start_at_login;
 use retaskable_agent::{
@@ -370,6 +370,10 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     // first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
     // Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`. A
     // release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
+    // The settings page's Now tab reads the latest result (agent-settings.md section 4.5), so it's
+    // kept and run again every ten minutes, quietly.
+    let latest_checks: Arc<Mutex<Option<setup_check::SetupChecks>>> = Arc::new(Mutex::new(None));
+    let kept_checks = latest_checks.clone();
     tokio::spawn(async move {
         let checks = setup_check::run_setup_checks(env).await;
         let report = setup_check::setup_check_report(&checks);
@@ -377,6 +381,12 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             tracing::info!("{report}");
         } else {
             println!("{report}");
+        }
+        *kept_checks.lock().unwrap() = Some(checks);
+        loop {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let checks = setup_check::run_setup_checks(env).await;
+            *kept_checks.lock().unwrap() = Some(checks);
         }
     });
     // installers/03-the-bundle-agent-bundle.md section 3.11/3.12: a release build has no checkout
@@ -440,6 +450,11 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         exit_fn,
         keychain.clone(),
     ));
+    settings.set_status_source(StatusSource {
+        view: (*view).clone(),
+        started: std::time::Instant::now(),
+        checks: latest_checks,
+    });
     axum::serve(
         listener,
         api::router(version.to_string(), settings).into_make_service_with_connect_info::<SocketAddr>(),
