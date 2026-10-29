@@ -97,16 +97,7 @@ pub fn tick(
 mod tests {
     use super::*;
     use crate::lane_pool::PoolRules;
-
-    fn cfg() -> ProjectConfig {
-        ProjectConfig {
-            max_check_rounds: 3,
-            max_review_rounds: 3,
-            max_conflict_rounds: 5,
-            max_slices_per_item: 10,
-            ..Default::default()
-        }
-    }
+    use crate::test_support::item_lifecycle_cfg as cfg;
 
     fn pool(lanes: u32) -> LanePool {
         LanePool::new(PoolRules {

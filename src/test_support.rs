@@ -1,8 +1,23 @@
 //! A tiny local git repo with an `origin` remote, shared by this crate's own `#[cfg(test)]`
-//! modules that need real git plumbing to exercise (repo checks, galleries).
+//! modules that need real git plumbing to exercise (repo checks, galleries). Also a baseline
+//! `ProjectConfig` for the item-lifecycle state machine and its callers (`item_lifecycle`,
+//! `orchestrator`), since the derived `Default` leaves every round/slice cap at 0, which would
+//! escalate to `needs_human` on the very first failure or claim.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::config::ProjectConfig;
+
+pub(crate) fn item_lifecycle_cfg() -> ProjectConfig {
+    ProjectConfig {
+        max_check_rounds: 3,
+        max_review_rounds: 3,
+        max_conflict_rounds: 5,
+        max_slices_per_item: 10,
+        ..Default::default()
+    }
+}
 
 pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
