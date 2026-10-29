@@ -141,10 +141,7 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
 mod tests {
     use super::project::{Playtests, ProjectType, SandboxMode};
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     #[test]
     fn a_missing_file_is_the_defaults_and_no_projects() {

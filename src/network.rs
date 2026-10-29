@@ -62,10 +62,7 @@ pub fn env_network_access(env: impl Fn(&str) -> Option<String>) -> Option<Networ
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     #[test]
     fn off_by_default() {
