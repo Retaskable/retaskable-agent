@@ -13,9 +13,17 @@ What the implementer says this slice does:
 
 {{checks}}
 
+## Diff stat
+
+{{diffStat}}
+
 ## What the scouts found
 
 {{scouts}}
+
+## The implementer's suggested playtest
+
+{{playtest}}
 
 ## The User Manual
 

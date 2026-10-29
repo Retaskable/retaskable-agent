@@ -93,7 +93,7 @@ mod tests {
 
     fn writer(cwd: &'static Path) -> Reviewer<'static> {
         Reviewer {
-            template: "{{itemId}} {{title}} {{slice}} {{specRefs}} {{sliceDescription}} {{range}} {{scope}} {{checks}} {{scouts}} {{manualApprovals}}",
+            template: "{{itemId}} {{title}} {{slice}} {{specRefs}} {{sliceDescription}} {{range}} {{scope}} {{checks}} {{diffStat}} {{scouts}} {{playtest}} {{manualApprovals}}",
             session: EphemeralSessionConfig {
                 cwd,
                 budget_usd: 2.0,
@@ -118,7 +118,9 @@ mod tests {
                 scope: "",
                 checks: "✓ test",
             },
+            diff_stat: "1 file changed",
             scouts: "### correctness\n(no findings)",
+            playtest: None,
             manual_approvals: "(none)",
         }
     }
