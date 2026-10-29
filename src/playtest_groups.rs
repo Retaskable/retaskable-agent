@@ -220,24 +220,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::engines::engine::test_result as result;
 
     const TEMPLATE: &str = "{{projectNoun}} {{count}} {{list}} {{projectParts}}";
-
-    fn result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
-        SessionResult {
-            ok,
-            subtype: subtype.to_string(),
-            structured,
-            error: error.map(str::to_string),
-            cost_usd: Some(0.2),
-            session_id: "s".to_string(),
-            limit_hit: false,
-            signed_out: false,
-            context_tokens: None,
-            usage: None,
-            tokens: None,
-        }
-    }
 
     fn entry(key: &str) -> PlaytestEntry {
         PlaytestEntry {
@@ -373,7 +358,7 @@ mod tests {
         let groups = planned.groups.unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].keys, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(planned.cost_usd, 0.2);
+        assert_eq!(planned.cost_usd, 0.12);
         assert!(planned.note.is_none());
     }
 
@@ -384,7 +369,7 @@ mod tests {
         })
         .await;
         assert!(planned.groups.is_none());
-        assert_eq!(planned.note.as_deref(), Some("hit its $0.5 budget (spent $0.20)"));
+        assert_eq!(planned.note.as_deref(), Some("hit its $0.5 budget (spent $0.12)"));
     }
 
     #[tokio::test]
