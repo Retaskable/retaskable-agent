@@ -1,15 +1,17 @@
 name: CI
 
+# Pull requests and Linux run on Woodpecker (.woodpecker/ci.yaml). This covers the other two OSes once a change is
+# on main, so nothing Windows- or macOS-only goes unseen, without a pull request waiting for GitHub minutes.
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,13 +24,13 @@ jobs:
       - run: cargo test
 
   # installers/03-the-bundle-agent-bundle.md sections 3.9 and 3.10: each OS's runner builds and
-  # start-checks its own target (win-x64, linux-x64, mac-arm64 — macos-latest is arm64), and the
-  # macOS runner also cross-builds mac-x64 beside its own, so all four targets are built.
+  # start-checks its own target (win-x64, mac-arm64 — macos-latest is arm64), and the macOS runner
+  # also cross-builds mac-x64 beside its own; linux-x64 is built on Woodpecker.
   bundle:
     needs: check
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
