@@ -317,6 +317,41 @@ async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
 }
 
 #[tokio::test]
+async fn a_status_change_still_arrives_when_another_projects_changes_right_after() {
+    // Two project ids of their own, as above: this test means to prove that a change on
+    // `other`, landing right after this project's own change, doesn't make the connector miss
+    // its own (the watch channel the two share keeps only the latest value).
+    let project = "connector-gallery-resend-own";
+    let other = "connector-gallery-resend-other";
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let v = view_with_models_gallery(project);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let galleries = read(&mut first).await["state"]["galleries"].clone();
+    assert_eq!(galleries[0]["status"], "idle");
+
+    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
+    galleries::set_status(other, "models", galleries::GalleryStatus::Shooting);
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);

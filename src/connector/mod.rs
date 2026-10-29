@@ -482,6 +482,7 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
     paused.mark_unchanged();
     let mut gallery_status = galleries::subscribe_status_changes();
     gallery_status.mark_unchanged();
+    let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
@@ -497,7 +498,9 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = gallery_status.changed() => {
-                if *gallery_status.borrow() == project {
+                let count = gallery_status.borrow().get(project).copied().unwrap_or(0);
+                if count != gallery_changes {
+                    gallery_changes = count;
                     Some(view.snapshot(project, &cloud.dir))
                 } else {
                     None

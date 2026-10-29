@@ -168,10 +168,14 @@ type GalleryKey = (String, String);
 
 /// Every gallery's status, kept across shoots until the process restarts.
 static STATUS: LazyLock<Mutex<HashMap<GalleryKey, GalleryStatus>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-/// The project whose gallery status last changed, so a subscriber only resends its own project's
-/// snapshot (the signal is shared across every project, like [`STATUS`] itself); blank before any
-/// shoot. See [`subscribe_status_changes`].
-static STATUS_CHANGED: LazyLock<watch::Sender<String>> = LazyLock::new(|| watch::Sender::new(String::new()));
+/// How many times each project's gallery status has changed, so a subscriber can tell whether
+/// its own project changed since it last looked (the signal is shared across every project, like
+/// [`STATUS`] itself). A `watch` keeps only the latest value, so a bare project name would let a
+/// change on one project hide a same-tick change on another; a per-project count doesn't, since
+/// the subscriber compares its own project's count rather than trusting the last name sent. See
+/// [`subscribe_status_changes`].
+static STATUS_CHANGED: LazyLock<watch::Sender<HashMap<String, u64>>> =
+    LazyLock::new(|| watch::Sender::new(HashMap::new()));
 /// The gallery each project is shooting, if any: only one shoot holds a project's base checkout
 /// at a time (06.8: "Only one gallery shoots at a time").
 static SHOOTING: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -201,15 +205,17 @@ fn cache_picture(key: PictureKey, data: String) {
 
 pub(crate) fn set_status(project: &str, slug: &str, status: GalleryStatus) {
     lock(&STATUS).insert((project.to_string(), slug.to_string()), status);
-    let _ = STATUS_CHANGED.send(project.to_string());
+    STATUS_CHANGED.send_modify(|counts| *counts.entry(project.to_string()).or_insert(0) += 1);
 }
 
-/// Subscribes to gallery status changes, each naming the project whose status just changed
+/// Subscribes to gallery status changes: each value is every project's change count, so a
+/// subscriber can tell its own project changed by comparing the count against what it last saw,
+/// even if another project's change coalesced with it in the same `watch` value
 /// (`connector::connected`'s `sizes`/`paused`, the same pattern, filtered to the subscriber's own
 /// project since the signal is shared): a shoot's `shooting` -> `converting` -> `idle`/`failed`
 /// resends that project's snapshot the same way a lane-size or pause change does (tray.md section
 /// 5.3.3: "Progress is the gallery's status in the snapshot").
-pub fn subscribe_status_changes() -> watch::Receiver<String> {
+pub fn subscribe_status_changes() -> watch::Receiver<HashMap<String, u64>> {
     STATUS_CHANGED.subscribe()
 }
 
