@@ -967,17 +967,24 @@ fn random_hex(bytes_len: usize) -> String {
 #[cfg(test)]
 pub(crate) fn test_server() -> (Arc<SettingsServer>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let settings = Arc::new(SettingsServer::new(
-        dir.path().to_path_buf(),
+    let keychain = test_keychain(dir.path());
+    (test_server_with_keychain(dir.path(), keychain), dir)
+}
+
+/// [`test_server`] with the keychain a caller provides, for a test that cares what this machine
+/// is linked to.
+#[cfg(test)]
+pub(crate) fn test_server_with_keychain(dir: &std::path::Path, keychain: Arc<dyn TokenStore>) -> Arc<SettingsServer> {
+    Arc::new(SettingsServer::new(
+        dir.to_path_buf(),
         4700,
         4700,
         false,
         |_: &str| None,
         || 1_700_000_000,
         |_: i32| {},
-        test_keychain(dir.path()),
-    ));
-    (settings, dir)
+        keychain,
+    ))
 }
 
 /// A `FileStore` under `dir`, for a test that doesn't care what this machine is linked to.

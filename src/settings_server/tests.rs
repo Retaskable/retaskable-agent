@@ -541,16 +541,7 @@ async fn link_lists_the_three_environments_and_which_one_is_connected() {
     let dir = tempfile::tempdir().unwrap();
     let keychain = test_keychain(dir.path());
     keychain.set("https://staging.retaskable.com", "refresh-token").unwrap();
-    let settings = Arc::new(SettingsServer::new(
-        dir.path().to_path_buf(),
-        4700,
-        4700,
-        false,
-        |_: &str| None,
-        || 1_700_000_000,
-        |_: i32| {},
-        keychain,
-    ));
+    let settings = test_server_with_keychain(dir.path(), keychain);
     let app = app(settings.clone());
     let (cookie, _csrf) = sign_in(&app, &settings).await;
     let res = app
