@@ -1,28 +1,12 @@
-//! Ideas (docs/specs/agent/09-web-ui.md section 9.3, "Ideas"; Retaskable.com's `agent/src/ideas.ts`
-//! and `shared/storeIdeas.ts` are the ground truth). After a slice merges, a read-only `writer`
-//! session suggests a few new features or UI improvements, from what went live, the questions asked,
-//! and the owner's past answers. [`refilled`] folds its answer into the queue that waits for a person
-//! to accept, set aside or turn down: at most [`QUEUE`] ideas wait at a time, and one left unanswered
-//! through [`IDEAS_MAX_WAITS_DEFAULT`] refills drops off.
-//!
-//! Not wired to anything yet: there's no daily chore that calls this, no command, and no
-//! shared-backlog store (`ideas_list`/`ideas_round`/`idea_answer`) to read the team's queue from or
-//! record an answer in, so Accept/Not now/Never aren't ported either. A caller puts this together
-//! with [`crate::engines::runner`] itself, the same as [`crate::release_notes`]: build a session with
-//! `schema: ideas_result_schema()`, `prompt: build_prompt(...)`, `budget_usd: cfg.budget.scout_usd`,
-//! role `writer`, `itemId` `_ideas`, read-only, run it, then fold the structured answer into the
-//! existing queue with [`refilled`]. Gathering the prompt's `context` (what went live, what was asked,
-//! past answers) needs the shared backlog and the audiences book this agent doesn't read yet, so
-//! [`build_prompt`] takes it already built. Person-added ideas (shared-ideas.md) need that same
-//! shared backlog.
+//! The pure half of ideas (Retaskable.com's `agent/src/ideas.ts`): the plain data types, the
+//! session's own result shape, and [`refilled`]'s fold of a fresh round into the queue that waits
+//! for a person to accept, set aside or turn down.
 use std::collections::HashSet;
 
-use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::config::ProjectType;
-use crate::release_notes::{clip, project_words, render_prompt};
+use crate::release_notes::clip;
 
 /// `ideasQueue`'s default (shared/tuning.ts): at most this many ideas wait at a time.
 pub const QUEUE: usize = 5;
@@ -189,56 +173,10 @@ pub fn refilled(
     waiting.into_iter().chain(fresh).collect()
 }
 
-/// A user type the prompt names (`Audience`, shared/audiences.ts, trimmed to what the prompt shows):
-/// the full audiences book isn't ported yet.
-#[derive(Debug, Clone)]
-pub struct Profile {
-    pub id: String,
-    pub name: String,
-    pub who: String,
-    pub part: String,
-}
-
-/// Fills `prompts/ideas.md`'s template with this project's words, what prompted the round, how much
-/// room is left in the queue, the user types, and the already-gathered `context` (what went live,
-/// what was asked, past answers — shared/moreTypes.ts's shape, built by the caller: see the module
-/// doc comment).
-pub fn build_prompt(
-    template: &str,
-    project_type: ProjectType,
-    github_repo: &str,
-    after: &str,
-    room: usize,
-    profiles: &[Profile],
-    context: &Value,
-) -> Result<String> {
-    let words = project_words(project_type);
-    let profiles_json = serde_json::to_string_pretty(
-        &profiles
-            .iter()
-            .map(|p| json!({ "id": p.id, "name": p.name, "who": p.who, "part": p.part }))
-            .collect::<Vec<_>>(),
-    )
-    .context("rendering ideas profiles as json")?;
-    let context_json = serde_json::to_string_pretty(context).context("rendering ideas context as json")?;
-    render_prompt(
-        template,
-        &[
-            ("projectKind", words.kind.to_string()),
-            ("githubRepo", github_repo.to_string()),
-            ("after", after.to_string()),
-            ("room", room.to_string()),
-            ("profiles", profiles_json),
-            ("context", context_json),
-        ],
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
+    use crate::ideas::test_support::waiting_idea;
 
     fn res(titles: &[&str]) -> IdeasResult {
         IdeasResult {
@@ -263,20 +201,6 @@ mod tests {
                 })
                 .collect(),
             error: None,
-        }
-    }
-
-    fn waiting_idea(title: &str, waited: u32) -> Idea {
-        Idea {
-            id: title.to_string(),
-            title: title.to_string(),
-            experience: String::new(),
-            why: String::new(),
-            why_now: String::new(),
-            for_profiles: vec![],
-            feature: None,
-            new_feature: None,
-            waited,
         }
     }
 
@@ -365,41 +289,5 @@ mod tests {
         assert_eq!(idea.why.chars().count(), IDEA_WHY_MAX);
         assert_eq!(idea.why_now.chars().count(), IDEA_WHY_NOW_MAX);
         assert_eq!(idea.feature.as_ref().unwrap().chars().count(), IDEA_FEATURE_MAX);
-    }
-
-    #[test]
-    fn build_prompt_fills_the_ideas_template() {
-        let template = std::fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("prompts")
-                .join("ideas.md"),
-        )
-        .unwrap();
-        let prompt = build_prompt(
-            &template,
-            ProjectType::Web,
-            "x/y",
-            "Chores",
-            3,
-            &[Profile {
-                id: "shopper".to_string(),
-                name: "Shopper".to_string(),
-                who: "Buys things".to_string(),
-                part: "customer".to_string(),
-            }],
-            &json!({ "live": [], "asked": [] }),
-        )
-        .unwrap();
-        assert!(!prompt.contains("{{"));
-        assert!(prompt.contains("a web app"));
-        assert!(prompt.contains("x/y"));
-        assert!(prompt.contains("Chores"));
-        assert!(prompt.contains("Shopper"));
-    }
-
-    #[test]
-    fn build_prompt_fails_on_a_template_with_a_placeholder_it_cant_fill() {
-        let err = build_prompt("{{unknown}}", ProjectType::Web, "x/y", "", 1, &[], &json!({})).unwrap_err();
-        assert!(err.to_string().contains("unknown"));
     }
 }
