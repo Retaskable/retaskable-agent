@@ -13,7 +13,7 @@ use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::start_at_login;
 use retaskable_agent::{
     api, backlog, config, connector, engines, lane_pool, lanes, link, local_model, network, phone, release,
-    release_install, release_update, setup_check, store, tags, telemetry,
+    release_install, release_update, setup_check, store, tags, telemetry, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -264,15 +264,15 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(connector::AgentView {
+    let view = Arc::new(view::AgentView {
         machine: link::machine_name(env),
         tags: tag_list,
-        projects: cfg.projects.iter().map(connector::ProjectView::from).collect(),
+        projects: cfg.projects.iter().map(view::ProjectView::from).collect(),
         version: version.to_string(),
         lanes: lane_count,
         chore_lane: cfg.machine.chore_lane,
         lane_sizes: lane_pool::LaneSizes::default(),
-        paused: connector::PauseState::default(),
+        paused: view::PauseState::default(),
     });
     // 04-architecture.md section 4.1: each lane's disk use, for the app's lanes panel. Walking a
     // lane's build output takes a while, so off the async threads and only every ten minutes.
@@ -329,7 +329,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             });
         }
     };
-    let exit_arc: Arc<connector::Exit> = Arc::new(exit_fn.clone());
+    let exit_arc: Arc<view::Exit> = Arc::new(exit_fn.clone());
     let connectors: Vec<_> = cloud_urls
         .iter()
         .map(|url| {

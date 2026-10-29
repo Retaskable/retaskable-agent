@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::process::Command;
 
 use crate::backlog::{BacklogError, Client};
-use crate::store::write_json_atomic;
+use crate::fs_util::write_json_atomic;
 
 /// The fixed folder an older repo's saved notes are moved over from (release-notes.md section 9).
 pub const RELEASES_DIR: &str = "docs/releases";

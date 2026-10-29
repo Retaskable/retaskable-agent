@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
-use crate::release_notes::{project_words, render_prompt};
+use crate::prompt::{project_words, render_prompt};
 
 /// The store's `chore_lock` name for grouping (shared/backlogTypes.ts's `TRYOUT_GROUPS_LOCK`):
 /// grouping runs on one computer at a time, so every planner round takes this lock first and drops

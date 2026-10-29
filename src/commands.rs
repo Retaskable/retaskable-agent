@@ -18,10 +18,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use crate::connector::{AgentView, Exit};
 use crate::galleries;
 use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
+use crate::view::{AgentView, Exit};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -187,7 +187,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::connector::ProjectView;
+    use crate::view::ProjectView;
 
     fn view() -> AgentView {
         AgentView {

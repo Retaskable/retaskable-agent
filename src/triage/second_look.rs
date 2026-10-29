@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
-use crate::release_notes::{project_words, render_prompt};
+use crate::prompt::{project_words, render_prompt};
 
 use super::{TriageButton, TriageContext, TriageDecision, TriageResult};
 
