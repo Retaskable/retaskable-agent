@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use crate::config::ProjectType;
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
-use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
+use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
 use crate::release_notes::{project_words, render_prompt};
 
 /// What the triager is given about the item (06.9 bullet 1): gathered by the caller from the
@@ -180,26 +180,24 @@ pub struct Triager<'a> {
 /// The read-only triager session for one `needs_human` item: nothing to resume, so it's
 /// ephemeral.
 pub fn session_spec(t: &Triager<'_>, ctx: &TriageContext) -> Result<SessionSpec> {
-    Ok(SessionSpec {
-        engine: t.engine,
-        model: t.model.clone(),
-        prompt: build_prompt(
-            t.template,
-            t.project_type,
-            t.github_repo,
-            t.max_automatic_decisions,
-            ctx,
-        )?,
-        schema: triage_result_schema(),
-        cwd: t.cwd.to_path_buf(),
-        max_turns: None,
-        budget_usd: t.budget_usd,
-        start: SessionStart::Ephemeral,
-        readonly: true,
-        cursor: t.cursor.clone(),
-        local: t.local.clone(),
-        sandbox: t.sandbox,
-    })
+    let prompt = build_prompt(
+        t.template,
+        t.project_type,
+        t.github_repo,
+        t.max_automatic_decisions,
+        ctx,
+    )?;
+    Ok(ephemeral_readonly_spec(
+        t.engine,
+        t.model.clone(),
+        prompt,
+        triage_result_schema(),
+        t.cwd.to_path_buf(),
+        t.budget_usd,
+        t.cursor.clone(),
+        t.local.clone(),
+        t.sandbox,
+    ))
 }
 
 /// What [`decide`] came back with: either the triager's own decision, or why there isn't one
@@ -270,6 +268,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::engines::SessionStart;
 
     const TEMPLATE: &str = "Looking at {{projectKind}} (`{{githubRepo}}`):\n{{context}}";
 
