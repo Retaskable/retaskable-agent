@@ -154,3 +154,57 @@ pub fn release_notes_result_schema() -> Value {
         "required": ["status", "title", "summary", "highlights", "entries"]
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_a_minimal_result() {
+        let r: ReleaseNotesResult = serde_json::from_value(json!({ "status": "ok" })).unwrap();
+        assert_eq!(r.status, "ok");
+        assert_eq!(r.title, "");
+        assert_eq!(r.summary, "");
+        assert!(r.highlights.is_empty());
+        assert!(r.entries.is_empty());
+        assert!(r.error.is_none());
+    }
+
+    #[test]
+    fn deserializes_every_field() {
+        let r: ReleaseNotesResult = serde_json::from_value(json!({
+            "status": "failed",
+            "title": "This week",
+            "summary": "A quiet week",
+            "highlights": [{ "key": "item-1", "headline": "Shipped X", "text": "X landed." }],
+            "entries": [{ "key": "item-1", "text": "Did X." }],
+            "error": "ran out of budget",
+        }))
+        .unwrap();
+        assert_eq!(r.status, "failed");
+        assert_eq!(r.title, "This week");
+        assert_eq!(r.summary, "A quiet week");
+        assert_eq!(r.highlights[0].key, "item-1");
+        assert_eq!(r.highlights[0].headline, "Shipped X");
+        assert_eq!(r.entries[0].text, "Did X.");
+        assert_eq!(r.error.as_deref(), Some("ran out of budget"));
+    }
+
+    #[test]
+    fn schema_requires_status_title_summary_highlights_and_entries() {
+        let schema = release_notes_result_schema();
+        assert_eq!(
+            schema["required"],
+            json!(["status", "title", "summary", "highlights", "entries"])
+        );
+        assert_eq!(schema["properties"]["status"]["enum"], json!(["ok", "failed"]));
+        assert_eq!(
+            schema["properties"]["highlights"]["items"]["required"],
+            json!(["key", "headline", "text"])
+        );
+        assert_eq!(
+            schema["properties"]["entries"]["items"]["required"],
+            json!(["key", "text"])
+        );
+    }
+}
