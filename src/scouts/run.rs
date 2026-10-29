@@ -5,13 +5,11 @@
 //! item) to read.
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::Path;
 
 use anyhow::Result;
 use futures_util::future::join_all;
 
-use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
-use crate::engines::{SessionResult, SessionSpec, ephemeral_readonly_spec};
+use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec};
 use crate::release_notes::clip;
 
 use super::info::{ScoutInfo, scout_info};
@@ -27,16 +25,9 @@ const EVIDENCE_MAX: usize = 400;
 pub struct Scouts<'a> {
     /// `prompts/scout.md`.
     pub template: &'a str,
-    /// A checkout at the slice's head, where a scout reads its share of the diff.
-    pub cwd: &'a Path,
-    /// `budget.scoutUsd`.
-    pub budget_usd: f64,
-    pub model: String,
-    pub local: Option<LocalTarget>,
-    /// [`crate::engines::engine_for`] with `Role::Scout`.
-    pub engine: Option<EngineId>,
-    pub cursor: Option<CursorOptions>,
-    pub sandbox: bool,
+    /// `Role::Scout`'s engine/model/budget/local/cursor/sandbox bundle; `session.cwd` is a
+    /// checkout at the slice's head, where a scout reads its share of the diff.
+    pub session: EphemeralSessionConfig<'a>,
 }
 
 /// The read-only, ephemeral session for one scout job.
@@ -48,17 +39,7 @@ pub fn session_spec(
 ) -> Result<SessionSpec> {
     let entry = scout_info(info, job.scout)?;
     let prompt = build_prompt(w.template, ctx, job, entry)?;
-    Ok(ephemeral_readonly_spec(
-        w.engine,
-        w.model.clone(),
-        prompt,
-        scout_result_schema(),
-        w.cwd.to_path_buf(),
-        w.budget_usd,
-        w.cursor.clone(),
-        w.local.clone(),
-        w.sandbox,
-    ))
+    Ok(w.session.spec(prompt, scout_result_schema()))
 }
 
 /// Runs every job's session concurrently (`Promise.all` in `review.ts`) through `run` (the
@@ -163,13 +144,15 @@ mod tests {
     fn writer(cwd: &'static Path) -> Scouts<'static> {
         Scouts {
             template: TEMPLATE,
-            cwd,
-            budget_usd: 0.5,
-            model: "haiku".to_string(),
-            local: None,
-            engine: None,
-            cursor: None,
-            sandbox: false,
+            session: EphemeralSessionConfig {
+                cwd,
+                budget_usd: 0.5,
+                model: "haiku".to_string(),
+                local: None,
+                engine: None,
+                cursor: None,
+                sandbox: false,
+            },
         }
     }
 
