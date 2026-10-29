@@ -324,6 +324,7 @@ mod tests {
             readonly: false,
             cursor: None,
             local: None,
+            sandbox: false,
         };
         let result = run_session(&engine, &bin, &spec, "known", None).await.unwrap();
         assert!(result.ok);
