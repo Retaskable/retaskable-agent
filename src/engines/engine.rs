@@ -102,6 +102,40 @@ pub fn ephemeral_readonly_spec(
     }
 }
 
+/// The engine/model/budget/local/cursor/sandbox bundle every read-only `writer`-style role
+/// (release notes, ideas, scouts) carries alongside its own prompt inputs — factored out so each
+/// role's struct holds one `session: EphemeralSessionConfig` field instead of repeating these
+/// seven fields and the [`ephemeral_readonly_spec`] call that reads them back off.
+#[derive(Debug, Clone)]
+pub struct EphemeralSessionConfig<'a> {
+    /// A checkout where the session may read specs/diffs/code, per the role's own doc comment.
+    pub cwd: &'a std::path::Path,
+    pub budget_usd: f64,
+    pub model: String,
+    pub local: Option<LocalTarget>,
+    /// [`crate::engines::engine_for`] with the role's own [`crate::engines::Role`].
+    pub engine: Option<EngineId>,
+    pub cursor: Option<CursorOptions>,
+    pub sandbox: bool,
+}
+
+impl EphemeralSessionConfig<'_> {
+    /// [`ephemeral_readonly_spec`] for this bundle, with the caller's own `prompt` and `schema`.
+    pub fn spec(&self, prompt: String, schema: Value) -> SessionSpec {
+        ephemeral_readonly_spec(
+            self.engine,
+            self.model.clone(),
+            prompt,
+            schema,
+            self.cwd.to_path_buf(),
+            self.budget_usd,
+            self.cursor.clone(),
+            self.local.clone(),
+            self.sandbox,
+        )
+    }
+}
+
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
 #[derive(Debug, Clone, Default)]
 pub struct CursorOptions {
