@@ -41,12 +41,12 @@ fn status_word(status: ItemStatus) -> &'static str {
     }
 }
 
-fn ensure_section(by_key: &mut HashMap<String, Section>, key: &str, heading: &str) {
-    by_key.entry(key.to_string()).or_insert_with(|| Section {
+fn new_section(key: &str, heading: &str) -> Section {
+    Section {
         key: key.to_string(),
         heading: heading.to_string(),
         entries: Vec::new(),
-    });
+    }
 }
 
 /// The spec's own title: its first `#` heading with a trailing "— Spec" (any dash, case-insensitive)
@@ -55,7 +55,7 @@ pub fn spec_title(path: &str, content: Option<&str>) -> String {
     if let Some(content) = content {
         let heading = Regex::new(r"(?m)^#\s+(.+?)\s*$").unwrap();
         if let Some(caps) = heading.captures(content) {
-            let suffix = RegexBuilder::new(r"\s+[-—–]\s*spec$")
+            let suffix = RegexBuilder::new(r"\s+[-—–]\s+spec$")
                 .case_insensitive(true)
                 .build()
                 .unwrap();
@@ -71,10 +71,13 @@ pub fn spec_title(path: &str, content: Option<&str>) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-/// Groups merged PRs and commits by the backlog item that owns them (`releaseNotes.ts`'s grouping,
-/// simplified: no Draft reconciliation, and chores land in one `"chores"` section instead of being
-/// split from playtest fixes). `files` is each named spec's content at the base branch (or `None` if
-/// it couldn't be read), from [`super::gather::read_base_files`], used to title that spec's section.
+/// Groups merged PRs and commits by the backlog item that owns them (`releaseNotes.ts`'s `group`):
+/// one section per spec, in the order of its first item in the backlog, then chores, then other
+/// changes. Simplified where this agent's `Item` carries less: no Draft reconciliation, chores are
+/// the `"chores"` milestone and land in one section (no playtest-fix split), an item's spec is its
+/// first `spec_refs` entry, and "done" is its status alone. `files` is each named spec's content at
+/// the base branch (or `None` if it couldn't be read), from [`super::gather::read_base_files`], used
+/// to title that spec's section.
 pub fn group(
     prs: &[MergedPr],
     commits: &[Commit],
@@ -84,140 +87,108 @@ pub fn group(
     let mut sorted: Vec<&MergedPr> = prs.iter().collect();
     sorted.sort_by(|a, b| a.merged_at.cmp(&b.merged_at));
 
-    let mut by_key: HashMap<String, Section> = HashMap::new();
-    let mut merge_commit_oids: HashSet<&str> = HashSet::new();
+    let mut spec_sections: Vec<Section> = Vec::new();
+    let mut chores = new_section("chores", "Chores");
+    let mut other = new_section("other", "Other changes");
 
+    // Backlog items and chores, one entry each with all their PRs in the range.
+    let mut by_item: HashMap<&str, Vec<&MergedPr>> = HashMap::new();
+    let mut rest: Vec<&MergedPr> = Vec::new();
     for pr in &sorted {
-        if let Some(oid) = &pr.merge_commit_oid {
-            merge_commit_oids.insert(oid.as_str());
-        }
-
-        let owner = pr_owner(pr, items);
-        let (section_key, section_heading, entry_key, item_ref, fallback, specs, chore) = match owner {
-            Some(item) if item.milestone.as_deref() == Some("chores") => (
-                "chores".to_string(),
-                "Chores".to_string(),
-                format!("item:{}", item.id),
-                Some(ItemRef {
-                    id: item.id.clone(),
-                    title: item.title.clone(),
-                    status: item.status,
-                }),
-                String::new(),
-                Vec::new(),
-                true,
-            ),
-            Some(item) => match item.spec_refs.first() {
-                Some(spec) => (
-                    format!("spec:{spec}"),
-                    spec_title(spec, files.get(spec).and_then(|c| c.as_deref())),
-                    format!("item:{}", item.id),
-                    Some(ItemRef {
-                        id: item.id.clone(),
-                        title: item.title.clone(),
-                        status: item.status,
-                    }),
-                    String::new(),
-                    item.spec_refs.clone(),
-                    false,
-                ),
-                None => (
-                    "other".to_string(),
-                    "Other changes".to_string(),
-                    format!("item:{}", item.id),
-                    Some(ItemRef {
-                        id: item.id.clone(),
-                        title: item.title.clone(),
-                        status: item.status,
-                    }),
-                    String::new(),
-                    Vec::new(),
-                    false,
-                ),
-            },
-            None => (
-                "other".to_string(),
-                "Other changes".to_string(),
-                format!("pr:{}", pr.number),
-                None,
-                pr.title.clone(),
-                Vec::new(),
-                false,
-            ),
-        };
-
-        ensure_section(&mut by_key, &section_key, &section_heading);
-        let section = by_key.get_mut(&section_key).unwrap();
-        match section.entries.iter_mut().find(|e| e.key == entry_key) {
-            Some(existing) => existing.prs.push(to_pr_ref(pr)),
-            None => section.entries.push(Entry {
-                key: entry_key,
-                item: item_ref,
-                fallback,
-                prs: vec![to_pr_ref(pr)],
-                commit: None,
-                specs,
-                chore,
-            }),
+        match pr_owner(pr, items) {
+            Some(item) => by_item.entry(item.id.as_str()).or_default().push(pr),
+            None => rest.push(pr),
         }
     }
-
-    for commit in commits {
-        if merge_commit_oids.contains(commit.sha.as_str()) {
+    for item in items {
+        let Some(its) = by_item.get(item.id.as_str()) else {
+            continue;
+        };
+        let prs: Vec<PrRef> = its.iter().map(|pr| to_pr_ref(pr)).collect();
+        if item.milestone.as_deref() == Some("chores") {
+            chores.entries.push(Entry {
+                key: format!("item:{}", item.id),
+                item: None,
+                fallback: item.title.clone(),
+                prs,
+                commit: None,
+                specs: Vec::new(),
+                chore: true,
+            });
             continue;
         }
-        let key = format!("commit:{}", &commit.sha[..commit.sha.len().min(7)]);
-        ensure_section(&mut by_key, "other", "Other changes");
-        let section = by_key.get_mut("other").unwrap();
-        if !section.entries.iter().any(|e| e.key == key) {
-            section.entries.push(Entry {
-                key,
-                item: None,
-                fallback: commit.subject.clone(),
-                prs: Vec::new(),
-                commit: Some(commit.clone()),
-                specs: Vec::new(),
-                chore: false,
-            });
+        let entry = Entry {
+            key: format!("item:{}", item.id),
+            item: Some(ItemRef {
+                id: item.id.clone(),
+                title: item.title.clone(),
+                status: item.status,
+            }),
+            fallback: its.iter().map(|pr| pr.title.as_str()).collect::<Vec<_>>().join("; "),
+            prs,
+            commit: None,
+            specs: item.spec_refs.clone(),
+            chore: false,
+        };
+        match item.spec_refs.first() {
+            Some(spec) => {
+                let key = format!("spec:{spec}");
+                let at = match spec_sections.iter().position(|s| s.key == key) {
+                    Some(at) => at,
+                    None => {
+                        let heading = spec_title(spec, files.get(spec).and_then(|c| c.as_deref()));
+                        spec_sections.push(new_section(&key, &heading));
+                        spec_sections.len() - 1
+                    }
+                };
+                spec_sections[at].entries.push(entry);
+            }
+            None => other.entries.push(entry),
         }
     }
+    for pr in rest {
+        other.entries.push(Entry {
+            key: format!("pr:{}", pr.number),
+            item: None,
+            fallback: pr.title.clone(),
+            prs: vec![to_pr_ref(pr)],
+            commit: None,
+            specs: Vec::new(),
+            chore: false,
+        });
+    }
 
-    let mut spec_keys: Vec<String> = by_key.keys().filter(|k| k.starts_with("spec:")).cloned().collect();
-    spec_keys.sort();
-
-    let mut ordered = Vec::new();
-    for key in &spec_keys {
-        if let Some(section) = by_key.remove(key) {
-            ordered.push(section);
+    // Commits pushed without a PR.
+    let merged: HashSet<&str> = sorted.iter().filter_map(|pr| pr.merge_commit_oid.as_deref()).collect();
+    for commit in commits {
+        if merged.contains(commit.sha.as_str()) {
+            continue;
         }
+        other.entries.push(Entry {
+            key: format!("commit:{}", &commit.sha[..commit.sha.len().min(7)]),
+            item: None,
+            fallback: commit.subject.clone(),
+            prs: Vec::new(),
+            commit: Some(commit.clone()),
+            specs: Vec::new(),
+            chore: false,
+        });
     }
-    if let Some(section) = by_key.remove("chores") {
-        ordered.push(section);
-    }
-    if let Some(section) = by_key.remove("other") {
-        ordered.push(section);
-    }
-    ordered.into_iter().filter(|s| !s.entries.is_empty()).collect()
+
+    spec_sections.push(chores);
+    spec_sections.push(other);
+    spec_sections.retain(|s| !s.entries.is_empty());
+    spec_sections
 }
 
-/// How many PRs, distinct items and chores a grouping covers.
+/// How many PRs, items and chores a grouping covers (`releaseNotes.ts`'s `counts`: an item has one
+/// entry, and a chore's entry isn't an item's).
 pub fn counts(sections: &[Section], total_prs: usize) -> Counts {
-    let mut items = HashSet::new();
-    let mut chores = 0usize;
-    for section in sections {
-        for entry in &section.entries {
-            if let Some(item) = &entry.item {
-                items.insert(item.id.clone());
-            }
-            if entry.chore {
-                chores += 1;
-            }
-        }
-    }
+    let entries = || sections.iter().flat_map(|s| &s.entries);
     Counts {
         prs: total_prs,
-        items: items.len(),
-        chores,
+        items: entries().filter(|e| e.item.is_some()).count(),
+        chores: entries().filter(|e| e.chore).count(),
     }
 }
 
@@ -412,6 +383,92 @@ mod tests {
     }
 
     #[test]
+    fn group_orders_specs_and_entries_by_the_backlog_not_by_merge_time() {
+        let items = vec![
+            item("1", "Zebra", ItemStatus::OnMain, None, &["docs/specs/zebra.md"], None),
+            item("2", "Apple", ItemStatus::OnMain, None, &["docs/specs/apple.md"], None),
+            item("3", "Loose", ItemStatus::OnMain, None, &[], None),
+        ];
+        let prs = [
+            pr(
+                1,
+                "Apple PR",
+                "https://github.com/x/y/pull/1",
+                "retaskable/2-apple",
+                "2026-09-24T00:00:00Z",
+            ),
+            pr(
+                2,
+                "Stray",
+                "https://github.com/x/y/pull/2",
+                "someone/stray",
+                "2026-09-25T00:00:00Z",
+            ),
+            pr(
+                3,
+                "Loose PR",
+                "https://github.com/x/y/pull/3",
+                "retaskable/3-loose",
+                "2026-09-26T00:00:00Z",
+            ),
+            pr(
+                4,
+                "Zebra PR",
+                "https://github.com/x/y/pull/4",
+                "retaskable/1-zebra",
+                "2026-09-27T00:00:00Z",
+            ),
+        ];
+        let sections = group(&prs, &[], &items, &HashMap::new());
+        let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["spec:docs/specs/zebra.md", "spec:docs/specs/apple.md", "other"]);
+        let other: Vec<&str> = sections[2].entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(other, ["item:3", "pr:2"]);
+    }
+
+    #[test]
+    fn group_falls_back_to_an_items_pr_titles_and_a_chores_own_title() {
+        let items = vec![
+            item("1", "Charts", ItemStatus::OnMain, None, &[], None),
+            item("2", "Bump deps", ItemStatus::OnMain, None, &[], Some("chores")),
+        ];
+        let prs = [
+            pr(
+                1,
+                "Add charts",
+                "https://github.com/x/y/pull/1",
+                "retaskable/1-charts",
+                "2026-09-24T00:00:00Z",
+            ),
+            pr(
+                2,
+                "More charts",
+                "https://github.com/x/y/pull/2",
+                "retaskable/1-charts",
+                "2026-09-25T00:00:00Z",
+            ),
+            pr(
+                3,
+                "Bump serde",
+                "https://github.com/x/y/pull/3",
+                "retaskable/2-bump",
+                "2026-09-26T00:00:00Z",
+            ),
+        ];
+        let sections = group(&prs, &[], &items, &HashMap::new());
+        let chores = sections.iter().find(|s| s.key == "chores").unwrap();
+        assert_eq!(chores.entries[0].fallback, "Bump deps");
+        assert!(chores.entries[0].item.is_none());
+        let other = sections.iter().find(|s| s.key == "other").unwrap();
+        assert_eq!(other.entries[0].fallback, "Add charts; More charts");
+    }
+
+    #[test]
+    fn spec_title_keeps_a_dash_spec_with_no_space_before_spec() {
+        assert_eq!(spec_title("docs/specs/x.md", Some("# Charts -Spec\n")), "Charts -Spec");
+    }
+
+    #[test]
     fn group_merges_two_prs_from_the_same_item_into_one_entry() {
         let items = vec![item(
             "1",
@@ -530,7 +587,7 @@ mod tests {
         let sections = group(&[p1, p2, p3], &[], &items, &HashMap::new());
         let c = counts(&sections, 3);
         assert_eq!(c.prs, 3);
-        assert_eq!(c.items, 2);
+        assert_eq!(c.items, 1);
         assert_eq!(c.chores, 1);
     }
 

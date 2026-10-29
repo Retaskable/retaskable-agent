@@ -47,6 +47,8 @@ pub fn note_markdown(
     fixes: &[String],
 ) -> String {
     let mut out = front_matter_lines(range);
+    out.push(format!("# {}", title.trim()));
+    out.push(String::new());
 
     let highlights: Vec<&(String, String)> = highlights
         .iter()
@@ -73,9 +75,6 @@ pub fn note_markdown(
         out.push(String::new());
         return out.join("\n");
     }
-
-    out.push(format!("# {}", title.trim()));
-    out.push(String::new());
 
     if let Some(summary) = summary {
         let summary = summary.trim();
@@ -138,9 +137,6 @@ pub fn empty_note(range: &Range) -> String {
 /// `releaseNotes.ts`'s behaviour when a session fails or hasn't run yet.
 pub fn markdown(sections: &[Section], range: &Range, result: Option<&ReleaseNotesResult>) -> String {
     let visible = for_users(sections);
-    if visible.iter().all(|s| s.entries.is_empty()) {
-        return empty_note(range);
-    }
 
     let mut section_of: HashMap<&str, &str> = HashMap::new();
     for section in &visible {
@@ -341,8 +337,7 @@ mod tests {
     #[test]
     fn note_markdown_says_nothing_new_when_everything_is_empty() {
         let md = note_markdown(&range(), "Title", None, &[], &[], &[]);
-        assert!(md.contains("Nothing new for users between"));
-        assert!(!md.contains("# Title"));
+        assert!(md.contains("# Title\n\nNothing new for users between"));
     }
 
     #[test]
@@ -412,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_is_the_empty_note_with_nothing_for_users() {
+    fn markdown_says_nothing_new_for_users_for_a_range_of_only_chores() {
         let items = vec![item("1", "Bump", ItemStatus::OnMain, None, &[], Some("chores"))];
         let p = pr(
             1,
@@ -423,7 +418,9 @@ mod tests {
         );
         let sections = group(&[p], &[], &items, &HashMap::new());
         let md = markdown(&sections, &range(), None);
-        assert!(md.contains("Nothing merged between"));
+        assert!(md.contains("# What's new: "));
+        assert!(md.contains("Nothing new for users between"));
+        assert!(!md.contains("Nothing merged"));
     }
 
     // project_words

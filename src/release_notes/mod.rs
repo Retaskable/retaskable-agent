@@ -6,12 +6,12 @@
 //! ([`ReleaseNotesResult`]/[`release_notes_result_schema`]).
 //!
 //! Not wired to anything yet: there's no command that calls this, no saved/published note state, and
-//! no model/tier selection. A caller puts this together with [`crate::session`] itself: build a
-//! [`crate::session::SessionSpec`] with `schema: release_notes_result_schema()`,
+//! no model/tier selection. A caller puts this together with [`crate::engines`] itself: build a
+//! [`crate::engines::engine::SessionSpec`] with `schema: release_notes_result_schema()`,
 //! `prompt: build_prompt(...)`, `budget_usd: cfg.budget.release_notes_usd`, and
 //! `start: SessionStart::Ephemeral` (the note is read-only and interactive like an ask — there's
-//! nothing to resume), run it with [`crate::session::run_session`], then render the result with
-//! [`markdown`]. That wiring, and the Draft-based grouping, chore/fix split and spec-link resolution
+//! nothing to resume), run it with [`crate::engines::runner::run_session`], then render the result with
+//! [`markdown`]. That wiring, and the Draft-based grouping, chore/playtest-fix split and spec-link resolution
 //! the TypeScript agent layers on top of this, are later slices.
 //!
 //! Split by responsibility, each piece with its own tests: `model` holds the plain data types,

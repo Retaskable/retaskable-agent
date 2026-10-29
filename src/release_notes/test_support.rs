@@ -70,12 +70,10 @@ pub(crate) fn write_fake_binary_printing(path: &Path, fixture: &Path) {
         std::fs::write(path, format!("@type \"{}\"\r\n", fixture.display())).unwrap();
     } else {
         std::fs::write(path, format!("#!/bin/sh\ncat \"{}\"\n", fixture.display())).unwrap();
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o755);
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        std::fs::set_permissions(path, perms).unwrap();
     }
 }
