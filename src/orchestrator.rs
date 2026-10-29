@@ -18,7 +18,7 @@ use serde_json::{Map, json};
 
 use crate::config::ProjectConfig;
 use crate::item_lifecycle::{ItemRun, ItemState};
-use crate::lane_pool::{LanePool, Want};
+use crate::lane_pool::{Holder, LanePool, Want};
 use crate::telemetry::EventLog;
 
 /// One project's items tracked between ticks, by item id.
@@ -70,6 +70,27 @@ pub fn tick(
         };
         let Some(lane) = pool.claim(&want) else { break };
         run.claimed(cfg);
+        if run.state == ItemState::NeedsHuman {
+            // Past its slice limit: needs_human frees the lane and skips the item
+            // (05-item-lifecycle.md), rather than starting an implementer for it.
+            pool.release(
+                lane,
+                &Holder::Item {
+                    project: project.to_string(),
+                    item: item_id.clone(),
+                },
+            );
+            events.add(
+                "item_state",
+                Map::from_iter([
+                    ("project".into(), json!(project)),
+                    ("item".into(), json!(item_id)),
+                    ("from".into(), json!("queued")),
+                    ("to".into(), json!("needs_human")),
+                ]),
+            );
+            continue;
+        }
         events.add(
             "lane_taken",
             Map::from_iter([
@@ -199,16 +220,17 @@ mod tests {
         let mut pool = pool(1);
         let mut events = EventLog::new();
         let actions = tick("proj", false, &mut runs, &mut pool, &cfg(), &mut events);
-        // The lane still takes the item (claiming is `ItemRun::claimed`'s job to redirect), but it
-        // lands in `needs_human` rather than `implementing`.
-        assert_eq!(
-            actions,
-            vec![Action::StartImplementer {
-                item_id: "a".into(),
-                lane: 1
-            }]
-        );
+        // needs_human frees the lane and skips the item (05-item-lifecycle.md), so the lane it
+        // briefly took is free again, and the caller is told to ask the store instead.
+        assert_eq!(actions, vec![Action::AskForWork]);
         assert_eq!(runs["a"].state, ItemState::NeedsHuman);
+        assert_eq!(pool.lane_of("proj", "a"), None);
+        let kinds: Vec<_> = events.recent().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            vec!["tick", "item_state"],
+            "no lane_taken for an item that needs a human"
+        );
     }
 
     #[test]
