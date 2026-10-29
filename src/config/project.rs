@@ -248,6 +248,11 @@ pub struct ProjectConfig {
     pub max_check_rounds: u32,
     #[serde(default = "default_max_slices_per_item")]
     pub max_slices_per_item: u32,
+    /// Times in a row a session may ask again what a person already answered before it needs a
+    /// human after all (`needs_clarification` row, decisions.rs): the answers go back to the
+    /// session instead, up to this many times.
+    #[serde(default = "default_max_reasks")]
+    pub max_reasks: u32,
     #[serde(default)]
     pub review: ReviewConfig,
     #[serde(default)]
@@ -282,6 +287,9 @@ fn default_max_check_rounds() -> u32 {
 }
 fn default_max_slices_per_item() -> u32 {
     10
+}
+fn default_max_reasks() -> u32 {
+    2
 }
 
 /// A project's id, made once from its repo folder's name in kebab case (`retaskable.com` gives `retaskable-com`).
@@ -453,6 +461,7 @@ mod tests {
             max_conflict_rounds: default_max_conflict_rounds(),
             max_check_rounds: default_max_check_rounds(),
             max_slices_per_item: default_max_slices_per_item(),
+            max_reasks: default_max_reasks(),
             review: ReviewConfig::default(),
             code_gates: CodeGates::default(),
             budget: ProjectBudget::default(),

@@ -7,6 +7,10 @@
 //! What's deliberately left out: the cross-item merge queue, batch merges and GitHub-specific landing
 //! mechanics inside `merging` (github-workflow.md, team-branch.md — neither ported here yet). This
 //! module only tracks what the *item's own* state becomes once that step reports an outcome.
+//!
+//! `crate::decisions` is the other half of the `needs_clarification` row: it matches a freshly
+//! asked question against what a person has already answered for the item, so a caller can tell
+//! `implementer_finished` whether this is a real question or a reask.
 use crate::config::{Playtests, ProjectConfig};
 
 /// Section 5's diagram, one variant per box.
@@ -59,6 +63,11 @@ pub struct ItemRun {
     /// Slices a human has allowed past `maxSlicesPerItem` (row 29: "Carry on" at the limit
     /// "raises the item's own sliceLimit by another maxSlicesPerItem").
     pub extra_slices: u32,
+    /// Times in a row a session has asked again what a person already answered (`decisions.rs`),
+    /// and been sent the answer back instead of a person; capped by `maxReasks` (`needs_clarification`
+    /// row: "at most twice before the item needs a human"). A person answering directly
+    /// (`clarification_answered`) resets it, since that always comes from a person, not a reask.
+    pub reasks: u32,
 }
 
 impl Default for ItemRun {
@@ -77,6 +86,7 @@ impl ItemRun {
             approved_at_head: false,
             slice: 0,
             extra_slices: 0,
+            reasks: 0,
         }
     }
 
@@ -96,7 +106,22 @@ impl ItemRun {
     /// The implementer session exited.
     pub fn implementer_finished(&mut self, outcome: ImplementerOutcome, cfg: &ProjectConfig) {
         self.state = match outcome {
-            ImplementerOutcome::Questions => ItemState::NeedsClarification,
+            // "Only questions nobody has answered are put to the person": every one just asked
+            // already has a decision on file, so the answers go back to the session instead,
+            // up to maxReasks times before it needs a human after all.
+            ImplementerOutcome::Questions {
+                all_already_answered: true,
+            } => {
+                self.reasks += 1;
+                if self.reasks > cfg.max_reasks {
+                    ItemState::NeedsHuman
+                } else {
+                    ItemState::Implementing
+                }
+            }
+            ImplementerOutcome::Questions {
+                all_already_answered: false,
+            } => ItemState::NeedsClarification,
             ImplementerOutcome::MainSync => awaiting_ci_entry(cfg),
             ImplementerOutcome::Finished => {
                 if ci_when_ready_active(cfg) {
@@ -108,8 +133,10 @@ impl ItemRun {
         };
     }
 
-    /// A person answered the session's questions; the same session resumes.
+    /// A person answered the session's questions; the same session resumes. Always from a
+    /// person, never a reask, so it resets that count.
     pub fn clarification_answered(&mut self) {
+        self.reasks = 0;
         self.state = ItemState::Implementing;
     }
 
@@ -321,8 +348,10 @@ pub enum ImplementerOutcome {
     Finished,
     /// It brought the branch up to date with the base (a main sync), which always waits for CI.
     MainSync,
-    /// It exited with questions for a person.
-    Questions,
+    /// It exited with questions. `all_already_answered`: every one it asked already has a
+    /// decision on file (`decisions::split_asked` found none open), so it's a reask rather than
+    /// a real `needs_clarification` — the answers go back to the session instead of a person.
+    Questions { all_already_answered: bool },
 }
 
 /// How the CI run `awaiting_ci` was watching finished.
@@ -399,6 +428,7 @@ mod tests {
             max_review_rounds: 3,
             max_conflict_rounds: 5,
             max_slices_per_item: 10,
+            max_reasks: 2,
             ..Default::default()
         }
     }
@@ -414,10 +444,63 @@ mod tests {
     #[test]
     fn questions_go_to_needs_clarification_and_an_answer_resumes_implementing() {
         let mut run = ItemRun::new();
-        run.implementer_finished(ImplementerOutcome::Questions, &cfg());
+        run.implementer_finished(
+            ImplementerOutcome::Questions {
+                all_already_answered: false,
+            },
+            &cfg(),
+        );
         assert_eq!(run.state, ItemState::NeedsClarification);
         run.clarification_answered();
         assert_eq!(run.state, ItemState::Implementing);
+    }
+
+    #[test]
+    fn a_reask_of_an_already_answered_question_resumes_implementing_and_counts_itself() {
+        let mut run = ItemRun::new();
+        run.implementer_finished(
+            ImplementerOutcome::Questions {
+                all_already_answered: true,
+            },
+            &cfg(),
+        );
+        assert_eq!(run.state, ItemState::Implementing);
+        assert_eq!(run.reasks, 1);
+    }
+
+    #[test]
+    fn reasks_past_max_reasks_needs_a_human() {
+        let cfg = ProjectConfig { max_reasks: 1, ..cfg() };
+        let mut run = ItemRun::new();
+        run.implementer_finished(
+            ImplementerOutcome::Questions {
+                all_already_answered: true,
+            },
+            &cfg,
+        );
+        assert_eq!(run.state, ItemState::Implementing);
+        run.implementer_finished(
+            ImplementerOutcome::Questions {
+                all_already_answered: true,
+            },
+            &cfg,
+        );
+        assert_eq!(run.state, ItemState::NeedsHuman);
+        assert_eq!(run.reasks, 2);
+    }
+
+    #[test]
+    fn a_person_answering_directly_resets_the_reask_count() {
+        let mut run = ItemRun::new();
+        run.implementer_finished(
+            ImplementerOutcome::Questions {
+                all_already_answered: true,
+            },
+            &cfg(),
+        );
+        assert_eq!(run.reasks, 1);
+        run.clarification_answered();
+        assert_eq!(run.reasks, 0);
     }
 
     #[test]
