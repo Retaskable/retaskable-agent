@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::link::{self, DeviceCode, TokenStore};
 
@@ -110,21 +111,48 @@ pub struct Item {
     pub milestone: Option<String>,
 }
 
-/// Why `list` didn't answer the items. Every variant means the same thing to a caller: don't guess,
+/// A spec draft as `drafts` answers it (backlog/06.2-operations.md): only what release notes match a
+/// merged PR by.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Draft {
+    pub id: String,
+    #[serde(default)]
+    pub titles: Vec<String>,
+    #[serde(default)]
+    pub pr_url: Option<String>,
+}
+
+/// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
 /// stop and wait for the store (agent/02-principles.md).
 #[derive(Debug)]
 pub enum BacklogError {
     /// The store couldn't be reached at all: no address, no network, a timeout, a refused connection.
     Unreachable(String),
-    /// The store answered, but refused the request or sent something this agent can't read.
-    BadAnswer { status: u16, message: String },
+    /// The store answered, but refused the request (`code` is its `error`, e.g. `bad_request` or
+    /// `not_found`) or sent something this agent can't read (no `code`).
+    BadAnswer {
+        status: u16,
+        code: Option<String>,
+        message: String,
+    },
+}
+
+impl BacklogError {
+    /// The store's own refusal code, when it refused.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            BacklogError::BadAnswer { code, .. } => code.as_deref(),
+            BacklogError::Unreachable(_) => None,
+        }
+    }
 }
 
 impl std::fmt::Display for BacklogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BacklogError::Unreachable(msg) => write!(f, "couldn't reach the backlog store: {msg}"),
-            BacklogError::BadAnswer { status, message } => {
+            BacklogError::BadAnswer { status, message, .. } => {
                 write!(f, "the backlog store answered {status}: {message}")
             }
         }
@@ -172,11 +200,27 @@ impl Client {
     /// ported here yet); a request with none is sent as the store's own `unauthorized` answer, not
     /// guessed around.
     pub async fn list(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Item>, BacklogError> {
+        self.op(repo_id, token, "list", json!({}), "items").await
+    }
+
+    /// `drafts` (backlog/06.2-operations.md): the project's spec drafts, oldest first.
+    pub async fn drafts(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Draft>, BacklogError> {
+        self.op(repo_id, token, "drafts", json!({}), "drafts").await
+    }
+
+    /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
+    /// answering its `value` read as `T` (`what` names it when it can't be read). A refusal keeps the
+    /// store's own `error` code (`bad_request`, `not_found`, ...) so a caller can tell them apart.
+    pub async fn op<T: DeserializeOwned>(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+        what: &str,
+    ) -> Result<T, BacklogError> {
         let url = format!("{}/v1/repos/{}/ops", self.base_url, repo_id);
-        let mut req = self.http.post(&url).json(&OpRequest {
-            op: "list",
-            args: Value::Object(Default::default()),
-        });
+        let mut req = self.http.post(&url).json(&OpRequest { op, args });
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
@@ -186,21 +230,21 @@ impl Client {
         if !status.is_success() {
             let message = body
                 .message
-                .or(body.error)
+                .or_else(|| body.error.clone())
                 .unwrap_or_else(|| format!("the store answered {status}"));
             return Err(BacklogError::BadAnswer {
                 status: status.as_u16(),
+                code: body.error,
                 message,
             });
         }
-        let value = body.value.ok_or_else(|| BacklogError::BadAnswer {
+        let bad = |message: String| BacklogError::BadAnswer {
             status: status.as_u16(),
-            message: "its answer had no value".to_string(),
-        })?;
-        serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
-            status: status.as_u16(),
-            message: format!("couldn't read the items it sent: {e}"),
-        })
+            code: None,
+            message,
+        };
+        let value = body.value.ok_or_else(|| bad("its answer had no value".to_string()))?;
+        serde_json::from_value(value).map_err(|e| bad(format!("couldn't read the {what} it sent: {e}")))
     }
 }
 
@@ -208,7 +252,6 @@ impl Client {
 mod tests {
     use super::*;
     use axum::{Json, Router, routing::post};
-    use serde_json::json;
     use std::net::TcpListener as StdTcpListener;
 
     fn no_env(_: &str) -> Option<String> {
@@ -287,6 +330,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drafts_sends_its_op_and_reads_each_drafts_pr() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["op"], "drafts");
+            Json(json!({
+                "value": [
+                    { "kind": "draft", "id": "draft-1", "status": "merged", "titles": ["Charts"],
+                      "prUrl": "https://github.com/x/y/pull/4" },
+                    { "kind": "draft", "id": "draft-2", "status": "queued", "titles": [], "prUrl": null },
+                ]
+            }))
+        }))
+        .await;
+
+        let drafts = Client::new(base).drafts(1, Some("tok")).await.unwrap();
+        assert_eq!(drafts[0].pr_url.as_deref(), Some("https://github.com/x/y/pull/4"));
+        assert_eq!(drafts[0].titles, ["Charts"]);
+        assert_eq!(drafts[1].pr_url, None);
+    }
+
+    #[tokio::test]
     async fn a_refusal_is_a_bad_answer_with_its_status_and_message() {
         let base = fake_store(post(|| async {
             (
@@ -298,8 +361,9 @@ mod tests {
 
         let err = Client::new(base).list(1, Some("tok")).await.unwrap_err();
         match err {
-            BacklogError::BadAnswer { status, message } => {
+            BacklogError::BadAnswer { status, code, message } => {
                 assert_eq!(status, 403);
+                assert_eq!(code.as_deref(), Some("forbidden"));
                 assert_eq!(message, "No access to this repo.");
             }
             other => panic!("expected BadAnswer, got {other:?}"),

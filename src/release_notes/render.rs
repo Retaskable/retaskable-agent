@@ -305,9 +305,8 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::release_notes::group::group;
     use crate::release_notes::model::{Highlight, NoteEntry};
-    use crate::release_notes::test_support::{charts_item_and_pr, item, pr, range};
+    use crate::release_notes::test_support::{charts_item_and_pr, grouped, item, pr, range};
 
     use super::*;
 
@@ -376,7 +375,7 @@ mod tests {
     #[test]
     fn markdown_falls_back_to_done_item_titles_with_no_model_result() {
         let (charts_item, p) = charts_item_and_pr();
-        let sections = group(&[p], &[], &[charts_item], &HashMap::new());
+        let sections = grouped(&[p], &[], &[charts_item], &HashMap::new());
         let md = markdown(&sections, &range(), None);
         assert!(md.contains("### Charts\n"));
         assert!(!md.contains("### 1 Charts"));
@@ -408,7 +407,7 @@ mod tests {
                 "2026-09-26T00:00:00Z",
             ),
         ];
-        let sections = group(&prs, &[], &items, &HashMap::new());
+        let sections = grouped(&prs, &[], &items, &HashMap::new());
         let result = ReleaseNotesResult {
             status: "ok".to_string(),
             title: "This week".to_string(),
@@ -434,7 +433,7 @@ mod tests {
     #[test]
     fn markdown_uses_the_models_title_summary_and_highlight_text() {
         let (charts_item, p) = charts_item_and_pr();
-        let sections = group(&[p], &[], &[charts_item], &HashMap::new());
+        let sections = grouped(&[p], &[], &[charts_item], &HashMap::new());
         let result = ReleaseNotesResult {
             status: "ok".to_string(),
             title: "My App: this week".to_string(),
@@ -464,7 +463,7 @@ mod tests {
             "retaskable/1-bump",
             "2026-09-24T00:00:00Z",
         );
-        let sections = group(&[p], &[], &items, &HashMap::new());
+        let sections = grouped(&[p], &[], &items, &HashMap::new());
         let md = markdown(&sections, &range(), None);
         assert!(md.contains("# What's new: "));
         assert!(md.contains("Nothing new for users between"));
