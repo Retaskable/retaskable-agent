@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use super::write_json_atomic;
+use crate::smoke::SmokeState;
 
 const STATE_FILE: &str = "state.json";
 
@@ -69,6 +70,24 @@ impl Store {
     /// does.
     pub fn set_usage(&mut self, usage: Value) {
         self.data.insert("usage".to_string(), usage);
+    }
+
+    /// Replaces `state.smoke` with the post-merge smoke's latest result
+    /// (docs/specs/agent/06.3-review.md: "`State.smoke = {sha, status, at, url, tail?}`").
+    /// Doesn't save on its own; call `save` after, as every other change here does.
+    pub fn set_smoke(&mut self, smoke: &SmokeState) {
+        self.data.insert(
+            "smoke".to_string(),
+            serde_json::to_value(smoke).expect("SmokeState always serializes"),
+        );
+    }
+
+    /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses
+    /// (an older agent's file, say) rather than erroring.
+    pub fn smoke(&self) -> Option<SmokeState> {
+        self.data
+            .get("smoke")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 }
 
@@ -172,6 +191,28 @@ mod tests {
             saved,
             serde_json::json!({"usage": {"status": "rejected", "resetsAt": 2000}})
         );
+    }
+
+    #[test]
+    fn set_smoke_replaces_the_smoke_key_once_saved_and_reads_back_the_same_state() {
+        use crate::smoke::SmokeStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert!(store.smoke().is_none());
+
+        let state = SmokeState {
+            sha: "abc123".to_string(),
+            status: SmokeStatus::Running,
+            at: "2026-10-28T00:00:00.000Z".to_string(),
+            url: Some("https://staging.example.com".to_string()),
+            tail: None,
+        };
+        store.set_smoke(&state);
+        store.save().unwrap();
+
+        let reloaded = Store::load(dir.path()).unwrap();
+        assert_eq!(reloaded.smoke(), Some(state));
     }
 
     #[test]

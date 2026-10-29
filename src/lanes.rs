@@ -129,6 +129,32 @@ pub fn head_sha(dir: &Path) -> Result<String> {
     Ok(git_output_in_worktree(dir, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
+/// `<worktrees_dir>/smoke`: the post-merge staging smoke's own checkout
+/// (docs/specs/agent/06.3-review.md, "Run it in its own worktree"), reused between runs so its
+/// `node_modules` stays warm, the same way the base checkout is.
+pub fn smoke_path(worktrees_dir: &Path) -> PathBuf {
+    worktrees_dir.join("smoke")
+}
+
+/// Resets the smoke worktree ([`smoke_path`]) onto `sha`, detached, the same way
+/// [`prepare_base_checkout`] resets the base checkout — except at a specific commit rather than
+/// the base branch's current head, since a later merge must not move a smoke run already under
+/// way out from under it ("one at a time per project, newest only").
+pub fn prepare_smoke_checkout(repo_path: &Path, worktrees_dir: &Path, sha: &str) -> Result<PathBuf> {
+    let dir = smoke_path(worktrees_dir);
+    ensure_worktree(repo_path, worktrees_dir, &dir)?;
+    kill_processes_in(&dir)?;
+    {
+        let _guard = lock(&GIT_LOCK);
+        fetch(repo_path, true)?;
+        run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
+        run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
+        run(git_in_worktree(&dir).args(["checkout", "--detach", sha]))?;
+    }
+    link_outside_deps(repo_path, worktrees_dir, &dir)?;
+    Ok(dir)
+}
+
 /// Something just changed origin without a fetch here (a PR merged on GitHub): the next lane
 /// fetches again.
 pub fn fetch_is_stale(repo_path: &Path) {
@@ -333,6 +359,14 @@ fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
     run(git(repo_path).args(["fetch", "--prune", "origin"]))?;
     lock(&FETCHED_AT).insert(key, started);
     Ok(true)
+}
+
+/// Fetches `repo_path` under [`GIT_LOCK`], unless another fetch of it began within
+/// [`FRESH_FETCH`]: the locked, deduped fetch every caller outside this module needs before
+/// reading `origin/*` (docs/specs/agent/06.3-review.md's post-merge smoke is the first of those).
+pub(crate) fn fetch_latest(repo_path: &Path) -> Result<bool> {
+    let _guard = lock(&GIT_LOCK);
+    fetch(repo_path, true)
 }
 
 fn is_worktree(path: &Path) -> bool {
@@ -767,6 +801,40 @@ mod tests {
         assert_eq!(branch_of(&lane), "retaskable/item-slug-s1");
         assert!(!lane.join("dirt.txt").exists());
         assert_eq!(std::fs::read_to_string(lane.join("README.md")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn prepare_smoke_checkout_reuses_the_worktree_and_checks_out_the_given_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_origin(root.path());
+        let worktrees = root.path().join("worktrees");
+        let first_sha = git_output_in_worktree(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let dir = prepare_smoke_checkout(&repo, &worktrees, &first_sha).unwrap();
+
+        assert_eq!(dir, smoke_path(&worktrees));
+        assert_eq!(head_sha(&dir).unwrap(), first_sha);
+
+        // Dirt the checkout and add a second commit on main; a later call reuses the same
+        // worktree, cleans it and lands on the newly given commit.
+        std::fs::write(dir.join("dirt.txt"), "gone").unwrap();
+        std::fs::write(repo.join("README.md"), "second").unwrap();
+        run(git(&repo).args(["add", "README.md"])).unwrap();
+        run(git(&repo).args(["commit", "--quiet", "-m", "second"])).unwrap();
+        run(git(&repo).args(["push", "--quiet", "origin", "main"])).unwrap();
+        let second_sha = git_output_in_worktree(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let dir_again = prepare_smoke_checkout(&repo, &worktrees, &second_sha).unwrap();
+
+        assert_eq!(dir_again, dir);
+        assert_eq!(head_sha(&dir).unwrap(), second_sha);
+        assert!(!dir.join("dirt.txt").exists());
     }
 
     #[test]
