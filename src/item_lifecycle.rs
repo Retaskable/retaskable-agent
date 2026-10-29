@@ -70,7 +70,8 @@ impl ItemRun {
         }
     }
 
-    /// `queued` -> `implementing`: the store handed the item out.
+    /// `queued` -> `implementing`: the store handed the item out. Also takes a `merged` item
+    /// (one not yet `done`) into its next slice, once the store hands that out too.
     pub fn claimed(&mut self) {
         self.state = ItemState::Implementing;
     }
@@ -81,7 +82,7 @@ impl ItemRun {
             ImplementerOutcome::Questions => ItemState::NeedsClarification,
             ImplementerOutcome::MainSync => awaiting_ci_entry(cfg),
             ImplementerOutcome::Finished => {
-                if cfg.require_ci && cfg.ci_when_ready {
+                if ci_when_ready_active(cfg) {
                     ItemState::Checking
                 } else {
                     awaiting_ci_entry(cfg)
@@ -98,17 +99,31 @@ impl ItemRun {
     /// The CI run `awaiting_ci` was watching finished (or never started within the grace, or
     /// doesn't cover the base at all).
     pub fn ci_finished(&mut self, outcome: CiOutcome, cfg: &ProjectConfig) {
+        let ci_when_ready = ci_when_ready_active(cfg);
         self.state = match outcome {
             CiOutcome::Passed => {
                 if self.approved_at_head {
                     ItemState::Merging
+                } else if ci_when_ready {
+                    // "With ciWhenReady on, ciCoversChecks doesn't apply": the lane's checks
+                    // still run even though CI just passed.
+                    ItemState::Checking
                 } else if cfg.ci_covers_checks {
                     ItemState::Reviewing
                 } else {
                     ItemState::Checking
                 }
             }
-            CiOutcome::NoChecksRan => ItemState::Checking,
+            CiOutcome::NoChecksRan => {
+                // "An item approved at the PR's head goes to merging rather than back to
+                // review" — but only in ciWhenReady mode; otherwise it just carries on to
+                // checking (checks still need to run; nothing covered them).
+                if self.approved_at_head && ci_when_ready {
+                    ItemState::Merging
+                } else {
+                    ItemState::Checking
+                }
+            }
             CiOutcome::Failed => self.fail_check(cfg),
             CiOutcome::TimedOut => ItemState::NeedsHuman,
         };
@@ -134,12 +149,16 @@ impl ItemRun {
     /// Scouts and the reviewer finished looking at the diff.
     pub fn review_finished(&mut self, outcome: ReviewOutcome, cfg: &ProjectConfig) {
         self.state = match outcome {
-            ReviewOutcome::Approved => {
+            ReviewOutcome::Approved { playtest } => {
                 self.approved_at_head = true;
-                if cfg.playtests == Playtests::On {
+                // 06.3-review.md: "approve moves the item to awaiting_playtest if the
+                // reviewer's result has a playtest, and to merging if it doesn't" — gated on
+                // the project's playtests setting (06.4-playtests.md): "on" asks before
+                // merging; "after_merge" and "off" never block the merge on one.
+                if playtest && cfg.playtests == Playtests::On {
                     ItemState::AwaitingPlaytest
                 } else {
-                    ItemState::Merging
+                    merge_entry(cfg)
                 }
             }
             ReviewOutcome::ChangesRequested => {
@@ -158,7 +177,7 @@ impl ItemRun {
     /// A person played the approved build.
     pub fn playtest_finished(&mut self, outcome: PlaytestOutcome, cfg: &ProjectConfig) {
         self.state = match outcome {
-            PlaytestOutcome::Passed => ItemState::Merging,
+            PlaytestOutcome::Passed => merge_entry(cfg),
             PlaytestOutcome::Failed => {
                 self.approved_at_head = false;
                 self.review_rounds += 1;
@@ -176,6 +195,19 @@ impl ItemRun {
         self.state = match outcome {
             MergeOutcome::Merged => ItemState::Merged,
             MergeOutcome::HandedToGithub => ItemState::AwaitingMerge,
+            MergeOutcome::UpdatedFromBase { approval_kept } => {
+                // The base moved, so it's brought up to date and checked again before it
+                // merges — unlike a real Conflict below, this merged in cleanly, so it goes
+                // on to awaiting_ci rather than back to implementing. It still counts against
+                // maxConflictRounds; past the cap, a PR that's only behind merges as it is.
+                self.approved_at_head = approval_kept;
+                self.conflict_rounds += 1;
+                if self.conflict_rounds > cfg.max_conflict_rounds {
+                    ItemState::Merged
+                } else {
+                    ItemState::AwaitingCi
+                }
+            }
             MergeOutcome::Conflict => {
                 self.approved_at_head = false;
                 self.conflict_rounds += 1;
@@ -198,8 +230,11 @@ impl ItemRun {
     }
 
     /// The backlog store said whether anything is left in the item once this slice merged.
+    /// Row 27: done moves it to `done`; otherwise "it stays `merged` here and is back in the
+    /// backlog's queue for its next slice" — `claimed()` takes it from `merged` to
+    /// `implementing` once the store hands that slice out.
     pub fn merged_resolved(&mut self, item_done: bool) {
-        self.state = if item_done { ItemState::Done } else { ItemState::Queued };
+        self.state = if item_done { ItemState::Done } else { ItemState::Merged };
     }
 
     /// Any state can go to `needs_human`: a budget hit, max rounds, max slices, a reviewer
@@ -225,6 +260,23 @@ fn awaiting_ci_entry(cfg: &ProjectConfig) -> ItemState {
         ItemState::AwaitingCi
     } else {
         ItemState::Checking
+    }
+}
+
+/// Whether CI only runs once a change is ready (`ciWhenReady`, which only means anything with
+/// `requireCi` on too).
+fn ci_when_ready_active(cfg: &ProjectConfig) -> bool {
+    cfg.require_ci && cfg.ci_when_ready
+}
+
+/// Where an approved item (the review approved it, or its playtest passed) goes next. 06.3's
+/// `ciWhenReady` rule: "wherever an approved item would go to `merging` ... it goes to
+/// `awaiting_ci` instead, and CI passing on the approved commit merges it."
+fn merge_entry(cfg: &ProjectConfig) -> ItemState {
+    if ci_when_ready_active(cfg) {
+        ItemState::AwaitingCi
+    } else {
+        ItemState::Merging
     }
 }
 
@@ -260,7 +312,11 @@ pub enum CheckOutcome {
 /// How review finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewOutcome {
-    Approved,
+    /// `playtest`: whether the reviewer's result asks for one (06.3-review.md), which only
+    /// sends it to `awaiting_playtest` when the project's `playtests` setting is `on`.
+    Approved {
+        playtest: bool,
+    },
     ChangesRequested,
     /// The reviewer sent it straight to a human instead of asking for changes.
     Escalated,
@@ -280,6 +336,10 @@ pub enum MergeOutcome {
     Merged,
     /// Handed to GitHub's auto-merge or a person; waits in `awaiting_merge`.
     HandedToGithub,
+    /// The base moved since its checks ran, so it was merged in (cleanly, no conflict) and
+    /// goes on to `awaiting_ci` to be checked again before it merges. `approval_kept`: whether
+    /// the slice's own changes still read the same as at `approvedSha`.
+    UpdatedFromBase { approval_kept: bool },
     /// Couldn't bring the branch up to date with the base, or the merge failed mechanically.
     Conflict,
     /// Some other failure (e.g. the code host didn't answer after repeated retries).
@@ -406,6 +466,47 @@ mod tests {
     }
 
     #[test]
+    fn ci_when_ready_ignores_ci_covers_checks_and_still_goes_to_checking() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::AwaitingCi;
+        let cfg = ProjectConfig {
+            require_ci: true,
+            ci_when_ready: true,
+            ci_covers_checks: true,
+            ..cfg()
+        };
+        run.ci_finished(CiOutcome::Passed, &cfg);
+        assert_eq!(run.state, ItemState::Checking);
+    }
+
+    #[test]
+    fn ci_when_ready_with_no_checks_ran_and_approved_at_head_goes_to_merging() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::AwaitingCi;
+        run.approved_at_head = true;
+        let cfg = ProjectConfig {
+            require_ci: true,
+            ci_when_ready: true,
+            ..cfg()
+        };
+        run.ci_finished(CiOutcome::NoChecksRan, &cfg);
+        assert_eq!(run.state, ItemState::Merging);
+    }
+
+    #[test]
+    fn ci_when_ready_with_no_checks_ran_and_not_yet_approved_goes_to_checking() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::AwaitingCi;
+        let cfg = ProjectConfig {
+            require_ci: true,
+            ci_when_ready: true,
+            ..cfg()
+        };
+        run.ci_finished(CiOutcome::NoChecksRan, &cfg);
+        assert_eq!(run.state, ItemState::Checking);
+    }
+
+    #[test]
     fn ci_timing_out_goes_straight_to_needs_human() {
         let mut run = ItemRun::new();
         run.state = ItemState::AwaitingCi;
@@ -472,7 +573,7 @@ mod tests {
     fn approval_without_playtests_on_goes_straight_to_merging() {
         let mut run = ItemRun::new();
         run.state = ItemState::Reviewing;
-        run.review_finished(ReviewOutcome::Approved, &cfg());
+        run.review_finished(ReviewOutcome::Approved { playtest: false }, &cfg());
         assert_eq!(run.state, ItemState::Merging);
         assert!(run.approved_at_head);
     }
@@ -485,8 +586,55 @@ mod tests {
             playtests: Playtests::On,
             ..cfg()
         };
-        run.review_finished(ReviewOutcome::Approved, &cfg);
+        run.review_finished(ReviewOutcome::Approved { playtest: true }, &cfg);
         assert_eq!(run.state, ItemState::AwaitingPlaytest);
+    }
+
+    #[test]
+    fn playtests_on_does_not_wait_when_the_reviewer_did_not_ask_for_one() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::Reviewing;
+        let cfg = ProjectConfig {
+            playtests: Playtests::On,
+            ..cfg()
+        };
+        run.review_finished(ReviewOutcome::Approved { playtest: false }, &cfg);
+        assert_eq!(run.state, ItemState::Merging);
+    }
+
+    #[test]
+    fn ci_when_ready_sends_an_approval_to_awaiting_ci_instead_of_straight_to_merging() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::Reviewing;
+        let cfg = ProjectConfig {
+            require_ci: true,
+            ci_when_ready: true,
+            ..cfg()
+        };
+        run.review_finished(ReviewOutcome::Approved { playtest: false }, &cfg);
+        assert_eq!(run.state, ItemState::AwaitingCi);
+        assert!(run.approved_at_head);
+
+        run.ci_finished(CiOutcome::Passed, &cfg);
+        assert_eq!(run.state, ItemState::Merging);
+    }
+
+    #[test]
+    fn ci_when_ready_sends_a_passed_playtest_to_awaiting_ci_instead_of_straight_to_merging() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::AwaitingPlaytest;
+        run.approved_at_head = true;
+        let cfg = ProjectConfig {
+            require_ci: true,
+            ci_when_ready: true,
+            playtests: Playtests::On,
+            ..cfg()
+        };
+        run.playtest_finished(PlaytestOutcome::Passed, &cfg);
+        assert_eq!(run.state, ItemState::AwaitingCi);
+
+        run.ci_finished(CiOutcome::Passed, &cfg);
+        assert_eq!(run.state, ItemState::Merging);
     }
 
     #[test]
@@ -603,7 +751,44 @@ mod tests {
     }
 
     #[test]
-    fn merged_resolves_to_done_or_back_to_queued_from_the_backlog_itemdone_flag() {
+    fn being_brought_up_to_date_with_approval_kept_waits_in_awaiting_ci_again() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::Merging;
+        run.approved_at_head = true;
+        run.merge_finished(MergeOutcome::UpdatedFromBase { approval_kept: true }, &cfg());
+        assert_eq!(run.state, ItemState::AwaitingCi);
+        assert!(run.approved_at_head);
+        assert_eq!(run.conflict_rounds, 1);
+    }
+
+    #[test]
+    fn being_brought_up_to_date_without_keeping_approval_drops_it_but_still_waits_for_ci() {
+        let mut run = ItemRun::new();
+        run.state = ItemState::Merging;
+        run.approved_at_head = true;
+        run.merge_finished(MergeOutcome::UpdatedFromBase { approval_kept: false }, &cfg());
+        assert_eq!(run.state, ItemState::AwaitingCi);
+        assert!(!run.approved_at_head);
+        assert_eq!(run.conflict_rounds, 1);
+    }
+
+    #[test]
+    fn conflict_rounds_cap_from_repeated_base_updates_merges_anyway_since_its_only_behind() {
+        let cfg = ProjectConfig {
+            max_conflict_rounds: 1,
+            ..cfg()
+        };
+        let mut run = ItemRun::new();
+        run.state = ItemState::Merging;
+        run.merge_finished(MergeOutcome::UpdatedFromBase { approval_kept: true }, &cfg);
+        assert_eq!(run.state, ItemState::AwaitingCi);
+        run.state = ItemState::Merging;
+        run.merge_finished(MergeOutcome::UpdatedFromBase { approval_kept: true }, &cfg);
+        assert_eq!(run.state, ItemState::Merged);
+    }
+
+    #[test]
+    fn merged_resolves_to_done_or_stays_merged_from_the_backlog_itemdone_flag() {
         let mut run = ItemRun::new();
         run.state = ItemState::Merged;
         run.merged_resolved(true);
@@ -612,7 +797,10 @@ mod tests {
         let mut run = ItemRun::new();
         run.state = ItemState::Merged;
         run.merged_resolved(false);
-        assert_eq!(run.state, ItemState::Queued);
+        assert_eq!(run.state, ItemState::Merged);
+
+        run.claimed();
+        assert_eq!(run.state, ItemState::Implementing);
     }
 
     #[test]
