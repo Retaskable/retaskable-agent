@@ -152,6 +152,25 @@ fn run_timed(
     }
 }
 
+/// `checksSummary` (checks.ts): each check as "✓ name" or "✗ name (non-blocking)", one per line
+/// — the evidence a scout or the stage 3 reviewer reads for context. `CheckRun` doesn't track a
+/// duration or whether a check also fails on main (`preexisting`), so this is simpler than the
+/// TypeScript original.
+pub fn checks_summary(checks: &[CheckRun]) -> String {
+    checks
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {}{}",
+                if c.passed() { "✓" } else { "✗" },
+                c.name,
+                if c.blocking { "" } else { " (non-blocking)" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn diff_stat(lane_dir: &Path, base_branch: &str) -> Result<String> {
     let range = format!("origin/{base_branch}...HEAD");
     lanes::git_output_in_worktree(lane_dir, &["diff", "--stat", &range]).context("git diff --stat")
@@ -298,6 +317,29 @@ mod tests {
             output_tail: String::new(),
         };
         assert!(!run.passed());
+    }
+
+    #[test]
+    fn checks_summary_marks_each_check_passed_or_failed_and_names_non_blocking_ones() {
+        let checks = vec![
+            CheckRun {
+                name: "test".to_string(),
+                command: "exit 0".to_string(),
+                blocking: true,
+                exit_code: 0,
+                timed_out: false,
+                output_tail: String::new(),
+            },
+            CheckRun {
+                name: "lint".to_string(),
+                command: "exit 1".to_string(),
+                blocking: false,
+                exit_code: 1,
+                timed_out: false,
+                output_tail: String::new(),
+            },
+        ];
+        assert_eq!(checks_summary(&checks), "✓ test\n✗ lint (non-blocking)");
     }
 
     #[test]

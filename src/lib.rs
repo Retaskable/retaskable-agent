@@ -34,6 +34,7 @@ pub mod release_notes;
 pub mod release_update;
 pub mod repo;
 pub mod scan;
+pub mod scouts;
 pub mod settings_server;
 pub mod setup_check;
 pub mod start_at_login;
