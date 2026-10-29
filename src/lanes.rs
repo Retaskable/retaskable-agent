@@ -383,7 +383,9 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn git_output_in_worktree(dir: &Path, args: &[&str]) -> Result<String> {
+/// A git call inside a lane whose output the caller wants back, e.g. stage 1's `diff --stat`
+/// and `diff --name-only` (docs/specs/agent/06.3-review.md), as well as this module's own use.
+pub(crate) fn git_output_in_worktree(dir: &Path, args: &[&str]) -> Result<String> {
     let output = git_in_worktree(dir).args(args).output().context("running git")?;
     if !output.status.success() {
         bail!("git failed: {}", String::from_utf8_lossy(&output.stderr).trim());

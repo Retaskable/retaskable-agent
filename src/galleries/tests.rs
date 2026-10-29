@@ -457,75 +457,6 @@ fn picture_cache_evicts_the_oldest_entry_once_full() {
 }
 
 #[test]
-fn needs_npm_install_is_false_without_a_package_json() {
-    let root = tempfile::tempdir().unwrap();
-    assert!(!needs_npm_install(root.path()));
-}
-
-#[test]
-fn needs_npm_install_is_true_when_node_modules_is_missing() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package.json"), "{}").unwrap();
-    assert!(needs_npm_install(root.path()));
-}
-
-#[test]
-fn needs_npm_install_is_false_once_node_modules_is_up_to_date() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package.json"), "{}").unwrap();
-    std::fs::write(root.path().join("package-lock.json"), "{}").unwrap();
-    std::fs::create_dir_all(root.path().join("node_modules")).unwrap();
-    std::fs::write(root.path().join("node_modules").join(".package-lock.json"), "{}").unwrap();
-    let now = std::time::SystemTime::now();
-    set_mtime(
-        &root.path().join("package-lock.json"),
-        now - std::time::Duration::from_secs(60),
-    );
-    set_mtime(&root.path().join("node_modules").join(".package-lock.json"), now);
-
-    assert!(!needs_npm_install(root.path()));
-}
-
-fn set_mtime(path: &Path, when: std::time::SystemTime) {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(when)
-        .unwrap();
-}
-
-#[test]
-fn needs_npm_install_is_true_once_the_lockfile_is_newer_than_the_installed_copy() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package.json"), "{}").unwrap();
-    std::fs::write(root.path().join("package-lock.json"), "{}").unwrap();
-    std::fs::create_dir_all(root.path().join("node_modules")).unwrap();
-    std::fs::write(root.path().join("node_modules").join(".package-lock.json"), "{}").unwrap();
-    let now = std::time::SystemTime::now();
-    set_mtime(
-        &root.path().join("node_modules").join(".package-lock.json"),
-        now - std::time::Duration::from_secs(60),
-    );
-    set_mtime(&root.path().join("package-lock.json"), now);
-
-    assert!(needs_npm_install(root.path()));
-}
-
-#[test]
-fn npm_install_command_prefers_ci_when_theres_a_lockfile() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package-lock.json"), "{}").unwrap();
-    assert_eq!(npm_install_command(root.path()), "npm ci");
-}
-
-#[test]
-fn npm_install_command_falls_back_to_install_without_a_lockfile() {
-    let root = tempfile::tempdir().unwrap();
-    assert_eq!(npm_install_command(root.path()), "npm install");
-}
-
-#[test]
 fn npm_install_if_needed_with_skips_the_runner_when_nothing_is_needed() {
     let root = tempfile::tempdir().unwrap();
     let ran = std::cell::Cell::new(false);
@@ -554,28 +485,7 @@ fn npm_install_if_needed_with_runs_npm_ci_and_passes_on_its_failure() {
 
     assert_eq!(seen.borrow().as_ref().unwrap().0, "npm ci");
     assert_eq!(seen.borrow().as_ref().unwrap().1, root.path());
-    assert_eq!(seen.borrow().as_ref().unwrap().2, NPM_INSTALL_TIMEOUT);
+    assert_eq!(seen.borrow().as_ref().unwrap().2, proc::NPM_INSTALL_TIMEOUT);
     assert!(err.to_string().contains("failed (1)"), "{err}");
     assert!(err.to_string().contains("boom"), "{err}");
-}
-
-#[test]
-fn scrub_path_drops_every_node_modules_bin_and_puts_this_checkouts_first() {
-    let dir = Path::new("checkout");
-    let other_sep = if cfg!(windows) { ';' } else { ':' };
-    let other = std::env::join_paths([
-        Path::new("checkout").join("node_modules").join(".bin"),
-        Path::new("other-checkout").join("node_modules").join(".bin"),
-        Path::new("usr").join("bin"),
-    ])
-    .unwrap()
-    .to_string_lossy()
-    .into_owned();
-
-    let scrubbed = scrub_path(&other, dir);
-
-    let parts: Vec<&str> = scrubbed.split(other_sep).collect();
-    assert_eq!(parts[0], dir.join("node_modules").join(".bin").to_string_lossy());
-    assert_eq!(parts.len(), 2, "{scrubbed}");
-    assert!(parts[1].ends_with("bin"), "{scrubbed}");
 }

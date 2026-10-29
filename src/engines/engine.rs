@@ -71,6 +71,37 @@ pub struct SessionSpec {
     pub sandbox: bool,
 }
 
+/// A `SessionSpec` for a read-only session with nothing to resume (a `writer`, e.g. release notes'
+/// or ideas', both interactive-like-an-ask and run once): no `max_turns` cap, `start:
+/// SessionStart::Ephemeral`, `readonly: true`.
+#[allow(clippy::too_many_arguments)]
+pub fn ephemeral_readonly_spec(
+    engine: Option<EngineId>,
+    model: String,
+    prompt: String,
+    schema: Value,
+    cwd: PathBuf,
+    budget_usd: f64,
+    cursor: Option<CursorOptions>,
+    local: Option<LocalTarget>,
+    sandbox: bool,
+) -> SessionSpec {
+    SessionSpec {
+        engine,
+        model,
+        prompt,
+        schema,
+        cwd,
+        max_turns: None,
+        budget_usd,
+        start: SessionStart::Ephemeral,
+        readonly: true,
+        cursor,
+        local,
+        sandbox,
+    }
+}
+
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
 #[derive(Debug, Clone, Default)]
 pub struct CursorOptions {
@@ -267,6 +298,25 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
         cursor: None,
         local: None,
         sandbox: false,
+    }
+}
+
+/// A `SessionResult` test fixture shared by `write_note`'s and `run_round`'s own tests: a result
+/// with a cost, and nothing else interesting. Callers set `ok`, `subtype`, `structured` and `error`.
+#[cfg(test)]
+pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
+    SessionResult {
+        ok,
+        subtype: subtype.to_string(),
+        structured,
+        error: error.map(str::to_string),
+        cost_usd: Some(0.12),
+        session_id: "s".to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
     }
 }
 

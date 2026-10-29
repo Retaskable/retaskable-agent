@@ -5,6 +5,7 @@
 pub mod api;
 pub mod app_menu;
 pub mod backlog;
+pub mod checks;
 pub mod ci_coverage;
 pub mod config;
 pub mod connector;
@@ -14,6 +15,7 @@ pub mod env_path;
 pub mod galleries;
 pub mod git_bin;
 pub mod ideas;
+pub mod implementer;
 pub mod item_lifecycle;
 pub mod lane_pool;
 pub mod lanes;
@@ -24,6 +26,7 @@ pub mod orchestrator;
 pub mod password;
 pub mod paths;
 pub mod phone;
+pub mod proc;
 pub mod release;
 pub mod release_install;
 pub mod release_notes;
@@ -39,3 +42,4 @@ pub mod tags;
 pub mod telemetry;
 #[cfg(test)]
 mod test_support;
+pub mod triage;
