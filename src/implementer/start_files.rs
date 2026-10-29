@@ -329,8 +329,10 @@ mod tests {
         } else {
             let mut script = String::from("#!/bin/sh\n");
             for (marker, fixture) in cases {
+                // The marker is quoted inside the glob so a space in it (e.g. "log -1") stays one
+                // pattern token instead of becoming a syntax error (two words with no `|` between).
                 script.push_str(&format!(
-                    "case \"$*\" in *{marker}*) cat \"{}\"; exit 0;; esac\n",
+                    "case \"$*\" in *\"{marker}\"*) cat \"{}\"; exit 0;; esac\n",
                     fixture.display()
                 ));
             }
