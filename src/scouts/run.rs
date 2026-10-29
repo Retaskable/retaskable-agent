@@ -11,17 +11,18 @@ use futures_util::future::join_all;
 
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec};
 use crate::release_notes::clip;
+use crate::review_context::ReviewContext;
 
 use super::info::{ScoutInfo, scout_info};
 use super::model::ScoutResult;
 use super::model::scout_result_schema;
 use super::plan::ScoutJob;
-use super::prompt::{ScoutContext, build_prompt};
+use super::prompt::build_prompt;
 
 /// How much of a finding's evidence [`format_scout`] quotes (`cut(..., 400)` in `review.ts`).
 const EVIDENCE_MAX: usize = 400;
 
-/// What a scout session runs with, besides the job and [`ScoutContext`].
+/// What a scout session runs with, besides the job and [`ReviewContext`].
 pub struct Scouts<'a> {
     /// `prompts/scout.md`.
     pub template: &'a str,
@@ -33,7 +34,7 @@ pub struct Scouts<'a> {
 /// The read-only, ephemeral session for one scout job.
 pub fn session_spec(
     w: &Scouts<'_>,
-    ctx: &ScoutContext<'_>,
+    ctx: &ReviewContext<'_>,
     job: &ScoutJob,
     info: &HashMap<String, ScoutInfo>,
 ) -> Result<SessionSpec> {
@@ -50,7 +51,7 @@ pub fn session_spec(
 pub async fn run_scouts<F, Fut>(
     jobs: &[ScoutJob],
     w: &Scouts<'_>,
-    ctx: &ScoutContext<'_>,
+    ctx: &ReviewContext<'_>,
     info: &HashMap<String, ScoutInfo>,
     run: F,
 ) -> Vec<(String, Result<SessionResult>)>
@@ -156,8 +157,8 @@ mod tests {
         }
     }
 
-    fn ctx<'a>() -> ScoutContext<'a> {
-        ScoutContext {
+    fn ctx<'a>() -> ReviewContext<'a> {
+        ReviewContext {
             item_id: "my-item",
             title: "My item",
             slice: 1,

@@ -6,29 +6,14 @@
 use anyhow::Result;
 
 use crate::release_notes::render_prompt;
+use crate::review_context::ReviewContext;
 
 use super::info::ScoutInfo;
 use super::plan::ScoutJob;
 
-/// One scout job's prompt vars besides its own focus, instructions and files
-/// (`common` in `review.ts`'s `reviewStep`).
-pub struct ScoutContext<'a> {
-    pub item_id: &'a str,
-    pub title: &'a str,
-    pub slice: u32,
-    /// Joined with ", ", or "(none)" when the item links no specs.
-    pub spec_refs: &'a str,
-    pub slice_description: &'a str,
-    /// The range a scout reads with `git diff <range> -- <files>`.
-    pub range: &'a str,
-    /// The re-review note (`scope` in `review.ts`), or "" for a first review.
-    pub scope: &'a str,
-    pub checks: &'a str,
-}
-
 /// Fills `prompts/scout.md`'s template with `ctx`, `job`'s files, and `info`'s focus and
 /// instructions.
-pub fn build_prompt(template: &str, ctx: &ScoutContext<'_>, job: &ScoutJob, info: &ScoutInfo) -> Result<String> {
+pub fn build_prompt(template: &str, ctx: &ReviewContext<'_>, job: &ScoutJob, info: &ScoutInfo) -> Result<String> {
     let files = if job.files.is_empty() {
         "(no files)".to_string()
     } else {
@@ -38,22 +23,11 @@ pub fn build_prompt(template: &str, ctx: &ScoutContext<'_>, job: &ScoutJob, info
             .collect::<Vec<_>>()
             .join("\n")
     };
-    render_prompt(
-        template,
-        &[
-            ("itemId", ctx.item_id.to_string()),
-            ("title", ctx.title.to_string()),
-            ("slice", ctx.slice.to_string()),
-            ("specRefs", ctx.spec_refs.to_string()),
-            ("sliceDescription", ctx.slice_description.to_string()),
-            ("range", ctx.range.to_string()),
-            ("scope", ctx.scope.to_string()),
-            ("files", files),
-            ("checks", ctx.checks.to_string()),
-            ("focus", info.focus.clone()),
-            ("instructions", info.instructions.clone()),
-        ],
-    )
+    let mut vars = ctx.vars();
+    vars.push(("files", files));
+    vars.push(("focus", info.focus.clone()));
+    vars.push(("instructions", info.instructions.clone()));
+    render_prompt(template, &vars)
 }
 
 #[cfg(test)]
@@ -72,8 +46,8 @@ mod tests {
         .unwrap()
     }
 
-    fn ctx<'a>() -> ScoutContext<'a> {
-        ScoutContext {
+    fn ctx<'a>() -> ReviewContext<'a> {
+        ReviewContext {
             item_id: "my-item",
             title: "My item",
             slice: 2,
