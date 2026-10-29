@@ -27,6 +27,7 @@ pub mod orchestrator;
 pub mod password;
 pub mod paths;
 pub mod phone;
+pub mod playtest_groups;
 pub mod proc;
 pub mod release;
 pub mod release_install;
