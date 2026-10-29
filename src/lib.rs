@@ -11,6 +11,7 @@ pub mod connector;
 pub mod engines;
 pub mod env_path;
 pub mod galleries;
+pub mod item_lifecycle;
 pub mod lane_pool;
 pub mod lanes;
 pub mod link;
