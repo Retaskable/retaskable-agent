@@ -8,6 +8,7 @@ pub mod backlog;
 pub mod ci_coverage;
 pub mod config;
 pub mod connector;
+pub mod decisions;
 pub mod engines;
 pub mod env_path;
 pub mod galleries;
