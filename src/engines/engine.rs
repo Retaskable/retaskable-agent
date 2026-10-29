@@ -103,9 +103,10 @@ pub fn ephemeral_readonly_spec(
 }
 
 /// The engine/model/budget/local/cursor/sandbox bundle every read-only `writer`-style role
-/// (release notes, ideas, scouts) carries alongside its own prompt inputs — factored out so each
-/// role's struct holds one `session: EphemeralSessionConfig` field instead of repeating these
-/// seven fields and the [`ephemeral_readonly_spec`] call that reads them back off.
+/// (release notes, ideas, scouts, the triager) carries alongside its own prompt inputs —
+/// factored out so each role's struct holds one `session: EphemeralSessionConfig` field instead
+/// of repeating these seven fields and the [`ephemeral_readonly_spec`] call that reads them back
+/// off.
 #[derive(Debug, Clone)]
 pub struct EphemeralSessionConfig<'a> {
     /// A checkout where the session may read specs/diffs/code, per the role's own doc comment.

@@ -8,12 +8,15 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3). Continue, Start over, Shoot and Play
 //! still need the orchestrator loop and lanes (milestones 4 and 5) this agent doesn't have yet.
+//! Every command checked, run or refused is written to `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::connector::{AgentView, Exit};
+use crate::telemetry::events::iso_utc_millis;
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -112,6 +115,37 @@ fn ack(id: &str) -> Value {
 
 fn nack(id: &str, reason: String) -> Value {
     json!({ "type": "nack", "id": id, "reason": reason })
+}
+
+/// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
+/// ones and replays included, never a `read_file`'s content — moot so far, since no read command
+/// is ported yet. `answerBytes` and `auditArgs`'s release_edit/ci_link/picture-count sanitising
+/// (`agent/src/commands.ts`) aren't ported either, for the same reason: none of those commands are.
+/// A write that fails is dropped silently, the same as the event log's.
+pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
+    let outcome = answer.get("type").and_then(Value::as_str).unwrap_or("nack");
+    let mut entry = Map::new();
+    entry.insert("at".into(), json!(iso_utc_millis(now_ms())));
+    entry.insert("id".into(), json!(cmd.id));
+    entry.insert("name".into(), json!(cmd.name));
+    entry.insert("issuedBy".into(), json!(cmd.issued_by));
+    entry.insert("args".into(), cmd.args.clone());
+    entry.insert("outcome".into(), json!(outcome));
+    if outcome == "nack" {
+        entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));
+    }
+    entry.insert("cloud".into(), json!(cloud));
+    let line = format!("{}\n", Value::Object(entry));
+    let _ = std::fs::create_dir_all(dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("remote.log"))
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(line.as_bytes())
+            })
+    });
 }
 
 #[cfg(test)]

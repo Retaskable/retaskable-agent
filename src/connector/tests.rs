@@ -151,7 +151,7 @@ async fn close(a: &mut Accepted, code: u16) {
 #[tokio::test]
 async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() {
     let (url, refreshes, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
+    let (dir, store) = linked(&url);
     let c = Connector::start(
         &url,
         store.clone(),
@@ -159,6 +159,7 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
         view(&["one", "two"]),
         timing(),
         noop_exit(),
+        dir.path(),
     );
     let mut first = next(&mut rx).await;
     assert_eq!(first.uri, "/api/agents/connect?project=one");
@@ -192,9 +193,17 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
 #[tokio::test]
 async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_changes() {
     let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
+    let (dir, store) = linked(&url);
     let view = view(&["one"]);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view.clone(), timing(), noop_exit());
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view.clone(),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello
     let lanes = read(&mut first).await["state"]["lanes"].clone();
@@ -218,8 +227,16 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
 #[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&[]), timing(), noop_exit());
+    let (dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&[]),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
     let mut a = next(&mut rx).await;
     assert_eq!(a.uri, "/api/agents/connect");
     assert_eq!(read(&mut a).await["project"], Value::Null);
@@ -247,7 +264,15 @@ fn command(id: &str, name: &str, args: Value) -> Value {
 async fn connected_project(exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&["one"]), timing(), exit);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        exit,
+        dir.path(),
+    );
     let mut a = next(&mut rx).await;
     read(&mut a).await; // hello
     read(&mut a).await; // snapshot
@@ -268,6 +293,33 @@ async fn an_unported_command_is_refused_with_a_nack() {
     assert_eq!(nack["id"], "c1");
     assert_eq!(nack["reason"], "Not a command this agent takes yet: shoot");
     c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn every_command_answered_is_logged_to_remote_log() {
+    let (c, mut a, dir) = connected_project(noop_exit()).await;
+    a.ws.send(Message::text(command("c1", "shoot", json!({})).to_string()))
+        .await
+        .unwrap();
+    read(&mut a).await; // the nack
+    a.ws.send(Message::text(command("c2", "restart", json!({})).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c2" }));
+    c.stop(Duration::from_secs(1)).await;
+
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let lines: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["id"], "c1");
+    assert_eq!(lines[0]["name"], "shoot");
+    assert_eq!(lines[0]["issuedBy"], "jc");
+    assert_eq!(lines[0]["outcome"], "nack");
+    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: shoot");
+    assert!(lines[0]["at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(lines[1]["id"], "c2");
+    assert_eq!(lines[1]["outcome"], "ack");
+    assert_eq!(lines[1].get("reason"), None);
 }
 
 #[tokio::test]
@@ -355,7 +407,7 @@ async fn an_expired_command_is_refused() {
 #[tokio::test]
 async fn it_reconnects_after_a_close_and_takes_a_fresh_token_when_its_one_expired() {
     let (url, refreshes, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
+    let (dir, store) = linked(&url);
     let c = Connector::start(
         &url,
         store.clone(),
@@ -363,6 +415,7 @@ async fn it_reconnects_after_a_close_and_takes_a_fresh_token_when_its_one_expire
         view(&["one"]),
         timing(),
         noop_exit(),
+        dir.path(),
     );
     let mut a = next(&mut rx).await;
     close(&mut a, close::REPLACED).await;
@@ -389,6 +442,7 @@ async fn an_unlinked_agent_waits_and_connects_once_linked() {
         view(&["one"]),
         timing(),
         noop_exit(),
+        dir.path(),
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(300), rx.recv())

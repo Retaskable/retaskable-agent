@@ -12,6 +12,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -259,12 +260,17 @@ struct Cloud {
     view: Arc<AgentView>,
     timing: Timing,
     exit: Arc<Exit>,
+    /// Where `.retaskable/remote.log` goes (cloud.md section 6.3).
+    dir: PathBuf,
+    /// For the audit log's `cloud` field: the same url every connection's token answer carries.
+    url: String,
 }
 
 impl Connector {
     /// Starts a connection for each of `view`'s projects to the cloud at `url`. Projects after the first wait until
     /// the first has connected once, so the first is the one that keeps the agent's own hub (projects.md section 9.2).
-    /// `exit` is Restart's (the same one the settings page's restart button uses).
+    /// `exit` is Restart's (the same one the settings page's restart button uses). `dir` is the agent's own data
+    /// directory, where every command answered gets logged (`commands::audit`).
     pub fn start(
         url: &str,
         store: Arc<dyn TokenStore>,
@@ -272,6 +278,7 @@ impl Connector {
         view: Arc<AgentView>,
         timing: Timing,
         exit: Arc<Exit>,
+        dir: &Path,
     ) -> Self {
         let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
@@ -281,6 +288,8 @@ impl Connector {
             view,
             timing,
             exit,
+            dir: dir.to_path_buf(),
+            url: url.to_string(),
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -369,8 +378,7 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
                             let _ = opened.send(true); // the other projects may connect now
                         }
                         let since = Instant::now();
-                        let (code, reason) =
-                            connected(ws, &cloud.view, &project, t, &log, &mut seen, cloud.exit.as_ref()).await;
+                        let (code, reason) = connected(ws, &cloud, &project, &log, &mut seen).await;
                         if since.elapsed() >= t.stable {
                             attempt = 0;
                         }
@@ -429,21 +437,15 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 
 /// Runs an open connection: hello and a snapshot, then answers what the hub sends, and says it's alive in a quiet
 /// minute (sync-health.md section 3.1). The close code and reason when it closes.
-async fn connected(
-    ws: Socket,
-    view: &AgentView,
-    project: &str,
-    t: Timing,
-    log: &impl Fn(String),
-    seen: &mut Seen,
-    exit: &Exit,
-) -> (u16, String) {
+async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(String), seen: &mut Seen) -> (u16, String) {
+    let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
     for msg in [view.hello(project), view.snapshot(project)] {
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
     }
+    let t = cloud.timing;
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
     // The snapshot just sent has the sizes and pause as they are now; a later change sends it again.
     let mut sizes = view.lane_sizes.subscribe();
@@ -453,7 +455,7 @@ async fn connected(
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
-                Some(Ok(Message::Text(text))) => receive(&text, view, project, seen, exit, log),
+                Some(Ok(Message::Text(text))) => receive(&text, cloud, project, seen, log),
                 Some(Ok(Message::Close(frame))) => {
                     return frame.map_or((1005, String::new()), |f| (u16::from(f.code), f.reason.to_string()));
                 }
@@ -473,16 +475,9 @@ async fn connected(
     }
 }
 
-/// The answer to a message from the hub, if it needs one. A command is checked and run (commands.rs); `watch`
-/// finds no session to send; everything else is nothing to act on yet.
-fn receive(
-    text: &str,
-    view: &AgentView,
-    project: &str,
-    seen: &mut Seen,
-    exit: &Exit,
-    log: &impl Fn(String),
-) -> Option<Value> {
+/// The answer to a message from the hub, if it needs one. A command is checked, run (commands.rs) and audited;
+/// `watch` finds no session to send; everything else is nothing to act on yet.
+fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl Fn(String)) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
     if msg.get("type").and_then(Value::as_str) != Some("command") {
         return None;
@@ -505,12 +500,13 @@ fn receive(
         issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
     };
-    let answer = commands::run(&cmd, project, seen, view, exit);
+    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref());
     let outcome = if answer.get("type").and_then(Value::as_str) == Some("ack") {
         "done".to_string()
     } else {
         answer.get("reason").and_then(Value::as_str).unwrap_or("?").to_string()
     };
     log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
+    commands::audit(&cloud.dir, &cmd, &answer, &cloud.url);
     Some(answer)
 }
