@@ -15,6 +15,17 @@ pub struct MergedPr {
     pub merged_at: String,
     pub head_ref_name: String,
     pub merge_commit_oid: Option<String>,
+    /// The files it changed: read only for a spec draft's PR (`gather::fill_draft_files`), to find the
+    /// spec it adds or edits; empty otherwise.
+    pub files: Vec<String>,
+}
+
+/// A spec an entry built, linked on the base branch: `label` is the file's name ("agent.md"), which is
+/// all the facts give the model; `url` is its page on GitHub.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecLink {
+    pub label: String,
+    pub url: String,
 }
 
 /// One commit `git log --first-parent` reported on the base branch.
@@ -47,8 +58,9 @@ pub struct ItemRef {
     pub status: ItemStatus,
 }
 
-/// One thing in a section: a backlog item (one or more merged PRs), or, when no item claims a PR or
-/// commit, the PR/commit standing for itself under `fallback`.
+/// One thing in a section: a backlog item (one or more merged PRs), a merged spec draft
+/// (`draft:<id>`), or, when no item or draft claims a PR or commit, the PR/commit standing for itself
+/// under `fallback`.
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub key: String,
@@ -56,12 +68,12 @@ pub struct Entry {
     pub fallback: String,
     pub prs: Vec<PrRef>,
     pub commit: Option<Commit>,
-    pub specs: Vec<String>,
+    pub specs: Vec<SpecLink>,
     pub chore: bool,
 }
 
-/// A group of entries: one per spec an item names (`spec:<path>`), one for chores, and one
-/// (`other`) for everything with no spec, no owning item, or no item at all.
+/// A group of entries: one per spec an item names or a draft adds (`spec:<path>`), one for chores,
+/// and one (`other`) for everything with no spec, no owning item, or no item at all.
 #[derive(Debug, Clone)]
 pub struct Section {
     pub key: String,

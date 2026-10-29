@@ -1,11 +1,13 @@
 //! Shared fixtures for this module's own tests: an [`Item`]/[`MergedPr`] builder, the "Charts"
 //! item+PR pair several tests across `group` and `render` build identically, a fixed [`Range`], and
 //! a fake `gh`/`git` binary that just prints a fixture file.
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::backlog::{Item, ItemStatus};
 
-use super::model::{MergedPr, Range};
+use super::group::{GroupInput, group};
+use super::model::{Commit, MergedPr, Range, Section};
 
 pub(crate) fn item(
     id: &str,
@@ -41,6 +43,7 @@ pub(crate) fn pr(number: u64, title: &str, url: &str, head_ref_name: &str, merge
         merged_at: merged_at.to_string(),
         head_ref_name: head_ref_name.to_string(),
         merge_commit_oid: None,
+        files: Vec::new(),
     }
 }
 
@@ -76,4 +79,22 @@ pub(crate) fn write_fake_binary_printing(path: &Path, fixture: &Path) {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
+}
+
+/// `group` over `x/y` at `main`, with no spec drafts.
+pub(crate) fn grouped(
+    prs: &[MergedPr],
+    commits: &[Commit],
+    items: &[Item],
+    files: &HashMap<String, Option<String>>,
+) -> Vec<Section> {
+    group(&GroupInput {
+        prs,
+        commits,
+        items,
+        drafts: &[],
+        files,
+        github_repo: "x/y",
+        base_branch: "main",
+    })
 }

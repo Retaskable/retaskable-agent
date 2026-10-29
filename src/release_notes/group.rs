@@ -6,9 +6,9 @@ use std::path::Path;
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
-use crate::backlog::{Item, ItemStatus};
+use crate::backlog::{Draft, Item, ItemStatus};
 
-use super::model::{Commit, Counts, Entry, ItemRef, MergedPr, PrRef, Section};
+use super::model::{Commit, Counts, Entry, ItemRef, MergedPr, PrRef, Section, SpecLink};
 
 /// `releaseFullEntries`'s default (shared/tuning.ts): entries beyond this many are trimmed to just
 /// their title before they go to the model.
@@ -71,20 +71,81 @@ pub fn spec_title(path: &str, content: Option<&str>) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// What [`group`] works from: the gathered PRs and commits, the store's items and spec drafts, each
+/// named spec's content at the base branch (`None` when it couldn't be read, from
+/// [`super::gather::read_base_files`]), and the repo and branch its links point at.
+pub struct GroupInput<'a> {
+    pub prs: &'a [MergedPr],
+    pub commits: &'a [Commit],
+    pub items: &'a [Item],
+    pub drafts: &'a [Draft],
+    pub files: &'a HashMap<String, Option<String>>,
+    pub github_repo: &'a str,
+    pub base_branch: &'a str,
+}
+
+/// `encodeURIComponent` for one path segment.
+fn encode_segment(segment: &str) -> String {
+    let mut out = String::new();
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn is_markdown(path: &str) -> bool {
+    path.to_lowercase().ends_with(".md")
+}
+
+/// The links for an item's specs (`releaseNotes.ts`'s `itemSpecs`/`specLinks`): each Markdown file its
+/// `spec_refs` names, once, at its page on the base branch, labelled with its file name. The store's
+/// `specRefs` name whole files, so a link is to the file, not a section in it.
+pub fn spec_links(spec_refs: &[String], github_repo: &str, base_branch: &str) -> Vec<SpecLink> {
+    let mut seen = HashSet::new();
+    spec_refs
+        .iter()
+        .filter(|r| is_markdown(r) && seen.insert(r.as_str()))
+        .map(|r| {
+            let encoded: Vec<String> = r.split('/').map(encode_segment).collect();
+            SpecLink {
+                label: r.rsplit('/').next().unwrap_or(r).to_string(),
+                url: format!(
+                    "https://github.com/{github_repo}/blob/{base_branch}/{}",
+                    encoded.join("/")
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Puts `entry` in the section for `spec`, adding that section (titled from the spec's content) the
+/// first time.
+fn push_under_spec(sections: &mut Vec<Section>, files: &HashMap<String, Option<String>>, spec: &str, entry: Entry) {
+    let key = format!("spec:{spec}");
+    let at = match sections.iter().position(|s| s.key == key) {
+        Some(at) => at,
+        None => {
+            let heading = spec_title(spec, files.get(spec).and_then(|c| c.as_deref()));
+            sections.push(new_section(&key, &heading));
+            sections.len() - 1
+        }
+    };
+    sections[at].entries.push(entry);
+}
+
 /// Groups merged PRs and commits by the backlog item that owns them (`releaseNotes.ts`'s `group`):
 /// one section per spec, in the order of its first item in the backlog, then chores, then other
-/// changes. Simplified where this agent's `Item` carries less: no Draft reconciliation, chores are
-/// the `"chores"` milestone and land in one section (no playtest-fix split), an item's spec is its
-/// first `spec_refs` entry, and "done" is its status alone. `files` is each named spec's content at
-/// the base branch (or `None` if it couldn't be read), from [`super::gather::read_base_files`], used
-/// to title that spec's section.
-pub fn group(
-    prs: &[MergedPr],
-    commits: &[Commit],
-    items: &[Item],
-    files: &HashMap<String, Option<String>>,
-) -> Vec<Section> {
-    let mut sorted: Vec<&MergedPr> = prs.iter().collect();
+/// changes. A merged spec draft's PR (the store's `drafts`, by `prUrl`) goes under the spec it adds or
+/// edits (the first Markdown file it changed) as "Specced: <its titles>"; one that changed none is
+/// another change. Simplified where this agent's `Item` carries less: chores are the `"chores"`
+/// milestone and land in one section (no playtest-fix split), an item's spec is its first Markdown
+/// `spec_refs` entry, and "done" is its status alone.
+pub fn group(inp: &GroupInput) -> Vec<Section> {
+    let mut sorted: Vec<&MergedPr> = inp.prs.iter().collect();
     sorted.sort_by(|a, b| a.merged_at.cmp(&b.merged_at));
 
     let mut spec_sections: Vec<Section> = Vec::new();
@@ -95,12 +156,12 @@ pub fn group(
     let mut by_item: HashMap<&str, Vec<&MergedPr>> = HashMap::new();
     let mut rest: Vec<&MergedPr> = Vec::new();
     for pr in &sorted {
-        match pr_owner(pr, items) {
+        match pr_owner(pr, inp.items) {
             Some(item) => by_item.entry(item.id.as_str()).or_default().push(pr),
             None => rest.push(pr),
         }
     }
-    for item in items {
+    for item in inp.items {
         let Some(its) = by_item.get(item.id.as_str()) else {
             continue;
         };
@@ -127,26 +188,36 @@ pub fn group(
             fallback: its.iter().map(|pr| pr.title.as_str()).collect::<Vec<_>>().join("; "),
             prs,
             commit: None,
-            specs: item.spec_refs.clone(),
+            specs: spec_links(&item.spec_refs, inp.github_repo, inp.base_branch),
             chore: false,
         };
-        match item.spec_refs.first() {
-            Some(spec) => {
-                let key = format!("spec:{spec}");
-                let at = match spec_sections.iter().position(|s| s.key == key) {
-                    Some(at) => at,
-                    None => {
-                        let heading = spec_title(spec, files.get(spec).and_then(|c| c.as_deref()));
-                        spec_sections.push(new_section(&key, &heading));
-                        spec_sections.len() - 1
-                    }
-                };
-                spec_sections[at].entries.push(entry);
-            }
+        match item.spec_refs.iter().find(|r| is_markdown(r)) {
+            Some(spec) => push_under_spec(&mut spec_sections, inp.files, spec, entry),
             None => other.entries.push(entry),
         }
     }
+    // Spec drafts go under the spec they add or edit; anything else is someone else's.
     for pr in rest {
+        let draft = inp.drafts.iter().find(|d| d.pr_url.as_deref() == Some(pr.url.as_str()));
+        let spec = pr.files.iter().find(|f| is_markdown(f));
+        if let (Some(draft), Some(spec)) = (draft, spec) {
+            let title = if draft.titles.is_empty() {
+                pr.title.clone()
+            } else {
+                draft.titles.join("; ")
+            };
+            let entry = Entry {
+                key: format!("draft:{}", draft.id),
+                item: None,
+                fallback: format!("Specced: {title}"),
+                prs: vec![to_pr_ref(pr)],
+                commit: None,
+                specs: spec_links(std::slice::from_ref(spec), inp.github_repo, inp.base_branch),
+                chore: false,
+            };
+            push_under_spec(&mut spec_sections, inp.files, spec, entry);
+            continue;
+        }
         other.entries.push(Entry {
             key: format!("pr:{}", pr.number),
             item: None,
@@ -160,7 +231,7 @@ pub fn group(
 
     // Commits pushed without a PR.
     let merged: HashSet<&str> = sorted.iter().filter_map(|pr| pr.merge_commit_oid.as_deref()).collect();
-    for commit in commits {
+    for commit in inp.commits {
         if merged.contains(commit.sha.as_str()) {
             continue;
         }
@@ -192,9 +263,23 @@ pub fn counts(sections: &[Section], total_prs: usize) -> Counts {
     }
 }
 
-/// The sections a release note shows people: everything but chores.
-pub fn for_users(sections: &[Section]) -> Vec<&Section> {
-    sections.iter().filter(|s| s.key != "chores").collect()
+/// The sections a release note shows people (`releaseNotes.ts`'s `forUsers`): everything but chores
+/// and spec drafts, which are the team's; a section left with nothing isn't shown.
+pub fn for_users(sections: &[Section]) -> Vec<Section> {
+    sections
+        .iter()
+        .filter(|s| s.key != "chores")
+        .map(|s| Section {
+            entries: s
+                .entries
+                .iter()
+                .filter(|e| !e.key.starts_with("draft:"))
+                .cloned()
+                .collect(),
+            ..s.clone()
+        })
+        .filter(|s| !s.entries.is_empty())
+        .collect()
 }
 
 pub(super) fn title_of(entry: &Entry) -> String {
@@ -225,7 +310,7 @@ pub fn facts(sections: &[Section], max_full_entries: usize) -> Value {
 
     let mut by_size: Vec<usize> = (0..visible.len()).collect();
     by_size.sort_by_key(|&i| {
-        let section = visible[i];
+        let section = &visible[i];
         let rank = if section.key == "other" { 0 } else { 1 };
         (rank, section.entries.len())
     });
@@ -265,7 +350,8 @@ pub fn facts(sections: &[Section], max_full_entries: usize) -> Value {
                     if entry.commit.is_some() {
                         obj.insert("commit".to_string(), json!(entry.fallback));
                     }
-                    obj.insert("specs".to_string(), json!(entry.specs));
+                    let specs: Vec<&str> = entry.specs.iter().map(|s| s.label.as_str()).collect();
+                    obj.insert("specs".to_string(), json!(specs));
                     Value::Object(obj)
                 })
                 .collect();
@@ -278,7 +364,7 @@ pub fn facts(sections: &[Section], max_full_entries: usize) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::release_notes::test_support::{charts_item_and_pr, item, pr};
+    use crate::release_notes::test_support::{charts_item_and_pr, grouped, item, pr};
 
     use super::*;
 
@@ -352,7 +438,7 @@ mod tests {
             "retaskable/1-bump",
             "2026-09-24T00:00:00Z",
         );
-        let sections = group(&[p], &[], &items, &HashMap::new());
+        let sections = grouped(&[p], &[], &items, &HashMap::new());
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].key, "chores");
         assert!(sections[0].entries[0].chore);
@@ -366,7 +452,7 @@ mod tests {
             "docs/specs/charts.md".to_string(),
             Some("# Charts — Spec\n".to_string()),
         );
-        let sections = group(&[p], &[], &[charts_item], &files);
+        let sections = grouped(&[p], &[], &[charts_item], &files);
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].key, "spec:docs/specs/charts.md");
         assert_eq!(sections[0].heading, "Charts");
@@ -409,7 +495,7 @@ mod tests {
                 "2026-09-27T00:00:00Z",
             ),
         ];
-        let sections = group(&prs, &[], &items, &HashMap::new());
+        let sections = grouped(&prs, &[], &items, &HashMap::new());
         let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, ["spec:docs/specs/zebra.md", "spec:docs/specs/apple.md", "other"]);
         let other: Vec<&str> = sections[2].entries.iter().map(|e| e.key.as_str()).collect();
@@ -445,7 +531,7 @@ mod tests {
                 "2026-09-26T00:00:00Z",
             ),
         ];
-        let sections = group(&prs, &[], &items, &HashMap::new());
+        let sections = grouped(&prs, &[], &items, &HashMap::new());
         let chores = sections.iter().find(|s| s.key == "chores").unwrap();
         assert_eq!(chores.entries[0].fallback, "Bump deps");
         assert!(chores.entries[0].item.is_none());
@@ -482,7 +568,7 @@ mod tests {
             "retaskable/1-charts",
             "2026-09-25T00:00:00Z",
         );
-        let sections = group(&[p1, p2], &[], &items, &HashMap::new());
+        let sections = grouped(&[p1, p2], &[], &items, &HashMap::new());
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].entries.len(), 1);
         assert_eq!(sections[0].entries[0].prs.len(), 2);
@@ -497,7 +583,7 @@ mod tests {
             "someone/stray",
             "2026-09-24T00:00:00Z",
         );
-        let sections = group(&[p], &[], &[], &HashMap::new());
+        let sections = grouped(&[p], &[], &[], &HashMap::new());
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].key, "other");
         assert_eq!(sections[0].entries[0].key, "pr:1");
@@ -512,7 +598,7 @@ mod tests {
             author: "A".to_string(),
             subject: "Tidy".to_string(),
         };
-        let sections = group(&[], &[commit], &[], &HashMap::new());
+        let sections = grouped(&[], &[commit], &[], &HashMap::new());
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].entries[0].key, "commit:abcdef1");
     }
@@ -533,7 +619,7 @@ mod tests {
             author: "A".to_string(),
             subject: "Charts".to_string(),
         };
-        let sections = group(&[p], &[commit], &[], &HashMap::new());
+        let sections = grouped(&[p], &[commit], &[], &HashMap::new());
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].entries.len(), 1);
         assert_eq!(sections[0].entries[0].key, "pr:1");
@@ -541,7 +627,7 @@ mod tests {
 
     #[test]
     fn group_drops_empty_sections() {
-        let sections = group(&[], &[], &[], &HashMap::new());
+        let sections = grouped(&[], &[], &[], &HashMap::new());
         assert!(sections.is_empty());
     }
 
@@ -574,7 +660,7 @@ mod tests {
             "retaskable/2-bump",
             "2026-09-26T00:00:00Z",
         );
-        let sections = group(&[p1, p2, p3], &[], &items, &HashMap::new());
+        let sections = grouped(&[p1, p2, p3], &[], &items, &HashMap::new());
         let c = counts(&sections, 3);
         assert_eq!(c.prs, 3);
         assert_eq!(c.items, 1);
@@ -591,7 +677,7 @@ mod tests {
             "retaskable/1-bump",
             "2026-09-24T00:00:00Z",
         );
-        let sections = group(&[p], &[], &items, &HashMap::new());
+        let sections = grouped(&[p], &[], &items, &HashMap::new());
         assert!(for_users(&sections).is_empty());
     }
 
@@ -612,7 +698,7 @@ mod tests {
     #[test]
     fn facts_keeps_a_small_section_in_full() {
         let (charts_item, p) = charts_item_and_pr();
-        let sections = group(&[p], &[], &[charts_item], &HashMap::new());
+        let sections = grouped(&[p], &[], &[charts_item], &HashMap::new());
         let f = facts(&sections, 120);
         let entry = &f[0]["entries"][0];
         assert_eq!(entry["item"], "1 Charts");
@@ -647,7 +733,7 @@ mod tests {
                 )
             })
             .collect();
-        let sections = group(&prs, &[], &items, &HashMap::new());
+        let sections = grouped(&prs, &[], &items, &HashMap::new());
         let f = facts(&sections, 2);
         let total_title_only: usize = f
             .as_array()
@@ -672,5 +758,92 @@ mod tests {
     #[test]
     fn spec_title_falls_back_to_the_file_name_with_no_heading() {
         assert_eq!(spec_title("docs/specs/charts.md", None), "charts");
+    }
+
+    // spec_links
+
+    #[test]
+    fn spec_links_link_each_markdown_ref_once_at_the_base_branch() {
+        let refs: Vec<String> = ["docs/specs/agent/09 web.md", "docs/specs/agent/09 web.md", "src/x.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            spec_links(&refs, "x/y", "main"),
+            [SpecLink {
+                label: "09 web.md".to_string(),
+                url: "https://github.com/x/y/blob/main/docs/specs/agent/09%20web.md".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_items_facts_name_its_specs_by_file_name() {
+        let (charts_item, charts_pr) = charts_item_and_pr();
+        let sections = grouped(&[charts_pr], &[], &[charts_item], &HashMap::new());
+        assert_eq!(sections[0].entries[0].specs[0].label, "charts.md");
+        let f = facts(&sections, DEFAULT_FULL_ENTRIES);
+        assert_eq!(f[0]["entries"][0]["specs"], json!(["charts.md"]));
+    }
+
+    // spec drafts
+
+    fn draft_pr(files: &[&str]) -> MergedPr {
+        let mut p = pr(
+            4,
+            "Spec the charts",
+            "https://github.com/x/y/pull/4",
+            "retaskable/draft-1",
+            "2026-09-25T00:00:00Z",
+        );
+        p.files = files.iter().map(|s| s.to_string()).collect();
+        p
+    }
+
+    fn with_draft(prs: &[MergedPr], items: &[Item]) -> Vec<Section> {
+        let drafts = [Draft {
+            id: "draft-1".to_string(),
+            titles: vec!["Charts".to_string(), "Legends".to_string()],
+            pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+        }];
+        group(&GroupInput {
+            prs,
+            commits: &[],
+            items,
+            drafts: &drafts,
+            files: &HashMap::new(),
+            github_repo: "x/y",
+            base_branch: "main",
+        })
+    }
+
+    #[test]
+    fn a_drafts_pr_goes_under_the_spec_it_adds_as_specced() {
+        let (charts_item, charts_pr) = charts_item_and_pr();
+        let sections = with_draft(
+            &[charts_pr, draft_pr(&["src/a.rs", "docs/specs/charts.md"])],
+            &[charts_item],
+        );
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].key, "spec:docs/specs/charts.md");
+        let draft = &sections[0].entries[1];
+        assert_eq!(draft.key, "draft:draft-1");
+        assert_eq!(draft.fallback, "Specced: Charts; Legends");
+        assert_eq!(draft.specs[0].label, "charts.md");
+    }
+
+    #[test]
+    fn readers_and_the_model_never_see_a_draft() {
+        let sections = with_draft(&[draft_pr(&["docs/specs/charts.md"])], &[]);
+        assert_eq!(sections[0].entries[0].key, "draft:draft-1");
+        assert!(for_users(&sections).is_empty());
+        assert_eq!(facts(&sections, DEFAULT_FULL_ENTRIES), json!([]));
+    }
+
+    #[test]
+    fn a_drafts_pr_that_changed_no_spec_is_another_change() {
+        let sections = with_draft(&[draft_pr(&["src/a.rs"])], &[]);
+        assert_eq!(sections[0].key, "other");
+        assert_eq!(sections[0].entries[0].key, "pr:4");
     }
 }

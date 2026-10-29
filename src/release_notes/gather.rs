@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 use super::group::clip;
 use super::model::{Commit, MergedPr};
+use crate::backlog::Draft;
 
 /// `releaseMaxPrs`'s default (shared/tuning.ts): more than this many merged PRs in one range is
 /// refused rather than guessed at.
@@ -105,6 +106,7 @@ impl From<RawMergedPr> for MergedPr {
             merged_at: r.merged_at,
             head_ref_name: r.head_ref_name,
             merge_commit_oid: r.merge_commit.map(|m| m.oid),
+            files: Vec::new(),
         }
     }
 }
@@ -137,6 +139,48 @@ pub async fn gather_merged_prs(
         serde_json::from_str(&stdout).context("parsing gh pr list output")?
     };
     Ok(raw.into_iter().map(MergedPr::from).collect())
+}
+
+#[derive(Deserialize)]
+struct RawPrFile {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct RawPrFiles {
+    #[serde(default)]
+    files: Vec<RawPrFile>,
+}
+
+/// Reads the changed files of each PR that's a spec draft's (the store's `drafts`, by `prUrl`) with
+/// `gh pr view <number> --json files`, so `group` can put it under the spec it adds or edits. The
+/// store's draft doesn't keep its files, and only a draft's PR needs them, so the others aren't asked.
+pub async fn fill_draft_files(
+    gh_bin: &Path,
+    cwd: &Path,
+    repo: &str,
+    prs: &mut [MergedPr],
+    drafts: &[Draft],
+) -> Result<()> {
+    for pr in prs.iter_mut() {
+        if !drafts.iter().any(|d| d.pr_url.as_deref() == Some(pr.url.as_str())) {
+            continue;
+        }
+        let number = pr.number.to_string();
+        let output = Command::new(gh_bin)
+            .args(["pr", "view", &number, "--repo", repo, "--json", "files"])
+            .current_dir(cwd)
+            .output()
+            .await
+            .context("running gh pr view")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            anyhow::bail!("gh pr view {number} failed: {}", clip(&stderr, 300));
+        }
+        let raw: RawPrFiles = serde_json::from_slice(&output.stdout).context("parsing gh pr view output")?;
+        pr.files = raw.files.into_iter().map(|f| f.path).collect();
+    }
+    Ok(())
 }
 
 /// `commitLogArgs()`-equivalent (agent/src/git.ts's merged-commit gathering): `git log` arguments for
@@ -221,7 +265,7 @@ pub async fn gather(args: GatherArgs<'_>) -> Result<(Vec<MergedPr>, Vec<Commit>)
 
 #[cfg(test)]
 mod tests {
-    use crate::release_notes::test_support::write_fake_binary_printing;
+    use crate::release_notes::test_support::{pr, write_fake_binary_printing};
 
     use super::*;
 
@@ -277,6 +321,43 @@ mod tests {
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].number, 1);
         assert_eq!(prs[0].merge_commit_oid, Some("abc123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fill_draft_files_reads_only_a_drafts_prs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("files.json");
+        std::fs::write(&out, r#"{"files":[{"path":"docs/specs/charts.md","additions":3}]}"#).unwrap();
+        let fake_gh = dir
+            .path()
+            .join(if cfg!(windows) { "fake_gh.cmd" } else { "fake_gh.sh" });
+        write_fake_binary_printing(&fake_gh, &out);
+        let mut prs = vec![
+            pr(
+                4,
+                "Spec charts",
+                "https://github.com/x/y/pull/4",
+                "draft",
+                "2026-09-24T00:00:00Z",
+            ),
+            pr(
+                5,
+                "Bump",
+                "https://github.com/x/y/pull/5",
+                "bump",
+                "2026-09-24T00:00:00Z",
+            ),
+        ];
+        let drafts = vec![Draft {
+            id: "draft-1".to_string(),
+            titles: vec!["Charts".to_string()],
+            pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+        }];
+        fill_draft_files(&fake_gh, dir.path(), "x/y", &mut prs, &drafts)
+            .await
+            .unwrap();
+        assert_eq!(prs[0].files, ["docs/specs/charts.md"]);
+        assert!(prs[1].files.is_empty());
     }
 
     #[tokio::test]

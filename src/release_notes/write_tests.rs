@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::backlog::ItemStatus;
-use crate::release_notes::group::group;
-use crate::release_notes::test_support::{charts_item_and_pr, item, pr, range};
+
+use crate::release_notes::test_support::{charts_item_and_pr, grouped, item, pr, range};
 
 const TEMPLATE: &str = "Notes for {{projectNoun}} on {{baseBranch}} of {{githubRepo}}, {{from}} to {{to}} \
     ({{projectKind}}, {{projectUser}}):\n{{facts}}";
@@ -47,7 +47,7 @@ fn result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str
 
 fn charts_sections() -> Vec<Section> {
     let (charts_item, charts_pr) = charts_item_and_pr();
-    group(&[charts_pr], &[], &[charts_item], &HashMap::new())
+    grouped(&[charts_pr], &[], &[charts_item], &HashMap::new())
 }
 
 /// A `run` that must never be called.
@@ -119,7 +119,7 @@ async fn a_range_of_only_chores_gets_the_plain_list_without_a_session() {
         "retaskable/1-bump",
         "2026-09-24T00:00:00Z",
     );
-    let sections = group(&[p], &[], &items, &HashMap::new());
+    let sections = grouped(&[p], &[], &items, &HashMap::new());
     let w = write_note(&sections, 1, &range(), &writer("haiku"), no_session).await;
     assert!(w.markdown.contains("Nothing new for users between"));
     assert_eq!(w.counts.chores, 1);
