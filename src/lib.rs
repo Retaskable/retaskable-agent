@@ -38,3 +38,4 @@ pub mod tags;
 pub mod telemetry;
 #[cfg(test)]
 mod test_support;
+pub mod triage;
