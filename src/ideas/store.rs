@@ -68,8 +68,7 @@ pub struct StoreIdeaAnswer {
     pub draft_id: Option<String>,
 }
 
-/// One row of the store's queue (`StoreIdea`, shared/storeIdeas.ts), trimmed to what a round reads:
-/// a person's own idea (`addedBy` set) isn't read here yet — see the module doc comment.
+/// One row of the store's queue (`StoreIdea`, shared/storeIdeas.ts), trimmed to what a round reads.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreIdea {
@@ -81,6 +80,9 @@ pub struct StoreIdea {
     pub at: i64,
     #[serde(default)]
     pub answer: Option<StoreIdeaAnswer>,
+    /// Set when a person added this idea themselves; a round leaves these alone (06.2-operations.md).
+    #[serde(default, rename = "addedBy")]
+    pub added_by: Option<Value>,
 }
 
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
@@ -101,8 +103,9 @@ pub struct StoreIdeas {
     pub ideas: Vec<StoreIdea>,
 }
 
-/// [`refilled`](super::model::refilled)'s [`Queue`], folded from the store's own rows (trimmed from
-/// `asList`, shared/storeIdeas.ts: a person's waiting ideas, `addedBy` set, aren't folded in yet).
+/// [`refilled`](super::model::refilled)'s [`Queue`], folded from the store's own rows (`asList`,
+/// shared/storeIdeas.ts): a person's own waiting idea (`addedBy` set) is left out of `ideas`, since a
+/// round must leave those alone (backlog/06.2-operations.md).
 pub fn queue_from_store(s: &StoreIdeas) -> Queue {
     let of = |i: &StoreIdea| {
         let body = i.idea.clone().unwrap_or_default();
@@ -122,7 +125,7 @@ pub fn queue_from_store(s: &StoreIdeas) -> Queue {
         ideas: s
             .ideas
             .iter()
-            .filter(|i| i.state == IdeaState::Waiting)
+            .filter(|i| i.state == IdeaState::Waiting && i.added_by.is_none())
             .map(of)
             .collect(),
         accepted_titles: s
@@ -223,6 +226,7 @@ mod tests {
             idea,
             at: 0,
             answer: None,
+            added_by: None,
         }
     }
 
@@ -249,10 +253,18 @@ mod tests {
                 store_idea("3", "Taken", IdeaState::Accepted, None),
                 store_idea("4", "Turned down", IdeaState::Never, None),
                 store_idea("5", "Set aside", IdeaState::Later, None),
+                StoreIdea {
+                    added_by: Some(json!({ "login": "owner" })),
+                    ..store_idea("6", "A person's own idea", IdeaState::Waiting, None)
+                },
             ],
         };
         let q = queue_from_store(&s);
-        assert_eq!(q.ideas.len(), 2, "only the waiting rows become ideas");
+        assert_eq!(
+            q.ideas.len(),
+            2,
+            "only the waiting rows nobody added themselves become ideas"
+        );
         assert_eq!(q.ideas[0].title, "Waiting");
         assert_eq!(q.ideas[0].why_now, "Now.");
         assert_eq!(q.ideas[0].feature, Some("inbox".to_string()));

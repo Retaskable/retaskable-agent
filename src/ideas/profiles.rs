@@ -56,7 +56,7 @@ pub fn build_prompt(
 /// real audiences book — one a person can add to and edit — reaches this agent.
 pub fn starter_profiles() -> Vec<Profile> {
     [
-        ("admin", "Admin", "Runs the day-to-day admin panel.", "admin"),
+        ("admin", "Admin", "Runs the admin panel.", "admin"),
         (
             "support",
             "Support",
@@ -71,12 +71,7 @@ pub fn starter_profiles() -> Vec<Profile> {
             "Reads the reports and checks the numbers.",
             "reports",
         ),
-        (
-            "buyer",
-            "Buyer",
-            "Chooses and buys the product for their company.",
-            "enterprise",
-        ),
+        ("buyer", "Buyer", "Chooses the product for a company.", "enterprise"),
         (
             "account-admin",
             "Account admin",
