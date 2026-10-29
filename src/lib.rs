@@ -7,6 +7,7 @@ pub mod app_menu;
 pub mod backlog;
 pub mod checks;
 pub mod ci_coverage;
+pub mod commands;
 pub mod config;
 pub mod connector;
 pub mod decisions;
