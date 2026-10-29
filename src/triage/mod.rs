@@ -8,13 +8,14 @@
 //! Not wired to anything yet: [`crate::orchestrator`]'s tick only claims a lane for a `queued`
 //! item so far, nothing notices a `needs_human` item and runs this on it; [`crate::commands`]'s
 //! Continue, Start over and Skip (the buttons this decision would be carried out through) still
-//! need the orchestrator loop and lanes too. Also still missing: capping this at 2 automatic
-//! decisions a slice and reporting `claudeOnIt` while it's thinking (both need an
-//! item-record data model that doesn't exist yet), and actually sending a decided
-//! [`bug_report::BugReportMessage`] over the cloud link (reading the hub's own consent and known
-//! bugs to decide one with [`bug_report::decide_bug_report`] is as far as this slice goes); no
-//! `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the prompt
-//! tells the session to run those itself). A caller puts this together the same way as
+//! need the orchestrator loop and lanes too. [`schedule`] has the cap on automatic decisions and
+//! the `claudeOnIt` predicate (06.9 bullets 16 and 20) as pure functions over the few item facts
+//! they need, named after the shared backlog's own fields — there is still no item-record data
+//! model in this port for a caller to read those facts from. Also still missing: actually sending
+//! a decided [`bug_report::BugReportMessage`] over the cloud link (reading the hub's own consent
+//! and known bugs to decide one with [`bug_report::decide_bug_report`] is as far as this slice
+//! goes); no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the
+//! prompt tells the session to run those itself). A caller puts this together the same way as
 //! [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`] from the
 //! item's own state, build a [`Triager`] with the project's words, the item's lane (or the base
 //! checkout) and `budget.reviewerUsd`, and run [`decide`] with
@@ -24,6 +25,7 @@
 //! failure) back onto the triager's own answer with [`second_look::resolve`] before the caller
 //! carries anything out.
 pub mod bug_report;
+pub mod schedule;
 pub mod second_look;
 
 use std::future::Future;
