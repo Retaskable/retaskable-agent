@@ -70,12 +70,14 @@ pub fn named_code_paths(spec_path: &str, spec_content: &str, root: &Path) -> Vec
     let backticked = Regex::new(r"`([^`\s]+)`").unwrap();
     let spec_dir = Path::new(spec_path).parent();
     let mut seen = HashSet::new();
+    let mut named = 0usize;
     let mut found = Vec::new();
     for caps in backticked.captures_iter(spec_content) {
         let candidate = &caps[1];
         if !looks_like_a_path(candidate) || !seen.insert(candidate.to_string()) {
             continue;
         }
+        named += 1;
         if root.join(candidate).is_file() {
             found.push(candidate.to_string());
             continue;
@@ -87,7 +89,7 @@ pub fn named_code_paths(spec_path: &str, spec_content: &str, root: &Path) -> Vec
             }
         }
     }
-    if found.len() > MAX_FILES {
+    if named > MAX_FILES {
         return Vec::new();
     }
     found
@@ -387,6 +389,20 @@ mod tests {
         for i in 0..(MAX_FILES + 1) {
             let name = format!("f{i}.rs");
             std::fs::write(dir.path().join(&name), "").unwrap();
+            content.push_str(&format!("`{name}` "));
+        }
+        assert!(named_code_paths("x.md", &content, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn named_code_paths_is_empty_when_more_than_the_cap_is_named_even_if_most_dont_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::new();
+        for i in 0..(MAX_FILES + 1) {
+            let name = format!("f{i}.rs");
+            if i == 0 {
+                std::fs::write(dir.path().join(&name), "").unwrap();
+            }
             content.push_str(&format!("`{name}` "));
         }
         assert!(named_code_paths("x.md", &content, dir.path()).is_empty());
