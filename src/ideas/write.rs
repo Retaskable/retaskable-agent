@@ -6,14 +6,22 @@ use std::future::Future;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::engines::{SessionResult, SessionSpec, WriterConfig, describe_failure, ephemeral_readonly_spec};
+use crate::config::ProjectType;
+use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
 
 use super::model::{Idea, IdeasResult, Queue, ideas_result_schema, refilled};
 use super::profiles::{Profile, build_prompt};
 
-/// What an ideas session runs with, besides what prompted it and the room left in the queue
-/// (`budget_usd` here is `budget.scout_usd`).
-pub type Writer<'a> = WriterConfig<'a>;
+/// What an ideas session runs with, besides what prompted it and the room left in the queue.
+pub struct Writer<'a> {
+    /// `prompts/ideas.md`.
+    pub template: &'a str,
+    pub project_type: ProjectType,
+    pub github_repo: &'a str,
+    /// `Role::Writer`'s engine/model/budget/local/cursor/sandbox bundle; `session.cwd` is a
+    /// checkout of the project, where the session may read its specs.
+    pub session: EphemeralSessionConfig<'a>,
+}
 
 /// The read-only, ephemeral `writer` session for a round.
 pub fn session_spec(
@@ -32,17 +40,7 @@ pub fn session_spec(
         profiles,
         context,
     )?;
-    Ok(ephemeral_readonly_spec(
-        w.engine,
-        w.model.clone(),
-        prompt,
-        ideas_result_schema(),
-        w.cwd.to_path_buf(),
-        w.budget_usd,
-        w.cursor.clone(),
-        w.local.clone(),
-        w.sandbox,
-    ))
+    Ok(w.session.spec(prompt, ideas_result_schema()))
 }
 
 /// A round's own outcome: the queue's new ideas (unchanged from `was` when it fails), the model that
@@ -111,7 +109,7 @@ where
             was.ideas.clone(),
             model,
             cost_usd,
-            Some(describe_failure(&r, w.budget_usd)),
+            Some(describe_failure(&r, w.session.budget_usd)),
         );
     }
     let res = r.structured.and_then(|v| serde_json::from_value::<IdeasResult>(v).ok());
@@ -139,7 +137,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::config::ProjectType;
     use crate::engines::engine::test_result as result;
     use crate::ideas::model::{IDEAS_MAX_WAITS_DEFAULT, QUEUE};
     use crate::ideas::test_support::waiting_idea;
@@ -151,13 +148,15 @@ mod tests {
             template: TEMPLATE,
             project_type: ProjectType::Web,
             github_repo: "x/y",
-            cwd,
-            budget_usd: 0.5,
-            model: model.to_string(),
-            local: None,
-            engine: None,
-            cursor: None,
-            sandbox: false,
+            session: EphemeralSessionConfig {
+                cwd,
+                budget_usd: 0.5,
+                model: model.to_string(),
+                local: None,
+                engine: None,
+                cursor: None,
+                sandbox: false,
+            },
         }
     }
 

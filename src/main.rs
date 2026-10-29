@@ -272,6 +272,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         lanes: lane_count,
         chore_lane: cfg.machine.chore_lane,
         lane_sizes: lane_pool::LaneSizes::default(),
+        paused: connector::PauseState::default(),
     });
     // 04-architecture.md section 4.1: each lane's disk use, for the app's lanes panel. Walking a
     // lane's build output takes a while, so off the async threads and only every ten minutes.
@@ -289,6 +290,46 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     }
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
+    // Shared by the settings page's own restart button, below, a newer build asking for one, and
+    // Restart from retaskable.com (commands.rs): the one place code 75's exit installs whatever
+    // `release_update` has ready first (installers/03-the-bundle-agent-bundle.md section 3.12 —
+    // `ReleaseUpdater.installNow` runs "instead of relaunch"). When it doesn't install anything
+    // (nothing ready, or the install failed), a release build falls back to the plain relaunch
+    // section 3.8 describes; a checkout has none to fall back to, since nothing here supervises it
+    // the way a release build's own exit does.
+    let updater_slot: Arc<Mutex<Option<Arc<release_update::ReleaseUpdater>>>> = Arc::new(Mutex::new(None));
+    let exit_fn = {
+        let updater_slot = updater_slot.clone();
+        let exe_path = exe_path.clone();
+        move |code: i32| {
+            let updater_slot = updater_slot.clone();
+            let exe_path = exe_path.clone();
+            // Restarting answers the request first: the process exit happens on another thread, a
+            // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
+            // none in flight on its own HTTP thread, but the response still deserves to flush).
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let installed = code == 75
+                    && updater_slot
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .is_some_and(|updater| updater.install_now());
+                if code == 75 && is_release && !installed {
+                    if let Some(exe) = &exe_path {
+                        let target = release_install::relaunch_target(exe);
+                        if let Err(e) = release_install::relaunch_with_same_args(&target) {
+                            tracing::error!("starting the next copy ({e}), so this copy stays down.");
+                        }
+                    } else {
+                        tracing::error!("nothing to restart into (no executable path), so this copy stays down.");
+                    }
+                }
+                std::process::exit(code);
+            });
+        }
+    };
+    let exit_arc: Arc<connector::Exit> = Arc::new(exit_fn.clone());
     let connectors: Vec<_> = cloud_urls
         .iter()
         .map(|url| {
@@ -298,6 +339,8 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
                 http.clone(),
                 view.clone(),
                 connector::Timing::default(),
+                exit_arc.clone(),
+                dir,
             )
         })
         .collect();
@@ -336,45 +379,6 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
             println!("{report}");
         }
     });
-    // Shared by the settings page's own restart button and, below, a newer build asking for one:
-    // the one place code 75's exit installs whatever `release_update` has ready first
-    // (installers/03-the-bundle-agent-bundle.md section 3.12 — `ReleaseUpdater.installNow` runs
-    // "instead of relaunch"). When it doesn't install anything (nothing ready, or the install
-    // failed), a release build falls back to the plain relaunch section 3.8 describes; a checkout
-    // has none to fall back to, since nothing here supervises it the way a release build's own
-    // exit does.
-    let updater_slot: Arc<Mutex<Option<Arc<release_update::ReleaseUpdater>>>> = Arc::new(Mutex::new(None));
-    let exit_fn = {
-        let updater_slot = updater_slot.clone();
-        let exe_path = exe_path.clone();
-        move |code: i32| {
-            let updater_slot = updater_slot.clone();
-            let exe_path = exe_path.clone();
-            // Restarting answers the request first: the process exit happens on another thread, a
-            // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
-            // none in flight on its own HTTP thread, but the response still deserves to flush).
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let installed = code == 75
-                    && updater_slot
-                        .lock()
-                        .unwrap()
-                        .clone()
-                        .is_some_and(|updater| updater.install_now());
-                if code == 75 && is_release && !installed {
-                    if let Some(exe) = &exe_path {
-                        let target = release_install::relaunch_target(exe);
-                        if let Err(e) = release_install::relaunch_with_same_args(&target) {
-                            tracing::error!("starting the next copy ({e}), so this copy stays down.");
-                        }
-                    } else {
-                        tracing::error!("nothing to restart into (no executable path), so this copy stays down.");
-                    }
-                }
-                std::process::exit(code);
-            });
-        }
-    };
     // installers/03-the-bundle-agent-bundle.md section 3.11/3.12: a release build has no checkout
     // to move forward, so it asks its own environment's release feed for a newer build, downloads
     // and readies it, then asks for the same restart the settings page's own button does once

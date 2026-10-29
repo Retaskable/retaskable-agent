@@ -21,7 +21,7 @@ anyhow = "1.0.104"
 axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22.1"
-futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "alloc"] }
 gethostname = { version = "1.1.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = "4"

@@ -2,8 +2,9 @@
 //! is the ground truth): when the triager names a bug in Retaskable itself rather than the
 //! project, this is what scrubs the project, its people and its computer out of it before it
 //! ever leaves this one. Sending the result over the cloud link, the hub's consent, and deduping
-//! it against what the item already reported are the orchestrator's (not built yet — see the
-//! module doc on [`crate::triage`]); [`prepare_bug_report`] is as far as this slice goes.
+//! it against what the item already reported are the orchestrator's, once something runs the
+//! triager at all (see the module doc on [`crate::triage`]); [`prepare_bug_report`] is as far as
+//! this slice goes.
 use std::path::Path;
 use std::sync::LazyLock;
 

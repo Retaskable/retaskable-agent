@@ -1,12 +1,13 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
-//! never falls back to a local list."): `list`, read over `POST <store>/v1/repos/<repo id>/ops`
-//! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2), and `auto_link`, this machine's
-//! own link to the store (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A
-//! repo's numeric GitHub id, and wiring a linked access token into `list`, come from elsewhere (the
-//! orchestrator isn't built yet); every way `list` can fail — no address, no network, a refused or
-//! unreadable answer — comes back as a `BacklogError` and never as a guessed or empty list, so a
-//! caller can't mistake "couldn't ask" for "nothing to do".
+//! never falls back to a local list."): `list`, `claim_next` and `drafts`, each read over
+//! `POST <store>/v1/repos/<repo id>/ops` (Retaskable.com's docs/specs/backlog.md sections 3.1 and
+//! 6.2, and backlog/06.6-handing-out-work.md for `claim_next`), and `auto_link`, this machine's own
+//! link to the store (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A
+//! repo's numeric GitHub id, and wiring a linked access token in, come from elsewhere (not ported
+//! here yet); every way an operation can fail — no address, no network, a refused or unreadable
+//! answer — comes back as a `BacklogError` and never as a guessed or empty answer, so a caller
+//! can't mistake "couldn't ask" for "nothing to do".
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -123,6 +124,24 @@ pub struct Draft {
     pub pr_url: Option<String>,
 }
 
+/// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its
+/// machine name, the host of the retaskable.com it links to, and the project's base branch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaimNextAgent {
+    pub machine: String,
+    pub environment: String,
+    pub base_branch: String,
+}
+
+/// What `claim_next` answers: an item claimed, with the lease token that goes with it, or nothing
+/// to claim right now (paused, or nothing ready).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimNextAnswer {
+    Item { item: Box<Item>, token: String },
+    Nothing,
+}
+
 /// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
 /// stop and wait for the store (agent/02-principles.md).
 #[derive(Debug)]
@@ -208,6 +227,40 @@ impl Client {
         self.op(repo_id, token, "drafts", json!({}), "drafts").await
     }
 
+    /// `claim_next` (backlog/06.6-handing-out-work.md): the next item ready for this agent, or
+    /// `Nothing` while the project is paused or nothing is ready. Unlike `op`'s other callers, a
+    /// `null` value is a real, successful answer here, not a bad one.
+    pub async fn claim_next(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        agent: &ClaimNextAgent,
+    ) -> Result<ClaimNextAnswer, BacklogError> {
+        let (status, body) = self
+            .send(repo_id, token, "claim_next", json!({ "agent": agent }))
+            .await?;
+        match body.value {
+            None | Some(Value::Null) => Ok(ClaimNextAnswer::Nothing),
+            Some(value) => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Answer {
+                    item: Item,
+                    token: String,
+                }
+                let answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
+                    status,
+                    code: None,
+                    message: format!("couldn't read the item it claimed: {e}"),
+                })?;
+                Ok(ClaimNextAnswer::Item {
+                    item: Box::new(answer.item),
+                    token: answer.token,
+                })
+            }
+        }
+    }
+
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
     /// answering its `value` read as `T` (`what` names it when it can't be read). A refusal keeps the
     /// store's own `error` code (`bad_request`, `not_found`, ...) so a caller can tell them apart.
@@ -219,6 +272,26 @@ impl Client {
         args: Value,
         what: &str,
     ) -> Result<T, BacklogError> {
+        let (status, body) = self.send(repo_id, token, op, args).await?;
+        let bad = |message: String| BacklogError::BadAnswer {
+            status,
+            code: None,
+            message,
+        };
+        let value = body.value.ok_or_else(|| bad("its answer had no value".to_string()))?;
+        serde_json::from_value(value).map_err(|e| bad(format!("couldn't read the {what} it sent: {e}")))
+    }
+
+    /// Sends one `{ op, args }` request and reads back its status and body, every network or
+    /// non-2xx failure turned into a `BacklogError` so no caller can mistake "couldn't ask" for an
+    /// empty or missing answer.
+    async fn send(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(u16, OpResponse), BacklogError> {
         let url = format!("{}/v1/repos/{}/ops", self.base_url, repo_id);
         let mut req = self.http.post(&url).json(&OpRequest { op, args });
         if let Some(token) = token {
@@ -238,13 +311,7 @@ impl Client {
                 message,
             });
         }
-        let bad = |message: String| BacklogError::BadAnswer {
-            status: status.as_u16(),
-            code: None,
-            message,
-        };
-        let value = body.value.ok_or_else(|| bad("its answer had no value".to_string()))?;
-        serde_json::from_value(value).map_err(|e| bad(format!("couldn't read the {what} it sent: {e}")))
+        Ok((status.as_u16(), body))
     }
 }
 
@@ -347,6 +414,49 @@ mod tests {
         assert_eq!(drafts[0].pr_url.as_deref(), Some("https://github.com/x/y/pull/4"));
         assert_eq!(drafts[0].titles, ["Charts"]);
         assert_eq!(drafts[1].pr_url, None);
+    }
+
+    #[tokio::test]
+    async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["op"], "claim_next");
+            assert_eq!(req["args"]["agent"]["machine"], "box-1");
+            assert_eq!(req["args"]["agent"]["baseBranch"], "main");
+            Json(json!({
+                "value": {
+                    "item": { "id": "a", "title": "First", "status": "claimed", "rank": 0 },
+                    "token": "lease-1",
+                }
+            }))
+        }))
+        .await;
+
+        let agent = ClaimNextAgent {
+            machine: "box-1".to_string(),
+            environment: "Production".to_string(),
+            base_branch: "main".to_string(),
+        };
+        let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
+        match answer {
+            ClaimNextAnswer::Item { item, token } => {
+                assert_eq!(item.id, "a");
+                assert_eq!(token, "lease-1");
+            }
+            ClaimNextAnswer::Nothing => panic!("expected an item"),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_next_reads_a_null_value_as_nothing_not_a_bad_answer() {
+        let base = fake_store(post(|| async { Json(json!({ "value": null })) })).await;
+
+        let agent = ClaimNextAgent {
+            machine: "box-1".to_string(),
+            environment: "Production".to_string(),
+            base_branch: "main".to_string(),
+        };
+        let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
+        assert_eq!(answer, ClaimNextAnswer::Nothing);
     }
 
     #[tokio::test]

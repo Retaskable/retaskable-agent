@@ -5,15 +5,18 @@
 //! `start_over` as Start over, `skip` as Skip, `human` as leaving it alone, `person_steps` as
 //! waiting on a person's own steps.
 //!
-//! Not wired to anything yet: there's no orchestrator loop (section 7, not ported) to run this on
-//! a slot, carry out its decision, cap it at 2 automatic decisions a slice, report `claudeOnIt`
-//! while it's thinking, or send a scrubbed [`bug_report::PreparedBugReport`] over the cloud link
-//! and dedupe it against what the item already reported; no `gh pr view`/`glab mr view` wrapper
-//! of our own to gather the PR it names either (the prompt tells the session to run those
-//! itself). A caller puts this together the same way as [`crate::ideas`] and
-//! [`crate::release_notes::write`]: gather a [`TriageContext`] from the item's own state, build a
-//! [`Triager`] with the project's words, the item's lane (or the base checkout) and
-//! `budget.reviewerUsd`, and run [`decide`] with [`crate::engines::runner::run_session`].
+//! Not wired to anything yet: [`crate::orchestrator`]'s tick only claims a lane for a `queued`
+//! item so far, nothing notices a `needs_human` item and runs this on it; [`crate::commands`]'s
+//! Continue, Start over and Skip (the buttons this decision would be carried out through) still
+//! need the orchestrator loop and lanes too. Also still missing: capping this at 2 automatic
+//! decisions a slice, reporting `claudeOnIt` while it's thinking, and sending a scrubbed
+//! [`bug_report::PreparedBugReport`] over the cloud link and deduping it against what the item
+//! already reported; no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names
+//! either (the prompt tells the session to run those itself). A caller puts this together the
+//! same way as [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`]
+//! from the item's own state, build a [`Triager`] with the project's words, the item's lane (or
+//! the base checkout) and `budget.reviewerUsd`, and run [`decide`] with
+//! [`crate::engines::runner::run_session`].
 pub mod bug_report;
 
 use std::future::Future;
@@ -23,7 +26,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config::ProjectType;
-use crate::engines::{SessionResult, SessionSpec, WriterConfig, describe_failure, ephemeral_readonly_spec};
+use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
 use crate::release_notes::{project_words, render_prompt};
 
 /// What the triager is given about the item (06.9 bullet 1): gathered by the caller from the
@@ -155,7 +158,13 @@ pub fn build_prompt(
 /// [`crate::ideas::write::Writer`] and [`crate::release_notes::write::Writer`], plus the one field
 /// below that's specific to triage.
 pub struct Triager<'a> {
-    pub common: WriterConfig<'a>,
+    /// `prompts/triage.md`.
+    pub template: &'a str,
+    pub project_type: ProjectType,
+    pub github_repo: &'a str,
+    /// `Role::Writer`'s engine/model/budget/local/cursor/sandbox bundle; `session.cwd` is the
+    /// item's lane if it kept one, or else the base checkout.
+    pub session: EphemeralSessionConfig<'a>,
     /// Told to the model so it knows how much room is left (06.9's "It can't loop"); not
     /// enforced here — the cap across retries is the orchestrator's.
     pub max_automatic_decisions: u32,
@@ -164,25 +173,14 @@ pub struct Triager<'a> {
 /// The read-only triager session for one `needs_human` item: nothing to resume, so it's
 /// ephemeral.
 pub fn session_spec(t: &Triager<'_>, ctx: &TriageContext) -> Result<SessionSpec> {
-    let c = &t.common;
     let prompt = build_prompt(
-        c.template,
-        c.project_type,
-        c.github_repo,
+        t.template,
+        t.project_type,
+        t.github_repo,
         t.max_automatic_decisions,
         ctx,
     )?;
-    Ok(ephemeral_readonly_spec(
-        c.engine,
-        c.model.clone(),
-        prompt,
-        triage_result_schema(),
-        c.cwd.to_path_buf(),
-        c.budget_usd,
-        c.cursor.clone(),
-        c.local.clone(),
-        c.sandbox,
-    ))
+    Ok(t.session.spec(prompt, triage_result_schema()))
 }
 
 /// What [`decide`] came back with: either the triager's own decision, or why there isn't one
@@ -228,7 +226,7 @@ where
         return Decided {
             result: None,
             cost_usd,
-            note: Some(describe_failure(&r, t.common.budget_usd)),
+            note: Some(describe_failure(&r, t.session.budget_usd)),
         };
     }
     let result = r
@@ -259,10 +257,10 @@ mod tests {
 
     fn triager() -> Triager<'static> {
         Triager {
-            common: WriterConfig {
-                template: TEMPLATE,
-                project_type: ProjectType::Web,
-                github_repo: "x/y",
+            template: TEMPLATE,
+            project_type: ProjectType::Web,
+            github_repo: "x/y",
+            session: EphemeralSessionConfig {
                 cwd: Path::new("lane"),
                 budget_usd: 1.5,
                 model: "sonnet".to_string(),

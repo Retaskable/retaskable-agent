@@ -2,14 +2,12 @@
 //! back (`SessionResult`), the `Engine` interface each AI tool implements behind
 //! `runner::run_session`, and `describe_failure` — following `agent/src/engines/engine.ts` in
 //! Retaskable.com (the ground truth this is porting) and docs/specs/engines/02-the-engine-layer.md.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
-
-use crate::config::ProjectType;
 
 /// `EngineId` in `shared/types.ts`: which AI tool a session runs on. Missing on a `SessionSpec`
 /// means `Claude`.
@@ -104,22 +102,39 @@ pub fn ephemeral_readonly_spec(
     }
 }
 
-/// What an ephemeral, read-only session runs with, besides what's specific to its own round or
-/// decision: shared by [`crate::ideas::write::Writer`] and [`crate::triage::Triager`] (which adds
-/// its own `max_automatic_decisions` alongside this).
-pub struct WriterConfig<'a> {
-    pub template: &'a str,
-    pub project_type: ProjectType,
-    pub github_repo: &'a str,
-    /// A checkout of the project, where the session may read its specs.
-    pub cwd: &'a Path,
+/// The engine/model/budget/local/cursor/sandbox bundle every read-only `writer`-style role
+/// (release notes, ideas, scouts, the triager) carries alongside its own prompt inputs —
+/// factored out so each role's struct holds one `session: EphemeralSessionConfig` field instead
+/// of repeating these seven fields and the [`ephemeral_readonly_spec`] call that reads them back
+/// off.
+#[derive(Debug, Clone)]
+pub struct EphemeralSessionConfig<'a> {
+    /// A checkout where the session may read specs/diffs/code, per the role's own doc comment.
+    pub cwd: &'a std::path::Path,
     pub budget_usd: f64,
     pub model: String,
     pub local: Option<LocalTarget>,
-    /// [`crate::engines::engine_for`] with `Role::Writer`.
+    /// [`crate::engines::engine_for`] with the role's own [`crate::engines::Role`].
     pub engine: Option<EngineId>,
     pub cursor: Option<CursorOptions>,
     pub sandbox: bool,
+}
+
+impl EphemeralSessionConfig<'_> {
+    /// [`ephemeral_readonly_spec`] for this bundle, with the caller's own `prompt` and `schema`.
+    pub fn spec(&self, prompt: String, schema: Value) -> SessionSpec {
+        ephemeral_readonly_spec(
+            self.engine,
+            self.model.clone(),
+            prompt,
+            schema,
+            self.cwd.to_path_buf(),
+            self.budget_usd,
+            self.cursor.clone(),
+            self.local.clone(),
+            self.sandbox,
+        )
+    }
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
