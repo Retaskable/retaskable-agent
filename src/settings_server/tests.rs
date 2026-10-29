@@ -264,6 +264,7 @@ async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
         env,
         || 1_700_000_000,
         |_| {},
+        test_keychain(dir.path()),
     ));
     let body = signed_in_settings(&settings).await;
     assert_eq!(body["tags"]["effective"], json!(["linux"]));
@@ -300,6 +301,7 @@ async fn saving_a_typed_tag_list_keeps_only_what_changes_and_round_trips() {
         |_: &str| None,
         || 1_700_000_000,
         |_: i32| {},
+        test_keychain(dir.path()),
     ));
     let app = app(settings.clone());
     let (cookie, csrf) = sign_in(&app, &settings).await;
@@ -374,6 +376,7 @@ async fn restart_calls_exit_with_75_once_signed_in_with_csrf() {
         |_: &str| None,
         || 1_700_000_000,
         move |code: i32| exits_clone.lock().unwrap().push(code),
+        test_keychain(dir.path()),
     ));
     let app = app(settings.clone());
     let (cookie, csrf) = sign_in(&app, &settings).await;
@@ -405,6 +408,7 @@ async fn five_wrong_tries_wait_a_minute_then_longer_even_for_the_right_one() {
         |_: &str| None,
         move || *now_clone.lock().unwrap(),
         |_: i32| {},
+        test_keychain(dir.path()),
     ));
     let app = app(settings.clone());
 
@@ -471,6 +475,7 @@ async fn a_wait_still_in_force_doubles_the_next_one() {
             |_: &str| None,
             move || *now_clone.lock().unwrap(),
             |_: i32| {},
+            test_keychain(dir.path()),
         ));
         (settings, dir)
     };
@@ -521,6 +526,59 @@ async fn a_body_over_16kb_is_refused() {
     assert!(res.status().is_client_error());
 }
 
+#[tokio::test]
+async fn link_without_a_session_is_refused() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/api/link").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn link_lists_the_three_environments_and_which_one_is_connected() {
+    let dir = tempfile::tempdir().unwrap();
+    let keychain = test_keychain(dir.path());
+    keychain.set("https://staging.retaskable.com", "refresh-token").unwrap();
+    let settings = test_server_with_keychain(dir.path(), keychain);
+    let app = app(settings.clone());
+    let (cookie, _csrf) = sign_in(&app, &settings).await;
+    let res = app
+        .oneshot(
+            request("GET", "/api/link")
+                .header("Cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = json_body(res).await;
+    let environments = body["environments"].as_array().unwrap();
+    assert_eq!(environments.len(), 3);
+    let staging = environments
+        .iter()
+        .find(|e| e["name"].as_str() == Some("Staging"))
+        .unwrap();
+    assert_eq!(staging["connected"], json!(true));
+    let production = environments
+        .iter()
+        .find(|e| e["name"].as_str() == Some("Production"))
+        .unwrap();
+    assert_eq!(production["connected"], json!(false));
+}
+
+#[tokio::test]
+async fn profile_without_a_session_is_refused() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/api/profile").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// Starts a signed-in session against a fresh config dir, for a test that posts a setting.
 async fn signed_in_app(dir: &Path) -> (Arc<SettingsServer>, Router, String, String) {
     let settings = settings_with_network(dir, false, None);
@@ -541,6 +599,7 @@ fn settings_with_network(dir: &Path, network_enabled: bool, stored: Option<Netwo
         |_: &str| None,
         || 1_700_000_000,
         |_: i32| {},
+        test_keychain(dir),
     ))
 }
 
@@ -682,6 +741,7 @@ async fn saving_the_port_is_refused_when_set_by_env() {
         |k: &str| (k == "RETASKABLE_PORT").then(|| "4900".to_string()),
         || 1_700_000_000,
         |_: i32| {},
+        test_keychain(dir.path()),
     ));
     let app = app(settings.clone());
     let (cookie, csrf) = sign_in(&app, &settings).await;

@@ -46,6 +46,12 @@
     <button type="button" id="restart">Restart now</button>
   </p>
 
+  <h2>Who this computer works as</h2>
+  <p id="profile">Checking&hellip;</p>
+
+  <h2>Link to retaskable.com</h2>
+  <ul id="linkList"></ul>
+
   <div class="group" id="tagsGroup">
     <label for="tags">Tags</label>
     <textarea id="tags" placeholder="one tag per line"></textarea>
@@ -241,6 +247,27 @@
     return api("/api/settings").then(renderSettings);
   }
 
+  function renderProfile(p) {
+    var el = document.getElementById("profile");
+    if (p.signedIn) {
+      el.textContent = "Signed in as " + (p.name ? p.name + " (" + p.login + ")" : p.login) + ".";
+    } else {
+      el.textContent = p.error || "Not signed in.";
+    }
+  }
+
+  function renderLink(l) {
+    document.getElementById("linkList").innerHTML = l.environments
+      .map(function (e) {
+        return "<li>" + e.name + ": " + (e.connected ? "Connected" : "Not linked") + "</li>";
+      })
+      .join("");
+  }
+
+  function loadExtras() {
+    return Promise.all([api("/api/profile").then(renderProfile), api("/api/link").then(renderLink)]);
+  }
+
   function showApp() {
     document.getElementById("signedOut").hidden = true;
     document.getElementById("app").hidden = false;
@@ -254,7 +281,7 @@
     }).then(function (resBody) {
       csrfToken = resBody.csrfToken;
       showApp();
-      return loadSettings();
+      return Promise.all([loadSettings(), loadExtras()]);
     });
   }
 

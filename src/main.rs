@@ -438,6 +438,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         env,
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         exit_fn,
+        keychain.clone(),
     ));
     axum::serve(
         listener,
