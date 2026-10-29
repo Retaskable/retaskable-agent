@@ -251,27 +251,11 @@ mod tests {
     use super::*;
     use crate::engines::SessionStart;
     use crate::engines::engine::test_result as result;
-    use crate::triage::KnownBug;
 
     const TEMPLATE: &str = "Checking {{projectKind}} (`{{githubRepo}}`):\n{{context}}";
 
     fn triage_ctx() -> TriageContext {
-        TriageContext {
-            reason: "Review escalated: unclear which library to add.".to_string(),
-            failed_in: "reviewing".to_string(),
-            timeline: vec!["Review requested changes".to_string()],
-            last_check_result: Some("passed".to_string()),
-            pr_url: Some("https://github.com/x/y/pull/9".to_string()),
-            branch: Some("retaskable/9-thing".to_string()),
-            has_pushed_branch: true,
-            has_session_to_continue: true,
-            automatic_decisions: 1,
-            transcripts_dir: Some(".retaskable/projects/x/runs/9".to_string()),
-            known_bugs: vec![KnownBug {
-                id: "retaskable-bug-abc123".to_string(),
-                title: "A known bug".to_string(),
-            }],
-        }
+        crate::test_support::triage_context(vec!["Review requested changes".to_string()], "A known bug")
     }
 
     fn triage_result(suggest: TriageButton) -> TriageResult {

@@ -321,22 +321,10 @@ mod tests {
     }
 
     fn ctx() -> TriageContext {
-        TriageContext {
-            reason: "Review escalated: unclear which library to add.".to_string(),
-            failed_in: "reviewing".to_string(),
-            timeline: vec!["Review requested changes".to_string(), "Checks passed".to_string()],
-            last_check_result: Some("passed".to_string()),
-            pr_url: Some("https://github.com/x/y/pull/9".to_string()),
-            branch: Some("retaskable/9-thing".to_string()),
-            has_pushed_branch: true,
-            has_session_to_continue: true,
-            automatic_decisions: 1,
-            transcripts_dir: Some(".retaskable/projects/x/runs/9".to_string()),
-            known_bugs: vec![KnownBug {
-                id: "retaskable-bug-abc123".to_string(),
-                title: "A bug already on the board".to_string(),
-            }],
-        }
+        crate::test_support::triage_context(
+            vec!["Review requested changes".to_string(), "Checks passed".to_string()],
+            "A bug already on the board",
+        )
     }
 
     // build_prompt
