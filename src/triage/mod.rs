@@ -6,14 +6,16 @@
 //! waiting on a person's own steps.
 //!
 //! Not wired to anything yet: there's no orchestrator loop (section 7, not ported) to run this on
-//! a slot, carry out its decision, cap it at 2 automatic decisions a slice, or report `claudeOnIt`
-//! while it's thinking; no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it
-//! names (the prompt tells the session to run those itself); and no `retaskableBug` scrubbing
-//! (`bugReport.ts`'s port) to clean what it reports before it ever leaves this computer. A caller
-//! puts this together the same way as [`crate::ideas`] and [`crate::release_notes::write`]:
-//! gather a [`TriageContext`] from the item's own state, build a [`Triager`] with the project's
-//! words, the item's lane (or the base checkout) and `budget.reviewerUsd`, and run [`decide`]
-//! with [`crate::engines::runner::run_session`].
+//! a slot, carry out its decision, cap it at 2 automatic decisions a slice, report `claudeOnIt`
+//! while it's thinking, or send a scrubbed [`bug_report::PreparedBugReport`] over the cloud link
+//! and dedupe it against what the item already reported; no `gh pr view`/`glab mr view` wrapper
+//! of our own to gather the PR it names either (the prompt tells the session to run those
+//! itself). A caller puts this together the same way as [`crate::ideas`] and
+//! [`crate::release_notes::write`]: gather a [`TriageContext`] from the item's own state, build a
+//! [`Triager`] with the project's words, the item's lane (or the base checkout) and
+//! `budget.reviewerUsd`, and run [`decide`] with [`crate::engines::runner::run_session`].
+pub mod bug_report;
+
 use std::future::Future;
 use std::path::Path;
 
@@ -72,7 +74,7 @@ pub enum TriageButton {
 }
 
 /// `retaskableBug` (06.9 bullet 18): set only when what went wrong is Retaskable's own, never the
-/// project's. Scrubbed before it ever leaves this computer — not ported yet (see the module doc).
+/// project's. [`bug_report::prepare_bug_report`] scrubs it before it ever leaves this computer.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RetaskableBug {
     pub title: String,
