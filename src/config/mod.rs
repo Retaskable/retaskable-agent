@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 pub use machine::{
-    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines,
-    cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
+    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
+    RoleEngines, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
 };
 pub(crate) use machine::{
     lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,

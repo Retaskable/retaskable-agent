@@ -108,6 +108,34 @@ pub fn other_engine_lanes(cfg: &EngineChoiceConfig, project_engines: Option<&Val
         .collect()
 }
 
+/// The kinds of work (`engineChoice.roles` keys) with the one role that stands for each, in the
+/// order the Now tab lists them (`ENGINE_GROUPS` / `GROUP_ROLE`).
+pub const GROUP_ROLES: [(&str, Role); 6] = [
+    ("planner", Role::Planner),
+    ("implementer", Role::Implementer),
+    ("review", Role::Reviewer),
+    ("drafter", Role::Drafter),
+    ("chat", Role::Assistant),
+    ("writer", Role::Writer),
+];
+
+/// `usedFor`: the kinds of work that run on `engine`, and the lanes (1-based, of `lanes`) set to
+/// it: what the Now tab says an engine is used for. Only a lane's own pick counts as its lane.
+pub fn used_for(
+    cfg: &EngineChoiceConfig,
+    project_engines: Option<&Value>,
+    engine: Engine,
+    lanes: u32,
+) -> (Vec<&'static str>, Vec<u32>) {
+    let groups = GROUP_ROLES
+        .iter()
+        .filter(|(_, role)| engine_for(cfg, project_engines, *role, None) == engine)
+        .map(|(g, _)| *g)
+        .collect();
+    let own = (1..=lanes).filter(|&k| lane_engine(cfg, k) == Some(engine)).collect();
+    (groups, own)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +298,24 @@ mod tests {
         assert_eq!(lane_engine(&cfg, 1), Some(Engine::Cursor));
         assert_eq!(lane_engine(&cfg, 2), None);
         assert_eq!(lane_engine(&cfg, 3), None);
+    }
+
+    #[test]
+    fn used_for_lists_the_groups_and_lanes_on_an_engine() {
+        let cfg = EngineChoiceConfig {
+            default: Some(Engine::Cursor),
+            roles: RoleEngines {
+                review: Some(Engine::Codex),
+                ..RoleEngines::default()
+            },
+            lanes: vec![LaneEngine::Codex, LaneEngine::Default, LaneEngine::Codex],
+        };
+        let (groups, lanes) = used_for(&cfg, None, Engine::Codex, 4);
+        assert_eq!(groups, vec!["review"]);
+        assert_eq!(lanes, vec![1, 3]);
+        let (groups, lanes) = used_for(&cfg, None, Engine::Cursor, 4);
+        assert_eq!(groups, vec!["planner", "implementer", "drafter", "chat", "writer"]);
+        assert!(lanes.is_empty());
+        assert_eq!(used_for(&cfg, None, Engine::Claude, 4), (vec![], vec![]));
     }
 }

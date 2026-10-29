@@ -1,141 +1,313 @@
 <!doctype html>
+<!-- This computer's page (docs/specs/agent-settings.md section 4): served by the agent at /settings, with no app code and
+     nothing from elsewhere. The Now tab reads GET /api/settings/status; the Settings tab edits what only this computer sets.
+     {{NONCE}} is filled in on each answer, for the page's CSP (no inline style attributes: every look is a class below, and
+     the few computed widths are set from the script). -->
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Retaskable settings</title>
+<title>This computer</title>
 <style nonce="{{NONCE}}">
-  body { font: 14px system-ui, sans-serif; margin: 2em; max-width: 36em; color: #222; }
-  h1 { font-size: 1.2em; }
-  h2 { font-size: 1em; margin-top: 2em; border-top: 1px solid #ddd; padding-top: 1em; }
-  label { display: block; margin-top: 0.6em; font-weight: 600; }
-  textarea, input[type=text], input[type=password], input[type=number], select {
-    width: 100%; box-sizing: border-box; font: inherit; padding: 0.4em;
+  :root {
+    --page: #f4f5f7; --card: #ffffff; --line: #e1e4e9; --soft: #eceef2; --fg: #1b1f24; --text2: #3a414b; --muted: #5a626e;
+    --field: #c9ced6; --accent: #2949c6; --accent-hover: #1b3392; --on-accent: #ffffff; --step-now: #8fa3ec; --track-hatch: #f7f8fa;
+    --ok-bg: #e3f2ea; --ok-fg: #17603c; --ok-dot: #1f8a55; --bad-bg: #fbe3e1; --bad-fg: #9b1c14; --bad-dot: #b42318; --warn-bg: #fbebd3; --warn-fg: #7a4300; --warn-dot: #b76e00;
+    --bad-box: #fdf3f2; --bad-line: #f2c4bf; --warn-box: #fdf8ef; --warn-line: #e9d6b4; --neutral-bg: #f1f2f4; --neutral-fg: #4a515c;
+    --claude-bg: #e6ebfb; --claude-fg: #1f3a9e; --codex-bg: #ece6f8; --codex-fg: #4a2a8c; --cursor-bg: #e9ecef; --cursor-fg: #2f363f; --local-bg: #dff1f0; --local-fg: #14585a;
   }
-  textarea { height: 4em; }
-  input[type=checkbox] { margin-top: 0.6em; }
-  button { margin-top: 1em; padding: 0.5em 1em; font: inherit; }
-  .hint { color: #666; font-size: 0.9em; margin: 0.2em 0 0; }
-  .group[data-env-set="true"] input,
-  .group[data-env-set="true"] select,
-  .group[data-env-set="true"] textarea,
-  .group[data-env-set="true"] button {
-    background: #eee; color: #888;
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #121418; --card: #1b1e24; --line: #2f343c; --soft: #272b32; --fg: #ececf1; --text2: #c9cdd5; --muted: #9aa1ad;
+      --field: #454b55; --accent: #6f8af0; --accent-hover: #9db0f6; --on-accent: #0e1220; --step-now: #46549a; --track-hatch: #1b1e24;
+      --ok-bg: #173a29; --ok-fg: #8fdcb2; --ok-dot: #4cc58a; --bad-bg: #4a1f1c; --bad-fg: #ffb4ad; --bad-dot: #ff7b70; --warn-bg: #46300f; --warn-fg: #f2c882; --warn-dot: #e5a03b;
+      --bad-box: #2a1a19; --bad-line: #5a2b27; --warn-box: #2a2314; --warn-line: #54431f; --neutral-bg: #2a2e35; --neutral-fg: #c0c5ce;
+      --claude-bg: #232d55; --claude-fg: #b5c3f8; --codex-bg: #33274f; --codex-fg: #cdbcf2; --cursor-bg: #2a2e35; --cursor-fg: #d3d7de; --local-bg: #153b3c; --local-fg: #9be0df;
+    }
   }
-  #status { margin-top: 1em; }
-  #status.error { color: #a00; }
-  #app[hidden], #signedOut[hidden] { display: none; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--fg); font: 15px/1.45 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: var(--accent); }
+  a:hover { color: var(--accent-hover); }
+  select, input, button, textarea { font: inherit; }
+  [hidden] { display: none !important; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+  .top { background: var(--card); border-bottom: 1px solid var(--line); }
+  .top .wrap { padding-top: 22px; display: flex; flex-direction: column; gap: 16px; }
+  .head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+  .title { display: flex; flex-direction: column; gap: 4px; }
+  .name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+  h2 { margin: 0; font-size: 18px; font-weight: 600; }
+  h3 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .eyebrow { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .meta { color: var(--muted); font-size: 13px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--neutral-bg); color: var(--neutral-fg); }
+  .chip.big { padding: 3px 10px; font-size: 13px; }
+  .chip.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .chip.bad { background: var(--bad-bg); color: var(--bad-fg); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .chip.claude { background: var(--claude-bg); color: var(--claude-fg); }
+  .chip.codex { background: var(--codex-bg); color: var(--codex-fg); }
+  .chip.cursor, .chip.pi { background: var(--cursor-bg); color: var(--cursor-fg); }
+  .chip.local { background: var(--local-bg); color: var(--local-fg); }
+  .dot { width: 8px; height: 8px; border-radius: 999px; background: currentColor; flex-shrink: 0; }
+  .chip.ok .dot { background: var(--ok-dot); }
+  .chip.bad .dot { background: var(--bad-dot); }
+  .chip.warn .dot { background: var(--warn-dot); }
+  .btn { min-height: 44px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--field); background: var(--card); color: var(--fg); font-weight: 500; cursor: pointer; }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; padding: 0 24px; }
+  .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .tabs { display: flex; gap: 4px; }
+  .tab { min-height: 44px; padding: 0 18px; border: 0; border-bottom: 3px solid transparent; background: transparent; cursor: pointer; font-weight: 600; color: var(--muted); }
+  .tab[aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent); }
+  .tab:focus-visible, .btn:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  main.wrap { padding-top: 28px; padding-bottom: 64px; }
+  .stack { display: flex; flex-direction: column; gap: 32px; }
+  section.block { display: flex; flex-direction: column; gap: 12px; }
+  .block-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  #msg { margin: 0 0 16px; min-height: 0; }
+  #msg:empty { display: none; }
+  #msg.bad { color: var(--bad-fg); }
+  .alerts { display: flex; flex-direction: column; gap: 8px; }
+  .alert { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-radius: 10px; border: 1px solid var(--warn-line); background: var(--warn-box); }
+  .alert.bad { border-color: var(--bad-line); background: var(--bad-box); }
+  .alert .pip { width: 10px; height: 10px; border-radius: 999px; flex-shrink: 0; background: var(--warn-dot); }
+  .alert.bad .pip { background: var(--bad-dot); }
+  .alert .words { display: flex; flex-direction: column; gap: 1px; flex: 1 1 320px; min-width: 0; }
+  .alert .words b { font-weight: 600; }
+  .alert .words span { font-size: 14px; color: var(--text2); }
+  .calm { margin: 0; font-size: 14px; color: var(--muted); }
+  .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .lane { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .lane.idle { background: transparent; border-style: dashed; }
+  .lane .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; }
+  .lane .what { display: flex; flex-direction: column; gap: 2px; min-height: 64px; }
+  .lane .state { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+  .lane .state.free { color: var(--ok-fg); }
+  .lane .state.waiting { color: var(--warn-fg); }
+  .lane .state.off { color: var(--muted); }
+  .lane .item { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+  .lane .item.none { color: var(--muted); font-weight: 500; }
+  .lane .sub { font-size: 13px; color: var(--muted); }
+  .lane .note { font-size: 14px; color: var(--text2); flex-grow: 1; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .engine { display: flex; flex-wrap: wrap; gap: 16px 32px; align-items: center; padding: 18px; border-bottom: 1px solid var(--soft); }
+  .engine .id { display: flex; flex-direction: column; gap: 4px; flex: 1 1 220px; min-width: 0; }
+  .engine .id .top-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .engine .id .nm { font-size: 16px; font-weight: 600; }
+  .engine .ver { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .engine .used { font-size: 14px; color: var(--text2); }
+  .engine .extra { font-size: 13px; color: var(--muted); }
+  .engine .limit { display: flex; flex-direction: column; gap: 6px; flex: 1 1 300px; min-width: 0; }
+  .engine .limit .line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; flex-wrap: wrap; }
+  #status { margin: 0 0 16px; }
+  #status:empty { display: none; }
+  #status.error { color: var(--bad-fg); }
+  .save { align-self: flex-start; }
+  .engine .limit .line.under { color: var(--muted); }
+  .engine .limit .line .mono { font-weight: 500; }
+  .meter { height: 8px; border-radius: 999px; background: var(--soft); overflow: hidden; }
+  .meter.hatch { background: repeating-linear-gradient(90deg, var(--soft) 0 6px, var(--track-hatch) 6px 12px); }
+  .meter > div { height: 100%; border-radius: 999px; background: var(--accent); }
+  .meter > div.full { background: var(--bad-dot); }
+  .engine .today { display: flex; flex-direction: column; gap: 2px; flex: 0 1 180px; text-align: right; }
+  .engine .today .lbl { font-size: 13px; color: var(--muted); }
+  .engine .today .mono { font-weight: 500; }
+  .engine .today .mono.small { font-size: 13px; color: var(--muted); }
+  .idle-engines { padding: 14px 18px; font-size: 14px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  .idle-engines b { font-weight: 600; color: var(--text2); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .card h2 { font-size: 16px; }
+  .card .sub { color: var(--muted); font-size: 14px; }
+  .card .head2 { display: flex; flex-direction: column; gap: 4px; }
+  .card .head2.inline { flex-direction: row; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .cols { display: flex; flex-wrap: wrap; gap: 24px 40px; }
+  .col { display: flex; flex-direction: column; gap: 10px; flex: 1 1 320px; min-width: 0; }
+  .choice { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .choice label { flex: 1 1 140px; display: flex; flex-direction: column; margin: 0; }
+  .choice label span:first-child { font-weight: 500; }
+  .choice select { flex: 0 1 200px; }
+  .hint { font-size: 13px; color: var(--muted); }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 14px; font-weight: 500; }
+  input[type=text], input[type=number], input[type=password], textarea, select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--field); border-radius: 8px; background: var(--card); color: var(--fg); }
+  textarea { padding: 10px 12px; resize: vertical; }
+  p { margin: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  input:disabled, select:disabled, textarea:disabled { color: var(--muted); background: var(--soft); }
+  .check { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+  .check input { width: 20px; height: 20px; margin: 0; }
+  .check label { font-size: 14px; font-weight: 500; }
+  .by { color: var(--muted); font-size: 13px; }
+  .by:empty { display: none; }
+  .bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 20px; }
+  .bar span { font-size: 14px; color: var(--muted); }
+  #signin { max-width: 420px; margin: 48px auto; display: flex; flex-direction: column; gap: 14px; }
+  #password-box { display: flex; flex-direction: column; gap: 10px; }
+  @media (max-width: 520px) {
+    .wrap { padding: 0 16px; }
+    h1 { font-size: 21px; }
+    .engine .today { text-align: left; flex-basis: 100%; }
+    .tab { flex: 1; }
+  }
 </style>
 </head>
 <body>
-<h1>Retaskable settings</h1>
-
-<div id="signedOut">
-  <p id="signedOutMessage">
-    Open the tray's "Settings&hellip;" link for a fresh one-time link, or sign in below with this
-    computer's password.
-  </p>
-  <label for="password">Password</label>
-  <input type="password" id="password" autocomplete="current-password" />
-  <button type="button" id="signIn">Sign in</button>
+<div id="signedOut" class="wrap" hidden>
+  <div id="signin">
+    <h1>This computer</h1>
+    <p id="signedOutMessage">
+      Open the tray's "Settings&hellip;" link for a fresh one-time link, or sign in below with this
+      computer's password.
+    </p>
+    <div id="password-box">
+      <label for="password">Password</label>
+      <input type="password" id="password" autocomplete="current-password" />
+      <button type="button" class="btn primary" id="signIn">Sign in</button>
+    </div>
+  </div>
 </div>
 
 <div id="app" hidden>
-  <p id="restartWaiting" hidden>
-    A saved change needs a restart before it takes effect.
-    <button type="button" id="restart">Restart now</button>
-  </p>
-
-  <h2>Who this computer works as</h2>
-  <p id="profile">Checking&hellip;</p>
-
-  <h2>Link to retaskable.com</h2>
-  <ul id="linkList"></ul>
-
-  <div class="group" id="tagsGroup">
-    <label for="tags">Tags</label>
-    <textarea id="tags" placeholder="one tag per line"></textarea>
-    <p class="hint" id="tagsHint" hidden></p>
-    <button type="button" id="saveTags">Save tags</button>
+  <div class="top">
+    <div class="wrap">
+      <div class="head">
+        <div class="title">
+          <div class="name-row"><h1 id="name">This computer</h1><span id="state" class="chip big"><span class="dot"></span><span id="state-text">Reading&hellip;</span></span><span id="restartWaiting" class="chip warn" hidden>A saved change needs a restart</span></div>
+          <span class="meta" id="meta"></span>
+          <span class="stale" id="stale" hidden>Not updating: this computer isn't answering.</span>
+        </div>
+        <button type="button" id="restart" class="btn">Restart</button>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Views">
+        <button type="button" role="tab" class="tab" id="tab-now" aria-controls="panel-now" aria-selected="true">Now</button>
+        <button type="button" role="tab" class="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false">Settings</button>
+      </div>
+    </div>
   </div>
 
-  <h2>Port</h2>
-  <div class="group" id="portGroup">
-    <label for="port">Port (1024&ndash;65535)</label>
-    <input type="number" id="port" min="1024" max="65535" />
-    <p class="hint" id="portHint" hidden></p>
-    <button type="button" id="savePort">Save port</button>
-  </div>
+  <main class="wrap">
+    <p id="status" role="status"></p>
 
-  <h2>How often it checks</h2>
-  <div class="group" id="pollGroup">
-    <label for="pollIntervalSec">Checks every (2&ndash;3600 seconds)</label>
-    <input type="number" id="pollIntervalSec" min="2" max="3600" />
-    <p class="hint" id="pollHint" hidden></p>
-    <button type="button" id="savePoll">Save</button>
-  </div>
+    <div id="panel-now" role="tabpanel" aria-labelledby="tab-now" class="stack">
+      <section class="block" aria-labelledby="att-h">
+        <h2 class="eyebrow" id="att-h">Needs attention</h2>
+        <div class="alerts" id="alerts"></div>
+      </section>
+      <section class="block" aria-labelledby="lanes-h">
+        <div class="block-head"><h2 id="lanes-h">Lanes</h2><span class="meta">Shared by every project on this computer</span></div>
+        <div class="lanes" id="lane-cards"></div>
+      </section>
+      <section class="block" aria-labelledby="eng-h">
+        <div class="block-head"><h2 id="eng-h">Engines</h2><span class="meta">Each has its own limit and only pauses its own work</span></div>
+        <div class="panel" id="engines"></div>
+      </section>
+    </div>
 
-  <h2>Local model</h2>
-  <div class="group" id="localGroup">
-    <label><input type="checkbox" id="localEnabled" /> On</label>
-    <label for="localModel">Model</label>
-    <input type="text" id="localModel" placeholder="e.g. llama3.1" />
-    <label for="localBaseUrl">Address</label>
-    <input type="text" id="localBaseUrl" placeholder="http://127.0.0.1:11434" />
-    <p class="hint" id="localHint" hidden></p>
-    <button type="button" id="saveLocal">Save</button>
-  </div>
+    <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+      <div class="stack">
+        <section class="card group" id="engineGroup" aria-labelledby="who-h">
+          <div class="head2">
+            <h2 id="who-h">Who does what</h2>
+            <span class="sub">Every engine choice on this computer, in one place. Anything set to Default follows the Default line; a lane on Default follows Building.</span>
+          </div>
+          <div class="cols">
+            <div class="col">
+              <h3>Kinds of work</h3>
+              <div id="engineRoles" class="col"></div>
+            </div>
+            <div class="col">
+              <h3>Lanes</h3>
+              <div id="engineLanes" class="col"></div>
+            </div>
+          </div>
+          <p class="hint" id="engineHint" hidden></p>
+          <button type="button" class="btn save" id="saveEngine">Save</button>
+        </section>
 
-  <h2>Engines</h2>
-  <div class="group" id="engineGroup">
-    <label for="engineDefault">Default engine</label>
-    <select id="engineDefault">
-      <option value="claude">claude</option>
-      <option value="cursor">cursor</option>
-      <option value="pi">pi</option>
-      <option value="local">local</option>
-    </select>
-    <div id="engineRoles"></div>
-    <p class="hint">Per-lane engine (lane 1 first)</p>
-    <div id="engineLanes"></div>
-    <p class="hint" id="engineHint" hidden></p>
-    <button type="button" id="saveEngine">Save</button>
-  </div>
+        <div class="cards">
+          <section class="card">
+            <h2>Work</h2>
+            <div class="field group" id="pollGroup">
+              <label for="pollIntervalSec">Check for work every (2&ndash;3600 seconds)</label>
+              <input type="number" id="pollIntervalSec" min="2" max="3600" />
+              <p class="hint" id="pollHint" hidden></p>
+              <button type="button" class="btn save" id="savePoll">Save</button>
+            </div>
+            <div class="field group" id="tagsGroup">
+              <label for="tags">Tags</label>
+              <textarea id="tags" rows="3" placeholder="one tag per line"></textarea>
+              <p class="hint" id="tagsHint" hidden></p>
+              <button type="button" class="btn save" id="saveTags">Save tags</button>
+            </div>
+            <span class="hint" id="lanesNote"></span>
+          </section>
+          <section class="card group" id="localGroup">
+            <h2>Local model</h2>
+            <div class="check"><input id="localEnabled" type="checkbox" /><label for="localEnabled">Use a local model</label></div>
+            <div class="field"><label for="localModel">Model</label><input id="localModel" type="text" placeholder="qwen3-coder" /></div>
+            <div class="field"><label for="localBaseUrl">Address</label><input id="localBaseUrl" type="text" placeholder="http://127.0.0.1:11434" /></div>
+            <p class="hint" id="localHint" hidden></p>
+            <button type="button" class="btn save" id="saveLocal">Save</button>
+          </section>
+          <section class="card group" id="cursorGroup">
+            <h2>Cursor's models</h2>
+            <div class="field"><label for="cursorTop">Planning and review</label><input id="cursorTop" type="text" placeholder="auto" /></div>
+            <div class="field"><label for="cursorImplementer">Building</label><input id="cursorImplementer" type="text" placeholder="auto" /></div>
+            <div class="field"><label for="cursorScout">Scouts and small jobs</label><input id="cursorScout" type="text" placeholder="auto" /></div>
+            <p class="hint" id="cursorHint" hidden></p>
+            <button type="button" class="btn save" id="saveCursor">Save</button>
+          </section>
+          <section class="card">
+            <div class="head2 inline"><h2>This page</h2><span class="chip warn">Changes need a restart</span></div>
+            <div class="field group" id="portGroup">
+              <label for="port">Port (1024&ndash;65535)</label>
+              <input type="number" id="port" min="1024" max="65535" />
+              <p class="hint" id="portHint" hidden></p>
+              <button type="button" class="btn save" id="savePort">Save port</button>
+            </div>
+            <div class="field group" id="networkGroup">
+              <div class="check"><input id="networkEnabled" type="checkbox" /><label for="networkEnabled">Open from other devices on my network</label></div>
+              <label for="networkPassword">Password</label>
+              <input type="password" id="networkPassword" autocomplete="new-password" />
+              <span class="hint" id="networkPasswordHint"></span>
+              <p class="hint" id="networkHint" hidden></p>
+              <button type="button" class="btn save" id="saveNetwork">Save</button>
+            </div>
+          </section>
+          <section class="card">
+            <h2>Who this computer works as</h2>
+            <p id="profile" class="sub">Checking&hellip;</p>
+            <h3>Link to retaskable.com</h3>
+            <ul id="linkList" class="sub"></ul>
+          </section>
+        </div>
 
-  <h2>Cursor's models</h2>
-  <div class="group" id="cursorGroup">
-    <label for="cursorTop">Planning and review</label>
-    <input type="text" id="cursorTop" placeholder="auto" />
-    <label for="cursorImplementer">Building</label>
-    <input type="text" id="cursorImplementer" placeholder="auto" />
-    <label for="cursorScout">Scouts and small jobs</label>
-    <input type="text" id="cursorScout" placeholder="auto" />
-    <p class="hint" id="cursorHint" hidden></p>
-    <button type="button" id="saveCursor">Save</button>
-  </div>
-
-  <h2>Network access</h2>
-  <div class="group" id="networkGroup">
-    <label><input type="checkbox" id="networkEnabled" /> On (lets another computer on the local network reach this page)</label>
-    <label for="networkPassword">Password (leave blank to keep the current one)</label>
-    <input type="password" id="networkPassword" autocomplete="new-password" />
-    <p class="hint" id="networkPasswordHint"></p>
-    <p class="hint" id="networkHint" hidden></p>
-    <button type="button" id="saveNetwork">Save</button>
-  </div>
+        <div class="bar">
+          <span>Only this computer changes these. The daily budget, sessions at once and models are on retaskable.com.</span>
+        </div>
+      </div>
+    </div>
+  </main>
 </div>
-
-<p id="status"></p>
 
 <script nonce="{{NONCE}}">
 (function () {
   "use strict";
-  var statusEl = document.getElementById("status");
+  var $ = function (id) { return document.getElementById(id); };
   var csrfToken = null;
+  var signedIn = false;
+  var tab = "now";
+  var last = null;
+  var laneCount = 0;
 
   function setStatus(message, isError) {
-    statusEl.textContent = message || "";
-    statusEl.className = isError ? "error" : "";
+    $("status").textContent = message || "";
+    $("status").className = isError ? "error" : "";
   }
 
   function api(path, options) {
@@ -143,52 +315,68 @@
     options.headers = options.headers || {};
     if (csrfToken) options.headers["X-CSRF-Token"] = csrfToken;
     return fetch(path, options).then(function (res) {
-      return res.json().then(function (body) {
-        if (!res.ok) throw new Error(body.error || res.statusText);
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (!res.ok) {
+          var err = new Error(body.error || res.statusText);
+          err.status = res.status;
+          throw err;
+        }
         return body;
       });
     });
   }
 
-  // agent-settings.md section 3.1: a role's own override, or a lane's own override.
-  var ENGINE_OPTIONS = ["claude", "cursor", "pi", "local"];
-  var LANE_ENGINE_OPTIONS = ["claude", "cursor"];
-  var ROLE_FIELDS = [
-    { key: "planner", label: "Planning" },
-    { key: "implementer", label: "Implementing" },
-    { key: "review", label: "Review" },
-    { key: "drafter", label: "Drafting" },
-    { key: "chat", label: "Chat" },
-    { key: "writer", label: "Writing" },
+  // h(tag, class, ...children): a small element builder; text goes in as text, never as markup.
+  function h(tag, cls) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    for (var i = 2; i < arguments.length; i++) {
+      var k = arguments[i];
+      if (k !== null && k !== undefined && k !== false) e.append(k);
+    }
+    return e;
+  }
+
+  // ---- Settings tab (agent-settings.md section 3.1: a role's own override, or a lane's own) ----
+  var PICKS = [["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"], ["pi", "pi"], ["local", "Local model"]];
+  var LANE_PICKS = [["default", "Default"], ["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"]];
+  var GROUPS = [
+    ["planner", "Planning", "Turns specs into the board"],
+    ["implementer", "Building", "Lanes on Default use this"],
+    ["review", "Review", "Reviews and scouts"],
+    ["drafter", "Drafting specs", "Spec drafts on the site"],
+    ["chat", "Chat", "The assistant and triage"],
+    ["writer", "Writing", "Release notes and the like"],
   ];
 
-  function engineSelectHtml(id, label, options, selected) {
-    var opts = options
-      .map(function (opt) {
-        return '<option value="' + opt + '"' + (opt === selected ? " selected" : "") + ">" + opt + "</option>";
-      })
-      .join("");
-    return '<label for="' + id + '">' + label + "</label>" + '<select id="' + id + '">' + opts + "</select>";
+  function choice(id, title, hint, picks, value, laneHint) {
+    var select = h("select");
+    select.id = id;
+    picks.forEach(function (p) {
+      var o = document.createElement("option");
+      o.value = p[0];
+      o.textContent = p[1];
+      select.append(o);
+    });
+    select.value = value;
+    var text = h("span", "hint", hint);
+    if (laneHint) text.setAttribute("data-lane-hint", laneHint);
+    return h("div", "choice", h("label", "", h("span", "", title), text), select);
   }
 
-  function renderEngineRoles(roles) {
-    document.getElementById("engineRoles").innerHTML = ROLE_FIELDS.map(function (f) {
-      return engineSelectHtml("role_" + f.key, f.label, ["default"].concat(ENGINE_OPTIONS), roles[f.key] || "default");
-    }).join("");
-  }
-
-  function renderEngineLanes(laneCount, laneOverrides) {
-    var count = Math.max(laneCount, laneOverrides.length);
-    var html = "";
-    for (var i = 0; i < count; i++) {
-      html += engineSelectHtml(
-        "lane_" + i,
-        "Lane " + (i + 1),
-        ["default"].concat(LANE_ENGINE_OPTIONS),
-        laneOverrides[i] || "default"
-      );
+  function renderEngines(choiceCfg, lanes) {
+    var roles = $("engineRoles");
+    roles.replaceChildren(choice("engineDefault", "Default", "Anything set to Default", PICKS, choiceCfg.default || "claude"));
+    GROUPS.forEach(function (g) {
+      roles.append(choice("role_" + g[0], g[1], g[2], [["default", "Default"]].concat(PICKS), choiceCfg.roles[g[0]] || "default"));
+    });
+    var overrides = choiceCfg.lanes || [];
+    laneCount = Math.max(lanes, overrides.length);
+    $("engineLanes").replaceChildren();
+    for (var i = 0; i < laneCount; i++) {
+      $("engineLanes").append(choice("lane_" + i, "Lane " + (i + 1), "", LANE_PICKS, overrides[i] || "default", String(i + 1)));
     }
-    document.getElementById("engineLanes").innerHTML = html;
+    paintLaneHints();
   }
 
   // agent-settings.md section 3.2: a setting a variable sets is greyed out, with why.
@@ -205,8 +393,8 @@
   function applyEnvGating(envVars) {
     ENV_GROUPS.forEach(function (g) {
       var setBy = g.vars.filter(function (v) { return envVars[v]; });
-      var group = document.getElementById(g.groupId);
-      var hint = document.getElementById(g.hintId);
+      var group = $(g.groupId);
+      var hint = $(g.hintId);
       var isSet = setBy.length > 0;
       group.setAttribute("data-env-set", isSet ? "true" : "false");
       group.querySelectorAll("input, select, textarea, button").forEach(function (el) {
@@ -222,23 +410,24 @@
   }
 
   function renderSettings(s) {
-    document.getElementById("restartWaiting").hidden = !s.restartWaiting;
-    document.getElementById("tags").value = s.tags.effective.join("\n");
-    document.getElementById("port").value = s.port;
-    document.getElementById("pollIntervalSec").value = s.pollIntervalSec;
-    document.getElementById("localEnabled").checked = s.local.enabled;
-    document.getElementById("localModel").value = s.local.model;
-    document.getElementById("localBaseUrl").value = s.local.baseUrl;
-    document.getElementById("engineDefault").value = s.engineChoice.default || "claude";
-    renderEngineRoles(s.engineChoice.roles);
-    renderEngineLanes(s.lanes, s.engineChoice.lanes);
-    document.getElementById("cursorTop").value = s.cursorModels.top || "";
-    document.getElementById("cursorImplementer").value = s.cursorModels.implementer || "";
-    document.getElementById("cursorScout").value = s.cursorModels.scout || "";
-    document.getElementById("networkEnabled").checked = s.network.enabled;
-    document.getElementById("networkPassword").value = "";
-    document.getElementById("networkPasswordHint").textContent = s.network.hasPassword
-      ? "A password is already set."
+    $("restartWaiting").hidden = !s.restartWaiting;
+    $("restart").className = s.restartWaiting ? "btn primary" : "btn";
+    $("restart").textContent = s.restartWaiting ? "Restart now" : "Restart";
+    $("tags").value = s.tags.effective.join("\n");
+    $("port").value = s.port;
+    $("pollIntervalSec").value = s.pollIntervalSec;
+    $("lanesNote").textContent = s.lanes + (s.lanes === 1 ? " lane" : " lanes") + " (set on retaskable.com or in config.json).";
+    $("localEnabled").checked = s.local.enabled;
+    $("localModel").value = s.local.model;
+    $("localBaseUrl").value = s.local.baseUrl;
+    renderEngines(s.engineChoice, s.lanes);
+    $("cursorTop").value = s.cursorModels.top || "";
+    $("cursorImplementer").value = s.cursorModels.implementer || "";
+    $("cursorScout").value = s.cursorModels.scout || "";
+    $("networkEnabled").checked = s.network.enabled;
+    $("networkPassword").value = "";
+    $("networkPasswordHint").textContent = s.network.hasPassword
+      ? "A password is already set. Empty keeps it."
       : "No password is set yet; one is needed to turn network access on.";
     applyEnvGating(s.envVars);
   }
@@ -248,29 +437,178 @@
   }
 
   function renderProfile(p) {
-    var el = document.getElementById("profile");
     if (p.signedIn) {
-      el.textContent = "Signed in as " + (p.name ? p.name + " (" + p.login + ")" : p.login) + ".";
+      $("profile").textContent = "Signed in as " + (p.name ? p.name + " (" + p.login + ")" : p.login) + ".";
     } else {
-      el.textContent = p.error || "Not signed in.";
+      $("profile").textContent = p.error || "Not signed in.";
     }
   }
 
   function renderLink(l) {
-    document.getElementById("linkList").innerHTML = l.environments
-      .map(function (e) {
-        return "<li>" + e.name + ": " + (e.connected ? "Connected" : "Not linked") + "</li>";
-      })
-      .join("");
+    $("linkList").replaceChildren.apply(
+      $("linkList"),
+      l.environments.map(function (e) { return h("li", "", e.name + ": " + (e.connected ? "Connected" : "Not linked")); })
+    );
   }
 
   function loadExtras() {
     return Promise.all([api("/api/profile").then(renderProfile), api("/api/link").then(renderLink)]);
   }
 
+  // ---- Now tab (agent-settings.md section 4.5) ----
+  function clock(when) { return new Date(when).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+  function upFor(sec) {
+    var m = Math.floor(sec / 60), hr = Math.floor(m / 60);
+    return hr ? hr + "h " + (m % 60) + "m" : Math.max(1, m) + "m";
+  }
+  function tokens(n) {
+    return n >= 1e6 ? (n / 1e6).toFixed(1) + "M tokens" : n >= 1e3 ? Math.round(n / 1e3) + "k tokens" : n + " tokens";
+  }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  var ENGINE_WORD = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", pi: "pi", local: "Local model" };
+
+  function renderHeader(st) {
+    var hd = st.header;
+    $("name").textContent = hd.name;
+    $("state").className = "chip big " + (hd.state === "running" ? "ok" : "warn");
+    $("state-text").textContent = hd.stateText;
+    $("meta").replaceChildren(
+      "Retaskable ",
+      h("span", "mono", hd.version),
+      " · up " + upFor(hd.uptimeSec) + " · " + plural(hd.projects, "project", "projects") + " · " + hd.lanesBusy + " of " + plural(hd.lanesTotal, "lane", "lanes") + " busy"
+    );
+    document.title = hd.name + " · This computer";
+  }
+
+  function renderAlerts(st) {
+    $("att-h").textContent = st.alerts.length ? "Needs attention · " + st.alerts.length : "Needs attention";
+    if (!st.alerts.length) return $("alerts").replaceChildren(h("p", "calm", "Nothing needs attention."));
+    $("alerts").replaceChildren.apply(
+      $("alerts"),
+      st.alerts.map(function (a) {
+        return h("div", "alert " + a.tone, h("span", "pip"), h("div", "words", h("b", "", a.title), h("span", "", a.detail)));
+      })
+    );
+  }
+
+  function renderLanes(st) {
+    if (!st.lanes.length) return $("lane-cards").replaceChildren(h("p", "calm", "No lanes yet: Setup has not run."));
+    $("lane-cards").replaceChildren.apply(
+      $("lane-cards"),
+      st.lanes.map(function (l) {
+        var chip = h("span", "chip " + l.engine, l.own ? ENGINE_WORD[l.engine] : "Default · " + ENGINE_WORD[l.engine]);
+        var what = h("div", "what", h("span", "state " + l.state, l.stateText), h("span", "item none", "Nothing yet"));
+        return h("article", "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what, h("span", "note", l.note));
+      })
+    );
+  }
+
+  function engineLimit(e) {
+    var meter = h("div", "meter hatch");
+    meter.setAttribute("role", "img");
+    meter.setAttribute("aria-label", e.name + " does not report how much is left");
+    var fill = h("div", "");
+    fill.style.width = "0%";
+    meter.append(fill);
+    return h("div", "limit",
+      h("div", "line", h("span", "meta", "Limit"), h("span", "mono", "Not reported")),
+      meter,
+      h("div", "line under", h("span", "", "Pauses only when it says so")));
+  }
+
+  function renderEngineRows(st) {
+    var live = st.engines.filter(function (e) { return e.inUse; });
+    var idle = st.engines.filter(function (e) { return !e.inUse; });
+    var rows = live.map(function (e) {
+      var tone = e.state === "ok" ? "ok" : e.state === "off" ? "" : "bad";
+      var today = e.todayTokens !== undefined
+        ? [h("span", "mono", "Not reported"), h("span", "mono small", tokens(e.todayTokens))]
+        : [h("span", "mono", "Not reported")];
+      return h("div", "engine",
+        h("div", "id",
+          h("div", "top-line", h("span", "nm", e.name), h("span", "chip " + tone, e.stateText)),
+          e.version ? h("span", "mono ver", e.version) : null,
+          h("span", "used", e.usedFor.length ? "Used for: " + e.usedFor.join(", ") : "Used for: nothing set"),
+          h("span", "extra", "Nothing running on it")),
+        e.id === "local"
+          ? h("div", "limit", h("div", "line", h("span", "meta", "Limit"), h("span", "mono", "None")), h("div", "line under", "Runs on this computer"))
+          : engineLimit(e),
+        h("div", "today", h("span", "lbl", "Today"), today[0], today[1] || null));
+    });
+    var box = $("engines");
+    box.replaceChildren.apply(box, rows);
+    if (idle.length) {
+      var idleLine = h("div", "idle-engines", h("b", "", "Not in use"));
+      idle.forEach(function (e) {
+        var why = e.id === "local" ? "off" : e.found === false ? "not installed" : e.found === null ? "not checked yet" : "installed, no work set to it";
+        idleLine.append(h("span", "", e.name + " — " + why));
+      });
+      box.append(idleLine);
+    }
+  }
+
+  function paintLaneHints() {
+    document.querySelectorAll("[data-lane-hint]").forEach(function (el) {
+      var l = last && last.lanes.filter(function (x) { return String(x.k) === el.getAttribute("data-lane-hint"); })[0];
+      el.textContent = l ? (l.state === "off" ? "Off" : l.note === "Nothing on it" ? "Free" : l.note) : "";
+    });
+  }
+
+  function render(st) {
+    last = st;
+    renderHeader(st);
+    renderAlerts(st);
+    renderLanes(st);
+    renderEngineRows(st);
+    paintLaneHints();
+  }
+
+  // ---- Tabs, polling and sign-in ----
+  function setTab(name, focus) {
+    tab = name;
+    ["now", "settings"].forEach(function (t) {
+      $("tab-" + t).setAttribute("aria-selected", String(t === name));
+      $("tab-" + t).tabIndex = t === name ? 0 : -1;
+      $("panel-" + t).hidden = t !== name;
+    });
+    if (focus) $("tab-" + name).focus();
+    history.replaceState(null, "", window.location.pathname + window.location.search + "#" + name);
+    if (name === "now") poll();
+  }
+  $("tab-now").addEventListener("click", function () { setTab("now"); });
+  $("tab-settings").addEventListener("click", function () { setTab("settings"); });
+  document.querySelector(".tabs").addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") setTab(tab === "now" ? "settings" : "now", true);
+  });
+
+  function showSignedOut() {
+    signedIn = false;
+    csrfToken = null;
+    $("app").hidden = true;
+    $("signedOut").hidden = false;
+  }
+
+  function poll() {
+    if (!signedIn || tab !== "now" || document.hidden) return;
+    api("/api/settings/status")
+      .then(function (st) {
+        $("stale").hidden = true;
+        render(st);
+      })
+      .catch(function (e) {
+        if (e.status === 401) return showSignedOut();
+        $("stale").hidden = false;
+      });
+  }
+  document.addEventListener("visibilitychange", poll);
+
   function showApp() {
-    document.getElementById("signedOut").hidden = true;
-    document.getElementById("app").hidden = false;
+    $("signedOut").hidden = true;
+    $("app").hidden = false;
+    if (!signedIn) {
+      signedIn = true;
+      setInterval(poll, 5000);
+    }
   }
 
   function signInWith(body) {
@@ -281,29 +619,26 @@
     }).then(function (resBody) {
       csrfToken = resBody.csrfToken;
       showApp();
+      poll();
       return Promise.all([loadSettings(), loadExtras()]);
     });
   }
 
-  function signInWithToken() {
-    var hash = window.location.hash.replace(/^#/, "");
-    if (!hash) return;
-    history.replaceState(null, "", window.location.pathname + window.location.search);
-    signInWith({ token: hash }).catch(function (e) {
-      setStatus("Couldn't sign in: " + e.message, true);
-    });
+  function signInFailed(e) {
+    showSignedOut();
+    setStatus("Couldn't sign in: " + e.message, true);
   }
 
-  document.getElementById("signIn").addEventListener("click", function () {
-    var password = document.getElementById("password").value;
+  function signIn() {
+    var password = $("password").value;
     if (!password) return;
     setStatus("Signing in…");
     signInWith({ password: password })
       .then(function () { setStatus(""); })
-      .catch(function (e) {
-        setStatus("Couldn't sign in: " + e.message, true);
-      });
-  });
+      .catch(signInFailed);
+  }
+  $("signIn").addEventListener("click", signIn);
+  $("password").addEventListener("keydown", function (e) { if (e.key === "Enter") signIn(); });
 
   function save(body, savedMessage) {
     setStatus("Saving…");
@@ -324,75 +659,49 @@
   // agent-settings.md section 4.1: the port and network access say this, specifically.
   var RESTART_MESSAGE = "Saved. The port and network access change once Retaskable restarts.";
 
-  document.getElementById("saveTags").addEventListener("click", function () {
-    var typed = document
-      .getElementById("tags")
-      .value.split("\n")
-      .map(function (s) { return s.trim(); })
-      .filter(Boolean);
-    save({ tags: typed });
+  $("saveTags").addEventListener("click", function () {
+    save({ tags: $("tags").value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean) });
   });
-
-  document.getElementById("savePort").addEventListener("click", function () {
-    save({ port: Number(document.getElementById("port").value) }, RESTART_MESSAGE);
+  $("savePort").addEventListener("click", function () {
+    save({ port: Number($("port").value) }, RESTART_MESSAGE);
   });
-
-  document.getElementById("savePoll").addEventListener("click", function () {
-    save({ pollIntervalSec: Number(document.getElementById("pollIntervalSec").value) });
+  $("savePoll").addEventListener("click", function () {
+    save({ pollIntervalSec: Number($("pollIntervalSec").value) });
   });
-
-  document.getElementById("saveLocal").addEventListener("click", function () {
-    save({
-      local: {
-        enabled: document.getElementById("localEnabled").checked,
-        model: document.getElementById("localModel").value,
-        baseUrl: document.getElementById("localBaseUrl").value,
-      },
-    });
+  $("saveLocal").addEventListener("click", function () {
+    save({ local: { enabled: $("localEnabled").checked, model: $("localModel").value, baseUrl: $("localBaseUrl").value } });
   });
-
-  document.getElementById("saveEngine").addEventListener("click", function () {
+  $("saveEngine").addEventListener("click", function () {
     var roles = {};
-    ROLE_FIELDS.forEach(function (f) {
-      roles[f.key] = document.getElementById("role_" + f.key).value;
-    });
-    var lanes = Array.prototype.map.call(document.querySelectorAll("#engineLanes select"), function (el) {
-      return el.value;
-    });
-    save({
-      engineChoice: {
-        default: document.getElementById("engineDefault").value,
-        roles: roles,
-        lanes: lanes,
-      },
-    });
+    GROUPS.forEach(function (g) { roles[g[0]] = $("role_" + g[0]).value; });
+    var lanes = Array.prototype.map.call(document.querySelectorAll("#engineLanes select"), function (el) { return el.value; });
+    save({ engineChoice: { default: $("engineDefault").value, roles: roles, lanes: lanes } });
   });
-
-  document.getElementById("saveCursor").addEventListener("click", function () {
-    save({
-      cursorModels: {
-        top: document.getElementById("cursorTop").value,
-        implementer: document.getElementById("cursorImplementer").value,
-        scout: document.getElementById("cursorScout").value,
-      },
-    });
+  $("saveCursor").addEventListener("click", function () {
+    save({ cursorModels: { top: $("cursorTop").value, implementer: $("cursorImplementer").value, scout: $("cursorScout").value } });
   });
-
-  document.getElementById("saveNetwork").addEventListener("click", function () {
-    var password = document.getElementById("networkPassword").value;
-    var update = { enabled: document.getElementById("networkEnabled").checked };
+  $("saveNetwork").addEventListener("click", function () {
+    var password = $("networkPassword").value;
+    var update = { enabled: $("networkEnabled").checked };
     if (password) update.password = password;
     save({ network: update }, RESTART_MESSAGE);
   });
-
-  document.getElementById("restart").addEventListener("click", function () {
+  $("restart").addEventListener("click", function () {
     setStatus("Restarting…");
     api("/api/settings/restart", { method: "POST" }).catch(function (e) {
       setStatus("Couldn't restart: " + e.message, true);
     });
   });
 
-  signInWithToken();
+  // The address's # is the tab ("#now", "#settings") or, from the tray's link, a one-time sign-in token.
+  var hash = window.location.hash.replace(/^#/, "");
+  if (hash === "settings") setTab("settings");
+  if (hash && hash !== "now" && hash !== "settings") {
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    signInWith({ token: hash }).catch(signInFailed);
+  } else {
+    $("signedOut").hidden = false;
+  }
 })();
 </script>
 </body>

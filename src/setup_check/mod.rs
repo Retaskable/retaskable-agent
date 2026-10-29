@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::engines::resolve_claude_on_path;
+use crate::engines::{resolve_claude_on_path, resolve_codex_on_path, resolve_pi_on_path};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -69,6 +69,10 @@ pub struct SetupChecks {
     pub claude: SetupCheck,
     pub claude_signed_in: SetupCheck,
     pub cursor: SetupCheck,
+    /// `pi --version`, present only when the binary ran; never counted by `setup_checks_pass`.
+    pub pi: Option<SetupCheck>,
+    /// `codex --version`, same rules as `pi`.
+    pub codex: Option<SetupCheck>,
 }
 
 struct RunOutput {
@@ -250,6 +254,16 @@ fn cursor_check(installed: bool, status: Option<&RunOutput>) -> SetupCheck {
     }
 }
 
+/// `optionalEngineCheck`: a pass naming the first line of `--version`, only when the binary ran.
+fn optional_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck> {
+    let r = r?;
+    if r.code != Some(0) {
+        return None;
+    }
+    let line = first_line(&r.stdout);
+    Some(SetupCheck::pass(if line.is_empty() { name.to_string() } else { line }))
+}
+
 /// `runSetupChecks()`: runs every probe, never through a shell, the git/`gh`/engine probes
 /// concurrently the same way the TypeScript agent does so a missing binary's 20s timeout doesn't
 /// stack with the others.
@@ -258,12 +272,17 @@ pub async fn run_setup_checks(env: impl Fn(&str) -> Option<String>) -> SetupChec
     let cursor_bin = resolve_cursor_on_path(&env);
     let api_key = env("ANTHROPIC_API_KEY").is_some();
 
-    let (git, gh_version, gh_auth, claude_version, cursor_version) = tokio::join!(
+    let pi_bin = resolve_pi_on_path(&env);
+    let codex_bin = resolve_codex_on_path(&env);
+
+    let (git, gh_version, gh_auth, claude_version, cursor_version, pi_version, codex_version) = tokio::join!(
         run("git", &["--version"]),
         run("gh", &["--version"]),
         run("gh", &["auth", "status"]),
         run_opt(claude_bin.as_deref(), &["--version"]),
         run(&cursor_bin, &["--version"]),
+        run(&pi_bin, &["--version"]),
+        run(&codex_bin, &["--version"]),
     );
     let git = git_check(git.as_ref());
     let claude = claude_check(claude_version.as_ref());
@@ -294,6 +313,8 @@ pub async fn run_setup_checks(env: impl Fn(&str) -> Option<String>) -> SetupChec
         claude,
         claude_signed_in: claude_signed_in_check(claude_ok, claude_auth.as_ref(), api_key),
         cursor: cursor_check(cursor_installed, cursor_status.as_ref()),
+        pi: optional_engine_check("pi", pi_version.as_ref()),
+        codex: optional_engine_check("Codex", codex_version.as_ref()),
     }
 }
 

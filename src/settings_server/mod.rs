@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
@@ -26,6 +26,9 @@ use crate::password;
 use crate::profile;
 use crate::store::MachineStore;
 use crate::tags;
+
+mod status;
+pub use status::StatusSource;
 
 const COOKIE_NAME: &str = "retaskable_settings_session";
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
@@ -99,6 +102,8 @@ pub struct SettingsServer {
     /// state", local only).
     keychain: Arc<dyn TokenStore>,
     state: Mutex<InnerState>,
+    /// The Now tab's live inputs (`status.rs`), given once at start.
+    status: OnceLock<StatusSource>,
 }
 
 impl SettingsServer {
@@ -125,6 +130,7 @@ impl SettingsServer {
             exit: Box::new(exit),
             keychain,
             state: Mutex::new(InnerState::default()),
+            status: OnceLock::new(),
         }
     }
 
@@ -642,6 +648,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/settings", get(get_settings_page))
         .route("/api/settings/session", post(post_session))
         .route("/api/settings", get(get_settings).post(post_settings))
+        .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
         .route("/api/profile", get(get_profile))
