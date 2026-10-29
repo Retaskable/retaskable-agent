@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::TimeZone;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::*;
 use crate::backlog::ItemStatus;
+use crate::engines::SessionStart;
+use crate::engines::engine::test_result as result;
 
 use crate::release_notes::test_support::{charts_item_and_pr, grouped, item, pr, range};
 
@@ -26,22 +28,6 @@ fn writer(model: &str) -> Writer<'static> {
         engine: None,
         cursor: None,
         sandbox: false,
-    }
-}
-
-fn result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
-    SessionResult {
-        ok,
-        subtype: subtype.to_string(),
-        structured,
-        error: error.map(str::to_string),
-        cost_usd: Some(0.12),
-        session_id: "s".to_string(),
-        limit_hit: false,
-        signed_out: false,
-        context_tokens: None,
-        usage: None,
-        tokens: None,
     }
 }
 
