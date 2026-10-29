@@ -26,6 +26,25 @@ async fn fake_store(handler: axum::routing::MethodRouter) -> String {
     format!("http://{addr}")
 }
 
+fn test_agent() -> ClaimNextAgent {
+    ClaimNextAgent {
+        machine: "box-1".to_string(),
+        environment: "Production".to_string(),
+        base_branch: "main".to_string(),
+    }
+}
+
+/// A `reopen` request with no `by`, `what` or `steps`, for tests that don't care about them.
+fn reopen_request() -> ReopenRequest<'static> {
+    ReopenRequest {
+        item_id: "a",
+        notes: "The chart didn't load.",
+        by: None,
+        what: None,
+        steps: None,
+    }
+}
+
 #[tokio::test]
 async fn list_reads_the_items_the_store_answers() {
     let base = fake_store(post(|| async {
@@ -112,11 +131,7 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
     }))
     .await;
 
-    let agent = ClaimNextAgent {
-        machine: "box-1".to_string(),
-        environment: "Production".to_string(),
-        base_branch: "main".to_string(),
-    };
+    let agent = test_agent();
     let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
     match answer {
         ClaimNextAnswer::Item { item, token } => {
@@ -131,11 +146,7 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
 async fn claim_next_reads_a_null_value_as_nothing_not_a_bad_answer() {
     let base = fake_store(post(|| async { Json(json!({ "value": null })) })).await;
 
-    let agent = ClaimNextAgent {
-        machine: "box-1".to_string(),
-        environment: "Production".to_string(),
-        base_branch: "main".to_string(),
-    };
+    let agent = test_agent();
     let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
     assert_eq!(answer, ClaimNextAnswer::Nothing);
 }
@@ -250,17 +261,12 @@ async fn reopen_sends_the_notes_and_agent_then_reads_back_the_claimed_item() {
     }))
     .await;
 
-    let agent = ClaimNextAgent {
-        machine: "box-1".to_string(),
-        environment: "Production".to_string(),
-        base_branch: "main".to_string(),
-    };
+    let agent = test_agent();
     let req = ReopenRequest {
-        item_id: "a",
-        notes: "The chart didn't load.",
         by: Some("jcn"),
         what: Some("Open the charts page"),
         steps: Some(&["Open it".to_string()]),
+        ..reopen_request()
     };
     let answer = Client::new(base).reopen(1, Some("tok"), &req, &agent).await.unwrap();
     match answer {
@@ -283,18 +289,8 @@ async fn reopen_leaves_out_by_what_and_steps_when_there_are_none() {
     }))
     .await;
 
-    let agent = ClaimNextAgent {
-        machine: "box-1".to_string(),
-        environment: "Production".to_string(),
-        base_branch: "main".to_string(),
-    };
-    let req = ReopenRequest {
-        item_id: "a",
-        notes: "The chart didn't load.",
-        by: None,
-        what: None,
-        steps: None,
-    };
+    let agent = test_agent();
+    let req = reopen_request();
     Client::new(base).reopen(1, None, &req, &agent).await.unwrap();
 }
 
@@ -302,18 +298,8 @@ async fn reopen_leaves_out_by_what_and_steps_when_there_are_none() {
 async fn reopen_is_kept_when_the_store_declines_it() {
     let base = fake_store(post(|| async { Json(json!({ "value": { "reopened": false } })) })).await;
 
-    let agent = ClaimNextAgent {
-        machine: "box-1".to_string(),
-        environment: "Production".to_string(),
-        base_branch: "main".to_string(),
-    };
-    let req = ReopenRequest {
-        item_id: "a",
-        notes: "The chart didn't load.",
-        by: None,
-        what: None,
-        steps: None,
-    };
+    let agent = test_agent();
+    let req = reopen_request();
     let answer = Client::new(base).reopen(1, Some("tok"), &req, &agent).await.unwrap();
     assert_eq!(answer, ReopenAnswer::Kept);
 }
