@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::ProjectConfig;
+use crate::triage::{KnownBug, TriageContext};
 
 pub(crate) fn item_lifecycle_cfg() -> ProjectConfig {
     ProjectConfig {
@@ -16,6 +17,27 @@ pub(crate) fn item_lifecycle_cfg() -> ProjectConfig {
         max_conflict_rounds: 5,
         max_slices_per_item: 10,
         ..Default::default()
+    }
+}
+
+/// A `TriageContext` fixture shared by the triager's and the second look's tests (`timeline` and
+/// `bug_title` vary between callers; everything else they need identical).
+pub(crate) fn triage_context(timeline: Vec<String>, bug_title: &str) -> TriageContext {
+    TriageContext {
+        reason: "Review escalated: unclear which library to add.".to_string(),
+        failed_in: "reviewing".to_string(),
+        timeline,
+        last_check_result: Some("passed".to_string()),
+        pr_url: Some("https://github.com/x/y/pull/9".to_string()),
+        branch: Some("retaskable/9-thing".to_string()),
+        has_pushed_branch: true,
+        has_session_to_continue: true,
+        automatic_decisions: 1,
+        transcripts_dir: Some(".retaskable/projects/x/runs/9".to_string()),
+        known_bugs: vec![KnownBug {
+            id: "retaskable-bug-abc123".to_string(),
+            title: bug_title.to_string(),
+        }],
     }
 }
 
