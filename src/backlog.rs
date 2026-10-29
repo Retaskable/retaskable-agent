@@ -1,13 +1,15 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
-//! never falls back to a local list."): `list`, `claim_next` and `drafts`, each read over
-//! `POST <store>/v1/repos/<repo id>/ops` (Retaskable.com's docs/specs/backlog.md sections 3.1 and
-//! 6.2, and backlog/06.6-handing-out-work.md for `claim_next`), and `auto_link`, this machine's own
-//! link to the store (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A
-//! repo's numeric GitHub id, and wiring a linked access token in, come from elsewhere (not ported
-//! here yet); every way an operation can fail — no address, no network, a refused or unreadable
-//! answer — comes back as a `BacklogError` and never as a guessed or empty answer, so a caller
-//! can't mistake "couldn't ask" for "nothing to do".
+//! never falls back to a local list."): `list`, `claim_next`, `drafts`, the after-merge try-out
+//! queue (`tryout_add`, `tryout_result`, `tryout_groups`, docs/specs/agent/06.4-playtests.md) and a
+//! named project-wide lock (`chore_lock`), each read over `POST <store>/v1/repos/<repo id>/ops`
+//! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2, and backlog/06.6-handing-out-work.md
+//! for `claim_next`), and `auto_link`, this machine's own link to the store
+//! (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A repo's numeric GitHub
+//! id, and wiring a linked access token in, come from elsewhere (not ported here yet); every way an
+//! operation can fail — no address, no network, a refused or unreadable answer — comes back as a
+//! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
+//! for "nothing to do".
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -142,6 +144,54 @@ pub enum ClaimNextAnswer {
     Nothing,
 }
 
+/// What `tryout_add` sends for a merged slice's after-merge try-out (backlog/06-data-and-operations.md
+/// section 6.2, docs/specs/agent/06.4-playtests.md): keyed `<itemId>@<mergedAt>` in the store, so
+/// sending the same one again changes nothing. The pre-merge `onBranch` variant (keyed by branch and
+/// sha instead of `mergedAt`) isn't sent here yet — nothing in this crate tracks an item's approved
+/// branch and sha to send it with.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TryoutAdd {
+    pub item_id: String,
+    pub merged_at: String,
+    pub title: String,
+    pub what: String,
+    pub steps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    pub machine: String,
+}
+
+/// A person's answer to one try-out, sent with `tryout_result` (backlog/06-data-and-operations.md
+/// section 6.2): once per key, after which the store triggers its own `tryout_problem` or
+/// merge-cleanup follow-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TryoutOutcome {
+    Passed,
+    Problem,
+}
+
+/// What `tryout_groups` sends for one themed session (backlog/06-data-and-operations.md section 6.2,
+/// docs/specs/agent/06.4-playtests.md "Grouped into sessions"): the wire shape of
+/// [`crate::playtest_groups::PlaytestGroup`], kept separate so this module doesn't depend on that
+/// feature's own types.
+#[derive(Debug, Clone, Serialize)]
+pub struct TryoutGroup {
+    pub title: String,
+    pub why: String,
+    pub keys: Vec<String>,
+}
+
+/// `chore_lock`'s answer (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): a
+/// project-wide named lock, used for grouping playtests under `TRYOUT_GROUPS_LOCK` as well as chores.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LockAnswer {
+    pub held: bool,
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
 /// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
 /// stop and wait for the store (agent/02-principles.md).
 #[derive(Debug)]
@@ -259,6 +309,74 @@ impl Client {
                 })
             }
         }
+    }
+
+    /// `tryout_add` (backlog/06-data-and-operations.md section 6.2): adds (or, on a repeat, no-ops) one
+    /// merged slice's after-merge try-out to the shared queue.
+    pub async fn tryout_add(&self, repo_id: u64, token: Option<&str>, add: &TryoutAdd) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "tryout_add", json!(add)).await?;
+        Ok(())
+    }
+
+    /// `tryout_result` (backlog/06-data-and-operations.md section 6.2): records a person's answer to
+    /// the try-out named `key`, once.
+    pub async fn tryout_result(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        key: &str,
+        outcome: TryoutOutcome,
+        notes: Option<&str>,
+    ) -> Result<(), BacklogError> {
+        self.send(
+            repo_id,
+            token,
+            "tryout_result",
+            json!({ "key": key, "result": outcome, "notes": notes }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `tryout_groups` (docs/specs/agent/06.4-playtests.md "Grouped into sessions"): sends the
+    /// planner's grouping of the waiting try-outs, under `signature` (its own, so a stale round
+    /// never overwrites a newer one).
+    pub async fn tryout_groups(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        signature: &str,
+        groups: &[TryoutGroup],
+    ) -> Result<(), BacklogError> {
+        self.send(
+            repo_id,
+            token,
+            "tryout_groups",
+            json!({ "signature": signature, "groups": groups }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `chore_lock` (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): takes or
+    /// drops the project-wide lock named `name`, so only one computer runs the work it guards at a
+    /// time (the playtest planner's own lock name is
+    /// [`crate::playtest_groups::TRYOUT_GROUPS_LOCK`]).
+    pub async fn lock(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        name: &str,
+        take: bool,
+    ) -> Result<LockAnswer, BacklogError> {
+        self.op(
+            repo_id,
+            token,
+            "chore_lock",
+            json!({ "name": name, "take": take }),
+            "lock answer",
+        )
+        .await
     }
 
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
@@ -457,6 +575,134 @@ mod tests {
         };
         let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
         assert_eq!(answer, ClaimNextAnswer::Nothing);
+    }
+
+    #[tokio::test]
+    async fn tryout_add_sends_the_merged_slice_with_its_machine() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["op"], "tryout_add");
+            assert_eq!(req["args"]["itemId"], "a");
+            assert_eq!(req["args"]["mergedAt"], "2026-10-28T00:00:00Z");
+            assert_eq!(req["args"]["title"], "Charts");
+            assert_eq!(req["args"]["prUrl"], "https://github.com/x/y/pull/4");
+            assert_eq!(req["args"]["machine"], "box-1");
+            Json(json!({}))
+        }))
+        .await;
+
+        let add = TryoutAdd {
+            item_id: "a".to_string(),
+            merged_at: "2026-10-28T00:00:00Z".to_string(),
+            title: "Charts".to_string(),
+            what: "Open the charts page".to_string(),
+            steps: vec!["Open it".to_string()],
+            pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+            machine: "box-1".to_string(),
+        };
+        Client::new(base).tryout_add(1, Some("tok"), &add).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tryout_add_leaves_out_pr_url_when_there_is_none() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert!(req["args"].as_object().unwrap().get("prUrl").is_none());
+            Json(json!({}))
+        }))
+        .await;
+
+        let add = TryoutAdd {
+            item_id: "a".to_string(),
+            merged_at: "2026-10-28T00:00:00Z".to_string(),
+            title: "Charts".to_string(),
+            what: "Open the charts page".to_string(),
+            steps: vec![],
+            pr_url: None,
+            machine: "box-1".to_string(),
+        };
+        Client::new(base).tryout_add(1, None, &add).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tryout_result_sends_the_key_outcome_and_notes() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["op"], "tryout_result");
+            assert_eq!(req["args"]["key"], "a@2026-10-28T00:00:00Z");
+            assert_eq!(req["args"]["result"], "problem");
+            assert_eq!(req["args"]["notes"], "The chart didn't load.");
+            Json(json!({}))
+        }))
+        .await;
+
+        Client::new(base)
+            .tryout_result(
+                1,
+                Some("tok"),
+                "a@2026-10-28T00:00:00Z",
+                TryoutOutcome::Problem,
+                Some("The chart didn't load."),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tryout_groups_sends_its_signature_and_groups() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["op"], "tryout_groups");
+            assert_eq!(req["args"]["signature"], "sig-1");
+            assert_eq!(req["args"]["groups"][0]["title"], "Build");
+            assert_eq!(req["args"]["groups"][0]["keys"][0], "a");
+            Json(json!({}))
+        }))
+        .await;
+
+        let groups = vec![TryoutGroup {
+            title: "Build".to_string(),
+            why: "Same place".to_string(),
+            keys: vec!["a".to_string()],
+        }];
+        Client::new(base)
+            .tryout_groups(1, Some("tok"), "sig-1", &groups)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn lock_sends_the_name_and_take_and_reads_who_holds_it() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["op"], "chore_lock");
+            assert_eq!(req["args"]["name"], "tryout-groups");
+            assert_eq!(req["args"]["take"], true);
+            Json(json!({ "value": { "held": true, "by": "box-1" } }))
+        }))
+        .await;
+
+        let answer = Client::new(base)
+            .lock(1, Some("tok"), "tryout-groups", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            answer,
+            LockAnswer {
+                held: true,
+                by: Some("box-1".to_string())
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_dropping_sends_take_false_and_reads_a_lock_held_by_no_one() {
+        let base = fake_store(post(|Json(req): Json<Value>| async move {
+            assert_eq!(req["args"]["take"], false);
+            Json(json!({ "value": { "held": false } }))
+        }))
+        .await;
+
+        let answer = Client::new(base)
+            .lock(1, Some("tok"), "tryout-groups", false)
+            .await
+            .unwrap();
+        assert_eq!(answer, LockAnswer { held: false, by: None });
     }
 
     #[tokio::test]

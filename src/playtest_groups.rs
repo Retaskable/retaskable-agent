@@ -3,12 +3,12 @@
 //! waiting, a small read-only Sonnet **planner** session sorts them into themed groups of about
 //! 3 to 6, by where in the project they happen, ordered to flow in one sitting.
 //!
-//! Not wired to anything yet: nothing in this crate tracks the shared after-merge playtest queue
-//! (`tryout_add`/`tryout_result`, team-state-on-server.md section 3.2) or holds the store's
-//! `tryout-groups` lock, so there is no live queue to call [`plan`] with and no `tryout_groups`
-//! send once it answers — both wait on the shared queue sync and the orchestrator loop (section 7,
-//! not ported yet). A caller puts this together the same way as [`crate::triage`]: gather the
-//! waiting [`PlaytestEntry`]s, build a [`Planner`] with the project's words and
+//! [`crate::backlog::Client`] now has the shared queue's own operations (`tryout_add`,
+//! `tryout_result`, `tryout_groups`, the [`TRYOUT_GROUPS_LOCK`] lock), but nothing yet calls them
+//! periodically: there's no orchestrator loop (section 7, not ported yet) to notice 4 or more
+//! waiting, run [`plan`] on this round's [`PlaytestEntry`]s, and send its [`PlaytestGroup`]s on
+//! under the lock. A caller puts the planning half together the same way as [`crate::triage`]:
+//! gather the waiting entries, build a [`Planner`] with the project's words and
 //! `budget.plannerUsd`, and run [`plan`] with [`crate::engines::runner::run_session`].
 use std::collections::HashSet;
 use std::future::Future;
@@ -20,6 +20,11 @@ use serde_json::{Value, json};
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
 use crate::release_notes::{project_words, render_prompt};
+
+/// The store's `chore_lock` name for grouping (shared/backlogTypes.ts's `TRYOUT_GROUPS_LOCK`):
+/// grouping runs on one computer at a time, so every planner round takes this lock first and drops
+/// it once `tryout_groups` is sent (or the round gave up).
+pub const TRYOUT_GROUPS_LOCK: &str = "tryout-groups";
 
 /// One after-merge playtest waiting to be grouped (playtestGroups.ts's `Entry`): `key` is what a
 /// group's `keys` names it by, the caller's own (not computed here, since nothing yet reads the
