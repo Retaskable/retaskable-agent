@@ -1,8 +1,8 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
 //! never falls back to a local list."): `list`, `claim_next`, `drafts`, the after-merge try-out
-//! queue (`tryout_add`, `tryout_result`, `tryout_groups`, docs/specs/agent/06.4-playtests.md) and a
-//! named project-wide lock (`chore_lock`), each read over `POST <store>/v1/repos/<repo id>/ops`
+//! queue (`tryout_add`, `tryout_result`, `tryout_groups`, `reopen`, docs/specs/agent/06.4-playtests.md)
+//! and a named project-wide lock (`chore_lock`), each read over `POST <store>/v1/repos/<repo id>/ops`
 //! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2, and backlog/06.6-handing-out-work.md
 //! for `claim_next`), and `auto_link`, this machine's own link to the store
 //! (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A repo's numeric GitHub
@@ -183,6 +183,29 @@ pub struct TryoutGroup {
     pub keys: Vec<String>,
 }
 
+/// What `reopen` sends about the try-out's problem (docs/specs/agent/06.4-playtests.md "Problem
+/// reopens the item itself"; `agent/src/reopen.ts`'s `reopen`): the playtest's own `what`/`steps` and
+/// who said it, so a store that keeps the item as it is (or an older one that doesn't know `reopen`)
+/// still gives the caller enough to queue a playtest-fix chore with, as before.
+#[derive(Debug, Clone)]
+pub struct ReopenRequest<'a> {
+    pub item_id: &'a str,
+    pub notes: &'a str,
+    pub by: Option<&'a str>,
+    pub what: Option<&'a str>,
+    pub steps: Option<&'a [String]>,
+}
+
+/// What `reopen` answers: the item handed straight back with a lease token, the way `claim_next`
+/// hands one out, so the computer that built it resumes there; or kept as it is (being built, or an
+/// older store that doesn't know `reopen`) — [`crate::reopen::may_reopen`] and this answer are what a
+/// caller uses to fall back to a playtest-fix chore instead.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReopenAnswer {
+    Reopened { item: Box<Item>, token: String },
+    Kept,
+}
+
 /// `chore_lock`'s answer (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): a
 /// project-wide named lock, used for grouping playtests under `TRYOUT_GROUPS_LOCK` as well as chores.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -358,6 +381,57 @@ impl Client {
         Ok(())
     }
 
+    /// `reopen` (docs/specs/agent/06.4-playtests.md "Problem reopens the item itself"): asks the
+    /// store to put the item back in the queue with the try-out's notes as its next slice, and hand
+    /// it straight back to this agent (`agent` is this computer's, the same as `claim_next`'s) so the
+    /// session that built it can resume. `ReopenAnswer::Kept` when the store declined (the item's
+    /// being built, or it's an older store that doesn't know `reopen`): the caller queues a
+    /// playtest-fix chore with `req`'s notes and steps instead, as before.
+    pub async fn reopen(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        req: &ReopenRequest<'_>,
+        agent: &ClaimNextAgent,
+    ) -> Result<ReopenAnswer, BacklogError> {
+        let mut args = json!({ "id": req.item_id, "notes": req.notes, "agent": agent });
+        let obj = args.as_object_mut().expect("built as an object above");
+        if let Some(by) = req.by {
+            obj.insert("by".to_string(), json!(by));
+        }
+        if let Some(what) = req.what {
+            obj.insert("what".to_string(), json!(what));
+        }
+        if let Some(steps) = req.steps {
+            obj.insert("steps".to_string(), json!(steps));
+        }
+        let (status, body) = self.send(repo_id, token, "reopen", args).await?;
+        let bad = |message: String| BacklogError::BadAnswer {
+            status,
+            code: None,
+            message,
+        };
+        let value = body.value.ok_or_else(|| bad("its answer had no value".to_string()))?;
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Answer {
+            reopened: bool,
+            #[serde(default)]
+            item: Option<Item>,
+            #[serde(default)]
+            token: Option<String>,
+        }
+        let answer: Answer =
+            serde_json::from_value(value).map_err(|e| bad(format!("couldn't read its reopen answer: {e}")))?;
+        Ok(match (answer.reopened, answer.item, answer.token) {
+            (true, Some(item), Some(token)) => ReopenAnswer::Reopened {
+                item: Box::new(item),
+                token,
+            },
+            _ => ReopenAnswer::Kept,
+        })
+    }
+
     /// `chore_lock` (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): takes or
     /// drops the project-wide lock named `name`, so only one computer runs the work it guards at a
     /// time (the playtest planner's own lock name is
@@ -434,411 +508,4 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{Json, Router, routing::post};
-    use std::net::TcpListener as StdTcpListener;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
-
-    #[test]
-    fn url_defaults_then_takes_the_env_and_trims_a_trailing_slash() {
-        assert_eq!(url(no_env), DEFAULT_URL);
-        let env = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "https://example.test/".to_string());
-        assert_eq!(url(env), "https://example.test");
-        let blank = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "   ".to_string());
-        assert_eq!(url(blank), DEFAULT_URL);
-    }
-
-    /// Starts a fake store answering `handler` on `POST /v1/repos/:id/ops`, and gives its base URL.
-    async fn fake_store(handler: axum::routing::MethodRouter) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let app = Router::new().route("/v1/repos/{id}/ops", handler);
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    #[tokio::test]
-    async fn list_reads_the_items_the_store_answers() {
-        let base = fake_store(post(|| async {
-            Json(json!({
-                "value": [
-                    { "id": "a", "title": "First", "status": "todo", "rank": 0, "doNext": true,
-                      "dependsOn": ["b"], "specRefs": ["docs/specs/x.md"], "slice": 1, "remaining": "more" },
-                    { "id": "b", "title": "Second", "status": "on_main", "rank": 1 },
-                ]
-            }))
-        }))
-        .await;
-
-        let items = Client::new(base).list(1, Some("tok")).await.unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].id, "a");
-        assert_eq!(items[0].status, ItemStatus::Todo);
-        assert!(items[0].do_next);
-        assert_eq!(items[0].depends_on, vec!["b".to_string()]);
-        assert_eq!(items[0].slice, 1);
-        assert_eq!(items[0].remaining, Some("more".to_string()));
-        // Fields the store left out take their defaults rather than failing to parse.
-        assert_eq!(items[1].id, "b");
-        assert_eq!(items[1].status, ItemStatus::OnMain);
-        assert!(!items[1].do_next);
-        assert!(items[1].depends_on.is_empty());
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_store_is_its_own_error_not_an_empty_list() {
-        // Bind, then drop the listener at once: nothing answers that port, like a down store.
-        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let err = Client::new(format!("http://{addr}")).list(1, None).await.unwrap_err();
-        assert!(
-            matches!(err, BacklogError::Unreachable(_)),
-            "expected Unreachable, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unaddressable_url_is_unreachable_too() {
-        let err = Client::new("not a url").list(1, None).await.unwrap_err();
-        assert!(
-            matches!(err, BacklogError::Unreachable(_)),
-            "expected Unreachable, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn drafts_sends_its_op_and_reads_each_drafts_pr() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["op"], "drafts");
-            Json(json!({
-                "value": [
-                    { "kind": "draft", "id": "draft-1", "status": "merged", "titles": ["Charts"],
-                      "prUrl": "https://github.com/x/y/pull/4" },
-                    { "kind": "draft", "id": "draft-2", "status": "queued", "titles": [], "prUrl": null },
-                ]
-            }))
-        }))
-        .await;
-
-        let drafts = Client::new(base).drafts(1, Some("tok")).await.unwrap();
-        assert_eq!(drafts[0].pr_url.as_deref(), Some("https://github.com/x/y/pull/4"));
-        assert_eq!(drafts[0].titles, ["Charts"]);
-        assert_eq!(drafts[1].pr_url, None);
-    }
-
-    #[tokio::test]
-    async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["op"], "claim_next");
-            assert_eq!(req["args"]["agent"]["machine"], "box-1");
-            assert_eq!(req["args"]["agent"]["baseBranch"], "main");
-            Json(json!({
-                "value": {
-                    "item": { "id": "a", "title": "First", "status": "claimed", "rank": 0 },
-                    "token": "lease-1",
-                }
-            }))
-        }))
-        .await;
-
-        let agent = ClaimNextAgent {
-            machine: "box-1".to_string(),
-            environment: "Production".to_string(),
-            base_branch: "main".to_string(),
-        };
-        let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
-        match answer {
-            ClaimNextAnswer::Item { item, token } => {
-                assert_eq!(item.id, "a");
-                assert_eq!(token, "lease-1");
-            }
-            ClaimNextAnswer::Nothing => panic!("expected an item"),
-        }
-    }
-
-    #[tokio::test]
-    async fn claim_next_reads_a_null_value_as_nothing_not_a_bad_answer() {
-        let base = fake_store(post(|| async { Json(json!({ "value": null })) })).await;
-
-        let agent = ClaimNextAgent {
-            machine: "box-1".to_string(),
-            environment: "Production".to_string(),
-            base_branch: "main".to_string(),
-        };
-        let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
-        assert_eq!(answer, ClaimNextAnswer::Nothing);
-    }
-
-    #[tokio::test]
-    async fn tryout_add_sends_the_merged_slice_with_its_machine() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["op"], "tryout_add");
-            assert_eq!(req["args"]["itemId"], "a");
-            assert_eq!(req["args"]["mergedAt"], "2026-10-28T00:00:00Z");
-            assert_eq!(req["args"]["title"], "Charts");
-            assert_eq!(req["args"]["prUrl"], "https://github.com/x/y/pull/4");
-            assert_eq!(req["args"]["machine"], "box-1");
-            Json(json!({}))
-        }))
-        .await;
-
-        let add = TryoutAdd {
-            item_id: "a".to_string(),
-            merged_at: "2026-10-28T00:00:00Z".to_string(),
-            title: "Charts".to_string(),
-            what: "Open the charts page".to_string(),
-            steps: vec!["Open it".to_string()],
-            pr_url: Some("https://github.com/x/y/pull/4".to_string()),
-            machine: "box-1".to_string(),
-        };
-        Client::new(base).tryout_add(1, Some("tok"), &add).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tryout_add_leaves_out_pr_url_when_there_is_none() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert!(req["args"].as_object().unwrap().get("prUrl").is_none());
-            Json(json!({}))
-        }))
-        .await;
-
-        let add = TryoutAdd {
-            item_id: "a".to_string(),
-            merged_at: "2026-10-28T00:00:00Z".to_string(),
-            title: "Charts".to_string(),
-            what: "Open the charts page".to_string(),
-            steps: vec![],
-            pr_url: None,
-            machine: "box-1".to_string(),
-        };
-        Client::new(base).tryout_add(1, None, &add).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn tryout_result_sends_the_key_outcome_and_notes() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["op"], "tryout_result");
-            assert_eq!(req["args"]["key"], "a@2026-10-28T00:00:00Z");
-            assert_eq!(req["args"]["result"], "problem");
-            assert_eq!(req["args"]["notes"], "The chart didn't load.");
-            Json(json!({}))
-        }))
-        .await;
-
-        Client::new(base)
-            .tryout_result(
-                1,
-                Some("tok"),
-                "a@2026-10-28T00:00:00Z",
-                TryoutOutcome::Problem,
-                Some("The chart didn't load."),
-            )
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn tryout_groups_sends_its_signature_and_groups() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["op"], "tryout_groups");
-            assert_eq!(req["args"]["signature"], "sig-1");
-            assert_eq!(req["args"]["groups"][0]["title"], "Build");
-            assert_eq!(req["args"]["groups"][0]["keys"][0], "a");
-            Json(json!({}))
-        }))
-        .await;
-
-        let groups = vec![TryoutGroup {
-            title: "Build".to_string(),
-            why: "Same place".to_string(),
-            keys: vec!["a".to_string()],
-        }];
-        Client::new(base)
-            .tryout_groups(1, Some("tok"), "sig-1", &groups)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn lock_sends_the_name_and_take_and_reads_who_holds_it() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["op"], "chore_lock");
-            assert_eq!(req["args"]["name"], "tryout-groups");
-            assert_eq!(req["args"]["take"], true);
-            Json(json!({ "value": { "held": true, "by": "box-1" } }))
-        }))
-        .await;
-
-        let answer = Client::new(base)
-            .lock(1, Some("tok"), "tryout-groups", true)
-            .await
-            .unwrap();
-        assert_eq!(
-            answer,
-            LockAnswer {
-                held: true,
-                by: Some("box-1".to_string())
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn lock_dropping_sends_take_false_and_reads_a_lock_held_by_no_one() {
-        let base = fake_store(post(|Json(req): Json<Value>| async move {
-            assert_eq!(req["args"]["take"], false);
-            Json(json!({ "value": { "held": false } }))
-        }))
-        .await;
-
-        let answer = Client::new(base)
-            .lock(1, Some("tok"), "tryout-groups", false)
-            .await
-            .unwrap();
-        assert_eq!(answer, LockAnswer { held: false, by: None });
-    }
-
-    #[tokio::test]
-    async fn a_refusal_is_a_bad_answer_with_its_status_and_message() {
-        let base = fake_store(post(|| async {
-            (
-                axum::http::StatusCode::FORBIDDEN,
-                Json(json!({ "error": "forbidden", "message": "No access to this repo." })),
-            )
-        }))
-        .await;
-
-        let err = Client::new(base).list(1, Some("tok")).await.unwrap_err();
-        match err {
-            BacklogError::BadAnswer { status, code, message } => {
-                assert_eq!(status, 403);
-                assert_eq!(code.as_deref(), Some("forbidden"));
-                assert_eq!(message, "No access to this repo.");
-            }
-            other => panic!("expected BadAnswer, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_success_status_with_no_value_is_a_bad_answer_not_an_empty_list() {
-        let base = fake_store(post(|| async { Json(json!({})) })).await;
-
-        let err = Client::new(base).list(1, None).await.unwrap_err();
-        assert!(
-            matches!(err, BacklogError::BadAnswer { status: 200, .. }),
-            "expected BadAnswer, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn items_that_dont_parse_are_a_bad_answer() {
-        let base = fake_store(post(|| async { Json(json!({ "value": [{ "id": "a" }] })) })).await;
-
-        let err = Client::new(base).list(1, None).await.unwrap_err();
-        assert!(
-            matches!(err, BacklogError::BadAnswer { status: 200, .. }),
-            "expected BadAnswer, got {err:?}"
-        );
-    }
-
-    fn file_store() -> (tempfile::TempDir, Arc<dyn TokenStore>) {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(crate::link::FileStore::new(
-            dir.path().join("credentials.json"),
-            "retaskable",
-        ));
-        (dir, store)
-    }
-
-    /// Starts a fake store answering the device flow on `/v1/device/code` and `/v1/device/token`, and gives
-    /// its base URL.
-    async fn fake_device_store(code: Value, tokens: Vec<Value>) -> String {
-        use std::sync::Mutex as StdMutex;
-        struct Fake {
-            code: Value,
-            tokens: StdMutex<std::collections::VecDeque<Value>>,
-        }
-        let fake = Arc::new(Fake {
-            code,
-            tokens: StdMutex::new(tokens.into()),
-        });
-        async fn code_route(axum::extract::State(f): axum::extract::State<Arc<Fake>>) -> Json<Value> {
-            Json(f.code.clone())
-        }
-        async fn token_route(axum::extract::State(f): axum::extract::State<Arc<Fake>>) -> Json<Value> {
-            Json(f.tokens.lock().unwrap().pop_front().expect("an answer for /token"))
-        }
-        let app = Router::new()
-            .route("/v1/device/code", post(code_route))
-            .route("/v1/device/token", post(token_route))
-            .with_state(fake);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}")
-    }
-
-    #[tokio::test]
-    async fn auto_link_starts_the_device_flow_against_v1_device_and_stores_the_refresh_token() {
-        let base = fake_device_store(
-            json!({ "device_code": "dc", "user_code": "WXYZ-2345", "verification_uri": "https://x/link",
-                    "verification_uri_complete": "https://x/link?code=WXYZ-2345", "interval": 1, "expires_in": 900 }),
-            vec![json!({ "refresh_token": "r1", "agent_id": 9 })],
-        )
-        .await;
-        let env = {
-            let base = base.clone();
-            move |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| base.clone())
-        };
-        let (_dir, store) = file_store();
-        let mut shown = None;
-        let id = auto_link(store.clone(), reqwest::Client::new(), env, "9.9.9", |c| {
-            shown = Some(c.clone())
-        })
-        .await
-        .unwrap();
-        assert_eq!(id, Some(9));
-        assert_eq!(shown.unwrap().user_code, "WXYZ-2345");
-        assert_eq!(store.get(&base).unwrap().as_deref(), Some("r1"));
-    }
-
-    #[tokio::test]
-    async fn auto_link_does_nothing_when_already_linked() {
-        // An address nothing listens on: a request here would fail, proving none was sent.
-        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let base = format!("http://{addr}");
-        let env = {
-            let base = base.clone();
-            move |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| base.clone())
-        };
-        let (_dir, store) = file_store();
-        store.set(&base, "already-linked").unwrap();
-        let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
-            panic!("no code expected")
-        })
-        .await
-        .unwrap();
-        assert_eq!(id, None);
-    }
-
-    #[tokio::test]
-    async fn auto_link_does_nothing_for_a_bad_backlog_url() {
-        let env = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "not a url".to_string());
-        let (_dir, store) = file_store();
-        let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
-            panic!("no code expected")
-        })
-        .await
-        .unwrap();
-        assert_eq!(id, None);
-    }
-}
+mod tests;
