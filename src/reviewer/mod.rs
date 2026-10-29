@@ -5,8 +5,10 @@
 //! `agent/src/review.ts` (the reviewer half) is the ground truth.
 //!
 //! [`model`] holds the session's structured result (`ReviewerResult`), [`prompt`] fills
-//! `prompts/reviewer.md` from an item, the stage 1 results and the scouts' findings, and [`run`]
-//! builds the session and renders its verdict as the PR comment the orchestrator posts. Nothing
+//! `prompts/reviewer.md` from an item, the stage 1 results and the scouts' findings (its
+//! [`ReviewerContext`] embeds the same [`crate::review_context::ReviewContext`] a scout's own
+//! prompt uses), and [`run`] builds the session and renders its verdict as the PR comment the
+//! orchestrator posts. Nothing
 //! calls any of it yet: turning `verdict` into the item's next `item_lifecycle::ReviewOutcome`
 //! (including `person_steps`, which isn't one of that enum's variants yet), looking up the User
 //! Manual's approved versions, and posting the comment through `gh pr comment` all come with the

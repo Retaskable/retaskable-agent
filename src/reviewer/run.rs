@@ -88,6 +88,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::review_context::ReviewContext;
     use crate::reviewer::model::{DismissedFinding, ReviewerComment};
 
     fn writer(cwd: &'static Path) -> Reviewer<'static> {
@@ -107,14 +108,16 @@ mod tests {
 
     fn ctx<'a>() -> ReviewerContext<'a> {
         ReviewerContext {
-            item_id: "my-item",
-            title: "My item",
-            slice: 1,
-            spec_refs: "(none)",
-            slice_description: "(none given)",
-            range: "origin/main...HEAD",
-            scope: "",
-            checks: "✓ test",
+            common: ReviewContext {
+                item_id: "my-item",
+                title: "My item",
+                slice: 1,
+                spec_refs: "(none)",
+                slice_description: "(none given)",
+                range: "origin/main...HEAD",
+                scope: "",
+                checks: "✓ test",
+            },
             scouts: "### correctness\n(no findings)",
             manual_approvals: "(none)",
         }
