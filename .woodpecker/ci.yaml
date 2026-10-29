@@ -1,7 +1,7 @@
 # The repo's checks on Woodpecker (ci.jcnash.dnsalias.com), on Linux: every pull request and every push to main.
 # Woodpecker reports to GitHub as the `ci/woodpecker/pr/ci` status, which Retaskable's agent reads with the other
-# checks. Windows and macOS run on GitHub Actions only once a change is on main (.github/workflows/ci.yml), so a
-# pull request waits for no GitHub minutes.
+# checks. The repo's only CI: no GitHub Actions (2026-10-29, the human: no GitHub minutes), so Windows and macOS
+# aren't built or tested here; win-x64 and mac-* are checked on those machines until a runner of their own joins.
 
 when:
   - event: pull_request
