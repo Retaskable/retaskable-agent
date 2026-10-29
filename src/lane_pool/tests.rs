@@ -179,6 +179,43 @@ fn running_work_keeps_a_lane_past_the_limit_and_a_cursor_lane_is_never_held_back
 }
 
 #[test]
+fn lane_scaling_also_holds_back_the_chore_lane_unless_its_a_cursor_lane() {
+    // 04-architecture.md section 4.1: laneScaling narrows new work to the base lanes "with Cursor
+    // lanes exempt" — nothing exempts the chore lane too, so a chore lane past the base is scaled
+    // out just like any other, and a chore (which only ever runs in the chore lane) gets nothing.
+    let scaling = Some(LaneScaling {
+        base: 1,
+        below_used_pct: 50.0,
+    });
+    let mut pool = LanePool::new(PoolRules {
+        chore_lane: Some(3),
+        scaling,
+        ..rules(3)
+    });
+    pool.set_used_pct(Some(60.0));
+    assert!(pool.scaled_out(3), "lane 3 is past the base of 1");
+    let mut chore = want("p", "chore-1");
+    chore.chore = true;
+    assert_eq!(
+        pool.claim_lane(&chore),
+        None,
+        "the chore lane is scaled out too, and a chore never runs anywhere else"
+    );
+
+    pool.set_rules(PoolRules {
+        chore_lane: Some(3),
+        scaling,
+        cursor_lanes: BTreeSet::from([3]),
+        ..rules(3)
+    });
+    assert_eq!(
+        pool.claim_lane(&chore),
+        Some(3),
+        "a cursor chore lane isn't held back by the Claude Code window"
+    );
+}
+
+#[test]
 fn free_lane_leaves_out_a_lane_whose_engine_cant_start() {
     let pool = LanePool::new(rules(2));
     assert_eq!(pool.free_lane(false, None, None, |k| k != 1), Some(2));

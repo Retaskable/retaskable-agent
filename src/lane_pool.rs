@@ -155,7 +155,7 @@ impl LanePool {
         }
         let allowed = |k: u32| exempt(k) || (!full && k <= limit);
         if let (Some(c), true) = (chore, side) {
-            return ((exempt(c) || !full) && open(c)).then_some(c);
+            return (allowed(c) && open(c)).then_some(c);
         }
         if let Some(p) = prefer
             && p <= r.lanes
