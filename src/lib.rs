@@ -39,6 +39,7 @@ pub mod scan;
 pub mod scouts;
 pub mod settings_server;
 pub mod setup_check;
+pub mod smoke;
 pub mod start_at_login;
 pub mod store;
 mod sync;
