@@ -362,9 +362,7 @@ fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
 }
 
 fn git(repo_path: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(repo_path);
-    cmd
+    crate::git_bin::command(repo_path)
 }
 
 /// A git call inside `<worktreesDir>` (a lane, in this module). These worktrees share the

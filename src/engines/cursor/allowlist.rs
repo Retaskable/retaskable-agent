@@ -138,9 +138,7 @@ fn repo_allowlist_problem(cwd: &Path) -> Option<String> {
 }
 
 fn git_cwd(cwd: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(cwd);
-    cmd
+    crate::git_bin::command(cwd)
 }
 
 /// True when the repo tracks `.cursor/cli.json`, so a session uses that file instead of ours.
