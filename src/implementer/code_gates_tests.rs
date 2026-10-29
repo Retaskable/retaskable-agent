@@ -41,6 +41,15 @@ fn passes(dir: &Path, gates: CodeGates) -> bool {
     run(dir, "main", &gates).unwrap().is_none()
 }
 
+/// Every gate at 0, which turns the whole check off.
+fn gates_off() -> CodeGates {
+    CodeGates {
+        max_file_lines: 0,
+        dup_lines: 0,
+        max_spec_chars: 0,
+    }
+}
+
 /// A repo with `base` committed on `main` and pushed to `origin`, then `change` committed on
 /// top locally (not pushed): the lane as a session leaves it. `None` in `change` deletes.
 fn lane(root: &Path, base: &[(&str, Vec<String>)], change: &[(&str, Option<Vec<String>>)]) -> std::path::PathBuf {
@@ -95,14 +104,7 @@ fn a_touched_source_file_over_the_limit_is_sent_back_with_where_it_could_split()
     assert_eq!(out.note, "Code gates: 1 file over 1000 lines (src/big.ts)");
 
     // 0 turns it off, and every gate at 0 turns the check off entirely.
-    assert!(passes(
-        &dir,
-        CodeGates {
-            max_file_lines: 0,
-            dup_lines: 0,
-            max_spec_chars: 0
-        }
-    ));
+    assert!(passes(&dir, gates_off()));
     assert!(passes(
         &dir,
         CodeGates {
@@ -233,14 +235,7 @@ fn a_touched_spec_over_max_spec_chars_is_sent_back_with_the_headings_to_split_at
         .unwrap()
         .is_match(&out.note)
     );
-    assert!(passes(
-        &dir,
-        CodeGates {
-            max_file_lines: 0,
-            dup_lines: 0,
-            max_spec_chars: 0
-        }
-    ));
+    assert!(passes(&dir, gates_off()));
     assert!(passes(
         &dir,
         CodeGates {
