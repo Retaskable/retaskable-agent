@@ -20,3 +20,20 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # installers/03-the-bundle-agent-bundle.md sections 3.9 and 3.10: each OS's runner builds and
+  # start-checks its own target (win-x64, linux-x64, mac-arm64 — macos-latest is arm64), and the
+  # macOS runner also cross-builds mac-x64 beside its own, so all four targets are built.
+  bundle:
+    needs: check
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release --bin bundle
+      - run: cargo run --release --bin bundle -- --target mac-x64
+        if: matrix.os == 'macos-latest'

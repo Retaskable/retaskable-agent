@@ -13,10 +13,17 @@ mod project;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
-pub use machine::{MachineConfig, lanes, local_model, poll_interval_sec, port};
-pub use project::{ProjectConfig, ProjectType};
+pub use machine::{
+    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines,
+    cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
+};
+pub(crate) use machine::{
+    lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
+    valid_model_name,
+};
+pub use project::{CheckConfig, GalleryConfig, ProjectConfig, ProjectType};
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -41,6 +48,31 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
     parse(&text).with_context(|| format!("reading {}", file.display()))
+}
+
+/// Patches `<dir>/config.json`'s top-level object and writes it back indented, keeping every key
+/// `patch` doesn't touch (`projects[]`, unknown fields, ...). When there's no file yet, starts
+/// from an empty version 2 file rather than an empty object: an empty object has no `"version"`
+/// key, so `parse` would read it back as a version 1 single project with an empty `repoPath`,
+/// conjuring a phantom project out of the first setting anyone saves. Used by the settings page's
+/// save paths, which change only the machine's own settings.
+pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
+    let file = dir.join("config.json");
+    let mut obj = match std::fs::read_to_string(&file) {
+        Ok(text) => match serde_json::from_str(&text)? {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut obj = Map::new();
+            obj.insert("version".to_string(), json!(2));
+            obj.insert("projects".to_string(), json!([]));
+            obj
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+    };
+    patch(&mut obj);
+    crate::store::write_json_atomic(&file, &Value::Object(obj), false)
 }
 
 /// A version 2 file as it is; a version 1 one (no `"version"` key) as one project, its id made when it has none
@@ -104,7 +136,6 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::machine::DEFAULT_PORT;
     use super::project::{Playtests, ProjectType, SandboxMode};
     use super::*;
 
@@ -116,7 +147,9 @@ mod tests {
     fn a_missing_file_is_the_defaults_and_no_projects() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, DEFAULT_PORT);
+        // No "port" key at all: the file says nothing, so `port()` falls back to the caller's
+        // own default rather than a value baked into the file's own defaults.
+        assert_eq!(cfg.machine.port, None);
         assert!(cfg.projects.is_empty());
     }
 
@@ -137,7 +170,7 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, 4711);
+        assert_eq!(cfg.machine.port, Some(4711));
         assert_eq!(cfg.machine.lanes, 4);
         assert_eq!(cfg.projects.len(), 1);
         let p = &cfg.projects[0];
@@ -271,7 +304,7 @@ mod tests {
         )
         .unwrap();
         let cfg = load(dir.path()).unwrap();
-        assert_eq!(cfg.machine.port, 4700);
+        assert_eq!(cfg.machine.port, Some(4700));
         assert_eq!(cfg.machine.lanes, 2);
         assert_eq!(cfg.machine.concurrency, 1);
         assert_eq!(cfg.projects.len(), 1);
@@ -320,10 +353,44 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_engine_in_config_json_does_not_stop_the_agent_starting() {
+        // "pi" is a real engine (ENGINE_PICKS in the TypeScript agent, engines.md section 13), and
+        // an unrecognised one ("steam") in a role or a lane must not fail the whole load either.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "engineChoice": {
+                    "default": "pi",
+                    "roles": { "implementer": "steam" },
+                    "lanes": ["claude", "steam"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.machine.engine_choice.default, Some(Engine::Pi));
+        assert_eq!(cfg.machine.engine_choice.roles.implementer, None);
+        assert!(cfg.machine.engine_choice.lanes.is_empty());
+    }
+
+    #[test]
     fn a_broken_file_is_an_error_naming_it() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.json"), "{").unwrap();
         assert!(format!("{:#}", load(dir.path()).unwrap_err()).contains("config.json"));
+    }
+
+    #[test]
+    fn saving_into_a_dir_with_no_config_json_yet_writes_a_version_2_file_with_no_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        save_machine_settings(dir.path(), |obj| {
+            obj.insert("port".to_string(), serde_json::json!(4800));
+        })
+        .unwrap();
+        let cfg = load(dir.path()).unwrap();
+        assert_eq!(cfg.machine.port, Some(4800));
+        assert!(cfg.projects.is_empty());
     }
 
     #[test]

@@ -23,6 +23,8 @@ The files are in `docker/agent/`: `Dockerfile`, `compose.yaml`, `start.sh` and a
 - **Nothing secret** is in the image: no token, no login, no checkout.
 - **No GPU.** The operator's Docker can pass one through, but nothing here uses it and the compose file doesn't ask for it.
 
+In this Rust agent, `docker/agent/` (`Dockerfile`, `compose.yaml`, `start.sh`, `README.md`) is the port, built from the repo root with `docker compose -f docker/agent/compose.yaml up -d --build`. The image is still `node:22-bookworm-slim` with the same tool list (git, `gh`, `glab` pinned by `GLAB_VERSION`, `python3`, `tini`, Playwright's Chromium pinned by `PLAYWRIGHT_VERSION`, the Claude Code CLI pinned by `CLAUDE_CODE_VERSION` with `DISABLE_AUTOUPDATER` set, Cursor's agent left out) and the same `node` uid-1000 user, `safe.directory '*'` and no-secret rule — Node stays the base image because the Claude Code CLI and the projects the agent builds and tests still need it, even though the agent itself no longer does. The difference is the agent's own executable: a multi-stage build cross-compiles `retaskable` (`cargo build --release --bin retaskable`, with `assets/settings.html` copied in for its `include_str!`) and bakes the binary straight into the image, instead of cloning a checkout and running it from source. Before switching to `node`, the image also creates and hands over the volumes' mount points (`/work`, `/home/node/.claude`, `/home/node/.config/gh`), since Docker would otherwise create a fresh named volume's mount point as root.
+
 ## 3. How it runs
 
 ### 3.1 Volumes
@@ -37,9 +39,13 @@ Named Docker volumes, never a Windows folder mounted in (a bind mount is slow an
 
 Rebuilding the image or recreating the container keeps all three.
 
+In this Rust agent, the volumes are the same three, but `work` holds only `.retaskable/` (relative to the `/work` working directory, same as a checkout on any other machine) and each linked project's checkout and lane worktrees — there's no Retaskable.com checkout to keep beside them, since the agent itself is the image's baked-in binary, not something cloned into `/work`.
+
 ### 3.2 First run
 
 `start.sh` is the container's command. Each start it: runs `gh auth setup-git` when `GH_TOKEN` is set (git over https then signs in with it); sets git's `user.name` and `user.email` from `GIT_USER_NAME` and `GIT_USER_EMAIL`; clones `https://github.com/Retaskable/Retaskable.com` (`RETASKABLE_REPO_URL` overrides it) into `/work/Retaskable.com` when there's no checkout yet; runs `npm ci` when `node_modules/` or `app/node_modules/` is missing; then runs `node agent/scripts/supervise.mjs` with its own arguments, which starts the agent again when it restarts itself (exit code 75, agent.md section 7). After that the agent's self-update keeps the checkout and its packages current, as on any machine.
+
+In this Rust agent, `start.sh` only does the git setup (`gh auth setup-git`, `user.name`, `user.email`) and then `exec`s `retaskable` — there's no checkout to clone or `npm ci` to run first, and no supervise loop: this port has no release-bundle self-update yet (`installers/03-the-bundle-agent-bundle.md` section 3.12 isn't built), so getting a newer agent means rebuilding this image, not something a running container fetches for itself.
 
 ### 3.3 Credentials by environment
 
@@ -56,9 +62,13 @@ The agent's sessions inherit its environment, so these reach `claude -p`, `gh` a
 
 A container's host name is a random id. `RETASKABLE_MACHINE` names the machine instead, wherever the agent says its name (the `/link` page, the connector's hello, merge locks, tryouts), e.g. `jcnash-docker`; the compose file also sets the container's host name to it. Unset, the agent uses the host name, as before (`machineName`, `agent/src/link.ts`).
 
+In this Rust agent, this was already built for every machine (`machine_name`, `src/link/mod.rs`), not added for this container; the compose file passes `RETASKABLE_MACHINE` through and sets the container's host name to it the same way.
+
 ### 3.5 The terminal menu
 
 There's no desktop in the container, so with a terminal the agent draws the tray's menu in it (tray.md section 4.7). The compose file keeps one open (`stdin_open`, `tty`), and `docker attach retaskable-agent` reaches it. **Ctrl-P Ctrl-Q** leaves it running; Ctrl+C there stops the agent, and the container with it (`restart: unless-stopped` starts it again; `docker compose stop` stops it for good). The menu's **Quit** is the same.
+
+In this Rust agent, there's no tray menu yet in any environment, so the compose file doesn't open a `stdin_open`/`tty` terminal for one and `docker attach` has nothing to show. `docker compose logs -f` is how you watch the container today, and `docker compose stop` (or `down`, which also removes the container but keeps the volumes) is how you stop it — the agent already shuts down gracefully on that signal (`serve()`'s `with_graceful_shutdown`, `src/main.rs`).
 
 ## 4. Credentials without an OS credential store
 
@@ -69,6 +79,8 @@ The agent keeps its secrets (the refresh token of each link, [cloud.md](https://
 - **At start** the agent says so: "No OS credential store here: link tokens and keys are kept in …/credentials.json, readable by this user only."
 - **The trade:** anyone who can read the `work` volume (or run `docker exec` as the user that owns Docker) has the tokens, as with any server's token on its disk. That's the same reach as the checkout, the session transcripts and the `GH_TOKEN` in the container's environment. Forgetting a link from the menu, or unlinking the computer on retaskable.com, revokes it as anywhere else.
 
+In this Rust agent, this rule was already built for every machine (`OsStore`, `FileStore`, `os_store_works`, `credential_file_note`, `src/link/credentials.rs`), not added for this container; it probes the same way on Linux and was confirmed to fall back and log the same banner when run in this container, which has neither a Secret Service nor kernel-keyring access.
+
 ## 5. Switching a machine over
 
 1. Build and start it: `docker compose -f docker/agent/compose.yaml up -d --build`, with the section 3.3 variables set.
@@ -76,6 +88,8 @@ The agent keeps its secrets (the refresh token of each link, [cloud.md](https://
 3. `docker attach retaskable-agent`, then **Link to ▸ Production ▸ Link**: the menu says the code and the `/link?code=…` address; open it on Windows, check the machine's name (`RETASKABLE_MACHINE`) and approve. Or `docker exec -it -w /work/Retaskable.com retaskable-agent npm run link`. Once that's approved the agent starts the shared backlog's link by itself: its `/link?code=…` address is in the log and in **Requests** (`npm run link -- backlog` does the same); approve it the same way. The same **Link to** for any other environment.
 4. On retaskable.com, Settings → **Link project…** for each project: it's cloned into `/work` beside Retaskable's checkout. Settings → CI → **Link** seals the Woodpecker token to the new computer, unless `RETASKABLE_WOODPECKER_TOKEN` is set.
 5. Resume the projects. The Windows computer can be unlinked on retaskable.com once the container has taken over.
+
+In this Rust agent, step 3's tray menu doesn't exist yet (section 3.5), so link the computer with `docker exec -it retaskable-agent retaskable link [production|staging|local]` instead: it runs the same device flow in the terminal, printing the code and the `/link?code=…` address to approve the same way. `retaskable link backlog` does the shared backlog's link the same way, though it also starts by itself once the computer already holds a cloud link (`auto_link_backlog`, `src/main.rs`). Step 4's **Link project…** and CI **Link** aren't wired to this port's CLI yet, on this or any other machine — that's a later item, not this one — so until then a project is added by hand, cloned under `/work` and pointed to from `/work/.retaskable/config.json` (`docker/agent/README.md`), the same on every machine running this port.
 
 ## 6. Measured
 
