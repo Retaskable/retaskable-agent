@@ -184,15 +184,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn run_round_asks_for_the_room_left_in_the_queue() {
-        let was = Queue {
-            ideas: vec![waiting_idea("A", 0), waiting_idea("B", 0)],
-            ..Queue::default()
-        };
-        let cwd = Path::new("repo");
-        let round = run_round(
-            &was,
+    /// `run_round` with the args every test below shares, bar `was` and `run`.
+    async fn run_chores<F, Fut>(was: &Queue, cwd: &'static Path, run: F) -> Round
+    where
+        F: FnOnce(SessionSpec) -> Fut,
+        Fut: Future<Output = Result<SessionResult>>,
+    {
+        run_round(
+            was,
             &writer("haiku", cwd),
             "Chores",
             &[],
@@ -200,20 +199,31 @@ mod tests {
             QUEUE,
             IDEAS_MAX_WAITS_DEFAULT,
             "t",
-            |spec| async move {
-                assert!(
-                    spec.prompt.contains(" 3 "),
-                    "asks for the 3 slots still free: {}",
-                    spec.prompt
-                );
-                Ok(result(
-                    true,
-                    "success",
-                    Some(json!({ "status": "ok", "ideas": [] })),
-                    None,
-                ))
-            },
+            run,
         )
+        .await
+    }
+
+    #[tokio::test]
+    async fn run_round_asks_for_the_room_left_in_the_queue() {
+        let was = Queue {
+            ideas: vec![waiting_idea("A", 0), waiting_idea("B", 0)],
+            ..Queue::default()
+        };
+        let cwd = Path::new("repo");
+        let round = run_chores(&was, cwd, |spec| async move {
+            assert!(
+                spec.prompt.contains(" 3 "),
+                "asks for the 3 slots still free: {}",
+                spec.prompt
+            );
+            Ok(result(
+                true,
+                "success",
+                Some(json!({ "status": "ok", "ideas": [] })),
+                None,
+            ))
+        })
         .await;
         assert!(round.error.is_none());
     }
@@ -225,25 +235,15 @@ mod tests {
             ..Queue::default()
         };
         let cwd = Path::new("repo");
-        run_round(
-            &was,
-            &writer("haiku", cwd),
-            "Chores",
-            &[],
-            &json!({}),
-            QUEUE,
-            IDEAS_MAX_WAITS_DEFAULT,
-            "t",
-            |spec| async move {
-                assert!(spec.prompt.contains(" 1 "), "asks for at least 1: {}", spec.prompt);
-                Ok(result(
-                    true,
-                    "success",
-                    Some(json!({ "status": "ok", "ideas": [] })),
-                    None,
-                ))
-            },
-        )
+        run_chores(&was, cwd, |spec| async move {
+            assert!(spec.prompt.contains(" 1 "), "asks for at least 1: {}", spec.prompt);
+            Ok(result(
+                true,
+                "success",
+                Some(json!({ "status": "ok", "ideas": [] })),
+                None,
+            ))
+        })
         .await;
     }
 
@@ -293,17 +293,9 @@ mod tests {
     async fn a_failed_session_leaves_the_queue_waiting_and_says_why() {
         let was = one_waiting();
         let cwd = Path::new("repo");
-        let round = run_round(
-            &was,
-            &writer("haiku", cwd),
-            "Chores",
-            &[],
-            &json!({}),
-            QUEUE,
-            IDEAS_MAX_WAITS_DEFAULT,
-            "t",
-            |_| async { Ok(result(false, "error_max_budget_usd", None, None)) },
-        )
+        let round = run_chores(&was, cwd, |_| async {
+            Ok(result(false, "error_max_budget_usd", None, None))
+        })
         .await;
         assert_eq!(round.ideas, was.ideas);
         assert_eq!(
@@ -317,15 +309,9 @@ mod tests {
         let was = one_waiting();
         let cwd = Path::new("repo");
         let failed = json!({ "status": "failed", "error": "no ideas come to mind" });
-        let round = run_round(
+        let round = run_chores(
             &was,
-            &writer("haiku", cwd),
-            "Chores",
-            &[],
-            &json!({}),
-            QUEUE,
-            IDEAS_MAX_WAITS_DEFAULT,
-            "t",
+            cwd,
             |_| async move { Ok(result(true, "success", Some(failed), None)) },
         )
         .await;
@@ -335,18 +321,7 @@ mod tests {
             Some("Claude couldn't think of ideas: no ideas come to mind.")
         );
 
-        let round = run_round(
-            &was,
-            &writer("haiku", cwd),
-            "Chores",
-            &[],
-            &json!({}),
-            QUEUE,
-            IDEAS_MAX_WAITS_DEFAULT,
-            "t",
-            |_| async { anyhow::bail!("no claude") },
-        )
-        .await;
+        let round = run_chores(&was, cwd, |_| async { anyhow::bail!("no claude") }).await;
         assert_eq!(round.ideas, was.ideas);
         assert_eq!(
             round.error.as_deref(),
