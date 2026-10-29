@@ -114,6 +114,16 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
     })
 }
 
+fn view_with_models_gallery(project: &str) -> Arc<AgentView> {
+    let mut v = view(&[project]);
+    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    }];
+    v
+}
+
 /// An `exit` that does nothing, for tests that don't send Restart.
 fn noop_exit() -> Arc<Exit> {
     Arc::new(|_: i32| {})
@@ -246,12 +256,7 @@ async fn the_snapshot_reports_a_projects_gallery_info() {
         .to_string(),
     )
     .unwrap();
-    let mut v = view(&["one"]);
-    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
-        name: "Models".to_string(),
-        command: "echo hi".to_string(),
-        out_dir: "out".to_string(),
-    }];
+    let v = view_with_models_gallery("one");
     let c = Connector::start(
         &url,
         store,
@@ -286,12 +291,7 @@ async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
     let project = "connector-gallery-resend";
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
-    let mut v = view(&[project]);
-    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
-        name: "Models".to_string(),
-        command: "echo hi".to_string(),
-        out_dir: "out".to_string(),
-    }];
+    let v = view_with_models_gallery(project);
     let c = Connector::start(
         &url,
         store,
