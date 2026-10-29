@@ -394,3 +394,120 @@ pub fn report_text(events: &[Value], from: i64, to: i64) -> String {
     lines.extend(restart_section(&in_window));
     lines.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const T0_TEXT: &str = "2026-10-15T08:00:00.000Z";
+
+    fn t0() -> i64 {
+        parse_iso_ms(T0_TEXT).unwrap()
+    }
+
+    fn at(min: i64) -> String {
+        iso_utc_millis(t0() + min * 60_000)
+    }
+
+    #[test]
+    fn median_is_nan_when_empty_and_averages_the_middle_pair_when_even() {
+        assert!(median(&[]).is_nan());
+        assert_eq!(
+            median(&[3.0, 1.0, 2.0]),
+            2.0,
+            "odd count: the middle value, once sorted"
+        );
+        assert_eq!(
+            median(&[1.0, 2.0, 3.0, 4.0]),
+            2.5,
+            "even count: the middle pair, averaged"
+        );
+    }
+
+    #[test]
+    fn pct_rounds_to_the_nearest_whole_percent() {
+        assert_eq!(pct(0.0), "0%");
+        assert_eq!(pct(2.0 / 3.0), "67%");
+        assert_eq!(pct(1.0), "100%");
+    }
+
+    #[test]
+    fn rework_why_groups_by_the_notes_prefix_and_falls_back_to_from() {
+        assert_eq!(
+            rework_why(Some(&json!("Blocking checks failed: test")), "checking"),
+            "Blocking checks failed"
+        );
+        assert_eq!(
+            rework_why(Some(&json!("Needs changes (see review)")), "reviewing"),
+            "Needs changes"
+        );
+        assert_eq!(rework_why(None, "checking"), "from checking");
+        assert_eq!(rework_why(Some(&json!("")), "merging"), "from merging");
+    }
+
+    #[test]
+    fn restart_section_is_none_without_any_restart_events() {
+        assert_eq!(restart_section(&[]), vec!["  none".to_string()]);
+    }
+
+    #[test]
+    fn restart_section_covers_still_waiting_and_exited_not_back() {
+        let waiting = vec![json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james" })];
+        assert_eq!(
+            restart_section(&waiting),
+            vec!["  2026-10-15 08:00 asked by @james: still waiting to restart".to_string()]
+        );
+
+        let exited = vec![
+            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked" }),
+            json!({ "at": at(1), "kind": "restart_exit", "reason": "asked", "drainMs": 45_000 }),
+        ];
+        assert_eq!(
+            restart_section(&exited),
+            vec!["  2026-10-15 08:00 asked: exited after draining 45s, not back in this window".to_string()]
+        );
+    }
+
+    #[test]
+    fn restart_section_dedupes_the_same_restart_logged_in_two_projects() {
+        let twice = vec![
+            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james", "project": "alpha" }),
+            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james", "project": "beta" }),
+        ];
+        assert_eq!(
+            restart_section(&twice),
+            vec!["  2026-10-15 08:00 asked by @james: still waiting to restart".to_string()]
+        );
+    }
+
+    #[test]
+    fn lane_section_says_so_without_any_minute_summaries() {
+        assert_eq!(
+            lane_section(&[], t0()),
+            vec!["  no minute summaries in this window".to_string()]
+        );
+    }
+
+    #[test]
+    fn lane_section_has_no_idle_stretches_when_a_lane_is_always_busy() {
+        let ticks = vec![
+            json!({ "at": at(0), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
+            json!({ "at": at(1), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
+        ];
+        assert!(lane_section(&ticks, t0() + 2 * 60_000).contains(&"  no idle stretches of 15m or more".to_string()));
+    }
+
+    #[test]
+    fn lane_section_marks_a_gap_between_summaries_as_the_agent_being_down() {
+        let ticks = vec![
+            json!({ "at": at(0), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
+            json!({ "at": at(5), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
+        ];
+        assert!(
+            lane_section(&ticks, t0() + 6 * 60_000)
+                .contains(&"  down 2026-10-15 08:00 → 08:05 (5m): no summaries, the agent wasn't running".to_string())
+        );
+    }
+}
