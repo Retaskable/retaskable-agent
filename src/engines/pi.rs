@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::engine::{Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec};
 use super::json_result::{check_schema, extract_json};
-use super::text::{clip, tail};
+use crate::text::{clip, collapse_and_clip, tail};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
@@ -100,8 +100,7 @@ fn pi_tool_text(ev: &Value) -> String {
     if arg.is_empty() {
         ev.get("toolName").and_then(Value::as_str).unwrap_or("tool").to_string()
     } else {
-        let collapsed = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        clip(&collapsed, 160)
+        collapse_and_clip(arg, 160)
     }
 }
 

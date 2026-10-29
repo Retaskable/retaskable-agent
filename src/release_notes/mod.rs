@@ -30,9 +30,7 @@ pub use gather::{
     DEFAULT_MAX_PRS, GatherArgs, commit_log_args, fill_draft_files, gather, gather_commits, gather_merged_prs,
     merged_pr_args, read_base_files,
 };
-pub use group::{
-    DEFAULT_FULL_ENTRIES, GroupInput, clip, counts, facts, for_users, group, pr_owner, spec_links, spec_title,
-};
+pub use group::{DEFAULT_FULL_ENTRIES, GroupInput, counts, facts, for_users, group, pr_owner, spec_links, spec_title};
 pub use model::{
     Commit, Counts, Entry, Highlight, ItemRef, MergedPr, NoteEntry, PrRef, Range, ReleaseNotesResult, Section,
     SpecLink, release_notes_result_schema,

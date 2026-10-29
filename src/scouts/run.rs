@@ -10,8 +10,8 @@ use anyhow::Result;
 use futures_util::future::join_all;
 
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec};
-use crate::release_notes::clip;
 use crate::review_context::ReviewContext;
+use crate::text::clip;
 
 use super::info::{ScoutInfo, scout_info};
 use super::model::ScoutResult;

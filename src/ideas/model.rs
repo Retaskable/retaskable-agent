@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::release_notes::clip;
+use crate::text::clip;
 
 /// `ideasQueue`'s default (shared/tuning.ts): at most this many ideas wait at a time.
 pub const QUEUE: usize = 5;

@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::group::clip;
 use super::model::{Commit, MergedPr};
 use crate::backlog::Draft;
+use crate::text::clip;
 
 /// `releaseMaxPrs`'s default (shared/tuning.ts): more than this many merged PRs in one range is
 /// refused rather than guessed at.
