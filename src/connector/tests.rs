@@ -229,6 +229,57 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
 }
 
 #[tokio::test]
+async fn the_snapshot_reports_a_projects_gallery_info() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    // As `galleries::shoot` would leave it after a shoot.
+    let dest = crate::paths::gallery_dir(dir.path(), "one", "models");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+        dest.join("index.json"),
+        json!({
+            "name": "Models",
+            "shotAt": "2026-01-01T00:00:00Z",
+            "sha": "deadbeef",
+            "images": [{ "file": "01-first.jpg", "title": "First" }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut v = view(&["one"]);
+    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    }];
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    let galleries = read(&mut a).await["state"]["galleries"].clone();
+
+    assert_eq!(
+        galleries,
+        json!([{
+            "slug": "models",
+            "name": "Models",
+            "status": "idle",
+            "shotAt": "2026-01-01T00:00:00Z",
+            "sha": "deadbeef",
+            "count": 1,
+        }])
+    );
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);

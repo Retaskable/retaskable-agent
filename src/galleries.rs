@@ -98,6 +98,59 @@ pub enum GalleryStatus {
     Failed(String),
 }
 
+impl GalleryStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            GalleryStatus::Idle => "idle",
+            GalleryStatus::Shooting => "shooting",
+            GalleryStatus::Converting => "converting",
+            GalleryStatus::Failed(_) => "failed",
+        }
+    }
+}
+
+/// A gallery's info in the snapshot (tray/05.3-private-galleries-and-pictures-from.md section
+/// 5.3.1's `GalleryInfo`: name, status, `shotAt`, `sha`, `count`, error), read fresh each time:
+/// [`status`] from memory, the rest from its last shoot's `index.json` on disk, if it has shot at
+/// least once.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryInfo {
+    pub slug: String,
+    pub name: String,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shot_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `gallery`'s [`GalleryInfo`] for the snapshot: its in-memory [`status`] plus its last shoot's
+/// `shotAt`/`sha`/picture count from `<dataDir>/.../<slug>/index.json`, left out when it hasn't
+/// shot yet. The old set (and so its info) stays until a new shoot's conversion fully replaces it.
+pub fn info(data_dir: &Path, project: &str, gallery: &GalleryConfig) -> GalleryInfo {
+    let slug = gallery.slug();
+    let state = status(project, &slug);
+    let error = match &state {
+        GalleryStatus::Failed(e) => Some(e.clone()),
+        _ => None,
+    };
+    let last = gallery_index(data_dir, project, &slug).ok();
+    GalleryInfo {
+        slug,
+        name: gallery.name.clone(),
+        status: state.as_str(),
+        shot_at: last.as_ref().map(|i| i.shot_at.clone()),
+        sha: last.as_ref().map(|i| i.sha.clone()),
+        count: last.as_ref().map(|i| i.images.len()),
+        error,
+    }
+}
+
 /// One entry of the game's own `index.json` in `outDir`, naming a picture and, optionally, its
 /// title and group.
 #[derive(Debug, Deserialize)]
