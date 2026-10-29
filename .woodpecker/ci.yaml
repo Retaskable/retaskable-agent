@@ -12,8 +12,14 @@ when:
 steps:
   - name: check
     image: rust:1-bookworm
-    environment:
+    environment: &cargo_env
       CARGO_TERM_COLOR: always
+      # The crates and the build kept on the runner (the repo is trusted for volumes, 2026-10-29), so a run compiles
+      # only what changed. Cargo locks the build folder, so two runs at once take turns rather than clash.
+      CARGO_TARGET_DIR: /cargo-target
+    volumes: &cargo_volumes
+      - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
+      - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
     commands:
       - rustup component add rustfmt clippy
       - cargo fmt --check
@@ -25,6 +31,8 @@ steps:
   - name: bundle
     image: rust:1-bookworm
     depends_on: [check]
+    environment: *cargo_env
+    volumes: *cargo_volumes
     when:
       - event: push
       - event: pull_request
