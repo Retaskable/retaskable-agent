@@ -1,6 +1,6 @@
-//! The two small text helpers every engine's reader needs, following `shared/text.ts` in
-//! Retaskable.com. Previously duplicated verbatim across `summarize.rs`, `claude.rs`, `pi.rs` and
-//! `cursor::result`.
+//! Small text helpers shared across the codebase, following `shared/text.ts` in Retaskable.com.
+//! Previously duplicated verbatim across `summarize.rs`, `claude.rs`, `pi.rs`, `cursor::result`
+//! and `release_notes::group`.
 
 /// `s`, cut to at most `n` chars, with a trailing `…` when it was longer (`clip`).
 pub fn clip(s: &str, n: usize) -> String {
@@ -23,6 +23,13 @@ pub fn tail(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// `s` with runs of whitespace (including newlines) collapsed to single spaces, then [`clip`]ped
+/// to at most `n` chars. Every engine's reader uses this to fit a tool call's argument onto one
+/// transcript line.
+pub fn collapse_and_clip(s: &str, n: usize) -> String {
+    clip(&s.split_whitespace().collect::<Vec<_>>().join(" "), n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,5 +44,11 @@ mod tests {
     fn tail_keeps_only_the_last_n_characters() {
         assert_eq!(tail("hello world", 5), "world");
         assert_eq!(tail("hi", 10), "hi");
+    }
+
+    #[test]
+    fn collapse_and_clip_joins_whitespace_runs_before_clipping() {
+        assert_eq!(collapse_and_clip("hello\n  world", 20), "hello world");
+        assert_eq!(collapse_and_clip("hello   world", 7), "hello …");
     }
 }

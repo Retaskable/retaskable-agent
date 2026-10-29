@@ -16,7 +16,7 @@ use super::engine::{
     Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
     signed_out_text,
 };
-use super::text::tail;
+use crate::text::tail;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.

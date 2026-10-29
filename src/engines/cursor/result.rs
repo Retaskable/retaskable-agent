@@ -1,7 +1,7 @@
 //! Turning `cursor-agent`'s own stream-json lines into either a session's structured result
 //! (`extractJson`/`checkSchema`, shared with pi's own reader via [`super::super::json_result`])
 //! or a live-transcript line (`summarizeCursor`, engines.md section 8). Re-exports
-//! [`super::super::text::tail`] for [`super::reader`], which needs it too.
+//! [`crate::text::tail`] for [`super::reader`], which needs it too.
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use crate::engines::engine::{EventKind, SessionEvent, Tokens};
 pub(super) use crate::engines::json_result::{check_schema, extract_json};
-use crate::engines::text::clip;
-pub(super) use crate::engines::text::tail;
+pub(super) use crate::text::tail;
+use crate::text::{clip, collapse_and_clip};
 
 const TOOLS: [(&str, &str); 6] = [
     ("shellToolCall", "Bash"),
@@ -54,8 +54,7 @@ fn tool_text(ev: &Value) -> String {
     if arg.is_empty() {
         name
     } else {
-        let collapsed = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        format!("{name}: {}", clip(&collapsed, 160))
+        format!("{name}: {}", collapse_and_clip(arg, 160))
     }
 }
 

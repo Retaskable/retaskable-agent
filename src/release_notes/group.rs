@@ -7,6 +7,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
 use crate::backlog::{Draft, Item, ItemStatus};
+use crate::text::clip;
 
 use super::model::{Commit, Counts, Entry, ItemRef, MergedPr, PrRef, Section, SpecLink};
 
@@ -287,17 +288,6 @@ pub(super) fn title_of(entry: &Entry) -> String {
         Some(item) => format!("{} {}", item.id, item.title),
         None => entry.fallback.clone(),
     }
-}
-
-/// `cut()` (shared/text.ts): truncates to `n` characters (dropping the last if it would split a
-/// pair), plus `"…"`. Rust `char`s are already whole Unicode scalar values, so this is a plain
-/// char-count truncation — there is no surrogate pair to protect against.
-pub fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    let kept: String = s.chars().take(n.saturating_sub(1)).collect();
-    format!("{kept}…")
 }
 
 /// The JSON "facts" the prompt gives the model: every user-facing section, entries beyond
@@ -679,18 +669,6 @@ mod tests {
         );
         let sections = grouped(&[p], &[], &items, &HashMap::new());
         assert!(for_users(&sections).is_empty());
-    }
-
-    // clip
-
-    #[test]
-    fn clip_leaves_short_text_alone() {
-        assert_eq!(clip("hello", 10), "hello");
-    }
-
-    #[test]
-    fn clip_truncates_and_adds_an_ellipsis() {
-        assert_eq!(clip("hello world", 5), "hell…");
     }
 
     // facts
