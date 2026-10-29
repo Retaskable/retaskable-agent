@@ -1,10 +1,11 @@
 //! Reporting Retaskable's own bugs (docs/specs/bug-reports.md section 3.2; `agent/src/bugReport.ts`
 //! is the ground truth): when the triager names a bug in Retaskable itself rather than the
-//! project, this is what scrubs the project, its people and its computer out of it before it
-//! ever leaves this one. Sending the result over the cloud link, the hub's consent, and deduping
-//! it against what the item already reported are the orchestrator's, once something runs the
-//! triager at all (see the module doc on [`crate::triage`]); [`prepare_bug_report`] is as far as
-//! this slice goes.
+//! project, this is what scrubs the project, its people and its computer out of it, and decides
+//! whether it's worth sending, before it ever leaves this one. [`decide_bug_report`] covers
+//! `reportBug` up to the message it would send; actually sending it over the cloud link (reading
+//! the hub's own `bug_reports { on, known }` and answering with `reportedBug`, writing the
+//! signature it sent so a later failure isn't retried) is the orchestrator's, once something runs
+//! the triager at all (see the module doc on [`crate::triage`]).
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -13,7 +14,7 @@ use regex::{Match, Regex, RegexBuilder};
 use crate::config::ProjectConfig;
 use crate::link::{machine_name, truncate};
 
-use super::RetaskableBug;
+use super::{KnownBug, RetaskableBug};
 
 /// bug-reports.md section 3.2: the limits a signature, a title and the details are cut to.
 pub const BUG_SIGNATURE_MAX: usize = 200;
@@ -65,6 +66,57 @@ pub fn prepare_bug_report(
         signature,
         title,
         details,
+    })
+}
+
+/// A scrubbed, signed bug the orchestrator has decided is worth sending: everything `bug_report`
+/// needs besides its `ref` and `version`, which are the orchestrator's to attach (`BugReportMessage`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BugReportMessage {
+    pub signature: String,
+    pub title: String,
+    pub details: String,
+    /// The id of a [`KnownBug`] this is the same bug as, worded differently, only when it's one
+    /// the hub actually listed.
+    pub same_as: Option<String>,
+}
+
+/// Decides whether a `retaskableBug` the triager named is worth sending (06.9 bullet 18,
+/// `bugReport.ts`'s `reportBug` up to the message it builds): `None` when there's no bug, the
+/// project's hub hasn't said its person agreed (`consent_on`), nothing's left once it's scrubbed
+/// ([`prepare_bug_report`] returning `None`), or this exact signature is what `already_reported`
+/// (the item's own `reportedBug`) already sent — the same bug is reported once per item, answered
+/// or not, so a retry never sends it again. `known_bugs` is the hub's own `bug_reports.known`;
+/// `bug.same_as` only carries through when it names one of them, same as `reportBug`'s
+/// `deps.known().find((b) => b.id === bug.sameAs)`.
+pub fn decide_bug_report(
+    bug: Option<&RetaskableBug>,
+    needs_human_reason: Option<&str>,
+    words: &[ScrubWord],
+    consent_on: bool,
+    already_reported: Option<&str>,
+    known_bugs: &[KnownBug],
+) -> Option<BugReportMessage> {
+    let bug = bug?;
+    if !consent_on {
+        return None;
+    }
+    let prepared = prepare_bug_report(bug, needs_human_reason, words)?;
+    if already_reported == Some(prepared.signature.as_str()) {
+        return None;
+    }
+    let same_as = bug
+        .same_as
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| known_bugs.iter().find(|b| b.id == id))
+        .map(|b| b.id.clone());
+    Some(BugReportMessage {
+        signature: prepared.signature,
+        title: prepared.title,
+        details: prepared.details,
+        same_as,
     })
 }
 
@@ -458,6 +510,7 @@ mod tests {
         RetaskableBug {
             title: "Retaskable didn't fill {{codeLimits}} for void-miner".to_string(),
             details: "In C:\\code\\void-miner\\prompts it stopped on acme/void-miner's main.".to_string(),
+            same_as: None,
         }
     }
 
@@ -495,7 +548,64 @@ mod tests {
         let bug = RetaskableBug {
             title: "   ".to_string(),
             details: String::new(),
+            same_as: None,
         };
         assert!(prepare_bug_report(&bug, Some("reason"), &[]).is_none());
+    }
+
+    // decide_bug_report
+
+    #[test]
+    fn nothing_with_no_bug_no_consent_or_nothing_left_once_scrubbed() {
+        assert!(decide_bug_report(None, Some("reason"), &harness_words(), true, None, &[]).is_none());
+        assert!(decide_bug_report(Some(&bug()), Some("reason"), &harness_words(), false, None, &[]).is_none());
+        let empty = RetaskableBug {
+            title: " ".to_string(),
+            details: String::new(),
+            same_as: None,
+        };
+        assert!(decide_bug_report(Some(&empty), Some("reason"), &harness_words(), true, None, &[]).is_none());
+    }
+
+    #[test]
+    fn nothing_when_this_items_already_reported_bug_has_the_same_signature() {
+        let reason = "Prompt variable {{codeLimits}} not provided";
+        assert!(decide_bug_report(Some(&bug()), Some(reason), &harness_words(), true, Some(reason), &[]).is_none());
+    }
+
+    #[test]
+    fn a_decided_report_carries_through_a_same_as_the_hub_actually_listed() {
+        let mut named = bug();
+        named.same_as = Some("retaskable-bug-abc123".to_string());
+        let known = [KnownBug {
+            id: "retaskable-bug-abc123".to_string(),
+            title: "A known bug".to_string(),
+        }];
+        let decided = decide_bug_report(Some(&named), Some("reason"), &harness_words(), true, None, &known).unwrap();
+        assert_eq!(decided.same_as, Some("retaskable-bug-abc123".to_string()));
+    }
+
+    #[test]
+    fn a_same_as_the_hub_never_listed_is_dropped() {
+        let mut named = bug();
+        named.same_as = Some("retaskable-bug-not-listed".to_string());
+        let decided = decide_bug_report(Some(&named), Some("reason"), &harness_words(), true, None, &[]).unwrap();
+        assert_eq!(decided.same_as, None);
+    }
+
+    #[test]
+    fn decides_to_send_the_scrubbed_bug_when_nothing_blocks_it() {
+        let decided = decide_bug_report(
+            Some(&bug()),
+            Some("Prompt variable {{codeLimits}} not provided"),
+            &harness_words(),
+            true,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(decided.signature, "Prompt variable {{codeLimits}} not provided");
+        assert_eq!(decided.title, "Retaskable didn't fill {{codeLimits}} for <repo>");
+        assert_eq!(decided.same_as, None);
     }
 }

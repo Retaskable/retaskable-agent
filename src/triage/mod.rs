@@ -9,13 +9,15 @@
 //! item so far, nothing notices a `needs_human` item and runs this on it; [`crate::commands`]'s
 //! Continue, Start over and Skip (the buttons this decision would be carried out through) still
 //! need the orchestrator loop and lanes too. Also still missing: capping this at 2 automatic
-//! decisions a slice, reporting `claudeOnIt` while it's thinking, and sending a scrubbed
-//! [`bug_report::PreparedBugReport`] over the cloud link and deduping it against what the item
-//! already reported; no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names
-//! either (the prompt tells the session to run those itself). A caller puts this together the
-//! same way as [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`]
-//! from the item's own state, build a [`Triager`] with the project's words, the item's lane (or
-//! the base checkout) and `budget.reviewerUsd`, and run [`decide`] with
+//! decisions a slice, reporting `claudeOnIt` while it's thinking, the top-tier second look on a
+//! `human` decision with a `suggest`, and actually sending a decided
+//! [`bug_report::BugReportMessage`] over the cloud link (reading the hub's own consent and known
+//! bugs to decide one with [`bug_report::decide_bug_report`] is as far as this slice goes); no
+//! `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the prompt
+//! tells the session to run those itself). A caller puts this together the same way as
+//! [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`] from the
+//! item's own state, build a [`Triager`] with the project's words, the item's lane (or the base
+//! checkout) and `budget.reviewerUsd`, and run [`decide`] with
 //! [`crate::engines::runner::run_session`].
 pub mod bug_report;
 
@@ -50,6 +52,17 @@ pub struct TriageContext {
     pub automatic_decisions: u32,
     /// Where this item's session transcripts are, for the triager to read if it wants to.
     pub transcripts_dir: Option<String>,
+    /// Bugs already on Retaskable's board that the hub listed (`bug_reports`' `known`), so the
+    /// triager can name one in `retaskableBug.sameAs` when this is the same bug worded
+    /// differently (06.9 bullet 18).
+    pub known_bugs: Vec<KnownBug>,
+}
+
+/// One bug already reported, as the hub's `bug_reports` message listed it.
+#[derive(Debug, Clone)]
+pub struct KnownBug {
+    pub id: String,
+    pub title: String,
 }
 
 /// `decision` (06.9 bullet 2): one of the five the orchestrator carries out the same way as the
@@ -75,11 +88,15 @@ pub enum TriageButton {
 }
 
 /// `retaskableBug` (06.9 bullet 18): set only when what went wrong is Retaskable's own, never the
-/// project's. [`bug_report::prepare_bug_report`] scrubs it before it ever leaves this computer.
+/// project's. [`bug_report::decide_bug_report`] scrubs it and decides whether to send it before it
+/// ever leaves this computer.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RetaskableBug {
     pub title: String,
     pub details: String,
+    /// The id of a [`KnownBug`] this is the same bug as, worded differently.
+    #[serde(default, rename = "sameAs")]
+    pub same_as: Option<String>,
 }
 
 /// The structured answer a triager session returns (06.9 bullet 2).
@@ -112,7 +129,8 @@ pub fn triage_result_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "title": { "type": "string" },
-                    "details": { "type": "string" }
+                    "details": { "type": "string" },
+                    "sameAs": { "type": "string" }
                 },
                 "required": ["title", "details"]
             }
@@ -142,6 +160,7 @@ pub fn build_prompt(
         "automaticDecisionsUsed": ctx.automatic_decisions,
         "maxAutomaticDecisions": max_automatic_decisions,
         "transcriptsDir": ctx.transcripts_dir,
+        "knownBugs": ctx.known_bugs.iter().map(|b| json!({ "id": b.id, "title": b.title })).collect::<Vec<_>>(),
     }))
     .context("rendering triage context as json")?;
     render_prompt(
@@ -286,6 +305,10 @@ mod tests {
             has_session_to_continue: true,
             automatic_decisions: 1,
             transcripts_dir: Some(".retaskable/projects/x/runs/9".to_string()),
+            known_bugs: vec![KnownBug {
+                id: "retaskable-bug-abc123".to_string(),
+                title: "A bug already on the board".to_string(),
+            }],
         }
     }
 
@@ -300,6 +323,8 @@ mod tests {
         assert!(prompt.contains("unclear which library to add"));
         assert!(prompt.contains("\"automaticDecisionsUsed\": 1"));
         assert!(prompt.contains("\"maxAutomaticDecisions\": 2"));
+        assert!(prompt.contains("retaskable-bug-abc123"));
+        assert!(prompt.contains("A bug already on the board"));
     }
 
     #[test]
@@ -372,6 +397,25 @@ mod tests {
         let result = decided.result.unwrap();
         assert_eq!(result.decision, TriageDecision::Human);
         assert_eq!(result.suggest, Some(TriageButton::Skip));
+    }
+
+    #[tokio::test]
+    async fn decide_reads_a_retaskable_bug_naming_a_known_one_its_the_same_as() {
+        let answer = json!({
+            "decision": "human",
+            "reason": "A prompt variable never got filled.",
+            "retaskableBug": {
+                "title": "A variable isn't filled",
+                "details": "Some prompt is missing a value.",
+                "sameAs": "retaskable-bug-abc123",
+            },
+        });
+        let decided = decide(&triager(), &ctx(), |_| async {
+            Ok(result(true, "success", Some(answer), None))
+        })
+        .await;
+        let bug = decided.result.unwrap().retaskable_bug.unwrap();
+        assert_eq!(bug.same_as, Some("retaskable-bug-abc123".to_string()));
     }
 
     #[tokio::test]
