@@ -1,0 +1,34 @@
+# The repo's checks on Woodpecker (ci.jcnash.dnsalias.com), on Linux: every pull request and every push to main.
+# Woodpecker reports to GitHub as the `ci/woodpecker/pr/ci` status, which Retaskable's agent reads with the other
+# checks. Windows and macOS run on GitHub Actions only once a change is on main (.github/workflows/ci.yml), so a
+# pull request waits for no GitHub minutes.
+
+when:
+  - event: pull_request
+    branch: main
+  - event: push
+    branch: main
+
+steps:
+  - name: check
+    image: rust:1-bookworm
+    environment:
+      CARGO_TERM_COLOR: always
+    commands:
+      - rustup component add rustfmt clippy
+      - cargo fmt --check
+      - cargo clippy --all-targets -- -D warnings
+      - cargo test
+
+  # installers/03-the-bundle-agent-bundle.md sections 3.9 and 3.10: linux-x64 built and start-checked. On a push to
+  # main, or a pull request that changes how it's built.
+  - name: bundle
+    image: rust:1-bookworm
+    depends_on: [check]
+    when:
+      - event: push
+      - event: pull_request
+        path:
+          include: [src/bin/bundle.rs, "src/release*.rs", "src/release*/**", Cargo.toml, Cargo.lock, .woodpecker/ci.yaml]
+    commands:
+      - cargo run --release --bin bundle
