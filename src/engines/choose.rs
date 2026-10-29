@@ -2,6 +2,8 @@
 //! section 3.1), following `agent/src/engines/choose.ts` in Retaskable.com: the computer's own
 //! `engineChoice`, a project's older `engines.default`/`roles` while the computer hasn't saved its own
 //! choice yet (`legacyChoice`), and `engineChoice.lanes`' per-lane override for the implementer's work.
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 
 use crate::config::{Engine, EngineChoiceConfig, LaneEngine, RoleEngines};
@@ -60,6 +62,7 @@ pub fn lane_engine(cfg: &EngineChoiceConfig, lane: u32) -> Option<Engine> {
     match cfg.lanes.get(index as usize)? {
         LaneEngine::Claude => Some(Engine::Claude),
         LaneEngine::Cursor => Some(Engine::Cursor),
+        LaneEngine::Codex => Some(Engine::Codex),
         LaneEngine::Default => None,
     }
 }
@@ -89,6 +92,20 @@ pub fn engine_for(cfg: &EngineChoiceConfig, project_engines: Option<&Value>, rol
     role_override(&active.roles, role)
         .or(active.default)
         .unwrap_or(Engine::Claude)
+}
+
+/// The lanes (1-based, of `lanes`) whose implementer work runs on another engine than Claude Code:
+/// Cursor, pi or Codex (the local model is Claude Code). They aren't held back by lane scaling, nor
+/// counted against it, since the 5-hour window is Claude Code's (`exempt` in `orchestratorSchedule.ts`).
+pub fn other_engine_lanes(cfg: &EngineChoiceConfig, project_engines: Option<&Value>, lanes: u32) -> BTreeSet<u32> {
+    (1..=lanes)
+        .filter(|&k| {
+            !matches!(
+                engine_for(cfg, project_engines, Role::Implementer, Some(k)),
+                Engine::Claude | Engine::Local
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -213,6 +230,34 @@ mod tests {
         cfg.lanes = vec![LaneEngine::Default, LaneEngine::Claude];
         assert_eq!(engine_for(&cfg, None, Role::Implementer, Some(1)), Engine::Cursor);
         assert_eq!(engine_for(&cfg, None, Role::Implementer, Some(2)), Engine::Claude);
+    }
+
+    #[test]
+    fn lanes_on_another_engine_than_claude_code_are_the_ones_lane_scaling_leaves_alone() {
+        let mut cfg = with_default(Engine::Claude);
+        cfg.lanes = vec![
+            LaneEngine::Claude,
+            LaneEngine::Cursor,
+            LaneEngine::Codex,
+            LaneEngine::Default,
+        ];
+        assert_eq!(other_engine_lanes(&cfg, None, 4), BTreeSet::from([2, 3]));
+        cfg.roles.implementer = Some(Engine::Pi);
+        assert_eq!(other_engine_lanes(&cfg, None, 4), BTreeSet::from([2, 3, 4]));
+        cfg.roles.implementer = Some(Engine::Local);
+        assert_eq!(other_engine_lanes(&cfg, None, 4), BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn codex_is_picked_by_default_role_and_lane_and_never_falls_back_to_claude() {
+        let mut cfg = with_default(Engine::Codex);
+        assert_eq!(engine_for(&cfg, None, Role::Reviewer, None), Engine::Codex);
+        cfg.roles.planner = Some(Engine::Claude);
+        assert_eq!(engine_for(&cfg, None, Role::Planner, None), Engine::Claude);
+        let mut lanes = with_default(Engine::Claude);
+        lanes.lanes = vec![LaneEngine::Claude, LaneEngine::Codex];
+        assert_eq!(engine_for(&lanes, None, Role::Implementer, Some(2)), Engine::Codex);
+        assert_eq!(engine_for(&lanes, None, Role::Implementer, Some(1)), Engine::Claude);
     }
 
     #[test]

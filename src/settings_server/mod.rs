@@ -413,14 +413,14 @@ impl SettingsServer {
         Ok(())
     }
 
-    /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi or local) and, per
+    /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi, codex or local) and, per
     /// kind of work ..., the default or one of the four", plus the per-lane override below it.
     /// `roles` and `lanes` entries are always present in the request (the page's one "Engines"
     /// save sends the whole group), so this both parses and validates them.
     fn validate_engine_choice(&self, update: &EngineChoiceUpdate) -> Result<config::EngineChoiceConfig, SaveError> {
         self.env_gate("RETASKABLE_ENGINES")?;
         let default = config::parse_engine(&update.default)
-            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi or local.".to_string()))?;
+            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi, codex or local.".to_string()))?;
         let roles = config::RoleEngines {
             planner: parse_role_engine(&update.roles.planner)?,
             implementer: parse_role_engine(&update.roles.implementer)?,
@@ -430,7 +430,7 @@ impl SettingsServer {
             writer: parse_role_engine(&update.roles.writer)?,
         };
         let lanes = config::lanes_of(&update.lanes)
-            .ok_or_else(|| SaveError::Invalid("Lanes must be claude, cursor or default.".to_string()))?;
+            .ok_or_else(|| SaveError::Invalid("Lanes must be claude, cursor, codex or default.".to_string()))?;
         Ok(config::EngineChoiceConfig {
             default: Some(default),
             roles,
@@ -571,7 +571,7 @@ fn parse_role_engine(value: &str) -> Result<Option<config::Engine>, SaveError> {
     }
     config::parse_engine(trimmed)
         .map(Some)
-        .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi, local or default.".to_string()))
+        .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi, codex, local or default.".to_string()))
 }
 
 fn save_error_response(e: SaveError) -> Response {

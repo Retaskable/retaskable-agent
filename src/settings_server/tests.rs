@@ -886,6 +886,23 @@ async fn saving_the_engines_lane_overrides_validates_them_and_round_trips() {
 
     let settings_value = signed_in_settings(&settings).await;
     assert_eq!(settings_value["engineChoice"]["lanes"], json!(["claude", "cursor"]));
+
+    // A lane can be set to Codex, and the refusal names it among the picks.
+    let codex = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "engineChoice": { "default": "codex", "roles": { "review": "codex" }, "lanes": ["codex", "default"] } }),
+    )
+    .await;
+    assert_eq!(codex.status(), StatusCode::OK);
+    let saved = config::load(dir.path()).unwrap().machine.engine_choice;
+    assert_eq!(saved.default, Some(config::Engine::Codex));
+    assert_eq!(saved.roles.review, Some(config::Engine::Codex));
+    assert_eq!(saved.lanes, vec![config::LaneEngine::Codex]);
+    let settings_value = signed_in_settings(&settings).await;
+    assert_eq!(settings_value["engineChoice"]["default"], json!("codex"));
+    assert_eq!(settings_value["engineChoice"]["lanes"], json!(["codex"]));
 }
 
 #[tokio::test]

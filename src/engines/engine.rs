@@ -16,6 +16,7 @@ pub enum EngineId {
     Claude,
     Cursor,
     Pi,
+    Codex,
 }
 
 impl std::fmt::Display for EngineId {
@@ -24,6 +25,7 @@ impl std::fmt::Display for EngineId {
             EngineId::Claude => "claude",
             EngineId::Cursor => "cursor",
             EngineId::Pi => "pi",
+            EngineId::Codex => "codex",
         })
     }
 }
@@ -34,6 +36,7 @@ pub fn engine_id_from_str(id: Option<&str>) -> EngineId {
     match id {
         Some("cursor") => EngineId::Cursor,
         Some("pi") => EngineId::Pi,
+        Some("codex") => EngineId::Codex,
         _ => EngineId::Claude,
     }
 }
@@ -313,6 +316,11 @@ pub trait Engine: Send + Sync {
     /// Turns one stored transcript line back into events, for reading a run back
     /// (`summarize(ev, at)` in `engine.ts`; `readTranscripts`).
     fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent>;
+    /// Its process can linger after the result (a sandboxed child still running), so the runner ends
+    /// it a moment after one, and the result stands (`endsOnResult`; Codex).
+    fn ends_on_result(&self) -> bool {
+        false
+    }
 }
 
 /// A `SessionSpec` test fixture shared by every engine module's tests: cloud, ephemeral, no
@@ -425,11 +433,13 @@ mod tests {
         assert_eq!(EngineId::Claude.to_string(), "claude");
         assert_eq!(EngineId::Cursor.to_string(), "cursor");
         assert_eq!(EngineId::Pi.to_string(), "pi");
+        assert_eq!(EngineId::Codex.to_string(), "codex");
     }
 
     #[test]
     fn engine_id_from_str_reads_pi_and_falls_back_to_claude() {
         assert_eq!(engine_id_from_str(Some("pi")), EngineId::Pi);
+        assert_eq!(engine_id_from_str(Some("codex")), EngineId::Codex);
         assert_eq!(engine_id_from_str(Some("cursor")), EngineId::Cursor);
         assert_eq!(engine_id_from_str(Some("steam")), EngineId::Claude);
         assert_eq!(engine_id_from_str(None), EngineId::Claude);

@@ -7,6 +7,7 @@
 //! only makes the write side of the format `transcripts.rs` already reads real.
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -14,10 +15,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::claude::ClaudeEngine;
+use super::codex::CodexEngine;
 use super::cursor::CursorEngine;
 use super::engine::{Engine, EngineId, SessionResult, SessionSpec};
 use super::pi::PiEngine;
 use crate::telemetry::events::now_ms;
+
+/// How long an `ends_on_result` engine's process has to exit on its own after its result.
+const END_AFTER_RESULT: Duration = Duration::from_secs(5);
 
 /// `engineOf(id)`: the `Engine` a session's `SessionSpec.engine` names; missing means Claude Code.
 pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
@@ -25,6 +30,7 @@ pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
         EngineId::Claude => Ok(Box::new(ClaudeEngine)),
         EngineId::Cursor => Ok(Box::new(CursorEngine)),
         EngineId::Pi => Ok(Box::new(PiEngine)),
+        EngineId::Codex => Ok(Box::new(CodexEngine)),
     }
 }
 
@@ -75,6 +81,8 @@ struct SpawnSpec<'a> {
     cwd: &'a Path,
     prompt: &'a str,
     known_session_id: &'a str,
+    /// Ends the process tree this long after a result, when the engine's process can linger.
+    end_after_result: Option<Duration>,
 }
 
 /// Spawns `spec.bin` with `spec.args`, feeds `spec.prompt` in on stdin, and reads the engine's
@@ -110,15 +118,36 @@ async fn spawn_and_read(
     });
 
     let stdout = child.stdout.take().context("session has no stdout")?;
+    let pid = child.id();
     let mut lines = BufReader::new(stdout).lines();
     let mut result = None;
-    while let Some(line) = lines.next_line().await.context("reading the session's output")? {
+    let mut ends_at = None;
+    loop {
+        let next = match ends_at {
+            Some(at) => match tokio::time::timeout_at(at, lines.next_line()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    if let Some(pid) = pid {
+                        let _ = crate::lanes::kill_tree(pid);
+                    }
+                    let _ = child.start_kill();
+                    break;
+                }
+            },
+            None => lines.next_line().await,
+        };
+        let Some(line) = next.context("reading the session's output")? else {
+            break;
+        };
         if let Some(file) = sink.as_mut() {
             use std::io::Write as _;
             let _ = writeln!(file, "{line}");
         }
         if let Some(r) = reader.line(&line, spec.known_session_id) {
             result = Some(r);
+            if let Some(wait) = spec.end_after_result {
+                ends_at.get_or_insert_with(|| tokio::time::Instant::now() + wait);
+            }
         }
     }
 
@@ -154,6 +183,7 @@ pub async fn run_session(
             cwd: &spec.cwd,
             prompt: &engine.prompt(spec),
             known_session_id,
+            end_after_result: engine.ends_on_result().then_some(END_AFTER_RESULT),
         },
         engine.reader(spec),
         file,
@@ -200,6 +230,7 @@ mod tests {
                 cwd: dir,
                 prompt: "hi",
                 known_session_id: "known",
+                end_after_result: None,
             },
             Box::new(SessionReader::new(false)),
             None,
@@ -253,6 +284,80 @@ mod tests {
     #[test]
     fn engine_of_resolves_the_pi_engine_by_id() {
         assert_eq!(engine_of(Some(EngineId::Pi)).unwrap().id(), EngineId::Pi);
+    }
+
+    #[test]
+    fn engine_of_resolves_the_codex_engine_by_id() {
+        assert_eq!(engine_of(Some(EngineId::Codex)).unwrap().id(), EngineId::Codex);
+    }
+
+    /// A command that prints `out`'s contents and then lingers for 30 seconds, like a Codex whose
+    /// sandboxed child is still running after the turn is done.
+    #[cfg(windows)]
+    fn print_then_linger_command(file: &Path) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/C".to_string(),
+                format!("type {} & ping -n 30 127.0.0.1 >nul", file.display()),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn print_then_linger_command(file: &Path) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("sh"),
+            vec!["-c".to_string(), format!("cat '{}'; sleep 30", file.display())],
+        )
+    }
+
+    #[tokio::test]
+    async fn a_process_that_lingers_after_its_result_is_ended_and_the_result_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("codex.jsonl");
+        std::fs::write(
+            &out,
+            [
+                json!({"type": "thread.started", "thread_id": "t-linger"}),
+                json!({"type": "item.completed", "item": {"type": "agent_message", "text": "```json
+{\"ok\":true}
+```"}}),
+                json!({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            ]
+            .iter()
+            .map(|line| {
+                format!(
+                    "{line}
+"
+                )
+            })
+            .collect::<String>(),
+        )
+        .unwrap();
+        let (bin, args) = print_then_linger_command(&out);
+        let started = std::time::Instant::now();
+        let result = spawn_and_read(
+            SpawnSpec {
+                bin: &bin,
+                args: &args,
+                envs: &[],
+                cwd: dir.path(),
+                prompt: "hi",
+                known_session_id: "known",
+                end_after_result: Some(Duration::from_millis(300)),
+            },
+            Box::new(crate::engines::codex::CodexReader::new(json!({"type": "object"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "it didn't wait out the lingering process"
+        );
+        assert!(result.ok, "{:?}", result.error);
+        assert_eq!(result.structured, Some(json!({"ok": true})));
     }
 
     /// Stands in for an engine's own `args`/`env`/`prompt`/`reader`: whatever `args` it's given is
@@ -353,6 +458,7 @@ mod tests {
                 cwd: dir.path(),
                 prompt: "hi",
                 known_session_id: "known",
+                end_after_result: None,
             },
             Box::new(SessionReader::new(false)),
             Some(file),

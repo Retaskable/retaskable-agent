@@ -2,11 +2,12 @@
 //! following docs/specs/engines/02-the-engine-layer.md and `agent/src/engines/` in Retaskable.com
 //! (the ground truth this is porting). The runner stays one engine-neutral piece (`runner.rs`);
 //! what differs per tool sits behind the `Engine` interface (`engine.rs`), with Claude Code
-//! (`claude.rs`), Cursor (`cursor.rs`) and pi (`pi.rs`) all built, and which one a session uses
+//! (`claude.rs`), Cursor (`cursor.rs`), pi (`pi.rs`) and Codex (`codex.rs`) all built, and which one a session uses
 //! looked up by `choose::engine_for` (docs/specs/engines/03-choosing-the-engine.md) — the
 //! orchestrator/pool that actually spawns sessions through this is still a later item.
 pub mod choose;
 pub mod claude;
+pub mod codex;
 pub mod cursor;
 pub mod engine;
 mod json_result;
@@ -15,8 +16,9 @@ pub mod runner;
 pub mod summarize;
 pub mod transcripts;
 
-pub use choose::{Role, engine_for, has_lane_engines, lane_engine};
+pub use choose::{Role, engine_for, has_lane_engines, lane_engine, other_engine_lanes};
 pub use claude::{resolve_claude, resolve_claude_on_path};
+pub use codex::{resolve_codex, resolve_codex_on_path};
 pub use engine::{
     Engine, EngineId, EngineReader, EphemeralSessionConfig, EventKind, SessionEvent, SessionResult, SessionSpec,
     SessionStart, describe_failure, engine_id_from_str, ephemeral_readonly_spec, is_signed_out, signed_out_text,
