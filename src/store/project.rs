@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-use super::write_json_atomic;
-use crate::smoke::SmokeState;
+use super::SmokeState;
+use crate::fs_util::write_json_atomic;
 
 const STATE_FILE: &str = "state.json";
 
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn set_smoke_replaces_the_smoke_key_once_saved_and_reads_back_the_same_state() {
-        use crate::smoke::SmokeStatus;
+        use super::super::SmokeStatus;
 
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::load(dir.path()).unwrap();

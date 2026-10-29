@@ -16,10 +16,10 @@ use serde::Serialize;
 use super::SettingsServer;
 
 use crate::config::{self, Engine, EngineChoiceConfig, LocalModelConfig};
-use crate::connector::AgentView;
 use crate::engines::choose::{self, Role};
 use crate::setup_check::{SetupCheck, SetupChecks};
 use crate::store::MachineStore;
+use crate::view::AgentView;
 
 /// What the status is built from beyond the config files: the agent's own view of itself, when it
 /// started, and the latest setup checks (none until the first run finishes).

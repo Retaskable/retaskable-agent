@@ -16,6 +16,7 @@ use super::engine::{
     Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
     signed_out_text,
 };
+use super::resolve::resolve_claude;
 use crate::text::tail;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
@@ -37,44 +38,6 @@ const NO_DEPLOY_TOOLS: [&str; 8] = [
 
 /// `claude.ts` `COMPACT_AT`: how many tokens of context Claude Code is told to auto-compact at.
 const COMPACT_AT: &str = "200000";
-
-/// `resolveClaude()`: finds the real `claude` binary to run, following docs/specs/agent/
-/// 04-architecture.md's "Finding Claude" — on Windows the `claude` on PATH is an npm shim batch
-/// file, so this looks behind it for the `claude.exe` it wraps, since spawning a `.cmd` directly
-/// from a piped child process is unreliable. `RETASKABLE_CLAUDE` always wins when set.
-pub fn resolve_claude(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
-    if let Some(over) = env("RETASKABLE_CLAUDE") {
-        return Ok(PathBuf::from(over));
-    }
-    if !windows {
-        return Ok(PathBuf::from("claude"));
-    }
-    for dir in path_dirs {
-        let exe = dir.join("claude.exe");
-        if exe.is_file() {
-            return Ok(exe);
-        }
-        let shim = dir.join("claude.cmd");
-        if shim.is_file() {
-            let behind = dir
-                .join("node_modules")
-                .join("@anthropic-ai")
-                .join("claude-code")
-                .join("bin")
-                .join("claude.exe");
-            if behind.is_file() {
-                return Ok(behind);
-            }
-        }
-    }
-    anyhow::bail!("claude.exe wasn't found on PATH behind the npm shim. Set RETASKABLE_CLAUDE to its full path.")
-}
-
-/// `resolve_claude`, reading PATH itself the way the real agent does.
-pub fn resolve_claude_on_path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
-    let dirs = crate::env_path::path_dirs(&env);
-    resolve_claude(env, cfg!(windows), &dirs)
-}
 
 /// `sandboxSupported()`: Claude Code's own sandbox (04-architecture.md section 4.2) is built for
 /// macOS and Linux only; on native Windows a session runs unsandboxed, as before.

@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::backlog::Item;
 use crate::config::{CheckConfig, CodeGates, ProjectType};
-use crate::release_notes::{project_words, render_prompt};
+use crate::prompt::{project_words, render_prompt};
 
 /// `checksText` (agent/src/steps.ts): the prompt's bulleted list of a project's checks, one per
 /// line, or a line saying there are none.

@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
 
 use crate::config::ProjectType;
-use crate::release_notes::{project_words, render_prompt};
+use crate::prompt::{project_words, render_prompt};
 
 /// A user type the prompt names (`Audience`, shared/audiences.ts, trimmed to what the prompt shows):
 /// the full audiences book isn't ported yet.

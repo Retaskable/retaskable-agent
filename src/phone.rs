@@ -121,7 +121,7 @@ pub fn mark_warned(file: &Path, serial: &str) -> Result<()> {
         return Ok(());
     }
     warned.push(serial.to_string());
-    crate::store::write_json_atomic(file, &serde_json::json!({ "warned": warned }), false)
+    crate::fs_util::write_json_atomic(file, &serde_json::json!({ "warned": warned }), false)
 }
 
 /// Whether a `phone_play` request for `serial` may proceed (section 4): `serial` must be one of

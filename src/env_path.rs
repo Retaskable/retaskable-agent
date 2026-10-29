@@ -1,6 +1,5 @@
 //! Reading `PATH` the way every `resolve_*_on_path` / `find_*_on_path` lookup does
-//! (`engines::resolve_claude_on_path`, `resolve_pi_on_path`, `setup_check::resolve_cursor_on_path`,
-//! `phone::find_adb_on_path`): split into directories, with a missing `PATH` reading as empty
+//! (the `engines::resolve` functions and `phone::find_adb_on_path`): split into directories, with a missing `PATH` reading as empty
 //! rather than erroring.
 use std::path::PathBuf;
 

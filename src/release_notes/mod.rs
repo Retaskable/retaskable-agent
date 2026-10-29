@@ -35,10 +35,7 @@ pub use model::{
     Commit, Counts, Entry, Highlight, ItemRef, MergedPr, NoteEntry, PrRef, Range, ReleaseNotesResult, Section,
     SpecLink, release_notes_result_schema,
 };
-pub use render::{
-    MAX_HIGHLIGHTS, ProjectWords, build_prompt, empty_note, front_matter_lines, local_day, markdown, note_markdown,
-    project_words, render_prompt,
-};
+pub use render::{MAX_HIGHLIGHTS, build_prompt, empty_note, front_matter_lines, local_day, markdown, note_markdown};
 pub use saved::{
     RELEASE_BODY_MAX_BYTES, RELEASE_TITLE_MAX, RELEASES_DIR, ReleaseFile, ReleaseOffer, SavedReleases, StoreRelease,
     offered_file, read_release_files, release_of_file,

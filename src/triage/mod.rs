@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
-use crate::release_notes::{project_words, render_prompt};
+use crate::prompt::{project_words, render_prompt};
 
 /// What the triager is given about the item (06.9 bullet 1): gathered by the caller from the
 /// item's own state, not read here.

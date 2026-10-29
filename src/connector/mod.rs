@@ -10,7 +10,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
@@ -25,13 +24,9 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 use crate::commands::{self, Seen};
-use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
-use crate::lane_pool::LaneSizes;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
-
-/// A callback that ends the process, to run restart (connector.ts's `exit`, `commands.ts`'s `restart`).
-pub type Exit = dyn Fn(i32) + Send + Sync;
+use crate::view::{AgentView, Exit};
 
 /// The name a socket that signs in with a token offers beside it (shared/cloud.ts `SUBPROTOCOL`).
 pub const SUBPROTOCOL: &str = "retaskable";
@@ -80,198 +75,6 @@ fn random() -> f64 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u8(0);
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
-}
-
-/// What the agent says about itself and its projects over the link.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentView {
-    /// `link::machine_name`.
-    pub machine: String,
-    /// This computer's tags (computer-tags.md section 3.1).
-    pub tags: Vec<String>,
-    /// The projects, the first first; none before Setup.
-    pub projects: Vec<ProjectView>,
-    /// This crate's version in a checkout, or a release build's `build.json` one
-    /// (installers/03-the-bundle-agent-bundle.md section 3.7).
-    pub version: String,
-    /// The computer's `lanes` and `choreLane`, for each project's lanes list.
-    pub lanes: u32,
-    pub chore_lane: Option<u32>,
-    /// Each project's lanes' disk use; a change sends that project's snapshot again.
-    pub lane_sizes: LaneSizes,
-    /// Each paused project's reason, Pause and Resume's (orchestrator.ts's `paused`/`pausedReason`); a change
-    /// sends that project's snapshot again, as a lane-size change does.
-    pub paused: PauseState,
-}
-
-/// A project's pause, Pause and Resume's (`{ computer: true }` only; the project-wide pause is the shared
-/// backlog's own, answered by retaskable.com without reaching a computer). Keyed and watched like
-/// [`LaneSizes`], since both resend a project's snapshot the same way.
-#[derive(Debug, Clone)]
-pub struct PauseState(Arc<watch::Sender<BTreeMap<String, String>>>);
-
-impl Default for PauseState {
-    fn default() -> Self {
-        Self(Arc::new(watch::Sender::new(BTreeMap::new())))
-    }
-}
-
-impl PartialEq for PauseState {
-    fn eq(&self, other: &Self) -> bool {
-        *self.0.borrow() == *other.0.borrow()
-    }
-}
-
-impl PauseState {
-    pub fn reason(&self, project: &str) -> Option<String> {
-        self.0.borrow().get(project).cloned()
-    }
-
-    /// `Some(reason)` pauses the project with that reason, `None` resumes it.
-    pub fn set(&self, project: &str, reason: Option<String>) {
-        self.0.send_if_modified(|all| match reason {
-            Some(reason) => {
-                if all.get(project) == Some(&reason) {
-                    return false;
-                }
-                all.insert(project.to_string(), reason);
-                true
-            }
-            None => all.remove(project).is_some(),
-        });
-    }
-
-    pub fn subscribe(&self) -> watch::Receiver<BTreeMap<String, String>> {
-        self.0.subscribe()
-    }
-}
-
-/// A project as its hub knows it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProjectView {
-    pub id: String,
-    pub github_repo: String,
-    pub backlog_path: String,
-    /// What the Shoot command needs to run `galleries::shoot` (`commands.rs`): the base checkout's
-    /// own clone, where its worktrees go, which branch is the base, and the project's own galleries.
-    pub repo_path: PathBuf,
-    pub worktrees_dir: PathBuf,
-    pub base_branch: String,
-    pub galleries: Vec<GalleryConfig>,
-}
-
-impl From<&ProjectConfig> for ProjectView {
-    fn from(p: &ProjectConfig) -> Self {
-        Self {
-            id: p.id_or_derived(),
-            github_repo: p.github_repo.clone(),
-            backlog_path: p.backlog_path.clone(),
-            repo_path: PathBuf::from(&p.repo_path),
-            worktrees_dir: PathBuf::from(&p.worktrees_dir),
-            base_branch: p.base_branch.clone(),
-            galleries: p.galleries.clone(),
-        }
-    }
-}
-
-impl AgentView {
-    /// The hubs to connect to: each project's by its id, or the agent's own ("") before the first project.
-    fn keys(&self) -> Vec<String> {
-        if self.projects.is_empty() {
-            vec![String::new()]
-        } else {
-            self.projects.iter().map(|p| p.id.clone()).collect()
-        }
-    }
-
-    /// `hello` (cloud.md section 5.3): the agent's version, OS and machine, and the project's repo and backlog, or
-    /// null until Setup is done.
-    pub fn hello(&self, project: &str) -> Value {
-        let repo = self
-            .projects
-            .iter()
-            .find(|p| p.id == project && !p.github_repo.is_empty());
-        json!({
-            "type": "hello",
-            "agentVersion": truncate(&self.version, 50),
-            "os": platform(),
-            "machine": truncate(&self.machine, 200),
-            "capabilities": [],
-            "policy": {},
-            "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
-            "tags": self.tags,
-        })
-    }
-
-    /// The project's snapshot (cloud.md section 5.2): every list the hub needs. Most are still
-    /// empty, since this agent runs no work yet, but a project's galleries report their real
-    /// status and last shoot (agent/09-web-ui.md section 9.2), and an orchestrator that says so.
-    pub fn snapshot(&self, project: &str, data_dir: &Path) -> Value {
-        let orchestrator = if project.is_empty() {
-            json!({ "status": "setup", "machine": self.machine })
-        } else {
-            let reason = self.paused.reason(project).unwrap_or_else(|| NO_WORK_YET.to_string());
-            json!({ "status": "paused", "machine": self.machine, "pausedReason": reason })
-        };
-        json!({
-            "type": "snapshot",
-            "state": {
-                "orchestrator": orchestrator,
-                "usage": {},
-                "milestones": [],
-                "items": [],
-                "sessions": [],
-                "lanes": self.lanes_list(project),
-                "mainPlaying": false,
-                "galleries": self.galleries_list(project, data_dir),
-                "drafts": [],
-                "asks": [],
-            },
-        })
-    }
-
-    /// The snapshot's galleries (tray/05.3-private-galleries-and-pictures-from.md section 5.3.1):
-    /// each of the project's own galleries' [`galleries::GalleryInfo`], none before Setup.
-    fn galleries_list(&self, project: &str, data_dir: &Path) -> Vec<Value> {
-        self.projects
-            .iter()
-            .find(|p| p.id == project)
-            .map(|p| {
-                p.galleries
-                    .iter()
-                    .map(|g| json!(galleries::info(data_dir, project, g)))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.
-    fn lanes_list(&self, project: &str) -> Vec<Value> {
-        (1..=self.lanes)
-            .map(|k| {
-                let mut lane = json!({ "k": k, "diskGb": self.lane_sizes.gb(project, k), "playing": false });
-                if Some(k) == self.chore_lane {
-                    lane["note"] = json!(CHORE_LANE_NOTE);
-                }
-                lane
-            })
-            .collect()
-    }
-}
-
-/// The chore lane's note in the lanes list (pageView.ts).
-pub const CHORE_LANE_NOTE: &str = "chore lane: playtest fixes first, then roadmap items, then chores";
-
-/// Why a project's orchestrator reads as paused.
-pub const NO_WORK_YET: &str = "This computer's agent doesn't run work yet.";
-
-/// `process.platform`'s name for this OS, as the hub keeps it.
-fn platform() -> &'static str {
-    match std::env::consts::OS {
-        "windows" => "win32",
-        "macos" => "darwin",
-        other => other,
-    }
 }
 
 /// One cloud's link: one access token shared by every project's connection, and those connections.

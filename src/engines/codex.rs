@@ -19,6 +19,7 @@ use super::engine::{
     Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart, Tokens,
 };
 use super::json_result::{check_schema, extract_json};
+use super::resolve::resolve_codex;
 use crate::text::{clip, tail};
 
 /// Codex's own thread id for each of our session ids, learnt from `thread.started`, so a resume can
@@ -37,28 +38,6 @@ fn thread_of(session_id: &str) -> Option<String> {
 
 /// `/usage limit|rate limit|\b429\b/i`: Codex's words for a limit, from a failed turn or a crash's stderr.
 static LIMIT_TEXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)usage limit|rate limit|\b429\b").unwrap());
-
-/// `resolveCodex()`: `RETASKABLE_CODEX` always wins; otherwise the first `codex[.exe]` on `PATH`,
-/// falling back to the bare name so a missing Codex is reported by the spawn itself.
-pub fn resolve_codex(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_CODEX") {
-        return PathBuf::from(over);
-    }
-    let name = if windows { "codex.exe" } else { "codex" };
-    for dir in path_dirs {
-        let exe = dir.join(name);
-        if exe.is_file() {
-            return exe;
-        }
-    }
-    PathBuf::from(name)
-}
-
-/// `resolve_codex`, reading `PATH` itself the way the real agent does.
-pub fn resolve_codex_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    resolve_codex(&env, cfg!(windows), &dirs)
-}
 
 /// The repo's git folder (the main checkout's, for a worktree): a writing session commits, and it's
 /// outside the lane (`gitDir`).
@@ -422,21 +401,6 @@ mod tests {
 
     fn schema() -> Value {
         json!({"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]})
-    }
-
-    #[test]
-    fn resolve_codex_prefers_the_env_then_the_path_then_the_bare_name() {
-        let env = |k: &str| (k == "RETASKABLE_CODEX").then(|| "C:/custom/codex.exe".to_string());
-        assert_eq!(resolve_codex(env, false, &[]), PathBuf::from("C:/custom/codex.exe"));
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("codex"), "").unwrap();
-        let none = |_: &str| None;
-        assert_eq!(
-            resolve_codex(none, false, &[dir.path().to_path_buf()]),
-            dir.path().join("codex")
-        );
-        assert_eq!(resolve_codex(none, false, &[]), PathBuf::from("codex"));
-        assert_eq!(resolve_codex(none, true, &[]), PathBuf::from("codex.exe"));
     }
 
     #[test]

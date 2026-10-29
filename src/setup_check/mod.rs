@@ -2,7 +2,7 @@
 //! before their first session, ported from `agent/src/setupCheck.ts` and
 //! `agent/src/engines/probe.ts`. This agent has no Node runtime to check, so `node` isn't
 //! ported; everything else (`git`, `ghInstalled`, `gh`, `claude`, `claudeSignedIn`, `cursor`) is.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -12,7 +12,9 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::engines::{resolve_claude_on_path, resolve_codex_on_path, resolve_pi_on_path};
+use crate::engines::resolve::{
+    resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
+};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -113,48 +115,6 @@ async fn run_opt(bin: Option<&Path>, args: &[&str]) -> Option<RunOutput> {
         Some(bin) => run(bin, args).await,
         None => None,
     }
-}
-
-/// `resolveCursor()` (`agent/src/engines/cursor.ts`): `RETASKABLE_CURSOR` always wins; otherwise
-/// the first `cursor-agent[.exe]` (or, on Windows, `cursor-agent.cmd`) on PATH, then
-/// `~/.local/bin`. Never errors (unlike `resolve_claude`): a missing Cursor isn't fatal, so this
-/// falls back to the bare name and lets the spawn itself report "not installed".
-pub fn resolve_cursor(
-    env: impl Fn(&str) -> Option<String>,
-    windows: bool,
-    path_dirs: &[PathBuf],
-    home: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_CURSOR") {
-        return PathBuf::from(over);
-    }
-    let name = if windows { "cursor-agent.exe" } else { "cursor-agent" };
-    for dir in path_dirs {
-        let exe = dir.join(name);
-        if exe.is_file() {
-            return exe;
-        }
-        if windows {
-            let shim = dir.join("cursor-agent.cmd");
-            if shim.is_file() {
-                return shim;
-            }
-        }
-    }
-    if let Some(home) = home {
-        let fallback = home.join(".local").join("bin").join(name);
-        if fallback.is_file() {
-            return fallback;
-        }
-    }
-    PathBuf::from(name)
-}
-
-/// `resolve_cursor`, reading PATH and the home directory itself the way the real agent does.
-pub fn resolve_cursor_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
-    resolve_cursor(&env, cfg!(windows), &dirs, home)
 }
 
 fn git_check(r: Option<&RunOutput>) -> SetupCheck {

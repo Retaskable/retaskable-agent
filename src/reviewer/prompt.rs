@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use crate::implementer::Playtest;
-use crate::release_notes::render_prompt;
+use crate::prompt::render_prompt;
 use crate::review_context::ReviewContext;
 
 /// The reviewer session's prompt vars: the item, diff range and stage 1 evidence it shares with

@@ -75,7 +75,7 @@ pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Val
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
     patch(&mut obj);
-    crate::store::write_json_atomic(&file, &Value::Object(obj), false)
+    crate::fs_util::write_json_atomic(&file, &Value::Object(obj), false)
 }
 
 /// A version 2 file as it is; a version 1 one (no `"version"` key) as one project, its id made when it has none

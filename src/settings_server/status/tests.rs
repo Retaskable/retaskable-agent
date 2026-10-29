@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::config::{LaneEngine, RoleEngines};
-use crate::connector::{PauseState, ProjectView};
 use crate::lane_pool::LaneSizes;
+use crate::view::{PauseState, ProjectView};
 
 fn check(ok: Option<bool>, detail: &str) -> SetupCheck {
     SetupCheck {

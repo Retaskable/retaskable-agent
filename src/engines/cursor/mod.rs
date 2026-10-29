@@ -130,7 +130,7 @@ impl Engine for CursorEngine {
 
     fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
         let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
-        Ok(crate::setup_check::resolve_cursor(env, windows, path_dirs, home))
+        Ok(super::resolve::resolve_cursor(env, windows, path_dirs, home))
     }
 
     fn args(&self, spec: &SessionSpec) -> Vec<String> {

@@ -8,8 +8,11 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::*;
+use crate::config::GalleryConfig;
+use crate::lane_pool::LaneSizes;
 use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
+use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState, ProjectView};
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {

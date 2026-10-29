@@ -5,7 +5,7 @@
 //! worktrees) is left out of the template rather than carried as an always-empty variable.
 use anyhow::Result;
 
-use crate::release_notes::render_prompt;
+use crate::prompt::render_prompt;
 use crate::review_context::ReviewContext;
 
 use super::info::ScoutInfo;

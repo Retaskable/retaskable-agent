@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::*;
 
 fn out(code: i32, stdout: &str) -> RunOutput {
@@ -203,88 +205,6 @@ fn cursor_check_passes_with_the_status_line_and_strips_its_own_checkmark() {
         cursor_check(true, Some(&r)),
         SetupCheck::pass("Cursor's agent: Logged in as a@b.c")
     );
-}
-
-// resolve_cursor / resolve_cursor_on_path
-
-#[test]
-fn resolve_cursor_prefers_the_env_override_on_any_platform() {
-    let env = |k: &str| (k == "RETASKABLE_CURSOR").then(|| "C:/custom/cursor-agent.exe".to_string());
-    assert_eq!(
-        resolve_cursor(env, true, &[], None),
-        PathBuf::from("C:/custom/cursor-agent.exe")
-    );
-    assert_eq!(
-        resolve_cursor(env, false, &[], None),
-        PathBuf::from("C:/custom/cursor-agent.exe")
-    );
-}
-
-#[test]
-fn resolve_cursor_finds_cursor_agent_directly_on_the_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    std::fs::write(dir.path().join(name), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_cursor(no_env, cfg!(windows), &[dir.path().to_path_buf()], None);
-    assert_eq!(got, dir.path().join(name));
-}
-
-#[test]
-fn resolve_cursor_falls_back_to_the_cmd_shim_on_windows() {
-    if !cfg!(windows) {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("cursor-agent.cmd"), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_cursor(no_env, true, &[dir.path().to_path_buf()], None);
-    assert_eq!(got, dir.path().join("cursor-agent.cmd"));
-}
-
-#[test]
-fn resolve_cursor_falls_back_to_home_local_bin() {
-    let home = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    let bin_dir = home.path().join(".local").join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    std::fs::write(bin_dir.join(name), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_cursor(no_env, cfg!(windows), &[], Some(home.path().to_path_buf()));
-    assert_eq!(got, bin_dir.join(name));
-}
-
-#[test]
-fn resolve_cursor_falls_back_to_the_bare_name_when_nothing_matches() {
-    let no_env = |_: &str| None;
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    assert_eq!(resolve_cursor(no_env, cfg!(windows), &[], None), PathBuf::from(name));
-}
-
-#[test]
-fn resolve_cursor_on_path_reads_dirs_from_the_path_env() {
-    let dir = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    std::fs::write(dir.path().join(name), "").unwrap();
-    let path_value = dir.path().to_string_lossy().into_owned();
-    let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-    assert_eq!(resolve_cursor_on_path(env), dir.path().join(name));
 }
 
 // claude_ready / engine_ready / show_cursor / setup_checks_pass

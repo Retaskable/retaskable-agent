@@ -18,7 +18,6 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::api::not_found_response;
 use crate::config;
 use crate::link::{self, TokenStore};
 use crate::network::{self, NetworkAccess};
@@ -639,6 +638,12 @@ struct NetworkUpdate {
     enabled: bool,
     #[serde(default)]
     password: Option<String>,
+}
+
+/// The 404 for a path this agent doesn't serve. A request the Host/Origin checks refuse gets the
+/// same one, so it gives away nothing about which paths exist.
+pub(crate) fn not_found_response() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({ "error": "Not found" }))).into_response()
 }
 
 /// The settings page's own routes (agent/08-http-api.md), merged into the agent's router

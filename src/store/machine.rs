@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
 use serde_json::{Map, Value};
 
-use super::write_json_atomic;
+use crate::fs_util::write_json_atomic;
 use crate::network::NetworkAccess;
 use crate::tags::TagOverrides;
 

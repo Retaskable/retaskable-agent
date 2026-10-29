@@ -1006,7 +1006,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
         StatusCode::INTERNAL_SERVER_ERROR
     );
     settings.set_status_source(StatusSource {
-        view: crate::connector::AgentView {
+        view: crate::view::AgentView {
             machine: "pc".into(),
             tags: vec![],
             projects: vec![],

@@ -13,34 +13,12 @@ use serde_json::{Value, json};
 
 use super::engine::{Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec};
 use super::json_result::{check_schema, extract_json};
+use super::resolve::resolve_pi;
 use crate::text::{clip, collapse_and_clip, tail};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
 static LIMIT_TEXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)usage limit|rate limit").unwrap());
-
-/// `resolvePi()`: `RETASKABLE_PI` always wins; otherwise the first `pi[.exe]` on `PATH`. Never
-/// errors (unlike `resolve_claude`): a missing pi isn't fatal, so this falls back to the bare name
-/// and lets the spawn itself report "not installed".
-pub fn resolve_pi(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_PI") {
-        return PathBuf::from(over);
-    }
-    let name = if windows { "pi.exe" } else { "pi" };
-    for dir in path_dirs {
-        let exe = dir.join(name);
-        if exe.is_file() {
-            return exe;
-        }
-    }
-    PathBuf::from(name)
-}
-
-/// `resolve_pi`, reading `PATH` itself the way the real agent does.
-pub fn resolve_pi_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    resolve_pi(&env, cfg!(windows), &dirs)
-}
 
 /// `piArgs(spec)`: json mode, no persistent session, the chosen model, and the read-only tool set
 /// for a role that only reads. Never touches `spec.start` — pi has no resume to point at.
@@ -311,38 +289,6 @@ fn base_spec(cwd: &std::path::Path) -> SessionSpec {
 mod tests {
     use super::*;
     use crate::engines::engine::SessionStart;
-
-    // resolve_pi / resolve_pi_on_path
-
-    #[test]
-    fn resolve_pi_prefers_the_env_override_on_any_platform() {
-        let env = |k: &str| (k == "RETASKABLE_PI").then(|| "C:/custom/pi.exe".to_string());
-        assert_eq!(resolve_pi(env, true, &[]), PathBuf::from("C:/custom/pi.exe"));
-        assert_eq!(resolve_pi(env, false, &[]), PathBuf::from("C:/custom/pi.exe"));
-    }
-
-    #[test]
-    fn resolve_pi_finds_it_on_the_path_or_falls_back_to_the_bare_name() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("pi"), "").unwrap();
-        let no_env = |_: &str| None;
-        assert_eq!(
-            resolve_pi(no_env, false, &[dir.path().to_path_buf()]),
-            dir.path().join("pi")
-        );
-        assert_eq!(resolve_pi(no_env, false, &[]), PathBuf::from("pi"));
-        assert_eq!(resolve_pi(no_env, true, &[]), PathBuf::from("pi.exe"));
-    }
-
-    #[test]
-    fn resolve_pi_on_path_reads_dirs_from_the_path_env() {
-        let dir = tempfile::tempdir().unwrap();
-        let name = if cfg!(windows) { "pi.exe" } else { "pi" };
-        std::fs::write(dir.path().join(name), "").unwrap();
-        let path_value = dir.path().to_string_lossy().into_owned();
-        let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-        assert_eq!(resolve_pi_on_path(env), dir.path().join(name));
-    }
 
     // pi_args / pi_prompt
 
