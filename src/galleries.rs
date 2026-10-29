@@ -14,8 +14,8 @@
 //! memory when its base64 would otherwise be over 768 KiB. Per tray.md 5.3.1, reading the machine
 //! like this is really the fallback for a gallery not yet uploaded to the backlog store (a
 //! `/demo` environment); the primary path, the store serving a shot gallery once it's uploaded,
-//! needs that upload, which doesn't exist yet. Neither is wired to the hub either way, since that
-//! needs the command-dispatch layer this agent doesn't have for any command yet.
+//! needs that upload, which doesn't exist yet. `shoot` is wired to the hub's Shoot command
+//! (`src/commands.rs`); `gallery_index`/`gallery_image` aren't wired to any command yet.
 //!
 //! This is the shoot-and-shrink pipeline on its own: it runs the command, converts its pictures,
 //! and tracks a gallery's status in memory. Still to come, once there's something to wire it to:

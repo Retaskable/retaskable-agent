@@ -5,7 +5,7 @@
 //!
 //! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, and an
 //! orchestrator that runs no work yet (`AgentView`). A command from the site (`commands.rs`) is checked and run if
-//! it's one this agent has ported — so far Restart, Pause and Resume — and refused otherwise.
+//! it's one this agent has ported — so far Restart, Pause, Resume and Shoot — and refused otherwise.
 #[cfg(test)]
 mod tests;
 
@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 use crate::commands::{self, Seen};
-use crate::config::ProjectConfig;
+use crate::config::{GalleryConfig, ProjectConfig};
 use crate::lane_pool::LaneSizes;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
 
@@ -150,6 +150,12 @@ pub struct ProjectView {
     pub id: String,
     pub github_repo: String,
     pub backlog_path: String,
+    /// What the Shoot command needs to run `galleries::shoot` (`commands.rs`): the base checkout's
+    /// own clone, where its worktrees go, which branch is the base, and the project's own galleries.
+    pub repo_path: PathBuf,
+    pub worktrees_dir: PathBuf,
+    pub base_branch: String,
+    pub galleries: Vec<GalleryConfig>,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -158,6 +164,10 @@ impl From<&ProjectConfig> for ProjectView {
             id: p.id_or_derived(),
             github_repo: p.github_repo.clone(),
             backlog_path: p.backlog_path.clone(),
+            repo_path: PathBuf::from(&p.repo_path),
+            worktrees_dir: PathBuf::from(&p.worktrees_dir),
+            base_branch: p.base_branch.clone(),
+            galleries: p.galleries.clone(),
         }
     }
 }
@@ -500,7 +510,7 @@ fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl
         issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
     };
-    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref());
+    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir);
     let outcome = if answer.get("type").and_then(Value::as_str) == Some("ack") {
         "done".to_string()
     } else {
