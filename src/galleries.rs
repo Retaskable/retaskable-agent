@@ -26,11 +26,9 @@
 mod tests;
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -41,16 +39,13 @@ use serde::{Deserialize, Serialize};
 use crate::config::GalleryConfig;
 use crate::lanes;
 use crate::paths;
+use crate::proc;
 use crate::sync::lock;
 
 const SHOOT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const JPEG_QUALITY: u8 = 82;
 const MAX_WIDTH: u32 = 1920;
-/// How much of a failed or timed-out command's combined output is kept, and shown on failure.
-const OUTPUT_CAP: usize = 20_000;
 const TAIL_LINES: usize = 40;
-/// How long `npm ci`/`npm install` is given before it's treated as failed (06.8 bullet 9).
-const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A picture sent as-is above this many base64 bytes is re-encoded smaller instead (tray.md
 /// 5.3.2: "768 KiB").
 const MAX_PICTURE_BASE64: usize = 768 * 1024;
@@ -333,7 +328,11 @@ fn run_shoot(ctx: &ShootContext) -> Result<GalleryIndex> {
         } else {
             format!("failed ({code})")
         };
-        bail!("`{}` {what}:\n{}", ctx.gallery.command, tail_lines(&output, TAIL_LINES));
+        bail!(
+            "`{}` {what}:\n{}",
+            ctx.gallery.command,
+            proc::tail_lines(&output, TAIL_LINES)
+        );
     }
     set_status(ctx.project, ctx.slug, GalleryStatus::Converting);
     convert(&out, &ctx.gallery.name, &sha, ctx.gallery_dest)
@@ -342,7 +341,7 @@ fn run_shoot(ctx: &ShootContext) -> Result<GalleryIndex> {
 /// Installs a JS-based game's dependencies first when they're missing or stale (06.8 bullet 9),
 /// using the real `PATH` and a real `npm` subprocess.
 fn npm_install_if_needed(dir: &Path) -> Result<()> {
-    npm_install_if_needed_with(dir, run_command_with_timeout)
+    npm_install_if_needed_with(dir, proc::run_command_with_timeout)
 }
 
 /// [`npm_install_if_needed`] with the command runner injected, so tests don't need a real `npm`.
@@ -350,165 +349,27 @@ fn npm_install_if_needed_with(
     dir: &Path,
     run: impl Fn(&str, &Path, Duration) -> Result<(i32, String, bool)>,
 ) -> Result<()> {
-    if !needs_npm_install(dir) {
+    if !proc::needs_npm_install(dir) {
         return Ok(());
     }
-    let command = npm_install_command(dir);
-    let (code, output, timed_out) = run(command, dir, NPM_INSTALL_TIMEOUT)?;
+    let command = proc::npm_install_command(dir);
+    let (code, output, timed_out) = run(command, dir, proc::NPM_INSTALL_TIMEOUT)?;
     if code != 0 || timed_out {
         let what = if timed_out {
             "timed out".to_string()
         } else {
             format!("failed ({code})")
         };
-        bail!("`{command}` {what}:\n{}", tail_lines(&output, TAIL_LINES));
+        bail!("`{command}` {what}:\n{}", proc::tail_lines(&output, TAIL_LINES));
     }
     Ok(())
 }
 
-/// True when `dir` is a JS-based game whose dependencies are missing or stale: no
-/// `node_modules/`, or `package-lock.json` modified more recently than
-/// `node_modules/.package-lock.json` (06.8 bullet 9).
-fn needs_npm_install(dir: &Path) -> bool {
-    if !dir.join("package.json").exists() {
-        return false;
-    }
-    if !dir.join("node_modules").is_dir() {
-        return true;
-    }
-    let lock_mtime = std::fs::metadata(dir.join("package-lock.json")).and_then(|m| m.modified());
-    let installed_mtime =
-        std::fs::metadata(dir.join("node_modules").join(".package-lock.json")).and_then(|m| m.modified());
-    match (lock_mtime, installed_mtime) {
-        (Ok(lock), Ok(installed)) => lock > installed,
-        (Ok(_), Err(_)) => true,
-        _ => false,
-    }
-}
-
-/// `npm ci` when there's a lockfile to install exactly from, else `npm install`.
-fn npm_install_command(dir: &Path) -> &'static str {
-    if dir.join("package-lock.json").exists() {
-        "npm ci"
-    } else {
-        "npm install"
-    }
-}
-
 /// Runs `command` in a shell under `cwd`, with a window (it may need to render) and no input,
 /// for up to [`SHOOT_TIMEOUT`]. Returns its exit code (-1 if it couldn't be read), combined
-/// stdout/stderr (capped at [`OUTPUT_CAP`] bytes), and whether it was killed for running too long.
+/// stdout/stderr (capped), and whether it was killed for running too long.
 fn run_command(command: &str, cwd: &Path) -> Result<(i32, String, bool)> {
-    run_command_with_timeout(command, cwd, SHOOT_TIMEOUT)
-}
-
-/// [`run_command`] with the timeout as a parameter, so the npm-install step can use its own
-/// (06.8 bullet 9: 10 minutes). `PATH` is scrubbed of every other checkout's `node_modules/.bin`
-/// first, with `cwd`'s own put first (06.8 bullet 10).
-fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) -> Result<(i32, String, bool)> {
-    let mut child = shell_command(command)
-        .current_dir(cwd)
-        .env("PATH", scrub_path(&path_env(), cwd))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("starting `{command}`"))?;
-    let stdout = child.stdout.take().expect("piped");
-    let stderr = child.stderr.take().expect("piped");
-    let buf = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
-    let t_out = std::thread::spawn({
-        let buf = buf.clone();
-        move || capture_capped(stdout, buf)
-    });
-    let t_err = std::thread::spawn({
-        let buf = buf.clone();
-        move || capture_capped(stderr, buf)
-    });
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
-        }
-        if Instant::now() >= deadline {
-            timed_out = true;
-            let _ = lanes::kill_processes_in(cwd);
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let _ = t_out.join();
-    let _ = t_err.join();
-    let output_bytes = lock(&buf).clone();
-    let output = String::from_utf8_lossy(&output_bytes).into_owned();
-    let code = status.and_then(|s| s.code()).unwrap_or(-1);
-    Ok((code, output, timed_out))
-}
-
-#[cfg(windows)]
-fn shell_command(command: &str) -> Command {
-    let mut c = Command::new("cmd");
-    c.args(["/C", command]);
-    c
-}
-
-#[cfg(not(windows))]
-fn shell_command(command: &str) -> Command {
-    let mut c = Command::new("sh");
-    c.args(["-c", command]);
-    c
-}
-
-fn path_env() -> String {
-    std::env::var("PATH").unwrap_or_default()
-}
-
-/// `path` with every entry ending in `node_modules/.bin` (another checkout's, left over from a
-/// different project) dropped, and `dir`'s own `node_modules/.bin` put first (06.8 bullet 10:
-/// "applies to the install too").
-fn scrub_path(path: &str, dir: &Path) -> String {
-    let own_bin = dir.join("node_modules").join(".bin");
-    let kept = std::env::split_paths(path).filter(|p| !is_node_modules_bin(p));
-    let entries = std::iter::once(own_bin).chain(kept);
-    std::env::join_paths(entries)
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string())
-}
-
-fn is_node_modules_bin(p: &Path) -> bool {
-    p.file_name().is_some_and(|f| f == ".bin")
-        && p.parent()
-            .and_then(|p| p.file_name())
-            .is_some_and(|f| f == "node_modules")
-}
-
-/// Reads `pipe` to EOF into `buf`, kept to the last [`OUTPUT_CAP`] bytes, like the TypeScript
-/// agent's `output.slice(-20_000)` while a shoot's command is still running.
-fn capture_capped(mut pipe: impl Read, buf: std::sync::Arc<Mutex<Vec<u8>>>) {
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = match pipe.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
-            Ok(n) => n,
-        };
-        let mut buf = lock(&buf);
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > OUTPUT_CAP {
-            let drop = buf.len() - OUTPUT_CAP;
-            buf.drain(..drop);
-        }
-    }
-}
-
-/// The last `n` lines of `text` (06.8: a failed shoot's `failed` status carries "the output's
-/// last 40 lines").
-fn tail_lines(text: &str, n: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
+    proc::run_command_with_timeout(command, cwd, SHOOT_TIMEOUT)
 }
 
 /// `outDir` must be a relative path that stays inside the repo: no absolute path (POSIX or a
