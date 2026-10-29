@@ -20,8 +20,10 @@ use serde_json::{Map, Value, json};
 
 use crate::api::not_found_response;
 use crate::config;
+use crate::link::{self, TokenStore};
 use crate::network::{self, NetworkAccess};
 use crate::password;
+use crate::profile;
 use crate::store::MachineStore;
 use crate::tags;
 
@@ -89,6 +91,9 @@ pub struct SettingsServer {
     env: EnvFn,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
+    /// This machine's stored cloud tokens, for `GET /api/link` (section 9.2's "computer's link
+    /// state", local only).
+    keychain: Arc<dyn TokenStore>,
     state: Mutex<InnerState>,
 }
 
@@ -100,6 +105,7 @@ impl SettingsServer {
         env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
         now: impl Fn() -> u64 + Send + Sync + 'static,
         exit: impl Fn(i32) + Send + Sync + 'static,
+        keychain: Arc<dyn TokenStore>,
     ) -> Self {
         let env_network_access = network::env_network_access(|k| env(k));
         Self {
@@ -110,6 +116,7 @@ impl SettingsServer {
             env: Box::new(env),
             now: Box::new(now),
             exit: Box::new(exit),
+            keychain,
             state: Mutex::new(InnerState::default()),
         }
     }
@@ -288,6 +295,23 @@ impl SettingsServer {
                     .collect(),
             ),
         }))
+    }
+
+    /// `GET /api/link`'s view of each of retaskable.com's three environments, and a custom
+    /// `cloud.url` when one is set (tray.md section 4.2's "Link to" submenu), with whether this
+    /// machine already holds a stored token for it. The in-progress "Waiting: code" state isn't
+    /// here: only the `retaskable link` terminal command tracks it, and nothing persists it.
+    fn link_view(&self) -> Result<Value> {
+        let env = |k: &str| self.env(k);
+        let cfg = config::load(&self.dir)?;
+        let environments: Vec<Value> = link::cloud_urls(&cfg, env)
+            .into_iter()
+            .map(|url| {
+                let connected = matches!(self.keychain.get(&url), Ok(Some(_)));
+                json!({ "name": link::environment_name(&url), "url": url, "connected": connected })
+            })
+            .collect();
+        Ok(json!({ "environments": environments }))
     }
 
     /// Saves a typed tag list as changes to the found tags (added, removed), the same as setup
@@ -612,6 +636,8 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/settings/session", post(post_session))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/settings/restart", post(post_restart))
+        .route("/api/link", get(get_link))
+        .route("/api/profile", get(get_profile))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(settings.clone(), security_envelope))
         .with_state(settings)
@@ -814,6 +840,34 @@ async fn post_settings(
     Json(json!({ "saved": true })).into_response()
 }
 
+async fn get_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+    if settings.authenticate(&headers).is_none() {
+        return unauthorized("Sign in first.");
+    }
+    match settings.link_view() {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// `GET /api/profile?fresh=1`: every read already calls `gh api user` fresh (no cache here for
+/// `fresh` to bypass), so the query string changes nothing and isn't inspected.
+async fn get_profile(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+    if settings.authenticate(&headers).is_none() {
+        return unauthorized("Sign in first.");
+    }
+    match profile::read() {
+        Ok(p) => Json(json!({
+            "signedIn": true,
+            "login": p.login,
+            "name": p.name,
+            "avatarUrl": p.avatar_url,
+        }))
+        .into_response(),
+        Err(message) => Json(json!({ "signedIn": false, "error": message })).into_response(),
+    }
+}
+
 async fn post_restart(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
     let Some(session) = settings.authenticate(&headers) else {
         return unauthorized("Sign in first.");
@@ -913,8 +967,18 @@ pub(crate) fn test_server() -> (Arc<SettingsServer>, tempfile::TempDir) {
         |_: &str| None,
         || 1_700_000_000,
         |_: i32| {},
+        test_keychain(dir.path()),
     ));
     (settings, dir)
+}
+
+/// A `FileStore` under `dir`, for a test that doesn't care what this machine is linked to.
+#[cfg(test)]
+pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
+    Arc::new(link::FileStore::new(
+        dir.join("credentials.json"),
+        "retaskable-agent-test",
+    ))
 }
 
 #[cfg(test)]

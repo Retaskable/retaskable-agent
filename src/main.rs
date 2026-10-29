@@ -219,6 +219,7 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             });
         },
+        keychain.clone(),
     ));
     axum::serve(
         listener,
