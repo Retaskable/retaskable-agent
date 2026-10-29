@@ -475,11 +475,13 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
     }
     let t = cloud.timing;
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
-    // The snapshot just sent has the sizes and pause as they are now; a later change sends it again.
+    // The snapshot just sent has the sizes, pause and galleries as they are now; a later change sends it again.
     let mut sizes = view.lane_sizes.subscribe();
     sizes.mark_unchanged();
     let mut paused = view.paused.subscribe();
     paused.mark_unchanged();
+    let mut gallery_status = galleries::subscribe_status_changes();
+    gallery_status.mark_unchanged();
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
@@ -494,6 +496,13 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = gallery_status.changed() => {
+                if *gallery_status.borrow() == project {
+                    Some(view.snapshot(project, &cloud.dir))
+                } else {
+                    None
+                }
+            },
         };
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await

@@ -280,6 +280,43 @@ async fn the_snapshot_reports_a_projects_gallery_info() {
 }
 
 #[tokio::test]
+async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
+    // A project id of its own: `galleries::set_status` broadcasts across the whole process, and
+    // "one" is shared by plenty of other tests that never expect an extra snapshot.
+    let project = "connector-gallery-resend";
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let mut v = view(&[project]);
+    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    }];
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let galleries = read(&mut first).await["state"]["galleries"].clone();
+    assert_eq!(galleries[0]["status"], "idle");
+
+    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);

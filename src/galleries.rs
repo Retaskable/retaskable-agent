@@ -35,6 +35,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as base64;
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::config::GalleryConfig;
 use crate::lanes;
@@ -167,6 +168,10 @@ type GalleryKey = (String, String);
 
 /// Every gallery's status, kept across shoots until the process restarts.
 static STATUS: LazyLock<Mutex<HashMap<GalleryKey, GalleryStatus>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The project whose gallery status last changed, so a subscriber only resends its own project's
+/// snapshot (the signal is shared across every project, like [`STATUS`] itself); blank before any
+/// shoot. See [`subscribe_status_changes`].
+static STATUS_CHANGED: LazyLock<watch::Sender<String>> = LazyLock::new(|| watch::Sender::new(String::new()));
 /// The gallery each project is shooting, if any: only one shoot holds a project's base checkout
 /// at a time (06.8: "Only one gallery shoots at a time").
 static SHOOTING: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -194,8 +199,18 @@ fn cache_picture(key: PictureKey, data: String) {
     }
 }
 
-fn set_status(project: &str, slug: &str, status: GalleryStatus) {
+pub(crate) fn set_status(project: &str, slug: &str, status: GalleryStatus) {
     lock(&STATUS).insert((project.to_string(), slug.to_string()), status);
+    let _ = STATUS_CHANGED.send(project.to_string());
+}
+
+/// Subscribes to gallery status changes, each naming the project whose status just changed
+/// (`connector::connected`'s `sizes`/`paused`, the same pattern, filtered to the subscriber's own
+/// project since the signal is shared): a shoot's `shooting` -> `converting` -> `idle`/`failed`
+/// resends that project's snapshot the same way a lane-size or pause change does (tray.md section
+/// 5.3.3: "Progress is the gallery's status in the snapshot").
+pub fn subscribe_status_changes() -> watch::Receiver<String> {
+    STATUS_CHANGED.subscribe()
 }
 
 /// A gallery's current status, `idle` before its first shoot.
