@@ -241,21 +241,22 @@ fn command(id: &str, name: &str, args: Value) -> Value {
     })
 }
 
+/// Starts a connector for one project ("one") with `exit`, and returns it once its hello and
+/// snapshot have been read, ready for a test to send it a command. The returned `TempDir` must
+/// be kept (as `_dir`): dropping it removes the credentials file the connector's still using.
+async fn connected_project(exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let c = Connector::start(&url, store, reqwest::Client::new(), view(&["one"]), timing(), exit);
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    read(&mut a).await; // snapshot
+    (c, a, dir)
+}
+
 #[tokio::test]
 async fn an_unported_command_is_refused_with_a_nack() {
-    let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        noop_exit(),
-    );
-    let mut a = next(&mut rx).await;
-    read(&mut a).await;
-    read(&mut a).await;
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
     a.ws.send(Message::text(json!({ "type": "ping" }).to_string()))
         .await
         .unwrap();
@@ -271,19 +272,7 @@ async fn an_unported_command_is_refused_with_a_nack() {
 
 #[tokio::test]
 async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
-    let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        noop_exit(),
-    );
-    let mut a = next(&mut rx).await;
-    read(&mut a).await; // hello
-    read(&mut a).await; // snapshot
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
 
     a.ws.send(Message::text(command("c1", "pause", json!({})).to_string()))
         .await
@@ -320,15 +309,10 @@ async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
 
 #[tokio::test]
 async fn restart_acks_and_calls_exit_with_75() {
-    let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
     let calls: Arc<StdMutex<Vec<i32>>> = Arc::new(StdMutex::new(Vec::new()));
     let kept = calls.clone();
     let exit: Arc<Exit> = Arc::new(move |code: i32| kept.lock().unwrap().push(code));
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&["one"]), timing(), exit);
-    let mut a = next(&mut rx).await;
-    read(&mut a).await;
-    read(&mut a).await;
+    let (c, mut a, _dir) = connected_project(exit).await;
     a.ws.send(Message::text(command("c1", "restart", json!({})).to_string()))
         .await
         .unwrap();
@@ -339,19 +323,7 @@ async fn restart_acks_and_calls_exit_with_75() {
 
 #[tokio::test]
 async fn a_replayed_command_id_is_refused_the_second_time() {
-    let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        noop_exit(),
-    );
-    let mut a = next(&mut rx).await;
-    read(&mut a).await;
-    read(&mut a).await;
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
     let cmd = command("c1", "restart", json!({}));
     a.ws.send(Message::text(cmd.to_string())).await.unwrap();
     assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c1" }));
@@ -363,19 +335,7 @@ async fn a_replayed_command_id_is_refused_the_second_time() {
 
 #[tokio::test]
 async fn an_expired_command_is_refused() {
-    let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        noop_exit(),
-    );
-    let mut a = next(&mut rx).await;
-    read(&mut a).await;
-    read(&mut a).await;
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
     let issued_at = commands::now_ms() - 61_000;
     let old = json!({
         "type": "command",
