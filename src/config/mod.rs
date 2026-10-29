@@ -346,7 +346,6 @@ mod tests {
         assert_eq!(p.galleries[1].name, "UI");
         assert_eq!(p.max_conflict_rounds, 5);
         assert_eq!(p.max_check_rounds, 3);
-        assert_eq!(p.max_reasks, 2);
         assert!(!p.require_ci);
         assert!(!p.ci_covers_checks);
         assert_eq!(p.deploy.staging, None);

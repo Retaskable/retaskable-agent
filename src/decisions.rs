@@ -14,6 +14,12 @@ pub struct Decision {
     pub at: String,
 }
 
+/// How many times in a row an item may ask again what was answered before it's left for a
+/// person (`decisions.ts`). It's a project `tuning` limit on the server (`shared/tuning.ts`'s
+/// `maxReasks`: def 2, min 0, max 10), not a config key; this is that default, as a constant,
+/// the way `release_notes/gather.rs`'s `DEFAULT_MAX_PRS` holds `releaseMaxPrs`'s.
+pub const MAX_REASKS: u32 = 2;
+
 /// A question's text, loosely: case and run-of-whitespace insensitive, so the same question
 /// asked again in slightly different words still matches.
 fn same(s: &str) -> String {

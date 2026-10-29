@@ -17,7 +17,6 @@ Written by the agent when a project is linked and when a change to its settings 
   "maxReviewRounds": 3,
   "maxConflictRounds": 5,
   "maxCheckRounds": 3,
-  "maxReasks": 2,
   "checks": [
     { "name": "test", "command": "cargo test", "blocking": true, "timeoutSec": 1800 },
     { "name": "verify", "command": "cargo run --release -- --play --verify --headless", "blocking": true, "timeoutSec": 900 },
@@ -58,8 +57,6 @@ In Retaskable's own repo, `checks` are `npm run typecheck` and the tests. The te
 `phone` (optional) configures Play on phone for a project with a Capacitor Android app ([play-on-phone.md](../play-on-phone.md) section 2).
 
 `maxCheckRounds` (default 3) caps how many times failed CI or checks send a slice back, separately from `maxReviewRounds` (section 5).
-
-`maxReasks` (default 2) caps how many times in a row a question the implementer asks again, that a person already answered, is sent back to the session instead of to the person; past it, the item needs a human (section 5, the `needs_clarification` row).
 
 `maxResumeContextTokens` (default 150,000) and `maxTurns` (default 300) are this computer's own settings (`MACHINE_KEYS`, set in its config file; not on the site's settings yet): the size past which an implementer's follow-up starts a fresh session rather than resuming, and Claude Code's `--max-turns` for an implementer session (section 6.2).
 

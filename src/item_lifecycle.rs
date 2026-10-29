@@ -113,7 +113,7 @@ impl ItemRun {
                 all_already_answered: true,
             } => {
                 self.reasks += 1;
-                if self.reasks > cfg.max_reasks {
+                if self.reasks > crate::decisions::MAX_REASKS {
                     ItemState::NeedsHuman
                 } else {
                     ItemState::Implementing
@@ -348,9 +348,10 @@ pub enum ImplementerOutcome {
     Finished,
     /// It brought the branch up to date with the base (a main sync), which always waits for CI.
     MainSync,
-    /// It exited with questions. `all_already_answered`: every one it asked already has a
-    /// decision on file (`decisions::split_asked` found none open), so it's a reask rather than
-    /// a real `needs_clarification` — the answers go back to the session instead of a person.
+    /// It exited with questions. `all_already_answered`: at least one question was asked and
+    /// every one of them already has a decision on file (`decisions::split_asked` found none
+    /// open — an empty question list doesn't count), so it's a reask rather than a real
+    /// `needs_clarification` — the answers go back to the session instead of a person.
     Questions { all_already_answered: bool },
 }
 
@@ -428,7 +429,6 @@ mod tests {
             max_review_rounds: 3,
             max_conflict_rounds: 5,
             max_slices_per_item: 10,
-            max_reasks: 2,
             ..Default::default()
         }
     }
@@ -470,15 +470,17 @@ mod tests {
 
     #[test]
     fn reasks_past_max_reasks_needs_a_human() {
-        let cfg = ProjectConfig { max_reasks: 1, ..cfg() };
+        let cfg = cfg();
         let mut run = ItemRun::new();
-        run.implementer_finished(
-            ImplementerOutcome::Questions {
-                all_already_answered: true,
-            },
-            &cfg,
-        );
-        assert_eq!(run.state, ItemState::Implementing);
+        for _ in 0..crate::decisions::MAX_REASKS {
+            run.implementer_finished(
+                ImplementerOutcome::Questions {
+                    all_already_answered: true,
+                },
+                &cfg,
+            );
+            assert_eq!(run.state, ItemState::Implementing);
+        }
         run.implementer_finished(
             ImplementerOutcome::Questions {
                 all_already_answered: true,
@@ -486,7 +488,7 @@ mod tests {
             &cfg,
         );
         assert_eq!(run.state, ItemState::NeedsHuman);
-        assert_eq!(run.reasks, 2);
+        assert_eq!(run.reasks, crate::decisions::MAX_REASKS + 1);
     }
 
     #[test]
