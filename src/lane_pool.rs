@@ -111,6 +111,11 @@ impl LanePool {
             .map(|(k, _)| *k)
     }
 
+    /// Every lane currently held, for the tick's own telemetry.
+    pub fn held_lanes(&self) -> impl Iterator<Item = u32> + '_ {
+        self.held.keys().copied()
+    }
+
     /// `laneLimit`: how many lanes may take new work: every one while the window is under lane scaling's threshold
     /// (or its use isn't known yet), otherwise only the base ones, never more than `lanes`.
     pub fn limit(&self) -> u32 {

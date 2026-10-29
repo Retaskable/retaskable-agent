@@ -22,6 +22,7 @@ pub mod lanes;
 pub mod link;
 pub mod local_model;
 pub mod network;
+pub mod orchestrator;
 pub mod password;
 pub mod paths;
 pub mod phone;
