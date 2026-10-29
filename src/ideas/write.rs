@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::config::ProjectType;
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
-use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
+use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
 
 use super::model::{Idea, IdeasResult, Queue, ideas_result_schema, refilled};
 use super::profiles::{Profile, build_prompt};
@@ -40,28 +40,26 @@ pub fn session_spec(
     profiles: &[Profile],
     context: &Value,
 ) -> Result<SessionSpec> {
-    Ok(SessionSpec {
-        engine: w.engine,
-        model: w.model.clone(),
-        prompt: build_prompt(
-            w.template,
-            w.project_type,
-            w.github_repo,
-            after,
-            room,
-            profiles,
-            context,
-        )?,
-        schema: ideas_result_schema(),
-        cwd: w.cwd.to_path_buf(),
-        max_turns: None,
-        budget_usd: w.budget_usd,
-        start: SessionStart::Ephemeral,
-        readonly: true,
-        cursor: w.cursor.clone(),
-        local: w.local.clone(),
-        sandbox: w.sandbox,
-    })
+    let prompt = build_prompt(
+        w.template,
+        w.project_type,
+        w.github_repo,
+        after,
+        room,
+        profiles,
+        context,
+    )?;
+    Ok(ephemeral_readonly_spec(
+        w.engine,
+        w.model.clone(),
+        prompt,
+        ideas_result_schema(),
+        w.cwd.to_path_buf(),
+        w.budget_usd,
+        w.cursor.clone(),
+        w.local.clone(),
+        w.sandbox,
+    ))
 }
 
 /// A round's own outcome: the queue's new ideas (unchanged from `was` when it fails), the model that
@@ -158,6 +156,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::engines::engine::test_result as result;
     use crate::ideas::model::{IDEAS_MAX_WAITS_DEFAULT, QUEUE};
     use crate::ideas::test_support::waiting_idea;
 
@@ -178,19 +177,10 @@ mod tests {
         }
     }
 
-    fn result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
-        SessionResult {
-            ok,
-            subtype: subtype.to_string(),
-            structured,
-            error: error.map(str::to_string),
-            cost_usd: Some(0.12),
-            session_id: "s".to_string(),
-            limit_hit: false,
-            signed_out: false,
-            context_tokens: None,
-            usage: None,
-            tokens: None,
+    fn one_waiting() -> Queue {
+        Queue {
+            ideas: vec![waiting_idea("A", 0)],
+            ..Queue::default()
         }
     }
 
@@ -301,10 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_session_leaves_the_queue_waiting_and_says_why() {
-        let was = Queue {
-            ideas: vec![waiting_idea("A", 0)],
-            ..Queue::default()
-        };
+        let was = one_waiting();
         let cwd = Path::new("repo");
         let round = run_round(
             &was,
@@ -327,10 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_answer_or_a_session_that_wont_start_leaves_the_queue_waiting() {
-        let was = Queue {
-            ideas: vec![waiting_idea("A", 0)],
-            ..Queue::default()
-        };
+        let was = one_waiting();
         let cwd = Path::new("repo");
         let failed = json!({ "status": "failed", "error": "no ideas come to mind" });
         let round = run_round(

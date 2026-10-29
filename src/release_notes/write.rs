@@ -11,7 +11,7 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 
 use crate::config::ProjectType;
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
-use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
+use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
 
 use super::group::{counts, facts, for_users};
 use super::model::{Counts, Range, ReleaseNotesResult, Section, release_notes_result_schema};
@@ -91,20 +91,18 @@ pub struct Written {
 /// The read-only, interactive-like-an-ask `writer` session for a grouping: nothing to resume, so it's ephemeral.
 pub fn session_spec(w: &Writer<'_>, sections: &[Section], range: &Range) -> Result<SessionSpec> {
     let facts = facts(sections, w.max_full_entries);
-    Ok(SessionSpec {
-        engine: w.engine,
-        model: w.model.clone(),
-        prompt: build_prompt(w.template, w.project_type, w.base_branch, w.github_repo, range, &facts)?,
-        schema: release_notes_result_schema(),
-        cwd: w.cwd.to_path_buf(),
-        max_turns: None,
-        budget_usd: w.budget_usd,
-        start: SessionStart::Ephemeral,
-        readonly: true,
-        cursor: w.cursor.clone(),
-        local: w.local.clone(),
-        sandbox: w.sandbox,
-    })
+    let prompt = build_prompt(w.template, w.project_type, w.base_branch, w.github_repo, range, &facts)?;
+    Ok(ephemeral_readonly_spec(
+        w.engine,
+        w.model.clone(),
+        prompt,
+        release_notes_result_schema(),
+        w.cwd.to_path_buf(),
+        w.budget_usd,
+        w.cursor.clone(),
+        w.local.clone(),
+        w.sandbox,
+    ))
 }
 
 /// `generate` after gathering, and `write`: an empty range gets [`empty_note`], one with only chores the plain list
