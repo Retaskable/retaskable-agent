@@ -4,11 +4,14 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **Restart**, **Pause** and **Resume** (`{ computer: true }` only: the
+//! So far this runs **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
-//! reaching a computer, agent/09-web-ui.md section 9.3). Continue, Start over, Shoot and Play
-//! still need the orchestrator loop and lanes (milestones 4 and 5) this agent doesn't have yet.
-//! Every command checked, run or refused is written to `.retaskable/remote.log` ([`audit`]).
+//! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
+//! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3). Continue
+//! and Start over still need a real running implementer session (milestone 3 of
+//! 11-build-milestones.md); Play still needs the build-and-install command play-on-phone.md
+//! section 5 describes. Every command checked, run or refused is written to
+//! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,6 +19,8 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::connector::{AgentView, Exit};
+use crate::galleries;
+use crate::paths;
 use crate::telemetry::events::iso_utc_millis;
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
@@ -82,8 +87,9 @@ fn refusal(cmd: &Command, project: &str, seen: &mut Seen, now: i64) -> Option<St
 }
 
 /// Runs `cmd` against `project` (empty before Setup) if every check passes, and answers it.
-/// `seen` and `view.paused` persist for the project's connection, across reconnects.
-pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit) -> Value {
+/// `seen` and `view.paused` persist for the project's connection, across reconnects. `data_dir` is
+/// the agent's own data directory, where Shoot writes a gallery's converted pictures.
+pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, data_dir: &Path) -> Value {
     if let Some(reason) = refusal(cmd, project, seen, now_ms()) {
         return nack(&cmd.id, reason);
     }
@@ -105,8 +111,45 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             ack(&cmd.id)
         }
         "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
+        "shoot" => shoot(cmd, project, view, data_dir),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
+}
+
+/// Finds `cmd`'s gallery by its `gallery` slug (`GalleryConfig::slug`) among `project`'s own, runs
+/// [`galleries::shoot_refusal`]'s checks, then spawns [`galleries::shoot`] on its own thread and
+/// acks at once (tray.md section 5.3.3: "the ack comes once the shoot has started").
+fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    let slug = cmd.args.get("gallery").and_then(Value::as_str).unwrap_or("");
+    let not_found = || nack(&cmd.id, format!("No gallery called {slug}."));
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return not_found();
+    };
+    let Some(gallery) = p.galleries.iter().find(|g| g.slug() == slug) else {
+        return not_found();
+    };
+    if let Some(reason) = galleries::shoot_refusal(project, gallery) {
+        return nack(&cmd.id, reason);
+    }
+    let project = project.to_string();
+    let slug = slug.to_string();
+    let gallery = gallery.clone();
+    let repo_path = p.repo_path.clone();
+    let worktrees_dir = p.worktrees_dir.clone();
+    let base_branch = p.base_branch.clone();
+    let dest = paths::gallery_dir(data_dir, &project, &slug);
+    std::thread::spawn(move || {
+        let _ = galleries::shoot(
+            &project,
+            &slug,
+            &gallery,
+            &repo_path,
+            &worktrees_dir,
+            &base_branch,
+            &dest,
+        );
+    });
+    ack(&cmd.id)
 }
 
 fn ack(id: &str) -> Value {
@@ -150,6 +193,8 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::connector::ProjectView;
 
@@ -161,6 +206,10 @@ mod tests {
                 id: "one".into(),
                 github_repo: "o/one".into(),
                 backlog_path: "backlog".into(),
+                repo_path: PathBuf::new(),
+                worktrees_dir: PathBuf::new(),
+                base_branch: String::new(),
+                galleries: vec![],
             }],
             version: "9.9.9".into(),
             lanes: 1,
@@ -168,6 +217,10 @@ mod tests {
             lane_sizes: Default::default(),
             paused: Default::default(),
         }
+    }
+
+    fn data_dir() -> PathBuf {
+        std::env::temp_dir().join("retaskable-commands-test")
     }
 
     fn cmd(name: &str, args: Value) -> Command {
@@ -186,7 +239,14 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = calls.clone();
         let exit = move |code: i32| kept.lock().unwrap().push(code);
-        let answer = run(&cmd("restart", json!({})), "one", &mut Seen::default(), &view(), &exit);
+        let answer = run(
+            &cmd("restart", json!({})),
+            "one",
+            &mut Seen::default(),
+            &view(),
+            &exit,
+            &data_dir(),
+        );
         assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
         assert_eq!(*calls.lock().unwrap(), vec![75]);
     }
@@ -195,7 +255,14 @@ mod tests {
     fn pause_and_resume_need_computer_true_else_the_site_answered_it() {
         let v = view();
         let noop = |_: i32| {};
-        let answer = run(&cmd("pause", json!({})), "one", &mut Seen::default(), &v, &noop);
+        let answer = run(
+            &cmd("pause", json!({})),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
         assert_eq!(answer["reason"], SITE_ANSWERS);
         assert_eq!(v.paused.reason("one"), None);
 
@@ -205,6 +272,7 @@ mod tests {
             &mut Seen::default(),
             &v,
             &noop,
+            &data_dir(),
         );
         assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
         assert_eq!(
@@ -218,6 +286,7 @@ mod tests {
             &mut Seen::default(),
             &v,
             &noop,
+            &data_dir(),
         );
         assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
         assert_eq!(v.paused.reason("one"), None);
@@ -229,10 +298,10 @@ mod tests {
         let noop = |_: i32| {};
         let mut seen = Seen::default();
         assert_eq!(
-            run(&cmd("restart", json!({})), "one", &mut seen, &v, &noop)["type"],
+            run(&cmd("restart", json!({})), "one", &mut seen, &v, &noop, &data_dir())["type"],
             "ack"
         );
-        let answer = run(&cmd("restart", json!({})), "one", &mut seen, &v, &noop);
+        let answer = run(&cmd("restart", json!({})), "one", &mut seen, &v, &noop, &data_dir());
         assert_eq!(answer["reason"], "Already received: a command runs once.");
     }
 
@@ -243,7 +312,7 @@ mod tests {
         let mut old = cmd("restart", json!({}));
         old.issued_at = now_ms() - 61_000;
         old.expires_at = old.issued_at + 60_000;
-        let answer = run(&old, "one", &mut Seen::default(), &v, &noop);
+        let answer = run(&old, "one", &mut Seen::default(), &v, &noop, &data_dir());
         assert!(answer["reason"].as_str().unwrap().starts_with("Expired"));
     }
 
@@ -251,9 +320,23 @@ mod tests {
     fn before_setup_only_the_exempt_commands_run() {
         let v = view();
         let noop = |_: i32| {};
-        let answer = run(&cmd("restart", json!({})), "", &mut Seen::default(), &v, &noop);
+        let answer = run(
+            &cmd("restart", json!({})),
+            "",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
         assert_eq!(answer["reason"], "Finish setup first.");
-        let answer = run(&cmd("setup_check", json!({})), "", &mut Seen::default(), &v, &noop);
+        let answer = run(
+            &cmd("setup_check", json!({})),
+            "",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
         assert_eq!(answer["reason"], "Not a command this agent takes yet: setup_check");
     }
 
@@ -262,12 +345,103 @@ mod tests {
         let v = view();
         let noop = |_: i32| {};
         let answer = run(
+            &cmd("continue", json!({})),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], "Not a command this agent takes yet: continue");
+    }
+
+    #[test]
+    fn shoot_nacks_an_unknown_gallery() {
+        let v = view();
+        let noop = |_: i32| {};
+        let answer = run(
             &cmd("shoot", json!({ "gallery": "intro" })),
             "one",
             &mut Seen::default(),
             &v,
             &noop,
+            &data_dir(),
         );
-        assert_eq!(answer["reason"], "Not a command this agent takes yet: shoot");
+        assert_eq!(answer["reason"], "No gallery called intro.");
+    }
+
+    #[test]
+    fn shoot_nacks_a_gallery_with_no_command_set() {
+        let mut v = view();
+        v.projects[0].galleries = vec![crate::config::GalleryConfig {
+            name: "Intro".into(),
+            command: String::new(),
+            out_dir: "shots".into(),
+        }];
+        let noop = |_: i32| {};
+        let answer = run(
+            &cmd("shoot", json!({ "gallery": "intro" })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], "No command set for this gallery.");
+    }
+
+    #[cfg(windows)]
+    fn copy_fixture_command() -> String {
+        "mkdir shots && copy fixture.png shots\\01-first.png".to_string()
+    }
+    #[cfg(not(windows))]
+    fn copy_fixture_command() -> String {
+        "mkdir -p shots && cp fixture.png shots/01-first.png".to_string()
+    }
+
+    #[test]
+    fn shoot_acks_at_once_and_runs_the_gallery_in_the_background() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::test_support::repo_with_origin(root.path());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(100, 20))
+            .save(repo.join("fixture.png"))
+            .unwrap();
+        crate::test_support::run(crate::test_support::git(&repo).args(["add", "fixture.png"]));
+        crate::test_support::run(crate::test_support::git(&repo).args(["commit", "--quiet", "-m", "fixture"]));
+        crate::test_support::run(crate::test_support::git(&repo).args(["push", "--quiet", "origin", "main"]));
+
+        let mut v = view();
+        v.projects[0].id = "commands-shoot-happy-path".into();
+        v.projects[0].repo_path = repo.clone();
+        v.projects[0].worktrees_dir = root.path().join("worktrees");
+        v.projects[0].base_branch = "main".into();
+        v.projects[0].galleries = vec![crate::config::GalleryConfig {
+            name: "Models".into(),
+            command: copy_fixture_command(),
+            out_dir: "shots".into(),
+        }];
+        let noop = |_: i32| {};
+        let dir = root.path().join("data");
+
+        let answer = run(
+            &cmd("shoot", json!({ "gallery": "models" })),
+            "commands-shoot-happy-path",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &dir,
+        );
+        assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
+
+        let index = dir.join("projects/commands-shoot-happy-path/galleries/models/index.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !index.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(index.exists());
+        assert_eq!(
+            galleries::status("commands-shoot-happy-path", "models"),
+            galleries::GalleryStatus::Idle
+        );
     }
 }
