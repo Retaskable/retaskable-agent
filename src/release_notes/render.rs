@@ -216,12 +216,17 @@ pub fn markdown(sections: &[Section], range: &Range, result: Option<&ReleaseNote
     note_markdown(range, &title, summary.as_deref(), &highlights, &also_new, &fixes)
 }
 
-/// The words `{{projectKind}}`/`{{projectNoun}}`/`{{projectUser}}` fill in, one set per project type
-/// (shared/projectType.ts's `WORDS` + agent/src/prompts.ts's `PROMPT_WORDS`, combined).
+/// The words `{{projectKind}}`/`{{projectNoun}}`/`{{projectUser}}`/`{{projectExamples}}`/`{{projectSteps}}`
+/// fill in, one set per project type (shared/projectType.ts's `WORDS` + agent/src/prompts.ts's
+/// `PROMPT_WORDS`, combined).
 pub struct ProjectWords {
     pub kind: &'static str,
     pub noun: &'static str,
     pub user: &'static str,
+    /// `PROMPT_WORDS[t].examples`: the kinds of player/user-visible change `{{playtest}}` asks about.
+    pub examples: &'static str,
+    /// `PROMPT_WORDS[t].steps`: how the playtest's `steps` reach the change, from launch.
+    pub steps: &'static str,
 }
 
 pub fn project_words(project_type: ProjectType) -> ProjectWords {
@@ -230,26 +235,36 @@ pub fn project_words(project_type: ProjectType) -> ProjectWords {
             kind: "a game",
             noun: "the game",
             user: "a player",
+            examples: "new behaviour, visuals, controls, feel, balance",
+            steps: "from launch",
         },
         ProjectType::Web => ProjectWords {
             kind: "a web app",
             noun: "the web app",
             user: "a user",
+            examples: "new behaviour, pages, layout, flows, messages",
+            steps: "from launch (open the web app, then where to click)",
         },
         ProjectType::Server => ProjectWords {
             kind: "a server or API",
             noun: "the server",
             user: "a client or caller",
+            examples: "new behaviour, responses, output, errors, flags",
+            steps: "from launch (start the server, then the requests to send, e.g. `curl localhost:8787/api/me`)",
         },
         ProjectType::Cli => ProjectWords {
             kind: "a command-line program or library",
             noun: "the program",
             user: "a user",
+            examples: "new behaviour, responses, output, errors, flags",
+            steps: "from launch (the commands to run)",
         },
         ProjectType::Other => ProjectWords {
             kind: "an app",
             noun: "the app",
             user: "a user",
+            examples: "new behaviour, visuals, output, flows, messages",
+            steps: "from launch",
         },
     }
 }
