@@ -8,6 +8,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::*;
+use crate::commands;
 use crate::link::FileStore;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
@@ -105,7 +106,13 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         lanes: 2,
         chore_lane: Some(2),
         lane_sizes: LaneSizes::default(),
+        paused: PauseState::default(),
     })
+}
+
+/// An `exit` that does nothing, for tests that don't send Restart.
+fn noop_exit() -> Arc<Exit> {
+    Arc::new(|_: i32| {})
 }
 
 fn linked(url: &str) -> (tempfile::TempDir, Arc<dyn TokenStore>) {
@@ -151,6 +158,7 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
         reqwest::Client::new(),
         view(&["one", "two"]),
         timing(),
+        noop_exit(),
     );
     let mut first = next(&mut rx).await;
     assert_eq!(first.uri, "/api/agents/connect?project=one");
@@ -186,7 +194,7 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
     let (url, _, mut rx) = cloud().await;
     let (_dir, store) = linked(&url);
     let view = view(&["one"]);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view.clone(), timing());
+    let c = Connector::start(&url, store, reqwest::Client::new(), view.clone(), timing(), noop_exit());
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello
     let lanes = read(&mut first).await["state"]["lanes"].clone();
@@ -211,7 +219,7 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
     let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&[]), timing());
+    let c = Connector::start(&url, store, reqwest::Client::new(), view(&[]), timing(), noop_exit());
     let mut a = next(&mut rx).await;
     assert_eq!(a.uri, "/api/agents/connect");
     assert_eq!(read(&mut a).await["project"], Value::Null);
@@ -219,23 +227,168 @@ async fn before_setup_it_connects_to_its_own_hub() {
     c.stop(Duration::from_secs(1)).await;
 }
 
+/// A fresh, still-valid command: callers override `name`/`args` as needed.
+fn command(id: &str, name: &str, args: Value) -> Value {
+    let now = commands::now_ms();
+    json!({
+        "type": "command",
+        "id": id,
+        "name": name,
+        "args": args,
+        "issuedBy": "jc",
+        "issuedAt": now,
+        "expiresAt": now + 60_000,
+    })
+}
+
 #[tokio::test]
-async fn a_command_is_refused_with_a_nack() {
+async fn an_unported_command_is_refused_with_a_nack() {
     let (url, _, mut rx) = cloud().await;
     let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&["one"]), timing());
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+    );
     let mut a = next(&mut rx).await;
     read(&mut a).await;
     read(&mut a).await;
-    let command = json!({ "type": "command", "id": "c1", "name": "pause", "args": {}, "issuedBy": "jc" });
     a.ws.send(Message::text(json!({ "type": "ping" }).to_string()))
         .await
         .unwrap();
-    a.ws.send(Message::text(command.to_string())).await.unwrap();
+    a.ws.send(Message::text(command("c1", "shoot", json!({})).to_string()))
+        .await
+        .unwrap();
     let nack = read(&mut a).await;
     assert_eq!(nack["type"], "nack");
     assert_eq!(nack["id"], "c1");
-    assert_eq!(nack["reason"], "Not a command this agent takes yet: pause");
+    assert_eq!(nack["reason"], "Not a command this agent takes yet: shoot");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
+    let (url, _, mut rx) = cloud().await;
+    let (_dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    read(&mut a).await; // snapshot
+
+    a.ws.send(Message::text(command("c1", "pause", json!({})).to_string()))
+        .await
+        .unwrap();
+    let nack = read(&mut a).await;
+    assert_eq!(
+        nack["reason"],
+        "retaskable.com answers this one itself; it doesn't take a computer."
+    );
+
+    a.ws.send(Message::text(
+        command("c2", "pause", json!({ "computer": true })).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c2" }));
+    let snapshot = read(&mut a).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(
+        snapshot["state"]["orchestrator"]["pausedReason"],
+        "Paused from retaskable.com by jc"
+    );
+
+    a.ws.send(Message::text(
+        command("c3", "resume", json!({ "computer": true })).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c3" }));
+    let snapshot = read(&mut a).await;
+    assert_eq!(snapshot["state"]["orchestrator"]["pausedReason"], NO_WORK_YET);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn restart_acks_and_calls_exit_with_75() {
+    let (url, _, mut rx) = cloud().await;
+    let (_dir, store) = linked(&url);
+    let calls: Arc<StdMutex<Vec<i32>>> = Arc::new(StdMutex::new(Vec::new()));
+    let kept = calls.clone();
+    let exit: Arc<Exit> = Arc::new(move |code: i32| kept.lock().unwrap().push(code));
+    let c = Connector::start(&url, store, reqwest::Client::new(), view(&["one"]), timing(), exit);
+    let mut a = next(&mut rx).await;
+    read(&mut a).await;
+    read(&mut a).await;
+    a.ws.send(Message::text(command("c1", "restart", json!({})).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c1" }));
+    assert_eq!(*calls.lock().unwrap(), vec![75]);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_replayed_command_id_is_refused_the_second_time() {
+    let (url, _, mut rx) = cloud().await;
+    let (_dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await;
+    read(&mut a).await;
+    let cmd = command("c1", "restart", json!({}));
+    a.ws.send(Message::text(cmd.to_string())).await.unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c1" }));
+    a.ws.send(Message::text(cmd.to_string())).await.unwrap();
+    let nack = read(&mut a).await;
+    assert_eq!(nack["reason"], "Already received: a command runs once.");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn an_expired_command_is_refused() {
+    let (url, _, mut rx) = cloud().await;
+    let (_dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await;
+    read(&mut a).await;
+    let issued_at = commands::now_ms() - 61_000;
+    let old = json!({
+        "type": "command",
+        "id": "c1",
+        "name": "restart",
+        "args": {},
+        "issuedBy": "jc",
+        "issuedAt": issued_at,
+        "expiresAt": issued_at + 60_000,
+    });
+    a.ws.send(Message::text(old.to_string())).await.unwrap();
+    let nack = read(&mut a).await;
+    assert!(nack["reason"].as_str().unwrap().starts_with("Expired"));
     c.stop(Duration::from_secs(1)).await;
 }
 
@@ -243,7 +396,14 @@ async fn a_command_is_refused_with_a_nack() {
 async fn it_reconnects_after_a_close_and_takes_a_fresh_token_when_its_one_expired() {
     let (url, refreshes, mut rx) = cloud().await;
     let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store.clone(), reqwest::Client::new(), view(&["one"]), timing());
+    let c = Connector::start(
+        &url,
+        store.clone(),
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+    );
     let mut a = next(&mut rx).await;
     close(&mut a, close::REPLACED).await;
     // Same token, after a backoff.
@@ -262,7 +422,14 @@ async fn an_unlinked_agent_waits_and_connects_once_linked() {
     let (url, _, mut rx) = cloud().await;
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn TokenStore> = Arc::new(FileStore::new(dir.path().join("credentials.json"), "retaskable"));
-    let c = Connector::start(&url, store.clone(), reqwest::Client::new(), view(&["one"]), timing());
+    let c = Connector::start(
+        &url,
+        store.clone(),
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(300), rx.recv())
             .await
