@@ -100,6 +100,10 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
                 id: id.to_string(),
                 github_repo: format!("o/{id}"),
                 backlog_path: "backlog".into(),
+                repo_path: PathBuf::new(),
+                worktrees_dir: PathBuf::new(),
+                base_branch: String::new(),
+                galleries: vec![],
             })
             .collect(),
         version: "9.9.9".into(),
@@ -285,20 +289,20 @@ async fn an_unported_command_is_refused_with_a_nack() {
     a.ws.send(Message::text(json!({ "type": "ping" }).to_string()))
         .await
         .unwrap();
-    a.ws.send(Message::text(command("c1", "shoot", json!({})).to_string()))
+    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
         .await
         .unwrap();
     let nack = read(&mut a).await;
     assert_eq!(nack["type"], "nack");
     assert_eq!(nack["id"], "c1");
-    assert_eq!(nack["reason"], "Not a command this agent takes yet: shoot");
+    assert_eq!(nack["reason"], "Not a command this agent takes yet: continue");
     c.stop(Duration::from_secs(1)).await;
 }
 
 #[tokio::test]
 async fn every_command_answered_is_logged_to_remote_log() {
     let (c, mut a, dir) = connected_project(noop_exit()).await;
-    a.ws.send(Message::text(command("c1", "shoot", json!({})).to_string()))
+    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
         .await
         .unwrap();
     read(&mut a).await; // the nack
@@ -312,10 +316,10 @@ async fn every_command_answered_is_logged_to_remote_log() {
     let lines: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["id"], "c1");
-    assert_eq!(lines[0]["name"], "shoot");
+    assert_eq!(lines[0]["name"], "continue");
     assert_eq!(lines[0]["issuedBy"], "jc");
     assert_eq!(lines[0]["outcome"], "nack");
-    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: shoot");
+    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: continue");
     assert!(lines[0]["at"].as_str().unwrap().ends_with('Z'));
     assert_eq!(lines[1]["id"], "c2");
     assert_eq!(lines[1]["outcome"], "ack");
