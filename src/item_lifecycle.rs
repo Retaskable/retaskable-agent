@@ -199,14 +199,12 @@ impl ItemRun {
                 // The base moved, so it's brought up to date and checked again before it
                 // merges — unlike a real Conflict below, this merged in cleanly, so it goes
                 // on to awaiting_ci rather than back to implementing. It still counts against
-                // maxConflictRounds; past the cap, a PR that's only behind merges as it is.
+                // maxConflictRounds; the merge step checks `may_update_from_base` *before*
+                // doing this, and lands the PR as it is instead once the cap is reached, so
+                // this transition itself never needs to decide that.
                 self.approved_at_head = approval_kept;
                 self.conflict_rounds += 1;
-                if self.conflict_rounds > cfg.max_conflict_rounds {
-                    ItemState::Merged
-                } else {
-                    ItemState::AwaitingCi
-                }
+                ItemState::AwaitingCi
             }
             MergeOutcome::Conflict => {
                 self.approved_at_head = false;
@@ -241,6 +239,15 @@ impl ItemRun {
     /// escalation, or an error.
     pub fn escalate(&mut self) {
         self.state = ItemState::NeedsHuman;
+    }
+
+    /// Whether the merge step may still bring the PR up to date with its base before landing
+    /// it. Once `maxConflictRounds` is reached, the merge step checks this first and lands the
+    /// PR as it is instead (reporting `Merged` or `HandedToGithub`, not `UpdatedFromBase`) —
+    /// 05-item-lifecycle.md's `merging` row: "once the count is reached, a PR that is only
+    /// behind merges as it is".
+    pub fn may_update_from_base(&self, cfg: &ProjectConfig) -> bool {
+        self.conflict_rounds < cfg.max_conflict_rounds
     }
 
     /// A human chose **Carry on** or **Start this slice over**: either way it resumes in
@@ -773,18 +780,18 @@ mod tests {
     }
 
     #[test]
-    fn conflict_rounds_cap_from_repeated_base_updates_merges_anyway_since_its_only_behind() {
+    fn conflict_rounds_cap_stops_further_base_updates_so_the_merge_step_lands_it_as_is() {
         let cfg = ProjectConfig {
             max_conflict_rounds: 1,
             ..cfg()
         };
         let mut run = ItemRun::new();
+        assert!(run.may_update_from_base(&cfg));
+
         run.state = ItemState::Merging;
         run.merge_finished(MergeOutcome::UpdatedFromBase { approval_kept: true }, &cfg);
         assert_eq!(run.state, ItemState::AwaitingCi);
-        run.state = ItemState::Merging;
-        run.merge_finished(MergeOutcome::UpdatedFromBase { approval_kept: true }, &cfg);
-        assert_eq!(run.state, ItemState::Merged);
+        assert!(!run.may_update_from_base(&cfg));
     }
 
     #[test]
