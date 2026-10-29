@@ -9,8 +9,8 @@
 //! item so far, nothing notices a `needs_human` item and runs this on it; [`crate::commands`]'s
 //! Continue, Start over and Skip (the buttons this decision would be carried out through) still
 //! need the orchestrator loop and lanes too. Also still missing: capping this at 2 automatic
-//! decisions a slice, reporting `claudeOnIt` while it's thinking, the top-tier second look on a
-//! `human` decision with a `suggest`, and actually sending a decided
+//! decisions a slice and reporting `claudeOnIt` while it's thinking (both need an
+//! item-record data model that doesn't exist yet), and actually sending a decided
 //! [`bug_report::BugReportMessage`] over the cloud link (reading the hub's own consent and known
 //! bugs to decide one with [`bug_report::decide_bug_report`] is as far as this slice goes); no
 //! `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the prompt
@@ -18,13 +18,18 @@
 //! [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`] from the
 //! item's own state, build a [`Triager`] with the project's words, the item's lane (or the base
 //! checkout) and `budget.reviewerUsd`, and run [`decide`] with
-//! [`crate::engines::runner::run_session`].
+//! [`crate::engines::runner::run_session`]. When that answer is `human` with a `suggest`,
+//! [`second_look`] is the top-tier check on it (06.9 bullet 3): run [`second_look::check`] the
+//! same way, on the same role, place and budget, then fold whatever it answered (or didn't, on a
+//! failure) back onto the triager's own answer with [`second_look::resolve`] before the caller
+//! carries anything out.
 pub mod bug_report;
+pub mod second_look;
 
 use std::future::Future;
 
 use anyhow::{Context as _, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::ProjectType;
@@ -79,12 +84,34 @@ pub enum TriageDecision {
 
 /// `suggest` (06.9's opening line): which button the app would offer first, when the triager
 /// leaves the item for a person — only the three a person can actually press.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriageButton {
     Continue,
     StartOver,
     Skip,
+}
+
+impl TriageButton {
+    /// The decision this button carries out, the same as the triager's own `continue`/
+    /// `start_over`/`skip` (06.9 bullet 3: "carried out like the triager's own decision").
+    pub fn decision(self) -> TriageDecision {
+        match self {
+            TriageButton::Continue => TriageDecision::Continue,
+            TriageButton::StartOver => TriageDecision::StartOver,
+            TriageButton::Skip => TriageDecision::Skip,
+        }
+    }
+
+    /// How this button reads as a verb, for the timeline line 06.9 gives: "Claude decided to …,
+    /// checked with a second look: …".
+    pub fn verb(self) -> &'static str {
+        match self {
+            TriageButton::Continue => "continue",
+            TriageButton::StartOver => "start over",
+            TriageButton::Skip => "skip",
+        }
+    }
 }
 
 /// `retaskableBug` (06.9 bullet 18): set only when what went wrong is Retaskable's own, never the
