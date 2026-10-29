@@ -4,10 +4,12 @@
 //! reconnects with backoff. Outbound only: nothing listens on a public port.
 //!
 //! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, and an
-//! orchestrator that runs no work yet (`AgentView`). Every command from the site is refused, since none is ported.
+//! orchestrator that runs no work yet (`AgentView`). A command from the site (`commands.rs`) is checked and run if
+//! it's one this agent has ported — so far Restart, Pause and Resume — and refused otherwise.
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::Arc;
@@ -20,9 +22,13 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
+use crate::commands::{self, Seen};
 use crate::config::ProjectConfig;
 use crate::lane_pool::LaneSizes;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
+
+/// A callback that ends the process, to run restart (connector.ts's `exit`, `commands.ts`'s `restart`).
+pub type Exit = dyn Fn(i32) + Send + Sync;
 
 /// The name a socket that signs in with a token offers beside it (shared/cloud.ts `SUBPROTOCOL`).
 pub const SUBPROTOCOL: &str = "retaskable";
@@ -90,6 +96,51 @@ pub struct AgentView {
     pub chore_lane: Option<u32>,
     /// Each project's lanes' disk use; a change sends that project's snapshot again.
     pub lane_sizes: LaneSizes,
+    /// Each paused project's reason, Pause and Resume's (orchestrator.ts's `paused`/`pausedReason`); a change
+    /// sends that project's snapshot again, as a lane-size change does.
+    pub paused: PauseState,
+}
+
+/// A project's pause, Pause and Resume's (`{ computer: true }` only; the project-wide pause is the shared
+/// backlog's own, answered by retaskable.com without reaching a computer). Keyed and watched like
+/// [`LaneSizes`], since both resend a project's snapshot the same way.
+#[derive(Debug, Clone)]
+pub struct PauseState(Arc<watch::Sender<BTreeMap<String, String>>>);
+
+impl Default for PauseState {
+    fn default() -> Self {
+        Self(Arc::new(watch::Sender::new(BTreeMap::new())))
+    }
+}
+
+impl PartialEq for PauseState {
+    fn eq(&self, other: &Self) -> bool {
+        *self.0.borrow() == *other.0.borrow()
+    }
+}
+
+impl PauseState {
+    pub fn reason(&self, project: &str) -> Option<String> {
+        self.0.borrow().get(project).cloned()
+    }
+
+    /// `Some(reason)` pauses the project with that reason, `None` resumes it.
+    pub fn set(&self, project: &str, reason: Option<String>) {
+        self.0.send_if_modified(|all| match reason {
+            Some(reason) => {
+                if all.get(project) == Some(&reason) {
+                    return false;
+                }
+                all.insert(project.to_string(), reason);
+                true
+            }
+            None => all.remove(project).is_some(),
+        });
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<BTreeMap<String, String>> {
+        self.0.subscribe()
+    }
 }
 
 /// A project as its hub knows it.
@@ -145,7 +196,8 @@ impl AgentView {
         let orchestrator = if project.is_empty() {
             json!({ "status": "setup", "machine": self.machine })
         } else {
-            json!({ "status": "paused", "machine": self.machine, "pausedReason": NO_WORK_YET })
+            let reason = self.paused.reason(project).unwrap_or_else(|| NO_WORK_YET.to_string());
+            json!({ "status": "paused", "machine": self.machine, "pausedReason": reason })
         };
         json!({
             "type": "snapshot",
@@ -206,17 +258,20 @@ struct Cloud {
     tokens: Arc<DeviceTokens>,
     view: Arc<AgentView>,
     timing: Timing,
+    exit: Arc<Exit>,
 }
 
 impl Connector {
     /// Starts a connection for each of `view`'s projects to the cloud at `url`. Projects after the first wait until
     /// the first has connected once, so the first is the one that keeps the agent's own hub (projects.md section 9.2).
+    /// `exit` is Restart's (the same one the settings page's restart button uses).
     pub fn start(
         url: &str,
         store: Arc<dyn TokenStore>,
         http: reqwest::Client,
         view: Arc<AgentView>,
         timing: Timing,
+        exit: Arc<Exit>,
     ) -> Self {
         let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
@@ -225,6 +280,7 @@ impl Connector {
             tokens: tokens.clone(),
             view,
             timing,
+            exit,
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -292,6 +348,9 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
         wait
     };
     let mut stale: Option<String> = None;
+    // One project's commands, so a replay is caught across reconnects (commands.ts's `Commands` is one per
+    // project's connection too).
+    let mut seen = Seen::default();
     loop {
         // A token that never comes (a refresh hanging on the network) is a failed try, not a link that stops.
         let answer = tokio::time::timeout(t.connect, cloud.tokens.access_token(stale.as_deref()))
@@ -310,7 +369,8 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
                             let _ = opened.send(true); // the other projects may connect now
                         }
                         let since = Instant::now();
-                        let (code, reason) = connected(ws, &cloud.view, &project, t, &log).await;
+                        let (code, reason) =
+                            connected(ws, &cloud.view, &project, t, &log, &mut seen, cloud.exit.as_ref()).await;
                         if since.elapsed() >= t.stable {
                             attempt = 0;
                         }
@@ -369,7 +429,15 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 
 /// Runs an open connection: hello and a snapshot, then answers what the hub sends, and says it's alive in a quiet
 /// minute (sync-health.md section 3.1). The close code and reason when it closes.
-async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: &impl Fn(String)) -> (u16, String) {
+async fn connected(
+    ws: Socket,
+    view: &AgentView,
+    project: &str,
+    t: Timing,
+    log: &impl Fn(String),
+    seen: &mut Seen,
+    exit: &Exit,
+) -> (u16, String) {
     let (mut tx, mut rx) = ws.split();
     for msg in [view.hello(project), view.snapshot(project)] {
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
@@ -377,13 +445,15 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
         }
     }
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
-    // The snapshot just sent has the sizes as they are now; a later measurement sends it again.
+    // The snapshot just sent has the sizes and pause as they are now; a later change sends it again.
     let mut sizes = view.lane_sizes.subscribe();
     sizes.mark_unchanged();
+    let mut paused = view.paused.subscribe();
+    paused.mark_unchanged();
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
-                Some(Ok(Message::Text(text))) => receive(&text, log),
+                Some(Ok(Message::Text(text))) => receive(&text, view, project, seen, exit, log),
                 Some(Ok(Message::Close(frame))) => {
                     return frame.map_or((1005, String::new()), |f| (u16::from(f.code), f.reason.to_string()));
                 }
@@ -393,6 +463,7 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project)),
+            Ok(()) = paused.changed() => Some(view.snapshot(project)),
         };
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await
@@ -402,9 +473,16 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
     }
 }
 
-/// The answer to a message from the hub, if it needs one. A command is refused with a `nack`, since none is ported
-/// yet; `watch` finds no session to send; everything else is nothing to act on yet.
-fn receive(text: &str, log: &impl Fn(String)) -> Option<Value> {
+/// The answer to a message from the hub, if it needs one. A command is checked and run (commands.rs); `watch`
+/// finds no session to send; everything else is nothing to act on yet.
+fn receive(
+    text: &str,
+    view: &AgentView,
+    project: &str,
+    seen: &mut Seen,
+    exit: &Exit,
+    log: &impl Fn(String),
+) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
     if msg.get("type").and_then(Value::as_str) != Some("command") {
         return None;
@@ -419,8 +497,20 @@ fn receive(text: &str, log: &impl Fn(String)) -> Option<Value> {
             .map(|s| truncate(s, 100))
             .unwrap_or_else(|| "?".into())
     };
-    let (name, by) = (field("name"), field("issuedBy"));
-    let reason = format!("Not a command this agent takes yet: {name}");
-    log(format!("{name} from {by}: {reason}"));
-    Some(json!({ "type": "nack", "id": id, "reason": reason }))
+    let cmd = commands::Command {
+        id: id.to_string(),
+        name: field("name"),
+        args: msg.get("args").cloned().unwrap_or(Value::Null),
+        issued_by: field("issuedBy"),
+        issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
+        expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
+    };
+    let answer = commands::run(&cmd, project, seen, view, exit);
+    let outcome = if answer.get("type").and_then(Value::as_str) == Some("ack") {
+        "done".to_string()
+    } else {
+        answer.get("reason").and_then(Value::as_str).unwrap_or("?").to_string()
+    };
+    log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
+    Some(answer)
 }
