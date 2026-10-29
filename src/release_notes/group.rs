@@ -248,42 +248,32 @@ pub fn facts(sections: &[Section], max_full_entries: usize) -> Value {
                 .iter()
                 .map(|entry| {
                     if brief.contains(&i) {
-                        json!({ "key": entry.key, "title": title_of(entry), "titleOnly": true })
-                    } else {
-                        let mut obj = serde_json::Map::new();
-                        obj.insert("key".to_string(), json!(entry.key));
-                        match &entry.item {
-                            Some(item) => {
-                                obj.insert("item".to_string(), json!(item.title));
-                                obj.insert("status".to_string(), json!(status_word(item.status)));
-                            }
-                            None => {
-                                obj.insert("title".to_string(), json!(entry.fallback));
-                            }
-                        }
-                        if !entry.prs.is_empty() {
-                            let prs: Vec<Value> = entry
-                                .prs
-                                .iter()
-                                .map(|pr| json!({ "title": pr.title, "body": clip(&pr.body, 600) }))
-                                .collect();
-                            obj.insert("prs".to_string(), json!(prs));
-                        }
-                        if let Some(commit) = &entry.commit {
-                            obj.insert("commit".to_string(), json!(commit.subject));
-                        }
-                        if !entry.specs.is_empty() {
-                            obj.insert("specs".to_string(), json!(entry.specs));
-                        }
-                        Value::Object(obj)
+                        return json!({ "key": entry.key, "title": title_of(entry), "titleOnly": true });
                     }
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("key".to_string(), json!(entry.key));
+                    if let Some(item) = &entry.item {
+                        obj.insert("item".to_string(), json!(title_of(entry)));
+                        obj.insert("status".to_string(), json!(status_word(item.status)));
+                    }
+                    let prs: Vec<Value> = entry
+                        .prs
+                        .iter()
+                        .map(|pr| json!({ "title": pr.title, "body": clip(&pr.body, 600) }))
+                        .collect();
+                    obj.insert("prs".to_string(), json!(prs));
+                    if entry.commit.is_some() {
+                        obj.insert("commit".to_string(), json!(entry.fallback));
+                    }
+                    obj.insert("specs".to_string(), json!(entry.specs));
+                    Value::Object(obj)
                 })
                 .collect();
             json!({ "key": section.key, "heading": section.heading, "entries": entries_json })
         })
         .collect();
 
-    json!({ "sections": sections_json })
+    Value::Array(sections_json)
 }
 
 #[cfg(test)]
@@ -624,8 +614,11 @@ mod tests {
         let (charts_item, p) = charts_item_and_pr();
         let sections = group(&[p], &[], &[charts_item], &HashMap::new());
         let f = facts(&sections, 120);
-        let entry = &f["sections"][0]["entries"][0];
-        assert_eq!(entry["item"], "Charts");
+        let entry = &f[0]["entries"][0];
+        assert_eq!(entry["item"], "1 Charts");
+        assert_eq!(entry["status"], "done");
+        assert_eq!(entry["prs"][0]["title"], "Add charts");
+        assert_eq!(entry["title"], Value::Null);
         assert_eq!(entry["titleOnly"], Value::Null);
     }
 
@@ -656,7 +649,7 @@ mod tests {
             .collect();
         let sections = group(&prs, &[], &items, &HashMap::new());
         let f = facts(&sections, 2);
-        let total_title_only: usize = f["sections"]
+        let total_title_only: usize = f
             .as_array()
             .unwrap()
             .iter()

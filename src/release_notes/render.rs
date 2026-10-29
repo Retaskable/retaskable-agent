@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::backlog::ItemStatus;
 use crate::config::ProjectType;
 
-use super::group::{for_users, title_of};
+use super::group::for_users;
 use super::model::{Entry, Range, ReleaseNotesResult, Section};
 
 /// `MAX_HIGHLIGHTS` (shared/releaseNote.ts).
@@ -177,14 +177,10 @@ pub fn markdown(sections: &[Section], range: &Range, result: Option<&ReleaseNote
         }
         None => feature_entries
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.item.as_ref().map(|i| i.status),
-                    Some(ItemStatus::OnMain) | Some(ItemStatus::InProduction)
-                )
-            })
+            .filter_map(|e| e.item.as_ref().map(|item| (e, item)))
+            .filter(|(_, item)| matches!(item.status, ItemStatus::OnMain | ItemStatus::InProduction))
             .take(MAX_HIGHLIGHTS)
-            .map(|e| (e.key.clone(), title_of(e), String::new()))
+            .map(|(e, item)| (e.key.clone(), item.title.clone(), String::new()))
             .collect(),
     };
 
@@ -194,14 +190,16 @@ pub fn markdown(sections: &[Section], range: &Range, result: Option<&ReleaseNote
         .map(|(_, headline, text)| (headline, text))
         .collect();
 
+    // Another change only shows when the model wrote a line for it (a dependency bump means nothing
+    // to the readers); an item it left out is listed by its title.
     let also_new: Vec<String> = feature_entries
         .iter()
         .filter(|e| !highlighted_keys.contains(e.key.as_str()))
-        .map(|e| {
+        .filter_map(|e| {
             texts
                 .get(e.key.as_str())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| title_of(e))
+                .or_else(|| e.item.as_ref().map(|item| item.title.clone()))
         })
         .collect();
 
@@ -308,7 +306,7 @@ mod tests {
     use serde_json::json;
 
     use crate::release_notes::group::group;
-    use crate::release_notes::model::Highlight;
+    use crate::release_notes::model::{Highlight, NoteEntry};
     use crate::release_notes::test_support::{charts_item_and_pr, item, pr, range};
 
     use super::*;
@@ -380,7 +378,57 @@ mod tests {
         let (charts_item, p) = charts_item_and_pr();
         let sections = group(&[p], &[], &[charts_item], &HashMap::new());
         let md = markdown(&sections, &range(), None);
-        assert!(md.contains("### 1 Charts"));
+        assert!(md.contains("### Charts\n"));
+        assert!(!md.contains("### 1 Charts"));
+    }
+
+    #[test]
+    fn markdown_lists_an_item_by_its_bare_title_and_drops_another_change_with_no_line() {
+        let items = vec![item("7", "Phones", ItemStatus::Building, None, &[], None)];
+        let prs = [
+            pr(
+                1,
+                "Phone work",
+                "https://github.com/x/y/pull/1",
+                "retaskable/7-phones",
+                "2026-09-24T00:00:00Z",
+            ),
+            pr(
+                2,
+                "Bump serde",
+                "https://github.com/x/y/pull/2",
+                "someone/bump",
+                "2026-09-25T00:00:00Z",
+            ),
+            pr(
+                3,
+                "Fix typo",
+                "https://github.com/x/y/pull/3",
+                "someone/typo",
+                "2026-09-26T00:00:00Z",
+            ),
+        ];
+        let sections = group(&prs, &[], &items, &HashMap::new());
+        let result = ReleaseNotesResult {
+            status: "ok".to_string(),
+            title: "This week".to_string(),
+            summary: String::new(),
+            highlights: vec![],
+            entries: vec![NoteEntry {
+                key: "pr:3".to_string(),
+                text: "Fixed a typo on the start screen".to_string(),
+            }],
+            error: None,
+        };
+        let md = markdown(&sections, &range(), Some(&result));
+        assert!(md.contains("## What's new\n\n- Phones\n- Fixed a typo on the start screen\n"));
+        assert!(!md.contains("Bump serde"));
+        assert!(!md.contains("7 Phones"));
+
+        let md = markdown(&sections, &range(), None);
+        assert!(md.contains("- Phones\n"));
+        assert!(!md.contains("Bump serde"));
+        assert!(!md.contains("Fix typo"));
     }
 
     #[test]
@@ -467,15 +515,7 @@ mod tests {
                 .join("release-notes.md"),
         )
         .unwrap();
-        let prompt = build_prompt(
-            &template,
-            ProjectType::Web,
-            "main",
-            "x/y",
-            &range(),
-            &json!({"sections": []}),
-        )
-        .unwrap();
+        let prompt = build_prompt(&template, ProjectType::Web, "main", "x/y", &range(), &json!([])).unwrap();
         assert!(!prompt.contains("{{"));
         assert!(prompt.contains("a web app"));
         assert!(prompt.contains("main"));
