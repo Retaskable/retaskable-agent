@@ -227,6 +227,9 @@ pub struct ProjectWords {
     pub examples: &'static str,
     /// `PROMPT_WORDS[t].steps`: how the playtest's `steps` reach the change, from launch.
     pub steps: &'static str,
+    /// `PROMPT_WORDS[t].parts`: an example of "the same part of {{projectNoun}}", for the
+    /// playtest-groups prompt (06.4-playtests.md's "Grouped into sessions").
+    pub parts: &'static str,
 }
 
 pub fn project_words(project_type: ProjectType) -> ProjectWords {
@@ -237,6 +240,7 @@ pub fn project_words(project_type: ProjectType) -> ProjectWords {
             user: "a player",
             examples: "new behaviour, visuals, controls, feel, balance",
             steps: "from launch",
+            parts: "a screen or mode, like the menus, the HUD, a core mechanic or the opening",
         },
         ProjectType::Web => ProjectWords {
             kind: "a web app",
@@ -244,6 +248,7 @@ pub fn project_words(project_type: ProjectType) -> ProjectWords {
             user: "a user",
             examples: "new behaviour, pages, layout, flows, messages",
             steps: "from launch (open the web app, then where to click)",
+            parts: "a page or flow, like sign-in, settings or the dashboard",
         },
         ProjectType::Server => ProjectWords {
             kind: "a server or API",
@@ -251,6 +256,7 @@ pub fn project_words(project_type: ProjectType) -> ProjectWords {
             user: "a client or caller",
             examples: "new behaviour, responses, output, errors, flags",
             steps: "from launch (start the server, then the requests to send, e.g. `curl localhost:8787/api/me`)",
+            parts: "an endpoint group, like auth, users or billing",
         },
         ProjectType::Cli => ProjectWords {
             kind: "a command-line program or library",
@@ -258,6 +264,7 @@ pub fn project_words(project_type: ProjectType) -> ProjectWords {
             user: "a user",
             examples: "new behaviour, responses, output, errors, flags",
             steps: "from launch (the commands to run)",
+            parts: "a command and its flags",
         },
         ProjectType::Other => ProjectWords {
             kind: "an app",
@@ -265,6 +272,7 @@ pub fn project_words(project_type: ProjectType) -> ProjectWords {
             user: "a user",
             examples: "new behaviour, visuals, output, flows, messages",
             steps: "from launch",
+            parts: "a screen, feature or command",
         },
     }
 }
@@ -500,6 +508,7 @@ mod tests {
             assert!(!words.kind.is_empty());
             assert!(!words.noun.is_empty());
             assert!(!words.user.is_empty());
+            assert!(!words.parts.is_empty());
         }
     }
 

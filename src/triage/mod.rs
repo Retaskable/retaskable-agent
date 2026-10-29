@@ -252,6 +252,7 @@ mod tests {
 
     use super::*;
     use crate::engines::SessionStart;
+    use crate::engines::engine::test_result as result;
 
     const TEMPLATE: &str = "Looking at {{projectKind}} (`{{githubRepo}}`):\n{{context}}";
 
@@ -285,22 +286,6 @@ mod tests {
             has_session_to_continue: true,
             automatic_decisions: 1,
             transcripts_dir: Some(".retaskable/projects/x/runs/9".to_string()),
-        }
-    }
-
-    fn result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
-        SessionResult {
-            ok,
-            subtype: subtype.to_string(),
-            structured,
-            error: error.map(str::to_string),
-            cost_usd: Some(0.2),
-            session_id: "s".to_string(),
-            limit_hit: false,
-            signed_out: false,
-            context_tokens: None,
-            usage: None,
-            tokens: None,
         }
     }
 
@@ -369,7 +354,7 @@ mod tests {
         let result = decided.result.unwrap();
         assert_eq!(result.decision, TriageDecision::Continue);
         assert_eq!(result.instructions, "Add the import and retry.");
-        assert_eq!(decided.cost_usd, 0.2);
+        assert_eq!(decided.cost_usd, 0.12);
         assert!(decided.note.is_none());
     }
 
@@ -396,8 +381,8 @@ mod tests {
         })
         .await;
         assert!(decided.result.is_none());
-        assert_eq!(decided.cost_usd, 0.2);
-        assert_eq!(decided.note.as_deref(), Some("hit its $1.5 budget (spent $0.20)"));
+        assert_eq!(decided.cost_usd, 0.12);
+        assert_eq!(decided.note.as_deref(), Some("hit its $1.5 budget (spent $0.12)"));
     }
 
     #[tokio::test]
