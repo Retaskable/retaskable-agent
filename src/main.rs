@@ -340,6 +340,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
                 view.clone(),
                 connector::Timing::default(),
                 exit_arc.clone(),
+                dir,
             )
         })
         .collect();

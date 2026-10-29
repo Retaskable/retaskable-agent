@@ -12,6 +12,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -259,12 +260,15 @@ struct Cloud {
     view: Arc<AgentView>,
     timing: Timing,
     exit: Arc<Exit>,
+    /// Where `.retaskable/remote.log` goes (cloud.md section 6.3).
+    dir: PathBuf,
 }
 
 impl Connector {
     /// Starts a connection for each of `view`'s projects to the cloud at `url`. Projects after the first wait until
     /// the first has connected once, so the first is the one that keeps the agent's own hub (projects.md section 9.2).
-    /// `exit` is Restart's (the same one the settings page's restart button uses).
+    /// `exit` is Restart's (the same one the settings page's restart button uses). `dir` is the agent's own data
+    /// directory, where every command answered gets logged (`commands::audit`).
     pub fn start(
         url: &str,
         store: Arc<dyn TokenStore>,
@@ -272,6 +276,7 @@ impl Connector {
         view: Arc<AgentView>,
         timing: Timing,
         exit: Arc<Exit>,
+        dir: &Path,
     ) -> Self {
         let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
@@ -281,6 +286,7 @@ impl Connector {
             view,
             timing,
             exit,
+            dir: dir.to_path_buf(),
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -369,8 +375,18 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
                             let _ = opened.send(true); // the other projects may connect now
                         }
                         let since = Instant::now();
-                        let (code, reason) =
-                            connected(ws, &cloud.view, &project, t, &log, &mut seen, cloud.exit.as_ref()).await;
+                        let (code, reason) = connected(
+                            ws,
+                            &cloud.view,
+                            &project,
+                            t,
+                            &log,
+                            &mut seen,
+                            cloud.exit.as_ref(),
+                            &cloud.dir,
+                            &url,
+                        )
+                        .await;
                         if since.elapsed() >= t.stable {
                             attempt = 0;
                         }
@@ -437,6 +453,8 @@ async fn connected(
     log: &impl Fn(String),
     seen: &mut Seen,
     exit: &Exit,
+    dir: &Path,
+    cloud_url: &str,
 ) -> (u16, String) {
     let (mut tx, mut rx) = ws.split();
     for msg in [view.hello(project), view.snapshot(project)] {
@@ -453,7 +471,7 @@ async fn connected(
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
-                Some(Ok(Message::Text(text))) => receive(&text, view, project, seen, exit, log),
+                Some(Ok(Message::Text(text))) => receive(&text, view, project, seen, exit, log, dir, cloud_url),
                 Some(Ok(Message::Close(frame))) => {
                     return frame.map_or((1005, String::new()), |f| (u16::from(f.code), f.reason.to_string()));
                 }
@@ -482,6 +500,8 @@ fn receive(
     seen: &mut Seen,
     exit: &Exit,
     log: &impl Fn(String),
+    dir: &Path,
+    cloud_url: &str,
 ) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
     if msg.get("type").and_then(Value::as_str) != Some("command") {
@@ -512,5 +532,6 @@ fn receive(
         answer.get("reason").and_then(Value::as_str).unwrap_or("?").to_string()
     };
     log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
+    commands::audit(dir, &cmd, &answer, cloud_url);
     Some(answer)
 }
