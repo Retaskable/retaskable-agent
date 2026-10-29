@@ -64,6 +64,11 @@ pub struct SessionSpec {
     /// that reads `model` and `local` together to decide whether a session is actually local, so
     /// the args, the environment and the reader can't disagree about it.
     pub local: Option<LocalTarget>,
+    /// Whether this session should run inside Claude Code's own sandbox
+    /// (04-architecture.md section 4.2): `cfg.sandbox == Auto` and the platform supports it
+    /// (`claude.rs`'s `sandbox_supported`/`sandbox_enabled`). Cursor and pi have no sandbox of
+    /// their own, so they ignore this field.
+    pub sandbox: bool,
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
@@ -261,6 +266,7 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
         readonly: false,
         cursor: None,
         local: None,
+        sandbox: false,
     }
 }
 

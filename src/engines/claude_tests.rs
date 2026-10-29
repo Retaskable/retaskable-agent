@@ -285,6 +285,57 @@ fn session_env_points_a_local_session_at_the_local_server_and_skips_cloud_only_v
     assert!(!env.iter().any(|(k, _)| k == "CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
 }
 
+// sandbox_supported / sandbox_enabled / sandbox_settings / build_args sandbox
+
+#[test]
+fn sandbox_is_supported_on_every_platform_except_windows() {
+    assert!(!sandbox_supported(true));
+    assert!(sandbox_supported(false));
+}
+
+#[test]
+fn sandbox_enabled_needs_both_auto_and_a_supporting_platform() {
+    use crate::config::SandboxMode;
+    assert!(sandbox_enabled(SandboxMode::Auto, false));
+    assert!(!sandbox_enabled(SandboxMode::Auto, true));
+    assert!(!sandbox_enabled(SandboxMode::Off, false));
+    assert!(!sandbox_enabled(SandboxMode::Off, true));
+}
+
+#[test]
+fn sandbox_settings_allows_only_the_macos_certificate_checker() {
+    assert_eq!(
+        sandbox_settings(false),
+        json!({"enabled": true, "autoAllowBashIfSandboxed": true})
+    );
+    assert_eq!(
+        sandbox_settings(true),
+        json!({
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "network": {"allowMachLookup": ["com.apple.trustd.agent"]},
+        })
+    );
+}
+
+#[test]
+fn build_args_omits_settings_when_the_session_is_not_sandboxed() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!build_args(&base_spec(dir.path())).contains(&"--settings".to_string()));
+}
+
+#[test]
+fn build_args_turns_on_the_sandbox_as_the_very_last_flag_when_the_session_is_sandboxed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.sandbox = true;
+    let args = build_args(&spec);
+    assert_eq!(args[args.len() - 2], "--settings");
+    let settings: Value = serde_json::from_str(&args[args.len() - 1]).unwrap();
+    assert_eq!(settings["sandbox"]["enabled"], json!(true));
+    assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], json!(true));
+}
+
 #[test]
 fn build_args_starts_a_local_session_with_model_sonnet() {
     let dir = tempfile::tempdir().unwrap();
