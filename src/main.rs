@@ -1,7 +1,7 @@
 //! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it
 //! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,8 +12,8 @@ use retaskable_agent::settings_server::SettingsServer;
 #[cfg(target_os = "linux")]
 use retaskable_agent::start_at_login;
 use retaskable_agent::{
-    api, backlog, config, connector, engines, lanes, link, local_model, network, phone, release, release_install,
-    release_update, setup_check, store, tags, telemetry,
+    api, backlog, config, connector, engines, lane_pool, lanes, link, local_model, network, phone, release,
+    release_install, release_update, setup_check, store, tags, telemetry,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -210,12 +210,30 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     if let Some(note) = link::credential_file_note(dir, env) {
         tracing::info!("{note}");
     }
+    let lane_count = config::lanes(cfg, env);
     let view = Arc::new(connector::AgentView {
         machine: link::machine_name(env),
         tags: tag_list,
         projects: cfg.projects.iter().map(connector::ProjectView::from).collect(),
         version: version.to_string(),
+        lanes: lane_count,
+        chore_lane: cfg.machine.chore_lane,
+        lane_sizes: lane_pool::LaneSizes::default(),
     });
+    // 04-architecture.md section 4.1: each lane's disk use, for the app's lanes panel. Walking a
+    // lane's build output takes a while, so off the async threads and only every ten minutes.
+    for project in cfg.projects.iter().filter(|p| !p.worktrees_dir.is_empty()) {
+        let sizes = view.lane_sizes.clone();
+        let (id, worktrees_dir) = (project.id_or_derived(), PathBuf::from(&project.worktrees_dir));
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(lane_pool::SIZE_EVERY);
+            loop {
+                every.tick().await;
+                let (sizes, id, worktrees_dir) = (sizes.clone(), id.clone(), worktrees_dir.clone());
+                let _ = tokio::task::spawn_blocking(move || sizes.measure(&id, &worktrees_dir, lane_count)).await;
+            }
+        });
+    }
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let connectors: Vec<_> = cloud_urls

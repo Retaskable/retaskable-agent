@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::ConfigFile;
+pub use crate::lane_pool::LaneScaling;
 
 pub const DEFAULT_PORT: u16 = 4700;
 
@@ -16,6 +17,12 @@ pub const DEFAULT_PORT: u16 = 4700;
 pub struct MachineConfig {
     #[serde(default = "default_lanes")]
     pub lanes: u32,
+    /// `laneScaling` (04-architecture.md section 4.1); dropped when it isn't a `{ base, belowUsedPct }`.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub lane_scaling: Option<LaneScaling>,
+    /// `choreLane`, a lane number (section 4.1); dropped when it isn't a positive whole number.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub chore_lane: Option<u32>,
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
     #[serde(default = "default_poll_interval_sec")]
@@ -52,6 +59,8 @@ impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             lanes: default_lanes(),
+            lane_scaling: None,
+            chore_lane: None,
             concurrency: default_concurrency(),
             poll_interval_sec: default_poll_interval_sec(),
             max_resume_context_tokens: default_max_resume_context_tokens(),
@@ -176,6 +185,34 @@ pub(crate) fn parse_engine(s: &str) -> Option<Engine> {
 /// Reads an engine the lenient way the file allows: missing, `null`, not a string, or a name this
 /// agent doesn't know (a typo, a future engine) all read as `None` rather than failing the whole
 /// config load.
+/// An optional setting that's left out, rather than failing the whole config load, when it doesn't read as `T`
+/// (a zero `choreLane` included, since lanes count from 1).
+fn deserialize_lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Lenient,
+{
+    let raw = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<T>(raw).ok().filter(Lenient::usable))
+}
+
+/// Whether a value read for a lenient setting is one it can use.
+trait Lenient {
+    fn usable(&self) -> bool;
+}
+
+impl Lenient for u32 {
+    fn usable(&self) -> bool {
+        *self > 0
+    }
+}
+
+impl Lenient for LaneScaling {
+    fn usable(&self) -> bool {
+        self.below_used_pct.is_finite()
+    }
+}
+
 fn deserialize_lenient_engine<'de, D>(deserializer: D) -> Result<Option<Engine>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -524,6 +561,25 @@ mod tests {
             },
             ..ConfigFile::default()
         }
+    }
+
+    #[test]
+    fn lane_scaling_and_the_chore_lane_are_read_and_a_bad_one_is_dropped_not_fatal() {
+        let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
+        let cfg =
+            read(serde_json::json!({ "lanes": 3, "choreLane": 3, "laneScaling": { "base": 1, "belowUsedPct": 80 } }));
+        assert_eq!(cfg.chore_lane, Some(3));
+        assert_eq!(
+            cfg.lane_scaling,
+            Some(LaneScaling {
+                base: 1,
+                below_used_pct: 80.0
+            })
+        );
+        let bad = read(serde_json::json!({ "lanes": 3, "choreLane": 0, "laneScaling": { "base": "one" } }));
+        assert_eq!((bad.chore_lane, bad.lane_scaling, bad.lanes), (None, None, 3));
+        let missing = read(serde_json::json!({}));
+        assert_eq!((missing.chore_lane, missing.lane_scaling), (None, None));
     }
 
     #[test]

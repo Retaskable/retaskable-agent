@@ -21,6 +21,7 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 use crate::config::ProjectConfig;
+use crate::lane_pool::LaneSizes;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
 
 /// The name a socket that signs in with a token offers beside it (shared/cloud.ts `SUBPROTOCOL`).
@@ -84,6 +85,11 @@ pub struct AgentView {
     /// This crate's version in a checkout, or a release build's `build.json` one
     /// (installers/03-the-bundle-agent-bundle.md section 3.7).
     pub version: String,
+    /// The computer's `lanes` and `choreLane`, for each project's lanes list.
+    pub lanes: u32,
+    pub chore_lane: Option<u32>,
+    /// Each project's lanes' disk use; a change sends that project's snapshot again.
+    pub lane_sizes: LaneSizes,
 }
 
 /// A project as its hub knows it.
@@ -149,7 +155,7 @@ impl AgentView {
                 "milestones": [],
                 "items": [],
                 "sessions": [],
-                "lanes": [],
+                "lanes": self.lanes_list(project),
                 "mainPlaying": false,
                 "galleries": [],
                 "drafts": [],
@@ -157,7 +163,23 @@ impl AgentView {
             },
         })
     }
+
+    /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.
+    fn lanes_list(&self, project: &str) -> Vec<Value> {
+        (1..=self.lanes)
+            .map(|k| {
+                let mut lane = json!({ "k": k, "diskGb": self.lane_sizes.gb(project, k), "playing": false });
+                if Some(k) == self.chore_lane {
+                    lane["note"] = json!(CHORE_LANE_NOTE);
+                }
+                lane
+            })
+            .collect()
+    }
 }
+
+/// The chore lane's note in the lanes list (pageView.ts).
+pub const CHORE_LANE_NOTE: &str = "chore lane: playtest fixes first, then roadmap items, then chores";
 
 /// Why a project's orchestrator reads as paused.
 pub const NO_WORK_YET: &str = "This computer's agent doesn't run work yet.";
@@ -355,6 +377,9 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
         }
     }
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
+    // The snapshot just sent has the sizes as they are now; a later measurement sends it again.
+    let mut sizes = view.lane_sizes.subscribe();
+    sizes.mark_unchanged();
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
@@ -367,6 +392,7 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
                 None => return (1006, String::new()),
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
+            Ok(()) = sizes.changed() => Some(view.snapshot(project)),
         };
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await

@@ -5,8 +5,7 @@
 //! per item. `ensure` reconciles the worktrees on disk for one project to the wanted count.
 //! `prepare` resets a lane onto a fresh branch from the base (fetch, reset, clean, checkout -B),
 //! after stopping anything a previous session left running there, and links sibling path
-//! dependencies that climb out of the repo. Handing a lane to one session at a time is for a
-//! later piece, once there's a session to hand one to.
+//! dependencies that climb out of the repo. Which lane is free and who holds it is `lane_pool`.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -297,7 +296,7 @@ fn norm_path(path: &Path) -> String {
     }
 }
 
-fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
+pub(crate) fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         // A directory junction needs no elevation (unlike a directory symlink). mklink wants
