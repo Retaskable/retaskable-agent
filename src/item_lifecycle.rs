@@ -34,7 +34,8 @@ pub enum ItemState {
     Merged,
     /// Nothing in the item's backlog is left.
     Done,
-    /// Needs a human: a budget hit, too many rounds, a reviewer escalation, or an error.
+    /// Needs a human: a budget hit, too many rounds, too many slices, a reviewer escalation, or
+    /// an error.
     NeedsHuman,
 }
 
@@ -51,6 +52,13 @@ pub struct ItemRun {
     /// update or a failed playtest drops it, so the slice is checked or reviewed again rather
     /// than merged unchanged.
     pub approved_at_head: bool,
+    /// How many slices have merged so far (row 27: "increments slice" — on every merge, done or
+    /// not). Checked against the cap when the *next* one is claimed, not here, so a slice already
+    /// in flight always finishes.
+    pub slice: u32,
+    /// Slices a human has allowed past `maxSlicesPerItem` (row 29: "Carry on" at the limit
+    /// "raises the item's own sliceLimit by another maxSlicesPerItem").
+    pub extra_slices: u32,
 }
 
 impl Default for ItemRun {
@@ -67,13 +75,22 @@ impl ItemRun {
             review_rounds: 0,
             conflict_rounds: 0,
             approved_at_head: false,
+            slice: 0,
+            extra_slices: 0,
         }
     }
 
     /// `queued` -> `implementing`: the store handed the item out. Also takes a `merged` item
-    /// (one not yet `done`) into its next slice, once the store hands that out too.
-    pub fn claimed(&mut self) {
-        self.state = ItemState::Implementing;
+    /// (one not yet `done`) into its next slice, once the store hands that out too — unless it's
+    /// already merged `maxSlicesPerItem` of them (plus anything a human has since allowed past
+    /// that), in which case there's nothing in flight to resume and it goes to `needs_human`
+    /// instead (row 29); `resume_past_slice_limit` is the **Carry on** for that.
+    pub fn claimed(&mut self, cfg: &ProjectConfig) {
+        self.state = if self.slice >= cfg.max_slices_per_item + self.extra_slices {
+            ItemState::NeedsHuman
+        } else {
+            ItemState::Implementing
+        };
     }
 
     /// The implementer session exited.
@@ -228,10 +245,12 @@ impl ItemRun {
     }
 
     /// The backlog store said whether anything is left in the item once this slice merged.
-    /// Row 27: done moves it to `done`; otherwise "it stays `merged` here and is back in the
-    /// backlog's queue for its next slice" — `claimed()` takes it from `merged` to
-    /// `implementing` once the store hands that slice out.
+    /// Row 27: "increments slice" happens here regardless of the answer; done moves it to
+    /// `done`, otherwise "it stays `merged` here and is back in the backlog's queue for its next
+    /// slice" — `claimed()` takes it from `merged` to `implementing`, or to `needs_human` if
+    /// that next slice would be past the limit, once the store hands that slice out.
     pub fn merged_resolved(&mut self, item_done: bool) {
+        self.slice += 1;
         self.state = if item_done { ItemState::Done } else { ItemState::Merged };
     }
 
@@ -258,6 +277,14 @@ impl ItemRun {
         self.conflict_rounds = 0;
         self.approved_at_head = false;
         self.state = ItemState::Implementing;
+    }
+
+    /// Row 29's other **Carry on**, for when `needs_human` was reached with nothing in flight
+    /// because the item hit its slice limit: raises that limit by another `maxSlicesPerItem` and
+    /// queues the next slice.
+    pub fn resume_past_slice_limit(&mut self, cfg: &ProjectConfig) {
+        self.extra_slices += cfg.max_slices_per_item;
+        self.claimed(cfg);
     }
 }
 
@@ -364,13 +391,14 @@ pub enum AwaitingMergeOutcome {
 mod tests {
     use super::*;
 
-    /// A baseline config with real round caps (the derived `Default` leaves those at 0, which
-    /// would escalate to `needs_human` on the very first failure).
+    /// A baseline config with real round and slice caps (the derived `Default` leaves those at
+    /// 0, which would escalate to `needs_human` on the very first failure or claim).
     fn cfg() -> ProjectConfig {
         ProjectConfig {
             max_check_rounds: 3,
             max_review_rounds: 3,
             max_conflict_rounds: 5,
+            max_slices_per_item: 10,
             ..Default::default()
         }
     }
@@ -379,7 +407,7 @@ mod tests {
     fn claim_moves_queued_to_implementing() {
         let mut run = ItemRun::new();
         assert_eq!(run.state, ItemState::Queued);
-        run.claimed();
+        run.claimed(&cfg());
         assert_eq!(run.state, ItemState::Implementing);
     }
 
@@ -800,14 +828,51 @@ mod tests {
         run.state = ItemState::Merged;
         run.merged_resolved(true);
         assert_eq!(run.state, ItemState::Done);
+        assert_eq!(run.slice, 1);
 
         let mut run = ItemRun::new();
         run.state = ItemState::Merged;
         run.merged_resolved(false);
         assert_eq!(run.state, ItemState::Merged);
+        assert_eq!(run.slice, 1);
 
-        run.claimed();
+        run.claimed(&cfg());
         assert_eq!(run.state, ItemState::Implementing);
+    }
+
+    #[test]
+    fn claiming_past_the_slice_limit_needs_a_human_instead_of_implementing() {
+        let cfg = ProjectConfig {
+            max_slices_per_item: 2,
+            ..cfg()
+        };
+        let mut run = ItemRun::new();
+        run.state = ItemState::Merged;
+        run.slice = 2;
+        run.claimed(&cfg);
+        assert_eq!(run.state, ItemState::NeedsHuman);
+    }
+
+    #[test]
+    fn carrying_on_past_the_slice_limit_raises_it_and_resumes_implementing() {
+        let cfg = ProjectConfig {
+            max_slices_per_item: 2,
+            ..cfg()
+        };
+        let mut run = ItemRun::new();
+        run.state = ItemState::NeedsHuman;
+        run.slice = 2;
+        run.resume_past_slice_limit(&cfg);
+        assert_eq!(run.state, ItemState::Implementing);
+        assert_eq!(run.extra_slices, 2);
+
+        // It takes another maxSlicesPerItem slices to hit the raised limit, not just one more.
+        run.slice = 3;
+        run.claimed(&cfg);
+        assert_eq!(run.state, ItemState::Implementing);
+        run.slice = 4;
+        run.claimed(&cfg);
+        assert_eq!(run.state, ItemState::NeedsHuman);
     }
 
     #[test]
