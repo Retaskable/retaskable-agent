@@ -61,12 +61,13 @@ pub fn second_look_result_schema() -> Value {
     })
 }
 
-/// Fills `prompts/triage-check.md` with this project's words, the facts the triager had, and its
-/// answer.
+/// Fills `prompts/triage-check.md` with this project's words, the facts the triager had (06.9:
+/// "it gets what the triager got"), and the triager's own answer.
 pub fn build_prompt(
     template: &str,
     project_type: ProjectType,
     github_repo: &str,
+    max_automatic_decisions: u32,
     ctx: &SecondLookContext<'_>,
 ) -> Result<String> {
     let words = project_words(project_type);
@@ -80,6 +81,9 @@ pub fn build_prompt(
         "branch": t.branch,
         "hasPushedBranch": t.has_pushed_branch,
         "hasSessionToContinue": t.has_session_to_continue,
+        "automaticDecisionsUsed": t.automatic_decisions,
+        "maxAutomaticDecisions": max_automatic_decisions,
+        "transcriptsDir": t.transcripts_dir,
         "triagerReason": ctx.triager_reason,
         "triagerSuggest": ctx.triager_suggest,
         "triagerInstructions": ctx.triager_instructions,
@@ -104,12 +108,20 @@ pub struct SecondLook<'a> {
     pub project_type: ProjectType,
     pub github_repo: &'a str,
     pub session: EphemeralSessionConfig<'a>,
+    /// Told to the session the same way it was told to the triager (06.9's "It can't loop").
+    pub max_automatic_decisions: u32,
 }
 
 /// The read-only second-look session for one triager answer: nothing to resume, so it's
 /// ephemeral.
 pub fn session_spec(s: &SecondLook<'_>, ctx: &SecondLookContext<'_>) -> Result<SessionSpec> {
-    let prompt = build_prompt(s.template, s.project_type, s.github_repo, ctx)?;
+    let prompt = build_prompt(
+        s.template,
+        s.project_type,
+        s.github_repo,
+        s.max_automatic_decisions,
+        ctx,
+    )?;
     Ok(s.session.spec(prompt, second_look_result_schema()))
 }
 
@@ -254,7 +266,7 @@ mod tests {
             has_pushed_branch: true,
             has_session_to_continue: true,
             automatic_decisions: 1,
-            transcripts_dir: None,
+            transcripts_dir: Some(".retaskable/projects/x/runs/9".to_string()),
             known_bugs: vec![KnownBug {
                 id: "retaskable-bug-abc123".to_string(),
                 title: "A known bug".to_string(),
@@ -287,6 +299,7 @@ mod tests {
                 cursor: None,
                 sandbox: false,
             },
+            max_automatic_decisions: 2,
         }
     }
 
@@ -318,13 +331,16 @@ mod tests {
     fn build_prompt_fills_every_placeholder_with_the_triagers_own_answer() {
         let triage = triage_ctx();
         let triager_result = triage_result(TriageButton::StartOver);
-        let prompt = build_prompt(TEMPLATE, ProjectType::Web, "x/y", &ctx(&triage, &triager_result)).unwrap();
+        let prompt = build_prompt(TEMPLATE, ProjectType::Web, "x/y", 2, &ctx(&triage, &triager_result)).unwrap();
         assert!(!prompt.contains("{{"));
         assert!(prompt.contains("a web app"));
         assert!(prompt.contains("x/y"));
         assert!(prompt.contains("design call on the empty state"));
         assert!(prompt.contains("\"triagerSuggest\": \"start_over\""));
         assert!(prompt.contains("Pick the simpler empty state."));
+        assert!(prompt.contains("\"automaticDecisionsUsed\": 1"));
+        assert!(prompt.contains("\"maxAutomaticDecisions\": 2"));
+        assert!(prompt.contains(".retaskable/projects/x/runs/9"));
     }
 
     #[test]
@@ -337,7 +353,7 @@ mod tests {
         .unwrap();
         let triage = triage_ctx();
         let triager_result = triage_result(TriageButton::Continue);
-        let prompt = build_prompt(&template, ProjectType::Web, "x/y", &ctx(&triage, &triager_result)).unwrap();
+        let prompt = build_prompt(&template, ProjectType::Web, "x/y", 2, &ctx(&triage, &triager_result)).unwrap();
         assert!(!prompt.contains("{{"));
         assert!(prompt.contains("x/y"));
     }
