@@ -33,6 +33,7 @@ pub mod release;
 pub mod release_install;
 pub mod release_notes;
 pub mod release_update;
+pub mod reopen;
 pub mod repo;
 pub mod review_context;
 pub mod reviewer;
