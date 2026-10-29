@@ -172,6 +172,7 @@ fn base_spec(cwd: &Path) -> SessionSpec {
         readonly: true,
         cursor: None,
         local: None,
+        sandbox: false,
     }
 }
 
