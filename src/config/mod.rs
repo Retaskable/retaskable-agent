@@ -23,7 +23,7 @@ pub(crate) use machine::{
     lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
     valid_model_name,
 };
-pub use project::{CheckConfig, GalleryConfig, ProjectConfig, ProjectType, SandboxMode};
+pub use project::{CheckConfig, GalleryConfig, Playtests, ProjectConfig, ProjectType, SandboxMode};
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
 #[derive(Debug, Clone, Default, PartialEq)]

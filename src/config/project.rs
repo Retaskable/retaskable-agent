@@ -200,7 +200,7 @@ pub struct PhoneConfig {
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
     #[serde(default)]
