@@ -17,6 +17,7 @@ use super::claude::ClaudeEngine;
 use super::cursor::CursorEngine;
 use super::engine::{Engine, EngineId, SessionResult, SessionSpec};
 use super::pi::PiEngine;
+use crate::telemetry::events::now_ms;
 
 /// `engineOf(id)`: the `Engine` a session's `SessionSpec.engine` names; missing means Claude Code.
 pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
@@ -36,13 +37,6 @@ pub struct TranscriptSink {
     pub path: PathBuf,
     /// The implementer's lane, when this session has one (`started_on`'s `lane`).
     pub lane: Option<u32>,
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// The transcript's own header line, following `transcripts.rs`'s `started_on`/`read_transcripts`:
