@@ -149,3 +149,7 @@ pub fn why_text(events: &[Value], item: &str) -> String {
     }
     lines.join("\n")
 }
+
+#[cfg(test)]
+#[path = "why_tests.rs"]
+mod tests;
