@@ -3,9 +3,10 @@
 //! one access token for that cloud. Each says hello, sends a snapshot, and says it's alive in a quiet minute; it
 //! reconnects with backoff. Outbound only: nothing listens on a public port.
 //!
-//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, and an
-//! orchestrator that runs no work yet (`AgentView`). A command from the site (`commands.rs`) is checked and run if
-//! it's one this agent has ported — so far Restart, Pause, Resume and Shoot — and refused otherwise.
+//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, its
+//! galleries' real status and last shoot, and an orchestrator that runs no work yet (`AgentView`). A command from
+//! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause, Resume
+//! and Shoot — and refused otherwise.
 #[cfg(test)]
 mod tests;
 
@@ -25,6 +26,7 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 
 use crate::commands::{self, Seen};
 use crate::config::{GalleryConfig, ProjectConfig};
+use crate::galleries;
 use crate::lane_pool::LaneSizes;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
 
@@ -201,9 +203,10 @@ impl AgentView {
         })
     }
 
-    /// The project's snapshot (cloud.md section 5.2): every list the hub needs, empty, since this agent runs no work
-    /// yet, and an orchestrator that says so.
-    pub fn snapshot(&self, project: &str) -> Value {
+    /// The project's snapshot (cloud.md section 5.2): every list the hub needs. Most are still
+    /// empty, since this agent runs no work yet, but a project's galleries report their real
+    /// status and last shoot (agent/09-web-ui.md section 9.2), and an orchestrator that says so.
+    pub fn snapshot(&self, project: &str, data_dir: &Path) -> Value {
         let orchestrator = if project.is_empty() {
             json!({ "status": "setup", "machine": self.machine })
         } else {
@@ -220,11 +223,26 @@ impl AgentView {
                 "sessions": [],
                 "lanes": self.lanes_list(project),
                 "mainPlaying": false,
-                "galleries": [],
+                "galleries": self.galleries_list(project, data_dir),
                 "drafts": [],
                 "asks": [],
             },
         })
+    }
+
+    /// The snapshot's galleries (tray/05.3-private-galleries-and-pictures-from.md section 5.3.1):
+    /// each of the project's own galleries' [`galleries::GalleryInfo`], none before Setup.
+    fn galleries_list(&self, project: &str, data_dir: &Path) -> Vec<Value> {
+        self.projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| {
+                p.galleries
+                    .iter()
+                    .map(|g| json!(galleries::info(data_dir, project, g)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.
@@ -450,18 +468,21 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(String), seen: &mut Seen) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    for msg in [view.hello(project), view.snapshot(project)] {
+    for msg in [view.hello(project), view.snapshot(project, &cloud.dir)] {
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
     }
     let t = cloud.timing;
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
-    // The snapshot just sent has the sizes and pause as they are now; a later change sends it again.
+    // The snapshot just sent has the sizes, pause and galleries as they are now; a later change sends it again.
     let mut sizes = view.lane_sizes.subscribe();
     sizes.mark_unchanged();
     let mut paused = view.paused.subscribe();
     paused.mark_unchanged();
+    let mut gallery_status = galleries::subscribe_status_changes();
+    gallery_status.mark_unchanged();
+    let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
@@ -474,8 +495,17 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
                 None => return (1006, String::new()),
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
-            Ok(()) = sizes.changed() => Some(view.snapshot(project)),
-            Ok(()) = paused.changed() => Some(view.snapshot(project)),
+            Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = gallery_status.changed() => {
+                let count = gallery_status.borrow().get(project).copied().unwrap_or(0);
+                if count != gallery_changes {
+                    gallery_changes = count;
+                    Some(view.snapshot(project, &cloud.dir))
+                } else {
+                    None
+                }
+            },
         };
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await

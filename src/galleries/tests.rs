@@ -489,3 +489,70 @@ fn npm_install_if_needed_with_runs_npm_ci_and_passes_on_its_failure() {
     assert!(err.to_string().contains("failed (1)"), "{err}");
     assert!(err.to_string().contains("boom"), "{err}");
 }
+
+#[test]
+fn info_reports_idle_with_nothing_set_before_the_first_shoot() {
+    let root = tempfile::tempdir().unwrap();
+    let gallery = GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    };
+
+    let info = info(root.path(), "galleries-info-never-shot", &gallery);
+
+    assert_eq!(
+        info,
+        GalleryInfo {
+            slug: "models".to_string(),
+            name: "Models".to_string(),
+            status: "idle",
+            shot_at: None,
+            sha: None,
+            count: None,
+            error: None,
+        }
+    );
+}
+
+#[test]
+fn info_reports_the_last_shoots_shot_at_sha_and_count() {
+    let root = tempfile::tempdir().unwrap();
+    let idx = write_test_gallery(root.path(), "galleries-info-idle", "models", "01-first.jpg", 10, 10);
+    let gallery = GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    };
+
+    let info = info(root.path(), "galleries-info-idle", &gallery);
+
+    assert_eq!(info.status, "idle");
+    assert_eq!(info.shot_at, Some(idx.shot_at));
+    assert_eq!(info.sha, Some(idx.sha));
+    assert_eq!(info.count, Some(1));
+    assert_eq!(info.error, None);
+}
+
+#[test]
+fn info_reports_a_failed_shoots_error_alongside_its_previous_set() {
+    let root = tempfile::tempdir().unwrap();
+    write_test_gallery(root.path(), "galleries-info-failed", "models", "01-first.jpg", 10, 10);
+    set_status(
+        "galleries-info-failed",
+        "models",
+        GalleryStatus::Failed("`cmd` failed (1):\nboom".to_string()),
+    );
+    let gallery = GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    };
+
+    let info = info(root.path(), "galleries-info-failed", &gallery);
+
+    assert_eq!(info.status, "failed");
+    assert_eq!(info.error, Some("`cmd` failed (1):\nboom".to_string()));
+    // The old set's picture count stays visible while the new shoot's failure is reported.
+    assert_eq!(info.count, Some(1));
+}

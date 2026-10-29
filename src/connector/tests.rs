@@ -114,6 +114,39 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
     })
 }
 
+fn view_with_models_gallery(project: &str) -> Arc<AgentView> {
+    let mut v = view(&[project]);
+    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    }];
+    v
+}
+
+/// Starts a connector for `project` with a Models gallery, reads its hello and first snapshot,
+/// and checks the gallery starts `idle`: the shared setup for the gallery-status-resend tests,
+/// which then each send their own `galleries::set_status` calls and read what arrives next.
+async fn gallery_resend_setup(project: &str) -> (tempfile::TempDir, Connector, Accepted) {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let v = view_with_models_gallery(project);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let galleries = read(&mut first).await["state"]["galleries"].clone();
+    assert_eq!(galleries[0]["status"], "idle");
+    (dir, c, first)
+}
+
 /// An `exit` that does nothing, for tests that don't send Restart.
 fn noop_exit() -> Arc<Exit> {
     Arc::new(|_: i32| {})
@@ -225,6 +258,89 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
     }
     assert_eq!(again["type"], "snapshot");
     assert_eq!(again["state"]["lanes"][0]["diskGb"], 3.3);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_snapshot_reports_a_projects_gallery_info() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    // As `galleries::shoot` would leave it after a shoot.
+    let dest = crate::paths::gallery_dir(dir.path(), "one", "models");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+        dest.join("index.json"),
+        json!({
+            "name": "Models",
+            "shotAt": "2026-01-01T00:00:00Z",
+            "sha": "deadbeef",
+            "images": [{ "file": "01-first.jpg", "title": "First" }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let v = view_with_models_gallery("one");
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    let galleries = read(&mut a).await["state"]["galleries"].clone();
+
+    assert_eq!(
+        galleries,
+        json!([{
+            "slug": "models",
+            "name": "Models",
+            "status": "idle",
+            "shotAt": "2026-01-01T00:00:00Z",
+            "sha": "deadbeef",
+            "count": 1,
+        }])
+    );
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
+    // A project id of its own: `galleries::set_status` broadcasts across the whole process, and
+    // "one" is shared by plenty of other tests that never expect an extra snapshot.
+    let project = "connector-gallery-resend";
+    let (_dir, c, mut first) = gallery_resend_setup(project).await;
+
+    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_status_change_still_arrives_when_another_projects_changes_right_after() {
+    // Two project ids of their own, as above: this test means to prove that a change on
+    // `other`, landing right after this project's own change, doesn't make the connector miss
+    // its own (the watch channel the two share keeps only the latest value).
+    let project = "connector-gallery-resend-own";
+    let other = "connector-gallery-resend-other";
+    let (_dir, c, mut first) = gallery_resend_setup(project).await;
+
+    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
+    galleries::set_status(other, "models", galleries::GalleryStatus::Shooting);
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
     c.stop(Duration::from_secs(1)).await;
 }
 

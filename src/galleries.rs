@@ -35,6 +35,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as base64;
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::config::GalleryConfig;
 use crate::lanes;
@@ -98,6 +99,59 @@ pub enum GalleryStatus {
     Failed(String),
 }
 
+impl GalleryStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            GalleryStatus::Idle => "idle",
+            GalleryStatus::Shooting => "shooting",
+            GalleryStatus::Converting => "converting",
+            GalleryStatus::Failed(_) => "failed",
+        }
+    }
+}
+
+/// A gallery's info in the snapshot (tray/05.3-private-galleries-and-pictures-from.md section
+/// 5.3.1's `GalleryInfo`: name, status, `shotAt`, `sha`, `count`, error), read fresh each time:
+/// [`status`] from memory, the rest from its last shoot's `index.json` on disk, if it has shot at
+/// least once.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GalleryInfo {
+    pub slug: String,
+    pub name: String,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shot_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `gallery`'s [`GalleryInfo`] for the snapshot: its in-memory [`status`] plus its last shoot's
+/// `shotAt`/`sha`/picture count from `<dataDir>/.../<slug>/index.json`, left out when it hasn't
+/// shot yet. The old set (and so its info) stays until a new shoot's conversion fully replaces it.
+pub fn info(data_dir: &Path, project: &str, gallery: &GalleryConfig) -> GalleryInfo {
+    let slug = gallery.slug();
+    let state = status(project, &slug);
+    let error = match &state {
+        GalleryStatus::Failed(e) => Some(e.clone()),
+        _ => None,
+    };
+    let last = gallery_index(data_dir, project, &slug).ok();
+    GalleryInfo {
+        slug,
+        name: gallery.name.clone(),
+        status: state.as_str(),
+        shot_at: last.as_ref().map(|i| i.shot_at.clone()),
+        sha: last.as_ref().map(|i| i.sha.clone()),
+        count: last.as_ref().map(|i| i.images.len()),
+        error,
+    }
+}
+
 /// One entry of the game's own `index.json` in `outDir`, naming a picture and, optionally, its
 /// title and group.
 #[derive(Debug, Deserialize)]
@@ -114,6 +168,14 @@ type GalleryKey = (String, String);
 
 /// Every gallery's status, kept across shoots until the process restarts.
 static STATUS: LazyLock<Mutex<HashMap<GalleryKey, GalleryStatus>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// How many times each project's gallery status has changed, so a subscriber can tell whether
+/// its own project changed since it last looked (the signal is shared across every project, like
+/// [`STATUS`] itself). A `watch` keeps only the latest value, so a bare project name would let a
+/// change on one project hide a same-tick change on another; a per-project count doesn't, since
+/// the subscriber compares its own project's count rather than trusting the last name sent. See
+/// [`subscribe_status_changes`].
+static STATUS_CHANGED: LazyLock<watch::Sender<HashMap<String, u64>>> =
+    LazyLock::new(|| watch::Sender::new(HashMap::new()));
 /// The gallery each project is shooting, if any: only one shoot holds a project's base checkout
 /// at a time (06.8: "Only one gallery shoots at a time").
 static SHOOTING: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -141,8 +203,20 @@ fn cache_picture(key: PictureKey, data: String) {
     }
 }
 
-fn set_status(project: &str, slug: &str, status: GalleryStatus) {
+pub(crate) fn set_status(project: &str, slug: &str, status: GalleryStatus) {
     lock(&STATUS).insert((project.to_string(), slug.to_string()), status);
+    STATUS_CHANGED.send_modify(|counts| *counts.entry(project.to_string()).or_insert(0) += 1);
+}
+
+/// Subscribes to gallery status changes: each value is every project's change count, so a
+/// subscriber can tell its own project changed by comparing the count against what it last saw,
+/// even if another project's change coalesced with it in the same `watch` value
+/// (`connector::connected`'s `sizes`/`paused`, the same pattern, filtered to the subscriber's own
+/// project since the signal is shared): a shoot's `shooting` -> `converting` -> `idle`/`failed`
+/// resends that project's snapshot the same way a lane-size or pause change does (tray.md section
+/// 5.3.3: "Progress is the gallery's status in the snapshot").
+pub fn subscribe_status_changes() -> watch::Receiver<HashMap<String, u64>> {
+    STATUS_CHANGED.subscribe()
 }
 
 /// A gallery's current status, `idle` before its first shoot.
