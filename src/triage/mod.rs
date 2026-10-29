@@ -17,15 +17,13 @@
 pub mod bug_report;
 
 use std::future::Future;
-use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config::ProjectType;
-use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
-use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
+use crate::engines::{SessionResult, SessionSpec, WriterConfig, describe_failure, ephemeral_readonly_spec};
 use crate::release_notes::{project_words, render_prompt};
 
 /// What the triager is given about the item (06.9 bullet 1): gathered by the caller from the
@@ -153,25 +151,11 @@ pub fn build_prompt(
     )
 }
 
-/// What a triager session runs with, besides the context (mirrors
-/// [`crate::release_notes::write::Writer`]).
+/// What a triager session runs with, besides the context: the same shape as
+/// [`crate::ideas::write::Writer`] and [`crate::release_notes::write::Writer`], plus the one field
+/// below that's specific to triage.
 pub struct Triager<'a> {
-    /// `prompts/triage.md`.
-    pub template: &'a str,
-    pub project_type: ProjectType,
-    pub github_repo: &'a str,
-    /// The item's lane if it kept one, else the base checkout (06.9 bullet: "in the item's lane
-    /// if it kept one or else the base checkout").
-    pub cwd: &'a Path,
-    /// `budget.reviewerUsd`.
-    pub budget_usd: f64,
-    /// `<midTier>`, Sonnet at best (section 7.1) — resolved by the caller.
-    pub model: String,
-    pub local: Option<LocalTarget>,
-    /// [`crate::engines::engine_for`] with `Role::Triager`.
-    pub engine: Option<EngineId>,
-    pub cursor: Option<CursorOptions>,
-    pub sandbox: bool,
+    pub common: WriterConfig<'a>,
     /// Told to the model so it knows how much room is left (06.9's "It can't loop"); not
     /// enforced here — the cap across retries is the orchestrator's.
     pub max_automatic_decisions: u32,
@@ -180,23 +164,24 @@ pub struct Triager<'a> {
 /// The read-only triager session for one `needs_human` item: nothing to resume, so it's
 /// ephemeral.
 pub fn session_spec(t: &Triager<'_>, ctx: &TriageContext) -> Result<SessionSpec> {
+    let c = &t.common;
     let prompt = build_prompt(
-        t.template,
-        t.project_type,
-        t.github_repo,
+        c.template,
+        c.project_type,
+        c.github_repo,
         t.max_automatic_decisions,
         ctx,
     )?;
     Ok(ephemeral_readonly_spec(
-        t.engine,
-        t.model.clone(),
+        c.engine,
+        c.model.clone(),
         prompt,
         triage_result_schema(),
-        t.cwd.to_path_buf(),
-        t.budget_usd,
-        t.cursor.clone(),
-        t.local.clone(),
-        t.sandbox,
+        c.cwd.to_path_buf(),
+        c.budget_usd,
+        c.cursor.clone(),
+        c.local.clone(),
+        c.sandbox,
     ))
 }
 
@@ -243,7 +228,7 @@ where
         return Decided {
             result: None,
             cost_usd,
-            note: Some(describe_failure(&r, t.budget_usd)),
+            note: Some(describe_failure(&r, t.common.budget_usd)),
         };
     }
     let result = r
@@ -265,7 +250,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::engines::SessionStart;
@@ -274,16 +259,18 @@ mod tests {
 
     fn triager() -> Triager<'static> {
         Triager {
-            template: TEMPLATE,
-            project_type: ProjectType::Web,
-            github_repo: "x/y",
-            cwd: Path::new("lane"),
-            budget_usd: 1.5,
-            model: "sonnet".to_string(),
-            local: None,
-            engine: None,
-            cursor: None,
-            sandbox: false,
+            common: WriterConfig {
+                template: TEMPLATE,
+                project_type: ProjectType::Web,
+                github_repo: "x/y",
+                cwd: Path::new("lane"),
+                budget_usd: 1.5,
+                model: "sonnet".to_string(),
+                local: None,
+                engine: None,
+                cursor: None,
+                sandbox: false,
+            },
             max_automatic_decisions: 2,
         }
     }

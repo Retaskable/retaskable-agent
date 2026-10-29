@@ -2,12 +2,14 @@
 //! back (`SessionResult`), the `Engine` interface each AI tool implements behind
 //! `runner::run_session`, and `describe_failure` — following `agent/src/engines/engine.ts` in
 //! Retaskable.com (the ground truth this is porting) and docs/specs/engines/02-the-engine-layer.md.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use anyhow::Result;
 use regex::Regex;
 use serde_json::Value;
+
+use crate::config::ProjectType;
 
 /// `EngineId` in `shared/types.ts`: which AI tool a session runs on. Missing on a `SessionSpec`
 /// means `Claude`.
@@ -100,6 +102,24 @@ pub fn ephemeral_readonly_spec(
         local,
         sandbox,
     }
+}
+
+/// What an ephemeral, read-only session runs with, besides what's specific to its own round or
+/// decision: shared by [`crate::ideas::write::Writer`] and [`crate::triage::Triager`] (which adds
+/// its own `max_automatic_decisions` alongside this).
+pub struct WriterConfig<'a> {
+    pub template: &'a str,
+    pub project_type: ProjectType,
+    pub github_repo: &'a str,
+    /// A checkout of the project, where the session may read its specs.
+    pub cwd: &'a Path,
+    pub budget_usd: f64,
+    pub model: String,
+    pub local: Option<LocalTarget>,
+    /// [`crate::engines::engine_for`] with `Role::Writer`.
+    pub engine: Option<EngineId>,
+    pub cursor: Option<CursorOptions>,
+    pub sandbox: bool,
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.

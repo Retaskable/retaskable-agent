@@ -2,35 +2,18 @@
 //! read-only, ephemeral `writer` session, run through the caller's
 //! [`crate::engines::runner::run_session`], folded into the queue with [`super::model::refilled`].
 use std::future::Future;
-use std::path::Path;
 
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::config::ProjectType;
-use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
-use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
+use crate::engines::{SessionResult, SessionSpec, WriterConfig, describe_failure, ephemeral_readonly_spec};
 
 use super::model::{Idea, IdeasResult, Queue, ideas_result_schema, refilled};
 use super::profiles::{Profile, build_prompt};
 
-/// What an ideas session runs with, besides what prompted it and the room left in the queue.
-pub struct Writer<'a> {
-    /// `prompts/ideas.md`.
-    pub template: &'a str,
-    pub project_type: ProjectType,
-    pub github_repo: &'a str,
-    /// A checkout of the project, where the session may read its specs.
-    pub cwd: &'a Path,
-    /// `budget.scout_usd`.
-    pub budget_usd: f64,
-    pub model: String,
-    pub local: Option<LocalTarget>,
-    /// [`crate::engines::engine_for`] with `Role::Writer`.
-    pub engine: Option<EngineId>,
-    pub cursor: Option<CursorOptions>,
-    pub sandbox: bool,
-}
+/// What an ideas session runs with, besides what prompted it and the room left in the queue
+/// (`budget_usd` here is `budget.scout_usd`).
+pub type Writer<'a> = WriterConfig<'a>;
 
 /// The read-only, ephemeral `writer` session for a round.
 pub fn session_spec(
@@ -156,6 +139,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::ProjectType;
     use crate::engines::engine::test_result as result;
     use crate::ideas::model::{IDEAS_MAX_WAITS_DEFAULT, QUEUE};
     use crate::ideas::test_support::waiting_idea;

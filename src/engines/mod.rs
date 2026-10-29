@@ -19,7 +19,7 @@ pub mod transcripts;
 pub use choose::{Role, engine_for, has_lane_engines, lane_engine};
 pub use claude::{resolve_claude, resolve_claude_on_path};
 pub use engine::{
-    Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart,
+    Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart, WriterConfig,
     describe_failure, engine_id_from_str, ephemeral_readonly_spec, is_signed_out, signed_out_text,
 };
 pub use pi::{resolve_pi, resolve_pi_on_path};
