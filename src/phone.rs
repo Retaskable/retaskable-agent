@@ -356,9 +356,7 @@ mod tests {
 
     #[test]
     fn find_adb_falls_back_to_android_sdk_root_then_path_then_the_default_sdk() {
-        fn no_env(_: &str) -> Option<String> {
-            None
-        }
+        use crate::test_support::no_env;
 
         // Nothing anywhere: not found.
         assert_eq!(find_adb(no_env, "adb", &[], None), None);

@@ -19,6 +19,11 @@ pub(crate) fn item_lifecycle_cfg() -> ProjectConfig {
     }
 }
 
+/// An env lookup that always reports the variable unset, for tests that pass a real one in.
+pub(crate) fn no_env(_: &str) -> Option<String> {
+    None
+}
+
 pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);

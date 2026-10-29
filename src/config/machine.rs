@@ -548,10 +548,7 @@ fn apply_cursor_models_env(result: &mut CursorModels, raw: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     fn with_port(port: u16) -> ConfigFile {
         ConfigFile {

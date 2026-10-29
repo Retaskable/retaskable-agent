@@ -86,16 +86,13 @@ pub fn command(dir: &Path) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::no_env;
 
     fn write_exe(path: &Path) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, "").unwrap();
-    }
-
-    fn no_env(_: &str) -> Option<String> {
-        None
     }
 
     #[test]
