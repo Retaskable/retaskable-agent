@@ -62,10 +62,7 @@ pub fn env_network_access(env: impl Fn(&str) -> Option<String>) -> Option<Networ
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     #[test]
     fn off_by_default() {
@@ -110,5 +107,33 @@ mod tests {
                 password_hash: None
             }
         );
+    }
+
+    #[test]
+    fn a_password_at_exactly_the_minimum_length_turns_it_on() {
+        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "12345678".to_string());
+        assert!(env_network_access(env).is_some());
+    }
+
+    #[test]
+    fn one_character_under_the_minimum_falls_through() {
+        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "1234567".to_string());
+        assert!(env_network_access(env).is_none());
+    }
+
+    #[test]
+    fn length_is_counted_in_utf16_units_not_bytes() {
+        // 7 code points, each multi-byte in UTF-8 (9 bytes) but 1 UTF-16 unit each (7 units):
+        // a byte-length check would wrongly accept this as long enough.
+        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "pässwör".to_string());
+        assert!(env_network_access(env).is_none());
+    }
+
+    #[test]
+    fn length_is_counted_in_utf16_units_not_rust_chars() {
+        // 5 Rust chars (3 emoji + "ab"), but 8 UTF-16 units since each emoji is a surrogate
+        // pair: a char-count check would wrongly reject this as too short.
+        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "😀😀😀ab".to_string());
+        assert!(env_network_access(env).is_some());
     }
 }

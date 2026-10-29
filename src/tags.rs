@@ -186,10 +186,7 @@ pub fn effective_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     #[test]
     fn clean_tags_lowercases_dedupes_and_drops_junk() {

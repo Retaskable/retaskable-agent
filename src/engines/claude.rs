@@ -16,7 +16,7 @@ use super::engine::{
     Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
     signed_out_text,
 };
-use super::text::tail;
+use crate::text::tail;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.
@@ -72,9 +72,20 @@ pub fn resolve_claude(env: impl Fn(&str) -> Option<String>, windows: bool, path_
 
 /// `resolve_claude`, reading PATH itself the way the real agent does.
 pub fn resolve_claude_on_path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     resolve_claude(env, cfg!(windows), &dirs)
+}
+
+/// `sandboxSupported()`: Claude Code's own sandbox (04-architecture.md section 4.2) is built for
+/// macOS and Linux only; on native Windows a session runs unsandboxed, as before.
+pub fn sandbox_supported(windows: bool) -> bool {
+    !windows
+}
+
+/// `cfg.sandbox == Auto && sandboxSupported()`: whether a session for this project should run
+/// sandboxed, combining the project's own setting with whether this computer can run one at all.
+pub fn sandbox_enabled(mode: crate::config::SandboxMode, windows: bool) -> bool {
+    mode == crate::config::SandboxMode::Auto && sandbox_supported(windows)
 }
 
 /// `spec.model == "local"` with `spec.local` actually naming a server: the one check the args,
@@ -140,7 +151,23 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
     for tool in NO_DEPLOY_TOOLS {
         args.push(tool.to_string());
     }
+    if spec.sandbox {
+        args.push("--settings".to_string());
+        args.push(serde_json::json!({"sandbox": sandbox_settings(cfg!(target_os = "macos"))}).to_string());
+    }
     args
+}
+
+/// The sandbox a session runs in (`--settings`'s `sandbox` key), following `sandboxSettings()`.
+/// On macOS it may also reach the system's certificate checker (trustd) and nothing more, so
+/// `gh`, a Go program, can check GitHub's certificate and open the pull request; without it, it
+/// fails with `x509: OSStatus -26276`.
+fn sandbox_settings(macos: bool) -> Value {
+    let mut settings = serde_json::json!({"enabled": true, "autoAllowBashIfSandboxed": true});
+    if macos {
+        settings["network"] = serde_json::json!({"allowMachLookup": ["com.apple.trustd.agent"]});
+    }
+    settings
 }
 
 /// `sessionEnv(spec)`: environment variables layered on top of the agent's own for one session —

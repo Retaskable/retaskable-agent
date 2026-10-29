@@ -187,12 +187,11 @@ pub fn find_adb(
 }
 
 /// `find_adb`, reading `PATH`, `LOCALAPPDATA` and the home directory itself the way the real
-/// agent does, the same pattern as `engines::resolve_claude_on_path`.
+/// agent does.
 pub fn find_adb_on_path(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     let windows = cfg!(windows);
     let exe_name = if windows { "adb.exe" } else { "adb" };
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     let default_sdk = default_sdk_dir(&env, windows);
     find_adb(env, exe_name, &dirs, default_sdk.as_deref())
 }
@@ -357,9 +356,7 @@ mod tests {
 
     #[test]
     fn find_adb_falls_back_to_android_sdk_root_then_path_then_the_default_sdk() {
-        fn no_env(_: &str) -> Option<String> {
-            None
-        }
+        use crate::test_support::no_env;
 
         // Nothing anywhere: not found.
         assert_eq!(find_adb(no_env, "adb", &[], None), None);

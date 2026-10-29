@@ -148,8 +148,7 @@ pub fn resolve_cursor(
 
 /// `resolve_cursor`, reading PATH and the home directory itself the way the real agent does.
 pub fn resolve_cursor_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
     resolve_cursor(&env, cfg!(windows), &dirs, home)
 }

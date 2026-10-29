@@ -44,9 +44,24 @@ pub fn environment_name(url: &str) -> &'static str {
     }
 }
 
-/// The cloud this agent links to: `RETASKABLE_CLOUD_URL`, else `cloud.url`, else retaskable.com. No trailing slash.
-/// Errors on an address that isn't http or https, before anything is sent.
-pub fn cloud_url(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Result<String> {
+/// installers/03-the-bundle-agent-bundle.md section 3.8 "One environment" (tray.md decision 7): a release
+/// build's own cloud, ignoring `cloud.url` and `RETASKABLE_CLOUD_URL` entirely, so `cloud_url`/`cloud_urls`
+/// answer only it.
+fn fixed_environment_url(build: Option<&crate::release::Build>) -> Option<&'static str> {
+    environment_url(build?.environment.name())
+}
+
+/// The cloud this agent links to: `build.json`'s environment in a release build (section 3.8), else
+/// `RETASKABLE_CLOUD_URL`, else `cloud.url`, else retaskable.com. No trailing slash. Errors on an address
+/// that isn't http or https, before anything is sent.
+pub fn cloud_url(
+    cfg: &ConfigFile,
+    env: impl Fn(&str) -> Option<String>,
+    build: Option<&crate::release::Build>,
+) -> Result<String> {
+    if let Some(fixed) = fixed_environment_url(build) {
+        return Ok(fixed.to_string());
+    }
     let url = env("RETASKABLE_CLOUD_URL")
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
@@ -60,19 +75,54 @@ pub fn cloud_url(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Resu
                 .map(String::from)
         })
         .unwrap_or_else(|| DEFAULT_CLOUD_URL.to_string());
-    let parsed = Url::parse(&url).with_context(|| format!("The cloud URL isn't an address: {url}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("The cloud URL must be http or https: {url}");
-    }
+    valid_http_url(&url, "cloud")?;
     Ok(url.trim_end_matches('/').to_string())
 }
 
+/// Parses `url` as an address and requires http or https, before anything is sent to it (link.ts `httpUrl`).
+pub(crate) fn valid_http_url(url: &str, what: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| format!("The {what} URL isn't an address: {url}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("The {what} URL must be http or https: {url}");
+    }
+    Ok(())
+}
+
+/// Opens `url` in the default browser, without a shell, as the TypeScript agent's `openUrl` does
+/// (tray.md section 4.4): `rundll32 url.dll,FileProtocolHandler` on Windows, `open` on macOS, `xdg-open` on
+/// Linux. Only `http(s)` addresses; spawned, not waited on.
+pub fn open_url(url: &str) -> Result<()> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        bail!("not an http(s) URL: {url}");
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url);
+    cmd.spawn().with_context(|| format!("opening {url}"))?;
+    Ok(())
+}
+
 /// Every cloud this agent connects to (environments.md section 3.4): the three environments, then the agent's own
-/// cloud URL when it's none of them, the Custom one. A bad `cloud.url` is logged, and the three still connect. Every
-/// agent is a development build until installers exist (tray.md decision 7), so this is never just one.
-pub fn cloud_urls(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+/// cloud URL when it's none of them, the Custom one. A bad `cloud.url` is logged, and the three still connect. A
+/// release build (section 3.8) has only its one, fixed environment, never the other two or a Custom one.
+pub fn cloud_urls(
+    cfg: &ConfigFile,
+    env: impl Fn(&str) -> Option<String>,
+    build: Option<&crate::release::Build>,
+) -> Vec<String> {
+    if let Some(fixed) = fixed_environment_url(build) {
+        return vec![fixed.to_string()];
+    }
     let mut urls: Vec<String> = ENVIRONMENTS.iter().map(|(_, url)| url.to_string()).collect();
-    match cloud_url(cfg, env) {
+    match cloud_url(cfg, env, None) {
         Ok(own) if !urls.contains(&own) => urls.push(own),
         Ok(_) => {}
         Err(e) => tracing::warn!("cloud.url isn't a valid address: {e:#}"),
@@ -95,6 +145,13 @@ pub const CLOUD_TARGET: LinkTarget = LinkTarget {
     setting: "cloud.url or RETASKABLE_CLOUD_URL",
 };
 
+/// The shared backlog store's device endpoints are under `/v1/device` (backlog.md section 4.2).
+pub const BACKLOG_TARGET: LinkTarget = LinkTarget {
+    name: "backlog store",
+    device_path: "/v1/device",
+    setting: "RETASKABLE_BACKLOG_URL",
+};
+
 /// The name this machine goes by on retaskable.com: `RETASKABLE_MACHINE` when set (a container's hostname is a random
 /// id, docker.md section 3), else the hostname.
 pub fn machine_name(env: impl Fn(&str) -> Option<String>) -> String {
@@ -105,8 +162,9 @@ pub fn machine_name(env: impl Fn(&str) -> Option<String>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// What the `/link` page shows about this machine.
-pub fn machine_info(env: impl Fn(&str) -> Option<String>) -> Value {
+/// What the `/link` page shows about this machine. `version` is this crate's own in a checkout,
+/// or a release build's `build.json` one.
+pub fn machine_info(env: impl Fn(&str) -> Option<String>, version: &str) -> Value {
     let os = match std::env::consts::OS {
         "windows" => "Windows",
         "macos" => "macOS",
@@ -116,7 +174,7 @@ pub fn machine_info(env: impl Fn(&str) -> Option<String>) -> Value {
     json!({
         "machine": truncate(&machine_name(env), 100),
         "os": os,
-        "agentVersion": env!("CARGO_PKG_VERSION"),
+        "agentVersion": version,
     })
 }
 
@@ -241,6 +299,31 @@ pub(crate) fn cause(err: &(dyn std::error::Error + 'static)) -> String {
         inner = next;
     }
     inner.to_string()
+}
+
+/// installers/03-the-bundle-agent-bundle.md section 3.10: logged once at start, after the connections start, naming
+/// every cloud and the shared backlog store and whether each is linked — a checkout or release build alike (the
+/// release build's start check greps for it), the same words `linksLine`/`computerView.ts` uses for This computer's
+/// settings. For example: "Links: staging.retaskable.com not linked, backlog store backlog.retaskable.com not linked".
+pub fn links_line(cloud_urls: &[String], backlog_url: &str, linked: impl Fn(&str) -> bool) -> String {
+    let mut parts: Vec<String> = cloud_urls
+        .iter()
+        .map(|url| format!("{} {}", strip_scheme(url), state(linked(url))))
+        .collect();
+    parts.push(format!(
+        "backlog store {} {}",
+        strip_scheme(backlog_url),
+        state(linked(backlog_url))
+    ));
+    format!("Links: {}", parts.join(", "))
+}
+
+fn strip_scheme(url: &str) -> &str {
+    url.trim_start_matches("https://").trim_start_matches("http://")
+}
+
+fn state(linked: bool) -> &'static str {
+    if linked { "linked" } else { "not linked" }
 }
 
 /// An access token for one cloud, or why there's none.

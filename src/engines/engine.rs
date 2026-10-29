@@ -64,6 +64,77 @@ pub struct SessionSpec {
     /// that reads `model` and `local` together to decide whether a session is actually local, so
     /// the args, the environment and the reader can't disagree about it.
     pub local: Option<LocalTarget>,
+    /// Whether this session should run inside Claude Code's own sandbox
+    /// (04-architecture.md section 4.2): `cfg.sandbox == Auto` and the platform supports it
+    /// (`claude.rs`'s `sandbox_supported`/`sandbox_enabled`). Cursor and pi have no sandbox of
+    /// their own, so they ignore this field.
+    pub sandbox: bool,
+}
+
+/// A `SessionSpec` for a read-only session with nothing to resume (a `writer`, e.g. release notes'
+/// or ideas', both interactive-like-an-ask and run once): no `max_turns` cap, `start:
+/// SessionStart::Ephemeral`, `readonly: true`.
+#[allow(clippy::too_many_arguments)]
+pub fn ephemeral_readonly_spec(
+    engine: Option<EngineId>,
+    model: String,
+    prompt: String,
+    schema: Value,
+    cwd: PathBuf,
+    budget_usd: f64,
+    cursor: Option<CursorOptions>,
+    local: Option<LocalTarget>,
+    sandbox: bool,
+) -> SessionSpec {
+    SessionSpec {
+        engine,
+        model,
+        prompt,
+        schema,
+        cwd,
+        max_turns: None,
+        budget_usd,
+        start: SessionStart::Ephemeral,
+        readonly: true,
+        cursor,
+        local,
+        sandbox,
+    }
+}
+
+/// The engine/model/budget/local/cursor/sandbox bundle every read-only `writer`-style role
+/// (release notes, ideas, scouts, the triager) carries alongside its own prompt inputs —
+/// factored out so each role's struct holds one `session: EphemeralSessionConfig` field instead
+/// of repeating these seven fields and the [`ephemeral_readonly_spec`] call that reads them back
+/// off.
+#[derive(Debug, Clone)]
+pub struct EphemeralSessionConfig<'a> {
+    /// A checkout where the session may read specs/diffs/code, per the role's own doc comment.
+    pub cwd: &'a std::path::Path,
+    pub budget_usd: f64,
+    pub model: String,
+    pub local: Option<LocalTarget>,
+    /// [`crate::engines::engine_for`] with the role's own [`crate::engines::Role`].
+    pub engine: Option<EngineId>,
+    pub cursor: Option<CursorOptions>,
+    pub sandbox: bool,
+}
+
+impl EphemeralSessionConfig<'_> {
+    /// [`ephemeral_readonly_spec`] for this bundle, with the caller's own `prompt` and `schema`.
+    pub fn spec(&self, prompt: String, schema: Value) -> SessionSpec {
+        ephemeral_readonly_spec(
+            self.engine,
+            self.model.clone(),
+            prompt,
+            schema,
+            self.cwd.to_path_buf(),
+            self.budget_usd,
+            self.cursor.clone(),
+            self.local.clone(),
+            self.sandbox,
+        )
+    }
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
@@ -261,6 +332,26 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
         readonly: false,
         cursor: None,
         local: None,
+        sandbox: false,
+    }
+}
+
+/// A `SessionResult` test fixture shared by `write_note`'s and `run_round`'s own tests: a result
+/// with a cost, and nothing else interesting. Callers set `ok`, `subtype`, `structured` and `error`.
+#[cfg(test)]
+pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
+    SessionResult {
+        ok,
+        subtype: subtype.to_string(),
+        structured,
+        error: error.map(str::to_string),
+        cost_usd: Some(0.12),
+        session_id: "s".to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
     }
 }
 

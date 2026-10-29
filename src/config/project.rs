@@ -70,6 +70,15 @@ pub struct GalleryConfig {
     pub out_dir: String,
 }
 
+impl GalleryConfig {
+    /// This gallery's slug (agent/09-web-ui.md section 9.1): its name in kebab case, the same way
+    /// a project's id is made from its folder name. Names its tab, its folder and the `gallery`
+    /// the hub's Shoot command names it by.
+    pub fn slug(&self) -> String {
+        kebab_case(&self.name.to_lowercase())
+    }
+}
+
 fn default_galleries() -> Vec<GalleryConfig> {
     vec![
         GalleryConfig {
@@ -200,7 +209,7 @@ pub struct PhoneConfig {
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
     #[serde(default)]

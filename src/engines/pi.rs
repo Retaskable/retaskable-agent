@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::engine::{Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec};
 use super::json_result::{check_schema, extract_json};
-use super::text::{clip, tail};
+use crate::text::{clip, collapse_and_clip, tail};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
@@ -38,8 +38,7 @@ pub fn resolve_pi(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs
 
 /// `resolve_pi`, reading `PATH` itself the way the real agent does.
 pub fn resolve_pi_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     resolve_pi(&env, cfg!(windows), &dirs)
 }
 
@@ -101,8 +100,7 @@ fn pi_tool_text(ev: &Value) -> String {
     if arg.is_empty() {
         ev.get("toolName").and_then(Value::as_str).unwrap_or("tool").to_string()
     } else {
-        let collapsed = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        clip(&collapsed, 160)
+        collapse_and_clip(arg, 160)
     }
 }
 

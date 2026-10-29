@@ -259,6 +259,7 @@ async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        4700,
         false,
         env,
         || 1_700_000_000,
@@ -294,6 +295,7 @@ async fn saving_a_typed_tag_list_keeps_only_what_changes_and_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
+        4700,
         4700,
         false,
         |_: &str| None,
@@ -369,6 +371,7 @@ async fn restart_calls_exit_with_75_once_signed_in_with_csrf() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        4700,
         false,
         |_: &str| None,
         || 1_700_000_000,
@@ -399,6 +402,7 @@ async fn five_wrong_tries_wait_a_minute_then_longer_even_for_the_right_one() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
+        4700,
         4700,
         false,
         |_: &str| None,
@@ -465,6 +469,7 @@ async fn a_wait_still_in_force_doubles_the_next_one() {
         let dir = tempfile::tempdir().unwrap();
         let settings = Arc::new(SettingsServer::new(
             dir.path().to_path_buf(),
+            4700,
             4700,
             false,
             |_: &str| None,
@@ -539,6 +544,7 @@ async fn link_lists_the_three_environments_and_which_one_is_connected() {
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
+        4700,
         false,
         |_: &str| None,
         || 1_700_000_000,
@@ -596,6 +602,7 @@ fn settings_with_network(dir: &Path, network_enabled: bool, stored: Option<Netwo
     }
     Arc::new(SettingsServer::new(
         dir.to_path_buf(),
+        4700,
         4700,
         network_enabled,
         |_: &str| None,
@@ -717,7 +724,7 @@ async fn saving_the_port_validates_its_range_and_round_trips() {
 
     let ok = post_setting(&app, &cookie, &csrf, json!({ "port": 4800 })).await;
     assert_eq!(ok.status(), StatusCode::OK);
-    assert_eq!(config::load(dir.path()).unwrap().machine.port, 4800);
+    assert_eq!(config::load(dir.path()).unwrap().machine.port, Some(4800));
 }
 
 #[tokio::test]
@@ -737,6 +744,7 @@ async fn saving_the_port_is_refused_when_set_by_env() {
     let dir = tempfile::tempdir().unwrap();
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
+        4700,
         4700,
         false,
         |k: &str| (k == "RETASKABLE_PORT").then(|| "4900".to_string()),

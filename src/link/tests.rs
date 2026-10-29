@@ -256,18 +256,18 @@ fn cfg(url: Option<&str>) -> ConfigFile {
 #[test]
 fn the_cloud_url_is_the_env_then_the_config_then_production() {
     let none = |_: &str| None;
-    assert_eq!(cloud_url(&cfg(None), none).unwrap(), "https://retaskable.com");
+    assert_eq!(cloud_url(&cfg(None), none, None).unwrap(), "https://retaskable.com");
     assert_eq!(
-        cloud_url(&cfg(Some(" https://a.example/ ")), none).unwrap(),
+        cloud_url(&cfg(Some(" https://a.example/ ")), none, None).unwrap(),
         "https://a.example"
     );
     let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787/".to_string());
     assert_eq!(
-        cloud_url(&cfg(Some("https://a.example")), env).unwrap(),
+        cloud_url(&cfg(Some("https://a.example")), env, None).unwrap(),
         "http://localhost:8787"
     );
-    assert!(cloud_url(&cfg(Some("ftp://a.example")), none).is_err());
-    assert!(cloud_url(&cfg(Some("not a url")), none).is_err());
+    assert!(cloud_url(&cfg(Some("ftp://a.example")), none, None).is_err());
+    assert!(cloud_url(&cfg(Some("not a url")), none, None).is_err());
 }
 
 #[test]
@@ -278,11 +278,14 @@ fn every_environment_is_a_cloud_and_a_custom_url_is_added_last() {
         "https://staging.retaskable.com",
         "http://localhost:8787",
     ];
-    assert_eq!(cloud_urls(&cfg(None), none), three);
-    assert_eq!(cloud_urls(&cfg(Some("https://staging.retaskable.com")), none), three);
-    assert_eq!(cloud_urls(&cfg(Some("bad")), none), three);
+    assert_eq!(cloud_urls(&cfg(None), none, None), three);
     assert_eq!(
-        cloud_urls(&cfg(Some("https://a.example")), none)[3],
+        cloud_urls(&cfg(Some("https://staging.retaskable.com")), none, None),
+        three
+    );
+    assert_eq!(cloud_urls(&cfg(Some("bad")), none, None), three);
+    assert_eq!(
+        cloud_urls(&cfg(Some("https://a.example")), none, None)[3],
         "https://a.example"
     );
     assert_eq!(environment_name("http://localhost:8787/"), "Local");
@@ -291,13 +294,72 @@ fn every_environment_is_a_cloud_and_a_custom_url_is_added_last() {
     assert_eq!(environment_url("backlog"), None);
 }
 
+fn build(environment: crate::release::Environment) -> crate::release::Build {
+    crate::release::Build {
+        os: "win-x64".into(),
+        environment,
+        version: "1.4.2".into(),
+        commit: "abc1234".into(),
+    }
+}
+
+#[test]
+fn a_release_build_s_cloud_is_fixed_to_build_json_s_environment() {
+    use crate::release::Environment;
+    let none = |_: &str| None;
+    let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787/".to_string());
+    let staging = build(Environment::Staging);
+    // Ignores cloud.url and RETASKABLE_CLOUD_URL entirely.
+    assert_eq!(
+        cloud_url(&cfg(Some("https://a.example")), env, Some(&staging)).unwrap(),
+        "https://staging.retaskable.com"
+    );
+    assert_eq!(
+        cloud_urls(&cfg(Some("https://a.example")), none, Some(&staging)),
+        ["https://staging.retaskable.com"]
+    );
+    let production = build(Environment::Production);
+    assert_eq!(
+        cloud_url(&cfg(None), none, Some(&production)).unwrap(),
+        "https://retaskable.com"
+    );
+    assert_eq!(
+        cloud_urls(&cfg(None), none, Some(&production)),
+        ["https://retaskable.com"]
+    );
+}
+
 #[test]
 fn the_machine_is_named_by_retaskable_machine_else_the_hostname() {
     let env = |k: &str| (k == "RETASKABLE_MACHINE").then(|| " jcnash-docker ".to_string());
     assert_eq!(machine_name(env), "jcnash-docker");
     assert!(!machine_name(|_| None).is_empty());
     let long = "x".repeat(150);
-    let info = machine_info(|k| (k == "RETASKABLE_MACHINE").then(|| long.clone()));
+    let info = machine_info(|k| (k == "RETASKABLE_MACHINE").then(|| long.clone()), "9.9.9");
     assert_eq!(info["machine"].as_str().unwrap().len(), 100);
-    assert_eq!(info["agentVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["agentVersion"], "9.9.9");
+}
+
+#[test]
+fn the_links_line_names_every_cloud_and_the_backlog_store_by_host() {
+    let urls = ["https://staging.retaskable.com".to_string()];
+    assert_eq!(
+        links_line(&urls, "https://backlog.retaskable.com", |_| false),
+        "Links: staging.retaskable.com not linked, backlog store backlog.retaskable.com not linked"
+    );
+}
+
+#[test]
+fn the_links_line_says_linked_only_for_a_stored_url() {
+    let urls = [
+        "https://retaskable.com".to_string(),
+        "https://staging.retaskable.com".to_string(),
+    ];
+    let line = links_line(&urls, "https://backlog.retaskable.com", |url| {
+        url == "https://staging.retaskable.com"
+    });
+    assert_eq!(
+        line,
+        "Links: retaskable.com not linked, staging.retaskable.com linked, backlog store backlog.retaskable.com not linked"
+    );
 }
