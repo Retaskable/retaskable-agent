@@ -124,6 +124,29 @@ fn view_with_models_gallery(project: &str) -> Arc<AgentView> {
     v
 }
 
+/// Starts a connector for `project` with a Models gallery, reads its hello and first snapshot,
+/// and checks the gallery starts `idle`: the shared setup for the gallery-status-resend tests,
+/// which then each send their own `galleries::set_status` calls and read what arrives next.
+async fn gallery_resend_setup(project: &str) -> (tempfile::TempDir, Connector, Accepted) {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let v = view_with_models_gallery(project);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let galleries = read(&mut first).await["state"]["galleries"].clone();
+    assert_eq!(galleries[0]["status"], "idle");
+    (dir, c, first)
+}
+
 /// An `exit` that does nothing, for tests that don't send Restart.
 fn noop_exit() -> Arc<Exit> {
     Arc::new(|_: i32| {})
@@ -289,22 +312,7 @@ async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
     // A project id of its own: `galleries::set_status` broadcasts across the whole process, and
     // "one" is shared by plenty of other tests that never expect an extra snapshot.
     let project = "connector-gallery-resend";
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let v = view_with_models_gallery(project);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        v,
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    let galleries = read(&mut first).await["state"]["galleries"].clone();
-    assert_eq!(galleries[0]["status"], "idle");
+    let (_dir, c, mut first) = gallery_resend_setup(project).await;
 
     galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
     let mut again = read(&mut first).await;
@@ -323,22 +331,7 @@ async fn a_status_change_still_arrives_when_another_projects_changes_right_after
     // its own (the watch channel the two share keeps only the latest value).
     let project = "connector-gallery-resend-own";
     let other = "connector-gallery-resend-other";
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let v = view_with_models_gallery(project);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        v,
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    let galleries = read(&mut first).await["state"]["galleries"].clone();
-    assert_eq!(galleries[0]["status"], "idle");
+    let (_dir, c, mut first) = gallery_resend_setup(project).await;
 
     galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
     galleries::set_status(other, "models", galleries::GalleryStatus::Shooting);
