@@ -95,6 +95,33 @@ fn since_takes_an_iso_time_or_a_span_back_from_now() {
 }
 
 #[test]
+fn find_item_skips_flags_and_their_values_and_a_bare_double_dash() {
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let r12 = Some("R-12".to_string());
+    assert_eq!(find_item(&args(&["--", "R-12"])), r12);
+    assert_eq!(find_item(&args(&["--since", "6h", "R-12"])), r12);
+    assert_eq!(find_item(&args(&["--since=6h", "R-12"])), r12);
+    assert_eq!(find_item(&args(&["--", "R-12", "--project", "alpha"])), r12);
+    assert_eq!(find_item(&args(&["--", "--project", "alpha"])), None);
+}
+
+#[test]
+fn read_all_rewrites_a_short_hand_edited_at_in_full_so_the_reports_can_slice_it() {
+    let data = tempfile::tempdir().unwrap();
+    let dir = data.path().join("projects").join("alpha").join("events");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("2026-10-15.jsonl"),
+        "{\"at\":\"2026-10-15T8:0:0Z\",\"kind\":\"claim\",\"item\":\"R-1\"}
+",
+    )
+    .unwrap();
+    let events = read_all(data.path(), 0, i64::MAX, None);
+    assert_eq!(str_of(events[0].get("at")), "2026-10-15T08:00:00.000Z");
+    assert!(why_text(&events, "R-1").contains("08:00:00"));
+}
+
+#[test]
 fn read_all_reads_every_projects_days_in_order_a_project_or_a_window_when_asked() {
     let f = fixture();
     let all = read_all(f.path(), 0, i64::MAX, None);

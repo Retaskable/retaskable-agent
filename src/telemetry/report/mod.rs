@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::telemetry::events::{parse_iso_ms, read_events};
+use crate::telemetry::events::{iso_utc_millis, parse_iso_ms, read_events};
 
 mod agent_report;
 mod describe;
@@ -25,7 +25,8 @@ const IDLE_STRETCH_MS: i64 = 15 * 60_000;
 const TICK_GAP_MS: i64 = 3 * 60_000;
 
 /// Every project's events under `data` (`.retaskable`), oldest first, each marked with its
-/// project (a `"project"` field added to the event object).
+/// project (a `"project"` field added to the event object). Each `at` is rewritten in the full
+/// `YYYY-MM-DDTHH:MM:SS.sssZ` form, so a hand-edited short one still sorts and slices safely.
 pub fn read_all(data: &Path, since: i64, until: i64, project: Option<&str>) -> Vec<Value> {
     let root = data.join("projects");
     let entries = match std::fs::read_dir(&root) {
@@ -43,6 +44,10 @@ pub fn read_all(data: &Path, since: i64, until: i64, project: Option<&str>) -> V
         let dir = root.join(&name).join("events");
         for mut e in read_events(&dir, since, until) {
             if let Value::Object(map) = &mut e {
+                // `read_events` only returns events whose `at` parses.
+                if let Some(t) = map.get("at").and_then(Value::as_str).and_then(parse_iso_ms) {
+                    map.insert("at".to_string(), Value::String(iso_utc_millis(t)));
+                }
                 map.insert("project".to_string(), Value::String(name.clone()));
             }
             out.push(e);
@@ -74,7 +79,8 @@ pub fn flag(args: &[String], name: &str) -> Option<String> {
 }
 
 /// `retaskable why`'s one positional argument: the first value that is neither a flag nor a
-/// flag's value.
+/// flag's value. A bare `--` (from `retaskable why -- <item id>`) only ends the flags; it takes
+/// no value.
 pub fn find_item(args: &[String]) -> Option<String> {
     for (i, a) in args.iter().enumerate() {
         if a.starts_with("--") {
@@ -82,7 +88,7 @@ pub fn find_item(args: &[String]) -> Option<String> {
         }
         if i > 0 {
             let prev = &args[i - 1];
-            if prev.starts_with("--") && !prev.contains('=') {
+            if prev.starts_with("--") && prev != "--" && !prev.contains('=') {
                 continue;
             }
         }
