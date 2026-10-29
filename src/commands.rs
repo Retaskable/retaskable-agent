@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::connector::{AgentView, Exit};
 use crate::galleries;
 use crate::paths;
-use crate::telemetry::events::iso_utc_millis;
+use crate::telemetry::events::{iso_utc_millis, now_ms};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -60,15 +60,6 @@ impl Seen {
         self.0.insert(id.to_string(), now);
         replay
     }
-}
-
-/// Now, in epoch milliseconds, for the expiry check.
-pub fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 /// Checked in order (cloud.md section 6.2): replay, expiry, then Setup done. The first failing

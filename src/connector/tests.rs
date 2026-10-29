@@ -8,8 +8,8 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::*;
-use crate::commands;
 use crate::link::FileStore;
+use crate::telemetry::events::now_ms;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {
@@ -250,7 +250,7 @@ async fn before_setup_it_connects_to_its_own_hub() {
 
 /// A fresh, still-valid command: callers override `name`/`args` as needed.
 fn command(id: &str, name: &str, args: Value) -> Value {
-    let now = commands::now_ms();
+    let now = now_ms();
     json!({
         "type": "command",
         "id": id,
@@ -392,7 +392,7 @@ async fn a_replayed_command_id_is_refused_the_second_time() {
 #[tokio::test]
 async fn an_expired_command_is_refused() {
     let (c, mut a, _dir) = connected_project(noop_exit()).await;
-    let issued_at = commands::now_ms() - 61_000;
+    let issued_at = now_ms() - 61_000;
     let old = json!({
         "type": "command",
         "id": "c1",
