@@ -5,8 +5,7 @@
 //! per item. `ensure` reconciles the worktrees on disk for one project to the wanted count.
 //! `prepare` resets a lane onto a fresh branch from the base (fetch, reset, clean, checkout -B),
 //! after stopping anything a previous session left running there, and links sibling path
-//! dependencies that climb out of the repo. Handing a lane to one session at a time is for a
-//! later piece, once there's a session to hand one to.
+//! dependencies that climb out of the repo. Which lane is free and who holds it is `lane_pool`.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +13,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+
+use crate::sync::lock;
 
 /// How recently a fetch of a repo must have begun for the next lane's prepare to skip its own
 /// (section 4.1: every lane shares the one object store).
@@ -83,7 +84,7 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
     ensure_worktree(repo_path, worktrees_dir, &dir)?;
     kill_processes_in(&dir)?;
     {
-        let _guard = GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock(&GIT_LOCK);
         fetch(repo_path, true)?;
         run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
         run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
@@ -96,11 +97,69 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
     Ok(dir)
 }
 
+/// `<worktrees_dir>/_planner`: the project's shared base checkout (docs/specs/agent/06.1
+/// "Planner (retired)"), detached at `origin/<base_branch>`. Shoot (06.8) is its first user here;
+/// the baseline, Play main, phone builds and main syncs take the same checkout one at a time once
+/// they're ported, so a caller of [`prepare_base_checkout`] holds it alone until a lock shared
+/// across those is ported too.
+pub fn base_checkout_path(worktrees_dir: &Path) -> PathBuf {
+    worktrees_dir.join("_planner")
+}
+
+/// Resets the base checkout ([`base_checkout_path`]) onto `origin/<base_branch>`, detached, the
+/// same way [`prepare`] resets a lane onto a branch.
+pub fn prepare_base_checkout(repo_path: &Path, worktrees_dir: &Path, base_branch: &str) -> Result<PathBuf> {
+    let dir = base_checkout_path(worktrees_dir);
+    ensure_worktree(repo_path, worktrees_dir, &dir)?;
+    kill_processes_in(&dir)?;
+    {
+        let _guard = lock(&GIT_LOCK);
+        fetch(repo_path, true)?;
+        run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
+        run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
+        let start_point = format!("origin/{base_branch}");
+        run(git_in_worktree(&dir).args(["checkout", "--detach", &start_point]))?;
+    }
+    link_outside_deps(repo_path, worktrees_dir, &dir)?;
+    Ok(dir)
+}
+
+/// The base checkout's current commit (`git rev-parse HEAD`), trimmed.
+pub fn head_sha(dir: &Path) -> Result<String> {
+    Ok(git_output_in_worktree(dir, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// `<worktrees_dir>/smoke`: the post-merge staging smoke's own checkout
+/// (docs/specs/agent/06.3-review.md, "Run it in its own worktree"), reused between runs so its
+/// `node_modules` stays warm, the same way the base checkout is.
+pub fn smoke_path(worktrees_dir: &Path) -> PathBuf {
+    worktrees_dir.join("smoke")
+}
+
+/// Resets the smoke worktree ([`smoke_path`]) onto `sha`, detached, the same way
+/// [`prepare_base_checkout`] resets the base checkout — except at a specific commit rather than
+/// the base branch's current head, since a later merge must not move a smoke run already under
+/// way out from under it ("one at a time per project, newest only").
+pub fn prepare_smoke_checkout(repo_path: &Path, worktrees_dir: &Path, sha: &str) -> Result<PathBuf> {
+    let dir = smoke_path(worktrees_dir);
+    ensure_worktree(repo_path, worktrees_dir, &dir)?;
+    kill_processes_in(&dir)?;
+    {
+        let _guard = lock(&GIT_LOCK);
+        fetch(repo_path, true)?;
+        run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
+        run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
+        run(git_in_worktree(&dir).args(["checkout", "--detach", sha]))?;
+    }
+    link_outside_deps(repo_path, worktrees_dir, &dir)?;
+    Ok(dir)
+}
+
 /// Something just changed origin without a fetch here (a PR merged on GitHub): the next lane
 /// fetches again.
 pub fn fetch_is_stale(repo_path: &Path) {
     let key = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-    FETCHED_AT.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    lock(&FETCHED_AT).remove(&key);
 }
 
 /// Stops every process whose program or command line is inside `dir`, with its children. A session
@@ -263,7 +322,7 @@ fn norm_path(path: &Path) -> String {
     }
 }
 
-fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
+pub(crate) fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         // A directory junction needs no elevation (unlike a directory symlink). mklink wants
@@ -289,7 +348,7 @@ fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
 fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
     let key = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     if unless_fresh {
-        let map = FETCHED_AT.lock().unwrap_or_else(|e| e.into_inner());
+        let map = lock(&FETCHED_AT);
         if let Some(at) = map.get(&key)
             && at.elapsed() < FRESH_FETCH
         {
@@ -298,11 +357,16 @@ fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
     }
     let started = Instant::now();
     run(git(repo_path).args(["fetch", "--prune", "origin"]))?;
-    FETCHED_AT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, started);
+    lock(&FETCHED_AT).insert(key, started);
     Ok(true)
+}
+
+/// Fetches `repo_path` under [`GIT_LOCK`], unless another fetch of it began within
+/// [`FRESH_FETCH`]: the locked, deduped fetch every caller outside this module needs before
+/// reading `origin/*` (docs/specs/agent/06.3-review.md's post-merge smoke is the first of those).
+pub(crate) fn fetch_latest(repo_path: &Path) -> Result<bool> {
+    let _guard = lock(&GIT_LOCK);
+    fetch(repo_path, true)
 }
 
 fn is_worktree(path: &Path) -> bool {
@@ -332,9 +396,7 @@ fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
 }
 
 fn git(repo_path: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(repo_path);
-    cmd
+    crate::git_bin::command(repo_path)
 }
 
 /// A git call inside `<worktreesDir>` (a lane, in this module). These worktrees share the
@@ -355,7 +417,9 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn git_output_in_worktree(dir: &Path, args: &[&str]) -> Result<String> {
+/// A git call inside a lane whose output the caller wants back, e.g. stage 1's `diff --stat`
+/// and `diff --name-only` (docs/specs/agent/06.3-review.md), as well as this module's own use.
+pub(crate) fn git_output_in_worktree(dir: &Path, args: &[&str]) -> Result<String> {
     let output = git_in_worktree(dir).args(args).output().context("running git")?;
     if !output.status.success() {
         bail!("git failed: {}", String::from_utf8_lossy(&output.stderr).trim());
@@ -737,6 +801,40 @@ mod tests {
         assert_eq!(branch_of(&lane), "retaskable/item-slug-s1");
         assert!(!lane.join("dirt.txt").exists());
         assert_eq!(std::fs::read_to_string(lane.join("README.md")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn prepare_smoke_checkout_reuses_the_worktree_and_checks_out_the_given_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_origin(root.path());
+        let worktrees = root.path().join("worktrees");
+        let first_sha = git_output_in_worktree(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let dir = prepare_smoke_checkout(&repo, &worktrees, &first_sha).unwrap();
+
+        assert_eq!(dir, smoke_path(&worktrees));
+        assert_eq!(head_sha(&dir).unwrap(), first_sha);
+
+        // Dirt the checkout and add a second commit on main; a later call reuses the same
+        // worktree, cleans it and lands on the newly given commit.
+        std::fs::write(dir.join("dirt.txt"), "gone").unwrap();
+        std::fs::write(repo.join("README.md"), "second").unwrap();
+        run(git(&repo).args(["add", "README.md"])).unwrap();
+        run(git(&repo).args(["commit", "--quiet", "-m", "second"])).unwrap();
+        run(git(&repo).args(["push", "--quiet", "origin", "main"])).unwrap();
+        let second_sha = git_output_in_worktree(&repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let dir_again = prepare_smoke_checkout(&repo, &worktrees, &second_sha).unwrap();
+
+        assert_eq!(dir_again, dir);
+        assert_eq!(head_sha(&dir).unwrap(), second_sha);
+        assert!(!dir.join("dirt.txt").exists());
     }
 
     #[test]

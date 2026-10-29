@@ -5,6 +5,7 @@
 use serde_json::Value;
 
 use super::engine::{EventKind, SessionEvent};
+use crate::text::{clip, collapse_and_clip};
 
 const TOOL_ARG_KEYS: [&str; 8] = [
     "command",
@@ -17,18 +18,6 @@ const TOOL_ARG_KEYS: [&str; 8] = [
     "prompt",
 ];
 
-/// `s`, cut to at most `n` chars, with a trailing `…` when it was longer (`clip` in
-/// `shared/text.ts`).
-fn clip(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= n {
-        return s.to_string();
-    }
-    let mut out: String = chars[..n.saturating_sub(1)].iter().collect();
-    out.push('…');
-    out
-}
-
 /// `toolText(name, input)`: the tool name plus its first argument that matches (in
 /// `TOOL_ARG_KEYS` order), collapsed to single spaces and clipped to 160 characters.
 /// `StructuredOutput`'s own input is never shown.
@@ -40,8 +29,7 @@ fn tool_text(name: &str, input: Option<&Value>) -> String {
         .iter()
         .find_map(|key| input.and_then(|i| i.get(key)).and_then(Value::as_str))
         .unwrap_or("");
-    let collapsed = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{name}: {}", clip(&collapsed, 160))
+    format!("{name}: {}", collapse_and_clip(arg, 160))
 }
 
 /// `summarize(ev, at)`: an `assistant` event's tool calls and text become `tool`/`text` events; a

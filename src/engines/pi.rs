@@ -13,29 +13,7 @@ use serde_json::{Value, json};
 
 use super::engine::{Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec};
 use super::json_result::{check_schema, extract_json};
-
-/// `s`, cut to at most `n` chars, with a trailing `…` when it was longer (`clip` in
-/// `shared/text.ts`). Duplicated from `cursor::result`, which stays Cursor-only.
-fn clip(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= n {
-        return s.to_string();
-    }
-    let mut out: String = chars[..n.saturating_sub(1)].iter().collect();
-    out.push('…');
-    out
-}
-
-/// The last (up to) `max_chars` characters of `s`, on a char boundary (`tail` in
-/// `shared/text.ts`).
-fn tail(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        chars[chars.len() - max_chars..].iter().collect()
-    }
-}
+use crate::text::{clip, collapse_and_clip, tail};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
@@ -60,8 +38,7 @@ pub fn resolve_pi(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs
 
 /// `resolve_pi`, reading `PATH` itself the way the real agent does.
 pub fn resolve_pi_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let path = env("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let dirs = crate::env_path::path_dirs(&env);
     resolve_pi(&env, cfg!(windows), &dirs)
 }
 
@@ -123,8 +100,7 @@ fn pi_tool_text(ev: &Value) -> String {
     if arg.is_empty() {
         ev.get("toolName").and_then(Value::as_str).unwrap_or("tool").to_string()
     } else {
-        let collapsed = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        clip(&collapsed, 160)
+        collapse_and_clip(arg, 160)
     }
 }
 
@@ -328,19 +304,7 @@ impl Engine for PiEngine {
 
 #[cfg(test)]
 fn base_spec(cwd: &std::path::Path) -> SessionSpec {
-    use super::engine::SessionStart;
-    SessionSpec {
-        engine: Some(EngineId::Pi),
-        model: "sonnet".to_string(),
-        prompt: "plan the board".to_string(),
-        schema: json!({"type": "object"}),
-        cwd: cwd.to_path_buf(),
-        max_turns: None,
-        budget_usd: 0.0,
-        start: SessionStart::Ephemeral,
-        readonly: true,
-        cursor: None,
-    }
+    super::engine::test_spec(cwd, "plan the board")
 }
 
 #[cfg(test)]
@@ -387,6 +351,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = base_spec(dir.path());
         spec.start = SessionStart::Resume("ignored".to_string());
+        spec.readonly = true;
         let args = pi_args(&spec);
         assert_eq!(
             args,

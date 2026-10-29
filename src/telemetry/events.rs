@@ -188,12 +188,7 @@ pub struct EventLog {
 
 impl EventLog {
     pub fn new() -> Self {
-        Self::with_now(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0)
-        })
+        Self::with_now(now_ms)
     }
 
     pub fn with_now(now: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
@@ -328,13 +323,21 @@ fn iso_utc_day(ms: i64) -> String {
 }
 
 /// Full ISO-8601 UTC with milliseconds, e.g. `2026-10-15T23:59:30.000Z`.
-fn iso_utc_millis(ms: i64) -> String {
+pub(crate) fn iso_utc_millis(ms: i64) -> String {
     let (y, m, d, hh, mm, ss) = civil_from_ms(ms);
     let millis = ms.rem_euclid(1000) as u32;
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
 }
 
-fn parse_iso_ms(s: &str) -> Option<i64> {
+/// Now, in epoch milliseconds.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+pub(crate) fn parse_iso_ms(s: &str) -> Option<i64> {
     // Accept `YYYY-MM-DDTHH:MM:SS.sssZ` (and without fractional seconds).
     let s = s.strip_suffix('Z').unwrap_or(s);
     let (date, time) = s.split_once('T')?;

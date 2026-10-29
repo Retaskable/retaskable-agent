@@ -24,7 +24,6 @@ impl TagOverrides {
         })
     }
 
-    #[allow(dead_code)] // MachineStore::set_tags; settings page / setup later.
     pub fn to_value(&self) -> Value {
         Value::Object(Map::from_iter([
             (
@@ -78,7 +77,6 @@ pub fn computer_tags(found: &[String], overrides: Option<&TagOverrides>) -> Vec<
 
 /// Your changes, kept only where they change something: an added tag it didn't find, a removed
 /// one it did. Used when the settings page or setup saves a typed list.
-#[allow(dead_code)]
 pub fn tag_overrides(found: &[String], overrides: Option<&TagOverrides>) -> TagOverrides {
     let removed = overrides
         .map(|o| clean_tags(Value::Array(o.removed.iter().cloned().map(Value::String).collect())))
@@ -188,10 +186,7 @@ pub fn effective_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     #[test]
     fn clean_tags_lowercases_dedupes_and_drops_junk() {

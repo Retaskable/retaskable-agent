@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Retaskable settings</title>
+<style nonce="{{NONCE}}">
+  body { font: 14px system-ui, sans-serif; margin: 2em; max-width: 36em; color: #222; }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 2em; border-top: 1px solid #ddd; padding-top: 1em; }
+  label { display: block; margin-top: 0.6em; font-weight: 600; }
+  textarea, input[type=text], input[type=password], input[type=number], select {
+    width: 100%; box-sizing: border-box; font: inherit; padding: 0.4em;
+  }
+  textarea { height: 4em; }
+  input[type=checkbox] { margin-top: 0.6em; }
+  button { margin-top: 1em; padding: 0.5em 1em; font: inherit; }
+  .hint { color: #666; font-size: 0.9em; margin: 0.2em 0 0; }
+  .group[data-env-set="true"] input,
+  .group[data-env-set="true"] select,
+  .group[data-env-set="true"] textarea,
+  .group[data-env-set="true"] button {
+    background: #eee; color: #888;
+  }
+  #status { margin-top: 1em; }
+  #status.error { color: #a00; }
+  #app[hidden], #signedOut[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>Retaskable settings</h1>
+
+<div id="signedOut">
+  <p id="signedOutMessage">
+    Open the tray's "Settings&hellip;" link for a fresh one-time link, or sign in below with this
+    computer's password.
+  </p>
+  <label for="password">Password</label>
+  <input type="password" id="password" autocomplete="current-password" />
+  <button type="button" id="signIn">Sign in</button>
+</div>
+
+<div id="app" hidden>
+  <p id="restartWaiting" hidden>
+    A saved change needs a restart before it takes effect.
+    <button type="button" id="restart">Restart now</button>
+  </p>
+
+  <div class="group" id="tagsGroup">
+    <label for="tags">Tags</label>
+    <textarea id="tags" placeholder="one tag per line"></textarea>
+    <p class="hint" id="tagsHint" hidden></p>
+    <button type="button" id="saveTags">Save tags</button>
+  </div>
+
+  <h2>Port</h2>
+  <div class="group" id="portGroup">
+    <label for="port">Port (1024&ndash;65535)</label>
+    <input type="number" id="port" min="1024" max="65535" />
+    <p class="hint" id="portHint" hidden></p>
+    <button type="button" id="savePort">Save port</button>
+  </div>
+
+  <h2>How often it checks</h2>
+  <div class="group" id="pollGroup">
+    <label for="pollIntervalSec">Checks every (2&ndash;3600 seconds)</label>
+    <input type="number" id="pollIntervalSec" min="2" max="3600" />
+    <p class="hint" id="pollHint" hidden></p>
+    <button type="button" id="savePoll">Save</button>
+  </div>
+
+  <h2>Local model</h2>
+  <div class="group" id="localGroup">
+    <label><input type="checkbox" id="localEnabled" /> On</label>
+    <label for="localModel">Model</label>
+    <input type="text" id="localModel" placeholder="e.g. llama3.1" />
+    <label for="localBaseUrl">Address</label>
+    <input type="text" id="localBaseUrl" placeholder="http://127.0.0.1:11434" />
+    <p class="hint" id="localHint" hidden></p>
+    <button type="button" id="saveLocal">Save</button>
+  </div>
+
+  <h2>Engines</h2>
+  <div class="group" id="engineGroup">
+    <label for="engineDefault">Default engine</label>
+    <select id="engineDefault">
+      <option value="claude">claude</option>
+      <option value="cursor">cursor</option>
+      <option value="pi">pi</option>
+      <option value="local">local</option>
+    </select>
+    <div id="engineRoles"></div>
+    <p class="hint">Per-lane engine (lane 1 first)</p>
+    <div id="engineLanes"></div>
+    <p class="hint" id="engineHint" hidden></p>
+    <button type="button" id="saveEngine">Save</button>
+  </div>
+
+  <h2>Cursor's models</h2>
+  <div class="group" id="cursorGroup">
+    <label for="cursorTop">Planning and review</label>
+    <input type="text" id="cursorTop" placeholder="auto" />
+    <label for="cursorImplementer">Building</label>
+    <input type="text" id="cursorImplementer" placeholder="auto" />
+    <label for="cursorScout">Scouts and small jobs</label>
+    <input type="text" id="cursorScout" placeholder="auto" />
+    <p class="hint" id="cursorHint" hidden></p>
+    <button type="button" id="saveCursor">Save</button>
+  </div>
+
+  <h2>Network access</h2>
+  <div class="group" id="networkGroup">
+    <label><input type="checkbox" id="networkEnabled" /> On (lets another computer on the local network reach this page)</label>
+    <label for="networkPassword">Password (leave blank to keep the current one)</label>
+    <input type="password" id="networkPassword" autocomplete="new-password" />
+    <p class="hint" id="networkPasswordHint"></p>
+    <p class="hint" id="networkHint" hidden></p>
+    <button type="button" id="saveNetwork">Save</button>
+  </div>
+</div>
+
+<p id="status"></p>
+
+<script nonce="{{NONCE}}">
+(function () {
+  "use strict";
+  var statusEl = document.getElementById("status");
+  var csrfToken = null;
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message || "";
+    statusEl.className = isError ? "error" : "";
+  }
+
+  function api(path, options) {
+    options = options || {};
+    options.headers = options.headers || {};
+    if (csrfToken) options.headers["X-CSRF-Token"] = csrfToken;
+    return fetch(path, options).then(function (res) {
+      return res.json().then(function (body) {
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        return body;
+      });
+    });
+  }
+
+  // agent-settings.md section 3.1: a role's own override, or a lane's own override.
+  var ENGINE_OPTIONS = ["claude", "cursor", "pi", "local"];
+  var LANE_ENGINE_OPTIONS = ["claude", "cursor"];
+  var ROLE_FIELDS = [
+    { key: "planner", label: "Planning" },
+    { key: "implementer", label: "Implementing" },
+    { key: "review", label: "Review" },
+    { key: "drafter", label: "Drafting" },
+    { key: "chat", label: "Chat" },
+    { key: "writer", label: "Writing" },
+  ];
+
+  function engineSelectHtml(id, label, options, selected) {
+    var opts = options
+      .map(function (opt) {
+        return '<option value="' + opt + '"' + (opt === selected ? " selected" : "") + ">" + opt + "</option>";
+      })
+      .join("");
+    return '<label for="' + id + '">' + label + "</label>" + '<select id="' + id + '">' + opts + "</select>";
+  }
+
+  function renderEngineRoles(roles) {
+    document.getElementById("engineRoles").innerHTML = ROLE_FIELDS.map(function (f) {
+      return engineSelectHtml("role_" + f.key, f.label, ["default"].concat(ENGINE_OPTIONS), roles[f.key] || "default");
+    }).join("");
+  }
+
+  function renderEngineLanes(laneCount, laneOverrides) {
+    var count = Math.max(laneCount, laneOverrides.length);
+    var html = "";
+    for (var i = 0; i < count; i++) {
+      html += engineSelectHtml(
+        "lane_" + i,
+        "Lane " + (i + 1),
+        ["default"].concat(LANE_ENGINE_OPTIONS),
+        laneOverrides[i] || "default"
+      );
+    }
+    document.getElementById("engineLanes").innerHTML = html;
+  }
+
+  // agent-settings.md section 3.2: a setting a variable sets is greyed out, with why.
+  var ENV_GROUPS = [
+    { groupId: "tagsGroup", hintId: "tagsHint", vars: ["RETASKABLE_TAGS"] },
+    { groupId: "portGroup", hintId: "portHint", vars: ["RETASKABLE_PORT"] },
+    { groupId: "pollGroup", hintId: "pollHint", vars: ["RETASKABLE_POLL_SEC"] },
+    { groupId: "localGroup", hintId: "localHint", vars: ["RETASKABLE_LOCAL_MODEL", "RETASKABLE_LOCAL_URL"] },
+    { groupId: "engineGroup", hintId: "engineHint", vars: ["RETASKABLE_ENGINES"] },
+    { groupId: "cursorGroup", hintId: "cursorHint", vars: ["RETASKABLE_CURSOR_MODELS"] },
+    { groupId: "networkGroup", hintId: "networkHint", vars: ["RETASKABLE_NETWORK_PASSWORD"] },
+  ];
+
+  function applyEnvGating(envVars) {
+    ENV_GROUPS.forEach(function (g) {
+      var setBy = g.vars.filter(function (v) { return envVars[v]; });
+      var group = document.getElementById(g.groupId);
+      var hint = document.getElementById(g.hintId);
+      var isSet = setBy.length > 0;
+      group.setAttribute("data-env-set", isSet ? "true" : "false");
+      group.querySelectorAll("input, select, textarea, button").forEach(function (el) {
+        el.disabled = isSet;
+      });
+      if (isSet) {
+        hint.textContent = "Set by " + setBy.join(", ") + ": change it there.";
+        hint.hidden = false;
+      } else {
+        hint.hidden = true;
+      }
+    });
+  }
+
+  function renderSettings(s) {
+    document.getElementById("restartWaiting").hidden = !s.restartWaiting;
+    document.getElementById("tags").value = s.tags.effective.join("\n");
+    document.getElementById("port").value = s.port;
+    document.getElementById("pollIntervalSec").value = s.pollIntervalSec;
+    document.getElementById("localEnabled").checked = s.local.enabled;
+    document.getElementById("localModel").value = s.local.model;
+    document.getElementById("localBaseUrl").value = s.local.baseUrl;
+    document.getElementById("engineDefault").value = s.engineChoice.default || "claude";
+    renderEngineRoles(s.engineChoice.roles);
+    renderEngineLanes(s.lanes, s.engineChoice.lanes);
+    document.getElementById("cursorTop").value = s.cursorModels.top || "";
+    document.getElementById("cursorImplementer").value = s.cursorModels.implementer || "";
+    document.getElementById("cursorScout").value = s.cursorModels.scout || "";
+    document.getElementById("networkEnabled").checked = s.network.enabled;
+    document.getElementById("networkPassword").value = "";
+    document.getElementById("networkPasswordHint").textContent = s.network.hasPassword
+      ? "A password is already set."
+      : "No password is set yet; one is needed to turn network access on.";
+    applyEnvGating(s.envVars);
+  }
+
+  function loadSettings() {
+    return api("/api/settings").then(renderSettings);
+  }
+
+  function showApp() {
+    document.getElementById("signedOut").hidden = true;
+    document.getElementById("app").hidden = false;
+  }
+
+  function signInWith(body) {
+    return api("/api/settings/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (resBody) {
+      csrfToken = resBody.csrfToken;
+      showApp();
+      return loadSettings();
+    });
+  }
+
+  function signInWithToken() {
+    var hash = window.location.hash.replace(/^#/, "");
+    if (!hash) return;
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    signInWith({ token: hash }).catch(function (e) {
+      setStatus("Couldn't sign in: " + e.message, true);
+    });
+  }
+
+  document.getElementById("signIn").addEventListener("click", function () {
+    var password = document.getElementById("password").value;
+    if (!password) return;
+    setStatus("Signing in…");
+    signInWith({ password: password })
+      .then(function () { setStatus(""); })
+      .catch(function (e) {
+        setStatus("Couldn't sign in: " + e.message, true);
+      });
+  });
+
+  function save(body, savedMessage) {
+    setStatus("Saving…");
+    return api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+      .then(function () {
+        setStatus(savedMessage || "Saved.");
+        return loadSettings();
+      })
+      .catch(function (e) {
+        setStatus("Couldn't save: " + e.message, true);
+      });
+  }
+
+  // agent-settings.md section 4.1: the port and network access say this, specifically.
+  var RESTART_MESSAGE = "Saved. The port and network access change once Retaskable restarts.";
+
+  document.getElementById("saveTags").addEventListener("click", function () {
+    var typed = document
+      .getElementById("tags")
+      .value.split("\n")
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean);
+    save({ tags: typed });
+  });
+
+  document.getElementById("savePort").addEventListener("click", function () {
+    save({ port: Number(document.getElementById("port").value) }, RESTART_MESSAGE);
+  });
+
+  document.getElementById("savePoll").addEventListener("click", function () {
+    save({ pollIntervalSec: Number(document.getElementById("pollIntervalSec").value) });
+  });
+
+  document.getElementById("saveLocal").addEventListener("click", function () {
+    save({
+      local: {
+        enabled: document.getElementById("localEnabled").checked,
+        model: document.getElementById("localModel").value,
+        baseUrl: document.getElementById("localBaseUrl").value,
+      },
+    });
+  });
+
+  document.getElementById("saveEngine").addEventListener("click", function () {
+    var roles = {};
+    ROLE_FIELDS.forEach(function (f) {
+      roles[f.key] = document.getElementById("role_" + f.key).value;
+    });
+    var lanes = Array.prototype.map.call(document.querySelectorAll("#engineLanes select"), function (el) {
+      return el.value;
+    });
+    save({
+      engineChoice: {
+        default: document.getElementById("engineDefault").value,
+        roles: roles,
+        lanes: lanes,
+      },
+    });
+  });
+
+  document.getElementById("saveCursor").addEventListener("click", function () {
+    save({
+      cursorModels: {
+        top: document.getElementById("cursorTop").value,
+        implementer: document.getElementById("cursorImplementer").value,
+        scout: document.getElementById("cursorScout").value,
+      },
+    });
+  });
+
+  document.getElementById("saveNetwork").addEventListener("click", function () {
+    var password = document.getElementById("networkPassword").value;
+    var update = { enabled: document.getElementById("networkEnabled").checked };
+    if (password) update.password = password;
+    save({ network: update }, RESTART_MESSAGE);
+  });
+
+  document.getElementById("restart").addEventListener("click", function () {
+    setStatus("Restarting…");
+    api("/api/settings/restart", { method: "POST" }).catch(function (e) {
+      setStatus("Couldn't restart: " + e.message, true);
+    });
+  });
+
+  signInWithToken();
+})();
+</script>
+</body>
+</html>

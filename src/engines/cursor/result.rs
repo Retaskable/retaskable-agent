@@ -1,7 +1,7 @@
 //! Turning `cursor-agent`'s own stream-json lines into either a session's structured result
 //! (`extractJson`/`checkSchema`, shared with pi's own reader via [`super::super::json_result`])
-//! or a live-transcript line (`summarizeCursor`, engines.md section 8), plus the small text
-//! helpers (`clip`/`tail`, `shared/text.ts`) both that and [`super::reader`] need.
+//! or a live-transcript line (`summarizeCursor`, engines.md section 8). Re-exports
+//! [`crate::text::tail`] for [`super::reader`], which needs it too.
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 
 use crate::engines::engine::{EventKind, SessionEvent, Tokens};
 pub(super) use crate::engines::json_result::{check_schema, extract_json};
+pub(super) use crate::text::tail;
+use crate::text::{clip, collapse_and_clip};
 
 const TOOLS: [(&str, &str); 6] = [
     ("shellToolCall", "Bash"),
@@ -23,29 +25,6 @@ const TOOLS: [(&str, &str); 6] = [
 /// section 8). Cursor's allowlist refusals often carry only an empty `reason`.
 const EMPTY_DENIAL: &str =
     "not on the allowlist (Shell matches the command's first word only; use a bare allowed program, never a wrapper)";
-
-/// `s`, cut to at most `n` chars, with a trailing `…` when it was longer (`clip` in
-/// `shared/text.ts`). Duplicated from `summarize.rs`, which stays Claude-only.
-fn clip(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= n {
-        return s.to_string();
-    }
-    let mut out: String = chars[..n.saturating_sub(1)].iter().collect();
-    out.push('…');
-    out
-}
-
-/// The last (up to) `max_chars` characters of `s`, on a char boundary (`tail` in
-/// `shared/text.ts`).
-pub(super) fn tail(s: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        s.to_string()
-    } else {
-        chars[chars.len() - max_chars..].iter().collect()
-    }
-}
 
 /// The tool name plus its first matching argument, for a transcript drawer (`toolText`).
 fn tool_text(ev: &Value) -> String {
@@ -75,8 +54,7 @@ fn tool_text(ev: &Value) -> String {
     if arg.is_empty() {
         name
     } else {
-        let collapsed = arg.split_whitespace().collect::<Vec<_>>().join(" ");
-        format!("{name}: {}", clip(&collapsed, 160))
+        format!("{name}: {}", collapse_and_clip(arg, 160))
     }
 }
 

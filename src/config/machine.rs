@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::ConfigFile;
+pub use crate::lane_pool::LaneScaling;
 
 pub const DEFAULT_PORT: u16 = 4700;
 
@@ -16,6 +17,12 @@ pub const DEFAULT_PORT: u16 = 4700;
 pub struct MachineConfig {
     #[serde(default = "default_lanes")]
     pub lanes: u32,
+    /// `laneScaling` (04-architecture.md section 4.1); dropped when it isn't a `{ base, belowUsedPct }`.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub lane_scaling: Option<LaneScaling>,
+    /// `choreLane`, a lane number (section 4.1); dropped when it isn't a positive whole number.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub chore_lane: Option<u32>,
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
     #[serde(default = "default_poll_interval_sec")]
@@ -36,16 +43,24 @@ pub struct MachineConfig {
     /// The Cursor model per tier, `auto` when missing or invalid (section 3.1 below, engines.md section 3.4).
     #[serde(default)]
     pub cursor: CursorConfig,
-    #[serde(default = "default_port")]
-    pub port: u16,
+    /// `None` when the file sets no port at all, kept apart from an explicit value so [`port`]
+    /// can fall back to this build's own default (installers/03-the-bundle-agent-bundle.md
+    /// section 3.13: 4701 for a Staging release build) rather than one baked in here.
+    #[serde(default)]
+    pub port: Option<u16>,
     #[serde(default)]
     pub budget: MachineBudget,
+    /// The cloud this agent links to (`link::cloud_url`): `cloud.url`, retaskable.com when missing.
+    #[serde(default)]
+    pub cloud: CloudConfig,
 }
 
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             lanes: default_lanes(),
+            lane_scaling: None,
+            chore_lane: None,
             concurrency: default_concurrency(),
             poll_interval_sec: default_poll_interval_sec(),
             max_resume_context_tokens: default_max_resume_context_tokens(),
@@ -54,8 +69,9 @@ impl Default for MachineConfig {
             local: LocalModelConfig::default(),
             engine_choice: EngineChoiceConfig::default(),
             cursor: CursorConfig::default(),
-            port: default_port(),
+            port: None,
             budget: MachineBudget::default(),
+            cloud: CloudConfig::default(),
         }
     }
 }
@@ -74,9 +90,6 @@ fn default_max_resume_context_tokens() -> u32 {
 }
 fn default_max_turns() -> u32 {
     300
-}
-fn default_port() -> u16 {
-    DEFAULT_PORT
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -159,7 +172,7 @@ impl fmt::Display for Engine {
     }
 }
 
-fn parse_engine(s: &str) -> Option<Engine> {
+pub(crate) fn parse_engine(s: &str) -> Option<Engine> {
     match s.trim().to_ascii_lowercase().as_str() {
         "claude" => Some(Engine::Claude),
         "cursor" => Some(Engine::Cursor),
@@ -172,6 +185,34 @@ fn parse_engine(s: &str) -> Option<Engine> {
 /// Reads an engine the lenient way the file allows: missing, `null`, not a string, or a name this
 /// agent doesn't know (a typo, a future engine) all read as `None` rather than failing the whole
 /// config load.
+/// An optional setting that's left out, rather than failing the whole config load, when it doesn't read as `T`
+/// (a zero `choreLane` included, since lanes count from 1).
+fn deserialize_lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Lenient,
+{
+    let raw = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<T>(raw).ok().filter(Lenient::usable))
+}
+
+/// Whether a value read for a lenient setting is one it can use.
+trait Lenient {
+    fn usable(&self) -> bool;
+}
+
+impl Lenient for u32 {
+    fn usable(&self) -> bool {
+        *self > 0
+    }
+}
+
+impl Lenient for LaneScaling {
+    fn usable(&self) -> bool {
+        self.below_used_pct.is_finite()
+    }
+}
+
 fn deserialize_lenient_engine<'de, D>(deserializer: D) -> Result<Option<Engine>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -289,11 +330,18 @@ pub struct CursorConfig {
 
 /// "A name is one or more of letters, digits, `_`, `.`, `:`, `/` and `-`, not starting with `-`"
 /// (engines.md section 3.4, so `--force` can't be slipped in as a model).
-fn valid_cursor_model_name(s: &str) -> bool {
+pub(crate) fn valid_cursor_model_name(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
+}
+
+/// `cloud`: only its `url` is read here (`link::cloud_url`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CloudConfig {
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -305,16 +353,26 @@ pub struct MachineBudget {
 
 // agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535." Anything below
 // that (0 included) is as invalid as an unparseable value and falls through the same way.
-fn in_range(p: u16) -> bool {
+pub(crate) fn port_in_range(p: u16) -> bool {
     p >= 1024
 }
 
-pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
+/// `default` is this build's own fallback (installers/03-the-bundle-agent-bundle.md section
+/// 3.13: a Staging release build's own 4701, [`DEFAULT_PORT`] otherwise, from
+/// `release::default_port`), used only once neither `RETASKABLE_PORT` nor the file's own `port`
+/// says a valid one.
+pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>, default: u16) -> u16 {
     env("RETASKABLE_PORT")
         .and_then(|p| p.parse().ok())
-        .filter(|&p| in_range(p))
-        .or_else(|| Some(cfg.machine.port).filter(|&p| in_range(p)))
-        .unwrap_or(DEFAULT_PORT)
+        .filter(|&p| port_in_range(p))
+        .or_else(|| cfg.machine.port.filter(|&p| port_in_range(p)))
+        .unwrap_or(default)
+}
+
+/// "How often it checks": 2 to 3600 seconds (agent-settings.md section 3.1), the settings page's
+/// save validates the same range the environment variable does.
+pub(crate) fn poll_interval_in_range(n: u32) -> bool {
+    (2..=3600).contains(&n)
 }
 
 // agent-settings.md section 3.2 (`withEnvSettings`): each computer-only setting's environment
@@ -326,7 +384,7 @@ pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u16 {
 pub fn poll_interval_sec(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
     env("RETASKABLE_POLL_SEC")
         .and_then(|v| v.parse().ok())
-        .filter(|&n| (2..=3600).contains(&n))
+        .filter(|&n| poll_interval_in_range(n))
         .unwrap_or(cfg.machine.poll_interval_sec)
 }
 
@@ -363,7 +421,7 @@ fn is_local_model_off(raw: &str) -> bool {
     matches!(raw.to_ascii_lowercase().as_str(), "off" | "false" | "0" | "no")
 }
 
-fn valid_model_name(s: &str) -> bool {
+pub(crate) fn valid_model_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars().count() <= 100
         && s.chars()
@@ -371,7 +429,7 @@ fn valid_model_name(s: &str) -> bool {
 }
 
 /// `http` or `https`, with no user or password in it (an `@` before the path means userinfo).
-fn valid_local_url(s: &str) -> bool {
+pub(crate) fn valid_local_url(s: &str) -> bool {
     let Some(authority_and_path) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) else {
         return false;
     };
@@ -434,7 +492,7 @@ fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
 /// — a half-read list would put later lanes on the wrong engines. A single empty entry (an empty
 /// string split on `+`, or `lanes=` with nothing after it) is a real empty list, not an invalid
 /// one. Used for `lanes` read from both the environment and the file.
-fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
+pub(crate) fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
     if entries.len() == 1 && entries[0].trim().is_empty() {
         return Some(Vec::new());
     }
@@ -490,15 +548,12 @@ fn apply_cursor_models_env(result: &mut CursorModels, raw: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
+    use crate::test_support::no_env;
 
     fn with_port(port: u16) -> ConfigFile {
         ConfigFile {
             machine: MachineConfig {
-                port,
+                port: Some(port),
                 ..MachineConfig::default()
             },
             ..ConfigFile::default()
@@ -506,29 +561,55 @@ mod tests {
     }
 
     #[test]
-    fn port_prefers_the_env_then_the_file_then_4700() {
+    fn lane_scaling_and_the_chore_lane_are_read_and_a_bad_one_is_dropped_not_fatal() {
+        let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
+        let cfg =
+            read(serde_json::json!({ "lanes": 3, "choreLane": 3, "laneScaling": { "base": 1, "belowUsedPct": 80 } }));
+        assert_eq!(cfg.chore_lane, Some(3));
+        assert_eq!(
+            cfg.lane_scaling,
+            Some(LaneScaling {
+                base: 1,
+                below_used_pct: 80.0
+            })
+        );
+        let bad = read(serde_json::json!({ "lanes": 3, "choreLane": 0, "laneScaling": { "base": "one" } }));
+        assert_eq!((bad.chore_lane, bad.lane_scaling, bad.lanes), (None, None, 3));
+        let missing = read(serde_json::json!({}));
+        assert_eq!((missing.chore_lane, missing.lane_scaling), (None, None));
+    }
+
+    #[test]
+    fn port_prefers_the_env_then_the_file_then_the_callers_default() {
         let env = |k: &str| (k == "RETASKABLE_PORT").then(|| "4800".to_string());
-        assert_eq!(port(&with_port(4900), env), 4800);
-        assert_eq!(port(&with_port(4900), no_env), 4900);
-        assert_eq!(port(&ConfigFile::default(), no_env), DEFAULT_PORT);
+        assert_eq!(port(&with_port(4900), env, DEFAULT_PORT), 4800);
+        assert_eq!(port(&with_port(4900), no_env, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), no_env, DEFAULT_PORT), DEFAULT_PORT);
         let bad = |k: &str| (k == "RETASKABLE_PORT").then(|| "nope".to_string());
-        assert_eq!(port(&ConfigFile::default(), bad), DEFAULT_PORT);
-        // An unparseable env value falls through to the file, not straight to 4700.
-        assert_eq!(port(&with_port(4900), bad), 4900);
+        assert_eq!(port(&ConfigFile::default(), bad, DEFAULT_PORT), DEFAULT_PORT);
+        // An unparseable env value falls through to the file, not straight to the default.
+        assert_eq!(port(&with_port(4900), bad, DEFAULT_PORT), 4900);
+    }
+
+    #[test]
+    fn with_no_port_in_the_file_either_it_falls_back_to_the_callers_default() {
+        // installers/03-the-bundle-agent-bundle.md section 3.13: the final fallback is this
+        // build's own default (a Staging release build's 4701), not a hardcoded 4700.
+        assert_eq!(port(&ConfigFile::default(), no_env, 4701), 4701);
     }
 
     #[test]
     fn a_zero_env_port_is_not_used_either() {
         let zero = |k: &str| (k == "RETASKABLE_PORT").then(|| "0".to_string());
-        assert_eq!(port(&with_port(4900), zero), 4900);
-        assert_eq!(port(&ConfigFile::default(), zero), DEFAULT_PORT);
+        assert_eq!(port(&with_port(4900), zero, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), zero, DEFAULT_PORT), DEFAULT_PORT);
     }
 
     #[test]
     fn a_zero_port_in_the_file_is_not_used_either() {
         // Binding port 0 asks the OS for a random ephemeral port, not the documented
         // fallback, so a zero in config.json is as invalid as a zero env value.
-        assert_eq!(port(&with_port(0), no_env), DEFAULT_PORT);
+        assert_eq!(port(&with_port(0), no_env, DEFAULT_PORT), DEFAULT_PORT);
     }
 
     #[test]
@@ -536,10 +617,10 @@ mod tests {
         // agent-settings.md section 3.1: the documented valid range is 1024 to 65535,
         // so a sub-1024 port (env or file) is as invalid as zero and falls through too.
         let low_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "80".to_string());
-        assert_eq!(port(&with_port(4900), low_env), 4900);
-        assert_eq!(port(&ConfigFile::default(), low_env), DEFAULT_PORT);
-        assert_eq!(port(&with_port(80), no_env), DEFAULT_PORT);
-        assert_eq!(port(&with_port(1024), no_env), 1024);
+        assert_eq!(port(&with_port(4900), low_env, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), low_env, DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(80), no_env, DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(1024), no_env, DEFAULT_PORT), 1024);
     }
 
     #[test]
@@ -547,8 +628,8 @@ mod tests {
         // agent-settings.md section 3.1: the documented valid range runs up to 65535,
         // so the top of the range is as valid as the bottom (already covered at 1024).
         let top_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "65535".to_string());
-        assert_eq!(port(&ConfigFile::default(), top_env), 65535);
-        assert_eq!(port(&with_port(65535), no_env), 65535);
+        assert_eq!(port(&ConfigFile::default(), top_env, DEFAULT_PORT), 65535);
+        assert_eq!(port(&with_port(65535), no_env, DEFAULT_PORT), 65535);
     }
 
     #[test]

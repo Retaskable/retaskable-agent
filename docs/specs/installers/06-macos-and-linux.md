@@ -2,15 +2,10 @@
 
 ### 6.1 macOS (mac-release, staging-builds)
 
-Since 2026-10-20 both builds are the desktop app ([desktop-app.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/desktop-app.md) section 3), built, signed and notarized by electron-builder, Staging's first, from `staging.retaskable.com/download/mac`; its start at login is Electron's login item, not the LaunchAgent below.
+Since 2026-10-20 both builds are the desktop app ([desktop-app.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/desktop-app.md) section 3), built, signed and notarized by electron-builder, Staging's first, from `staging.retaskable.com/download/mac`. Packaging, signing, notarization, the `.dmg`, moving itself to Applications, start at login and uninstalling are all the desktop app's now, not this agent's — section 6.4 below is the plan that preceded that decision, superseded before any of it was built, kept only as a record of why the Mac app is shaped the way it is.
 
-
-- **Production**: a `.dmg` from retaskable.com's Getting started holding `Retaskable.app`; the user drags it to Applications and opens it. Signed with a Developer ID certificate, hardened runtime, and notarized by Apple, so Gatekeeper opens it with no warning. Universal (arm64 and x64) or one `.dmg` per architecture, whichever is simpler to build.
-- **Staging**: `Retaskable Staging.app` in a zip from staging. [Proposal] Signed and notarized too, with the same certificate: once the $99 is paid, signing Staging costs nothing more, and an unsigned app is blocked outright on current macOS, not just warned about.
-- **Start at login**: a LaunchAgent, `~/Library/LaunchAgents/com.retaskable.agent.plist` (Staging: `com.retaskable.agent.staging`), written at first run, on by default; macOS shows its own "background item added" notice and lists it in System Settings › General › Login Items. The menu's **Start at login** tick adds or removes it.
-- **The menu-bar icon**: `systray2`'s macOS helper, with a template image so it follows light and dark menu bars.
-- **Keychain**: `@napi-rs/keyring` uses the login keychain, as a checkout does today.
-- **Uninstall**: drag the app to the Bin; the menu also gets **Uninstall…**, which removes the LaunchAgent and data folder first (macOS has no uninstall hook), never project checkouts.
+- **The menu-bar icon** and its menu are the desktop app's too (desktop-app.md section 3.4), drawn by Electron's main process from the menu this agent still hands it (`desktopShell.ts`'s `view`), not a native tray the agent owns on this OS.
+- **Keychain**: `@napi-rs/keyring` uses the login keychain, as a checkout does today, whether this copy runs under the desktop app or (still possible, not yet removed) on its own.
 
 ### 6.2 Linux (linux-release, staging-builds)
 
@@ -33,9 +28,9 @@ Since 2026-10-20 both builds are the desktop app ([desktop-app.md](https://githu
 
 Each would turn "run the user's tools on the user's folders" into a fight with the sandbox. If one becomes worth it (people looking for it there), it's a later item.
 
-### 6.4 The macOS download in detail (mac-release)
+### 6.4 The macOS download in detail (superseded, 2026-10-20)
 
-Section 6.1 says what the Mac app is; this says how it behaves, end to end, for whoever builds mac-release. Every line here is a **[Proposal]** (2026-10-20) unless it repeats a line above or one of section 2's **[Decided]** lines (the Apple Developer Program, $99 a year; macOS working as Windows does, as near as it allows), and is the human's call. Nothing here changes a **[Decided]** line.
+Everything from here to the end of this section was mac-release's plan for building, signing and shipping the Mac app itself, before the 2026-10-20 decision moved that whole job to the desktop app (desktop-app.md section 3, built with electron-builder/electron-updater). None of the custom signing script, entitlements file, `.dmg` packaging, first-run move-to-Applications dialog or **Uninstall…** menu item described below was ever built, and none of it will be: section 6.1 above describes what actually ships. Kept as a record of the plan it replaced, not as still-open work.
 
 #### 6.4.1 Who builds what
 
