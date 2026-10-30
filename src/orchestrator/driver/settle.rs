@@ -211,7 +211,7 @@ impl ProjectLoop {
             );
             return;
         };
-        if let Some(usage) = outcome.usage.clone() {
+        if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
             self.store.set_usage(usage);
             if let Err(e) = self.store.save() {
                 tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);

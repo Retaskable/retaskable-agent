@@ -513,8 +513,8 @@ mod tests {
         let (mut request, mut rx) = request();
         request.usage = None;
         request.item.reopened = Some(crate::backlog::Reopened {
-            notes: "The list is empty".into(),
-            at: "2026-10-29T00:00:00Z".into(),
+            notes: Some("The list is empty".into()),
+            at: Some("2026-10-29T00:00:00Z".into()),
             by: None,
         });
         rig.starter.start(request).unwrap();

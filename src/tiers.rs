@@ -19,16 +19,36 @@ pub const SONNET: &str = "sonnet";
 /// full", i.e. `opus`).
 pub fn implementer_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig) -> &'static str {
     let Some(usage) = usage else { return OPUS };
-    if let Some(pct_left) = five_hour_pct_left(usage, now_epoch) {
-        return if pct_left >= f64::from(models.opus_above_pct) {
-            OPUS
-        } else {
-            SONNET
-        };
+    if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
+        return tier_from_five_hour_window(window, now_epoch, models);
+    }
+    if let Some(pct_left) = top_level_pct_left(usage, now_epoch) {
+        return tier_from_pct_left(pct_left, models);
     }
     match fresh_status(usage, now_epoch) {
         Some("allowed_warning") | Some("rejected") => SONNET,
         _ => OPUS,
+    }
+}
+
+/// Whether a `rate_limit_info` reading is (or carries) the 5-hour window `implementer_tier` reads,
+/// rather than some other window a build sent alone (`parseRateLimit` in the TypeScript agent):
+/// most builds report one window per event with no `rateLimitType` at all, a build that labels its
+/// window keeps only `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts,
+/// whatever its own `rateLimitType` says. Anything else — an older build's lone `seven_day` event,
+/// say — would otherwise overwrite a usable 5-hour reading with one this agent can't read a tier
+/// from, each time Claude Code happens to report it.
+///
+/// Not yet: the weekly limit itself (a `rateLimitType: "seven_day"` rejection, which the TypeScript
+/// agent keeps instead of dropping) isn't read for anything here, so such a reading is dropped
+/// rather than kept for its own sake.
+pub fn is_five_hour_reading(usage: &Value) -> bool {
+    if usage.get("unifiedWindows").and_then(|w| w.get("five_hour")).is_some() {
+        return true;
+    }
+    match usage.get("rateLimitType").and_then(Value::as_str) {
+        Some(rate_limit_type) => rate_limit_type == "five_hour",
+        None => true,
     }
 }
 
@@ -49,16 +69,33 @@ pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
     if item.reopened.is_some() { OPUS } else { SONNET }
 }
 
-/// `rate_limit_info.unifiedWindows.five_hour`'s percentage still left (newer Claude Code builds),
-/// or `None` when that window is missing or has already reset (`resetsAt` at or before `now`).
-fn five_hour_pct_left(usage: &Value, now_epoch: i64) -> Option<f64> {
-    let window = usage.get("unifiedWindows")?.get("five_hour")?;
-    let resets_at = window.get("resetsAt")?.as_i64()?;
+/// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
+/// its own `resetsAt`, at or before `now`, makes it a full window (`opus`) on its own — the
+/// top-level `status` is never consulted once this window exists, since it can belong to a later,
+/// unrelated reading (`is_five_hour_reading`, settled in `src/orchestrator/driver/settle.rs`).
+fn tier_from_five_hour_window(window: &Value, now_epoch: i64, models: &ModelsConfig) -> &'static str {
+    if let Some(resets_at) = window.get("resetsAt").and_then(Value::as_i64)
+        && resets_at <= now_epoch
+    {
+        return OPUS;
+    }
+    match window.get("utilization").and_then(Value::as_f64) {
+        Some(utilization) => tier_from_pct_left(pct_left(utilization), models),
+        None => OPUS,
+    }
+}
+
+/// The older, flat `rate_limit_info.utilization` (`parseRateLimit`'s `frac(info.utilization)` in
+/// the TypeScript agent), read against the top-level `resetsAt`, when there's no
+/// `unifiedWindows.five_hour` to read instead. `None` when there's no fresh percentage to read —
+/// `implementer_tier` then falls back to `fresh_status`.
+fn top_level_pct_left(usage: &Value, now_epoch: i64) -> Option<f64> {
+    let resets_at = usage.get("resetsAt")?.as_i64()?;
     if resets_at <= now_epoch {
         return None;
     }
-    let utilization = window.get("utilization")?.as_f64()?;
-    Some((1.0 - utilization.clamp(0.0, 1.0)) * 100.0)
+    let utilization = usage.get("utilization")?.as_f64()?;
+    Some(pct_left(utilization))
 }
 
 /// The old-format `rate_limit_info.status`, when its own `resetsAt` hasn't passed yet.
@@ -68,6 +105,25 @@ fn fresh_status(usage: &Value, now_epoch: i64) -> Option<&str> {
         return None;
     }
     usage.get("status")?.as_str()
+}
+
+fn tier_from_pct_left(pct_left: f64, models: &ModelsConfig) -> &'static str {
+    if pct_left >= f64::from(models.opus_above_pct) {
+        OPUS
+    } else {
+        SONNET
+    }
+}
+
+/// A usage fraction, or a whole-number percentage above 1 (`frac` in the TypeScript agent's
+/// `parseRateLimit`) — Claude Code sends either shape for the same field.
+fn frac(value: f64) -> f64 {
+    if value > 1.0 { value / 100.0 } else { value }
+}
+
+/// The percentage of a 5-hour window still left, from its `utilization` (see `frac`).
+fn pct_left(utilization: f64) -> f64 {
+    (1.0 - frac(utilization)).max(0.0) * 100.0
 }
 
 #[cfg(test)]
@@ -136,6 +192,57 @@ mod tests {
         assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
     }
 
+    #[test]
+    fn a_flat_top_level_utilization_with_no_unified_windows_is_read_too() {
+        let usage = json!({"status": "allowed", "utilization": 0.9, "resetsAt": NOW + 1});
+        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), SONNET);
+    }
+
+    #[test]
+    fn a_utilization_given_as_a_whole_number_percentage_is_normalized_not_clamped() {
+        // Clamped to 1.0 (fully used), this would wrongly read as sonnet; as 10% used it's opus.
+        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 10, "resetsAt": NOW + 1}}});
+        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
+    }
+
+    #[test]
+    fn a_reset_five_hour_window_is_full_even_when_the_top_level_status_is_not() {
+        let usage = json!({
+            "status": "allowed_warning",
+            "resetsAt": NOW + 1,
+            "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": NOW - 1}},
+        });
+        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
+    }
+
+    #[test]
+    fn a_reading_with_no_rate_limit_type_is_a_five_hour_reading() {
+        assert!(is_five_hour_reading(&json!({"status": "allowed"})));
+    }
+
+    #[test]
+    fn a_reading_labeled_five_hour_is_a_five_hour_reading() {
+        assert!(is_five_hour_reading(
+            &json!({"status": "allowed", "rateLimitType": "five_hour"})
+        ));
+    }
+
+    #[test]
+    fn a_reading_labeled_something_else_with_no_unified_five_hour_window_is_not() {
+        assert!(!is_five_hour_reading(
+            &json!({"status": "rejected", "rateLimitType": "seven_day"})
+        ));
+    }
+
+    #[test]
+    fn a_reading_with_a_unified_five_hour_window_counts_whatever_its_own_type_says() {
+        let usage = json!({
+            "rateLimitType": "seven_day",
+            "unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": NOW + 1}},
+        });
+        assert!(is_five_hour_reading(&usage));
+    }
+
     fn item(reopened: bool) -> Item {
         Item {
             id: "x".into(),
@@ -152,8 +259,8 @@ mod tests {
             kind: None,
             milestone: None,
             reopened: reopened.then(|| crate::backlog::Reopened {
-                notes: "n".into(),
-                at: "2026-10-29T00:00:00Z".into(),
+                notes: Some("n".into()),
+                at: Some("2026-10-29T00:00:00Z".into()),
                 by: None,
             }),
         }

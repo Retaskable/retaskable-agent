@@ -120,12 +120,15 @@ pub struct Item {
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the
-/// item, until its fix merges.
+/// item, until its fix merges. Only whether this is `Some` is read today, so a `notes`/`at` the
+/// store ever sent without the other doesn't fail the whole item's (or `claim_next`'s) read.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reopened {
-    pub notes: String,
-    pub at: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
     #[serde(default)]
     pub by: Option<String>,
 }
