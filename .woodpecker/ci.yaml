@@ -29,6 +29,13 @@ steps:
       # for that many at a time, especially for bundle's release build. One rustc/LLVM at a time costs build time,
       # not memory, so cap it instead of hoping the box grows more room.
       CARGO_BUILD_JOBS: "1"
+      # Pipeline 140: rustc SIGSEGV'd deep in rustc_monomorphize::collector::items_of_instance
+      # compiling `syn` (a proc-macro dependency several crates pull in), with rustc's own crash
+      # report suggesting exactly this: "you can increase rustc's stack size by setting
+      # RUST_MIN_STACK=33554432". `syn`'s "full" feature set builds deeply recursive generated
+      # code that can overrun the default thread stack; this is the compiler's own documented
+      # workaround, not a memory or cache problem.
+      RUST_MIN_STACK: "33554432"
     volumes: &cargo_volumes
       - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
       - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
