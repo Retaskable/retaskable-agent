@@ -303,6 +303,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .and_then(|u| reqwest::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default(),
+        env: env.clone(),
+        engine_choice: config::engine_choice(cfg, env),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),

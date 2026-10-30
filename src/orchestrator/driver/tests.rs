@@ -1,5 +1,6 @@
 use super::*;
 use crate::backlog::Client;
+use crate::config::EngineChoiceConfig;
 use crate::env::Env;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::Holder;
@@ -131,6 +132,8 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         paused: PauseState::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
+        env: Env::empty(),
+        engine_choice: EngineChoiceConfig::default(),
     };
     let mut machine = Machine::new(lanes, 8, links);
     for (i, base) in bases.iter().enumerate() {

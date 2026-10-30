@@ -14,6 +14,8 @@ fn restarted(old: Rig, base: &str) -> Rig {
         paused: PauseState::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
+        env: Env::empty(),
+        engine_choice: EngineChoiceConfig::default(),
     };
     let mut machine = Machine::new(2, 8, links);
     let store = Store::load(&_dir.path().join("0")).unwrap();

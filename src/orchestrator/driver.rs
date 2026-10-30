@@ -16,6 +16,7 @@
 //! and what starts the whole loop running; [`report`] is what the minute's fetch tells the store; [`settle`]
 //! is how work the loop started comes back to it.
 mod machine;
+mod playtest_round;
 mod project;
 mod report;
 mod settle;

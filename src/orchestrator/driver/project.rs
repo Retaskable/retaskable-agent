@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -192,6 +193,9 @@ pub struct ProjectLoop {
     pub(super) running: Running,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
+    /// Set while this project's playtest grouping round is running, so the next minute's pass
+    /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
+    pub(super) playtest_round_running: Arc<AtomicBool>,
 }
 
 impl ProjectLoop {
@@ -225,6 +229,7 @@ impl ProjectLoop {
             repo: None,
             running: Running::default(),
             seen: report::Seen::default(),
+            playtest_round_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
