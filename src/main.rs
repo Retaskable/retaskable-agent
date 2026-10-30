@@ -273,14 +273,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry (or claim, which
     // isn't built and runs dry). Read and logged once, here.
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
+    let live = orchestrator::live::LiveHandle::new(mode);
     orchestrator::driver::spawn_all(
         dir,
         &cfg.projects,
         lane_count,
-        mode,
         &backlog::url(env),
         &keychain,
         &view.paused,
+        &live,
     );
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
@@ -312,6 +313,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         view: (*view).clone(),
         started: std::time::Instant::now(),
         checks: latest_checks,
+        live,
     });
     axum::serve(
         listener,

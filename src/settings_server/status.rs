@@ -1,8 +1,9 @@
 //! The settings page's Now tab (agent-settings.md section 4.5): `GET /api/settings/status`, a
 //! read-only snapshot of the computer's lanes and engines, ported from `agent/src/computerStatus.ts`
 //! and `shared/computerStatus.ts`. Names and numbers only. This agent has no session pool yet, so
-//! every lane is free, no session runs, and an engine's limit is "Not reported"; the shape is the
-//! same as the TypeScript agent's so the page reads either.
+//! no session runs and an engine's limit is "Not reported". Lanes the orchestrator loop holds
+//! (`orchestrator::live`) show busy; the rest are free. The shape is the same as the TypeScript
+//! agent's so the page reads either, plus an `orchestrator` block for the loop's mode and decisions.
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -17,6 +18,8 @@ use super::SettingsServer;
 
 use crate::config::{self, Engine, EngineChoiceConfig, LocalModelConfig};
 use crate::engines::choose::{self, Role};
+use crate::orchestrator::driver::OrchestratorMode;
+use crate::orchestrator::live::{LiveHandle, LiveState};
 use crate::setup_check::{SetupCheck, SetupChecks};
 use crate::store::MachineStore;
 use crate::view::AgentView;
@@ -27,6 +30,8 @@ pub struct StatusSource {
     pub view: AgentView,
     pub started: Instant,
     pub checks: Arc<Mutex<Option<SetupChecks>>>,
+    /// What the orchestrator loop is doing; off and empty when it isn't running.
+    pub live: LiveHandle,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -58,6 +63,16 @@ pub struct Lane {
     pub state: &'static str,
     pub state_text: &'static str,
     pub note: String,
+    /// The item holding it, when the orchestrator loop does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<LaneItem>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct LaneItem {
+    pub id: String,
+    pub title: String,
+    pub project: String,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -97,6 +112,42 @@ pub struct ComputerStatus {
     /// Always empty: this agent has no session pool to list.
     pub sessions: Vec<()>,
     pub engines: Vec<EngineRow>,
+    pub orchestrator: Orchestrator,
+}
+
+/// The orchestrator loop as the page shows it: a note for the whole computer and a line per project.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Orchestrator {
+    pub mode: &'static str,
+    /// Quiet when off; says plainly that nothing is claimed when dry.
+    pub note: &'static str,
+    pub projects: Vec<OrchestratorProject>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestratorProject {
+    pub project: String,
+    pub paused: bool,
+    pub last_tick: Option<String>,
+    pub decision: Option<String>,
+}
+
+fn orchestrator_note(mode: OrchestratorMode) -> &'static str {
+    match mode {
+        OrchestratorMode::Off => "Orchestrator off",
+        OrchestratorMode::Dry => "Orchestrator running dry: it reads the backlog and claims nothing",
+        OrchestratorMode::Claim => "Orchestrator running dry (claim isn't built yet): it claims nothing",
+    }
+}
+
+/// `2026-10-29T14:03:05Z` as `2026-10-29 14:03 UTC`; anything else as it came.
+fn friendly_time(iso: &str) -> String {
+    match (iso.get(..10), iso.get(11..16)) {
+        (Some(day), Some(hm)) if iso.len() > 16 => format!("{day} {hm} UTC"),
+        _ => iso.to_string(),
+    }
 }
 
 /// Every engine row, in the order the page lists them (`USED_ENGINES`, then the local model).
@@ -133,10 +184,15 @@ pub struct Settled {
 }
 
 /// `computerStatus`: builds the snapshot. Pure, so it's tested without a server.
-pub fn build(settled: &Settled, source: &StatusSource, checks: Option<&SetupChecks>) -> ComputerStatus {
+pub fn build(
+    settled: &Settled,
+    source: &StatusSource,
+    checks: Option<&SetupChecks>,
+    live: &LiveState,
+) -> ComputerStatus {
     let view = &source.view;
     let choice = &settled.choice;
-    let lanes: Vec<Lane> = (1..=settled.lanes)
+    let mut lanes: Vec<Lane> = (1..=settled.lanes)
         .map(|k| {
             let engine = choose::engine_for(choice, None, Role::Implementer, Some(k));
             let note = if view.chore_lane == Some(k) {
@@ -156,9 +212,27 @@ pub fn build(settled: &Settled, source: &StatusSource, checks: Option<&SetupChec
                 state: "free",
                 state_text: "Free",
                 note: note.to_string(),
+                item: None,
             }
         })
         .collect();
+    let mut lanes_busy = 0;
+    for (project, p) in &live.projects {
+        for held in &p.held {
+            let Some(lane) = lanes.iter_mut().find(|l| l.k == held.lane) else {
+                continue;
+            };
+            lanes_busy += 1;
+            lane.state = "busy";
+            lane.state_text = "Busy";
+            lane.note = format!("Held for {project}");
+            lane.item = Some(LaneItem {
+                id: held.item_id.clone(),
+                title: held.title.clone().unwrap_or_else(|| held.item_id.clone()),
+                project: project.clone(),
+            });
+        }
+    }
 
     let mut alerts = Vec::new();
     if checks.is_some_and(|c| c.claude_signed_in.ok == Some(false)) {
@@ -168,6 +242,18 @@ pub fn build(settled: &Settled, source: &StatusSource, checks: Option<&SetupChec
             detail: "Nothing runs on Claude Code until it is signed in again. Run claude auth login on this computer."
                 .to_string(),
         });
+    }
+    for (project, p) in &live.projects {
+        if let Some(f) = &p.store_error {
+            alerts.push(Alert {
+                tone: "warn",
+                title: format!(
+                    "Can't reach the backlog for {project} since {}",
+                    friendly_time(&f.since)
+                ),
+                detail: format!("{} Nothing is started for it until the backlog answers.", f.message),
+            });
+        }
     }
     let mut all_paused = !view.projects.is_empty();
     for p in &view.projects {
@@ -202,13 +288,27 @@ pub fn build(settled: &Settled, source: &StatusSource, checks: Option<&SetupChec
             version: view.version.clone(),
             uptime_sec: source.started.elapsed().as_secs(),
             projects: view.projects.len(),
-            lanes_busy: 0,
+            lanes_busy,
             lanes_total: lanes.len(),
         },
         alerts,
         lanes,
         sessions: Vec::new(),
         engines,
+        orchestrator: Orchestrator {
+            mode: live.mode.name(),
+            note: orchestrator_note(live.mode),
+            projects: live
+                .projects
+                .iter()
+                .map(|(project, p)| OrchestratorProject {
+                    project: project.clone(),
+                    paused: p.paused,
+                    last_tick: p.last_tick.clone(),
+                    decision: p.decision.clone(),
+                })
+                .collect(),
+        },
     }
 }
 
@@ -305,7 +405,7 @@ impl SettingsServer {
                 cursor_tokens: machine.cursor_today_tokens(),
             };
             let checks = source.checks.lock().unwrap().clone();
-            Ok(build(&settled, source, checks.as_ref()))
+            Ok(build(&settled, source, checks.as_ref(), &source.live.snapshot()))
         })())
     }
 

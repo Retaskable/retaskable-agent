@@ -16,11 +16,12 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tokio::time::MissedTickBehavior;
 
+use super::live::{HeldLane, LiveHandle, now_iso8601};
 use super::{Action, ProjectRuns, tick, tick_payload};
 use crate::backlog::{BacklogError, Client};
 use crate::config::ProjectConfig;
 use crate::env::Env;
-use crate::lane_pool::{LanePool, PoolRules};
+use crate::lane_pool::{Holder, LanePool, PoolRules};
 use crate::link::TokenStore;
 use crate::store::Store;
 use crate::telemetry::{Event, EventLog, event};
@@ -112,6 +113,7 @@ pub struct ProjectLoop {
     pool: LanePool,
     events: EventLog,
     client: Client,
+    live: LiveHandle,
 }
 
 impl ProjectLoop {
@@ -122,7 +124,9 @@ impl ProjectLoop {
         lane_count: u32,
         events: EventLog,
         client: Client,
+        live: LiveHandle,
     ) -> Self {
+        live.register(&id);
         Self {
             id,
             project,
@@ -134,17 +138,24 @@ impl ProjectLoop {
             }),
             events,
             client,
+            live,
         }
     }
 
     /// Loads the project's state and opens its event log under `<data dir>/projects/<id>`.
-    pub fn open(dir: &Path, lane_count: u32, project: &ProjectConfig, client: Client) -> Result<Self> {
+    pub fn open(
+        dir: &Path,
+        lane_count: u32,
+        project: &ProjectConfig,
+        client: Client,
+        live: LiveHandle,
+    ) -> Result<Self> {
         let id = project.id_or_derived();
         let project_dir = dir.join("projects").join(&id);
         let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
         let mut events = EventLog::new();
         events.open(&project_dir.join("events"));
-        Ok(Self::new(id, project.clone(), store, lane_count, events, client))
+        Ok(Self::new(id, project.clone(), store, lane_count, events, client, live))
     }
 
     pub fn events(&self) -> &EventLog {
@@ -176,6 +187,24 @@ impl ProjectLoop {
         let (mut runs, mut pool, mut scratch) = (self.runs.clone(), self.pool.clone(), EventLog::new());
         let actions = tick(&self.id, paused, &mut runs, &mut pool, &self.project, &mut scratch);
         let would: Vec<String> = actions.iter().map(describe).collect();
+        let held = self
+            .pool
+            .held_lanes()
+            .filter_map(|lane| match self.pool.holder(lane)? {
+                Holder::Item { item, .. } | Holder::Play { item, .. } => Some(HeldLane {
+                    lane,
+                    title: items.iter().find(|i| &i.id == item).map(|i| i.title.clone()),
+                    item_id: item.clone(),
+                }),
+            })
+            .collect();
+        let decision = match actions.first() {
+            None if paused => "paused: would do nothing".to_string(),
+            None => "would do nothing".to_string(),
+            Some(Action::AskForWork) => "would ask for work".to_string(),
+            Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
+        };
+        self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
         let mut payload = tick_payload(paused, &self.pool);
         payload.states = Some(json!(states));
         payload.claim = Some(json!("not asked"));
@@ -187,8 +216,14 @@ impl ProjectLoop {
         Step::Ticked { would }
     }
 
+    /// A pass that couldn't even ask the store (no repo id, no link): the page hears of it too.
+    fn cant_start(&self, message: String) {
+        self.live.failed(&self.id, now_iso8601(), message);
+    }
+
     fn store_error(&mut self, op: &str, e: &BacklogError) -> Step {
         tracing::warn!("{}: dry tick skipped: {e}", self.id);
+        self.live.failed(&self.id, now_iso8601(), e.to_string());
         self.events.add_in(
             &self.id,
             Event::StoreError(event::StoreError {
@@ -234,12 +269,12 @@ pub fn spawn_all(
     dir: &Path,
     projects: &[ProjectConfig],
     lane_count: u32,
-    mode: OrchestratorMode,
     backlog_url: &str,
     keychain: &Arc<dyn TokenStore>,
     paused: &PauseState,
+    live: &LiveHandle,
 ) {
-    if mode == OrchestratorMode::Off {
+    if live.snapshot().mode == OrchestratorMode::Off {
         return;
     }
     for project in projects {
@@ -249,7 +284,7 @@ pub fn spawn_all(
             continue;
         }
         let client = Client::new(backlog_url);
-        let lp = match ProjectLoop::open(dir, lane_count, project, client) {
+        let lp = match ProjectLoop::open(dir, lane_count, project, client, live.clone()) {
             Ok(lp) => lp,
             Err(e) => {
                 tracing::warn!("{id}: orchestrator skipped: {e:#}");
@@ -283,12 +318,14 @@ async fn run(
         }
         let Some(repo_id) = repo else {
             tracing::warn!("{}: dry tick skipped: gh couldn't say the id of {github_repo}", lp.id);
+            lp.cant_start(format!("gh couldn't say the id of {github_repo}"));
             continue;
         };
         let token = match keychain.get(&backlog_url) {
             Ok(token) => token,
             Err(e) => {
                 tracing::warn!("{}: dry tick skipped: reading the backlog link: {e:#}", lp.id);
+                lp.cant_start(format!("reading the backlog link: {e:#}"));
                 continue;
             }
         };
@@ -352,6 +389,7 @@ mod tests {
             2,
             EventLog::with_now(|| 0),
             Client::new(base),
+            LiveHandle::new(OrchestratorMode::Dry),
         );
         (lp, dir)
     }
@@ -390,6 +428,33 @@ mod tests {
         );
         assert!(lp.runs.is_empty());
         assert_eq!(lp.pool.held_lanes().count(), 0, "a dry tick holds no lane");
+    }
+
+    #[tokio::test]
+    async fn the_live_state_follows_each_pass() {
+        let (base, _asked) = stub().await;
+        let (mut lp, _dir) = project_loop(&base);
+        let proj = |lp: &ProjectLoop| lp.live.snapshot().projects["proj"].clone();
+        assert_eq!(proj(&lp), Default::default(), "registered before its first pass");
+
+        lp.step(7, Some("tok"), false).await;
+        let live = proj(&lp);
+        assert!(live.last_tick.is_some());
+        assert_eq!(live.decision.as_deref(), Some("would ask for work"));
+        assert!(live.held.is_empty() && !live.paused && live.store_error.is_none());
+
+        lp.step(7, None, true).await;
+        let failed = proj(&lp);
+        assert!(failed.store_error.unwrap().message.contains("no link"));
+        assert_eq!(
+            failed.last_tick, live.last_tick,
+            "a failed pass leaves the last tick as it was"
+        );
+
+        lp.step(7, Some("tok"), true).await;
+        let live = proj(&lp);
+        assert!(live.paused && live.store_error.is_none());
+        assert_eq!(live.decision.as_deref(), Some("paused: would do nothing"));
     }
 
     #[tokio::test]
