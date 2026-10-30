@@ -17,6 +17,7 @@ Only the specs whose subject is the computer itself:
 - [docker.md](docker.md): the agent in Docker.
 - [first-run-check.md](first-run-check.md) and [claude-signed-out.md](claude-signed-out.md): the checks the computer runs on itself.
 - [local-state-diet.md](local-state-diet.md): the per-computer state file.
+- [pieces.md](pieces.md): taking work as short runs on pieces, instead of claiming whole items.
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
 
