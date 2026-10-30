@@ -43,9 +43,12 @@ http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 
-# Full (level 2) debug info on this crate's dev/test build is memory-hungry enough in LLVM's
+# Full (level 2) debug info on this crate's dev/test build was memory-hungry enough in LLVM's
 # whole-module debug-info finalization pass to SIGSEGV on the CI host (not reproducible locally,
-# not a cache problem — see Woodpecker pipelines 108-141). Line tables alone still give file:line
-# in panics/backtraces.
+# not a cache problem — see Woodpecker pipelines 108-141), so this was line-tables-only. That
+# still asks rustc to name closure captures for debug info, and pipeline 150 SIGSEGV'd doing
+# exactly that compiling a dependency (fastrand) — same memory-constrained host, different debug
+# info pass. panic!/assert! file:line comes from compile-time literals, not this debug info, so
+# turning it off entirely doesn't lose that; it only costs symbol names in a captured backtrace.
 [profile.dev]
-debug = "line-tables-only"
+debug = false
