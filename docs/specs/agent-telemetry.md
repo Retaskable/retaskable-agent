@@ -37,7 +37,7 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 
 ## 3. The event log
 
-`agent/src/telemetry/events.ts` (`EventLog`); in this Rust agent, `src/telemetry/events.rs`.
+`agent/src/telemetry/events.ts` (`EventLog`); in this Rust agent, `src/telemetry/events.rs` (the log) and `src/telemetry/event.rs` (the events as types: an `Event` enum with one variant per kind in the table below, wrapped in an `Entry` with its time and project; a line of a kind it does not know, or whose fields do not fit its kind, is kept whole as `Body::Other` and still reads, and fields a variant does not name are written back as they came).
 
 ### 3.1 Files
 
@@ -75,7 +75,7 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 
 Restart events are the machine's, so they go into every project's log.
 
-**Status in the Rust agent:** the log itself, and opening it at startup, are built (`src/telemetry/events.rs`, `src/runtime.rs`); nothing calls `EventLog::add` yet. Each event above lands with the backlog item that does the thing it records, the same way `events.rs` was built before anything used it ([agent/11-build-milestones.md](agent/11-build-milestones.md)): `item_state`, `claim`, `lease`, `session_start`/`session_end`, `step_start`/`step_end`, `ci`, `merged` and `error` come with `item-lifecycle` and `implementer-session`; `lane_taken`/`lane_freed`, `tick` and `restart_*` come with `orchestrator-loop`.
+**Status in the Rust agent:** the log itself, and opening it at startup, are built (`src/telemetry/events.rs`, `src/runtime.rs`); nothing calls `EventLog::add` / `add_in` (which take an `Event`) beyond the orchestrator's `tick`, `item_state` and `lane_taken` yet. Each event above lands with the backlog item that does the thing it records, the same way `events.rs` was built before anything used it ([agent/11-build-milestones.md](agent/11-build-milestones.md)): `item_state`, `claim`, `lease`, `session_start`/`session_end`, `step_start`/`step_end`, `ci`, `merged` and `error` come with `item-lifecycle` and `implementer-session`; `lane_taken`/`lane_freed`, `tick` and `restart_*` come with `orchestrator-loop`.
 
 ## 4. The watchdog
 
@@ -126,11 +126,11 @@ The first two commands read `.retaskable/projects/*/events/*.jsonl` only (`agent
   - **Anomalies**: each one in the window, its rule, item, text and how long it lasted.
 - `npm run start-report -- [--sessions 20] [--project <id>]`: how the newest fresh implementer sessions got going (agent.md section 6.2's Where to start). One line per session with its turns, calls and share of the cost before its first edit, then the medians and the share of those turns that made a single call. It reads the session transcripts (`.retaskable/projects/*/runs/<item>/*.jsonl`), not the event log, since only they keep each turn's tool calls and usage (`agent/src/telemetry/startStats.ts`, run by `scripts/start-report.ts`). Chores and the agent's own runs are left out. A turn's cost weighs its usage by price: cache writes 1.25×, cache reads 0.1×, output 5×.
 
-**In the Rust agent:** the three are `retaskable why -- <item id>`, `retaskable agent-report` and `retaskable start-report` (`src/telemetry/report/`, `src/telemetry/start_stats.rs`, `src/main.rs`), same flags and output. Like a release build's server, they read its own data folder (installers/03-the-bundle-agent-bundle.md section 3.3) unless `RETASKABLE_DATA_DIR` says otherwise. They only read what's on disk, so they stay accurate ahead of `EventLog::add` being wired in (section 3.3): empty until the events that feed them exist.
+**In the Rust agent:** the three are `retaskable why -- <item id>`, `retaskable agent-report` and `retaskable start-report` (`src/telemetry/report/`, `src/telemetry/start_stats.rs`, `src/main.rs`), same flags and output. Like a release build's server, they read its own data folder (installers/03-the-bundle-agent-bundle.md section 3.3) unless `RETASKABLE_DATA_DIR` says otherwise. They only read what's on disk, so they stay accurate ahead of every `Event` being written (section 3.3): empty until the events that feed them exist.
 
 ## 6. Tests
 
-- `agent/src/telemetry/events.test.ts` (and `src/telemetry/events.rs` here): the line format, one file per UTC day, pruning past 14 days, secrets redacted and long texts cut, dropped fields, reading back a window.
+- `agent/src/telemetry/events.test.ts` (and `src/telemetry/events.rs` here): the line format, one file per UTC day, pruning past 14 days, secrets redacted and long texts cut, dropped fields, reading back a window, and every kind round-tripping through `Event` (`src/telemetry/events.rs`, `event.rs`) with an unknown kind still reading.
 - `agent/src/telemetry/watchdog.test.ts`: each rule fires, doesn't fire, and ends.
 - `agent/src/telemetry/telemetry.test.ts`: item state, lane and lease events from the `Store`, steps' `again`, one anomaly event per start and end.
 - `agent/src/telemetry/report.test.ts` (and `src/telemetry/report/tests.rs` here): both readers on a fixture log.

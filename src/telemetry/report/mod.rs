@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::telemetry::event::Entry;
 use crate::telemetry::events::{iso_utc_millis, parse_iso_ms, read_events};
 
 mod agent_report;
@@ -25,9 +26,9 @@ const IDLE_STRETCH_MS: i64 = 15 * 60_000;
 const TICK_GAP_MS: i64 = 3 * 60_000;
 
 /// Every project's events under `data` (`.retaskable`), oldest first, each marked with its
-/// project (a `"project"` field added to the event object). Each `at` is rewritten in the full
+/// project (the name of the project's folder, whatever the line itself says). Each `at` is rewritten in the full
 /// `YYYY-MM-DDTHH:MM:SS.sssZ` form, so a hand-edited short one still sorts and slices safely.
-pub fn read_all(data: &Path, since: i64, until: i64, project: Option<&str>) -> Vec<Value> {
+pub fn read_all(data: &Path, since: i64, until: i64, project: Option<&str>) -> Vec<Entry> {
     let root = data.join("projects");
     let entries = match std::fs::read_dir(&root) {
         Ok(e) => e,
@@ -43,22 +44,15 @@ pub fn read_all(data: &Path, since: i64, until: i64, project: Option<&str>) -> V
         }
         let dir = root.join(&name).join("events");
         for mut e in read_events(&dir, since, until) {
-            if let Value::Object(map) = &mut e {
-                // `read_events` only returns events whose `at` parses.
-                if let Some(t) = map.get("at").and_then(Value::as_str).and_then(parse_iso_ms) {
-                    map.insert("at".to_string(), Value::String(iso_utc_millis(t)));
-                }
-                map.insert("project".to_string(), Value::String(name.clone()));
+            // `read_events` only returns entries whose `at` parses.
+            if let Some(t) = parse_iso_ms(&e.at) {
+                e.at = iso_utc_millis(t);
             }
+            e.project = Some(name.clone());
             out.push(e);
         }
     }
-    out.sort_by(|a, b| {
-        a.get("at")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .cmp(b.get("at").and_then(Value::as_str).unwrap_or(""))
-    });
+    out.sort_by(|a, b| a.at.cmp(&b.at));
     out
 }
 
@@ -133,16 +127,6 @@ fn span(ms: f64) -> String {
     format!("{}d {}h", h / 24, h % 24)
 }
 
-fn truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_none_or(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(_)) | Some(Value::Object(_)) => true,
-    }
-}
-
 fn str_of(v: Option<&Value>) -> String {
     match v {
         None | Some(Value::Null) => String::new(),
@@ -151,15 +135,4 @@ fn str_of(v: Option<&Value>) -> String {
         Some(Value::Number(n)) => n.to_string(),
         Some(other) => other.to_string(),
     }
-}
-
-fn usd_of(v: Option<&Value>) -> String {
-    match v.and_then(Value::as_f64) {
-        Some(n) => format!("${n:.2}"),
-        None => String::new(),
-    }
-}
-
-fn ms_of(v: Option<&Value>) -> f64 {
-    v.and_then(Value::as_f64).unwrap_or(0.0)
 }

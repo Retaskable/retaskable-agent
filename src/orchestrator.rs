@@ -14,12 +14,10 @@
 //! `concurrency` (no session pool exists yet to count).
 use std::collections::BTreeMap;
 
-use serde_json::{Map, json};
-
 use crate::config::ProjectConfig;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool, Want};
-use crate::telemetry::EventLog;
+use crate::telemetry::{Event, EventLog, event};
 
 /// One project's items tracked between ticks, by item id.
 pub type ProjectRuns = BTreeMap<String, ItemRun>;
@@ -47,13 +45,13 @@ pub fn tick(
     cfg: &ProjectConfig,
     events: &mut EventLog,
 ) -> Vec<Action> {
-    events.add(
-        "tick",
-        Map::from_iter([
-            ("project".into(), json!(project)),
-            ("lanes".into(), json!(pool.rules().lanes)),
-            ("busy".into(), json!(pool.held_lanes().collect::<Vec<_>>())),
-        ]),
+    events.add_in(
+        project,
+        Event::Tick(event::Tick {
+            lanes: Some(pool.rules().lanes),
+            busy: Some(pool.held_lanes().collect()),
+            ..Default::default()
+        }),
     );
     let mut actions = Vec::new();
     if paused {
@@ -80,24 +78,24 @@ pub fn tick(
                     item: item_id.clone(),
                 },
             );
-            events.add(
-                "item_state",
-                Map::from_iter([
-                    ("project".into(), json!(project)),
-                    ("item".into(), json!(item_id)),
-                    ("from".into(), json!("queued")),
-                    ("to".into(), json!("needs_human")),
-                ]),
+            events.add_in(
+                project,
+                Event::ItemState(event::ItemState {
+                    item: Some(item_id.clone()),
+                    from: Some("queued".into()),
+                    to: Some("needs_human".into()),
+                    ..Default::default()
+                }),
             );
             continue;
         }
-        events.add(
-            "lane_taken",
-            Map::from_iter([
-                ("project".into(), json!(project)),
-                ("item".into(), json!(item_id)),
-                ("lane".into(), json!(lane)),
-            ]),
+        events.add_in(
+            project,
+            Event::LaneTaken(event::LaneTaken {
+                item: Some(item_id.clone()),
+                lane: Some(lane),
+                ..Default::default()
+            }),
         );
         actions.push(Action::StartImplementer { item_id, lane });
     }
@@ -225,7 +223,7 @@ mod tests {
         assert_eq!(actions, vec![Action::AskForWork]);
         assert_eq!(runs["a"].state, ItemState::NeedsHuman);
         assert_eq!(pool.lane_of("proj", "a"), None);
-        let kinds: Vec<_> = events.recent().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        let kinds: Vec<_> = events.recent().iter().map(|e| e.kind()).collect();
         assert_eq!(
             kinds,
             vec!["tick", "item_state"],
@@ -240,7 +238,7 @@ mod tests {
         let mut events = EventLog::new();
         tick("proj", true, &mut runs, &mut pool, &cfg(), &mut events);
         assert_eq!(events.recent().len(), 1);
-        assert_eq!(events.recent()[0]["kind"], "tick");
-        assert_eq!(events.recent()[0]["lanes"], 3);
+        assert_eq!(events.recent()[0].kind(), "tick");
+        assert_eq!(events.recent()[0].to_value()["lanes"], 3);
     }
 }
