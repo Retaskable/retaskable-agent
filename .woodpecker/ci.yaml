@@ -17,6 +17,11 @@ steps:
       # The crates and the build kept on the runner (the repo is trusted for volumes, 2026-10-29), so a run compiles
       # only what changed. Cargo locks the build folder, so two runs at once take turns rather than clash.
       CARGO_TARGET_DIR: /cargo-target
+      # Off: a run on this shared, persistent target dir hit a rustc ICE (SIGSEGV in clippy-driver
+      # building a derived Deserialize impl's THIR) that a clean cache on the same toolchain didn't
+      # reproduce — the signature of a corrupted on-disk incremental cache, which incremental
+      # compilation's own point is to reuse across runs.
+      CARGO_INCREMENTAL: "0"
     volumes: &cargo_volumes
       - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
       - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
