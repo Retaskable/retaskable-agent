@@ -19,7 +19,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
+use crate::implementer::{ImplementerResult, Session, SilenceKilled, Start, run_implementer, session_spec};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::telemetry::now_ms;
 use crate::{lanes, paths};
@@ -284,12 +284,7 @@ async fn run(job: Job) -> Result<SessionResult> {
             resuming = None;
             continue;
         }
-        return Ok(match answer {
-            // A session ran (even if it crashed or answered with nothing usable), so this needs a person
-            // rather than going back to the queue: it may have left real work behind (section 7.3).
-            Err(e) => SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
-            Ok(r) => classify(&r),
-        });
+        return Ok(session_result_for_answer(answer));
     }
 }
 
@@ -338,6 +333,21 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             "The session answered with {other}, which needs a person: {}",
             r.summary
         )),
+    }
+}
+
+/// What `run_implementer`'s answer means for the item (`run`'s return): the watchdog's own kill
+/// ([`SilenceKilled`]) is this computer's problem, so the item goes back to the queue for a healthy
+/// lane to claim again, the same as any other own failure (07-orchestrator-loop.md's watchdog). Any
+/// other error means a session ran and didn't come back clean, so it needs a person instead (it may
+/// have left real work behind, section 7.3).
+fn session_result_for_answer(answer: Result<ImplementerResult>) -> SessionResult {
+    match answer {
+        Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => {
+            SessionResult::Failed(format!("went quiet and was killed: {e:#}"))
+        }
+        Err(e) => SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
+        Ok(r) => classify(&r),
     }
 }
 
@@ -535,6 +545,22 @@ mod tests {
         let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
         assert!(waits.contains("a, b"), "{waits}");
         assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
+    }
+
+    #[test]
+    fn a_watchdog_kill_is_an_own_failure_not_a_needs_human() {
+        let killed = Err(anyhow::Error::new(SilenceKilled(
+            "ended with killed_for_silence: no output".into(),
+        )));
+        assert!(
+            matches!(session_result_for_answer(killed), SessionResult::Failed(_)),
+            "a session the watchdog killed should requeue, not need a person"
+        );
+        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
+        assert!(matches!(
+            session_result_for_answer(crashed),
+            SessionResult::NeedsHuman(_)
+        ));
     }
 
     #[test]

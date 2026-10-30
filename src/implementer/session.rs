@@ -120,11 +120,27 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     })
 }
 
+/// Marks a failed run's error as the quiet-output watchdog's own kill (`killed_for_silence`,
+/// `engines::runner`'s `spawn_and_read`), rather than the implementer giving up: the session may
+/// have just stalled on something slow, so the caller treats this like an own failure (back to the
+/// queue) instead of escalating to a person (`orchestrator::session::run`'s `downcast_ref`).
+#[derive(Debug)]
+pub struct SilenceKilled(pub String);
+
+impl std::fmt::Display for SilenceKilled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SilenceKilled {}
+
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer. A session that failed, or answered with something other than the result
 /// Retaskable asked for, is an error: unlike a release note, there's no plain fallback for code
 /// that was never written — the caller (not yet built: the orchestrator loop) decides whether to
-/// retry, escalate, or ask a person from there.
+/// retry, escalate, or ask a person from there, except a watchdog kill ([`SilenceKilled`]), which
+/// already says which.
 pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> Result<ImplementerResult>
 where
     F: FnOnce(SessionSpec) -> Fut,
@@ -133,7 +149,11 @@ where
     let budget_usd = spec.budget_usd;
     let r = run(spec).await?;
     if !r.ok {
-        bail!(describe_failure(&r, budget_usd));
+        let why = describe_failure(&r, budget_usd);
+        if r.subtype == "killed_for_silence" {
+            return Err(anyhow::Error::new(SilenceKilled(why)));
+        }
+        bail!(why);
     }
     r.structured
         .and_then(|v| serde_json::from_value::<ImplementerResult>(v).ok())
@@ -277,5 +297,26 @@ mod tests {
             err.to_string(),
             "the session finished but didn't answer with the result Retaskable asked for"
         );
+    }
+
+    #[tokio::test]
+    async fn a_watchdog_kill_is_tagged_as_silence_killed_not_a_plain_failure() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let err = run_implementer(spec, |_| async { Ok(result(false, "killed_for_silence", None)) })
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<SilenceKilled>().is_some(),
+            "a watchdog kill should be distinguishable from an ordinary failure, got {err:#}"
+        );
+
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let err = run_implementer(spec, |_| async { Ok(result(false, "error_during_execution", None)) })
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<SilenceKilled>().is_none());
     }
 }

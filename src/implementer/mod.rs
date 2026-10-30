@@ -24,7 +24,7 @@ mod test_support;
 pub use code_gates::GateResult;
 pub use model::{ImplementerResult, Playtest, Question, implementer_result_schema};
 pub use prompt::{Prompt, build_prompt, checks_text, gate_rule};
-pub use session::{Session, Start, new_session_id, run_implementer, session_spec};
+pub use session::{Session, SilenceKilled, Start, new_session_id, run_implementer, session_spec};
 pub use start_files::{
     MAX_CHANGED_COMMITS, MAX_FILES, SpecChanges, StartFiles, build, item_spec_files, named_code_paths, render,
 };
