@@ -2,6 +2,7 @@ use super::*;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::test_support::item_lifecycle_cfg;
 use axum::{Json, Router, routing::post};
+use futures_util::FutureExt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
