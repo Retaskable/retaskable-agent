@@ -366,6 +366,21 @@ impl Client {
         Ok(())
     }
 
+    /// `specs_commit` (Retaskable.com's backlog.md section 6.4): the commit the store last took Items headers
+    /// from, or `None` before it took any.
+    pub async fn specs_commit(&self, repo_id: u64, token: Option<&str>) -> Result<Option<String>, BacklogError> {
+        let (status, body) = self.send(repo_id, token, "specs_commit", json!({})).await?;
+        match body.value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(commit)) => Ok(Some(commit)),
+            Some(other) => Err(BacklogError::BadAnswer {
+                status,
+                code: None,
+                message: format!("couldn't read the specs commit it sent: {other}"),
+            }),
+        }
+    }
+
     /// `tryout_add` (backlog/06-data-and-operations.md section 6.2): adds (or, on a repeat, no-ops) one
     /// merged slice's after-merge try-out to the shared queue.
     pub async fn tryout_add(&self, repo_id: u64, token: Option<&str>, add: &TryoutAdd) -> Result<(), BacklogError> {
