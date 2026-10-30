@@ -6,6 +6,13 @@ Theme: Orchestration
 
 Kind: new
 
+Items:
+- **session-stop-interrupts**: Kill every running session's whole process tree when the agent stops, and keep the item to resume. Depends on: orchestrator-loop. Specs: [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.4.
+- **resume-fresh-start-rules**: Start a fresh session when a resume can't carry on: transcript too large, out of turns, engine changed. Depends on: orchestrator-loop, implementer-session. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2.
+- **item-waits-and-finishes**: Handle a session result of waits_on (record the dependency, give the item back) and nothing_left (mark it done). Depends on: orchestrator-loop, implementer-session. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2.
+- **claim-tags-and-give-back-note**: Send this computer's tags with a claim, and a report note with every give-back. Depends on: orchestrator-loop. Specs: [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.5.
+- **live-sessions-reporting**: Show the running sessions on the settings page's Now tab and count them in the cloud tick. Depends on: orchestrator-loop, settings-page, cloud-link. Specs: [agent-settings.md](agent-settings.md) section 4.5.
+
 This spec is split: each section below is its own file in [agent/](agent/). Read this index, then only the sections you need.
 
 ## 1. What it is
