@@ -12,6 +12,8 @@
 //! actually starting a session (implementer-session), the pause flag's real source (today it's
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`), and `activeSessions` /
 //! `concurrency` (no session pool exists yet to count).
+pub mod driver;
+
 use std::collections::BTreeMap;
 
 use crate::config::ProjectConfig;
@@ -21,6 +23,25 @@ use crate::telemetry::{Event, EventLog, event};
 
 /// One project's items tracked between ticks, by item id.
 pub type ProjectRuns = BTreeMap<String, ItemRun>;
+
+/// The minute summary for one project (agent-telemetry.md section 3.3's `tick`), as `Pool.minute` in
+/// `agent/src/pool.ts` writes it: `status` is `paused` or `running` here. The TS agent also has `setup`
+/// (no config yet) and `waiting_for_limit` (`Orchestrator.status`); neither has a source in this crate
+/// yet. `sessions` is 0 because no session runs here yet. `states` and `claim` are left for the caller
+/// that knows them.
+pub fn tick_payload(paused: bool, pool: &LanePool) -> event::Tick {
+    let busy: Vec<u32> = pool.held_lanes().collect();
+    let lanes = pool.rules().lanes;
+    let free = lanes.saturating_sub(busy.iter().filter(|&&k| k <= lanes).count() as u32);
+    event::Tick {
+        status: Some(if paused { "paused" } else { "running" }.into()),
+        lanes: Some(lanes),
+        busy: Some(busy),
+        free: Some(free.into()),
+        sessions: Some(0.into()),
+        ..Default::default()
+    }
+}
 
 /// What one tick decided for one project, in the order it decided them. At most one `AskForWork`
 /// per tick, after every locally ready item has taken a lane (backlog/06.6-handing-out-work.md
@@ -37,6 +58,10 @@ pub enum Action {
 /// of the loop too, not just this). Otherwise every `queued` item that can take a lane does, each
 /// moving to `implementing` (`ItemRun::claimed`) and taking the project's `lane_taken` telemetry
 /// with it; only once none of them can is a free lane offered to `claim_next` instead.
+///
+/// This changes `runs`, `pool` and `events` as if every action were taken. A caller that must not
+/// act on the decision (the dry driver, `driver.rs`) passes scratch copies of all three and keeps
+/// only what it chooses from the actions returned.
 pub fn tick(
     project: &str,
     paused: bool,
@@ -45,14 +70,7 @@ pub fn tick(
     cfg: &ProjectConfig,
     events: &mut EventLog,
 ) -> Vec<Action> {
-    events.add_in(
-        project,
-        Event::Tick(event::Tick {
-            lanes: Some(pool.rules().lanes),
-            busy: Some(pool.held_lanes().collect()),
-            ..Default::default()
-        }),
-    );
+    events.add_in(project, Event::Tick(tick_payload(paused, pool)));
     let mut actions = Vec::new();
     if paused {
         return actions;
@@ -240,5 +258,42 @@ mod tests {
         assert_eq!(events.recent().len(), 1);
         assert_eq!(events.recent()[0].kind(), "tick");
         assert_eq!(events.recent()[0].to_value()["lanes"], 3);
+    }
+
+    #[test]
+    fn the_tick_event_says_running_or_paused_and_its_exact_json() {
+        let mut runs = ProjectRuns::new();
+        let mut pool = pool(3);
+        assert!(pool.take(
+            2,
+            Holder::Item {
+                project: "proj".into(),
+                item: "x".into(),
+            }
+        ));
+        let mut events = EventLog::with_now(|| 0);
+        tick("proj", false, &mut runs, &mut pool, &cfg(), &mut events);
+        assert_eq!(
+            events.recent()[0].to_value(),
+            serde_json::json!({
+                "at": "1970-01-01T00:00:00.000Z",
+                "kind": "tick",
+                "project": "proj",
+                "status": "running",
+                "lanes": 3,
+                "busy": [2],
+                "free": 2,
+                "sessions": 0
+            })
+        );
+    }
+
+    #[test]
+    fn a_paused_projects_tick_reports_paused() {
+        let mut runs = ProjectRuns::new();
+        let mut pool = pool(2);
+        let mut events = EventLog::with_now(|| 0);
+        tick("proj", true, &mut runs, &mut pool, &cfg(), &mut events);
+        assert_eq!(events.recent()[0].to_value()["status"], "paused");
     }
 }

@@ -62,7 +62,7 @@ pub struct Want {
 }
 
 /// The computer's lanes and who holds each.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LanePool {
     rules: PoolRules,
     /// How much of the 5-hour window is used, in percent; `None` until it's known (then every lane takes work).

@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, lane_pool, link, local_model, network, release, runtime, setup_check, store, tags,
-    telemetry, view,
+    api, backlog, config, connector, lane_pool, link, local_model, network, orchestrator, release, runtime,
+    setup_check, store, tags, telemetry, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -270,6 +270,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone());
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
+    // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry (or claim, which
+    // isn't built and runs dry). Read and logged once, here.
+    let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
+    orchestrator::driver::spawn_all(
+        dir,
+        &cfg.projects,
+        lane_count,
+        mode,
+        &backlog::url(env),
+        &keychain,
+        &view.paused,
+    );
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(

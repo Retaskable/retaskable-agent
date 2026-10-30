@@ -170,8 +170,8 @@ pub fn start_project(
     trim_state(&project_dir);
     // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
     // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
-    // Nothing calls `EventLog::add` yet — that needs the orchestrator loop, sessions and the
-    // backlog client wired in first, none of which this agent runs yet.
+    // Only the dry orchestrator loop (`orchestrator::driver`, RETASKABLE_ORCHESTRATOR) writes events
+    // so far, through its own log; this one only prunes and reads back.
     telemetry::EventLog::new().open(&project_dir.join("events"));
     ensure_lane_pool(project, lane_count);
     watch_phone(project, env);
