@@ -16,6 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use super::guard::PortGuard;
@@ -25,7 +26,7 @@ use super::{Action, ProjectRuns, apply, decide, tick_payload};
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::env::Env;
-use crate::item_lifecycle::ItemRun;
+use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool, PoolRules};
 use crate::link::TokenStore;
 use crate::store::Store;
@@ -134,13 +135,54 @@ pub struct StartRequest {
     pub item_id: String,
     pub lane: u32,
     pub token: String,
+    /// Where the session reports how it ended; the loop reads it at the start of its next pass.
+    pub outcomes: OutcomeSender,
 }
+
+/// How a started session ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionResult {
+    /// The implementer exited normally (it finished, synced main, or asked questions).
+    Implementer(ImplementerOutcome),
+    /// The session couldn't run or crashed through no fault of the item's (the TS `ownFailure`): the
+    /// item is given back to the store's queue. The text says why.
+    Failed(String),
+}
+
+/// A session's end, sent back to the loop that started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOutcome {
+    pub project: String,
+    pub item_id: String,
+    pub lane: u32,
+    pub result: SessionResult,
+}
+
+/// The sending end of the outcome channel: cloned into every [`StartRequest`].
+#[derive(Debug, Clone)]
+pub struct OutcomeSender(mpsc::UnboundedSender<SessionOutcome>);
+
+impl OutcomeSender {
+    /// Reports a session's end. A loop that has stopped hears nothing, which is fine: nothing is left to settle.
+    pub fn send(&self, outcome: SessionOutcome) {
+        let _ = self.0.send(outcome);
+    }
+}
+
+impl PartialEq for OutcomeSender {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
+}
+
+impl Eq for OutcomeSender {}
 
 /// Runs the implementer session for an item that took a lane. Built in a later piece; until one is given to
 /// the [`Machine`], `claim` mode claims nothing, so no claimed item is left with nothing working on it.
 pub trait SessionStarter: Send + Sync {
     /// Called once the item is `implementing` and its lane held. Must not block: start the session and return.
-    fn start(&self, request: StartRequest);
+    /// An `Err` (the session was refused or couldn't start) gives the lane and the claim straight back.
+    fn start(&self, request: StartRequest) -> Result<(), String>;
 }
 
 /// One project's orchestrator state, kept for as long as the agent runs. The lanes are not here: they
@@ -153,6 +195,14 @@ pub struct ProjectLoop {
     runs: ProjectRuns,
     /// Lease token of each item this computer holds, by id; kept in the state file so a restart still holds them.
     leases: BTreeMap<String, String>,
+    /// Leases given back here that the store hasn't taken yet (item id to token), kept in the state file
+    /// and sent again on later passes (the TS agent's `unreleased`).
+    unreleased: BTreeMap<String, String>,
+    /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
+    /// waits for, the item's state). Kept in the state file and sent again on later passes.
+    unparked: BTreeMap<String, (String, String, String)>,
+    /// Where this project's sessions report their end; replaced with the machine's by [`Machine::add`].
+    outcomes: OutcomeSender,
     /// Whether the held leases were matched against the backlog yet (once, on the first pass).
     adopted: bool,
     mode: OrchestratorMode,
@@ -179,6 +229,9 @@ impl ProjectLoop {
             id,
             project,
             leases: store.leases(),
+            unreleased: store.unreleased(),
+            unparked: store.unparked(),
+            outcomes: OutcomeSender(mpsc::unbounded_channel().0),
             store,
             runs: ProjectRuns::new(),
             adopted: false,
@@ -281,9 +334,11 @@ impl ProjectLoop {
         Step::Ticked { would }
     }
 
-    /// Writes the held leases to the state file.
+    /// Writes the held and the unreleased leases to the state file.
     fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
+        self.store.set_unreleased(&self.unreleased);
+        self.store.set_unparked(&self.unparked);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
         }
@@ -326,19 +381,189 @@ impl ProjectLoop {
         self.save_leases();
     }
 
-    /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its lane.
-    fn apply_starts(&mut self, actions: &[Action], pool: &mut LanePool, starter: &dyn SessionStarter) {
+    /// Gives an item's lane and lease back: its run is dropped, the lane freed (`lane_freed`), and the lease
+    /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
+    /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
+    /// TS agent's `lane_freed` (`<state>: <note>`).
+    async fn hand_back(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str, links: &Links) {
+        self.runs.remove(item_id);
+        self.free_lane(pool, item_id, state, why);
+        if let Some(token) = self.leases.remove(item_id) {
+            self.unreleased.insert(item_id.to_string(), token);
+            self.save_leases();
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(item_id.to_string()),
+                    change: Some("released".into()),
+                    state: Some(state.into()),
+                    ..Default::default()
+                }),
+            );
+            self.flush_owed(links).await;
+        }
+    }
+
+    /// Lets go of the lease while the item waits for `waits_for` (the TS `park`): the lane is freed, the run
+    /// kept, and the lease moved to `unparked` (saved first) and parked at once. The store keeps the item as
+    /// this computer's, so no other computer is handed it.
+    async fn park(&mut self, pool: &mut LanePool, item_id: &str, state: &str, waits_for: &str, links: &Links) {
+        self.free_lane(pool, item_id, state, "waiting");
+        if let Some(token) = self.leases.remove(item_id) {
+            self.unparked
+                .insert(item_id.to_string(), (token, waits_for.into(), state.into()));
+            self.save_leases();
+            self.flush_owed(links).await;
+        }
+    }
+
+    /// Frees the item's lane, if it holds one, and writes `lane_freed` (`<state>: <note>`).
+    fn free_lane(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str) {
+        let holder = Holder::Item {
+            project: self.id.clone(),
+            item: item_id.to_string(),
+        };
+        if let Some(lane) = pool.lane_of(&self.id, item_id)
+            && pool.release(lane, &holder)
+        {
+            self.events.add_in(
+                &self.id,
+                Event::LaneFreed(event::LaneFreed {
+                    item: Some(item_id.to_string()),
+                    lane: Some(lane),
+                    why: Some(format!("{state}: {why}")),
+                    ..Default::default()
+                }),
+            );
+        }
+    }
+
+    /// Sends the releases and parks still owed. One the store refuses (or can't reach) stays listed for
+    /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
+    async fn flush_owed(&mut self, links: &Links) {
+        let Some(repo) = self
+            .repo
+            .filter(|_| !self.unreleased.is_empty() || !self.unparked.is_empty())
+        else {
+            return;
+        };
+        let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
+            return;
+        };
+        for (id, lease) in self.unreleased.clone() {
+            match self.client.release(repo, Some(&token), &id, &lease).await {
+                Ok(()) => {}
+                Err(e) if e.code() == Some("stale_lease") => {}
+                Err(e) => {
+                    self.store_error("release", &e);
+                    continue;
+                }
+            }
+            self.unreleased.remove(&id);
+        }
+        for (id, (lease, waits_for, state)) in self.unparked.clone() {
+            match self.client.park(repo, Some(&token), &id, &lease, &waits_for).await {
+                Ok(()) => {}
+                Err(e) if e.code() == Some("stale_lease") => {}
+                Err(e) => {
+                    self.store_error("park", &e);
+                    continue;
+                }
+            }
+            self.unparked.remove(&id);
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(id),
+                    change: Some("parked".into()),
+                    state: Some(state),
+                    ..Default::default()
+                }),
+            );
+        }
+        self.save_leases();
+    }
+
+    /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code). A run that needs
+    /// a human frees its lane and, as the TS agent does for a stop with an implementer session and no PR,
+    /// keeps its lease (`parkFor` parks `needs_human` only with a PR or no session); one with questions for
+    /// a person frees its lane and parks. A failed session gives its lane and lease back. A finished slice goes
+    /// on to `checking` and stops there, keeping both: checks, CI and review aren't built in the Rust agent yet.
+    async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, links: &Links) {
+        let item = outcome.item_id;
+        let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
+            tracing::warn!(
+                "{}: a session ended for {item}, which isn't implementing here; ignored",
+                self.id
+            );
+            return;
+        };
+        match outcome.result {
+            SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, links).await,
+            SessionResult::Implementer(result) => {
+                run.implementer_finished(result, &self.project);
+                match run.state {
+                    ItemState::NeedsHuman => {
+                        self.events.add_in(
+                            &self.id,
+                            Event::ItemState(event::ItemState {
+                                item: Some(item.clone()),
+                                from: Some("implementing".into()),
+                                to: Some("needs_human".into()),
+                                ..Default::default()
+                            }),
+                        );
+                        self.free_lane(pool, &item, "needs_human", "the session needs a human");
+                    }
+                    ItemState::NeedsClarification => {
+                        self.park(pool, &item, "needs_clarification", "answer", links).await
+                    }
+                    ItemState::Checking => tracing::info!(
+                        "{}: {item} is coded; checks aren't built in the Rust agent yet, so it waits in checking on lane {}",
+                        self.id,
+                        outcome.lane
+                    ),
+                    other => tracing::info!(
+                        "{}: {item} moved to {other:?}, which the Rust agent can't carry on from yet; it keeps its lane and lease",
+                        self.id
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its
+    /// lane. A start the starter refuses gives the lane and the claim straight back.
+    async fn apply_starts(
+        &mut self,
+        actions: &[Action],
+        pool: &mut LanePool,
+        starter: &dyn SessionStarter,
+        links: &Links,
+    ) {
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
             if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
-                starter.start(StartRequest {
+                let request = StartRequest {
                     project: self.id.clone(),
                     item_id: item_id.clone(),
                     lane: *lane,
                     token: self.leases.get(item_id).cloned().unwrap_or_default(),
-                });
+                    outcomes: self.outcomes.clone(),
+                };
+                if let Err(why) = starter.start(request) {
+                    tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);
+                    self.hand_back(
+                        pool,
+                        item_id,
+                        "queued",
+                        &format!("the session didn't start: {why}"),
+                        links,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -376,7 +601,7 @@ impl ProjectLoop {
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.take_lease(&item, token);
                 let actions = decide(&self.id, false, &self.runs, pool, &self.project);
-                self.apply_starts(&actions, pool, starter);
+                self.apply_starts(&actions, pool, starter, links).await;
                 item.id.clone()
             }
         };
@@ -508,10 +733,14 @@ pub struct Machine {
     links: Links,
     /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
     starter: Option<Arc<dyn SessionStarter>>,
+    /// Sessions report their end here; the receiver is read at the start of each pass.
+    outcomes: mpsc::UnboundedReceiver<SessionOutcome>,
+    outcome_sender: OutcomeSender,
 }
 
 impl Machine {
     pub fn new(lane_count: u32, links: Links) -> Self {
+        let (sender, outcomes) = mpsc::unbounded_channel();
         Self {
             pool: LanePool::new(PoolRules {
                 lanes: lane_count,
@@ -521,7 +750,14 @@ impl Machine {
             last_served: None,
             links,
             starter: None,
+            outcomes,
+            outcome_sender: OutcomeSender(sender),
         }
+    }
+
+    /// The sender every started session gets (inside its [`StartRequest`]).
+    pub fn outcome_sender(&self) -> OutcomeSender {
+        self.outcome_sender.clone()
     }
 
     /// Lets `claim` mode claim and start work.
@@ -530,7 +766,8 @@ impl Machine {
         self
     }
 
-    pub fn add(&mut self, project: ProjectLoop) {
+    pub fn add(&mut self, mut project: ProjectLoop) {
+        project.outcomes = self.outcome_sender.clone();
         self.projects.push(project);
     }
 
@@ -597,6 +834,19 @@ impl Machine {
         }
     }
 
+    /// Sends the releases still owed, then settles the sessions that ended since the last pass.
+    async fn settle_outcomes(&mut self) {
+        for lp in self.projects.iter_mut().filter(|lp| lp.mode == OrchestratorMode::Claim) {
+            lp.flush_owed(&self.links).await;
+        }
+        while let Ok(outcome) = self.outcomes.try_recv() {
+            match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
+                Some(lp) => lp.settle(outcome, &mut self.pool, &self.links).await,
+                None => tracing::warn!("a session ended for the unknown project {}", outcome.project),
+            }
+        }
+    }
+
     /// The pass after the reads: plans the starts, and in `claim` mode with a starter applies them, asks
     /// for work and starts what comes back, then records each project's pass.
     async fn decide_and_record(&mut self, read_items: Vec<Option<Vec<Item>>>, paused: Vec<bool>) -> Vec<Step> {
@@ -607,6 +857,9 @@ impl Machine {
             {
                 lp.readopt(items);
             }
+        }
+        if starter.is_some() {
+            self.settle_outcomes().await;
         }
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(&read_items).zip(&paused))
             .map(|((lp, items), &paused)| {
@@ -631,7 +884,7 @@ impl Machine {
             if let Some(starter) = starter.as_deref()
                 && lp.mode == OrchestratorMode::Claim
             {
-                lp.apply_starts(&actions, &mut self.pool, starter);
+                lp.apply_starts(&actions, &mut self.pool, starter, &self.links).await;
                 live = Some(if actions.contains(&Action::AskForWork) {
                     lp.claim(&mut self.pool, &self.links, starter).await
                 } else {
@@ -1104,19 +1357,35 @@ mod tests {
         }
     }
 
-    /// A session starter that records what it was asked to start, and can panic once.
+    /// A session starter that records what it was asked to start, and can panic once, refuse, or end each
+    /// session at once with the next scripted result.
     #[derive(Default)]
     struct Fake {
         started: Mutex<Vec<StartRequest>>,
         panic_once: AtomicBool,
+        refuse: Mutex<Option<String>>,
+        script: Mutex<Vec<SessionResult>>,
     }
 
     impl SessionStarter for Fake {
-        fn start(&self, request: StartRequest) {
-            self.started.lock().unwrap().push(request);
+        fn start(&self, request: StartRequest) -> Result<(), String> {
+            self.started.lock().unwrap().push(request.clone());
             if self.panic_once.swap(false, Ordering::SeqCst) {
                 panic!("a starter that goes wrong");
             }
+            if let Some(why) = self.refuse.lock().unwrap().clone() {
+                return Err(why);
+            }
+            let mut script = self.script.lock().unwrap();
+            if !script.is_empty() {
+                request.outcomes.send(SessionOutcome {
+                    project: request.project,
+                    item_id: request.item_id,
+                    lane: request.lane,
+                    result: script.remove(0),
+                });
+            }
+            Ok(())
         }
     }
 
@@ -1124,18 +1393,33 @@ mod tests {
 
     /// A store that answers `list` with `listed` and `claim_next` with `claim` (a value) or, for `None`, an error.
     async fn claim_stub(listed: Value, claim: Option<Value>) -> (String, Asked) {
+        claim_stub_with(listed, claim, Arc::new(AtomicBool::new(false))).await
+    }
+
+    /// `claim_stub` that hands out its claim only once (later claims get nothing), and refuses `release`
+    /// with a 500 while `fail_release` is set.
+    async fn claim_stub_with(listed: Value, claim: Option<Value>, fail_release: Arc<AtomicBool>) -> (String, Asked) {
         use axum::http::StatusCode;
         let asked: Asked = Arc::new(Mutex::new(Vec::new()));
         let seen = asked.clone();
+        let handed = Arc::new(AtomicBool::new(false));
         let app = Router::new().route(
             "/v1/repos/{id}/ops",
             post(move |Json(body): Json<Value>| {
                 let (seen, listed, claim) = (seen.clone(), listed.clone(), claim.clone());
+                let (handed, fail_release) = (handed.clone(), fail_release.clone());
                 async move {
                     let op = body["op"].as_str().unwrap_or("").to_string();
                     seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                     match (op.as_str(), claim) {
+                        ("release" | "park", _) if fail_release.load(Ordering::SeqCst) => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
+                        }
+                        ("release" | "park", _) => (StatusCode::OK, Json(json!({}))),
                         ("claim_next", None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
+                        ("claim_next", Some(_)) if handed.swap(true, Ordering::SeqCst) => {
+                            (StatusCode::OK, Json(json!({ "value": null })))
+                        }
                         ("claim_next", Some(v)) => (StatusCode::OK, Json(json!({ "value": v }))),
                         _ => (StatusCode::OK, Json(json!({ "value": listed }))),
                     }
@@ -1187,7 +1471,8 @@ mod tests {
                 project: "p0".into(),
                 item_id: "a".into(),
                 lane: 1,
-                token: "lease-1".into()
+                token: "lease-1".into(),
+                outcomes: rig.machine.outcome_sender(),
             }]
         );
         assert_eq!(
@@ -1274,5 +1559,162 @@ mod tests {
         assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
         assert!(matches!(rig.machine.pass().await[..], [Step::Ticked { .. }]));
         assert_eq!(ops(&asked).iter().filter(|o| *o == "list").count(), 2);
+    }
+
+    fn done(result: ImplementerOutcome) -> SessionResult {
+        SessionResult::Implementer(result)
+    }
+
+    /// A rig that has claimed "a" on lane 1 with its session ended by `result` (not yet read), the store
+    /// refusing `release` while `fail_release` is set.
+    async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
+        let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), fail_release.clone()).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        fake.script.lock().unwrap().push(result);
+        rig.machine.pass().await;
+        (rig, fake, asked)
+    }
+
+    #[tokio::test]
+    async fn a_finished_session_parks_the_run_in_checking_keeping_its_lane_and_lease() {
+        let (mut rig, _fake, asked) = ended(done(ImplementerOutcome::Finished), &Default::default()).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::Checking);
+        assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+        assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+        assert!(!ops(&asked).contains(&"release".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_session_with_questions_for_a_person_parks_the_item_and_frees_its_lane() {
+        let asking = ImplementerOutcome::Questions {
+            all_already_answered: false,
+        };
+        let (mut rig, _fake, asked) = ended(done(asking), &Default::default()).await;
+        rig.machine.pass().await;
+        let parked = asked.lock().unwrap().iter().find(|(op, _)| op == "park").cloned();
+        assert_eq!(
+            parked.unwrap().1,
+            json!({ "id": "a", "token": "lease-1", "for": "answer" })
+        );
+        assert!(!ops(&asked).contains(&"release".to_string()));
+        assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
+        assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unparked().is_empty());
+        let events = rig.lp(0).events().recent();
+        assert!(events.iter().any(|e| e.kind() == "lane_freed"));
+        let lease = events.iter().rfind(|e| e.kind() == "lease").unwrap().to_value();
+        assert_eq!(
+            (lease["change"].clone(), lease["state"].clone()),
+            (json!("parked"), json!("needs_clarification"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_park_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let asking = ImplementerOutcome::Questions {
+            all_already_answered: false,
+        };
+        let (mut rig, _fake, asked) = ended(done(asking), &fail).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).store.unparked()["a"].0, "lease-1");
+        assert!(rig.lp(0).store.leases().is_empty());
+        assert!(
+            rig.lp(0)
+                .events()
+                .recent()
+                .iter()
+                .all(|e| e.to_value()["change"] != "parked")
+        );
+        fail.store(false, Ordering::SeqCst);
+        rig.machine.pass().await;
+        assert!(rig.lp(0).store.unparked().is_empty());
+        assert_eq!(ops(&asked).iter().filter(|o| *o == "park").count(), 2);
+        assert!(
+            rig.lp(0)
+                .events()
+                .recent()
+                .iter()
+                .any(|e| e.to_value()["change"] == "parked")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_needs_a_human_frees_its_lane_but_keeps_its_lease_as_ts_does() {
+        let questions = ImplementerOutcome::Questions {
+            all_already_answered: true,
+        };
+        let (mut rig, fake, asked) = ended(done(questions), &Default::default()).await;
+        rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::decisions::MAX_REASKS;
+        rig.machine.pass().await;
+        assert!(fake.started.lock().unwrap().len() == 1);
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+        assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+        assert_eq!(
+            rig.lp(0).store.leases()["a"],
+            "lease-1",
+            "still this computer's, not handed out again"
+        );
+        assert!(!ops(&asked).iter().any(|o| o == "release" || o == "park"));
+        let events = rig.lp(0).events().recent();
+        let freed = events.iter().find(|e| e.kind() == "lane_freed").unwrap().to_value();
+        assert_eq!((freed["item"].clone(), freed["lane"].clone()), (json!("a"), json!(1)));
+    }
+
+    #[tokio::test]
+    async fn a_start_the_starter_refuses_releases_the_item_at_once() {
+        let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        *fake.refuse.lock().unwrap() = Some("no room".into());
+        rig.machine.pass().await;
+        assert_eq!(ops(&asked), ["list", "claim_next", "release"]);
+        assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
+        assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unreleased().is_empty());
+        let freed = rig
+            .lp(0)
+            .events()
+            .recent()
+            .iter()
+            .find(|e| e.kind() == "lane_freed")
+            .unwrap()
+            .to_value();
+        assert!(freed["why"].as_str().unwrap().contains("no room"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_session_gives_the_item_back() {
+        let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
+        rig.machine.pass().await;
+        assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
+        assert_eq!(rig.machine.pool.held_lanes().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_release_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let (mut rig, _fake, asked) = ended(SessionResult::Failed("x".into()), &fail).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).store.unreleased()["a"], "lease-1");
+        assert!(rig.lp(0).store.leases().is_empty());
+        assert_eq!(rig.machine.pool.held_lanes().count(), 0, "the lane is free either way");
+        fail.store(false, Ordering::SeqCst);
+        rig.machine.pass().await;
+        assert!(rig.lp(0).store.unreleased().is_empty());
+        let releases = ops(&asked).iter().filter(|o| *o == "release").count();
+        assert_eq!(releases, 2, "once refused, once taken");
+    }
+
+    #[tokio::test]
+    async fn the_unreleased_list_survives_a_restart() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let (mut rig, _fake, _asked) = ended(SessionResult::Failed("x".into()), &fail).await;
+        rig.machine.pass().await;
+        let dir = rig._dir.path().join("0");
+        let reloaded = Store::load(&dir).unwrap();
+        assert_eq!(reloaded.unreleased()["a"], "lease-1");
+        assert!(reloaded.leases().is_empty());
     }
 }

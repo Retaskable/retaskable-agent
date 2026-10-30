@@ -336,6 +336,36 @@ impl Client {
         }
     }
 
+    /// `release` (backlog/06.6-handing-out-work.md; `HostedWork.release` in the TS agent): gives the
+    /// lease `lease` on item `id` back, so the store hands the item out again. A `stale_lease` refusal
+    /// means the lease is gone already, which a caller treats as released.
+    pub async fn release(&self, repo_id: u64, token: Option<&str>, id: &str, lease: &str) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "release", json!({ "id": id, "token": lease }))
+            .await?;
+        Ok(())
+    }
+
+    /// `park` (`HostedWork.park` in the TS agent): lets go of the lease on item `id` while it waits for
+    /// `waits_for` (`answer`, `help`, `ci`, `tryout` or `merge`), staying its owner so it isn't handed out
+    /// to another computer. The item is claimed back by name when the wait ends here.
+    pub async fn park(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        lease: &str,
+        waits_for: &str,
+    ) -> Result<(), BacklogError> {
+        self.send(
+            repo_id,
+            token,
+            "park",
+            json!({ "id": id, "token": lease, "for": waits_for }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// `tryout_add` (backlog/06-data-and-operations.md section 6.2): adds (or, on a repeat, no-ops) one
     /// merged slice's after-merge try-out to the shared queue.
     pub async fn tryout_add(&self, repo_id: u64, token: Option<&str>, add: &TryoutAdd) -> Result<(), BacklogError> {
