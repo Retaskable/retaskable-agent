@@ -82,6 +82,21 @@ impl Store {
         );
     }
 
+    /// The lease token of each item this computer holds in the shared backlog, by item id
+    /// (`state.leases`; the TS agent keeps it on the item record as `hosted.lease`). Empty when
+    /// missing or unreadable.
+    pub fn leases(&self) -> std::collections::BTreeMap<String, String> {
+        self.data
+            .get("leases")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.leases`. Doesn't save on its own; call `save` after.
+    pub fn set_leases(&mut self, leases: &std::collections::BTreeMap<String, String>) {
+        self.data.insert("leases".to_string(), serde_json::json!(leases));
+    }
+
     /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses
     /// (an older agent's file, say) rather than erroring.
     pub fn smoke(&self) -> Option<SmokeState> {

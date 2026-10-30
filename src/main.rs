@@ -294,6 +294,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         paused: &view.paused,
         live: &live,
         guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
+        machine: link::machine_name(env),
+        // `claim_next` is told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
+        environment: link::cloud_url(cfg, env, build)
+            .ok()
+            .and_then(|u| reqwest::Url::parse(&u).ok())
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default(),
+        starter: None,
     });
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
