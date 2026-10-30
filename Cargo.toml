@@ -42,3 +42,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Full (level 2) debug info on this crate's dev/test build is memory-hungry enough in LLVM's
+# whole-module debug-info finalization pass to SIGSEGV on CI's host (ci/woodpecker/pr/ci,
+# compiling retaskable_agent). line-tables-only keeps file:line for panics/backtraces without the
+# much larger per-variable/per-type metadata, and covers both `cargo test` and `cargo clippy`
+# since both build under this profile.
+[profile.dev]
+debug = "line-tables-only"
