@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::{Links, Machine, ProjectLoop, SessionStarter, Shared};
+use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
@@ -16,6 +17,11 @@ use crate::telemetry::{Event, event};
 /// work for every project on this computer (section 7.3): a problem with this computer, not the item, so
 /// hammering the store for more work would likely just fail the same way.
 pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
+
+/// How long a session that found Claude Code signed out (section 7.3's `claudeSignedOut`) blocks new or
+/// resumed Claude session starts on this computer: long enough that a person has time to sign back in
+/// before the next retry, short enough that work resumes soon after they do.
+pub(super) const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(60);
 
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +252,12 @@ impl ProjectLoop {
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) => {
                 run.escalate();
+                // Claude's sign-in running out is this computer's problem, not the item's (section 7.3):
+                // the item still needs a person (it may have left real work behind), but no other item
+                // should start a session here until someone signs back in.
+                if signed_out_text(Some(&why)) {
+                    *shared.claude_signed_out_until = Some(Instant::now() + SIGNED_OUT_PAUSE);
+                }
                 self.moved(pool, &item, ItemState::Implementing, &why, shared.links)
                     .await;
             }
@@ -332,6 +344,7 @@ impl Machine {
                         &mut Shared {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
                         },
                     )
                     .await

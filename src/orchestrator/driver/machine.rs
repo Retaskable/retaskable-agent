@@ -67,12 +67,13 @@ pub struct Links {
     pub environment: String,
 }
 
-/// `links` and the computer-wide claim pause ([`Machine::claim_paused_until`]), borrowed together: what a
-/// project's claim and start methods need from the [`Machine`] besides the lane pool, bundled so threading
-/// them through doesn't grow those methods past clippy's argument limit.
+/// `links` and the computer-wide gates ([`Machine::claim_paused_until`], [`Machine::claude_signed_out_until`]),
+/// borrowed together: what a project's claim and start methods need from the [`Machine`] besides the lane
+/// pool, bundled so threading them through doesn't grow those methods past clippy's argument limit.
 pub struct Shared<'a> {
     pub links: &'a Links,
     pub claim_paused_until: &'a mut Option<Instant>,
+    pub claude_signed_out_until: &'a mut Option<Instant>,
 }
 
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
@@ -122,6 +123,10 @@ pub struct Machine {
     /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
     /// by a restart.
     pub(super) claim_paused_until: Option<Instant>,
+    /// Set when a session ends having found Claude Code signed out ([`super::settle::settle`]): no new or
+    /// resumed Claude session starts on this computer until this time, the TS agent's `claudeSignedOut` gate
+    /// (section 7.3). Nothing but time clears it yet, so each pass just retries after it passes.
+    pub(super) claude_signed_out_until: Option<Instant>,
     pub(super) projects: Vec<ProjectLoop>,
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
@@ -144,6 +149,7 @@ impl Machine {
                 ..Default::default()
             }),
             claim_paused_until: None,
+            claude_signed_out_until: None,
             projects: Vec::new(),
             last_served: None,
             links,
@@ -331,6 +337,7 @@ impl Machine {
                         &mut Shared {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
                         },
                     )
                     .await;
@@ -371,6 +378,7 @@ impl Machine {
                         &mut Shared {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
                         },
                     )
                     .await,
@@ -383,6 +391,7 @@ impl Machine {
                         &mut Shared {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
                         },
                     )
                     .await
