@@ -228,6 +228,21 @@ async fn release_sends_the_item_id_and_its_lease_token() {
 }
 
 #[tokio::test]
+async fn park_sends_the_item_id_its_lease_token_and_what_it_waits_for() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "park");
+        assert_eq!(req["args"], json!({ "id": "a", "token": "lease-1", "for": "answer" }));
+        Json(json!({}))
+    }))
+    .await;
+
+    Client::new(base)
+        .park(1, Some("tok"), "a", "lease-1", "answer")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn release_keeps_the_stores_refusal_code() {
     let base = fake_store(post(|| async {
         (

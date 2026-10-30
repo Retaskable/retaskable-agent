@@ -198,6 +198,9 @@ pub struct ProjectLoop {
     /// Leases given back here that the store hasn't taken yet (item id to token), kept in the state file
     /// and sent again on later passes (the TS agent's `unreleased`).
     unreleased: BTreeMap<String, String>,
+    /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
+    /// waits for, the item's state). Kept in the state file and sent again on later passes.
+    unparked: BTreeMap<String, (String, String, String)>,
     /// Where this project's sessions report their end; replaced with the machine's by [`Machine::add`].
     outcomes: OutcomeSender,
     /// Whether the held leases were matched against the backlog yet (once, on the first pass).
@@ -227,6 +230,7 @@ impl ProjectLoop {
             project,
             leases: store.leases(),
             unreleased: store.unreleased(),
+            unparked: store.unparked(),
             outcomes: OutcomeSender(mpsc::unbounded_channel().0),
             store,
             runs: ProjectRuns::new(),
@@ -334,6 +338,7 @@ impl ProjectLoop {
     fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
+        self.store.set_unparked(&self.unparked);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
         }
@@ -382,6 +387,38 @@ impl ProjectLoop {
     /// TS agent's `lane_freed` (`<state>: <note>`).
     async fn hand_back(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str, links: &Links) {
         self.runs.remove(item_id);
+        self.free_lane(pool, item_id, state, why);
+        if let Some(token) = self.leases.remove(item_id) {
+            self.unreleased.insert(item_id.to_string(), token);
+            self.save_leases();
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(item_id.to_string()),
+                    change: Some("released".into()),
+                    state: Some(state.into()),
+                    ..Default::default()
+                }),
+            );
+            self.flush_owed(links).await;
+        }
+    }
+
+    /// Lets go of the lease while the item waits for `waits_for` (the TS `park`): the lane is freed, the run
+    /// kept, and the lease moved to `unparked` (saved first) and parked at once. The store keeps the item as
+    /// this computer's, so no other computer is handed it.
+    async fn park(&mut self, pool: &mut LanePool, item_id: &str, state: &str, waits_for: &str, links: &Links) {
+        self.free_lane(pool, item_id, state, "waiting");
+        if let Some(token) = self.leases.remove(item_id) {
+            self.unparked
+                .insert(item_id.to_string(), (token, waits_for.into(), state.into()));
+            self.save_leases();
+            self.flush_owed(links).await;
+        }
+    }
+
+    /// Frees the item's lane, if it holds one, and writes `lane_freed` (`<state>: <note>`).
+    fn free_lane(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str) {
         let holder = Holder::Item {
             project: self.id.clone(),
             item: item_id.to_string(),
@@ -399,26 +436,15 @@ impl ProjectLoop {
                 }),
             );
         }
-        if let Some(token) = self.leases.remove(item_id) {
-            self.unreleased.insert(item_id.to_string(), token);
-            self.save_leases();
-            self.events.add_in(
-                &self.id,
-                Event::Lease(event::Lease {
-                    item: Some(item_id.to_string()),
-                    change: Some("released".into()),
-                    state: Some(state.into()),
-                    ..Default::default()
-                }),
-            );
-            self.flush_unreleased(links).await;
-        }
     }
 
-    /// Sends the release of every lease given back and not yet taken by the store. One it refuses (or can't
-    /// reach) stays listed for the next pass; `stale_lease` means it was gone already, so it counts as released.
-    async fn flush_unreleased(&mut self, links: &Links) {
-        let Some(repo) = self.repo.filter(|_| !self.unreleased.is_empty()) else {
+    /// Sends the releases and parks still owed. One the store refuses (or can't reach) stays listed for
+    /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
+    async fn flush_owed(&mut self, links: &Links) {
+        let Some(repo) = self
+            .repo
+            .filter(|_| !self.unreleased.is_empty() || !self.unparked.is_empty())
+        else {
             return;
         };
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
@@ -435,12 +461,34 @@ impl ProjectLoop {
             }
             self.unreleased.remove(&id);
         }
+        for (id, (lease, waits_for, state)) in self.unparked.clone() {
+            match self.client.park(repo, Some(&token), &id, &lease, &waits_for).await {
+                Ok(()) => {}
+                Err(e) if e.code() == Some("stale_lease") => {}
+                Err(e) => {
+                    self.store_error("park", &e);
+                    continue;
+                }
+            }
+            self.unparked.remove(&id);
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(id),
+                    change: Some("parked".into()),
+                    state: Some(state),
+                    ..Default::default()
+                }),
+            );
+        }
         self.save_leases();
     }
 
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code). A run that needs
-    /// a human, or a session that failed, gives its lane and lease back. A finished slice goes on to
-    /// `checking` and stops there, keeping both: checks, CI and review aren't built in the Rust agent yet.
+    /// a human frees its lane and, as the TS agent does for a stop with an implementer session and no PR,
+    /// keeps its lease (`parkFor` parks `needs_human` only with a PR or no session); one with questions for
+    /// a person frees its lane and parks. A failed session gives its lane and lease back. A finished slice goes
+    /// on to `checking` and stops there, keeping both: checks, CI and review aren't built in the Rust agent yet.
     async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, links: &Links) {
         let item = outcome.item_id;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
@@ -465,8 +513,10 @@ impl ProjectLoop {
                                 ..Default::default()
                             }),
                         );
-                        self.hand_back(pool, &item, "needs_human", "the session needs a human", links)
-                            .await
+                        self.free_lane(pool, &item, "needs_human", "the session needs a human");
+                    }
+                    ItemState::NeedsClarification => {
+                        self.park(pool, &item, "needs_clarification", "answer", links).await
                     }
                     ItemState::Checking => tracing::info!(
                         "{}: {item} is coded; checks aren't built in the Rust agent yet, so it waits in checking on lane {}",
@@ -787,7 +837,7 @@ impl Machine {
     /// Sends the releases still owed, then settles the sessions that ended since the last pass.
     async fn settle_outcomes(&mut self) {
         for lp in self.projects.iter_mut().filter(|lp| lp.mode == OrchestratorMode::Claim) {
-            lp.flush_unreleased(&self.links).await;
+            lp.flush_owed(&self.links).await;
         }
         while let Ok(outcome) = self.outcomes.try_recv() {
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
@@ -1362,10 +1412,10 @@ mod tests {
                     let op = body["op"].as_str().unwrap_or("").to_string();
                     seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                     match (op.as_str(), claim) {
-                        ("release", _) if fail_release.load(Ordering::SeqCst) => {
+                        ("release" | "park", _) if fail_release.load(Ordering::SeqCst) => {
                             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
                         }
-                        ("release", _) => (StatusCode::OK, Json(json!({}))),
+                        ("release" | "park", _) => (StatusCode::OK, Json(json!({}))),
                         ("claim_next", None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
                         ("claim_next", Some(_)) if handed.swap(true, Ordering::SeqCst) => {
                             (StatusCode::OK, Json(json!({ "value": null })))
@@ -1537,26 +1587,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_needs_a_human_frees_its_lane_and_releases_the_item() {
+    async fn a_session_with_questions_for_a_person_parks_the_item_and_frees_its_lane() {
+        let asking = ImplementerOutcome::Questions {
+            all_already_answered: false,
+        };
+        let (mut rig, _fake, asked) = ended(done(asking), &Default::default()).await;
+        rig.machine.pass().await;
+        let parked = asked.lock().unwrap().iter().find(|(op, _)| op == "park").cloned();
+        assert_eq!(
+            parked.unwrap().1,
+            json!({ "id": "a", "token": "lease-1", "for": "answer" })
+        );
+        assert!(!ops(&asked).contains(&"release".to_string()));
+        assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
+        assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unparked().is_empty());
+        let events = rig.lp(0).events().recent();
+        assert!(events.iter().any(|e| e.kind() == "lane_freed"));
+        let lease = events.iter().rfind(|e| e.kind() == "lease").unwrap().to_value();
+        assert_eq!(
+            (lease["change"].clone(), lease["state"].clone()),
+            (json!("parked"), json!("needs_clarification"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_park_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let asking = ImplementerOutcome::Questions {
+            all_already_answered: false,
+        };
+        let (mut rig, _fake, asked) = ended(done(asking), &fail).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).store.unparked()["a"].0, "lease-1");
+        assert!(rig.lp(0).store.leases().is_empty());
+        assert!(
+            rig.lp(0)
+                .events()
+                .recent()
+                .iter()
+                .all(|e| e.to_value()["change"] != "parked")
+        );
+        fail.store(false, Ordering::SeqCst);
+        rig.machine.pass().await;
+        assert!(rig.lp(0).store.unparked().is_empty());
+        assert_eq!(ops(&asked).iter().filter(|o| *o == "park").count(), 2);
+        assert!(
+            rig.lp(0)
+                .events()
+                .recent()
+                .iter()
+                .any(|e| e.to_value()["change"] == "parked")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_needs_a_human_frees_its_lane_but_keeps_its_lease_as_ts_does() {
         let questions = ImplementerOutcome::Questions {
             all_already_answered: true,
         };
         let (mut rig, fake, asked) = ended(done(questions), &Default::default()).await;
         rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::decisions::MAX_REASKS;
         rig.machine.pass().await;
-        assert!(fake.started.lock().unwrap().len() == 1 && rig.lp(0).runs.is_empty());
+        assert!(fake.started.lock().unwrap().len() == 1);
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
         assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
-        assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unreleased().is_empty());
-        let release = asked.lock().unwrap().iter().find(|(op, _)| op == "release").cloned();
-        assert_eq!(release.unwrap().1, json!({ "id": "a", "token": "lease-1" }));
+        assert_eq!(
+            rig.lp(0).store.leases()["a"],
+            "lease-1",
+            "still this computer's, not handed out again"
+        );
+        assert!(!ops(&asked).iter().any(|o| o == "release" || o == "park"));
         let events = rig.lp(0).events().recent();
         let freed = events.iter().find(|e| e.kind() == "lane_freed").unwrap().to_value();
         assert_eq!((freed["item"].clone(), freed["lane"].clone()), (json!("a"), json!(1)));
-        let lease = events.iter().rfind(|e| e.kind() == "lease").unwrap().to_value();
-        assert_eq!(
-            (lease["change"].clone(), lease["state"].clone()),
-            (json!("released"), json!("needs_human"))
-        );
     }
 
     #[tokio::test]
