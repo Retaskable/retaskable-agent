@@ -285,16 +285,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = orchestrator::live::LiveHandle::new(mode);
-    orchestrator::driver::spawn_all(
+    orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
         dir,
-        &cfg.projects,
+        projects: &cfg.projects,
         lane_count,
-        &backlog::url(env),
-        &keychain,
-        &view.paused,
-        &live,
-        (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
-    );
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        live: &live,
+        guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
+    });
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
