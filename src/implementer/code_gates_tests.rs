@@ -330,6 +330,22 @@ fn added_lines_lists_each_files_added_line_numbers_a_deleted_file_isnt_there() {
 }
 
 #[test]
+fn added_lines_unescapes_a_c_quoted_path_with_an_embedded_quote() {
+    // git -c core.quotepath=false still quotes and backslash-escapes a path that itself
+    // contains a quote or backslash; only non-ASCII text is left unquoted by that setting.
+    let diff = [
+        "diff --git \"a/foo\\\"bar.ts\" \"b/foo\\\"bar.ts\"",
+        "--- \"a/foo\\\"bar.ts\"",
+        "+++ \"b/foo\\\"bar.ts\"",
+        "@@ -0,0 +1 @@",
+        "+x",
+    ]
+    .join("\n");
+    let got: Vec<String> = added_lines(&diff).into_iter().map(|(f, _)| f).collect();
+    assert_eq!(got, vec!["foo\"bar.ts".to_string()]);
+}
+
+#[test]
 fn oversized_split_points_are_top_level_declarations_near_equal_parts_at_most_3_across_files() {
     let file = |name: &str, n: usize| {
         let text: String = (0..n)

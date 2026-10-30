@@ -42,3 +42,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Full (level 2) debug info on this crate's dev/test build is memory-hungry enough in LLVM's
+# whole-module debug-info finalization pass to SIGSEGV on the CI host (not reproducible locally,
+# not a cache problem — see Woodpecker pipelines 108-141). Line tables alone still give file:line
+# in panics/backtraces.
+[profile.dev]
+debug = "line-tables-only"
