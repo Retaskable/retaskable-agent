@@ -265,26 +265,40 @@ mod tests {
         (PathBuf::from("cat"), vec![file.to_string_lossy().into_owned()])
     }
 
-    /// Runs `spawn_and_read` against a command that prints `out`'s contents, the shared shape
-    /// both "a session printed this" tests below spawn.
-    async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
-        let (bin, args) = print_file_command(out);
+    /// Runs `spawn_and_read` with the shape every test below shares (no envs, prompt "hi", known
+    /// session id "known", and no transcript sink), varying only the command, its reader, and the
+    /// two watchdog timeouts under test.
+    async fn run_spawn(
+        bin: &Path,
+        args: &[String],
+        cwd: &Path,
+        end_after_result: Option<Duration>,
+        quiet: Option<Duration>,
+        reader: Box<dyn super::super::engine::EngineReader>,
+    ) -> SessionResult {
         spawn_and_read(
             SpawnSpec {
-                bin: &bin,
-                args: &args,
+                bin,
+                args,
                 envs: &[],
-                cwd: dir,
+                cwd,
                 prompt: "hi",
                 known_session_id: "known",
-                end_after_result: None,
-                quiet: None,
+                end_after_result,
+                quiet,
             },
-            Box::new(SessionReader::new(false)),
+            reader,
             None,
         )
         .await
         .unwrap()
+    }
+
+    /// Runs `spawn_and_read` against a command that prints `out`'s contents, the shared shape
+    /// both "a session printed this" tests below spawn.
+    async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
+        let (bin, args) = print_file_command(out);
+        run_spawn(&bin, &args, dir, None, None, Box::new(SessionReader::new(false))).await
     }
 
     #[tokio::test]
@@ -337,22 +351,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (bin, args) = silent_command(5);
         let started = std::time::Instant::now();
-        let result = spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir.path(),
-                prompt: "hi",
-                known_session_id: "known",
-                end_after_result: None,
-                quiet: Some(Duration::from_millis(300)),
-            },
-            Box::new(SessionReader::new(false)),
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
             None,
+            Some(Duration::from_millis(300)),
+            Box::new(SessionReader::new(false)),
         )
-        .await
-        .unwrap();
+        .await;
         assert!(
             started.elapsed() < Duration::from_secs(4),
             "it waited out the silent process instead of killing it"
@@ -403,22 +410,15 @@ mod tests {
         // Each individual gap (the startup print, then before the file's contents) is well under
         // the quiet timeout, even though their sum isn't — proving the timer resets per line.
         let (bin, args) = print_wait_then_print_file_command(1, &out);
-        let result = spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir.path(),
-                prompt: "hi",
-                known_session_id: "known",
-                end_after_result: None,
-                quiet: Some(Duration::from_secs(3)),
-            },
-            Box::new(SessionReader::new(false)),
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
             None,
+            Some(Duration::from_secs(3)),
+            Box::new(SessionReader::new(false)),
         )
-        .await
-        .unwrap();
+        .await;
         assert!(result.ok, "{:?}", result.error);
         assert_eq!(result.session_id, "sess-1");
     }
@@ -490,22 +490,15 @@ mod tests {
         .unwrap();
         let (bin, args) = print_then_linger_command(&out);
         let started = std::time::Instant::now();
-        let result = spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir.path(),
-                prompt: "hi",
-                known_session_id: "known",
-                end_after_result: Some(Duration::from_millis(300)),
-                quiet: None,
-            },
-            Box::new(crate::engines::codex::CodexReader::new(json!({"type": "object"}))),
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
+            Some(Duration::from_millis(300)),
             None,
+            Box::new(crate::engines::codex::CodexReader::new(json!({"type": "object"}))),
         )
-        .await
-        .unwrap();
+        .await;
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "it didn't wait out the lingering process"
