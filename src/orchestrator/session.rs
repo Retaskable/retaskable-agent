@@ -4,7 +4,8 @@
 //! Left out: "Where to start" in the prompt, resuming a session (only fresh ones start, and the session
 //! id is not kept in the state file), Claude's sandbox, and the decisions a person already gave (the
 //! claimed item doesn't carry them). The usage-window model tier (section 7.1) is picked for the
-//! implementer ([`crate::tiers::implementer_tier`]); the other roles it covers have no sessions here yet.
+//! implementer ([`crate::tiers::implementer_tier`]), then moved off Opus for a first try
+//! ([`crate::tiers::implementer_model`]); the other roles it covers have no sessions here yet.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,7 +26,7 @@ use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, e
 use crate::env::Env;
 use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
-use crate::tiers::implementer_tier;
+use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
@@ -187,7 +188,8 @@ async fn run(job: Job) -> Result<(SessionResult, Option<Value>)> {
         models,
     } = job;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-    let model = implementer_tier(usage.as_ref(), now, &models).to_string();
+    let tier = implementer_tier(usage.as_ref(), now, &models);
+    let model = implementer_model(tier, &item).to_string();
     let branch = branch_name(&item);
     let (repo, worktrees, base) = (
         PathBuf::from(&project.repo_path),
@@ -355,6 +357,7 @@ mod tests {
             branch: None,
             kind: None,
             milestone: None,
+            reopened: None,
         }
     }
 
@@ -493,10 +496,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_usage_reading_yet_starts_the_implementer_on_opus() {
+    async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
         let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
         let (mut request, mut rx) = request();
         request.usage = None;
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
+        assert_eq!(model, Some("sonnet"), "{args}");
+    }
+
+    #[tokio::test]
+    async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let (mut request, mut rx) = request();
+        request.usage = None;
+        request.item.reopened = Some(crate::backlog::Reopened {
+            notes: "The list is empty".into(),
+            at: "2026-10-29T00:00:00Z".into(),
+            by: None,
+        });
         rig.starter.start(request).unwrap();
         rx.recv().await.unwrap();
         let args = std::fs::read_to_string(&rig.args).unwrap();

@@ -114,6 +114,20 @@ pub struct Item {
     pub kind: Option<String>,
     #[serde(default)]
     pub milestone: Option<String>,
+    /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
+    #[serde(default)]
+    pub reopened: Option<Reopened>,
+}
+
+/// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the
+/// item, until its fix merges.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reopened {
+    pub notes: String,
+    pub at: String,
+    #[serde(default)]
+    pub by: Option<String>,
 }
 
 /// A spec draft as `drafts` answers it (backlog/06.2-operations.md): only what release notes match a

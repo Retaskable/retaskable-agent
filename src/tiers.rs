@@ -8,6 +8,7 @@
 //! `opusAbovePct`.
 use serde_json::Value;
 
+use crate::backlog::Item;
 use crate::config::ModelsConfig;
 
 pub const OPUS: &str = "opus";
@@ -29,6 +30,23 @@ pub fn implementer_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsCo
         Some("allowed_warning") | Some("rejected") => SONNET,
         _ => OPUS,
     }
+}
+
+/// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
+/// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
+/// kept for retries, reopened items and the bigger ones. Only a tier of `opus` is ever moved; a tier
+/// already below it (from a usage reading, section 7.1's table) is returned unchanged.
+///
+/// Not yet: the store's claimed item (backlog/06.1-an-item.md) carries no retry count and no size
+/// (estimates.md section 3.2 — sizing came from the TypeScript agent's own planner, removed before
+/// this rule existed, so an item from the store never has one), so both are read as a first try on
+/// a size below L until the store carries them; only `reopened`, which the store does send, can keep
+/// `opus` here today.
+pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
+    if tier != OPUS {
+        return tier;
+    }
+    if item.reopened.is_some() { OPUS } else { SONNET }
 }
 
 /// `rate_limit_info.unifiedWindows.five_hour`'s percentage still left (newer Claude Code builds),
@@ -116,5 +134,43 @@ mod tests {
     fn an_unrecognized_status_is_treated_as_full() {
         let usage = json!({"status": "something_new", "resetsAt": NOW + 1});
         assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
+    }
+
+    fn item(reopened: bool) -> Item {
+        Item {
+            id: "x".into(),
+            title: "x".into(),
+            status: crate::backlog::ItemStatus::Todo,
+            rank: 1,
+            do_next: false,
+            depends_on: Vec::new(),
+            spec_refs: Vec::new(),
+            slice: 0,
+            remaining: None,
+            pr_url: None,
+            branch: None,
+            kind: None,
+            milestone: None,
+            reopened: reopened.then(|| crate::backlog::Reopened {
+                notes: "n".into(),
+                at: "2026-10-29T00:00:00Z".into(),
+                by: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_first_try_at_a_full_window_runs_on_sonnet_not_opus() {
+        assert_eq!(implementer_model(OPUS, &item(false)), SONNET);
+    }
+
+    #[test]
+    fn a_reopened_item_keeps_opus() {
+        assert_eq!(implementer_model(OPUS, &item(true)), OPUS);
+    }
+
+    #[test]
+    fn a_tier_already_below_opus_is_kept_whatever_the_item_is() {
+        assert_eq!(implementer_model(SONNET, &item(true)), SONNET);
     }
 }
