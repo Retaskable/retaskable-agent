@@ -393,10 +393,7 @@ async fn chore_next_sends_the_skipped_kinds_and_reads_the_answer() {
     }))
     .await;
 
-    let answer = Client::new(base)
-        .chore_next(1, Some("tok"), &["tidy"])
-        .await
-        .unwrap();
+    let answer = Client::new(base).chore_next(1, Some("tok"), &["tidy"]).await.unwrap();
     assert_eq!(
         answer,
         Some(ChoreNextAnswer {

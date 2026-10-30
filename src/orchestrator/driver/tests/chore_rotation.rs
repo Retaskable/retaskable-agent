@@ -100,7 +100,7 @@ async fn claim_chore_starts_the_rotations_next_kind_when_the_project_is_otherwis
     );
     assert_eq!(rig.lp(0).store.chores().next_id, 1);
     assert!(
-        rig.lp(0).leases.get("chore-1").is_none(),
+        !rig.lp(0).leases.contains_key("chore-1"),
         "a chore is local only to the agent, never leased from the backlog"
     );
 }
@@ -214,8 +214,8 @@ async fn a_failed_chore_session_is_dropped_not_handed_back_and_its_lock_released
     let (mut rig, _fake, asked) = chore_ended(SessionResult::Failed("boom".into())).await;
     rig.machine.pass().await;
 
-    assert!(rig.lp(0).runs.get("chore-1").is_none());
-    assert!(rig.lp(0).items.get("chore-1").is_none());
+    assert!(!rig.lp(0).runs.contains_key("chore-1"));
+    assert!(!rig.lp(0).items.contains_key("chore-1"));
     assert_eq!(rig.machine.pool.lane_of("p0", "chore-1"), None);
     assert_ne!(
         rig.lp(0).chore_inflight.as_ref().map(|c| c.item_id.as_str()),
@@ -245,7 +245,7 @@ async fn a_failed_chore_session_is_dropped_not_handed_back_and_its_lock_released
 async fn a_chore_session_that_needs_a_human_is_dropped_too() {
     let (mut rig, _fake, asked) = chore_ended(SessionResult::NeedsHuman("gave up".into())).await;
     rig.machine.pass().await;
-    assert!(rig.lp(0).runs.get("chore-1").is_none());
+    assert!(!rig.lp(0).runs.contains_key("chore-1"));
     assert_eq!(rig.lp(0).store.chores().history.last().unwrap().outcome, "dropped");
     assert!(ops(&asked).contains(&"chore_lock".to_string()));
 }
@@ -257,7 +257,7 @@ async fn a_chore_left_needing_a_person_is_dropped_not_parked() {
     };
     let (mut rig, _fake, asked) = chore_ended(SessionResult::Implementer(asking)).await;
     rig.machine.pass().await;
-    assert!(rig.lp(0).runs.get("chore-1").is_none());
+    assert!(!rig.lp(0).runs.contains_key("chore-1"));
     assert!(
         !ops(&asked).contains(&"park".to_string()),
         "a chore never waits on a person: it's dropped instead"
