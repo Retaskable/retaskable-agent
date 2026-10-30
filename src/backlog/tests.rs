@@ -216,6 +216,32 @@ async fn tryout_result_sends_the_key_outcome_and_notes() {
 }
 
 #[tokio::test]
+async fn release_sends_the_item_id_and_its_lease_token() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "release");
+        assert_eq!(req["args"], json!({ "id": "a", "token": "lease-1" }));
+        Json(json!({}))
+    }))
+    .await;
+
+    Client::new(base).release(1, Some("tok"), "a", "lease-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn release_keeps_the_stores_refusal_code() {
+    let base = fake_store(post(|| async {
+        (
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({ "error": "stale_lease", "message": "gone" })),
+        )
+    }))
+    .await;
+
+    let err = Client::new(base).release(1, Some("tok"), "a", "old").await.unwrap_err();
+    assert_eq!(err.code(), Some("stale_lease"));
+}
+
+#[tokio::test]
 async fn tryout_groups_sends_its_signature_and_groups() {
     let base = fake_store(post(|Json(req): Json<Value>| async move {
         assert_eq!(req["op"], "tryout_groups");

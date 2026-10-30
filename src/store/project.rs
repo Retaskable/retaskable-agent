@@ -97,6 +97,21 @@ impl Store {
         self.data.insert("leases".to_string(), serde_json::json!(leases));
     }
 
+    /// Leases given back here that the store hasn't taken yet, by item id (the TS agent's per-item
+    /// `unreleased`, trimmed to the lease token): sent again on later passes. Empty when missing.
+    pub fn unreleased(&self) -> std::collections::BTreeMap<String, String> {
+        self.data
+            .get("unreleased")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.unreleased`. Doesn't save on its own; call `save` after.
+    pub fn set_unreleased(&mut self, unreleased: &std::collections::BTreeMap<String, String>) {
+        self.data
+            .insert("unreleased".to_string(), serde_json::json!(unreleased));
+    }
+
     /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses
     /// (an older agent's file, say) rather than erroring.
     pub fn smoke(&self) -> Option<SmokeState> {
