@@ -1,25 +1,30 @@
-//! The computer's orchestrator ([`Machine`]): one shared lane pool and every project's state, plus
-//! `spawn_all`, which starts the one task that drives it (section 7's pseudocode).
+//! The computer's orchestrator: one shared lane pool and every project's state, and what starts the
+//! whole loop running (`spawn_all`).
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use super::{Action, EVERY, Links, OrchestratorMode, OutcomeSender, ProjectLoop, SessionOutcome, SessionStarter, Step};
+use super::{OrchestratorMode, OutcomeSender, ProjectLoop, SessionStarter, Step};
 use crate::backlog::{BacklogError, Client, Item};
 use crate::config::ProjectConfig;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
 use crate::link::TokenStore;
+use crate::orchestrator::Action;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
 use crate::telemetry::{Event, event};
 use crate::view::PauseState;
+
+/// How often the loop reads every project's backlog and writes its `tick` events: the TS agent's once a
+/// minute (`MINUTE_MS` in `agent/src/pool.ts`).
+pub const EVERY: Duration = Duration::from_secs(60);
 
 /// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
 /// project's backlog in the store.
@@ -50,6 +55,25 @@ enum Fail {
 struct Read {
     repo: Option<u64>,
     items: Result<Vec<Item>, Fail>,
+}
+
+/// The inputs every pass shares.
+pub struct Links {
+    pub backlog_url: String,
+    pub keychain: Arc<dyn TokenStore>,
+    pub paused: PauseState,
+    /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
+    pub machine: String,
+    pub environment: String,
+}
+
+/// `links` and the computer-wide gates ([`Machine::claim_paused_until`], [`Machine::claude_signed_out_until`]),
+/// borrowed together: what a project's claim and start methods need from the [`Machine`] besides the lane
+/// pool, bundled so threading them through doesn't grow those methods past clippy's argument limit.
+pub struct Shared<'a> {
+    pub links: &'a Links,
+    pub claim_paused_until: &'a mut Option<Instant>,
+    pub claude_signed_out_until: &'a mut Option<Instant>,
 }
 
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
@@ -95,17 +119,25 @@ async fn read(
 /// on the shared lanes (`round_robin::plan`), as the TS agent's `Pool.tick` does.
 pub struct Machine {
     pub(super) pool: LanePool,
+    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no `claim_next` for any
+    /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
+    /// by a restart.
+    pub(super) claim_paused_until: Option<Instant>,
+    /// Set when a session ends having found Claude Code signed out ([`super::settle::settle`]): no new or
+    /// resumed Claude session starts on this computer until this time, the TS agent's `claudeSignedOut` gate
+    /// (section 7.3). Nothing but time clears it yet, so each pass just retries after it passes.
+    pub(super) claude_signed_out_until: Option<Instant>,
     pub(super) projects: Vec<ProjectLoop>,
     /// Index in `projects` of the project served last: the next start goes to the one after it.
-    last_served: Option<usize>,
+    pub(super) last_served: Option<usize>,
     pub(super) links: Links,
     /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// How many sessions may run at once, across every project (`concurrency`).
     pub(super) concurrency: u32,
     /// Sessions report their end here; the receiver is read on each wake.
-    pub(super) outcomes: mpsc::UnboundedReceiver<SessionOutcome>,
-    outcome_sender: OutcomeSender,
+    pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
+    pub(super) outcome_sender: OutcomeSender,
 }
 
 impl Machine {
@@ -116,6 +148,8 @@ impl Machine {
                 lanes: lane_count,
                 ..Default::default()
             }),
+            claim_paused_until: None,
+            claude_signed_out_until: None,
             projects: Vec::new(),
             last_served: None,
             links,
@@ -126,7 +160,7 @@ impl Machine {
         }
     }
 
-    /// The sender every started session gets (inside its [`StartRequest`]).
+    /// The sender every started session gets (inside its [`super::StartRequest`]).
     pub fn outcome_sender(&self) -> OutcomeSender {
         self.outcome_sender.clone()
     }
@@ -297,7 +331,16 @@ impl Machine {
             self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
-                    lp.resume_sessions(&mut self.pool, starter, &self.links).await;
+                    lp.resume_sessions(
+                        &mut self.pool,
+                        starter,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
+                        },
+                    )
+                    .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     if !paused {
                         lp.advance(&self.pool, starter);
@@ -327,9 +370,31 @@ impl Machine {
         for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live) {
             let mut answer = None;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
-                slots = slots.saturating_sub(lp.apply_starts(&actions, &mut self.pool, starter, &self.links).await);
+                slots = slots.saturating_sub(
+                    lp.apply_starts(
+                        &actions,
+                        &mut self.pool,
+                        starter,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
+                        },
+                    )
+                    .await,
+                );
                 answer = Some(if actions.contains(&Action::AskForWork) {
-                    lp.claim(&mut self.pool, &mut slots, &self.links, starter).await
+                    lp.claim(
+                        &mut self.pool,
+                        &mut slots,
+                        starter,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
+                        },
+                    )
+                    .await
                 } else {
                     None
                 });

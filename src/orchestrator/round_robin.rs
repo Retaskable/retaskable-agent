@@ -100,3 +100,173 @@ fn next_start(c: &mut Candidate, pool: &mut LanePool, log: &mut EventLog, rush: 
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item_lifecycle::ItemRun;
+    use crate::lane_pool::PoolRules;
+    use crate::test_support::item_lifecycle_cfg as cfg;
+
+    fn pool(lanes: u32) -> LanePool {
+        LanePool::new(PoolRules {
+            lanes,
+            ..Default::default()
+        })
+    }
+
+    fn queued(ids: &[&str]) -> ProjectRuns {
+        ids.iter().map(|id| (id.to_string(), ItemRun::new())).collect()
+    }
+
+    fn candidate<'a>(id: &'a str, runs: ProjectRuns, cfg: &'a ProjectConfig) -> Candidate<'a> {
+        Candidate {
+            id,
+            paused: false,
+            runs,
+            cfg,
+            rush: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn a_do_next_item_starts_in_the_rush_phase_even_with_no_slots_left() {
+        let cfg = cfg();
+        let mut c = candidate("a", queued(&["x"]), &cfg);
+        c.rush.insert("x".to_string());
+        let mut candidates = [Some(c)];
+        let (actions, last) = plan(&pool(1), None, 0, &mut candidates);
+        assert_eq!(
+            actions[0],
+            vec![Action::StartImplementer {
+                item_id: "x".into(),
+                lane: 1
+            }]
+        );
+        assert_eq!(
+            last, None,
+            "the rush phase isn't a turn, so it doesn't change who was served last"
+        );
+    }
+
+    #[test]
+    fn only_do_next_items_run_in_the_rush_phase_a_plain_queued_item_waits_its_turn() {
+        let cfg = cfg();
+        let mut c = candidate("a", queued(&["x", "y"]), &cfg);
+        c.rush.insert("x".to_string());
+        let mut candidates = [Some(c)];
+        let (actions, _) = plan(&pool(2), None, 0, &mut candidates);
+        assert_eq!(
+            actions[0],
+            vec![Action::StartImplementer {
+                item_id: "x".into(),
+                lane: 1
+            }],
+            "y isn't a do-next item, and there are no turn slots left for it"
+        );
+    }
+
+    #[test]
+    fn turns_go_round_robin_starting_after_whoever_was_served_last() {
+        let cfg = cfg();
+        let mut candidates = [
+            Some(candidate("a", queued(&["a1"]), &cfg)),
+            Some(candidate("b", queued(&["b1"]), &cfg)),
+        ];
+        let (actions, last) = plan(&pool(2), Some(0), 1, &mut candidates);
+        assert_eq!(actions[0], Vec::new(), "a was served last, so b goes this turn");
+        assert_eq!(
+            actions[1],
+            vec![Action::StartImplementer {
+                item_id: "b1".into(),
+                lane: 1
+            }]
+        );
+        assert_eq!(last, Some(1));
+    }
+
+    #[test]
+    fn last_served_wraps_from_the_last_candidate_back_to_the_first() {
+        let cfg = cfg();
+        let mut candidates = [
+            Some(candidate("a", queued(&["a1"]), &cfg)),
+            Some(candidate("b", queued(&["b1"]), &cfg)),
+        ];
+        let (actions, last) = plan(&pool(2), Some(1), 1, &mut candidates);
+        assert_eq!(
+            actions[0],
+            vec![Action::StartImplementer {
+                item_id: "a1".into(),
+                lane: 1
+            }],
+            "b was served last, so a goes next, wrapping back to the front"
+        );
+        assert_eq!(actions[1], Vec::new());
+        assert_eq!(last, Some(0));
+    }
+
+    #[test]
+    fn an_item_past_the_slice_limit_goes_to_needs_human_and_is_not_a_turn() {
+        let cfg = cfg();
+        let mut over_limit = ItemRun::new();
+        over_limit.slice = 10;
+        let mut candidates = [
+            Some(candidate(
+                "a",
+                ProjectRuns::from_iter([("a1".to_string(), over_limit)]),
+                &cfg,
+            )),
+            Some(candidate("b", queued(&["b1"]), &cfg)),
+        ];
+        let (actions, last) = plan(&pool(2), None, 1, &mut candidates);
+        // needs_human is applied on the way (not returned as an action to start), holds no lane,
+        // and spends no turn: the one slot still reaches b.
+        assert_eq!(actions[0], Vec::new());
+        assert_eq!(candidates[0].as_ref().unwrap().runs["a1"].state, ItemState::NeedsHuman);
+        assert_eq!(
+            actions[1],
+            vec![Action::StartImplementer {
+                item_id: "b1".into(),
+                lane: 1
+            }]
+        );
+        assert_eq!(last, Some(1));
+    }
+
+    #[test]
+    fn a_paused_project_takes_no_turn_and_is_never_asked_for_work() {
+        let cfg = cfg();
+        let mut c = candidate("a", queued(&["x"]), &cfg);
+        c.paused = true;
+        let mut candidates = [Some(c)];
+        let (actions, last) = plan(&pool(2), None, 5, &mut candidates);
+        assert_eq!(actions[0], Vec::new());
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn a_free_lane_with_nothing_left_to_start_asks_the_store() {
+        let cfg = cfg();
+        let candidate = candidate("a", ProjectRuns::new(), &cfg);
+        let mut candidates = [Some(candidate)];
+        let (actions, last) = plan(&pool(1), None, 1, &mut candidates);
+        assert_eq!(actions[0], vec![Action::AskForWork]);
+        assert_eq!(last, None, "asking the store isn't a turn either");
+    }
+
+    #[test]
+    fn a_project_not_taking_part_this_pass_is_skipped_but_others_still_take_their_turn() {
+        let cfg = cfg();
+        let mut candidates = [None, Some(candidate("b", queued(&["b1"]), &cfg))];
+        let (actions, last) = plan(&pool(1), None, 1, &mut candidates);
+        assert_eq!(actions[0], Vec::new());
+        assert_eq!(
+            actions[1],
+            vec![Action::StartImplementer {
+                item_id: "b1".into(),
+                lane: 1
+            }]
+        );
+        assert_eq!(last, Some(1));
+    }
+}

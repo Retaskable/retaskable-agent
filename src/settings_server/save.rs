@@ -400,3 +400,6 @@ pub(super) struct SettingsUpdate {
     #[serde(flatten)]
     pub(super) unsupported: HashMap<String, Value>,
 }
+
+#[cfg(test)]
+mod tests;
