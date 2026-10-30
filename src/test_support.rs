@@ -46,6 +46,42 @@ pub(crate) fn no_env(_: &str) -> Option<String> {
     None
 }
 
+/// Writes `contents` as an executable file a test can spawn at once.
+///
+/// On Linux a program can't be started while any process still holds it open for writing
+/// (`ETXTBSY`, "Text file busy"). Another test thread forking at the wrong moment hands the child
+/// our write descriptor until that child execs, so a spawn right after the write sometimes fails.
+/// Once a spawn has succeeded nothing has the file open for writing and nothing will again, so
+/// this runs the file once, retrying while it's busy, and tests can then spawn it freely. The fake
+/// programs tests write are all harmless to run with no arguments.
+pub(crate) fn write_executable(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            match Command::new(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.wait();
+                    return;
+                }
+                Err(e) if e.raw_os_error() == Some(26) && started.elapsed() < std::time::Duration::from_secs(10) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("starting {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
 pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);

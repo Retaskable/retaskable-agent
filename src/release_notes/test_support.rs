@@ -72,12 +72,7 @@ pub(crate) fn write_fake_binary_printing(path: &Path, fixture: &Path) {
     if cfg!(windows) {
         std::fs::write(path, format!("@type \"{}\"\r\n", fixture.display())).unwrap();
     } else {
-        std::fs::write(path, format!("#!/bin/sh\ncat \"{}\"\n", fixture.display())).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_support::write_executable(path, &format!("#!/bin/sh\ncat \"{}\"\n", fixture.display()));
     }
 }
 
