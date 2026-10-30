@@ -61,8 +61,8 @@ Each kind takes a class, fixed in code in Basic:
 Looked up when the session starts, after it gets its slot, in plain code (`modelFor(cfg, kind, readings)`):
 
 1. **The candidates** are the kind's class's models (Basic) or the kind's own models (Expert, section 15.8) that are turned on, whose engine is found and signed in and may start (`canStartOn`: pause, a pending restart and its own limit for every engine; the daily budget, the 5-hour window and `laneScaling` for Claude Code), and whose share left is above the kind's step-down threshold below.
-2. **Most left wins.** The share left is 100 less the used percentage of the engine's tighter window: Claude Code's 5-hour or weekly, whichever has less left (`state.usage`); Cursor's billing period (`cursorUsage.ts`, section 7). Two models on one engine share its reading.
-3. **No reading comes last.** An engine that reports nothing (pi, and Codex until section 15.11 is answered), or whose reading failed, ranks below every engine that has one. Among those, the one with fewer sessions running goes first. A tie goes to the order of the page.
+2. **Most left wins.** The share left is 100 less the used percentage of the engine's tighter window: Claude Code's 5-hour or weekly, whichever has less left (`state.usage`); Codex's tighter of `primary` and `secondary` (section 15.11's reading); Cursor's billing period (`cursorUsage.ts`, section 7). Two models on one engine share its reading.
+3. **No reading comes last.** An engine that reports nothing (pi), or whose reading failed or is older than its window, ranks below every engine that has one. Among those, the one with fewer sessions running goes first. A tie goes to the order of the page.
 4. **Step down** when no candidate is left. Each kind has a chain, with the owner's thresholds (`models.*Pct`, the site's) as its numbers in Basic:
 
    | Kind | Its class while left is at least | Then | Then |
@@ -162,11 +162,11 @@ Read once when the agent starts, noted once (`retiredKeysNote`) and dropped by t
 
 ### 15.11 Open questions
 
-- **Does Codex report what's left?** `codex exec --json` may say it in its token-count events (a used percentage of its 5-hour and weekly windows). Check against the CLI before building; until then Codex has no reading and comes last.
+- **Codex's reading: answered** (2026-10-29, codex-cli 0.165.0, signed in with ChatGPT). `codex exec --json` doesn't print it: its `turn.completed` has only token counts. Codex's own session log does: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread_id>.jsonl` (`CODEX_HOME` is `~/.codex` when unset), found by the `thread_id` of `thread.started`, has a `token_count` event whose `rate_limits` is `{ primary: { used_percent, window_minutes, resets_at }, secondary, plan_type, rate_limit_reached_type }`. Seen on a free plan: `primary` 0% of a 43200-minute (30-day) window, `secondary` null, `plan_type` `free`. After each Codex session `codexUsage()` (`agent/src/engines/codexUsage.ts`) reads the last such event from that file and keeps only those fields, as `state.usage.codex`. Anything unexpected is no reading, never an error. A paid plan's windows (expected: 5 hours and a week) are taken as they come, by `window_minutes`. Before the first Codex session on a computer there is no reading, so Codex comes last until it has run once.
 - **Cursor's reading is only taken while the settings page asks for it** (`CURSOR_PLAN_EVERY_MS`). It would be read every 5 minutes while a kind in use has a Cursor model, and never otherwise.
 - **Cursor's and pi's model lists**: whether `cursor-agent` and `pi` can list the models a person can use, or the catalog has to stand in, as for Codex.
 - **The plan on macOS.** Claude Code keeps its sign-in in the Keychain there (`Claude Code-credentials`), not in the file, and reading it can ask the person to allow it. Until that's checked, a Mac has no reading and gets 2 lanes.
-- **Other engines' plans.** Whether `codex login status` or Cursor's dashboard says the plan, and how many lanes a second subscription adds.
+- **Other engines' plans.** Codex's comes with its reading (`plan_type`: `free` seen; `plus`, `pro` expected) and Cursor's dashboard may say Cursor's. How many lanes a second subscription adds is still open.
 - **A month against 5 hours.** Cursor's period is a month and Claude Code's window 5 hours, so 40% of Cursor's month used beats 70% of Claude's window used, though Claude's resets sooner. Taken as is for now.
 
 ### 15.12 What goes
@@ -175,5 +175,5 @@ Read once when the agent starts, noted once (`retiredKeysNote`) and dropped by t
 
 ### 15.13 Build order and tests
 
-1. **The agent** (about 500 lines): the catalog, `work` and its checks, moving over, `kindFor` and `modelFor`, `laneMayStart`. Tested: the catalog's patterns; most left wins; no reading comes last and fewer sessions breaks its tie; each kind's step-down at each threshold; Escalation for a retry, a reopened item and size L; Haiku only for `writer` on Claude Code; Basic ignores the overrides; each moving-over case; `claudePlan` for 20x, 5x, Pro, free, an API key and a file that doesn't read, and that it keeps no token.
+1. **The agent** (about 500 lines): the catalog, `work` and its checks, moving over, `kindFor` and `modelFor`, `laneMayStart`. Tested: the catalog's patterns; most left wins; no reading comes last and fewer sessions breaks its tie; each kind's step-down at each threshold; Escalation for a retry, a reopened item and size L; Haiku only for `writer` on Claude Code; Basic ignores the overrides; each moving-over case; `claudePlan` for 20x, 5x, Pro, free, an API key and a file that doesn't read, and that it keeps no token; `codexUsage` from a recorded rollout file (free plan, one window), one with two windows, and one with no `token_count`.
 2. **The settings page and the site**: Models in Basic and Expert, `computerRows`, the env forms. Tested: Save writes only what changed; Back to Basic keeps the overrides; a bad step order is refused.
