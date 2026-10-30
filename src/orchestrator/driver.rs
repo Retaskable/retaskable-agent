@@ -145,6 +145,11 @@ pub struct StartRequest {
     pub item: Item,
     /// Where the session reports how it ended; the loop reads it on its next wake.
     pub outcomes: OutcomeSender,
+    /// `None` starts the session fresh in a prepared lane, as a newly claimed item does. `Some` restarts an
+    /// implementer in its existing lane after it ran out of turns (06.2-implementer.md "at most maxTurns
+    /// turns"): the lane is reused as-is, keeping any uncommitted work, and this text is the session's prompt
+    /// verbatim.
+    pub follow_up: Option<String>,
 }
 
 mod report;
@@ -403,6 +408,7 @@ impl ProjectLoop {
                     token: self.leases.get(item_id).cloned().unwrap_or_default(),
                     item,
                     outcomes: self.outcomes.clone(),
+                    follow_up: None,
                 };
                 match starter.start(request) {
                     Ok(()) => {
@@ -832,7 +838,7 @@ impl Machine {
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
         if let Some(starter) = starter.as_deref() {
-            self.settle_outcomes().await;
+            self.settle_outcomes(starter).await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     lp.take_finished(&mut self.pool, &self.links).await;

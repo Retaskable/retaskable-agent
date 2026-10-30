@@ -20,7 +20,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
+use crate::implementer::{ImplementerFailure, ImplementerResult, Session, Start, run_implementer, session_spec};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::{lanes, paths};
 
@@ -83,6 +83,7 @@ impl SessionStarter for ClaudeStarter {
             lane,
             item,
             outcomes,
+            follow_up,
             ..
         } = request;
         let job = Job {
@@ -93,6 +94,7 @@ impl SessionStarter for ClaudeStarter {
             max_turns: self.max_turns,
             lane,
             item,
+            follow_up,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -143,6 +145,9 @@ struct Job {
     max_turns: u32,
     lane: u32,
     item: Item,
+    /// `None` prepares the lane fresh, as a newly claimed item does. `Some` is the picking-up prompt for a
+    /// restart after the lane's prior session ran out of turns: the lane is reused as-is instead.
+    follow_up: Option<String>,
 }
 
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`.
@@ -169,6 +174,7 @@ async fn run(job: Job) -> Result<SessionResult> {
         max_turns,
         lane,
         item,
+        follow_up,
     } = job;
     let branch = branch_name(&item);
     let (repo, worktrees, base) = (
@@ -176,12 +182,23 @@ async fn run(job: Job) -> Result<SessionResult> {
         PathBuf::from(&project.worktrees_dir),
         project.base_branch.clone(),
     );
-    let prepare_branch = branch.clone();
-    let cwd = tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &prepare_branch, &base))
-        .await
-        .context("preparing the lane")?
-        .context("preparing the lane")?;
+    let cwd = match &follow_up {
+        // A restart after running out of turns reuses the lane exactly as it was left: `lanes::prepare`
+        // would hard-reset the branch, discarding the prior session's uncommitted work.
+        Some(_) => lanes::lane_path(&worktrees, lane),
+        None => {
+            let prepare_branch = branch.clone();
+            tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &prepare_branch, &base))
+                .await
+                .context("preparing the lane")?
+                .context("preparing the lane")?
+        }
+    };
 
+    let start = match &follow_up {
+        Some(text) => Start::Continuing { follow_up: text },
+        None => Start::Fresh,
+    };
     let spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,
@@ -202,7 +219,7 @@ async fn run(job: Job) -> Result<SessionResult> {
             local: None,
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
-        Start::Fresh,
+        start,
     )?;
     let SessionStart::Fresh(session_id) = spec.start.clone() else {
         return Err(anyhow!("a fresh session has no id"));
@@ -218,7 +235,8 @@ async fn run(job: Job) -> Result<SessionResult> {
     })
     .await;
     Ok(match answer {
-        Err(e) => SessionResult::Failed(format!("{e:#}")),
+        Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
+        Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
         Ok(r) => classify(&r),
     })
 }
@@ -365,6 +383,7 @@ mod tests {
             token: "t".into(),
             item: item(&[], Some("Wire it.")),
             outcomes,
+            follow_up: None,
         };
         (request, rx)
     }

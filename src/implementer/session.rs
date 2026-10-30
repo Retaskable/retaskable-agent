@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::path::Path;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 
 use crate::backlog::Item;
 use crate::config::{CheckConfig, CodeGates, ProjectType};
@@ -46,6 +46,12 @@ pub enum Start<'a> {
     /// A brand new session: Retaskable names its id itself ([`new_session_id`]) so a later
     /// follow-up can resume it.
     Fresh,
+    /// A fresh session that picks up where one just ran out of turns left off (06.2-implementer.md
+    /// "at most maxTurns turns"): a new id ([`new_session_id`]), never `--resume` (a maxed-out
+    /// session has nothing left to resume into), and `follow_up` as the whole prompt — never the
+    /// template again, so the caller keeps the lane and its branch exactly as that session left
+    /// them rather than resetting onto a new one.
+    Continuing { follow_up: &'a str },
     /// A follow-up to a session already running: `follow_up` plus whatever a person has decided
     /// since (`decisions_text`) is the whole prompt — never the template again.
     Resume {
@@ -95,6 +101,7 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
         }
+        Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),
         Start::Resume {
             session_id,
             follow_up,
@@ -120,24 +127,58 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     })
 }
 
+/// Why [`run_implementer`] didn't get an answer. The orchestrator loop (`src/orchestrator/session.rs`)
+/// treats [`MaxTurns`](Self::MaxTurns) differently from any other failure: it starts a fresh
+/// [`Start::Continuing`] session in the same lane instead of giving the item back to the queue
+/// (06.2-implementer.md "at most maxTurns turns").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImplementerFailure {
+    /// The session ended with `error_max_turns`.
+    MaxTurns,
+    /// Any other failure: hit its budget, signed out, crashed, or finished without the answer
+    /// Retaskable asked for. Described by [`describe_failure`], or this run's own message.
+    Other(String),
+}
+
+impl std::fmt::Display for ImplementerFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImplementerFailure::MaxTurns => write!(f, "ended with error_max_turns"),
+            ImplementerFailure::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ImplementerFailure {}
+
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer. A session that failed, or answered with something other than the result
-/// Retaskable asked for, is an error: unlike a release note, there's no plain fallback for code
-/// that was never written — the caller (not yet built: the orchestrator loop) decides whether to
-/// retry, escalate, or ask a person from there.
-pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> Result<ImplementerResult>
+/// Retaskable asked for, is an [`ImplementerFailure`]: unlike a release note, there's no plain
+/// fallback for code that was never written — the caller (the orchestrator loop) decides whether
+/// to retry, escalate, or ask a person from there.
+pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> Result<ImplementerResult, ImplementerFailure>
 where
     F: FnOnce(SessionSpec) -> Fut,
     Fut: Future<Output = Result<SessionResult>>,
 {
     let budget_usd = spec.budget_usd;
-    let r = run(spec).await?;
+    let r = run(spec)
+        .await
+        .map_err(|e| ImplementerFailure::Other(format!("{e:#}")))?;
     if !r.ok {
-        bail!(describe_failure(&r, budget_usd));
+        return Err(if r.subtype == "error_max_turns" {
+            ImplementerFailure::MaxTurns
+        } else {
+            ImplementerFailure::Other(describe_failure(&r, budget_usd))
+        });
     }
     r.structured
         .and_then(|v| serde_json::from_value::<ImplementerResult>(v).ok())
-        .ok_or_else(|| anyhow!("the session finished but didn't answer with the result Retaskable asked for"))
+        .ok_or_else(|| {
+            ImplementerFailure::Other(
+                "the session finished but didn't answer with the result Retaskable asked for".into(),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -277,5 +318,34 @@ mod tests {
             err.to_string(),
             "the session finished but didn't answer with the result Retaskable asked for"
         );
+    }
+
+    #[tokio::test]
+    async fn run_implementer_reports_running_out_of_turns_distinctly() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let err = run_implementer(spec, |_| async { Ok(result(false, "error_max_turns", None)) })
+            .await
+            .unwrap_err();
+        assert_eq!(err, ImplementerFailure::MaxTurns);
+    }
+
+    #[test]
+    fn a_continuing_session_spec_is_just_the_follow_up_under_a_fresh_id() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+        let spec = session_spec(
+            &session(&it, &[], cwd),
+            Start::Continuing {
+                follow_up: "An earlier session ran out of turns before it finished.",
+            },
+        )
+        .unwrap();
+        assert_eq!(spec.prompt, "An earlier session ran out of turns before it finished.");
+        match spec.start {
+            SessionStart::Fresh(id) => assert_eq!(id.len(), 36),
+            other => panic!("expected a fresh session, got {other:?}"),
+        }
     }
 }

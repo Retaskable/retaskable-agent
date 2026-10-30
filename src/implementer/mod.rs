@@ -13,11 +13,13 @@
 //! push.
 //!
 //! `src/orchestrator/session.rs`'s `ClaudeStarter` is the orchestrator-level step that runs real
-//! sessions with the prompt template, `IMPLEMENTER_RESULT_SCHEMA` and [`run_implementer`]. Still
-//! not wired in there: [`start_files`] (its "Where to start" is passed empty), a context-size-driven
-//! fresh restart, max-turns escalation, resuming a session for any other kind of follow-up, and the
-//! orchestrator-level handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends
-//! all three to a person today), and [`code_gates::run`], which nothing calls yet.
+//! sessions with the prompt template, `IMPLEMENTER_RESULT_SCHEMA` and [`run_implementer`], restarting
+//! a fresh session with [`Start::Continuing`] in the same lane when one ends with
+//! [`ImplementerFailure::MaxTurns`] (escalating to a person on a second one in a row). Still not
+//! wired in there: [`start_files`] (its "Where to start" is passed empty), a context-size-driven
+//! fresh restart, resuming a session for any other kind of follow-up, and the orchestrator-level
+//! handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends all three to a person
+//! today), and [`code_gates::run`], which nothing calls yet.
 pub mod code_gates;
 pub mod model;
 pub mod prompt;
@@ -29,7 +31,7 @@ mod test_support;
 pub use code_gates::GateResult;
 pub use model::{ImplementerResult, Playtest, Question, implementer_result_schema};
 pub use prompt::{Prompt, build_prompt, checks_text, gate_rule};
-pub use session::{Session, Start, new_session_id, run_implementer, session_spec};
+pub use session::{ImplementerFailure, Session, Start, new_session_id, run_implementer, session_spec};
 pub use start_files::{
     MAX_CHANGED_COMMITS, MAX_FILES, SpecChanges, StartFiles, build, item_spec_files, named_code_paths, render,
 };
