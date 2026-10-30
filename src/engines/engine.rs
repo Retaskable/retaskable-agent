@@ -58,8 +58,10 @@ pub struct SessionSpec {
     /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check.
     pub budget_usd: f64,
     pub start: SessionStart,
-    /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist.
-    /// Claude Code's own permission mode doesn't change on this (that's a later slice).
+    /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist,
+    /// Claude Code's `--disallowedTools "Edit Write NotebookEdit"` (`claude.rs`'s
+    /// `READONLY_DISALLOWED_TOOLS`). `--permission-mode` itself never changes — that flag is about
+    /// not prompting for approval, not about which tools are available.
     pub readonly: bool,
     /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
     pub cursor: Option<CursorOptions>,

@@ -44,6 +44,26 @@ fn build_args_never_omits_the_no_deploy_tools() {
 }
 
 #[test]
+fn build_args_disallows_every_write_tool_on_a_readonly_session_but_not_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.readonly = true;
+    let args = build_args(&spec);
+    let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        assert!(args[idx..].contains(&tool.to_string()), "missing {tool} in {args:?}");
+    }
+    assert!(args.contains(&"--permission-mode".to_string()));
+    let idx = args.iter().position(|a| a == "--permission-mode").unwrap();
+    assert_eq!(args[idx + 1], "auto");
+
+    let not_readonly = build_args(&base_spec(dir.path()));
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        assert!(!not_readonly.contains(&tool.to_string()));
+    }
+}
+
+#[test]
 fn build_args_adds_the_budget_cap_only_when_positive() {
     let dir = tempfile::tempdir().unwrap();
     let mut spec = base_spec(dir.path());

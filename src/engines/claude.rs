@@ -37,6 +37,12 @@ const NO_DEPLOY_TOOLS: [&str; 8] = [
     "Bash(*git push*production*)",
 ];
 
+/// 06-sessions.md: "Rows marked read-only are launched with `--disallowedTools "Edit Write
+/// NotebookEdit"`" — the only three tools Claude Code itself can write a file with, on top of
+/// `--permission-mode auto`, which never changes for readonly (that mode is about not prompting,
+/// not about what's allowed).
+const READONLY_DISALLOWED_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+
 /// `claude.ts` `COMPACT_AT`: how many tokens of context Claude Code is told to auto-compact at.
 const COMPACT_AT: &str = "200000";
 
@@ -114,6 +120,11 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
     args.push("--disallowedTools".to_string());
     for tool in NO_DEPLOY_TOOLS {
         args.push(tool.to_string());
+    }
+    if spec.readonly {
+        for tool in READONLY_DISALLOWED_TOOLS {
+            args.push(tool.to_string());
+        }
     }
     if spec.sandbox {
         args.push("--settings".to_string());
