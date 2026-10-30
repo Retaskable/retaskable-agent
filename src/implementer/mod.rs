@@ -10,9 +10,14 @@
 //! answer ([`ImplementerResult`]), [`prompt`] fills `prompts/implementer.md` from an item and a
 //! project's config, [`session`] builds the `SessionSpec` either piece runs with and parses the
 //! result back, and [`code_gates`] is the plain-code check on a lane's committed change before the
-//! push. Nothing calls any of it yet: a context-size-driven fresh restart, max-turns escalation,
-//! and the orchestrator-level handling of `nothing_left`/`person_steps`/`waits_on` all come with
-//! the orchestrator loop and the item's own session-tracking store fields.
+//! push.
+//!
+//! `src/orchestrator/session.rs`'s `ClaudeStarter` is the orchestrator-level step that runs real
+//! sessions with the prompt template, `IMPLEMENTER_RESULT_SCHEMA` and [`run_implementer`]. Still
+//! not wired in there: [`start_files`] (its "Where to start" is passed empty), a context-size-driven
+//! fresh restart, max-turns escalation, resuming a session for any other kind of follow-up, and the
+//! orchestrator-level handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends
+//! all three to a person today), and [`code_gates::run`], which nothing calls yet.
 pub mod code_gates;
 pub mod model;
 pub mod prompt;
