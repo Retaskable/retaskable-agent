@@ -86,6 +86,7 @@
   .lane .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; }
   .lane .what { display: flex; flex-direction: column; gap: 2px; min-height: 64px; }
   .lane .state { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); }
+  .lane .state.busy { color: var(--accent-fg, var(--text2)); }
   .lane .state.free { color: var(--ok-fg); }
   .lane .state.waiting { color: var(--warn-fg); }
   .lane .state.off { color: var(--muted); }
@@ -197,6 +198,7 @@
       <section class="block" aria-labelledby="att-h">
         <h2 class="eyebrow" id="att-h">Needs attention</h2>
         <div class="alerts" id="alerts"></div>
+        <div id="orch"></div>
       </section>
       <section class="block" aria-labelledby="lanes-h">
         <div class="block-head"><h2 id="lanes-h">Lanes</h2><span class="meta">Shared by every project on this computer</span></div>
@@ -475,7 +477,8 @@
     $("meta").replaceChildren(
       "Retaskable ",
       h("span", "mono", hd.version),
-      " · up " + upFor(hd.uptimeSec) + " · " + plural(hd.projects, "project", "projects") + " · " + hd.lanesBusy + " of " + plural(hd.lanesTotal, "lane", "lanes") + " busy"
+      " · up " + upFor(hd.uptimeSec) + " · " + plural(hd.projects, "project", "projects") + " · " + hd.lanesBusy + " of " + plural(hd.lanesTotal, "lane", "lanes") + " busy" +
+        (st.orchestrator ? " · " + st.orchestrator.note : "")
     );
     document.title = hd.name + " · This computer";
   }
@@ -491,14 +494,25 @@
     );
   }
 
+  function renderOrchestrator(st) {
+    var o = st.orchestrator;
+    $("orch").replaceChildren.apply($("orch"), (o ? o.projects : []).map(function (p) {
+      var bits = [p.project + ": " + (p.decision || "waiting for its first tick")];
+      if (p.lastTick) bits.push("last tick " + p.lastTick.replace("T", " ").slice(0, 16) + " UTC");
+      return h("p", "calm", bits.join(" · "));
+    }));
+  }
+
   function renderLanes(st) {
     if (!st.lanes.length) return $("lane-cards").replaceChildren(h("p", "calm", "No lanes yet: Setup has not run."));
     $("lane-cards").replaceChildren.apply(
       $("lane-cards"),
       st.lanes.map(function (l) {
         var chip = h("span", "chip " + l.engine, l.own ? ENGINE_WORD[l.engine] : "Default · " + ENGINE_WORD[l.engine]);
-        var what = h("div", "what", h("span", "state " + l.state, l.stateText), h("span", "item none", "Nothing yet"));
-        return h("article", "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what, h("span", "note", l.note));
+        var what = h("div", "what", h("span", "state " + l.state, l.stateText),
+          l.item ? h("span", "item", l.item.title) : h("span", "item none", "Nothing yet"),
+          l.item ? h("span", "sub", l.item.project) : "");
+        return h("article", l.item ? "lane" : "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what, h("span", "note", l.note));
       })
     );
   }
@@ -558,6 +572,7 @@
     last = st;
     renderHeader(st);
     renderAlerts(st);
+    renderOrchestrator(st);
     renderLanes(st);
     renderEngineRows(st);
     paintLaneHints();

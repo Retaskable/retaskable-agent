@@ -13,6 +13,7 @@
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`), and `activeSessions` /
 //! `concurrency` (no session pool exists yet to count).
 pub mod driver;
+pub mod live;
 
 use std::collections::BTreeMap;
 

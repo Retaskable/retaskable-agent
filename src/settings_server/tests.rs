@@ -1019,6 +1019,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),
+        live: Default::default(),
     });
     let res = get(app, cookie).await;
     assert_eq!(res.status(), StatusCode::OK);
