@@ -29,6 +29,12 @@ steps:
       # for that many at a time, especially for bundle's release build. One rustc/LLVM at a time costs build time,
       # not memory, so cap it instead of hoping the box grows more room.
       CARGO_BUILD_JOBS: "1"
+      # A third proc-macro crate in a row (syn, then serde_derive, then zerofrom-derive) has stack-overflowed deep
+      # in codegen on this host, rustc's own crash report naming this exact fix each time at a higher size (32MiB,
+      # then 64MiB). 256MiB still wasn't enough for zerofrom-derive: it crashed again, later in LLVM codegen this
+      # time, with rustc's own hint asking for exactly double that (512MiB) — so use that value directly rather
+      # than guess at another number.
+      RUST_MIN_STACK: "536870912"
     volumes: &cargo_volumes
       - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
       - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
