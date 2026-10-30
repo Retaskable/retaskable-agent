@@ -21,6 +21,25 @@ const STATE_FILE: &str = "state.json";
 /// unlike the TypeScript `trimState(data, now)`, this takes no `now`.
 const LEGACY_KEYS: [&str; 2] = ["items", "drafts"];
 
+/// One leased item's run, as the TS agent's item record keeps it (`state`, `lane`, `implSessionId`,
+/// `branch`, `slice`): enough to take the item back after a restart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRecord {
+    /// `implementing`, `checking`, `needs_human` or `queued` (`item_lifecycle::ItemState`, snake case).
+    pub state: String,
+    /// The lane it holds; none once it needs a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<u32>,
+    /// The implementer session's id, to resume it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub slice: u32,
+}
+
 /// A project's own on-disk state.
 #[derive(Debug)]
 pub struct Store {
@@ -124,6 +143,20 @@ impl Store {
     /// Replaces `state.unparked`. Doesn't save on its own; call `save` after.
     pub fn set_unparked(&mut self, unparked: &std::collections::BTreeMap<String, (String, String, String)>) {
         self.data.insert("unparked".to_string(), serde_json::json!(unparked));
+    }
+
+    /// What each item in `leases` is doing, by item id (`state.runs`), so a restart can carry on: the
+    /// TS agent keeps these on its item record. Empty when missing or unreadable.
+    pub fn runs(&self) -> std::collections::BTreeMap<String, RunRecord> {
+        self.data
+            .get("runs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.runs`. Doesn't save on its own; call `save` after.
+    pub fn set_runs(&mut self, runs: &std::collections::BTreeMap<String, RunRecord>) {
+        self.data.insert("runs".to_string(), serde_json::json!(runs));
     }
 
     /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses

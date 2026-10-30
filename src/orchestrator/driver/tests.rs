@@ -547,6 +547,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
         agent,
         json!({ "machine": "my-pc", "environment": "retaskable.com", "baseBranch": "" })
     );
+    let session_id = fake.started.lock().unwrap()[0].session_id.clone();
     assert_eq!(
         *fake.started.lock().unwrap(),
         vec![StartRequest {
@@ -555,6 +556,8 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             lane: 1,
             token: "lease-1".into(),
             item: rig.lp(0).items["a"].clone(),
+            session_id,
+            resume: false,
             outcomes: rig.machine.outcome_sender(),
         }]
     );
@@ -831,4 +834,5 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
 }
 
 mod reporting;
+mod restart;
 mod settling;
