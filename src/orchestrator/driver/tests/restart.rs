@@ -124,6 +124,51 @@ async fn a_restart_drops_a_run_the_store_no_longer_shows_as_ours() {
 }
 
 #[tokio::test]
+async fn readopt_keeps_every_items_saved_run_not_just_the_first_one_taken_back() {
+    let listed = json!([item("a", "building"), item("b", "needs_person")]);
+    let (base, _) = claim_stub(listed, Some(Value::Null)).await;
+    let mut rig = rig(3, &[&base]);
+    let fake = rig.go_live();
+    rig.lp(0).leases = [("a".to_string(), "la".to_string()), ("b".to_string(), "lb".to_string())]
+        .into_iter()
+        .collect();
+    rig.lp(0).records = [
+        (
+            "a".to_string(),
+            RunRecord {
+                state: "implementing".into(),
+                lane: Some(1),
+                impl_session_id: Some("sess-a".into()),
+                branch: None,
+                slice: 0,
+            },
+        ),
+        (
+            "b".to_string(),
+            RunRecord {
+                state: "needs_human".into(),
+                lane: None,
+                impl_session_id: None,
+                branch: None,
+                slice: 0,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    rig.machine.pass().await;
+    // "b" sorts after "a" in the BTreeMap readopt iterates: its saved run must survive "a" being
+    // taken back first, not fall back to queued and start a brand new session.
+    assert_eq!(rig.lp(0).runs["b"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.lp(0).store.runs()["b"].state, "needs_human");
+    let started: Vec<_> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
+    assert!(
+        !started.contains(&"b".to_string()),
+        "needs_human starts no session: {started:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_run_is_removed_when_its_lease_is_given_back() {
     let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
