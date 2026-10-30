@@ -198,7 +198,9 @@ impl ProjectLoop {
 
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
-    /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
+    /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it. A chore
+    /// never waits on a person (agent/06.7-chores-never-idle.md): one that fails, needs a human, or asks
+    /// questions is dropped instead ([`drop_chore`](Self::drop_chore)).
     async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, links: &Links) {
         let item = outcome.item_id;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
@@ -208,6 +210,7 @@ impl ProjectLoop {
             );
             return;
         };
+        let chore = run.chore;
         self.events.add_in(
             &self.id,
             Event::SessionEnd(event::SessionEnd {
@@ -220,7 +223,9 @@ impl ProjectLoop {
             }),
         );
         match outcome.result {
+            SessionResult::Failed(why) if chore => self.drop_chore(pool, &item, &why, links).await,
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, links).await,
+            SessionResult::NeedsHuman(why) if chore => self.drop_chore(pool, &item, &why, links).await,
             SessionResult::NeedsHuman(why) => {
                 run.escalate();
                 self.moved(pool, &item, ItemState::Implementing, &why, links).await;
@@ -228,9 +233,22 @@ impl ProjectLoop {
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
                 let note = format!("the session on lane {} ended", outcome.lane);
-                self.moved(pool, &item, ItemState::Implementing, &note, links).await;
+                if chore && matches!(run.state, ItemState::NeedsHuman | ItemState::NeedsClarification) {
+                    self.drop_chore(pool, &item, "a chore never waits on a person: dropped instead", links)
+                        .await;
+                } else {
+                    self.moved(pool, &item, ItemState::Implementing, &note, links).await;
+                }
             }
         }
+    }
+
+    /// Drops a chore rather than let it wait on a person: frees its lane and lease like any hand-back, then
+    /// records it in the local roster's history and releases its store lock ([`finish_chore`](Self::finish_chore)).
+    async fn drop_chore(&mut self, pool: &mut LanePool, item_id: &str, why: &str, links: &Links) {
+        let title = self.items.get(item_id).map(|i| i.title.clone()).unwrap_or_default();
+        self.hand_back(pool, item_id, "dropped", why, links).await;
+        self.finish_chore(item_id, &title, "dropped", links).await;
     }
 
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means

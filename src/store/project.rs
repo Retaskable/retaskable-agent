@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use super::SmokeState;
+use crate::chores::ChoreRoster;
 use crate::fs_util::write_json_atomic;
 
 const STATE_FILE: &str = "state.json";
@@ -166,6 +167,25 @@ impl Store {
             .get("smoke")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
+
+    /// This agent's local chore roster (`state.chores`): code chores never live in the shared
+    /// backlog (agent/06.7-chores-never-idle.md), so their id counter and recent history are kept
+    /// here instead, under a key [`LEGACY_KEYS`] never touches. Its default when missing or
+    /// unreadable starts the counter at 0 with no history.
+    pub fn chores(&self) -> ChoreRoster {
+        self.data
+            .get("chores")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.chores`. Doesn't save on its own; call `save` after.
+    pub fn set_chores(&mut self, roster: &ChoreRoster) {
+        self.data.insert(
+            "chores".to_string(),
+            serde_json::to_value(roster).expect("ChoreRoster always serializes"),
+        );
+    }
 }
 
 fn parse_object(text: &str) -> Result<Map<String, Value>> {
@@ -290,6 +310,30 @@ mod tests {
 
         let reloaded = Store::load(dir.path()).unwrap();
         assert_eq!(reloaded.smoke(), Some(state));
+    }
+
+    #[test]
+    fn set_chores_round_trips_the_roster_and_leaves_legacy_items_alone() {
+        use crate::chores::ChoreRecord;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.chores(), ChoreRoster::default());
+
+        let mut roster = ChoreRoster::default();
+        let id = roster.take_id();
+        roster.finished(ChoreRecord {
+            id,
+            kind: "tidy".to_string(),
+            title: "Tidied the config module".to_string(),
+            outcome: "merged".to_string(),
+            at: "2026-10-29T00:00:00Z".to_string(),
+        });
+        store.set_chores(&roster);
+        store.save().unwrap();
+
+        let reloaded = Store::load(dir.path()).unwrap();
+        assert_eq!(reloaded.chores(), roster);
     }
 
     #[test]

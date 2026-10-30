@@ -76,7 +76,7 @@ pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, 
         let want = Want {
             project: project.to_string(),
             item: item_id.clone(),
-            chore: false,
+            chore: run.chore,
             last_lane: scratch.lane_of(project, item_id),
             fix_queued: false,
         };

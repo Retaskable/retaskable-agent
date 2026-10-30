@@ -2,7 +2,8 @@
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
 //! never falls back to a local list."): `list`, `claim_next`, `drafts`, the after-merge try-out
 //! queue (`tryout_add`, `tryout_result`, `tryout_groups`, `reopen`, docs/specs/agent/06.4-playtests.md)
-//! and a named project-wide lock (`chore_lock`), each read over `POST <store>/v1/repos/<repo id>/ops`
+//! a named project-wide lock (`chore_lock`), and the rotation chore picker (`chore_next`), each read
+//! over `POST <store>/v1/repos/<repo id>/ops`
 //! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2, and backlog/06.6-handing-out-work.md
 //! for `claim_next`), and `auto_link`, this machine's own link to the store
 //! (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A repo's numeric GitHub
@@ -215,6 +216,20 @@ pub struct LockAnswer {
     pub held: bool,
     #[serde(default)]
     pub by: Option<String>,
+}
+
+/// `chore_next`'s answer (agent/06.7-chores-never-idle.md "The store decides what kind next"): the
+/// rotation kind to run, the `chore-<kind>` lock already taken for this caller, and the day's count
+/// and limit so far (reported with the computer's state; this agent itself keeps no rotation or day
+/// count of its own).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChoreNextAnswer {
+    pub kind: String,
+    pub lock: String,
+    pub started: u32,
+    pub per_day: u32,
+    pub resets_at: String,
 }
 
 /// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
@@ -477,6 +492,29 @@ impl Client {
             },
             _ => ReopenAnswer::Kept,
         })
+    }
+
+    /// `chore_next` (agent/06.7-chores-never-idle.md): asks the store for the next rotation chore
+    /// (tidy, tests, bugs, specs), skipping the kinds in `skip` (e.g. ones already in flight
+    /// elsewhere); it answers the kind with that kind's lock already held for this caller, or
+    /// `None` when the day's limit is reached or nothing is left to pick.
+    pub async fn chore_next(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        skip: &[&str],
+    ) -> Result<Option<ChoreNextAnswer>, BacklogError> {
+        let (status, body) = self.send(repo_id, token, "chore_next", json!({ "skip": skip })).await?;
+        match body.value {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => serde_json::from_value(value)
+                .map(Some)
+                .map_err(|e| BacklogError::BadAnswer {
+                    status,
+                    code: None,
+                    message: format!("couldn't read the chore it chose: {e}"),
+                }),
+        }
     }
 
     /// `chore_lock` (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): takes or
