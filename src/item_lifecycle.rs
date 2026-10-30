@@ -68,6 +68,9 @@ pub struct ItemRun {
     /// row: "at most twice before the item needs a human"). A person answering directly
     /// (`clarification_answered`) resets it, since that always comes from a person, not a reask.
     pub reasks: u32,
+    /// Whether this run is a local rotation chore rather than a roadmap item (agent/06.7-chores-never-idle.md):
+    /// `decide` gives it the chore lane first, and `settle` drops it instead of waiting on a person.
+    pub chore: bool,
 }
 
 impl Default for ItemRun {
@@ -87,6 +90,7 @@ impl ItemRun {
             slice: 0,
             extra_slices: 0,
             reasks: 0,
+            chore: false,
         }
     }
 

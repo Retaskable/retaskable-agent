@@ -6,6 +6,7 @@ pub mod api;
 pub mod app_menu;
 pub mod backlog;
 pub mod checks;
+pub mod chores;
 pub mod ci_coverage;
 pub mod commands;
 pub mod config;

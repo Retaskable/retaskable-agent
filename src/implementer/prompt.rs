@@ -105,6 +105,10 @@ pub struct Prompt<'a> {
     pub code_gates: CodeGates,
     /// [`super::start_files::render`]'s output, appended after the rules; empty for none.
     pub where_to_start: &'a str,
+    /// `{{choreKind}}`/`{{choreInstructions}}` (`prompts/chore.md`): empty for a roadmap item's own
+    /// template, which never references them.
+    pub chore_kind: &'a str,
+    pub chore_instructions: &'a str,
 }
 
 /// Fills `prompts/implementer.md` for a fresh session on `p.item`.
@@ -153,6 +157,8 @@ pub fn build_prompt(template: &str, p: &Prompt<'_>) -> Result<String> {
             ("projectUser", words.user.to_string()),
             ("projectExamples", words.examples.to_string()),
             ("projectSteps", words.steps.to_string()),
+            ("choreKind", p.chore_kind.to_string()),
+            ("choreInstructions", p.chore_instructions.to_string()),
         ],
     )?;
     if p.where_to_start.is_empty() {
@@ -232,6 +238,8 @@ mod tests {
                 checks: &checks(),
                 code_gates: CodeGates::default(),
                 where_to_start: "## Where to start\n\n- `src/implementer/mod.rs`",
+                chore_kind: "",
+                chore_instructions: "",
             },
         )
         .unwrap();
@@ -261,9 +269,43 @@ mod tests {
                 checks: &[],
                 code_gates: CodeGates::default(),
                 where_to_start: "",
+                chore_kind: "",
+                chore_instructions: "",
             },
         )
         .unwrap();
         assert_eq!(prompt, "(nothing listed) / (none)");
+    }
+
+    #[test]
+    fn build_prompt_fills_the_chore_template() {
+        let template = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("prompts")
+                .join("chore.md"),
+        )
+        .unwrap();
+        let it = item(&[], None);
+        let prompt = build_prompt(
+            &template,
+            &Prompt {
+                item: &it,
+                project_type: ProjectType::Cli,
+                branch: "retaskable/chore-1-tidy-up-s1",
+                base_branch: "main",
+                github_repo: "Retaskable/retaskable-agent",
+                checks: &checks(),
+                code_gates: CodeGates::default(),
+                where_to_start: "",
+                chore_kind: "tidy",
+                chore_instructions: "Find one coherent area with warnings, dead code or duplication and clean it up.",
+            },
+        )
+        .unwrap();
+        assert!(!prompt.contains("{{"), "no placeholder left unfilled:\n{prompt}");
+        assert!(prompt.contains("tidy"));
+        assert!(prompt.contains("Find one coherent area"));
+        assert!(prompt.contains("retaskable/chore-1-tidy-up-s1"));
+        assert!(prompt.contains("cargo test"));
     }
 }

@@ -25,7 +25,7 @@ pub(crate) use machine::{
     valid_model_name,
 };
 pub use project::{
-    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, Playtests, ProjectConfig, ProjectType,
+    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, OnOff, Playtests, ProjectConfig, ProjectType,
     SandboxMode,
 };
 

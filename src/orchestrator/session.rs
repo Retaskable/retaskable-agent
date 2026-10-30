@@ -13,6 +13,7 @@ use futures_util::future::BoxFuture;
 use super::driver::{SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::steps::StepRequest;
 use crate::backlog::Item;
+use crate::chores::ChoreKind;
 use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
@@ -25,6 +26,13 @@ use crate::telemetry::now_ms;
 use crate::{lanes, paths};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
+const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
+
+/// The chore kind a rotation chore item carries (`chore:<kind>` in [`Item::kind`], set by
+/// `ProjectLoop::claim_chore`), or `None` for a roadmap item.
+fn chore_kind(item: &Item) -> Option<ChoreKind> {
+    ChoreKind::parse(item.kind.as_deref()?.strip_prefix("chore:")?)
+}
 
 /// Runs Claude implementer sessions for the claimed items of the projects it was built with.
 pub struct ClaudeStarter {
@@ -229,9 +237,10 @@ async fn run(job: Job) -> Result<SessionResult> {
         } else {
             Start::Fresh
         };
+        let kind = chore_kind(&item);
         let mut spec = session_spec(
             &Session {
-                template: IMPLEMENTER_TEMPLATE,
+                template: kind.map_or(IMPLEMENTER_TEMPLATE, |_| CHORE_TEMPLATE),
                 project_type: project.project_type,
                 item: &item,
                 branch: &branch,
@@ -240,6 +249,8 @@ async fn run(job: Job) -> Result<SessionResult> {
                 checks: &project.checks,
                 code_gates: project.code_gates,
                 where_to_start: "",
+                chore_kind: kind.map_or("", ChoreKind::as_str),
+                chore_instructions: kind.map_or("", ChoreKind::instructions),
                 cwd: &cwd,
                 model: "sonnet".to_string(),
                 budget_usd: project.budget.implementer_usd,

@@ -380,6 +380,44 @@ async fn lock_dropping_sends_take_false_and_reads_a_lock_held_by_no_one() {
 }
 
 #[tokio::test]
+async fn chore_next_sends_the_skipped_kinds_and_reads_the_answer() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "chore_next");
+        assert_eq!(req["args"]["skip"], json!(["tidy"]));
+        Json(json!({
+            "value": {
+                "kind": "tests", "lock": "lease-1", "started": 2, "perDay": 5,
+                "resetsAt": "2026-10-30T00:00:00Z",
+            }
+        }))
+    }))
+    .await;
+
+    let answer = Client::new(base)
+        .chore_next(1, Some("tok"), &["tidy"])
+        .await
+        .unwrap();
+    assert_eq!(
+        answer,
+        Some(ChoreNextAnswer {
+            kind: "tests".to_string(),
+            lock: "lease-1".to_string(),
+            started: 2,
+            per_day: 5,
+            resets_at: "2026-10-30T00:00:00Z".to_string(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn chore_next_reads_a_null_answer_as_nothing_to_run() {
+    let base = fake_store(post(|| async { Json(json!({ "value": null })) })).await;
+
+    let answer = Client::new(base).chore_next(1, Some("tok"), &[]).await.unwrap();
+    assert_eq!(answer, None);
+}
+
+#[tokio::test]
 async fn a_refusal_is_a_bad_answer_with_its_status_and_message() {
     let base = fake_store(post(|| async {
         (
