@@ -125,6 +125,8 @@ Missing means off. The computer's settings take it as a toggle plus the URL and 
 
 ### 7.4 Stopping and restarting
 
+Under runs ([pieces.md](../pieces.md)), nothing is kept to resume: what this section says about detached implementers, readopting, resuming by session id and keeping a lease is replaced by pieces.md section 3.1. Killing whole process trees still holds.
+
 These are the Rust agent's rules (items `restart-cuts-sessions` and `detached-implementers`), ported from Retaskable.com's agent.md section 4.2, "Restarts don't stop the lanes". The Restart command's own sequence is in section 9.3.
 
 - **Detached implementers (`detached-implementers`).** An implementer on Claude Code runs detached: started on its own, with its prompt read from `<session>.prompt.txt`, writing straight to its transcript, which the agent reads as it grows. Beside it, `<session>.live.json` holds its process id and where this run's lines start. A program behind a shell (a `.cmd` claude) runs piped, as before, since a detached process has no console for it on Windows. A restart neither waits for these nor stops them, and implementers keep starting while one is pending. Quit stops them too, and Quit when idle waits for everything to end.
@@ -136,6 +138,8 @@ These are the Rust agent's rules (items `restart-cuts-sessions` and `detached-im
 - **Only these finish first**, for 2 minutes at most: merges, plan merges, updates and a promote's push.
 
 ### 7.5 What a claim and a give-back send
+
+Under runs ([pieces.md](../pieces.md)), the tags go with `run_take` and there is no give-back: a run ends with `run_done` and its why.
 
 - **Tags go with a claim.** `claim_next`'s `agent` record carries this computer's tags (the found ones with the owner's changes, [agent-settings.md](../agent-settings.md) section 3.1; none when it has none), as Retaskable.com's agent sends them. The store matches them against the project's `settings.needs` (computer-tags.md section 3.3). When a needed tag is missing the answer is `{ waitingFor }`, the missing tags and no item: the agent logs them once, stops asking until `work_available` arrives, and starts nothing. Today `ClaimNextAgent` has no tags, so a project with needs would never hand this agent work.
 - **A give-back says why.** Giving an item back (a release the agent chooses: a computer's own failure, an engine's limit before anything was pushed, a lease with no local record, a `waits_on` result) first sends `report { id, token, note }` with one plain sentence, cut at 4,000 characters, then `release { id, token }`. The note lands in the item's history on every computer's board. The item's details are flushed before the release, while the lease still holds. If the store refuses either, the item keeps the note and the lease and tries again after the next fetch, so a lost release never leaves it claimed here. Own-failure handling (section 7.3) uses the same send with its own wording.
