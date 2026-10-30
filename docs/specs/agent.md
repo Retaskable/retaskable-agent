@@ -9,7 +9,7 @@ Kind: new
 Items:
 - **restart-cuts-sessions**: Cut every session a restart cuts, and every session on Quit, by killing its whole process tree; its runs end interrupted. Depends on: run-loop. Specs: [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.4, [pieces.md](pieces.md) section 4.
 - **resume-fresh-start-rules**: Start a fresh session when a resume can't carry on within one run: transcript too large, out of turns, engine changed. Depends on: piece-build-runs. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2, [pieces.md](pieces.md) section 4.
-- **item-waits-and-finishes**: Handle a session result of waits_on (record the dependency) and nothing_left (the run's nothing_left outcome). Depends on: piece-build-runs. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2, [pieces.md](pieces.md) section 4.
+- **item-waits-and-finishes**: Handle a session result of waits_on (the run fails, the items it needs as why) and nothing_left (the run's nothing_left outcome). Depends on: piece-build-runs. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2, [pieces.md](pieces.md) section 4.
 - **claim-tags-and-give-back-note**: Send this computer's tags with run_take, and why with every failed run. Depends on: run-loop. Specs: [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.5, [pieces.md](pieces.md) section 4.
 - **live-sessions-reporting**: Show the running sessions on the settings page's Now tab and count them in the cloud tick. Depends on: orchestrator-loop, settings-page, cloud-link. Specs: [agent-settings.md](agent-settings.md) section 4.5.
 

@@ -64,11 +64,7 @@ The merge lock and chore locks are `lock_take { name, note? }` and `lock_drop { 
 
 - **restart-cuts-sessions**: the process trees still die whole, and a stop or restart still cuts them; but no item is kept to resume. Its runs end `interrupted` through `runs_drop`, and the store gives them to whoever asks next.
 - **claim-tags-and-give-back-note**: the tags go with `run_take`, as section 3.1 says. There's no give-back: a run ends with `run_done`, its why in its result.
-- **item-waits-and-finishes**: `nothing_left` is the run's `nothing_left` outcome. Its `waits_on` half is unchanged until the source spec gives runs a way to say it (section 5).
+- **item-waits-and-finishes**: `nothing_left` is the run's `nothing_left` outcome. A `waits_on` result ends the run `failed`, with the items it needs as its why (decided 2026-10-30), until runs have an outcome of their own for it.
 - **resume-fresh-start-rules**: only within one run, where a fix round resumes the implementer's session. A new run always starts fresh.
 - **detached-implementers** is dropped: a restart waits for its runs or ends them, so there's nothing to attach to afterwards.
 - **implementer-session**: unchanged, but its brief for a piece is section 3.2's.
-
-## 5. Open questions
-
-- A `waits_on` result has no run outcome yet in the source spec. Until it has, should a run end `failed` with the dependency as its why?
