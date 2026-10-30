@@ -17,6 +17,12 @@ steps:
       # The crates and the build kept on the runner (the repo is trusted for volumes, 2026-10-29), so a run compiles
       # only what changed. Cargo locks the build folder, so two runs at once take turns rather than clash.
       CARGO_TARGET_DIR: /cargo-target
+      # That same target dir's incremental cache is shared by every run, forever: once one entry in it goes bad,
+      # rustc/clippy-driver segfaults reusing it on every run after, with nothing wrong in the source (2026-10-30,
+      # pipelines 111 and 116, a SIGSEGV compiling src/lib.rs that cargo check/clippy/test don't reproduce locally
+      # on an unshared target dir with the same toolchain). Incremental only pays off for a local edit/rebuild loop
+      # anyway, not a one-shot CI run, so it's off here rather than reused.
+      CARGO_INCREMENTAL: "0"
     volumes: &cargo_volumes
       - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
       - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
