@@ -44,7 +44,7 @@ fn five_hour_pct_left(usage: &Value, now_epoch: i64) -> Option<f64> {
 }
 
 /// The old-format `rate_limit_info.status`, when its own `resetsAt` hasn't passed yet.
-fn fresh_status<'a>(usage: &'a Value, now_epoch: i64) -> Option<&'a str> {
+fn fresh_status(usage: &Value, now_epoch: i64) -> Option<&str> {
     let resets_at = usage.get("resetsAt")?.as_i64()?;
     if resets_at <= now_epoch {
         return None;
