@@ -298,7 +298,7 @@ async fn run(job: Job) -> Result<(SessionResult, Option<Value>)> {
         };
         let engine = engine_of(Some(EngineId::Claude))?;
         let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
-        let answer = run_implementer(spec, |spec| async move {
+        let (answer, usage) = run_implementer(spec, |spec| async move {
             run_session(engine, bin, &spec, id, Some(sink), quiet).await
         })
         .await;
@@ -308,7 +308,7 @@ async fn run(job: Job) -> Result<(SessionResult, Option<Value>)> {
             resuming = None;
             continue;
         }
-        return Ok(session_result_for_answer(answer));
+        return Ok(session_result_for_answer(answer, usage));
     }
 }
 
@@ -364,17 +364,23 @@ fn classify(r: &ImplementerResult) -> SessionResult {
 /// ([`SilenceKilled`]) is this computer's problem, so the item goes back to the queue for a healthy
 /// lane to claim again, the same as any other own failure (07-orchestrator-loop.md's watchdog). Any
 /// other error means a session ran and didn't come back clean, so it needs a person instead (it may
-/// have left real work behind, section 7.3). The usage reading travels alongside, unset on any error.
-fn session_result_for_answer(answer: Result<(ImplementerResult, Option<Value>)>) -> (SessionResult, Option<Value>) {
+/// have left real work behind, section 7.3). `usage` travels alongside whatever `answer` is: a
+/// session that failed may still have reported a usage reading before it did, and that reading is
+/// often exactly the one section 7.1's tier needs most.
+fn session_result_for_answer(
+    answer: Result<ImplementerResult>,
+    usage: Option<Value>,
+) -> (SessionResult, Option<Value>) {
     match answer {
-        Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => {
-            (SessionResult::Failed(format!("went quiet and was killed: {e:#}")), None)
-        }
+        Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
+            SessionResult::Failed(format!("went quiet and was killed: {e:#}")),
+            usage,
+        ),
         Err(e) => (
             SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
-            None,
+            usage,
         ),
-        Ok((r, usage)) => (classify(&r), usage),
+        Ok(r) => (classify(&r), usage),
     }
 }
 
@@ -589,14 +595,28 @@ mod tests {
             "ended with killed_for_silence: no output".into(),
         )));
         assert!(
-            matches!(session_result_for_answer(killed).0, SessionResult::Failed(_)),
+            matches!(session_result_for_answer(killed, None).0, SessionResult::Failed(_)),
             "a session the watchdog killed should requeue, not need a person"
         );
         let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
         assert!(matches!(
-            session_result_for_answer(crashed).0,
+            session_result_for_answer(crashed, None).0,
             SessionResult::NeedsHuman(_)
         ));
+    }
+
+    #[test]
+    fn the_usage_reading_travels_with_the_result_whichever_way_the_session_ended() {
+        let usage = serde_json::json!({"status": "rejected", "resetsAt": i64::MAX});
+        let killed = Err(anyhow::Error::new(SilenceKilled(
+            "ended with killed_for_silence".into(),
+        )));
+        assert_eq!(
+            session_result_for_answer(killed, Some(usage.clone())).1,
+            Some(usage.clone())
+        );
+        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
+        assert_eq!(session_result_for_answer(crashed, Some(usage.clone())).1, Some(usage));
     }
 
     #[test]

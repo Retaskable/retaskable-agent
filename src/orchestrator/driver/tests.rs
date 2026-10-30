@@ -733,6 +733,28 @@ async fn a_finished_step_moves_the_item_and_frees_a_lane_it_no_longer_needs() {
 }
 
 #[tokio::test]
+async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
+    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    let usage = json!({"status": "rejected", "resetsAt": i64::MAX});
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::NeedsHuman("the session ended without answering".into()),
+        usage: Some(usage.clone()),
+    });
+    rig.machine.poll().await;
+    assert_eq!(
+        rig.lp(0).store.usage(),
+        Some(usage),
+        "a session that needs a person may still have reported the reading section 7.1 needs most"
+    );
+}
+
+#[tokio::test]
 async fn an_item_gets_one_step_at_a_time() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);

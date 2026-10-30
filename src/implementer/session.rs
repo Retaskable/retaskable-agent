@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::path::Path;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 use crate::backlog::Item;
@@ -137,32 +137,41 @@ impl std::fmt::Display for SilenceKilled {
 impl std::error::Error for SilenceKilled {}
 
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
-/// structured answer, alongside the latest usage reading the session's stream reported (for the
-/// caller to save as `state.usage`, `None` on a session that never sent one). A session that
-/// failed, or answered with something other than the result Retaskable asked for, is an error:
-/// unlike a release note, there's no plain fallback for code that was never written — the caller
-/// (the orchestrator loop) decides whether to retry, escalate, or ask a person from there, except
-/// a watchdog kill ([`SilenceKilled`]), which already says which.
-pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> Result<(ImplementerResult, Option<Value>)>
+/// structured answer, alongside the latest usage reading the session's stream reported — set
+/// whenever the stream sent one, whether the session went on to succeed or fail, since that
+/// reading (section 7.1: "The latest one is kept in `state.usage`") is often exactly the one a
+/// failed session would otherwise throw away (a rejection at the usage limit, say). `None` only
+/// when the session's stream never reported a reading at all, or `run` itself never produced a
+/// result (no session actually ran). A session that failed, or answered with something other than
+/// the result Retaskable asked for, is an error: unlike a release note, there's no plain fallback
+/// for code that was never written — the caller (the orchestrator loop) decides whether to retry,
+/// escalate, or ask a person from there, except a watchdog kill ([`SilenceKilled`]), which already
+/// says which.
+pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> (Result<ImplementerResult>, Option<Value>)
 where
     F: FnOnce(SessionSpec) -> Fut,
     Fut: Future<Output = Result<SessionResult>>,
 {
     let budget_usd = spec.budget_usd;
-    let r = run(spec).await?;
+    let r = match run(spec).await {
+        Ok(r) => r,
+        Err(e) => return (Err(e), None),
+    };
+    let usage = r.usage.clone();
     if !r.ok {
         let why = describe_failure(&r, budget_usd);
-        if r.subtype == "killed_for_silence" {
-            return Err(anyhow::Error::new(SilenceKilled(why)));
-        }
-        bail!(why);
+        let err = if r.subtype == "killed_for_silence" {
+            anyhow::Error::new(SilenceKilled(why))
+        } else {
+            anyhow!(why)
+        };
+        return (Err(err), usage);
     }
-    let usage = r.usage.clone();
     let result = r
         .structured
         .and_then(|v| serde_json::from_value::<ImplementerResult>(v).ok())
-        .ok_or_else(|| anyhow!("the session finished but didn't answer with the result Retaskable asked for"))?;
-    Ok((result, usage))
+        .ok_or_else(|| anyhow!("the session finished but didn't answer with the result Retaskable asked for"));
+    (result, usage)
 }
 
 #[cfg(test)]
@@ -196,6 +205,15 @@ mod tests {
     }
 
     fn result(ok: bool, subtype: &str, structured: Option<serde_json::Value>) -> SessionResult {
+        result_with_usage(ok, subtype, structured, None)
+    }
+
+    fn result_with_usage(
+        ok: bool,
+        subtype: &str,
+        structured: Option<serde_json::Value>,
+        usage: Option<serde_json::Value>,
+    ) -> SessionResult {
         SessionResult {
             ok,
             subtype: subtype.to_string(),
@@ -206,7 +224,7 @@ mod tests {
             limit_hit: false,
             signed_out: false,
             context_tokens: None,
-            usage: None,
+            usage,
             tokens: None,
         }
     }
@@ -277,8 +295,8 @@ mod tests {
                 Some(json!({ "status": "pr_opened", "summary": "Wired the session." })),
             ))
         })
-        .await
-        .unwrap();
+        .await;
+        let r = r.unwrap();
         assert_eq!(r.status, "pr_opened");
         assert_eq!(r.summary, "Wired the session.");
         assert_eq!(usage, None);
@@ -290,19 +308,38 @@ mod tests {
         let cwd = Path::new("repo");
 
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
-        let err = run_implementer(spec, |_| async { Ok(result(false, "error_max_budget_usd", None)) })
-            .await
-            .unwrap_err();
-        assert_eq!(err.to_string(), "hit its $5 budget (spent $1.50)");
+        let (r, usage) = run_implementer(spec, |_| async { Ok(result(false, "error_max_budget_usd", None)) }).await;
+        assert_eq!(r.unwrap_err().to_string(), "hit its $5 budget (spent $1.50)");
+        assert_eq!(usage, None);
 
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
-        let err = run_implementer(spec, |_| async { Ok(result(true, "success", None)) })
-            .await
-            .unwrap_err();
+        let (r, usage) = run_implementer(spec, |_| async { Ok(result(true, "success", None)) }).await;
         assert_eq!(
-            err.to_string(),
+            r.unwrap_err().to_string(),
             "the session finished but didn't answer with the result Retaskable asked for"
         );
+        assert_eq!(usage, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_sessions_rate_limit_info_still_reaches_the_usage_reading() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+        let rate_limit_info = json!({"status": "rejected", "resetsAt": i64::MAX});
+
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let for_closure = rate_limit_info.clone();
+        let (r, usage) = run_implementer(spec, |_| async move {
+            Ok(result_with_usage(
+                false,
+                "error_during_execution",
+                None,
+                Some(for_closure),
+            ))
+        })
+        .await;
+        assert!(r.is_err());
+        assert_eq!(usage, Some(rate_limit_info));
     }
 
     #[tokio::test]
@@ -311,18 +348,26 @@ mod tests {
         let cwd = Path::new("repo");
 
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
-        let err = run_implementer(spec, |_| async { Ok(result(false, "killed_for_silence", None)) })
-            .await
-            .unwrap_err();
+        let rate_limit_info = json!({"status": "allowed_warning", "resetsAt": i64::MAX});
+        let for_closure = rate_limit_info.clone();
+        let (err, usage) = run_implementer(spec, |_| async move {
+            Ok(result_with_usage(false, "killed_for_silence", None, Some(for_closure)))
+        })
+        .await;
+        let err = err.unwrap_err();
         assert!(
             err.downcast_ref::<SilenceKilled>().is_some(),
             "a watchdog kill should be distinguishable from an ordinary failure, got {err:#}"
         );
+        assert_eq!(
+            usage,
+            Some(rate_limit_info),
+            "the watchdog kill still carries whatever the stream reported"
+        );
 
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
-        let err = run_implementer(spec, |_| async { Ok(result(false, "error_during_execution", None)) })
-            .await
-            .unwrap_err();
+        let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "error_during_execution", None)) }).await;
+        let err = err.unwrap_err();
         assert!(err.downcast_ref::<SilenceKilled>().is_none());
     }
 }

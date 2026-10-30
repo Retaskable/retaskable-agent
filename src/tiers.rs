@@ -70,14 +70,14 @@ pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
 }
 
 /// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
-/// its own `resetsAt`, at or before `now`, makes it a full window (`opus`) on its own — the
-/// top-level `status` is never consulted once this window exists, since it can belong to a later,
-/// unrelated reading (`is_five_hour_reading`, settled in `src/orchestrator/driver/settle.rs`).
+/// its own `resetsAt`, missing or at or before `now`, makes it a full window (`opus`) on its own —
+/// the same as a missing `resetsAt` already does for `top_level_pct_left` and `fresh_status` below.
+/// The top-level `status` is never consulted once this window exists, since it can belong to a
+/// later, unrelated reading (`is_five_hour_reading`, settled in `src/orchestrator/driver/settle.rs`).
 fn tier_from_five_hour_window(window: &Value, now_epoch: i64, models: &ModelsConfig) -> &'static str {
-    if let Some(resets_at) = window.get("resetsAt").and_then(Value::as_i64)
-        && resets_at <= now_epoch
-    {
-        return OPUS;
+    match window.get("resetsAt").and_then(Value::as_i64) {
+        Some(resets_at) if resets_at > now_epoch => {}
+        _ => return OPUS,
     }
     match window.get("utilization").and_then(Value::as_f64) {
         Some(utilization) => tier_from_pct_left(pct_left(utilization), models),
@@ -212,6 +212,12 @@ mod tests {
             "resetsAt": NOW + 1,
             "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": NOW - 1}},
         });
+        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
+    }
+
+    #[test]
+    fn a_five_hour_window_with_no_resets_at_is_treated_as_full() {
+        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.9}}});
         assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
     }
 
