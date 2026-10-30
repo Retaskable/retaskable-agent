@@ -75,7 +75,7 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 
 Restart events are the machine's, so they go into every project's log.
 
-**Status in the Rust agent:** the log itself, and opening it at startup, are built (`src/telemetry/events.rs`, `src/runtime.rs`); nothing calls `EventLog::add` / `add_in` (which take an `Event`) beyond the orchestrator's `tick`, `item_state` and `lane_taken` yet. Each event above lands with the backlog item that does the thing it records, the same way `events.rs` was built before anything used it ([agent/11-build-milestones.md](agent/11-build-milestones.md)): `item_state`, `claim`, `lease`, `session_start`/`session_end`, `step_start`/`step_end`, `ci`, `merged` and `error` come with `item-lifecycle` and `implementer-session`; `lane_taken`/`lane_freed`, `tick` and `restart_*` come with `orchestrator-loop`.
+**Status in the Rust agent:** the log itself, and opening it at startup, are built (`src/telemetry/events.rs`, `src/runtime.rs`). Written today: `tick`, `item_state`, `lane_taken`, `lane_freed`, `lease`, `claim`, `store_error`, `session_start`, `session_end`, `step_start` and `error` (`src/orchestrator/driver.rs` and its `settle`/`recovery` submodules, `src/orchestrator.rs`), plus `anomaly` (section 4). Not yet written anywhere: `step_end`, `ci`, `merged` (no CI-polling or merge code exists in this agent yet), `host_call_undefined` and the `restart_*` family (this agent has no restart state machine yet — see section 4's status note). Each lands with the backlog item or piece that does the thing it records, the same way `events.rs` was built before anything used it ([agent/11-build-milestones.md](agent/11-build-milestones.md)).
 
 ## 4. The watchdog
 
@@ -99,6 +99,16 @@ The `lease_idle`, `idle_lanes` and `no_progress` thresholds above are defaults: 
 Nothing fires while the project has no config. `idle_lanes` and `no_progress` don't fire while the project is paused, over its budget or waiting for the usage limit (new work can't start then).
 
 When an anomaly starts the agent prints one line to its console, e.g. `[watchdog 14:05] retaskable: R-12 has held its lease for 12m with nothing running (needs_human)`.
+
+**Status in the Rust agent:** `src/telemetry/watchdog.rs` (the pure rules, called `check`) and `src/telemetry/debounce.rs` (each project's `Telemetry`, timing a finding from when it first holds and writing its `start`/`end` `anomaly` events), wired into `ProjectLoop::record`'s once-a-minute tick (`src/orchestrator/driver.rs`). Five rules are ported — `lease_idle`, `double_lane`, `idle_lanes`, `repeat_error`, `no_progress` — with these differences from the table above, each because the signal the TS rule reads doesn't exist yet in this agent:
+
+- `restart_wait`, `sync_failing` and `duplicate_step` aren't ported. This agent has no restart state machine (no code ever builds a `RestartAsked`/`RestartWaiting`/`RestartExit`/`RestartBack` event), no write path for details, drafts, settings or chat to the store (`sync_failing`'s whole premise), and `step_start`'s `key` and `again` fields, while defined on the type, are never set by `advance()` — so there's no way yet to tell a step started twice from one still open.
+- `lease_idle` only fires for a lease held at `needs_human`; it leaves out `implementing` (the TS rule's session-stale case), since that is already this agent's separate, shipped `tuning.sessionQuietMinutes` watchdog, entirely inside `run_session` (`src/orchestrator/session.rs`) and not surfaced to `ProjectLoop` per item — folding it in here would risk a false positive on a session that is in fact still running. `LEASE_PARK_MS`'s sub-case (a lease held in a state it should have let go of while it waits) isn't ported; there's no `parkFor` equivalent to read yet.
+- `no_progress` is scoped to `checking`, `reviewing` and `merging` for the same reason: `implementing` is left to `sessionQuietMinutes`.
+- `repeat_error`'s "numbers, hashes and ids stripped" is approximated by stripping runs of decimal digits only; a non-numeric hash or id (e.g. a git SHA) does not normalize away.
+- `idle_lanes` and `no_progress` only skip while the project is paused; this agent has no budget or usage-limit signal threaded to the watchdog yet, so those two exclusions from the table above aren't checked.
+- The three `tuning` overrides (`leaseIdleMinutes`, `idleLanesMinutes`, `noProgressMinutes`) are read from `TuningConfig` in `src/config/project.rs`, the same as `sessionQuietMinutes`.
+- Anomalies are logged and printed to the console; sending them on to the snapshot the site reads (section 4.1) is the separate `snapshot-reporting` item's job, not this one's.
 
 ### 4.1 On the screens
 
@@ -131,7 +141,7 @@ The first two commands read `.retaskable/projects/*/events/*.jsonl` only (`agent
 ## 6. Tests
 
 - `agent/src/telemetry/events.test.ts` (and `src/telemetry/events.rs` here): the line format, one file per UTC day, pruning past 14 days, secrets redacted and long texts cut, dropped fields, reading back a window, and every kind round-tripping through `Event` (`src/telemetry/events.rs`, `event.rs`) with an unknown kind still reading.
-- `agent/src/telemetry/watchdog.test.ts`: each rule fires, doesn't fire, and ends.
-- `agent/src/telemetry/telemetry.test.ts`: item state, lane and lease events from the `Store`, steps' `again`, one anomaly event per start and end.
+- `agent/src/telemetry/watchdog.test.ts` (and `src/telemetry/watchdog/tests.rs` here, for the five ported rules): each rule fires, doesn't fire, and ends.
+- `agent/src/telemetry/telemetry.test.ts` (and `src/telemetry/debounce/tests.rs` here): a finding below threshold writes nothing, crossing it writes one `start`, clearing writes one `end` with how long it held, and a zero-threshold finding starts on its first tick.
 - `agent/src/telemetry/report.test.ts` (and `src/telemetry/report/tests.rs` here): both readers on a fixture log.
 - `agent/src/telemetry/startStats.test.ts` (and `src/telemetry/start_stats.rs` here): a transcript's numbers before the first edit, which sessions count, the report's medians.
