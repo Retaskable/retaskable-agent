@@ -1,5 +1,6 @@
 //! This computer's tags (computer-tags.md section 3.1; agent-settings.md section 3): what it
 //! finds for itself, your overrides in `machine.json`, and `RETASKABLE_TAGS` over both.
+use crate::env::Env;
 use std::path::Path;
 use std::process::Command;
 
@@ -136,7 +137,7 @@ pub fn found_tags(f: &MachineFacts) -> Vec<String> {
 }
 
 /// This computer's facts, looked up fresh (including an `nvidia-smi` run) on every call.
-pub fn machine_facts(env: impl Fn(&str) -> Option<String>) -> MachineFacts {
+pub fn machine_facts(env: &Env) -> MachineFacts {
     let os = if cfg!(target_os = "windows") {
         OsKind::Windows
     } else if cfg!(target_os = "macos") {
@@ -149,7 +150,7 @@ pub fn machine_facts(env: impl Fn(&str) -> Option<String>) -> MachineFacts {
     let arch = std::env::consts::ARCH.to_string();
     let nvidia = nvidia_smi_lists_a_gpu();
     let dockerenv = Path::new("/.dockerenv").exists();
-    let display_env = env("DISPLAY").is_some() || env("WAYLAND_DISPLAY").is_some();
+    let display_env = env.get("DISPLAY").is_some() || env.get("WAYLAND_DISPLAY").is_some();
     MachineFacts {
         os,
         arch,
@@ -168,25 +169,20 @@ fn nvidia_smi_lists_a_gpu() -> bool {
 
 /// `RETASKABLE_TAGS`: comma between, instead of the found ones and your changes. A value that
 /// cleans to nothing still counts as set (an explicit empty list).
-pub fn tags_from_env(env: impl Fn(&str) -> Option<String>) -> Option<Vec<String>> {
-    let raw = env("RETASKABLE_TAGS")?;
+pub fn tags_from_env(env: &Env) -> Option<Vec<String>> {
+    let raw = env.get("RETASKABLE_TAGS")?;
     let parts: Vec<Value> = raw.split(',').map(|s| Value::String(s.to_string())).collect();
     Some(clean_tags(Value::Array(parts)))
 }
 
 /// The tags the agent runs with: the environment's list when set, otherwise found with overrides.
-pub fn effective_tags(
-    found: &[String],
-    overrides: Option<&TagOverrides>,
-    env: impl Fn(&str) -> Option<String>,
-) -> Vec<String> {
+pub fn effective_tags(found: &[String], overrides: Option<&TagOverrides>, env: &Env) -> Vec<String> {
     tags_from_env(env).unwrap_or_else(|| computer_tags(found, overrides))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::no_env;
 
     #[test]
     fn clean_tags_lowercases_dedupes_and_drops_junk() {
@@ -263,10 +259,10 @@ mod tests {
             added: vec!["games".into()],
             removed: vec![],
         };
-        let env = |k: &str| (k == "RETASKABLE_TAGS").then(|| "linux,web".to_string());
-        assert_eq!(effective_tags(&found, Some(&over), env), vec!["linux", "web"]);
+        let env = Env::from_pairs([("RETASKABLE_TAGS", "linux,web")]);
+        assert_eq!(effective_tags(&found, Some(&over), &env), vec!["linux", "web"]);
         assert_eq!(
-            effective_tags(&found, Some(&over), no_env),
+            effective_tags(&found, Some(&over), &Env::empty()),
             vec!["windows", "gpu", "games"]
         );
     }
@@ -274,7 +270,7 @@ mod tests {
     #[test]
     fn retaskable_tags_empty_is_none_of_the_found_ones() {
         let found = vec!["windows".into()];
-        let env = |k: &str| (k == "RETASKABLE_TAGS").then(|| "not a tag!!".to_string());
-        assert_eq!(effective_tags(&found, None, env), Vec::<String>::new());
+        let env = Env::from_pairs([("RETASKABLE_TAGS", "not a tag!!")]);
+        assert_eq!(effective_tags(&found, None, &env), Vec::<String>::new());
     }
 }

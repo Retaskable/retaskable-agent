@@ -255,37 +255,37 @@ fn cfg(url: Option<&str>) -> ConfigFile {
 
 #[test]
 fn the_cloud_url_is_the_env_then_the_config_then_production() {
-    let none = |_: &str| None;
-    assert_eq!(cloud_url(&cfg(None), none, None).unwrap(), "https://retaskable.com");
+    let none = Env::empty();
+    assert_eq!(cloud_url(&cfg(None), &none, None).unwrap(), "https://retaskable.com");
     assert_eq!(
-        cloud_url(&cfg(Some(" https://a.example/ ")), none, None).unwrap(),
+        cloud_url(&cfg(Some(" https://a.example/ ")), &none, None).unwrap(),
         "https://a.example"
     );
-    let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787/".to_string());
+    let env = Env::from_pairs([("RETASKABLE_CLOUD_URL", "http://localhost:8787/")]);
     assert_eq!(
-        cloud_url(&cfg(Some("https://a.example")), env, None).unwrap(),
+        cloud_url(&cfg(Some("https://a.example")), &env, None).unwrap(),
         "http://localhost:8787"
     );
-    assert!(cloud_url(&cfg(Some("ftp://a.example")), none, None).is_err());
-    assert!(cloud_url(&cfg(Some("not a url")), none, None).is_err());
+    assert!(cloud_url(&cfg(Some("ftp://a.example")), &none, None).is_err());
+    assert!(cloud_url(&cfg(Some("not a url")), &none, None).is_err());
 }
 
 #[test]
 fn every_environment_is_a_cloud_and_a_custom_url_is_added_last() {
-    let none = |_: &str| None;
+    let none = Env::empty();
     let three = [
         "https://retaskable.com",
         "https://staging.retaskable.com",
         "http://localhost:8787",
     ];
-    assert_eq!(cloud_urls(&cfg(None), none, None), three);
+    assert_eq!(cloud_urls(&cfg(None), &none, None), three);
     assert_eq!(
-        cloud_urls(&cfg(Some("https://staging.retaskable.com")), none, None),
+        cloud_urls(&cfg(Some("https://staging.retaskable.com")), &none, None),
         three
     );
-    assert_eq!(cloud_urls(&cfg(Some("bad")), none, None), three);
+    assert_eq!(cloud_urls(&cfg(Some("bad")), &none, None), three);
     assert_eq!(
-        cloud_urls(&cfg(Some("https://a.example")), none, None)[3],
+        cloud_urls(&cfg(Some("https://a.example")), &none, None)[3],
         "https://a.example"
     );
     assert_eq!(environment_name("http://localhost:8787/"), "Local");
@@ -306,36 +306,36 @@ fn build(environment: crate::release::Environment) -> crate::release::Build {
 #[test]
 fn a_release_build_s_cloud_is_fixed_to_build_json_s_environment() {
     use crate::release::Environment;
-    let none = |_: &str| None;
-    let env = |k: &str| (k == "RETASKABLE_CLOUD_URL").then(|| "http://localhost:8787/".to_string());
+    let none = Env::empty();
+    let env = Env::from_pairs([("RETASKABLE_CLOUD_URL", "http://localhost:8787/")]);
     let staging = build(Environment::Staging);
     // Ignores cloud.url and RETASKABLE_CLOUD_URL entirely.
     assert_eq!(
-        cloud_url(&cfg(Some("https://a.example")), env, Some(&staging)).unwrap(),
+        cloud_url(&cfg(Some("https://a.example")), &env, Some(&staging)).unwrap(),
         "https://staging.retaskable.com"
     );
     assert_eq!(
-        cloud_urls(&cfg(Some("https://a.example")), none, Some(&staging)),
+        cloud_urls(&cfg(Some("https://a.example")), &none, Some(&staging)),
         ["https://staging.retaskable.com"]
     );
     let production = build(Environment::Production);
     assert_eq!(
-        cloud_url(&cfg(None), none, Some(&production)).unwrap(),
+        cloud_url(&cfg(None), &none, Some(&production)).unwrap(),
         "https://retaskable.com"
     );
     assert_eq!(
-        cloud_urls(&cfg(None), none, Some(&production)),
+        cloud_urls(&cfg(None), &none, Some(&production)),
         ["https://retaskable.com"]
     );
 }
 
 #[test]
 fn the_machine_is_named_by_retaskable_machine_else_the_hostname() {
-    let env = |k: &str| (k == "RETASKABLE_MACHINE").then(|| " jcnash-docker ".to_string());
-    assert_eq!(machine_name(env), "jcnash-docker");
-    assert!(!machine_name(|_| None).is_empty());
+    let env = Env::from_pairs([("RETASKABLE_MACHINE", " jcnash-docker ")]);
+    assert_eq!(machine_name(&env), "jcnash-docker");
+    assert!(!machine_name(&Env::empty()).is_empty());
     let long = "x".repeat(150);
-    let info = machine_info(|k| (k == "RETASKABLE_MACHINE").then(|| long.clone()), "9.9.9");
+    let info = machine_info(&Env::from_pairs([("RETASKABLE_MACHINE", long)]), "9.9.9");
     assert_eq!(info["machine"].as_str().unwrap().len(), 100);
     assert_eq!(info["agentVersion"], "9.9.9");
 }

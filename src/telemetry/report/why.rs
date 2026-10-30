@@ -1,12 +1,11 @@
 //! `retaskable why -- <item>`: one item's history, its anomalies, its sessions.
 use std::collections::HashMap;
 
-use serde_json::Value;
-
+use crate::telemetry::event::{Entry, Event};
 use crate::telemetry::events::parse_iso_ms;
 
 use super::describe::describe;
-use super::{GAP_SHOWN_MS, ms_of, span, str_of, truthy, usd_of};
+use super::{GAP_SHOWN_MS, span};
 
 pub(super) struct AnomalySpan {
     rule: String,
@@ -16,24 +15,24 @@ pub(super) struct AnomalySpan {
 }
 
 /// Anomaly start and end events paired by id: each with how long it lasted, or open.
-pub(super) fn anomaly_spans(events: &[Value]) -> Vec<AnomalySpan> {
+pub(super) fn anomaly_spans(events: &[Entry]) -> Vec<AnomalySpan> {
     let mut out: Vec<AnomalySpan> = Vec::new();
     let mut open: HashMap<String, usize> = HashMap::new();
     for e in events {
-        if e.get("kind").and_then(Value::as_str) != Some("anomaly") {
+        let Some(Event::Anomaly(a)) = e.event() else {
             continue;
-        }
-        let id = str_of(e.get("id"));
-        if e.get("phase").and_then(Value::as_str) == Some("start") {
+        };
+        let id = a.id.clone().unwrap_or_default();
+        if a.phase.as_deref() == Some("start") {
             out.push(AnomalySpan {
-                rule: str_of(e.get("rule")),
-                text: str_of(e.get("text")),
-                start: str_of(e.get("at")),
+                rule: a.rule.clone().unwrap_or_default(),
+                text: a.text.clone().unwrap_or_default(),
+                start: e.at.clone(),
                 end: None,
             });
             open.insert(id, out.len() - 1);
         } else if let Some(idx) = open.remove(&id) {
-            out[idx].end = Some(str_of(e.get("at")));
+            out[idx].end = Some(e.at.clone());
         }
     }
     out
@@ -57,24 +56,20 @@ pub(super) fn anomaly_line(a: &AnomalySpan, with_day: bool) -> String {
 
 /// `retaskable why -- <item>`: the item's events in order with long gaps marked, its anomalies
 /// and its sessions.
-pub fn why_text(events: &[Value], item: &str) -> String {
-    let mine: Vec<Value> = events
-        .iter()
-        .filter(|e| e.get("item").and_then(Value::as_str) == Some(item))
-        .cloned()
-        .collect();
+pub fn why_text(events: &[Entry], item: &str) -> String {
+    let mine: Vec<Entry> = events.iter().filter(|e| e.item() == Some(item)).cloned().collect();
     if mine.is_empty() {
         return format!("Nothing in the event log for {item}.");
     }
     let mut projects: Vec<String> = Vec::new();
     for e in &mine {
-        let p = str_of(e.get("project"));
+        let p = e.project.clone().unwrap_or_default();
         if !projects.contains(&p) {
             projects.push(p);
         }
     }
-    let first_at = str_of(mine[0].get("at"));
-    let last_at = str_of(mine.last().unwrap().get("at"));
+    let first_at = mine[0].at.clone();
+    let last_at = mine.last().unwrap().at.clone();
     let mut lines = vec![
         format!(
             "{item} ({}): {} events, {} {} to {} {} UTC",
@@ -90,7 +85,7 @@ pub fn why_text(events: &[Value], item: &str) -> String {
     let mut last_day = String::new();
     let mut last: i64 = 0;
     for e in &mine {
-        let at = str_of(e.get("at"));
+        let at = e.at.clone();
         let t = parse_iso_ms(&at).unwrap_or(0);
         if last != 0 && t - last >= GAP_SHOWN_MS {
             lines.push(format!("            … nothing for {}", span((t - last) as f64)));
@@ -100,12 +95,7 @@ pub fn why_text(events: &[Value], item: &str) -> String {
             last_day = d.clone();
             lines.push(last_day.clone());
         }
-        lines.push(format!(
-            "  {}  {:<13} {}",
-            &at[11..19],
-            str_of(e.get("kind")),
-            describe(e)
-        ));
+        lines.push(format!("  {}  {:<13} {}", &at[11..19], e.kind(), describe(e)));
         last = t;
     }
     let anomalies = anomaly_spans(&mine);
@@ -116,34 +106,37 @@ pub fn why_text(events: &[Value], item: &str) -> String {
     } else {
         lines.extend(anomalies.iter().map(|a| anomaly_line(a, true)));
     }
-    let sessions: Vec<&Value> = mine
+    let sessions: Vec<(&Entry, &crate::telemetry::event::SessionEnd)> = mine
         .iter()
-        .filter(|e| e.get("kind").and_then(Value::as_str) == Some("session_end"))
+        .filter_map(|e| match e.event() {
+            Some(Event::SessionEnd(s)) => Some((e, s)),
+            _ => None,
+        })
         .collect();
     lines.push(String::new());
     lines.push("Sessions".to_string());
     if sessions.is_empty() {
         lines.push("  none".to_string());
     } else {
-        for e in sessions {
-            let at = str_of(e.get("at"));
-            let role = if truthy(e.get("scout")) {
-                format!("{} {}", str_of(e.get("role")), str_of(e.get("scout")))
-            } else {
-                str_of(e.get("role"))
+        for (e, s) in sessions {
+            let at = &e.at;
+            let role = s.role.clone().unwrap_or_default();
+            let role = match s.scout.as_deref() {
+                Some(scout) if !scout.is_empty() => format!("{role} {scout}"),
+                _ => role,
             };
-            let outcome = if truthy(e.get("ok")) {
+            let outcome = if s.ok == Some(true) {
                 "ok".to_string()
             } else {
-                str_of(e.get("subtype"))
+                s.subtype.clone().unwrap_or_default()
             };
             lines.push(format!(
                 "  {} {}  {role:<18} {:<7} {:>7}  {:>6}  {outcome}",
                 &at[0..10],
                 &at[11..16],
-                str_of(e.get("model")),
-                span(ms_of(e.get("ms"))),
-                usd_of(e.get("cost")),
+                s.model.as_deref().unwrap_or(""),
+                span(s.ms.unwrap_or(0.0)),
+                s.cost.map(|n| format!("${n:.2}")).unwrap_or_default(),
             ));
         }
     }

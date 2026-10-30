@@ -2,6 +2,7 @@
 //! versions (docs/specs/agent-settings.md). `port`, `poll_interval_sec`, `lanes`, `local_model`, `engine_choice`
 //! and `cursor_models` read each computer-only setting's environment variable over the file (section 3.2,
 //! `withEnvSettings`).
+use crate::env::Env;
 use std::fmt;
 
 use serde::Deserialize;
@@ -367,8 +368,8 @@ pub(crate) fn port_in_range(p: u16) -> bool {
 /// 3.13: a Staging release build's own 4701, [`DEFAULT_PORT`] otherwise, from
 /// `release::default_port`), used only once neither `RETASKABLE_PORT` nor the file's own `port`
 /// says a valid one.
-pub fn port(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>, default: u16) -> u16 {
-    env("RETASKABLE_PORT")
+pub fn port(cfg: &ConfigFile, env: &Env, default: u16) -> u16 {
+    env.get("RETASKABLE_PORT")
         .and_then(|p| p.parse().ok())
         .filter(|&p| port_in_range(p))
         .or_else(|| cfg.machine.port.filter(|&p| port_in_range(p)))
@@ -387,16 +388,16 @@ pub(crate) fn poll_interval_in_range(n: u32) -> bool {
 // the same as every other field `load` reads.
 
 /// "How often it checks": `RETASKABLE_POLL_SEC`, 2 to 3600 seconds.
-pub fn poll_interval_sec(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
-    env("RETASKABLE_POLL_SEC")
+pub fn poll_interval_sec(cfg: &ConfigFile, env: &Env) -> u32 {
+    env.get("RETASKABLE_POLL_SEC")
         .and_then(|v| v.parse().ok())
         .filter(|&n| poll_interval_in_range(n))
         .unwrap_or(cfg.machine.poll_interval_sec)
 }
 
 /// "Lanes": `RETASKABLE_LANES`, a whole number from 1 to 64.
-pub fn lanes(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
-    env("RETASKABLE_LANES")
+pub fn lanes(cfg: &ConfigFile, env: &Env) -> u32 {
+    env.get("RETASKABLE_LANES")
         .and_then(|v| v.parse().ok())
         .filter(|&n| (1..=64).contains(&n))
         .unwrap_or(cfg.machine.lanes)
@@ -405,9 +406,9 @@ pub fn lanes(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> u32 {
 /// "Local model": `RETASKABLE_LOCAL_MODEL` turns it on with that model's name, or off with
 /// `off`, `false`, `0` or `no`; `RETASKABLE_LOCAL_URL` sets its address. Each is independent of
 /// the other and of the file's own value.
-pub fn local_model(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> LocalModelConfig {
+pub fn local_model(cfg: &ConfigFile, env: &Env) -> LocalModelConfig {
     let mut result = cfg.machine.local.clone();
-    if let Some(raw) = env("RETASKABLE_LOCAL_MODEL") {
+    if let Some(raw) = env.get("RETASKABLE_LOCAL_MODEL") {
         if is_local_model_off(&raw) {
             result.enabled = false;
         } else if valid_model_name(&raw) {
@@ -415,7 +416,7 @@ pub fn local_model(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> Lo
             result.model = raw;
         }
     }
-    if let Some(url) = env("RETASKABLE_LOCAL_URL")
+    if let Some(url) = env.get("RETASKABLE_LOCAL_URL")
         && valid_local_url(&url)
     {
         result.base_url = url;
@@ -449,8 +450,8 @@ pub(crate) fn valid_local_url(s: &str) -> bool {
 /// names, the same way the TypeScript agent's `withEnvSettings` does (`next.engineChoice =
 /// e.engines`) — even when nothing in the value parses, which leaves every field unset rather
 /// than keeping the file's.
-pub fn engine_choice(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> EngineChoiceConfig {
-    match env("RETASKABLE_ENGINES") {
+pub fn engine_choice(cfg: &ConfigFile, env: &Env) -> EngineChoiceConfig {
+    match env.get("RETASKABLE_ENGINES") {
         Some(raw) => {
             let mut result = EngineChoiceConfig::default();
             apply_engines_env(&mut result, &raw);
@@ -515,9 +516,9 @@ pub(crate) fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
 /// "Cursor's models": `RETASKABLE_CURSOR_MODELS`, one model for every tier (`gpt-5`) or each by
 /// name (`top=gpt-5,implementer=sonnet,scout=gpt-5-mini`). A name that isn't valid is left out,
 /// keeping the file's value (already `auto` if that one wasn't valid either).
-pub fn cursor_models(cfg: &ConfigFile, env: impl Fn(&str) -> Option<String>) -> CursorModels {
+pub fn cursor_models(cfg: &ConfigFile, env: &Env) -> CursorModels {
     let mut result = sanitize_cursor_models(&cfg.machine.cursor.models);
-    if let Some(raw) = env("RETASKABLE_CURSOR_MODELS") {
+    if let Some(raw) = env.get("RETASKABLE_CURSOR_MODELS") {
         apply_cursor_models_env(&mut result, &raw);
     }
     result
@@ -554,7 +555,6 @@ fn apply_cursor_models_env(result: &mut CursorModels, raw: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::no_env;
 
     fn with_port(port: u16) -> ConfigFile {
         ConfigFile {
@@ -587,112 +587,112 @@ mod tests {
 
     #[test]
     fn port_prefers_the_env_then_the_file_then_the_callers_default() {
-        let env = |k: &str| (k == "RETASKABLE_PORT").then(|| "4800".to_string());
-        assert_eq!(port(&with_port(4900), env, DEFAULT_PORT), 4800);
-        assert_eq!(port(&with_port(4900), no_env, DEFAULT_PORT), 4900);
-        assert_eq!(port(&ConfigFile::default(), no_env, DEFAULT_PORT), DEFAULT_PORT);
-        let bad = |k: &str| (k == "RETASKABLE_PORT").then(|| "nope".to_string());
-        assert_eq!(port(&ConfigFile::default(), bad, DEFAULT_PORT), DEFAULT_PORT);
+        let env = Env::from_pairs([("RETASKABLE_PORT", "4800")]);
+        assert_eq!(port(&with_port(4900), &env, DEFAULT_PORT), 4800);
+        assert_eq!(port(&with_port(4900), &Env::empty(), DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), &Env::empty(), DEFAULT_PORT), DEFAULT_PORT);
+        let bad = Env::from_pairs([("RETASKABLE_PORT", "nope")]);
+        assert_eq!(port(&ConfigFile::default(), &bad, DEFAULT_PORT), DEFAULT_PORT);
         // An unparseable env value falls through to the file, not straight to the default.
-        assert_eq!(port(&with_port(4900), bad, DEFAULT_PORT), 4900);
+        assert_eq!(port(&with_port(4900), &bad, DEFAULT_PORT), 4900);
     }
 
     #[test]
     fn with_no_port_in_the_file_either_it_falls_back_to_the_callers_default() {
         // installers/03-the-bundle-agent-bundle.md section 3.13: the final fallback is this
         // build's own default (a Staging release build's 4701), not a hardcoded 4700.
-        assert_eq!(port(&ConfigFile::default(), no_env, 4701), 4701);
+        assert_eq!(port(&ConfigFile::default(), &Env::empty(), 4701), 4701);
     }
 
     #[test]
     fn a_zero_env_port_is_not_used_either() {
-        let zero = |k: &str| (k == "RETASKABLE_PORT").then(|| "0".to_string());
-        assert_eq!(port(&with_port(4900), zero, DEFAULT_PORT), 4900);
-        assert_eq!(port(&ConfigFile::default(), zero, DEFAULT_PORT), DEFAULT_PORT);
+        let zero = Env::from_pairs([("RETASKABLE_PORT", "0")]);
+        assert_eq!(port(&with_port(4900), &zero, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), &zero, DEFAULT_PORT), DEFAULT_PORT);
     }
 
     #[test]
     fn a_zero_port_in_the_file_is_not_used_either() {
         // Binding port 0 asks the OS for a random ephemeral port, not the documented
         // fallback, so a zero in config.json is as invalid as a zero env value.
-        assert_eq!(port(&with_port(0), no_env, DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(0), &Env::empty(), DEFAULT_PORT), DEFAULT_PORT);
     }
 
     #[test]
     fn a_privileged_port_below_1024_is_not_used_either() {
         // agent-settings.md section 3.1: the documented valid range is 1024 to 65535,
         // so a sub-1024 port (env or file) is as invalid as zero and falls through too.
-        let low_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "80".to_string());
-        assert_eq!(port(&with_port(4900), low_env, DEFAULT_PORT), 4900);
-        assert_eq!(port(&ConfigFile::default(), low_env, DEFAULT_PORT), DEFAULT_PORT);
-        assert_eq!(port(&with_port(80), no_env, DEFAULT_PORT), DEFAULT_PORT);
-        assert_eq!(port(&with_port(1024), no_env, DEFAULT_PORT), 1024);
+        let low_env = Env::from_pairs([("RETASKABLE_PORT", "80")]);
+        assert_eq!(port(&with_port(4900), &low_env, DEFAULT_PORT), 4900);
+        assert_eq!(port(&ConfigFile::default(), &low_env, DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(80), &Env::empty(), DEFAULT_PORT), DEFAULT_PORT);
+        assert_eq!(port(&with_port(1024), &Env::empty(), DEFAULT_PORT), 1024);
     }
 
     #[test]
     fn a_port_at_the_top_of_the_documented_range_is_used() {
         // agent-settings.md section 3.1: the documented valid range runs up to 65535,
         // so the top of the range is as valid as the bottom (already covered at 1024).
-        let top_env = |k: &str| (k == "RETASKABLE_PORT").then(|| "65535".to_string());
-        assert_eq!(port(&ConfigFile::default(), top_env, DEFAULT_PORT), 65535);
-        assert_eq!(port(&with_port(65535), no_env, DEFAULT_PORT), 65535);
+        let top_env = Env::from_pairs([("RETASKABLE_PORT", "65535")]);
+        assert_eq!(port(&ConfigFile::default(), &top_env, DEFAULT_PORT), 65535);
+        assert_eq!(port(&with_port(65535), &Env::empty(), DEFAULT_PORT), 65535);
     }
 
     #[test]
     fn poll_interval_sec_prefers_the_env_then_the_file_then_the_default() {
-        let env = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "30".to_string());
+        let env = Env::from_pairs([("RETASKABLE_POLL_SEC", "30")]);
         let mut cfg = ConfigFile::default();
         cfg.machine.poll_interval_sec = 20;
-        assert_eq!(poll_interval_sec(&cfg, env), 30);
-        assert_eq!(poll_interval_sec(&cfg, no_env), 20);
-        assert_eq!(poll_interval_sec(&ConfigFile::default(), no_env), 10);
+        assert_eq!(poll_interval_sec(&cfg, &env), 30);
+        assert_eq!(poll_interval_sec(&cfg, &Env::empty()), 20);
+        assert_eq!(poll_interval_sec(&ConfigFile::default(), &Env::empty()), 10);
     }
 
     #[test]
     fn poll_interval_sec_outside_2_to_3600_falls_through_to_the_file() {
         let mut cfg = ConfigFile::default();
         cfg.machine.poll_interval_sec = 20;
-        let too_low = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "1".to_string());
-        let too_high = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "3601".to_string());
-        let not_a_number = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "soon".to_string());
-        assert_eq!(poll_interval_sec(&cfg, too_low), 20);
-        assert_eq!(poll_interval_sec(&cfg, too_high), 20);
-        assert_eq!(poll_interval_sec(&cfg, not_a_number), 20);
+        let too_low = Env::from_pairs([("RETASKABLE_POLL_SEC", "1")]);
+        let too_high = Env::from_pairs([("RETASKABLE_POLL_SEC", "3601")]);
+        let not_a_number = Env::from_pairs([("RETASKABLE_POLL_SEC", "soon")]);
+        assert_eq!(poll_interval_sec(&cfg, &too_low), 20);
+        assert_eq!(poll_interval_sec(&cfg, &too_high), 20);
+        assert_eq!(poll_interval_sec(&cfg, &not_a_number), 20);
         // The documented range's ends are both valid.
-        let low_end = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "2".to_string());
-        let high_end = |k: &str| (k == "RETASKABLE_POLL_SEC").then(|| "3600".to_string());
-        assert_eq!(poll_interval_sec(&cfg, low_end), 2);
-        assert_eq!(poll_interval_sec(&cfg, high_end), 3600);
+        let low_end = Env::from_pairs([("RETASKABLE_POLL_SEC", "2")]);
+        let high_end = Env::from_pairs([("RETASKABLE_POLL_SEC", "3600")]);
+        assert_eq!(poll_interval_sec(&cfg, &low_end), 2);
+        assert_eq!(poll_interval_sec(&cfg, &high_end), 3600);
     }
 
     #[test]
     fn lanes_prefers_the_env_then_the_file_then_the_default() {
-        let env = |k: &str| (k == "RETASKABLE_LANES").then(|| "8".to_string());
+        let env = Env::from_pairs([("RETASKABLE_LANES", "8")]);
         let mut cfg = ConfigFile::default();
         cfg.machine.lanes = 4;
-        assert_eq!(lanes(&cfg, env), 8);
-        assert_eq!(lanes(&cfg, no_env), 4);
-        assert_eq!(lanes(&ConfigFile::default(), no_env), 2);
+        assert_eq!(lanes(&cfg, &env), 8);
+        assert_eq!(lanes(&cfg, &Env::empty()), 4);
+        assert_eq!(lanes(&ConfigFile::default(), &Env::empty()), 2);
     }
 
     #[test]
     fn lanes_outside_1_to_64_falls_through_to_the_file() {
         let mut cfg = ConfigFile::default();
         cfg.machine.lanes = 4;
-        let too_low = |k: &str| (k == "RETASKABLE_LANES").then(|| "0".to_string());
-        let too_high = |k: &str| (k == "RETASKABLE_LANES").then(|| "65".to_string());
-        assert_eq!(lanes(&cfg, too_low), 4);
-        assert_eq!(lanes(&cfg, too_high), 4);
-        let low_end = |k: &str| (k == "RETASKABLE_LANES").then(|| "1".to_string());
-        let high_end = |k: &str| (k == "RETASKABLE_LANES").then(|| "64".to_string());
-        assert_eq!(lanes(&cfg, low_end), 1);
-        assert_eq!(lanes(&cfg, high_end), 64);
+        let too_low = Env::from_pairs([("RETASKABLE_LANES", "0")]);
+        let too_high = Env::from_pairs([("RETASKABLE_LANES", "65")]);
+        assert_eq!(lanes(&cfg, &too_low), 4);
+        assert_eq!(lanes(&cfg, &too_high), 4);
+        let low_end = Env::from_pairs([("RETASKABLE_LANES", "1")]);
+        let high_end = Env::from_pairs([("RETASKABLE_LANES", "64")]);
+        assert_eq!(lanes(&cfg, &low_end), 1);
+        assert_eq!(lanes(&cfg, &high_end), 64);
     }
 
     #[test]
     fn local_model_env_turns_it_on_with_that_models_name() {
-        let env = |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| "llama3.1".to_string());
-        let result = local_model(&ConfigFile::default(), env);
+        let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", "llama3.1")]);
+        let result = local_model(&ConfigFile::default(), &env);
         assert!(result.enabled);
         assert_eq!(result.model, "llama3.1");
         // The file's own address is kept; RETASKABLE_LOCAL_URL wasn't set.
@@ -705,8 +705,8 @@ mod tests {
         cfg.machine.local.enabled = true;
         cfg.machine.local.model = "llama3.1".to_string();
         for off in ["off", "false", "0", "no", "OFF"] {
-            let env = move |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| off.to_string());
-            assert!(!local_model(&cfg, env).enabled, "{off} should turn it off");
+            let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", off)]);
+            assert!(!local_model(&cfg, &env).enabled, "{off} should turn it off");
         }
     }
 
@@ -717,19 +717,19 @@ mod tests {
         cfg.machine.local.model = "llama3.1".to_string();
         // Over 100 characters, and a character outside the documented set.
         let too_long = "a".repeat(101);
-        let env = |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| too_long.clone());
-        let result = local_model(&cfg, env);
+        let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", too_long.clone())]);
+        let result = local_model(&cfg, &env);
         assert!(result.enabled);
         assert_eq!(result.model, "llama3.1");
-        let bad_char = |k: &str| (k == "RETASKABLE_LOCAL_MODEL").then(|| "model name".to_string());
-        assert_eq!(local_model(&cfg, bad_char).model, "llama3.1");
+        let bad_char = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", "model name")]);
+        assert_eq!(local_model(&cfg, &bad_char).model, "llama3.1");
     }
 
     #[test]
     fn local_model_url_env_sets_its_address() {
-        let env = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "http://10.0.0.5:11436".to_string());
+        let env = Env::from_pairs([("RETASKABLE_LOCAL_URL", "http://10.0.0.5:11436")]);
         assert_eq!(
-            local_model(&ConfigFile::default(), env).base_url,
+            local_model(&ConfigFile::default(), &env).base_url,
             "http://10.0.0.5:11436"
         );
     }
@@ -737,15 +737,15 @@ mod tests {
     #[test]
     fn local_model_url_env_with_no_scheme_or_a_user_falls_through_to_the_file() {
         let cfg = ConfigFile::default();
-        let no_scheme = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "10.0.0.5:11436".to_string());
-        let with_user = |k: &str| (k == "RETASKABLE_LOCAL_URL").then(|| "http://me:pw@10.0.0.5:11436".to_string());
-        assert_eq!(local_model(&cfg, no_scheme).base_url, default_local_base_url());
-        assert_eq!(local_model(&cfg, with_user).base_url, default_local_base_url());
+        let no_scheme = Env::from_pairs([("RETASKABLE_LOCAL_URL", "10.0.0.5:11436")]);
+        let with_user = Env::from_pairs([("RETASKABLE_LOCAL_URL", "http://me:pw@10.0.0.5:11436")]);
+        assert_eq!(local_model(&cfg, &no_scheme).base_url, default_local_base_url());
+        assert_eq!(local_model(&cfg, &with_user).base_url, default_local_base_url());
     }
 
     #[test]
     fn engine_choice_missing_is_empty() {
-        let result = engine_choice(&ConfigFile::default(), no_env);
+        let result = engine_choice(&ConfigFile::default(), &Env::empty());
         assert_eq!(result.default, None);
         assert_eq!(result.roles, RoleEngines::default());
         assert!(result.lanes.is_empty());
@@ -757,7 +757,7 @@ mod tests {
         cfg.machine.engine_choice.default = Some(Engine::Claude);
         cfg.machine.engine_choice.roles.implementer = Some(Engine::Local);
         cfg.machine.engine_choice.lanes = vec![LaneEngine::Claude, LaneEngine::Cursor];
-        let result = engine_choice(&cfg, no_env);
+        let result = engine_choice(&cfg, &Env::empty());
         assert_eq!(result.default, Some(Engine::Claude));
         assert_eq!(result.roles.implementer, Some(Engine::Local));
         assert_eq!(result.lanes, vec![LaneEngine::Claude, LaneEngine::Cursor]);
@@ -767,8 +767,8 @@ mod tests {
     fn engine_choice_env_a_bare_engine_replaces_the_files_whole_engine_choice() {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.roles.implementer = Some(Engine::Cursor);
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "local".to_string());
-        let result = engine_choice(&cfg, env);
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "local")]);
+        let result = engine_choice(&cfg, &env);
         assert_eq!(result.default, Some(Engine::Local));
         // The variable replaces the file's whole engineChoice, not just the default: the file's
         // role override is gone (TypeScript's withEnvSettings: `next.engineChoice = e.engines`).
@@ -782,14 +782,14 @@ mod tests {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.default = Some(Engine::Cursor);
         cfg.machine.engine_choice.roles.implementer = Some(Engine::Local);
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "steam".to_string());
-        assert_eq!(engine_choice(&cfg, env), EngineChoiceConfig::default());
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "steam")]);
+        assert_eq!(engine_choice(&cfg, &env), EngineChoiceConfig::default());
     }
 
     #[test]
     fn engine_choice_env_pairs_set_default_and_roles() {
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "default=cursor,implementer=local".to_string());
-        let result = engine_choice(&ConfigFile::default(), env);
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "default=cursor,implementer=local")]);
+        let result = engine_choice(&ConfigFile::default(), &env);
         assert_eq!(result.default, Some(Engine::Cursor));
         assert_eq!(result.roles.implementer, Some(Engine::Local));
         assert_eq!(result.roles.planner, None);
@@ -799,18 +799,16 @@ mod tests {
     fn engine_choice_env_an_invalid_role_value_is_left_out_of_the_replacement() {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.roles.planner = Some(Engine::Cursor);
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "planner=steam".to_string());
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "planner=steam")]);
         // The variable still replaces the file's engineChoice, so the invalid value doesn't fall
         // through to the file's role: the whole thing ends up unset.
-        assert_eq!(engine_choice(&cfg, env).roles.planner, None);
+        assert_eq!(engine_choice(&cfg, &env).roles.planner, None);
     }
 
     #[test]
     fn engine_choice_env_lanes_sets_them_in_order() {
-        let env = |k: &str| {
-            (k == "RETASKABLE_ENGINES").then(|| "default=claude,lanes=claude+claude+cursor+cursor".to_string())
-        };
-        let result = engine_choice(&ConfigFile::default(), env);
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "default=claude,lanes=claude+claude+cursor+cursor")]);
+        let result = engine_choice(&ConfigFile::default(), &env);
         assert_eq!(
             result.lanes,
             vec![
@@ -826,34 +824,34 @@ mod tests {
     fn engine_choice_env_lanes_with_any_invalid_entry_is_left_out_whole() {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+steam+cursor".to_string());
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=claude+steam+cursor")]);
         // One bad entry drops the whole list; since the variable replaces the file's engineChoice
         // entirely, the result is empty, not the file's lanes.
-        assert_eq!(engine_choice(&cfg, env).lanes, Vec::<LaneEngine>::new());
+        assert_eq!(engine_choice(&cfg, &env).lanes, Vec::<LaneEngine>::new());
     }
 
     #[test]
     fn engine_choice_env_lanes_with_nothing_after_it_is_an_empty_list() {
         let mut cfg = ConfigFile::default();
         cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=".to_string());
-        assert_eq!(engine_choice(&cfg, env).lanes, Vec::<LaneEngine>::new());
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=")]);
+        assert_eq!(engine_choice(&cfg, &env).lanes, Vec::<LaneEngine>::new());
     }
 
     #[test]
     fn engine_choice_env_lanes_drops_trailing_default_entries() {
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=claude+default".to_string());
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=claude+default")]);
         assert_eq!(
-            engine_choice(&ConfigFile::default(), env).lanes,
+            engine_choice(&ConfigFile::default(), &env).lanes,
             vec![LaneEngine::Claude]
         );
     }
 
     #[test]
     fn engine_choice_env_lanes_keeps_a_default_entry_that_isnt_trailing() {
-        let env = |k: &str| (k == "RETASKABLE_ENGINES").then(|| "lanes=default+claude".to_string());
+        let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=default+claude")]);
         assert_eq!(
-            engine_choice(&ConfigFile::default(), env).lanes,
+            engine_choice(&ConfigFile::default(), &env).lanes,
             vec![LaneEngine::Default, LaneEngine::Claude]
         );
     }
@@ -883,7 +881,7 @@ mod tests {
                 machine: cfg,
                 ..ConfigFile::default()
             },
-            no_env,
+            &Env::empty(),
         );
         assert_eq!(resolved.top, Some("gpt-5".to_string()));
         assert_eq!(resolved.implementer, Some("auto".to_string()));
@@ -930,7 +928,7 @@ mod tests {
 
     #[test]
     fn cursor_models_missing_is_auto() {
-        let result = cursor_models(&ConfigFile::default(), no_env);
+        let result = cursor_models(&ConfigFile::default(), &Env::empty());
         assert_eq!(result.top, None);
         assert_eq!(result.implementer, None);
         assert_eq!(result.scout, None);
@@ -940,13 +938,13 @@ mod tests {
     fn cursor_models_a_bad_name_in_the_file_reads_as_auto() {
         let mut cfg = ConfigFile::default();
         cfg.machine.cursor.models.top = Some("--force".to_string());
-        assert_eq!(cursor_models(&cfg, no_env).top, None);
+        assert_eq!(cursor_models(&cfg, &Env::empty()).top, None);
     }
 
     #[test]
     fn cursor_models_env_a_bare_name_sets_every_tier() {
-        let env = |k: &str| (k == "RETASKABLE_CURSOR_MODELS").then(|| "gpt-5".to_string());
-        let result = cursor_models(&ConfigFile::default(), env);
+        let env = Env::from_pairs([("RETASKABLE_CURSOR_MODELS", "gpt-5")]);
+        let result = cursor_models(&ConfigFile::default(), &env);
         assert_eq!(result.top, Some("gpt-5".to_string()));
         assert_eq!(result.implementer, Some("gpt-5".to_string()));
         assert_eq!(result.scout, Some("gpt-5".to_string()));
@@ -954,10 +952,11 @@ mod tests {
 
     #[test]
     fn cursor_models_env_pairs_set_each_tier_by_name() {
-        let env = |k: &str| {
-            (k == "RETASKABLE_CURSOR_MODELS").then(|| "top=gpt-5,implementer=sonnet,scout=gpt-5-mini".to_string())
-        };
-        let result = cursor_models(&ConfigFile::default(), env);
+        let env = Env::from_pairs([(
+            "RETASKABLE_CURSOR_MODELS",
+            "top=gpt-5,implementer=sonnet,scout=gpt-5-mini",
+        )]);
+        let result = cursor_models(&ConfigFile::default(), &env);
         assert_eq!(result.top, Some("gpt-5".to_string()));
         assert_eq!(result.implementer, Some("sonnet".to_string()));
         assert_eq!(result.scout, Some("gpt-5-mini".to_string()));
@@ -967,9 +966,9 @@ mod tests {
     fn cursor_models_env_an_invalid_name_falls_through_to_the_file() {
         let mut cfg = ConfigFile::default();
         cfg.machine.cursor.models.top = Some("sonnet".to_string());
-        let bare = |k: &str| (k == "RETASKABLE_CURSOR_MODELS").then(|| "a b".to_string());
-        assert_eq!(cursor_models(&cfg, bare).top, Some("sonnet".to_string()));
-        let pair = |k: &str| (k == "RETASKABLE_CURSOR_MODELS").then(|| "top=--force".to_string());
-        assert_eq!(cursor_models(&cfg, pair).top, Some("sonnet".to_string()));
+        let bare = Env::from_pairs([("RETASKABLE_CURSOR_MODELS", "a b")]);
+        assert_eq!(cursor_models(&cfg, &bare).top, Some("sonnet".to_string()));
+        let pair = Env::from_pairs([("RETASKABLE_CURSOR_MODELS", "top=--force")]);
+        assert_eq!(cursor_models(&cfg, &pair).top, Some("sonnet".to_string()));
     }
 }

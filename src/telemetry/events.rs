@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{Map, Value};
 
+use super::event::{Entry, Event};
+
 /// Days of files kept.
 pub const KEEP_DAYS: i64 = 14;
 /// A note or an error is cut to this many characters.
@@ -113,7 +115,7 @@ pub fn prune(dir: &Path, now_ms: i64, keep_days: i64) -> Vec<String> {
 }
 
 /// The events in `dir` from `since` to `until` (epoch ms), in file order. Lines that don't parse are skipped.
-pub fn read_events(dir: &Path, since: i64, until: i64) -> Vec<Value> {
+pub fn read_events(dir: &Path, since: i64, until: i64) -> Vec<Entry> {
     let mut names: Vec<String> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
@@ -147,22 +149,13 @@ pub fn read_events(dir: &Path, since: i64, until: i64) -> Vec<Value> {
             if line.is_empty() {
                 continue;
             }
-            let Ok(e) = serde_json::from_str::<Value>(line) else {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue; // A line cut short by a crash.
             };
-            let Some(obj) = e.as_object() else {
-                continue;
+            let Some(e) = Entry::from_value(&v) else {
+                continue; // Not an event: no kind, or no time.
             };
-            let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if kind.is_empty() {
-                continue;
-            }
-            let Some(at) = obj.get("at").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(t) = parse_iso_ms(at) else {
+            let Some(t) = parse_iso_ms(&e.at) else {
                 continue;
             };
             if t >= since && t <= until {
@@ -174,12 +167,12 @@ pub fn read_events(dir: &Path, since: i64, until: i64) -> Vec<Value> {
 }
 
 /// Callback for every event (including those read back when the log opens).
-type EventListener = Box<dyn FnMut(&Value) + Send>;
+type EventListener = Box<dyn FnMut(&Entry) + Send>;
 
 /// One project's log: events kept in memory for the watchdog, and appended to the day's file once it's open.
 pub struct EventLog {
     /// The last `RECENT_MS` of events, oldest first.
-    recent: Vec<Value>,
+    recent: Vec<Entry>,
     dir: Option<PathBuf>,
     pruned_day: String,
     listeners: Vec<EventListener>,
@@ -213,11 +206,15 @@ impl EventLog {
         let known: std::collections::HashSet<String> = self
             .recent
             .iter()
-            .filter_map(|e| serde_json::to_string(e).ok())
+            .filter_map(|e| serde_json::to_string(&e.to_value()).ok())
             .collect();
-        let back: Vec<Value> = read_events(dir, since, i64::MAX)
+        let back: Vec<Entry> = read_events(dir, since, i64::MAX)
             .into_iter()
-            .filter(|e| serde_json::to_string(e).map(|s| !known.contains(&s)).unwrap_or(true))
+            .filter(|e| {
+                serde_json::to_string(&e.to_value())
+                    .map(|s| !known.contains(&s))
+                    .unwrap_or(true)
+            })
             .collect();
         for e in &back {
             for f in &mut self.listeners {
@@ -235,34 +232,35 @@ impl EventLog {
     }
 
     /// Called with every event, those read back on open included.
-    pub fn on_event(&mut self, f: impl FnMut(&Value) + Send + 'static) {
+    pub fn on_event(&mut self, f: impl FnMut(&Entry) + Send + 'static) {
         self.listeners.push(Box::new(f));
     }
 
-    pub fn recent(&self) -> &[Value] {
+    pub fn recent(&self) -> &[Entry] {
         &self.recent
     }
 
-    pub fn add(&mut self, kind: &str, fields: Map<String, Value>) -> Value {
+    /// Logs `event` now, with no project of its own (the file it goes to is the project's).
+    pub fn add(&mut self, event: Event) -> Entry {
+        self.push(None, event)
+    }
+
+    /// Logs `event` now, marked with the project it is about.
+    pub fn add_in(&mut self, project: &str, event: Event) -> Entry {
+        self.push(Some(project), event)
+    }
+
+    fn push(&mut self, project: Option<&str>, event: Event) -> Entry {
         let now = (self.now)();
-        let cleaned = clean(&Value::Object(fields), 0);
-        let mut e = Map::new();
-        e.insert("at".into(), Value::String(iso_utc_millis(now)));
-        e.insert("kind".into(), Value::String(kind.into()));
-        if let Value::Object(map) = cleaned {
-            for (k, v) in map {
-                e.insert(k, v);
-            }
-        }
-        let event = Value::Object(e);
+        // Cleaned as JSON, then read back as an entry: a field cleaned into the wrong shape leaves
+        // the entry as an `Other`, still cleaned.
+        let mut cleaned = Entry::new(iso_utc_millis(now), project.map(str::to_string), event).to_value();
+        cleaned = clean(&cleaned, 0);
+        let event = Entry::from_value(&cleaned).expect("a logged event has a kind and a time");
         self.recent.push(event.clone());
         let mut drop = 0;
         while drop < self.recent.len() {
-            let at = self.recent[drop]
-                .get("at")
-                .and_then(|v| v.as_str())
-                .and_then(parse_iso_ms)
-                .unwrap_or(0);
+            let at = parse_iso_ms(&self.recent[drop].at).unwrap_or(0);
             if at >= now - RECENT_MS {
                 break;
             }
@@ -280,7 +278,7 @@ impl EventLog {
         if let Some(dir) = self.dir.clone() {
             self.prune_daily();
             let path = day_file(&dir, now);
-            let line = match serde_json::to_string(&event) {
+            let line = match serde_json::to_string(&event.to_value()) {
                 Ok(s) => s + "\n",
                 Err(_) => return event,
             };
@@ -399,6 +397,7 @@ fn ms_from_civil(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::event::{Body, ItemState, Lease, Tick};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -417,26 +416,25 @@ mod tests {
         let now = Arc::new(Mutex::new(t0));
         let now_c = Arc::clone(&now);
         let mut log = EventLog::with_now(move || *now_c.lock().unwrap());
-        log.add("before_open", Map::from_iter([("item".into(), json!("R-1"))]));
+        log.add(Event::Lease(Lease {
+            item: Some("R-1".into()),
+            ..Default::default()
+        }));
         log.open(dir.path());
-        log.add(
-            "item_state",
-            Map::from_iter([
-                ("item".into(), json!("R-1")),
-                ("from".into(), json!("queued")),
-                ("to".into(), json!("implementing")),
-                ("lane".into(), json!(2)),
-            ]),
-        );
+        log.add(Event::ItemState(ItemState {
+            item: Some("R-1".into()),
+            from: Some("queued".into()),
+            to: Some("implementing".into()),
+            lane: Some(2),
+            ..Default::default()
+        }));
         *now.lock().unwrap() += 60_000; // past midnight UTC: the next day's file
-        log.add(
-            "tick",
-            Map::from_iter([
-                ("lanes".into(), json!(4)),
-                ("busy".into(), json!([1, 2])),
-                ("sessions".into(), json!(2)),
-            ]),
-        );
+        log.add(Event::Tick(Tick {
+            lanes: Some(4),
+            busy: Some(vec![1, 2]),
+            sessions: Some(json!(2)),
+            ..Default::default()
+        }));
         let day1 = std::fs::read_to_string(day_file(dir.path(), t0)).unwrap();
         let day1: Vec<&str> = day1.trim().split(['\n', '\r']).filter(|l| !l.is_empty()).collect();
         assert_eq!(day1.len(), 1, "nothing is written before the log opens");
@@ -465,14 +463,10 @@ mod tests {
                 "sessions": 2
             })
         );
-        let kinds: Vec<_> = log
-            .recent()
-            .iter()
-            .map(|e| e.get("kind").and_then(|v| v.as_str()).unwrap())
-            .collect();
+        let kinds: Vec<_> = log.recent().iter().map(|e| e.kind()).collect();
         assert_eq!(
             kinds,
-            ["before_open", "item_state", "tick"],
+            ["lease", "item_state", "tick"],
             "all kept in memory for the watchdog"
         );
     }
@@ -574,10 +568,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let kinds: Vec<_> = read_events(dir.path(), 0, i64::MAX)
-            .iter()
-            .map(|e| e.get("kind").and_then(|v| v.as_str()).unwrap().to_string())
-            .collect();
+        let kinds: Vec<_> = read_events(dir.path(), 0, i64::MAX).iter().map(|e| e.kind()).collect();
         assert_eq!(kinds, ["old", "late", "a", "b"]);
         let window: Vec<_> = read_events(
             dir.path(),
@@ -585,7 +576,7 @@ mod tests {
             parse_iso_ms("2026-10-15T08:30:00Z").unwrap(),
         )
         .iter()
-        .map(|e| e.get("kind").and_then(|v| v.as_str()).unwrap().to_string())
+        .map(|e| e.kind())
         .collect();
         assert_eq!(window, ["late", "a"]);
 
@@ -593,23 +584,121 @@ mod tests {
         let heard_c = Arc::clone(&heard);
         let mut log = EventLog::with_now(|| parse_iso_ms("2026-10-15T12:00:00Z").unwrap());
         log.on_event(move |e| {
-            heard_c
-                .lock()
-                .unwrap()
-                .push(e.get("kind").and_then(|v| v.as_str()).unwrap().to_string());
+            heard_c.lock().unwrap().push(e.kind());
         });
         log.open(dir.path());
-        let kinds: Vec<_> = log
-            .recent()
-            .iter()
-            .map(|e| e.get("kind").and_then(|v| v.as_str()).unwrap().to_string())
-            .collect();
+        let kinds: Vec<_> = log.recent().iter().map(|e| e.kind()).collect();
         assert_eq!(kinds, ["late", "a", "b"], "the last 24 hours");
         assert_eq!(
             *heard.lock().unwrap(),
             ["late", "a", "b"],
             "listeners hear what's read back too"
         );
+    }
+
+    /// Lines as the agent writes them (the TypeScript agent's and this one's), one per kind.
+    fn real_lines() -> Vec<Value> {
+        let at = "2026-10-15T08:00:00.000Z";
+        vec![
+            json!({ "at": at, "kind": "tick", "status": "running", "lanes": 2, "busy": [1], "free": [2], "sessions": 1, "states": { "implementing": 1 }, "claim": "idle" }),
+            json!({ "at": at, "kind": "item_state", "item": "R-12", "from": "queued", "to": "implementing", "note": "Slice 1 started", "lane": 1 }),
+            json!({ "at": at, "kind": "lease", "item": "R-12", "change": "renewed", "state": "held" }),
+            json!({ "at": at, "kind": "lane_taken", "item": "R-12", "lane": 1, "why": "implementing" }),
+            json!({ "at": at, "kind": "lane_freed", "item": "R-12", "lane": 1, "why": "merged" }),
+            json!({ "at": at, "kind": "session_start", "item": "R-12", "lane": 1, "role": "scout", "scout": "tests", "engine": "claude", "model": "opus", "session": "s-1", "detached": true, "attached": false }),
+            json!({ "at": at, "kind": "session_end", "item": "R-12", "lane": 1, "role": "implementer", "engine": "claude", "model": "opus", "session": "s-1", "ms": 1140000.0, "cost": 1.25, "ok": false, "subtype": "error_max_turns", "error": "ran out", "limitHit": "5h" }),
+            json!({ "at": at, "kind": "step_start", "item": "R-12", "step": "checks", "key": "slice 1 round 1", "again": true }),
+            json!({ "at": at, "kind": "step_end", "item": "R-12", "step": "checks", "key": "k", "ms": 240000.0, "ok": false, "outcome": "failed", "checks": [{ "name": "test", "ok": false, "sec": 200 }], "lines": 40, "scouts": 2 }),
+            json!({ "at": at, "kind": "claim", "answer": "no work" }),
+            json!({ "at": at, "kind": "store_error", "item": "R-12", "op": "claim", "code": "E_LOCK", "error": "locked" }),
+            json!({ "at": at, "kind": "error", "item": "R-12", "where": "checks", "error": "timeout" }),
+            json!({ "at": at, "kind": "ci", "item": "R-12", "state": "passed", "ms": 60000.0 }),
+            json!({ "at": at, "kind": "merged", "item": "R-12", "pr": 41, "chore": false }),
+            json!({ "at": at, "kind": "host_call_undefined", "cmd": "play", "args": ["x"] }),
+            json!({ "at": at, "kind": "restart_asked", "reason": "asked", "by": "james", "waitingOn": ["1 session"] }),
+            json!({ "at": at, "kind": "restart_waiting", "reason": "asked", "waitingOn": ["1 session"], "ms": 5000.0 }),
+            json!({ "at": at, "kind": "restart_exit", "reason": "asked", "by": "james", "drainMs": 900000.0 }),
+            json!({ "at": at, "kind": "restart_back", "reason": "asked", "by": "james", "downMs": 120000.0 }),
+            json!({ "at": at, "kind": "anomaly", "phase": "start", "id": "no_progress:R-12", "rule": "no_progress", "item": "R-12", "text": "stuck", "details": { "idleMs": 1 } }),
+        ]
+    }
+
+    #[test]
+    fn every_kind_the_agent_writes_reads_as_its_own_variant_and_writes_back_the_same_line() {
+        let lines = real_lines();
+        assert_eq!(lines.len(), 20, "one line shape per variant");
+        let mut kinds = std::collections::HashSet::new();
+        for line in &lines {
+            let entry = Entry::from_value(line).expect("an event line");
+            assert!(matches!(entry.body, Body::Known(_)), "typed: {line}");
+            assert_eq!(entry.to_value(), *line, "round trip");
+            kinds.insert(entry.kind());
+        }
+        assert_eq!(kinds.len(), 20);
+    }
+
+    #[test]
+    fn an_unknown_kind_an_extra_field_and_a_missing_field_all_still_read() {
+        let unknown = json!({ "at": "2026-10-15T08:00:00.000Z", "kind": "from_the_future", "item": "R-1", "n": 3 });
+        let e = Entry::from_value(&unknown).unwrap();
+        assert_eq!(e.kind(), "from_the_future");
+        assert_eq!(e.item(), Some("R-1"));
+        assert!(matches!(e.body, Body::Other { .. }));
+        assert_eq!(e.to_value(), unknown, "kept whole");
+        let extra =
+            json!({ "at": "2026-10-15T08:00:00.000Z", "kind": "ci", "state": "passed", "runner": "woodpecker" });
+        let e = Entry::from_value(&extra).unwrap();
+        assert!(
+            matches!(e.body, Body::Known(Event::Ci(_))),
+            "unknown fields do not unseat a known kind"
+        );
+        assert_eq!(e.to_value(), extra, "and are written back");
+        let bare = json!({ "at": "2026-10-15T08:00:00.000Z", "kind": "item_state" });
+        assert!(matches!(
+            Entry::from_value(&bare).unwrap().body,
+            Body::Known(Event::ItemState(_))
+        ));
+        let mistyped = json!({ "at": "2026-10-15T08:00:00.000Z", "kind": "merged", "pr": "forty-one" });
+        let e = Entry::from_value(&mistyped).unwrap();
+        assert!(
+            matches!(e.body, Body::Other { .. }),
+            "a field of the wrong type falls back, it does not fail"
+        );
+        assert_eq!(e.to_value(), mistyped);
+        assert!(Entry::from_value(&json!({ "at": "t", "kind": "" })).is_none());
+        assert!(Entry::from_value(&json!({ "kind": "tick" })).is_none());
+        assert!(Entry::from_value(&json!([1])).is_none());
+    }
+
+    #[test]
+    fn an_unknown_kind_line_in_a_day_file_is_read_beside_the_known_ones() {
+        let dir = tmp();
+        let mut text = String::new();
+        for line in [
+            json!({ "at": "2026-10-15T08:00:00.000Z", "kind": "mystery", "x": 1 }),
+            json!({ "at": "2026-10-15T08:01:00.000Z", "kind": "ci", "item": "R-1", "state": "passed" }),
+        ] {
+            text.push_str(&format!("{line}\n"));
+        }
+        std::fs::write(dir.path().join("2026-10-15.jsonl"), text).unwrap();
+        let read = read_events(dir.path(), 0, i64::MAX);
+        assert_eq!(read.iter().map(|e| e.kind()).collect::<Vec<_>>(), ["mystery", "ci"]);
+    }
+
+    #[test]
+    fn an_event_added_in_a_project_writes_that_project_and_is_cleaned() {
+        let mut log = EventLog::with_now(|| 0);
+        let e = log.add_in(
+            "alpha",
+            Event::Error(crate::telemetry::event::Error {
+                error: Some("gh said token ghp_abcdefghijklmnopqrstuvwxyz0123".into()),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(e.project.as_deref(), Some("alpha"));
+        let v = e.to_value();
+        assert_eq!(v["project"], "alpha");
+        assert_eq!(v["error"], "gh said token [redacted]");
     }
 
     #[test]

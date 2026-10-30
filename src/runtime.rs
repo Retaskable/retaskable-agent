@@ -1,6 +1,7 @@
 //! The long-lived pieces the binary starts: the restart handler, the background pollers and
 //! watchers, and one project's startup. Split out of `main.rs`'s `serve` and `start_project`,
 //! which only call these in order.
+use crate::env::Env;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -76,14 +77,11 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
 /// release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
 /// The settings page's Now tab reads the latest result (agent-settings.md section 4.5), so it's
 /// kept and run again every ten minutes, quietly.
-pub fn spawn_setup_checks(
-    is_release: bool,
-    env: impl Fn(&str) -> Option<String> + Copy + Send + Sync + 'static,
-) -> Arc<Mutex<Option<setup_check::SetupChecks>>> {
+pub fn spawn_setup_checks(is_release: bool, env: Env) -> Arc<Mutex<Option<setup_check::SetupChecks>>> {
     let latest = Arc::new(Mutex::new(None));
     let kept = latest.clone();
     tokio::spawn(async move {
-        let checks = setup_check::run_setup_checks(env).await;
+        let checks = setup_check::run_setup_checks(&env).await;
         let report = setup_check::setup_check_report(&checks);
         if is_release {
             tracing::info!("{report}");
@@ -93,7 +91,7 @@ pub fn spawn_setup_checks(
         *kept.lock().unwrap() = Some(checks);
         loop {
             tokio::time::sleep(Duration::from_secs(600)).await;
-            let checks = setup_check::run_setup_checks(env).await;
+            let checks = setup_check::run_setup_checks(&env).await;
             *kept.lock().unwrap() = Some(checks);
         }
     });
@@ -132,12 +130,12 @@ pub fn spawn_release_updater(
 /// desktop's app menu. macOS and Windows's own start-at-login are the desktop app's
 /// (desktop-app.md) and the installer's, not this agent's (06-macos-and-linux.md section 6.1).
 #[cfg(target_os = "linux")]
-pub fn register_desktop_entries(build: &release::Build, exe: &Path, dir: &Path, env: impl Fn(&str) -> Option<String>) {
-    let home = env("HOME").unwrap_or_default();
-    let appimage = env("APPIMAGE");
+pub fn register_desktop_entries(build: &release::Build, exe: &Path, dir: &Path, env: &Env) {
+    let home = env.get("HOME").unwrap_or_default();
+    let appimage = env.get("APPIMAGE");
     let (file, text) = start_at_login::login_entry(
         build,
-        env("XDG_CONFIG_HOME").as_deref(),
+        env.get("XDG_CONFIG_HOME").as_deref(),
         appimage.as_deref(),
         &home,
         &exe.to_string_lossy(),
@@ -148,8 +146,8 @@ pub fn register_desktop_entries(build: &release::Build, exe: &Path, dir: &Path, 
     if let Some(entry) = app_menu::menu_entry(
         build,
         appimage.as_deref(),
-        env("APPDIR").as_deref(),
-        env("XDG_DATA_HOME").as_deref(),
+        env.get("APPDIR").as_deref(),
+        env.get("XDG_DATA_HOME").as_deref(),
         &home,
         exe,
     ) && let Err(e) = app_menu::add_to_app_menu(&entry, dir)
@@ -166,7 +164,7 @@ pub fn start_project(
     lane_count: u32,
     engine_choice: &config::EngineChoiceConfig,
     project: &config::ProjectConfig,
-    env: impl Fn(&str) -> Option<String> + Copy,
+    env: &Env,
 ) {
     let project_dir = dir.join("projects").join(project.id_or_derived());
     trim_state(&project_dir);
@@ -219,7 +217,7 @@ fn ensure_lane_pool(project: &config::ProjectConfig, lane_count: u32) {
 /// play-on-phone.md section 3: while this project has a `phone` section, watch for a
 /// plugged-in, authorised Android phone. Only adb is looked up at start; re-finding it
 /// when Setup is saved needs the settings server, not yet ported.
-fn watch_phone(project: &config::ProjectConfig, env: impl Fn(&str) -> Option<String>) {
+fn watch_phone(project: &config::ProjectConfig, env: &Env) {
     if project.phone.is_none() {
         return;
     }

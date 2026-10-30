@@ -2,6 +2,7 @@
 //! before their first session, ported from `agent/src/setupCheck.ts` and
 //! `agent/src/engines/probe.ts`. This agent has no Node runtime to check, so `node` isn't
 //! ported; everything else (`git`, `ghInstalled`, `gh`, `claude`, `claudeSignedIn`, `cursor`) is.
+use crate::env::Env;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
@@ -227,13 +228,13 @@ fn optional_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck
 /// `runSetupChecks()`: runs every probe, never through a shell, the git/`gh`/engine probes
 /// concurrently the same way the TypeScript agent does so a missing binary's 20s timeout doesn't
 /// stack with the others.
-pub async fn run_setup_checks(env: impl Fn(&str) -> Option<String>) -> SetupChecks {
-    let claude_bin = resolve_claude_on_path(&env).ok();
-    let cursor_bin = resolve_cursor_on_path(&env);
-    let api_key = env("ANTHROPIC_API_KEY").is_some();
+pub async fn run_setup_checks(env: &Env) -> SetupChecks {
+    let claude_bin = resolve_claude_on_path(env).ok();
+    let cursor_bin = resolve_cursor_on_path(env);
+    let api_key = env.get("ANTHROPIC_API_KEY").is_some();
 
-    let pi_bin = resolve_pi_on_path(&env);
-    let codex_bin = resolve_codex_on_path(&env);
+    let pi_bin = resolve_pi_on_path(env);
+    let codex_bin = resolve_codex_on_path(env);
 
     let (git, gh_version, gh_auth, claude_version, cursor_version, pi_version, codex_version) = tokio::join!(
         run("git", &["--version"]),

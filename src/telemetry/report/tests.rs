@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::telemetry::events::{iso_utc_millis, parse_iso_ms};
 
 use super::*;
+use crate::telemetry::event::Entry;
 
 const T0_TEXT: &str = "2026-10-15T08:00:00.000Z";
 
@@ -117,7 +118,7 @@ fn read_all_rewrites_a_short_hand_edited_at_in_full_so_the_reports_can_slice_it(
     )
     .unwrap();
     let events = read_all(data.path(), 0, i64::MAX, None);
-    assert_eq!(str_of(events[0].get("at")), "2026-10-15T08:00:00.000Z");
+    assert_eq!(events[0].at, "2026-10-15T08:00:00.000Z");
     assert!(why_text(&events, "R-1").contains("08:00:00"));
 }
 
@@ -125,28 +126,25 @@ fn read_all_rewrites_a_short_hand_edited_at_in_full_so_the_reports_can_slice_it(
 fn read_all_reads_every_projects_days_in_order_a_project_or_a_window_when_asked() {
     let f = fixture();
     let all = read_all(f.path(), 0, i64::MAX, None);
-    let mut projects: Vec<String> = all.iter().map(|e| str_of(e.get("project"))).collect();
+    let mut projects: Vec<String> = all.iter().map(|e| e.project.clone().unwrap_or_default()).collect();
     projects.sort();
     projects.dedup();
     assert_eq!(projects, ["alpha", "beta"]);
-    assert!(
-        all.windows(2).all(|w| str_of(w[0].get("at")) <= str_of(w[1].get("at"))),
-        "oldest first"
-    );
+    assert!(all.windows(2).all(|w| w[0].at <= w[1].at), "oldest first");
     assert!(
         read_all(f.path(), 0, i64::MAX, Some("beta"))
             .iter()
-            .all(|e| str_of(e.get("project")) == "beta")
+            .all(|e| e.project.as_deref() == Some("beta"))
     );
     let since60 = t0() + 60 * 60_000;
     assert!(
         read_all(f.path(), since60, i64::MAX, None)
             .iter()
-            .all(|e| parse_iso_ms(&str_of(e.get("at"))).unwrap() >= since60)
+            .all(|e| parse_iso_ms(&e.at).unwrap() >= since60)
     );
     assert_eq!(
         read_all(&f.path().join("nowhere"), 0, i64::MAX, None),
-        Vec::<Value>::new()
+        Vec::<Entry>::new()
     );
 }
 

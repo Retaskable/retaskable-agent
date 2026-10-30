@@ -324,8 +324,7 @@ fn setup_check_report_has_the_setup_check_header_and_indented_lines() {
 
 #[tokio::test]
 async fn run_setup_checks_completes_promptly_and_builds_every_field() {
-    let no_env = |_: &str| None;
-    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(no_env)).await;
+    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(&Env::empty())).await;
     let c = result.expect("run_setup_checks should finish within its own 20s check budget");
     for check in [
         &c.git,

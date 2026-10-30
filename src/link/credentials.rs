@@ -1,6 +1,7 @@
 //! Where the agent keeps its secrets (Retaskable.com agent/src/credentials.ts): the OS credential store (Windows
 //! Credential Manager, macOS Keychain, the Secret Service on Linux), or, on a machine with none that works, such as
 //! a Docker container (docker.md section 4), one file in the data folder readable by this user only.
+use crate::env::Env;
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -27,8 +28,8 @@ pub fn credentials_file(data_dir: &Path) -> PathBuf {
 /// The link tokens' store (link.ts `keychain`): in the file `RETASKABLE_CREDENTIALS_FILE` names, else in the OS
 /// credential store when it works, else in the data folder's file. The override keeps an agent started to check a
 /// build off this computer's own link (credentials.ts `credentialsFileOverride`).
-pub fn keychain(data_dir: &Path, env: impl Fn(&str) -> Option<String>) -> Arc<dyn TokenStore> {
-    if let Some(file) = env("RETASKABLE_CREDENTIALS_FILE").filter(|f| !f.trim().is_empty()) {
+pub fn keychain(data_dir: &Path, env: &Env) -> Arc<dyn TokenStore> {
+    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !f.trim().is_empty()) {
         return Arc::new(FileStore::new(PathBuf::from(file.trim()), KEYCHAIN_SERVICE));
     }
     if os_store_works() {
@@ -39,8 +40,8 @@ pub fn keychain(data_dir: &Path, env: impl Fn(&str) -> Option<String>) -> Arc<dy
 }
 
 /// The line at start on a machine using a file, else None (credentials.ts `credentialFileNote`).
-pub fn credential_file_note(data_dir: &Path, env: impl Fn(&str) -> Option<String>) -> Option<String> {
-    if let Some(file) = env("RETASKABLE_CREDENTIALS_FILE").filter(|f| !f.trim().is_empty()) {
+pub fn credential_file_note(data_dir: &Path, env: &Env) -> Option<String> {
+    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !f.trim().is_empty()) {
         return Some(format!(
             "Link tokens and keys are kept in {} (RETASKABLE_CREDENTIALS_FILE), not the OS credential store.",
             file.trim()
@@ -255,11 +256,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("scratch.json");
         let path = file.to_string_lossy().to_string();
-        let env = |k: &str| (k == "RETASKABLE_CREDENTIALS_FILE").then(|| path.clone());
-        keychain(dir.path(), env).set("https://retaskable.com", "t").unwrap();
+        let env = Env::from_pairs([("RETASKABLE_CREDENTIALS_FILE", path.clone())]);
+        keychain(dir.path(), &env).set("https://retaskable.com", "t").unwrap();
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"t\""));
         assert!(
-            credential_file_note(dir.path(), env)
+            credential_file_note(dir.path(), &env)
                 .unwrap()
                 .contains("RETASKABLE_CREDENTIALS_FILE")
         );

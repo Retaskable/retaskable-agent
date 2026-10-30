@@ -7,6 +7,7 @@
 //! Codex picks its own thread id (`thread.started`), so the runner's transcript id stays the
 //! session id and the thread is remembered here, to resume. A follow-up across a restart starts
 //! fresh, as pi's does.
+use crate::env::Env;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -351,7 +352,7 @@ impl Engine for CodexEngine {
         EngineId::Codex
     }
 
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
         Ok(resolve_codex(env, windows, path_dirs))
     }
 

@@ -5,6 +5,7 @@
 //! Split by responsibility: [`allowlist`] (what a session may do, and keeping its own
 //! `.cursor/cli.json` sound), [`result`] (turning cursor-agent's own output into a structured
 //! result or a transcript line), and [`reader`] (the per-session `EngineReader` built on `result`).
+use crate::env::Env;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -128,8 +129,8 @@ impl Engine for CursorEngine {
         EngineId::Cursor
     }
 
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
-        let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
+        let home = env.get("HOME").or_else(|| env.get("USERPROFILE")).map(PathBuf::from);
         Ok(super::resolve::resolve_cursor(env, windows, path_dirs, home))
     }
 

@@ -4,6 +4,7 @@
 //! pointed at a chosen session id (`--session <id>` only resumes one that already exists), so it
 //! always runs with `--no-session`: the runner's own transcript file is the session's identity,
 //! and a follow-up starts a fresh pi session rather than resuming one.
+use crate::env::Env;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -255,7 +256,7 @@ impl Engine for PiEngine {
         EngineId::Pi
     }
 
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
         Ok(resolve_pi(env, windows, path_dirs))
     }
 

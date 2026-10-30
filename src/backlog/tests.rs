@@ -2,17 +2,13 @@ use super::*;
 use axum::{Json, Router, routing::post};
 use std::net::TcpListener as StdTcpListener;
 
-fn no_env(_: &str) -> Option<String> {
-    None
-}
-
 #[test]
 fn url_defaults_then_takes_the_env_and_trims_a_trailing_slash() {
-    assert_eq!(url(no_env), DEFAULT_URL);
-    let env = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "https://example.test/".to_string());
-    assert_eq!(url(env), "https://example.test");
-    let blank = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "   ".to_string());
-    assert_eq!(url(blank), DEFAULT_URL);
+    assert_eq!(url(&Env::empty()), DEFAULT_URL);
+    let env = Env::from_pairs([("RETASKABLE_BACKLOG_URL", "https://example.test/")]);
+    assert_eq!(url(&env), "https://example.test");
+    let blank = Env::from_pairs([("RETASKABLE_BACKLOG_URL", "   ")]);
+    assert_eq!(url(&blank), DEFAULT_URL);
 }
 
 /// Starts a fake store answering `handler` on `POST /v1/repos/:id/ops`, and gives its base URL.
@@ -430,13 +426,10 @@ async fn auto_link_starts_the_device_flow_against_v1_device_and_stores_the_refre
         vec![json!({ "refresh_token": "r1", "agent_id": 9 })],
     )
     .await;
-    let env = {
-        let base = base.clone();
-        move |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| base.clone())
-    };
+    let env = Env::from_pairs([("RETASKABLE_BACKLOG_URL", base.clone())]);
     let (_dir, store) = file_store();
     let mut shown = None;
-    let id = auto_link(store.clone(), reqwest::Client::new(), env, "9.9.9", |c| {
+    let id = auto_link(store.clone(), reqwest::Client::new(), &env, "9.9.9", |c| {
         shown = Some(c.clone())
     })
     .await
@@ -453,13 +446,10 @@ async fn auto_link_does_nothing_when_already_linked() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
     let base = format!("http://{addr}");
-    let env = {
-        let base = base.clone();
-        move |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| base.clone())
-    };
+    let env = Env::from_pairs([("RETASKABLE_BACKLOG_URL", base.clone())]);
     let (_dir, store) = file_store();
     store.set(&base, "already-linked").unwrap();
-    let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
+    let id = auto_link(store, reqwest::Client::new(), &env, "9.9.9", |_| {
         panic!("no code expected")
     })
     .await
@@ -469,9 +459,9 @@ async fn auto_link_does_nothing_when_already_linked() {
 
 #[tokio::test]
 async fn auto_link_does_nothing_for_a_bad_backlog_url() {
-    let env = |k: &str| (k == "RETASKABLE_BACKLOG_URL").then(|| "not a url".to_string());
+    let env = Env::from_pairs([("RETASKABLE_BACKLOG_URL", "not a url")]);
     let (_dir, store) = file_store();
-    let id = auto_link(store, reqwest::Client::new(), env, "9.9.9", |_| {
+    let id = auto_link(store, reqwest::Client::new(), &env, "9.9.9", |_| {
         panic!("no code expected")
     })
     .await

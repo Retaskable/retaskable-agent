@@ -2,6 +2,7 @@
 //! default. On needs a password of at least 8 characters, kept as its scrypt hash in
 //! `machine.json`'s `network` key; turning it off keeps the hash, so turning it on again needs no
 //! new one. Changes to the file take effect only once the agent restarts, the same as the port.
+use crate::env::Env;
 use serde_json::{Map, Value};
 
 use crate::password::hash_password;
@@ -40,7 +41,7 @@ impl NetworkAccess {
 /// start (never written to the file, the same way an environment value never is). Fewer than
 /// `MIN_PASSWORD_LEN` characters doesn't read, so it falls through to the file's own value, the
 /// same as any other setting's variable outside its documented range.
-pub fn network_access(stored: Option<&NetworkAccess>, env: impl Fn(&str) -> Option<String>) -> NetworkAccess {
+pub fn network_access(stored: Option<&NetworkAccess>, env: &Env) -> NetworkAccess {
     env_network_access(env).unwrap_or_else(|| stored.cloned().unwrap_or_default())
 }
 
@@ -48,8 +49,8 @@ pub fn network_access(stored: Option<&NetworkAccess>, env: impl Fn(&str) -> Opti
 /// is scrypt (deliberately slow), so a caller that only needs to know whether the variable is set
 /// (one hash per process start) should call this once and keep the result rather than calling
 /// `network_access` itself on every request.
-pub fn env_network_access(env: impl Fn(&str) -> Option<String>) -> Option<NetworkAccess> {
-    let password = env("RETASKABLE_NETWORK_PASSWORD")?;
+pub fn env_network_access(env: &Env) -> Option<NetworkAccess> {
+    let password = env.get("RETASKABLE_NETWORK_PASSWORD")?;
     if password.encode_utf16().count() < MIN_PASSWORD_LEN {
         return None;
     }
@@ -62,17 +63,16 @@ pub fn env_network_access(env: impl Fn(&str) -> Option<String>) -> Option<Networ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::no_env;
 
     #[test]
     fn off_by_default() {
-        assert_eq!(network_access(None, no_env), NetworkAccess::default());
+        assert_eq!(network_access(None, &Env::empty()), NetworkAccess::default());
     }
 
     #[test]
     fn the_env_password_turns_it_on_with_a_fresh_hash() {
-        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "a long enough password".to_string());
-        let result = network_access(None, env);
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "a long enough password")]);
+        let result = network_access(None, &env);
         assert!(result.enabled);
         assert!(result.password_hash.unwrap().starts_with("scrypt$"));
     }
@@ -83,8 +83,8 @@ mod tests {
             enabled: true,
             password_hash: Some("scrypt$16384$8$1$aa$bb".to_string()),
         };
-        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "short".to_string());
-        assert_eq!(network_access(Some(&stored), env), stored);
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "short")]);
+        assert_eq!(network_access(Some(&stored), &env), stored);
     }
 
     #[test]
@@ -111,29 +111,29 @@ mod tests {
 
     #[test]
     fn a_password_at_exactly_the_minimum_length_turns_it_on() {
-        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "12345678".to_string());
-        assert!(env_network_access(env).is_some());
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "12345678")]);
+        assert!(env_network_access(&env).is_some());
     }
 
     #[test]
     fn one_character_under_the_minimum_falls_through() {
-        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "1234567".to_string());
-        assert!(env_network_access(env).is_none());
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "1234567")]);
+        assert!(env_network_access(&env).is_none());
     }
 
     #[test]
     fn length_is_counted_in_utf16_units_not_bytes() {
         // 7 code points, each multi-byte in UTF-8 (9 bytes) but 1 UTF-16 unit each (7 units):
         // a byte-length check would wrongly accept this as long enough.
-        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "pässwör".to_string());
-        assert!(env_network_access(env).is_none());
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "pässwör")]);
+        assert!(env_network_access(&env).is_none());
     }
 
     #[test]
     fn length_is_counted_in_utf16_units_not_rust_chars() {
         // 5 Rust chars (3 emoji + "ab"), but 8 UTF-16 units since each emoji is a surrogate
         // pair: a char-count check would wrongly reject this as too short.
-        let env = |k: &str| (k == "RETASKABLE_NETWORK_PASSWORD").then(|| "😀😀😀ab".to_string());
-        assert!(env_network_access(env).is_some());
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "😀😀😀ab")]);
+        assert!(env_network_access(&env).is_some());
     }
 }

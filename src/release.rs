@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::env::Env;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -64,26 +65,26 @@ fn problem(exe_path: &Path, err: &impl std::fmt::Display) -> String {
 /// Section 3.3: a release build's data folder (`machine.json`, each project's `state.json`,
 /// `runs/`), named for its environment, in the OS's own place — never the `.retaskable` a
 /// checkout uses.
-pub fn data_dir(build: &Build, env: impl Fn(&str) -> Option<String>) -> PathBuf {
+pub fn data_dir(build: &Build, env: &Env) -> PathBuf {
     let (title, slug) = names(build.environment);
     if cfg!(target_os = "windows") {
-        local_app_data(&env).join(title)
+        local_app_data(env).join(title)
     } else if cfg!(target_os = "macos") {
-        home(&env).join("Library").join("Application Support").join(title)
+        home(env).join("Library").join("Application Support").join(title)
     } else {
-        xdg(&env, "XDG_DATA_HOME", ".local/share").join(slug)
+        xdg(env, "XDG_DATA_HOME", ".local/share").join(slug)
     }
 }
 
 /// Section 3.3: a release build's log folder.
-pub fn logs_dir(build: &Build, env: impl Fn(&str) -> Option<String>) -> PathBuf {
+pub fn logs_dir(build: &Build, env: &Env) -> PathBuf {
     let (title, slug) = names(build.environment);
     if cfg!(target_os = "windows") {
-        local_app_data(&env).join(title).join("logs")
+        local_app_data(env).join(title).join("logs")
     } else if cfg!(target_os = "macos") {
-        home(&env).join("Library").join("Logs").join(title)
+        home(env).join("Library").join("Logs").join(title)
     } else {
-        xdg(&env, "XDG_STATE_HOME", ".local/state").join(slug).join("logs")
+        xdg(env, "XDG_STATE_HOME", ".local/state").join(slug).join("logs")
     }
 }
 
@@ -113,16 +114,18 @@ pub fn default_port(build: Option<&Build>) -> u16 {
     }
 }
 
-fn local_app_data(env: &impl Fn(&str) -> Option<String>) -> PathBuf {
-    PathBuf::from(env("LOCALAPPDATA").unwrap_or_default())
+fn local_app_data(env: &Env) -> PathBuf {
+    PathBuf::from(env.get("LOCALAPPDATA").unwrap_or_default())
 }
 
-fn home(env: &impl Fn(&str) -> Option<String>) -> PathBuf {
-    PathBuf::from(env("HOME").unwrap_or_default())
+fn home(env: &Env) -> PathBuf {
+    PathBuf::from(env.get("HOME").unwrap_or_default())
 }
 
-fn xdg(env: &impl Fn(&str) -> Option<String>, var: &str, fallback: &str) -> PathBuf {
-    env(var).map(PathBuf::from).unwrap_or_else(|| home(env).join(fallback))
+fn xdg(env: &Env, var: &str, fallback: &str) -> PathBuf {
+    env.get(var)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home(env).join(fallback))
 }
 
 /// `win-x64`/`mac-arm64`/`mac-x64`/`linux-x64` (section 3.1), or `None` for a machine the bundle

@@ -2,6 +2,7 @@
 //! back (`SessionResult`), the `Engine` interface each AI tool implements behind
 //! `runner::run_session`, and `describe_failure` — following `agent/src/engines/engine.ts` in
 //! Retaskable.com (the ground truth this is porting) and docs/specs/engines/02-the-engine-layer.md.
+use crate::env::Env;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -296,7 +297,7 @@ pub trait Engine: Send + Sync {
     fn id(&self) -> EngineId;
     /// Finds this engine's binary on the computer (`resolveClaude()`/`resolveCursor()`), given the
     /// environment and `PATH` to search, so the search stays pure and testable.
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf>;
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf>;
     /// The invocation's argument list for `spec` (the prompt itself goes in on stdin, so it's
     /// never here — docs/specs/agent/04-architecture.md, clear of Windows's command-line length
     /// limit).

@@ -10,6 +10,7 @@
 //! operation can fail — no address, no network, a refused or unreadable answer — comes back as a
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
+use crate::env::Env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,8 +28,9 @@ pub const DEFAULT_URL: &str = "https://backlog.retaskable.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The store this agent reads: `RETASKABLE_BACKLOG_URL`, else the default. No trailing slash.
-pub fn url(env: impl Fn(&str) -> Option<String>) -> String {
-    let raw = env("RETASKABLE_BACKLOG_URL")
+pub fn url(env: &Env) -> String {
+    let raw = env
+        .get("RETASKABLE_BACKLOG_URL")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
@@ -44,11 +46,11 @@ pub fn url(env: impl Fn(&str) -> Option<String>) -> String {
 pub async fn auto_link(
     store: Arc<dyn TokenStore>,
     http: reqwest::Client,
-    env: impl Fn(&str) -> Option<String>,
+    env: &Env,
     version: &str,
     on_code: impl FnOnce(&DeviceCode),
 ) -> Result<Option<u64>> {
-    let backlog_url = url(&env);
+    let backlog_url = url(env);
     if let Err(e) = link::valid_http_url(&backlog_url, "backlog store") {
         tracing::warn!("backlog store URL isn't valid: {e:#}");
         return Ok(None);
@@ -59,7 +61,7 @@ pub async fn auto_link(
     let flow = link::Link {
         http,
         store: store.as_ref(),
-        machine: link::machine_info(&env, version),
+        machine: link::machine_info(env, version),
         target: link::BACKLOG_TARGET,
         second: Duration::from_secs(1),
     };

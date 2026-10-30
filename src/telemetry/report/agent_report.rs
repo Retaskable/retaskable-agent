@@ -1,12 +1,11 @@
 //! `retaskable agent-report`: lane use, phase times, restarts and anomalies over a window.
 use std::collections::HashMap;
 
-use serde_json::Value;
-
+use crate::telemetry::event::{Entry, Event, ItemState, RestartAsked, RestartExit, Tick};
 use crate::telemetry::events::{iso_utc_millis, parse_iso_ms};
 
 use super::why::{anomaly_line, anomaly_spans};
-use super::{IDLE_STRETCH_MS, TICK_GAP_MS, ms_of, span, str_of, truthy};
+use super::{IDLE_STRETCH_MS, TICK_GAP_MS, span};
 
 fn median(xs: &[f64]) -> f64 {
     if xs.is_empty() {
@@ -46,9 +45,8 @@ const BACK_FROM: [&str; 6] = [
 ];
 
 /// Why it went back to work, as a group: the note up to its first ":" or "(".
-fn rework_why(note: Option<&Value>, from: &str) -> String {
-    let text = str_of(note);
-    let first = text.split([':', '(']).next().unwrap_or("").trim().to_string();
+fn rework_why(note: &str, from: &str) -> String {
+    let first = note.split([':', '(']).next().unwrap_or("").trim().to_string();
     if first.is_empty() {
         format!("from {from}")
     } else {
@@ -71,26 +69,27 @@ fn close_idle(idle_from: &mut Option<String>, end_at: &str, stretches: &mut Vec<
     }
 }
 
-fn lane_section(ticks: &[Value], to: i64) -> Vec<String> {
+/// A minute summary and the time it was written.
+type TickAt<'a> = (&'a Entry, &'a Tick);
+
+fn lane_section(ticks: &[TickAt], to: i64) -> Vec<String> {
     if ticks.is_empty() {
         return vec!["  no minute summaries in this window".to_string()];
     }
-    let max_lanes = ticks
-        .iter()
-        .filter_map(|t| t.get("lanes").and_then(Value::as_f64))
-        .fold(0.0_f64, f64::max) as i64;
+    let lanes_of = |t: &Tick| t.lanes.unwrap_or(0);
+    let max_lanes = ticks.iter().map(|(_, t)| lanes_of(t)).max().unwrap_or(0);
     let mut lines = Vec::new();
     let mut busy_sum = 0.0;
     let mut lane_sum = 0.0;
-    for t in ticks {
-        let lanes = t.get("lanes").and_then(Value::as_f64).unwrap_or(0.0);
+    for (_, t) in ticks {
+        let lanes = lanes_of(t);
         let busy_count = t
-            .get("busy")
-            .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter(|k| k.as_f64().is_some_and(|n| n <= lanes)).count())
+            .busy
+            .as_ref()
+            .map(|busy| busy.iter().filter(|&&k| k <= lanes).count())
             .unwrap_or(0);
         busy_sum += busy_count as f64;
-        lane_sum += lanes;
+        lane_sum += lanes as f64;
     }
     let n = ticks.len() as f64;
     lines.push(format!(
@@ -105,17 +104,10 @@ fn lane_section(ticks: &[Value], to: i64) -> Vec<String> {
         ticks.len()
     ));
     for k in 1..=max_lanes {
-        let counted: Vec<&Value> = ticks
-            .iter()
-            .filter(|t| k as f64 <= t.get("lanes").and_then(Value::as_f64).unwrap_or(0.0))
-            .collect();
+        let counted: Vec<&Tick> = ticks.iter().map(|(_, t)| *t).filter(|t| k <= lanes_of(t)).collect();
         let busy = counted
             .iter()
-            .filter(|t| {
-                t.get("busy")
-                    .and_then(Value::as_array)
-                    .is_some_and(|arr| arr.iter().any(|v| v.as_f64() == Some(k as f64)))
-            })
+            .filter(|t| t.busy.as_ref().is_some_and(|busy| busy.contains(&k)))
             .count();
         lines.push(format!(
             "  lane {k}: busy {}",
@@ -130,11 +122,11 @@ fn lane_section(ticks: &[Value], to: i64) -> Vec<String> {
     // summaries (the agent was down).
     let mut stretches: Vec<String> = Vec::new();
     let mut idle_from: Option<String> = None;
-    let mut prev: Option<&Value> = None;
-    for t in ticks {
-        let at = str_of(t.get("at"));
+    let mut prev: Option<&Entry> = None;
+    for (e, t) in ticks {
+        let at = e.at.clone();
         if let Some(p) = prev {
-            let p_at = str_of(p.get("at"));
+            let p_at = p.at.clone();
             let gap = parse_iso_ms(&at).unwrap_or(0) - parse_iso_ms(&p_at).unwrap_or(0);
             if gap > TICK_GAP_MS {
                 close_idle(&mut idle_from, &p_at, &mut stretches);
@@ -147,8 +139,8 @@ fn lane_section(ticks: &[Value], to: i64) -> Vec<String> {
                 ));
             }
         }
-        let busy_len = t.get("busy").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
-        let running = t.get("status").and_then(Value::as_str) == Some("running");
+        let busy_len = t.busy.as_ref().map(|b| b.len()).unwrap_or(0);
+        let running = t.status.as_deref() == Some("running");
         let idle = running && busy_len == 0;
         if idle && idle_from.is_none() {
             idle_from = Some(at.clone());
@@ -156,10 +148,10 @@ fn lane_section(ticks: &[Value], to: i64) -> Vec<String> {
         if !idle {
             close_idle(&mut idle_from, &at, &mut stretches);
         }
-        prev = Some(t);
+        prev = Some(e);
     }
     if let Some(p) = prev {
-        let p_ms = parse_iso_ms(&str_of(p.get("at"))).unwrap_or(0);
+        let p_ms = parse_iso_ms(&p.at).unwrap_or(0);
         let end_at = iso_utc_millis((p_ms + 60_000).min(to));
         close_idle(&mut idle_from, &end_at, &mut stretches);
     }
@@ -174,13 +166,13 @@ fn lane_section(ticks: &[Value], to: i64) -> Vec<String> {
     lines
 }
 
-fn phase_section(events: &[Value]) -> Vec<String> {
-    let mut by_item: HashMap<String, Vec<&Value>> = HashMap::new();
+fn phase_section(events: &[Entry]) -> Vec<String> {
+    let mut by_item: HashMap<String, Vec<(&Entry, &ItemState)>> = HashMap::new();
     for e in events {
-        if e.get("kind").and_then(Value::as_str) == Some("item_state")
-            && let Some(item) = e.get("item").and_then(Value::as_str)
+        if let Some(Event::ItemState(s)) = e.event()
+            && let Some(item) = &s.item
         {
-            by_item.entry(item.to_string()).or_default().push(e);
+            by_item.entry(item.clone()).or_default().push((e, s));
         }
     }
     let mut visits: HashMap<String, Vec<f64>> = HashMap::new();
@@ -188,15 +180,14 @@ fn phase_section(events: &[Value]) -> Vec<String> {
     let mut rework: HashMap<String, i64> = HashMap::new();
     for moves in by_item.values() {
         let mut slice_start: Option<i64> = None;
-        for (i, e) in moves.iter().enumerate() {
-            let at = str_of(e.get("at"));
-            let t = parse_iso_ms(&at).unwrap_or(0);
-            let from = str_of(e.get("from"));
-            let to = str_of(e.get("to"));
+        for (i, (e, s)) in moves.iter().enumerate() {
+            let t = parse_iso_ms(&e.at).unwrap_or(0);
+            let from = s.from.clone().unwrap_or_default();
+            let to = s.to.clone().unwrap_or_default();
             if i > 0 {
-                let prev = moves[i - 1];
-                if str_of(prev.get("to")) == from {
-                    let prev_t = parse_iso_ms(&str_of(prev.get("at"))).unwrap_or(0);
+                let (prev_e, prev_s) = moves[i - 1];
+                if prev_s.to.as_deref().unwrap_or("") == from {
+                    let prev_t = parse_iso_ms(&prev_e.at).unwrap_or(0);
                     visits.entry(from.clone()).or_default().push((t - prev_t) as f64);
                 }
             }
@@ -204,7 +195,7 @@ fn phase_section(events: &[Value]) -> Vec<String> {
                 slice_start = Some(t);
             }
             if to == "implementing" && BACK_FROM.contains(&from.as_str()) {
-                let why = rework_why(e.get("note"), &from);
+                let why = rework_why(s.note.as_deref().unwrap_or(""), &from);
                 *rework.entry(why).or_insert(0) += 1;
             }
             if (to == "merged" || to == "done") && slice_start.is_some() {
@@ -247,53 +238,51 @@ fn phase_section(events: &[Value]) -> Vec<String> {
     lines
 }
 
-fn restart_section(events: &[Value]) -> Vec<String> {
+/// ` by @name` when the restart was asked by someone.
+fn by_part(by: &Option<String>) -> String {
+    match by.as_deref() {
+        Some(b) if !b.is_empty() => format!(" by @{b}"),
+        _ => String::new(),
+    }
+}
+
+fn restart_section(events: &[Entry]) -> Vec<String> {
     // The machine's restarts are in every project's log: each once.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut once: Vec<&Value> = Vec::new();
+    let mut once: Vec<&Entry> = Vec::new();
     for e in events {
-        let kind = str_of(e.get("kind"));
-        if !kind.starts_with("restart_") || kind == "restart_waiting" {
+        if !matches!(
+            e.event(),
+            Some(Event::RestartAsked(_) | Event::RestartExit(_) | Event::RestartBack(_))
+        ) {
             continue;
         }
-        let at = str_of(e.get("at"));
-        let key = format!("{kind}{}", &at[..19.min(at.len())]);
+        let key = format!("{}{}", e.kind(), &e.at[..19.min(e.at.len())]);
         if seen.insert(key) {
             once.push(e);
         }
     }
     let mut lines: Vec<String> = Vec::new();
-    let mut asked: Option<&Value> = None;
-    let mut exit: Option<&Value> = None;
+    let mut asked: Option<(&Entry, &RestartAsked)> = None;
+    let mut exit: Option<&RestartExit> = None;
     for e in once {
-        match str_of(e.get("kind")).as_str() {
-            "restart_asked" => asked = Some(e),
-            "restart_exit" => exit = Some(e),
-            "restart_back" => {
+        match e.event() {
+            Some(Event::RestartAsked(a)) => asked = Some((e, a)),
+            Some(Event::RestartExit(x)) => exit = Some(x),
+            Some(Event::RestartBack(b)) => {
                 let drained = exit
-                    .map(|ex| span(ms_of(ex.get("drainMs"))))
+                    .map(|ex| span(ex.drain_ms.unwrap_or(0.0)))
                     .unwrap_or_else(|| "?".to_string());
-                let down = e
-                    .get("downMs")
-                    .and_then(Value::as_f64)
-                    .map(span)
-                    .unwrap_or_else(|| "?".to_string());
-                let at = str_of(e.get("at"));
+                let down = b.down_ms.map(span).unwrap_or_else(|| "?".to_string());
+                let at = &e.at;
                 let prefix = match asked {
-                    Some(a) => {
-                        let a_at = str_of(a.get("at"));
-                        let by = if truthy(a.get("by")) {
-                            format!(" by @{}", str_of(a.get("by")))
-                        } else {
-                            String::new()
-                        };
-                        format!(
-                            "{} {} asked{by} ({})",
-                            &a_at[0..10],
-                            &a_at[11..16],
-                            str_of(a.get("reason"))
-                        )
-                    }
+                    Some((a_e, a)) => format!(
+                        "{} {} asked{} ({})",
+                        &a_e.at[0..10],
+                        &a_e.at[11..16],
+                        by_part(&a.by),
+                        a.reason.as_deref().unwrap_or("")
+                    ),
                     None => format!("{} back", &at[0..10]),
                 };
                 lines.push(format!(
@@ -306,21 +295,20 @@ fn restart_section(events: &[Value]) -> Vec<String> {
             _ => {}
         }
     }
-    if let Some(a) = asked {
-        let a_at = str_of(a.get("at"));
-        let by = if truthy(a.get("by")) {
-            format!(" by @{}", str_of(a.get("by")))
-        } else {
-            String::new()
-        };
+    if let Some((a_e, a)) = asked {
         let tail = match exit {
             Some(ex) => format!(
                 "exited after draining {}, not back in this window",
-                span(ms_of(ex.get("drainMs")))
+                span(ex.drain_ms.unwrap_or(0.0))
             ),
             None => "still waiting to restart".to_string(),
         };
-        lines.push(format!("  {} {} asked{by}: {tail}", &a_at[0..10], &a_at[11..16]));
+        lines.push(format!(
+            "  {} {} asked{}: {tail}",
+            &a_e.at[0..10],
+            &a_e.at[11..16],
+            by_part(&a.by)
+        ));
     }
     if lines.is_empty() {
         vec!["  none".to_string()]
@@ -330,13 +318,10 @@ fn restart_section(events: &[Value]) -> Vec<String> {
 }
 
 /// `retaskable agent-report`: lane use, phase times, restarts and anomalies over `[from, to]`.
-pub fn report_text(events: &[Value], from: i64, to: i64) -> String {
-    let in_window: Vec<Value> = events
+pub fn report_text(events: &[Entry], from: i64, to: i64) -> String {
+    let in_window: Vec<Entry> = events
         .iter()
-        .filter(|e| {
-            let t = e.get("at").and_then(Value::as_str).and_then(parse_iso_ms);
-            t.is_some_and(|t| t >= from && t <= to)
-        })
+        .filter(|e| parse_iso_ms(&e.at).is_some_and(|t| t >= from && t <= to))
         .cloned()
         .collect();
     let from_iso = iso_utc_millis(from);
@@ -351,7 +336,7 @@ pub fn report_text(events: &[Value], from: i64, to: i64) -> String {
     );
     let mut projects: Vec<String> = Vec::new();
     for e in &in_window {
-        let p = str_of(e.get("project"));
+        let p = e.project.clone().unwrap_or_default();
         if !projects.contains(&p) {
             projects.push(p);
         }
@@ -362,15 +347,17 @@ pub fn report_text(events: &[Value], from: i64, to: i64) -> String {
     projects.sort();
     let mut lines = vec![header];
     for project in &projects {
-        let mine: Vec<Value> = in_window
+        let mine: Vec<Entry> = in_window
             .iter()
-            .filter(|e| str_of(e.get("project")) == *project)
+            .filter(|e| e.project.as_deref().unwrap_or("") == project)
             .cloned()
             .collect();
-        let ticks: Vec<Value> = mine
+        let ticks: Vec<TickAt> = mine
             .iter()
-            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("tick"))
-            .cloned()
+            .filter_map(|e| match e.event() {
+                Some(Event::Tick(t)) => Some((e, t)),
+                _ => None,
+            })
             .collect();
         lines.push(String::new());
         lines.push(format!("== {project}"));
@@ -411,6 +398,21 @@ mod tests {
         iso_utc_millis(t0() + min * 60_000)
     }
 
+    fn ev(v: serde_json::Value) -> Entry {
+        Entry::from_value(&v).expect("an event")
+    }
+
+    /// The minute summaries among the entries.
+    fn ticks(entries: &[Entry]) -> Vec<TickAt<'_>> {
+        entries
+            .iter()
+            .filter_map(|e| match e.event() {
+                Some(Event::Tick(t)) => Some((e, t)),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn median_is_nan_when_empty_and_averages_the_middle_pair_when_even() {
         assert!(median(&[]).is_nan());
@@ -436,15 +438,12 @@ mod tests {
     #[test]
     fn rework_why_groups_by_the_notes_prefix_and_falls_back_to_from() {
         assert_eq!(
-            rework_why(Some(&json!("Blocking checks failed: test")), "checking"),
+            rework_why("Blocking checks failed: test", "checking"),
             "Blocking checks failed"
         );
-        assert_eq!(
-            rework_why(Some(&json!("Needs changes (see review)")), "reviewing"),
-            "Needs changes"
-        );
-        assert_eq!(rework_why(None, "checking"), "from checking");
-        assert_eq!(rework_why(Some(&json!("")), "merging"), "from merging");
+        assert_eq!(rework_why("Needs changes (see review)", "reviewing"), "Needs changes");
+        assert_eq!(rework_why("", "checking"), "from checking");
+        assert_eq!(rework_why("", "merging"), "from merging");
     }
 
     #[test]
@@ -454,15 +453,17 @@ mod tests {
 
     #[test]
     fn restart_section_covers_still_waiting_and_exited_not_back() {
-        let waiting = vec![json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james" })];
+        let waiting = vec![ev(
+            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james" }),
+        )];
         assert_eq!(
             restart_section(&waiting),
             vec!["  2026-10-15 08:00 asked by @james: still waiting to restart".to_string()]
         );
 
         let exited = vec![
-            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked" }),
-            json!({ "at": at(1), "kind": "restart_exit", "reason": "asked", "drainMs": 45_000 }),
+            ev(json!({ "at": at(0), "kind": "restart_asked", "reason": "asked" })),
+            ev(json!({ "at": at(1), "kind": "restart_exit", "reason": "asked", "drainMs": 45_000 })),
         ];
         assert_eq!(
             restart_section(&exited),
@@ -473,8 +474,8 @@ mod tests {
     #[test]
     fn restart_section_dedupes_the_same_restart_logged_in_two_projects() {
         let twice = vec![
-            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james", "project": "alpha" }),
-            json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james", "project": "beta" }),
+            ev(json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james", "project": "alpha" })),
+            ev(json!({ "at": at(0), "kind": "restart_asked", "reason": "asked", "by": "james", "project": "beta" })),
         ];
         assert_eq!(
             restart_section(&twice),
@@ -492,21 +493,24 @@ mod tests {
 
     #[test]
     fn lane_section_has_no_idle_stretches_when_a_lane_is_always_busy() {
-        let ticks = vec![
-            json!({ "at": at(0), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
-            json!({ "at": at(1), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
+        let entries = vec![
+            ev(json!({ "at": at(0), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] })),
+            ev(json!({ "at": at(1), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] })),
         ];
-        assert!(lane_section(&ticks, t0() + 2 * 60_000).contains(&"  no idle stretches of 15m or more".to_string()));
+        assert!(
+            lane_section(&ticks(&entries), t0() + 2 * 60_000)
+                .contains(&"  no idle stretches of 15m or more".to_string())
+        );
     }
 
     #[test]
     fn lane_section_marks_a_gap_between_summaries_as_the_agent_being_down() {
-        let ticks = vec![
-            json!({ "at": at(0), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
-            json!({ "at": at(5), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] }),
+        let entries = vec![
+            ev(json!({ "at": at(0), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] })),
+            ev(json!({ "at": at(5), "kind": "tick", "status": "running", "lanes": 1, "busy": [1] })),
         ];
         assert!(
-            lane_section(&ticks, t0() + 6 * 60_000)
+            lane_section(&ticks(&entries), t0() + 6 * 60_000)
                 .contains(&"  down 2026-10-15 08:00 → 08:05 (5m): no summaries, the agent wasn't running".to_string())
         );
     }

@@ -10,6 +10,7 @@
 mod machine;
 mod project;
 
+use crate::env::Env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -36,8 +37,8 @@ pub struct ConfigFile {
 }
 
 /// `RETASKABLE_DATA_DIR`, or the working folder's `.retaskable/`, as a checkout of the TypeScript agent uses.
-pub fn data_dir(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    env("RETASKABLE_DATA_DIR")
+pub fn data_dir(env: &Env) -> PathBuf {
+    env.get("RETASKABLE_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".retaskable"))
 }
@@ -141,7 +142,6 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
 mod tests {
     use super::project::{Playtests, ProjectType, SandboxMode};
     use super::*;
-    use crate::test_support::no_env;
 
     #[test]
     fn a_missing_file_is_the_defaults_and_no_projects() {
@@ -395,8 +395,8 @@ mod tests {
 
     #[test]
     fn the_data_dir_comes_from_the_env_or_the_working_folder() {
-        assert_eq!(data_dir(no_env), PathBuf::from(".retaskable"));
-        let env = |k: &str| (k == "RETASKABLE_DATA_DIR").then(|| "x".to_string());
-        assert_eq!(data_dir(env), PathBuf::from("x"));
+        assert_eq!(data_dir(&Env::empty()), PathBuf::from(".retaskable"));
+        let env = Env::from_pairs([("RETASKABLE_DATA_DIR", "x")]);
+        assert_eq!(data_dir(&env), PathBuf::from("x"));
     }
 }

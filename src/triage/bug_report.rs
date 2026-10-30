@@ -6,6 +6,7 @@
 //! the hub's own `bug_reports { on, known }` and answering with `reportedBug`, writing the
 //! signature it sent so a later failure isn't retried) is the orchestrator's, once something runs
 //! the triager at all (see the module doc on [`crate::triage`]).
+use crate::env::Env;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -129,11 +130,11 @@ pub fn scrub_words(
     cfg: &ProjectConfig,
     item_id: &str,
     item_branch: Option<&str>,
-    env: impl Fn(&str) -> Option<String>,
+    env: &Env,
 ) -> Vec<ScrubWord> {
-    let home = env("USERPROFILE").or_else(|| env("HOME"));
-    let user = env("USERNAME").or_else(|| env("USER"));
-    let computer = Some(machine_name(&env));
+    let home = env.get("USERPROFILE").or_else(|| env.get("HOME"));
+    let user = env.get("USERNAME").or_else(|| env.get("USER"));
+    let computer = Some(machine_name(env));
     let (owner, repo) = match cfg.github_repo.split_once('/') {
         Some((owner, repo)) => (Some(owner.to_string()), Some(repo.to_string())),
         None => (None, None),
@@ -485,12 +486,8 @@ mod tests {
             base_branch: "main".to_string(),
             ..Default::default()
         };
-        let env = |k: &str| match k {
-            "HOME" => Some("/home/ann".to_string()),
-            "USER" => Some("ann".to_string()),
-            _ => None,
-        };
-        let found = scrub_words("p1", &cfg, "level-select", Some("retaskable/level-select"), env);
+        let env = Env::from_pairs([("HOME", "/home/ann"), ("USER", "ann")]);
+        let found = scrub_words("p1", &cfg, "level-select", Some("retaskable/level-select"), &env);
         let has = |find: &str, as_: &str| found.iter().any(|(f, a)| f.as_deref() == Some(find) && *a == as_);
         assert!(has("acme/void-miner", "<repo>"));
         assert!(has("acme", "<repo>"));

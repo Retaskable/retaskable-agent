@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
     api, backlog, config, connector, lane_pool, link, local_model, network, release, runtime, setup_check, store, tags,
@@ -16,7 +17,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let env = Env::from_process();
+    let env = &env;
     // installers/03-the-bundle-agent-bundle.md section 3.7: a release build's own `build.json`,
     // beside the executable, read before anything else so a bad one (section 3.8) stops it here
     // rather than it guessing at its own identity. A checkout has none, and runs as always.
@@ -49,7 +51,7 @@ async fn main() -> Result<()> {
     // the OS's own place, not the `.retaskable` a checkout uses, unless `RETASKABLE_DATA_DIR`
     // says otherwise.
     let dir = match &build {
-        Some(b) if env("RETASKABLE_DATA_DIR").is_none() => release::data_dir(b, env),
+        Some(b) if env.get("RETASKABLE_DATA_DIR").is_none() => release::data_dir(b, env),
         _ => config::data_dir(env),
     };
     // agent-telemetry.md section 5: the three commands for reading the event log and the session
@@ -237,7 +239,7 @@ struct ServeArgs<'a> {
 
 /// Runs each cloud's outbound connector, the shared backlog's auto-link, the first-run check,
 /// and the settings/health HTTP server, until the server shuts down.
-async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy + Send + Sync + 'static) -> Result<()> {
+async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let ServeArgs {
         dir,
         cfg,
@@ -267,7 +269,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
     let updater_slot = runtime::UpdaterSlot::default();
     let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone());
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
-    let latest_checks = runtime::spawn_setup_checks(is_release, env);
+    let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
@@ -289,7 +291,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
         port,
         default_port,
         network_enabled,
-        env,
+        env.clone(),
         || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         move |code| exit(code),
         keychain.clone(),
@@ -312,12 +314,7 @@ async fn serve(args: ServeArgs<'_>, env: impl Fn(&str) -> Option<String> + Copy 
 }
 
 /// What the cloud sees of this computer.
-fn agent_view(
-    cfg: &config::ConfigFile,
-    tags: Vec<String>,
-    version: &str,
-    env: impl Fn(&str) -> Option<String> + Copy,
-) -> view::AgentView {
+fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &Env) -> view::AgentView {
     view::AgentView {
         machine: link::machine_name(env),
         tags,
@@ -341,7 +338,7 @@ fn link_clouds(
     exit: &Arc<view::Exit>,
     dir: &Path,
     version: &str,
-    env: impl Fn(&str) -> Option<String> + Copy + Send + Sync + 'static,
+    env: &Env,
 ) -> Vec<connector::Connector> {
     let connectors: Vec<_> = cloud_urls
         .iter()
@@ -373,7 +370,7 @@ fn link_clouds(
         tokio::spawn(auto_link_backlog(
             keychain.clone(),
             http.clone(),
-            env,
+            env.clone(),
             version.to_string(),
         ));
     }
@@ -388,7 +385,7 @@ fn log_runtime_settings(
     machine: &store::MachineStore,
     engine_choice: &config::EngineChoiceConfig,
     lane_count: u32,
-    env: impl Fn(&str) -> Option<String> + Copy,
+    env: &Env,
 ) -> Vec<String> {
     let found = tags::found_tags(&tags::machine_facts(env));
     let overrides = machine.tags();
@@ -445,7 +442,7 @@ async fn link_command(
     args: &[String],
     cfg: &config::ConfigFile,
     dir: &Path,
-    env: impl Fn(&str) -> Option<String> + Copy,
+    env: &Env,
     version: &str,
     build: Option<&release::Build>,
 ) -> i32 {
@@ -494,7 +491,13 @@ async fn link_command(
             println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
             // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
             // approval comes right after this one, opened by the agent itself.
-            auto_link_backlog(keychain.clone(), reqwest::Client::new(), env, version.to_string()).await;
+            auto_link_backlog(
+                keychain.clone(),
+                reqwest::Client::new(),
+                env.clone(),
+                version.to_string(),
+            )
+            .await;
             0
         }
         Err(e) => {
@@ -509,7 +512,7 @@ async fn run_link_in_terminal(
     keychain: &Arc<dyn link::TokenStore>,
     url: &str,
     target: link::LinkTarget,
-    env: impl Fn(&str) -> Option<String> + Copy,
+    env: &Env,
     version: &str,
 ) -> Result<u64, String> {
     if matches!(keychain.get(url), Ok(Some(_))) {
@@ -539,19 +542,14 @@ async fn run_link_in_terminal(
 /// installers/04-every-agent-on-the-shared-backlog-shared.md: starts the shared backlog's device flow by
 /// itself, printing and opening its `/link` page the moment a code is ready. Logs the outcome instead of
 /// failing the caller — a failed or expired code waits for the next start, or `retaskable link backlog`.
-async fn auto_link_backlog(
-    keychain: Arc<dyn link::TokenStore>,
-    http: reqwest::Client,
-    env: impl Fn(&str) -> Option<String> + Copy,
-    version: String,
-) {
+async fn auto_link_backlog(keychain: Arc<dyn link::TokenStore>, http: reqwest::Client, env: Env, version: String) {
     let shown = |code: &link::DeviceCode| {
         println!("Approve the shared backlog: {}", code.verification_uri_complete);
         if let Err(e) = link::open_url(&code.verification_uri_complete) {
             tracing::warn!("couldn't open the shared backlog's link page: {e:#}");
         }
     };
-    match backlog::auto_link(keychain, http, env, &version, shown).await {
+    match backlog::auto_link(keychain, http, &env, &version, shown).await {
         Ok(Some(id)) => tracing::info!("Linked to the shared backlog as agent {id}."),
         Ok(None) => {}
         Err(e) => tracing::warn!("Couldn't link to the shared backlog: {e:#}"),

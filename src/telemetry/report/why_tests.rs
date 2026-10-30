@@ -2,18 +2,22 @@ use serde_json::json;
 
 use super::*;
 
-fn start(id: &str, at: &str) -> Value {
-    json!({ "kind": "anomaly", "phase": "start", "id": id, "rule": "no_progress", "text": "stuck", "at": at })
+fn entry(v: serde_json::Value) -> Entry {
+    Entry::from_value(&v).expect("an event")
 }
 
-fn end(id: &str, at: &str) -> Value {
-    json!({ "kind": "anomaly", "phase": "end", "id": id, "at": at })
+fn start(id: &str, at: &str) -> Entry {
+    entry(json!({ "kind": "anomaly", "phase": "start", "id": id, "rule": "no_progress", "text": "stuck", "at": at }))
+}
+
+fn end(id: &str, at: &str) -> Entry {
+    entry(json!({ "kind": "anomaly", "phase": "end", "id": id, "at": at }))
 }
 
 #[test]
 fn anomaly_spans_pairs_start_and_end_by_id_skips_other_kinds_and_leaves_unmatched_starts_open() {
     let events = vec![
-        json!({ "kind": "tick", "at": "2026-10-15T07:59:00.000Z" }),
+        entry(json!({ "kind": "tick", "at": "2026-10-15T07:59:00.000Z" })),
         start("a", "2026-10-15T08:00:00.000Z"),
         start("b", "2026-10-15T08:01:00.000Z"),
         end("a", "2026-10-15T08:05:00.000Z"),

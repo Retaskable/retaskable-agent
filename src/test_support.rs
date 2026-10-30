@@ -41,11 +41,6 @@ pub(crate) fn triage_context(timeline: Vec<String>, bug_title: &str) -> TriageCo
     }
 }
 
-/// An env lookup that always reports the variable unset, for tests that pass a real one in.
-pub(crate) fn no_env(_: &str) -> Option<String> {
-    None
-}
-
 /// Writes `contents` as an executable file a test can spawn at once.
 ///
 /// On Linux a program can't be started while any process still holds it open for writing
