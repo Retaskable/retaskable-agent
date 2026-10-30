@@ -13,10 +13,11 @@ use super::driver::{SessionOutcome, SessionResult, SessionStarter, StartRequest}
 use crate::backlog::Item;
 use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
+use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{Session, Start, run_implementer, session_spec};
+use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
 use crate::item_lifecycle::ImplementerOutcome;
 use crate::{lanes, paths};
 
@@ -181,7 +182,7 @@ async fn run(job: Job) -> Result<SessionResult> {
             engine: Some(EngineId::Claude),
             cursor: None,
             local: None,
-            sandbox: false,
+            sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         Start::Fresh,
     )?;
@@ -200,20 +201,50 @@ async fn run(job: Job) -> Result<SessionResult> {
     .await;
     Ok(match answer {
         Err(e) => SessionResult::Failed(format!("{e:#}")),
-        Ok(r) => match r.status.as_str() {
-            "pr_opened" => SessionResult::Implementer(ImplementerOutcome::Finished),
-            "needs_clarification" => {
-                let asked: Vec<String> = r.questions.iter().map(|q| q.question.clone()).collect();
-                // The claimed item carries no decisions yet, so nothing counts as already answered.
-                let (answered, open) = split_asked(&asked, &[]);
-                SessionResult::Implementer(ImplementerOutcome::Questions {
-                    all_already_answered: !answered.is_empty() && open.is_empty(),
-                })
-            }
-            // The Rust loop can't wait on steps or other items, or count these as done: give the item back.
-            other => SessionResult::Failed(format!("the session ended with {other}: {}", r.summary)),
-        },
+        Ok(r) => classify(&r),
     })
+}
+
+/// What the loop does with a session's answer (`implement` in `steps.ts`). `failed` is `needsHuman("Implementer
+/// gave up")`, `person_steps` is `waitForSteps` (a needs_human with the steps), `waits_on` records the dependency
+/// and gives the item back (no `depends` op here yet, so it goes to a person), and `nothing_left` marks the item
+/// done and merged (not built here yet, so it goes to a person too).
+fn classify(r: &ImplementerResult) -> SessionResult {
+    match r.status.as_str() {
+        "pr_opened" => SessionResult::Implementer(ImplementerOutcome::Finished),
+        "needs_clarification" => {
+            let asked: Vec<String> = r.questions.iter().map(|q| q.question.clone()).collect();
+            // The claimed item carries no decisions yet, so nothing counts as already answered.
+            let (answered, open) = split_asked(&asked, &[]);
+            SessionResult::Implementer(ImplementerOutcome::Questions {
+                all_already_answered: !answered.is_empty() && open.is_empty(),
+            })
+        }
+        "failed" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
+        "nothing_left" => SessionResult::NeedsHuman(format!("Nothing left to build, so mark it done: {}", r.summary)),
+        "person_steps" if !r.person_steps.is_empty() => {
+            let steps: Vec<String> = r
+                .person_steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {s}", i + 1))
+                .collect();
+            SessionResult::NeedsHuman(format!("Only steps a person can do are left:\n{}", steps.join("\n")))
+        }
+        "person_steps" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
+        "waits_on" => {
+            let needs = if r.waits_on.is_empty() {
+                "another item".to_string()
+            } else {
+                r.waits_on.join(", ")
+            };
+            SessionResult::NeedsHuman(format!(
+                "The implementer found this item needs {needs} built first: {}",
+                r.summary
+            ))
+        }
+        other => SessionResult::Failed(format!("the session ended with {other}: {}", r.summary)),
+    }
 }
 
 #[cfg(test)]
@@ -361,13 +392,45 @@ mod tests {
         assert!(matches!(outcome_of(&rig).await, SessionResult::Failed(_)));
     }
 
-    #[tokio::test]
-    async fn a_session_that_gave_up_hands_the_item_back() {
-        let rig = rig(Some(&answer("failed", "[]")), EngineChoiceConfig::default(), true);
-        match outcome_of(&rig).await {
-            SessionResult::Failed(why) => assert!(why.contains("failed"), "{why}"),
+    fn classified(json: &str) -> SessionResult {
+        classify(&serde_json::from_str(json).unwrap())
+    }
+
+    #[test]
+    fn each_status_maps_to_what_the_ts_agent_does() {
+        let why = |r: SessionResult| match r {
+            SessionResult::NeedsHuman(why) => why,
             other => panic!("{other:?}"),
-        }
+        };
+        assert!(why(classified(r#"{"status":"failed","summary":"stuck"}"#)).contains("Implementer gave up: stuck"));
+        assert!(why(classified(r#"{"status":"nothing_left","summary":"built"}"#)).contains("Nothing left to build"));
+        let steps = why(classified(
+            r#"{"status":"person_steps","personSteps":["Press go"],"summary":"s"}"#,
+        ));
+        assert!(steps.contains("1. Press go"), "{steps}");
+        assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
+        let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
+        assert!(waits.contains("a, b"), "{waits}");
+        assert!(matches!(
+            classified(r#"{"status":"odd","summary":"s"}"#),
+            SessionResult::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn the_sandbox_follows_the_platform() {
+        use crate::config::SandboxMode;
+        assert!(sandbox_enabled(SandboxMode::Auto, false));
+        assert!(!sandbox_enabled(SandboxMode::Auto, true));
+        assert!(!sandbox_enabled(SandboxMode::Off, false));
+    }
+
+    #[tokio::test]
+    async fn a_sandboxed_platform_passes_the_sandbox_settings() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        outcome_of(&rig).await;
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert_eq!(args.contains("--settings"), !cfg!(windows), "{args}");
     }
 
     #[tokio::test]
