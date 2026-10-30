@@ -562,18 +562,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_lane_that_cannot_be_prepared_fails() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    /// A starter like `rig`'s, but whose only project's repo path is missing, so preparing its lane fails.
+    fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         let mut projects = rig.starter.projects.clone();
         projects[0].repo_path = rig.root.join("missing").to_string_lossy().into_owned();
-        let starter = ClaudeStarter::new(
+        ClaudeStarter::new(
             rig.root.join("data"),
             projects,
             EngineChoiceConfig::default(),
             rig.starter.env.clone(),
             50,
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn a_lane_that_cannot_be_prepared_fails() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let starter = starter_with_unpreparable_lane(&rig);
         let (request, mut rx) = request();
         starter.start(request).unwrap();
         let got = rx.recv().await.unwrap();
@@ -583,15 +588,7 @@ mod tests {
     #[tokio::test]
     async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_queue() {
         let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        let mut projects = rig.starter.projects.clone();
-        projects[0].repo_path = rig.root.join("missing").to_string_lossy().into_owned();
-        let starter = ClaudeStarter::new(
-            rig.root.join("data"),
-            projects,
-            EngineChoiceConfig::default(),
-            rig.starter.env.clone(),
-            50,
-        );
+        let starter = starter_with_unpreparable_lane(&rig);
         let (mut request, mut rx) = request();
         request.resume = true;
         starter.start(request).unwrap();
