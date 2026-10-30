@@ -272,7 +272,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry (or claim, which
     // isn't built and runs dry). Read and logged once, here.
+    // Where the TS agent may be listening: its default for this build, the shared default and the
+    // configured port. `claim` runs dry instead while one of them answers (port guard, guard.rs).
+    let guard = orchestrator::guard::PortGuard::new(
+        port,
+        [
+            default_port,
+            config::DEFAULT_PORT,
+            cfg.machine.port.unwrap_or(default_port),
+        ],
+    );
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
+    let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = orchestrator::live::LiveHandle::new(mode);
     orchestrator::driver::spawn_all(
         dir,
@@ -282,6 +293,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         &keychain,
         &view.paused,
         &live,
+        (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
     );
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
