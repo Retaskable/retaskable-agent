@@ -102,9 +102,16 @@ impl SessionStarter for ClaudeStarter {
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
+            // A fresh start's failure here is before any session ran (an own failure, section 7.3): it goes
+            // back to the queue. A resumed session already ran once, so the same failure here may have left
+            // real work behind, and needs a person instead.
             let result = match tokio::spawn(run(job)).await {
                 Ok(Ok(result)) => result,
+                Ok(Err(e)) if resume => SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")),
                 Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
+                Err(e) if resume => {
+                    SessionResult::NeedsHuman(format!("the session's task crashed while resuming: {e}"))
+                }
                 Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
             };
             running.fetch_sub(1, Ordering::SeqCst);
@@ -278,7 +285,9 @@ async fn run(job: Job) -> Result<SessionResult> {
             continue;
         }
         return Ok(match answer {
-            Err(e) => SessionResult::Failed(format!("{e:#}")),
+            // A session ran (even if it crashed or answered with nothing usable), so this needs a person
+            // rather than going back to the queue: it may have left real work behind (section 7.3).
+            Err(e) => SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
             Ok(r) => classify(&r),
         });
     }
@@ -287,7 +296,8 @@ async fn run(job: Job) -> Result<SessionResult> {
 /// What the loop does with a session's answer (`implement` in `steps.ts`). `failed` is `needsHuman("Implementer
 /// gave up")`, `person_steps` is `waitForSteps` (a needs_human with the steps), `waits_on` records the dependency
 /// and gives the item back (no `depends` op here yet, so it goes to a person), and `nothing_left` marks the item
-/// done and merged (not built here yet, so it goes to a person too).
+/// done and merged (not built here yet, so it goes to a person too). A status this agent doesn't recognize also
+/// needs a person: the session ran, so this is never the before-work own failure that goes back to the queue.
 fn classify(r: &ImplementerResult) -> SessionResult {
     match r.status.as_str() {
         "pr_opened" => SessionResult::Implementer(ImplementerOutcome::Finished),
@@ -322,7 +332,12 @@ fn classify(r: &ImplementerResult) -> SessionResult {
                 r.summary
             ))
         }
-        other => SessionResult::Failed(format!("the session ended with {other}: {}", r.summary)),
+        // An answer in a shape this agent doesn't know: a session ran, so this needs a person rather
+        // than going back to the queue.
+        other => SessionResult::NeedsHuman(format!(
+            "The session answered with {other}, which needs a person: {}",
+            r.summary
+        )),
     }
 }
 
@@ -495,9 +510,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_exits_without_an_answer_fails() {
+    async fn a_session_that_exits_without_an_answer_needs_a_human() {
         let rig = rig(None, EngineChoiceConfig::default(), true);
-        assert!(matches!(outcome_of(&rig).await, SessionResult::Failed(_)));
+        assert!(matches!(outcome_of(&rig).await, SessionResult::NeedsHuman(_)));
     }
 
     fn classified(json: &str) -> SessionResult {
@@ -519,10 +534,7 @@ mod tests {
         assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
         let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
         assert!(waits.contains("a, b"), "{waits}");
-        assert!(matches!(
-            classified(r#"{"status":"odd","summary":"s"}"#),
-            SessionResult::Failed(_)
-        ));
+        assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
     }
 
     #[test]
@@ -556,22 +568,38 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_lane_that_cannot_be_prepared_fails() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    /// A starter like `rig`'s, but whose only project's repo path is missing, so preparing its lane fails.
+    fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         let mut projects = rig.starter.projects.clone();
         projects[0].repo_path = rig.root.join("missing").to_string_lossy().into_owned();
-        let starter = ClaudeStarter::new(
+        ClaudeStarter::new(
             rig.root.join("data"),
             projects,
             EngineChoiceConfig::default(),
             rig.starter.env.clone(),
             50,
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn a_lane_that_cannot_be_prepared_fails() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let starter = starter_with_unpreparable_lane(&rig);
         let (request, mut rx) = request();
         starter.start(request).unwrap();
         let got = rx.recv().await.unwrap();
         assert!(matches!(got.result, SessionResult::Failed(_)), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_queue() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let starter = starter_with_unpreparable_lane(&rig);
+        let (mut request, mut rx) = request();
+        request.resume = true;
+        starter.start(request).unwrap();
+        let got = rx.recv().await.unwrap();
+        assert!(matches!(got.result, SessionResult::NeedsHuman(_)), "{got:?}");
     }
 
     #[tokio::test]
