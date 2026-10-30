@@ -58,9 +58,9 @@ Most of it goes into the snapshot over the cloud link; the app draws it. Two bul
   - **The sequence (item `command-handling`; TS: [restart-progress.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/restart-progress.md) section 3.1).** One restart request runs these steps in order, and asking again while one is pending keeps the first request's `why` (`at`, `by`, `reason`).
     1. **Stop claiming new work.** Ticks start nothing new, and no `claim_next` is sent.
     2. **Let only these finish:** a merge, a plan's merge, an update to main, a promote, for 2 minutes at most. Sessions, checks, a shoot and a Play on phone build are not on the list.
-    3. **Cancel the rest.** Every running session's tree is killed and ends `interrupted` (section 7.4), so each item keeps its lease and run record.
+    3. **Cancel the rest.** Every other running session, check, shoot and Play on phone build is killed whole and ends `interrupted` (section 7.4), so each item keeps its lease and run record. Detached implementers are not cancelled: they keep running through the restart.
     4. **Restart** by exiting 75, after the same-tick answers are sent and the cloud link flushed (2 seconds at most).
-    5. **Resume by session id.** After it starts, `readopt` resumes each interrupted session with "You were interrupted; continue."
+    5. **Pick up again.** After it starts, `readopt` attaches to each detached implementer still running, reads the result of one that finished, and resumes by session id any other with "You were interrupted; continue."
   - The snapshot shows the step (`waiting` with what it still waits on, then `now`), as in restart-progress.md.
   - **In this Rust agent**, `src/commands.rs`'s Restart calls the same `exit(75)` the settings page's own restart button uses (`restart_handler` in `src/runtime.rs`), so it finishes an install and relaunch the same way.
 - **Audit.** Every command checked, run or refused is logged (cloud.md section 6.3).
