@@ -40,6 +40,7 @@ pub mod reopen;
 pub mod repo;
 pub mod review_context;
 pub mod reviewer;
+pub mod runtime;
 pub mod scan;
 pub mod scouts;
 pub mod settings_server;
