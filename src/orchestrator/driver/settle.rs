@@ -15,6 +15,16 @@ use crate::telemetry::{Event, event};
 const MAX_TURNS_FOLLOW_UP: &str = "An earlier session ran out of turns before it finished. Check \
     `git status` and `git diff --stat` for its uncommitted work, then carry on with the slice.";
 
+/// The follow-up a session over `max_resume_context_tokens` gets instead of being resumed
+/// (06.2-implementer.md "A session that's grown starts fresh").
+pub(super) fn grown_follow_up(tokens: u64) -> String {
+    format!(
+        "Its session had grown to {tokens} tokens; this one picks up as a fresh session instead of \
+         resuming it. Check `git status` and `git diff --stat` for its uncommitted work, then carry \
+         on with the slice."
+    )
+}
+
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionResult {
@@ -39,6 +49,11 @@ pub struct SessionOutcome {
     pub item_id: String,
     pub lane: u32,
     pub result: SessionResult,
+    /// The session's own size as of its last turn (06.2-implementer.md "A session that's grown
+    /// starts fresh"), kept on the item's record for a later resume to weigh against
+    /// `max_resume_context_tokens`. `None` when the engine never reported one (any engine but
+    /// Claude, or a session that ended before its first turn).
+    pub context_tokens: Option<u64>,
 }
 
 /// The sending end of the outcome channel: cloned into every [`StartRequest`](super::StartRequest).
@@ -226,6 +241,11 @@ impl ProjectLoop {
             );
             return;
         };
+        if let Some(tokens) = outcome.context_tokens
+            && let Some(record) = self.records.get_mut(&item)
+        {
+            record.impl_context_tokens = Some(tokens);
+        }
         self.events.add_in(
             &self.id,
             Event::SessionEnd(event::SessionEnd {

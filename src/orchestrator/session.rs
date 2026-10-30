@@ -104,10 +104,10 @@ impl SessionStarter for ClaudeStarter {
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
-            let result = match tokio::spawn(run(job)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
-                Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
+            let (result, context_tokens) = match tokio::spawn(run(job)).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None),
+                Err(e) => (SessionResult::Failed(format!("the session task crashed: {e}")), None),
             };
             running.fetch_sub(1, Ordering::SeqCst);
             outcomes.send(SessionOutcome {
@@ -115,6 +115,7 @@ impl SessionStarter for ClaudeStarter {
                 item_id,
                 lane,
                 result,
+                context_tokens,
             });
         });
         Ok(())
@@ -175,7 +176,7 @@ pub(super) fn branch_name(item: &Item) -> String {
     format!("retaskable/{}-{}-s{}", item.id, slug.trim_end_matches('-'), item.slice)
 }
 
-async fn run(job: Job) -> Result<SessionResult> {
+async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
     let Job {
         data_dir,
         project,
@@ -231,20 +232,27 @@ async fn run(job: Job) -> Result<SessionResult> {
         };
         let engine = engine_of(Some(EngineId::Claude))?;
         let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
+        let mut context_tokens = None;
+        let ctx = &mut context_tokens;
         let answer = run_implementer(spec, |spec| async move {
-            run_session(engine, bin, &spec, id, Some(sink)).await
+            let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
+            *ctx = r.context_tokens;
+            Ok(r)
         })
         .await;
-        return Ok(match answer {
-            Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
-            Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
-            Ok(r) => classify(&r),
-        });
+        return Ok((
+            match answer {
+                Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
+                Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
+                Ok(r) => classify(&r),
+            },
+            context_tokens,
+        ));
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
-    // reset away the work), and anything the old session left running in it is stopped. Not ported: the
-    // TS rules that start fresh instead when the session has grown past `maxResumeContextTokens` (not
-    // tracked here yet); a transcript Claude Code no longer has is handled below.
+    // reset away the work), and anything the old session left running in it is stopped. The driver decides
+    // whether to resume at all, weighing the record's last known size against `maxResumeContextTokens` before
+    // ever calling this with `resume: true`; a transcript Claude Code no longer has is handled below.
     let mut resuming = resume
         .then(|| lanes::lane_path(&worktrees, lane))
         .filter(|d| d.is_dir());
@@ -314,8 +322,12 @@ async fn run(job: Job) -> Result<SessionResult> {
         };
         let engine = engine_of(Some(EngineId::Claude))?;
         let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
+        let mut context_tokens = None;
+        let ctx = &mut context_tokens;
         let answer = run_implementer(spec, |spec| async move {
-            run_session(engine, bin, &spec, id, Some(sink)).await
+            let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
+            *ctx = r.context_tokens;
+            Ok(r)
         })
         .await;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
@@ -324,11 +336,14 @@ async fn run(job: Job) -> Result<SessionResult> {
             resuming = None;
             continue;
         }
-        return Ok(match answer {
-            Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
-            Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
-            Ok(r) => classify(&r),
-        });
+        return Ok((
+            match answer {
+                Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
+                Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
+                Ok(r) => classify(&r),
+            },
+            context_tokens,
+        ));
     }
 }
 

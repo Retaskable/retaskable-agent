@@ -126,6 +126,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
             EventLog::with_now(|| 0),
             Client::new(*base),
             live.clone(),
+            150_000,
         );
         lp.repo = Some(7);
         machine.add(lp);
@@ -404,6 +405,8 @@ struct Fake {
     panic_once: AtomicBool,
     refuse: Mutex<Option<String>>,
     script: Mutex<Vec<SessionResult>>,
+    /// The next scripted outcome's `context_tokens`.
+    context_tokens: Mutex<Option<u64>>,
     /// Sessions it says are running.
     active: AtomicU32,
     /// Where a step leaves its item; `None` keeps its state.
@@ -452,6 +455,7 @@ impl SessionStarter for Fake {
                 item_id: request.item_id,
                 lane: request.lane,
                 result: script.remove(0),
+                context_tokens: *self.context_tokens.lock().unwrap(),
             });
         }
         Ok(())
