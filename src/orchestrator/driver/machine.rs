@@ -3,7 +3,7 @@
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
@@ -67,6 +67,14 @@ pub struct Links {
     pub environment: String,
 }
 
+/// `links` and the computer-wide claim pause ([`Machine::claim_paused_until`]), borrowed together: what a
+/// project's claim and start methods need from the [`Machine`] besides the lane pool, bundled so threading
+/// them through doesn't grow those methods past clippy's argument limit.
+pub struct Shared<'a> {
+    pub links: &'a Links,
+    pub claim_paused_until: &'a mut Option<Instant>,
+}
+
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
 /// project's failed read and nothing else's.
 async fn read(
@@ -110,6 +118,10 @@ async fn read(
 /// on the shared lanes (`round_robin::plan`), as the TS agent's `Pool.tick` does.
 pub struct Machine {
     pub(super) pool: LanePool,
+    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no `claim_next` for any
+    /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
+    /// by a restart.
+    pub(super) claim_paused_until: Option<Instant>,
     pub(super) projects: Vec<ProjectLoop>,
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
@@ -131,6 +143,7 @@ impl Machine {
                 lanes: lane_count,
                 ..Default::default()
             }),
+            claim_paused_until: None,
             projects: Vec::new(),
             last_served: None,
             links,
@@ -312,7 +325,15 @@ impl Machine {
             self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
-                    lp.resume_sessions(&mut self.pool, starter, &self.links).await;
+                    lp.resume_sessions(
+                        &mut self.pool,
+                        starter,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                        },
+                    )
+                    .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     if !paused {
                         lp.advance(&self.pool, starter);
@@ -342,9 +363,29 @@ impl Machine {
         for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live) {
             let mut answer = None;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
-                slots = slots.saturating_sub(lp.apply_starts(&actions, &mut self.pool, starter, &self.links).await);
+                slots = slots.saturating_sub(
+                    lp.apply_starts(
+                        &actions,
+                        &mut self.pool,
+                        starter,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                        },
+                    )
+                    .await,
+                );
                 answer = Some(if actions.contains(&Action::AskForWork) {
-                    lp.claim(&mut self.pool, &mut slots, &self.links, starter).await
+                    lp.claim(
+                        &mut self.pool,
+                        &mut slots,
+                        starter,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                        },
+                    )
+                    .await
                 } else {
                     None
                 });

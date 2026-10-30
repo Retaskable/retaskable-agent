@@ -10,7 +10,7 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::Links;
+use super::Shared;
 use super::report;
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
@@ -192,9 +192,6 @@ pub struct ProjectLoop {
     pub(super) running: Running,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
-    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no `claim_next` on this
-    /// project until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared by a restart.
-    pub(super) claim_paused_until: Option<std::time::Instant>,
 }
 
 impl ProjectLoop {
@@ -228,7 +225,6 @@ impl ProjectLoop {
             repo: None,
             running: Running::default(),
             seen: report::Seen::default(),
-            claim_paused_until: None,
         }
     }
 
@@ -457,7 +453,12 @@ impl ProjectLoop {
     }
 
     /// Resumes the sessions the first pass took back mid-run, each as its item's running step.
-    pub(super) async fn resume_sessions(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter, links: &Links) {
+    pub(super) async fn resume_sessions(
+        &mut self,
+        pool: &mut LanePool,
+        starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
+    ) {
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
             if let Some(RunRecord {
@@ -467,7 +468,7 @@ impl ProjectLoop {
             }) = record
             {
                 tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
-                self.launch(pool, &id, lane, Some(session), starter, links).await;
+                self.launch(pool, &id, lane, Some(session), starter, shared).await;
             }
         }
     }
@@ -482,11 +483,11 @@ impl ProjectLoop {
         lane: u32,
         resume: Option<String>,
         starter: &dyn SessionStarter,
-        links: &Links,
+        shared: &mut Shared<'_>,
     ) -> bool {
         let Some(item) = self.items.get(item_id).cloned() else {
             let why = "the session didn't start: the item is unknown here";
-            self.hand_back(pool, item_id, "queued", why, links).await;
+            self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
         let session_id = resume.clone().unwrap_or_else(new_session_id);
@@ -520,7 +521,7 @@ impl ProjectLoop {
             Err(why) => {
                 tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);
                 let why = format!("the session didn't start: {why}");
-                self.hand_back(pool, item_id, "queued", &why, links).await;
+                self.hand_back(pool, item_id, "queued", &why, shared).await;
                 false
             }
         }
@@ -534,7 +535,7 @@ impl ProjectLoop {
         actions: &[Action],
         pool: &mut LanePool,
         starter: &dyn SessionStarter,
-        links: &Links,
+        shared: &mut Shared<'_>,
     ) -> u32 {
         let mut started = 0;
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
@@ -542,7 +543,7 @@ impl ProjectLoop {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
-                started += u32::from(self.launch(pool, item_id, *lane, None, starter, links).await);
+                started += u32::from(self.launch(pool, item_id, *lane, None, starter, shared).await);
             }
         }
         started
@@ -556,10 +557,10 @@ impl ProjectLoop {
         &mut self,
         pool: &mut LanePool,
         slots: &mut u32,
-        links: &Links,
         starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
     ) -> Option<String> {
-        if self
+        if shared
             .claim_paused_until
             .is_some_and(|until| std::time::Instant::now() < until)
         {
@@ -572,7 +573,7 @@ impl ProjectLoop {
             if *slots == 0 || !asks {
                 break;
             }
-            let Some((answer, more)) = self.claim_once(pool, slots, links, starter).await else {
+            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared).await else {
                 break;
             };
             last = Some(answer);
@@ -588,8 +589,8 @@ impl ProjectLoop {
         &mut self,
         pool: &mut LanePool,
         slots: &mut u32,
-        links: &Links,
         starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
     ) -> Option<(String, bool)> {
         // Asked before every claim, so a TS agent started since is noticed at once.
         if let Some(guard) = self.guard.clone()
@@ -599,7 +600,7 @@ impl ProjectLoop {
             return None;
         }
         let repo = self.repo?;
-        let token = match links.keychain.get(&links.backlog_url) {
+        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
             Ok(None) => return None,
             Err(e) => {
@@ -608,8 +609,8 @@ impl ProjectLoop {
             }
         };
         let agent = ClaimNextAgent {
-            machine: links.machine.clone(),
-            environment: links.environment.clone(),
+            machine: shared.links.machine.clone(),
+            environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
         };
         let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
@@ -630,7 +631,7 @@ impl ProjectLoop {
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.take_lease(&item, token, ItemState::Queued);
                 let actions = decide(&self.id, false, &self.runs, pool, &self.project);
-                *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, links).await);
+                *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
                 let kept = self.runs.contains_key(&item.id);
                 (item.id, kept)

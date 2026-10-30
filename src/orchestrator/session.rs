@@ -102,9 +102,16 @@ impl SessionStarter for ClaudeStarter {
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
+            // A fresh start's failure here is before any session ran (an own failure, section 7.3): it goes
+            // back to the queue. A resumed session already ran once, so the same failure here may have left
+            // real work behind, and needs a person instead.
             let result = match tokio::spawn(run(job)).await {
                 Ok(Ok(result)) => result,
+                Ok(Err(e)) if resume => SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")),
                 Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
+                Err(e) if resume => {
+                    SessionResult::NeedsHuman(format!("the session's task crashed while resuming: {e}"))
+                }
                 Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
             };
             running.fetch_sub(1, Ordering::SeqCst);
@@ -571,6 +578,25 @@ mod tests {
         starter.start(request).unwrap();
         let got = rx.recv().await.unwrap();
         assert!(matches!(got.result, SessionResult::Failed(_)), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_queue() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let mut projects = rig.starter.projects.clone();
+        projects[0].repo_path = rig.root.join("missing").to_string_lossy().into_owned();
+        let starter = ClaudeStarter::new(
+            rig.root.join("data"),
+            projects,
+            EngineChoiceConfig::default(),
+            rig.starter.env.clone(),
+            50,
+        );
+        let (mut request, mut rx) = request();
+        request.resume = true;
+        starter.start(request).unwrap();
+        let got = rx.recv().await.unwrap();
+        assert!(matches!(got.result, SessionResult::NeedsHuman(_)), "{got:?}");
     }
 
     #[tokio::test]

@@ -137,7 +137,7 @@ async fn a_failed_session_gives_the_item_back() {
 async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
     rig.machine.pass().await;
-    assert!(rig.lp(0).claim_paused_until.is_some());
+    assert!(rig.machine.claim_paused_until.is_some());
     let events = rig.lp(0).events().recent();
     let error = events.iter().find(|e| e.kind() == "error").unwrap().to_value();
     assert_eq!(
@@ -153,10 +153,34 @@ async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
 async fn a_claim_pause_that_has_passed_lets_claiming_resume() {
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
     rig.machine.pass().await;
-    rig.lp(0).claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
+    rig.machine.claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
     assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this_computer() {
+    let (base0, asked0) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let (base1, asked1) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base0, &base1]);
+    let fake = rig.go_live();
+    fake.script
+        .lock()
+        .unwrap()
+        .push(SessionResult::Failed("git is gone".into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(rig.machine.claim_paused_until.is_some());
+    asked0.lock().unwrap().clear();
+    asked1.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(
+        !ops(&asked1).contains(&"claim_next".to_string()),
+        "the pause is computer-wide, not just p0's: {:?}",
+        ops(&asked1)
+    );
 }
 
 #[tokio::test]
@@ -245,11 +269,15 @@ async fn a_session_that_needs_a_human_frees_its_lane_and_keeps_the_lease() {
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
     assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
     assert!(!ops(&asked).contains(&"release".to_string()));
-    let freed = (rig.lp(0).events().recent().iter())
-        .find(|e| e.kind() == "lane_freed")
-        .unwrap()
-        .to_value();
+    let events = rig.lp(0).events().recent();
+    let freed = events.iter().find(|e| e.kind() == "lane_freed").unwrap().to_value();
     assert_eq!(freed["why"], "needs_human: gave up");
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["ok"], false);
+    assert!(
+        rig.machine.claim_paused_until.is_none(),
+        "a needs-human outcome never pauses claiming"
+    );
 }
 
 #[tokio::test]
