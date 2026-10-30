@@ -4,6 +4,7 @@
 //! hasn't taken yet sent again later: the TS agent's `unreleased`).
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{Links, Machine, ProjectLoop, SessionStarter, Shared};
@@ -46,6 +47,9 @@ pub struct SessionOutcome {
     pub item_id: String,
     pub lane: u32,
     pub result: SessionResult,
+    /// The session's latest usage reading, if any, saved as `state.usage` once settled
+    /// (docs/specs/agent/07-orchestrator-loop.md section 7.1).
+    pub usage: Option<Value>,
 }
 
 /// The sending end of the outcome channel: cloned into every [`StartRequest`](super::StartRequest).
@@ -237,6 +241,12 @@ impl ProjectLoop {
             );
             return;
         };
+        if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
+            self.store.set_usage(usage);
+            if let Err(e) = self.store.save() {
+                tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
+            }
+        }
         self.events.add_in(
             &self.id,
             Event::SessionEnd(event::SessionEnd {

@@ -468,6 +468,7 @@ impl SessionStarter for Fake {
                 item_id: request.item_id,
                 lane: request.lane,
                 result: script.remove(0),
+                usage: None,
             });
         }
         Ok(())
@@ -575,6 +576,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             session_id,
             resume: false,
             outcomes: rig.machine.outcome_sender(),
+            usage: None,
         }]
     );
     assert_eq!(
@@ -727,6 +729,28 @@ async fn a_finished_step_moves_the_item_and_frees_a_lane_it_no_longer_needs() {
     assert!(
         !ops(&asked).contains(&"list".to_string()),
         "a poll never reads the backlog"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
+    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    let usage = json!({"status": "rejected", "resetsAt": i64::MAX});
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::NeedsHuman("the session ended without answering".into()),
+        usage: Some(usage.clone()),
+    });
+    rig.machine.poll().await;
+    assert_eq!(
+        rig.lp(0).store.usage(),
+        Some(usage),
+        "a session that needs a person may still have reported the reading section 7.1 needs most"
     );
 }
 

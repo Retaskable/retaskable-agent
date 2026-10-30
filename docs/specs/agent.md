@@ -7,10 +7,10 @@ Theme: Orchestration
 Kind: new
 
 Items:
-- **restart-cuts-sessions**: Cut every session a restart cuts, and every session on Quit, by killing its whole process tree; its runs end interrupted. Depends on: run-loop. Specs: [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.4, [pieces.md](pieces.md) section 4.
+- **restart-cuts-sessions**: Cut every session a restart cuts, and every session on Quit, by killing its whole process tree; its runs end interrupted. Depends on: run-loop. Specs: [agent/07.4-stopping-and-restarting.md](agent/07.4-stopping-and-restarting.md) section 7.4, [pieces.md](pieces.md) section 4.
 - **resume-fresh-start-rules**: Start a fresh session when a resume can't carry on within one run: transcript too large, out of turns, engine changed. Depends on: piece-build-runs. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2, [pieces.md](pieces.md) section 4.
 - **item-waits-and-finishes**: Handle a session result of waits_on (the run fails, the items it needs as why) and nothing_left (the run's nothing_left outcome). Depends on: piece-build-runs. Specs: [agent/06.2-implementer.md](agent/06.2-implementer.md) section 6.2, [pieces.md](pieces.md) section 4.
-- **claim-tags-and-give-back-note**: Send this computer's tags with run_take, and why with every failed run. Depends on: run-loop. Specs: [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.5, [pieces.md](pieces.md) section 4.
+- **claim-tags-and-give-back-note**: Send this computer's tags with run_take, and why with every failed run. Depends on: run-loop. Specs: [agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md) section 7.5, [pieces.md](pieces.md) section 4.
 - **live-sessions-reporting**: Show the running sessions on the settings page's Now tab and count them in the cloud tick. Depends on: orchestrator-loop, settings-page, cloud-link. Specs: [agent-settings.md](agent-settings.md) section 4.5.
 
 This spec is split: each section below is its own file in [agent/](agent/). Read this index, then only the sections you need.
@@ -51,7 +51,12 @@ This spec is split: each section below is its own file in [agent/](agent/). Read
 
 ## 7. Orchestrator loop
 
-- [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md): 7.1 Model tiers · 7.2 Local model · 7.3 Retaskable's own failures
+- [agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md)
+- [agent/07.1-model-tiers.md](agent/07.1-model-tiers.md): 7.1 Model tiers
+- [agent/07.2-local-model.md](agent/07.2-local-model.md): 7.2 Local model
+- [agent/07.3-retaskables-own-failures.md](agent/07.3-retaskables-own-failures.md): 7.3 Retaskable's own failures
+- [agent/07.4-stopping-and-restarting.md](agent/07.4-stopping-and-restarting.md): 7.4 Stopping and restarting
+- [agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md): 7.5 What a claim and a give-back send
 
 ## 8. HTTP API
 

@@ -134,6 +134,9 @@ pub struct StartRequest {
     pub resume: bool,
     /// Where the session reports how it ended; the loop reads it on its next wake.
     pub outcomes: super::OutcomeSender,
+    /// The project's latest `state.usage` reading (section 7.1), for picking the implementer's
+    /// model tier. `None` when there's no reading yet, which is treated as a full window.
+    pub usage: Option<Value>,
 }
 
 /// Runs the sessions and steps for the work the loop schedules. Built in a later piece (implementer-session and
@@ -546,6 +549,7 @@ impl ProjectLoop {
             session_id,
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
+            usage: self.store.usage(),
         };
         match starter.start(request) {
             Ok(()) => {

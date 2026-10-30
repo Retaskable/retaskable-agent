@@ -31,12 +31,12 @@ This replaces claiming an item for its whole life: the lease, parking, take-over
 ### 3.1 The loop
 
 The agent keeps no copy of a piece's state:
-- **Ask**: when a lane (or, for `watch` and `merge`, no lane) and the usage limits allow, send `run_take { agent, kinds }` for the kinds it can run now. `agent` carries the computer's tags, as a claim's did ([agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.5); a missing tag answers `{ waitingFor }` and nothing, and the agent asks again on `work_available`. A person's action on this computer asks by name, `run_take { agent, piece }`.
+- **Ask**: when a lane (or, for `watch` and `merge`, no lane) and the usage limits allow, send `run_take { agent, kinds }` for the kinds it can run now. `agent` carries the computer's tags, as a claim's did ([agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md) section 7.5); a missing tag answers `{ waitingFor }` and nothing, and the agent asks again on `work_available`. A person's action on this computer asks by name, `run_take { agent, piece }`.
 - **Run** in memory: `{ token, kind, piece, lane?, processes }`. The lane comes from the computer's pool, preferring the piece's last lane here for its warm build, and goes back when the run ends, whatever the outcome.
 - **Beat**: `run_beat { tokens }` every minute with every run's and lock's token. An answer of `stop` for a token kills that run's process tree and ends it as `interrupted`.
 - **End**: `run_done { token, outcome, result }`. On `stale_run` the work is thrown away and nothing else happens. Any other refusal is sent again a minute later.
 - **Start**: `runs_drop` before the first `run_take`, which ends every run and lock this agent had as `interrupted`.
-- **Stop and restart**: no new runs; wait up to 15 minutes for the runs to end, then kill the rest's process trees ([agent/07-orchestrator-loop.md](agent/07-orchestrator-loop.md) section 7.4, "Process trees die whole") and exit. `runs_drop` on the next start ends them. Nothing is kept to resume.
+- **Stop and restart**: no new runs; wait up to 15 minutes for the runs to end, then kill the rest's process trees ([agent/07.4-stopping-and-restarting.md](agent/07.4-stopping-and-restarting.md) section 7.4, "Process trees die whole") and exit. `runs_drop` on the next start ends them. Nothing is kept to resume.
 
 `state.json` keeps only the computer's own settings and caches: no runs, no tokens, no items.
 

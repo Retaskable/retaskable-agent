@@ -56,5 +56,6 @@ pub mod telemetry;
 #[cfg(test)]
 mod test_support;
 pub mod text;
+pub mod tiers;
 pub mod triage;
 pub mod view;
