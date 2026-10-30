@@ -43,3 +43,5 @@ Synced with Retaskable.com PR #1850 at commit c825f06e15c8ce4025715208a57666ecc8
 Synced with Retaskable.com PR #1860 at commit 8a682e8c8ea5f8badc1289933563e43eba926540 (Cursor's token use on the Usage card).
 
 Synced with Retaskable.com PR #2008 at commit ee32ff7bf3c4cc5962904ce0af07aefb23741ad6 (triage: a second look that can carry out a clear suggestion, bug-report dedup via `sameAs`, not retrying a slice blocked on another item's unbuilt infrastructure, and retrying a failed triage look before waiting for a human).
+
+Synced with Retaskable.com PR #2040 at commit d8b1782cdb6703a671a653fc7935d453a2b67857 (Smart and Fast models, lanes from the Claude plan, Basic and Expert; proposal).

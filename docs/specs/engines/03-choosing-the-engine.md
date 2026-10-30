@@ -11,6 +11,8 @@ Built (the human, 2026-10-28: "when cursor or any agent hits limits we should au
 - **Tested** in `agent/src/engines/limits.test.ts` (`fallOver`) and `agent/src/engines/cursorRun.test.ts` (Cursor's limit carries on with Claude; Claude's limit carries on with Cursor; a computer that runs only Cursor still waits 30 minutes and asks a person after three).
 ### 3.1 Per computer and per role
 
+[Proposal] (2026-10-29) Section 15 replaces this section, 3.4 and 3.5 once built: lanes become one number, set from the Claude plan until set, and each kind of work takes a class of models (Smart or Fast) instead of an engine.
+
 Built. The choice is the computer's, not the server's: a team can mix Claude Code, Cursor, pi (section 13), Codex (section 14) and a local model. It is the machine key `engineChoice` in `.retaskable/config.json` (agent.md section 10), set in the tray's Settings…, `npm run link` or `RETASKABLE_ENGINES` ([agent-settings.md](../agent-settings.md) section 3.1), and `engineFor` (`agent/src/engines/choose.ts`) reads it when a session starts. Until the computer saves its own choice, a project's older `engines.default`/`roles` still count (`legacyChoice`). The machine-level `cursor.models` further down are built too (section 3.4). The computer reports its choice to the hub; the site only shows it (the Expo app's computer rows and Project settings).
 
 - The computer gets an optional `engineChoice`:

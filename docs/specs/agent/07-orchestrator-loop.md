@@ -33,6 +33,8 @@ every pollIntervalSec (default 10):
 
 ### 7.1 Model tiers
 
+[Proposal] (2026-10-29) Once [engines.md](../engines.md) section 15 is built, this table becomes the step-down of section 15.5 (the same thresholds, per kind of work), and "first tries on Sonnet" becomes its Escalation kind.
+
 Before every `claude -p` call (new or resumed), the orchestrator picks the model from the share of the 5-hour usage limit still left. `local` is the local model (section 7.2), which scouts and chores also use whenever its slot is free; with it off or its server down, the choice in brackets applies:
 
 | 5-hour limit left | Implementer (`<tier>`) | Scouts (`<scoutTier>`) | Drafter, triager (`<midTier>`) | Planner, final reviewer (`<topTier>`) |
