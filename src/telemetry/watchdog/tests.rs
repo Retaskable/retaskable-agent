@@ -47,6 +47,26 @@ fn leased_run(state: ItemState) -> ItemRun {
     run
 }
 
+fn checking_record(lane: u32) -> RunRecord {
+    RunRecord {
+        state: "checking".into(),
+        lane: Some(lane),
+        impl_session_id: None,
+        branch: None,
+        slice: 1,
+    }
+}
+
+fn take_for_item(pool: &mut LanePool, lane: u32, item: &str) {
+    pool.take(
+        lane,
+        Holder::Item {
+            project: PROJECT.into(),
+            item: item.into(),
+        },
+    );
+}
+
 #[test]
 fn lease_idle_fires_only_for_needs_human() {
     let mut runs = BTreeMap::new();
@@ -75,32 +95,11 @@ fn double_lane_fires_for_two_lanes_at_once_and_for_a_slower_mismatch() {
     let runs = BTreeMap::new();
     let leases = BTreeMap::new();
     let mut records = BTreeMap::new();
-    records.insert(
-        "mismatched".to_string(),
-        RunRecord {
-            state: "checking".into(),
-            lane: Some(5),
-            impl_session_id: None,
-            branch: None,
-            slice: 1,
-        },
-    );
+    records.insert("mismatched".to_string(), checking_record(5));
     let running = Running::default();
     let mut pool = pool(4);
-    pool.take(
-        1,
-        Holder::Item {
-            project: PROJECT.into(),
-            item: "doubled".into(),
-        },
-    );
-    pool.take(
-        2,
-        Holder::Item {
-            project: PROJECT.into(),
-            item: "doubled".into(),
-        },
-    );
+    take_for_item(&mut pool, 1, "doubled");
+    take_for_item(&mut pool, 2, "doubled");
     let actions = Vec::new();
     let recent = Vec::new();
     let input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
@@ -121,25 +120,10 @@ fn double_lane_says_nothing_about_an_item_whose_lane_agrees() {
     let runs = BTreeMap::new();
     let leases = BTreeMap::new();
     let mut records = BTreeMap::new();
-    records.insert(
-        "fine".to_string(),
-        RunRecord {
-            state: "checking".into(),
-            lane: Some(1),
-            impl_session_id: None,
-            branch: None,
-            slice: 1,
-        },
-    );
+    records.insert("fine".to_string(), checking_record(1));
     let running = Running::default();
     let mut pool = pool(4);
-    pool.take(
-        1,
-        Holder::Item {
-            project: PROJECT.into(),
-            item: "fine".into(),
-        },
-    );
+    take_for_item(&mut pool, 1, "fine");
     let actions = Vec::new();
     let recent = Vec::new();
     let input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
@@ -264,13 +248,7 @@ fn no_progress_fires_for_checking_with_a_lane_and_nothing_running() {
     let records = BTreeMap::new();
     let running = Running::default();
     let mut pool = pool(2);
-    pool.take(
-        1,
-        Holder::Item {
-            project: PROJECT.into(),
-            item: "R-1".into(),
-        },
-    );
+    take_for_item(&mut pool, 1, "R-1");
     let actions = Vec::new();
     let recent = Vec::new();
     let input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
