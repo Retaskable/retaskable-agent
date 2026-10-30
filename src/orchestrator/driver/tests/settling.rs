@@ -184,6 +184,61 @@ async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this
 }
 
 #[tokio::test]
+async fn a_session_that_finds_claude_signed_out_needs_a_human_and_blocks_new_starts_computer_wide() {
+    let why = "The session ended without answering: found Claude signed out on this computer (Not logged in)";
+    let (base0, asked0) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let (base1, asked1) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base0, &base1]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(SessionResult::NeedsHuman(why.into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(
+        rig.lp(0).runs["a"].state,
+        ItemState::NeedsHuman,
+        "still a person's to look at"
+    );
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1", "kept, not released");
+    assert!(rig.machine.claude_signed_out_until.is_some());
+    asked0.lock().unwrap().clear();
+    asked1.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(
+        !ops(&asked1).contains(&"claim_next".to_string()),
+        "the gate is computer-wide, not just p0's: {:?}",
+        ops(&asked1)
+    );
+}
+
+#[tokio::test]
+async fn a_signed_out_pause_that_has_passed_lets_starts_resume() {
+    let why = "The session ended without answering: found Claude signed out on this computer (Not logged in)";
+    let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(SessionResult::NeedsHuman(why.into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    rig.machine.claude_signed_out_until = Some(std::time::Instant::now() - Duration::from_secs(1));
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn an_ordinary_needs_human_session_leaves_the_signed_out_gate_alone() {
+    let questions = ImplementerOutcome::Questions {
+        all_already_answered: true,
+    };
+    let (mut rig, _fake, _asked) = ended(done(questions), &Default::default()).await;
+    rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::decisions::MAX_REASKS;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert!(rig.machine.claude_signed_out_until.is_none());
+}
+
+#[tokio::test]
 async fn a_release_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
     let fail = Arc::new(AtomicBool::new(true));
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("x".into()), &fail).await;

@@ -452,13 +452,18 @@ impl ProjectLoop {
         }
     }
 
-    /// Resumes the sessions the first pass took back mid-run, each as its item's running step.
+    /// Resumes the sessions the first pass took back mid-run, each as its item's running step. Left for a
+    /// later pass, untouched, while Claude Code is signed out on this computer (section 7.3): resuming now
+    /// would only fail the same way.
     pub(super) async fn resume_sessions(
         &mut self,
         pool: &mut LanePool,
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) {
+        if signed_out(shared) {
+            return;
+        }
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
             if let Some(RunRecord {
@@ -528,8 +533,10 @@ impl ProjectLoop {
     }
 
     /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its
-    /// lane. A start the starter refuses gives the lane and the claim straight back. How many sessions started
-    /// that take a session slot.
+    /// lane. A start the starter refuses gives the lane and the claim straight back. A start left for a
+    /// later pass, untouched, while Claude Code is signed out on this computer (section 7.3): the item stays
+    /// queued with its lane free, so `decide` plans the same start again once someone signs back in. How many
+    /// sessions started that take a session slot.
     pub(super) async fn apply_starts(
         &mut self,
         actions: &[Action],
@@ -537,8 +544,12 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> u32 {
+        let signed_out = signed_out(shared);
         let mut started = 0;
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
+            if signed_out && matches!(action, Action::StartImplementer { .. }) {
+                continue;
+            }
             if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
                 continue;
             }
@@ -551,8 +562,8 @@ impl ProjectLoop {
 
     /// Asks the store for work while a lane is free and a session slot is left (`slots`, used up as work
     /// starts), and starts what it hands out. The tick's `claim`, the last answer: the item id, `none` or
-    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, an own failure's claim pause, or
-    /// no link).
+    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, an own failure's claim pause,
+    /// Claude signed out on this computer, or no link).
     pub(super) async fn claim(
         &mut self,
         pool: &mut LanePool,
@@ -563,6 +574,7 @@ impl ProjectLoop {
         if shared
             .claim_paused_until
             .is_some_and(|until| std::time::Instant::now() < until)
+            || signed_out(shared)
         {
             return None;
         }
@@ -665,6 +677,14 @@ impl ProjectLoop {
             }),
         );
     }
+}
+
+/// Whether Claude Code was found signed out on this computer recently enough that no new or resumed
+/// session should start yet ([`Machine::claude_signed_out_until`](super::Machine), section 7.3).
+fn signed_out(shared: &Shared<'_>) -> bool {
+    shared
+        .claude_signed_out_until
+        .is_some_and(|until| std::time::Instant::now() < until)
 }
 
 fn describe(action: &Action) -> String {
