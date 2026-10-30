@@ -6,6 +6,7 @@ use std::future::Future;
 use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
+use serde_json::Value;
 
 use crate::backlog::Item;
 use crate::config::{CheckConfig, CodeGates, ProjectType};
@@ -121,11 +122,12 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
 }
 
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
-/// structured answer. A session that failed, or answered with something other than the result
-/// Retaskable asked for, is an error: unlike a release note, there's no plain fallback for code
-/// that was never written — the caller (not yet built: the orchestrator loop) decides whether to
-/// retry, escalate, or ask a person from there.
-pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> Result<ImplementerResult>
+/// structured answer, alongside the latest usage reading the session's stream reported (for the
+/// caller to save as `state.usage`, `None` on a session that never sent one). A session that
+/// failed, or answered with something other than the result Retaskable asked for, is an error:
+/// unlike a release note, there's no plain fallback for code that was never written — the caller
+/// (the orchestrator loop) decides whether to retry, escalate, or ask a person from there.
+pub async fn run_implementer<F, Fut>(spec: SessionSpec, run: F) -> Result<(ImplementerResult, Option<Value>)>
 where
     F: FnOnce(SessionSpec) -> Fut,
     Fut: Future<Output = Result<SessionResult>>,
@@ -135,9 +137,12 @@ where
     if !r.ok {
         bail!(describe_failure(&r, budget_usd));
     }
-    r.structured
+    let usage = r.usage.clone();
+    let result = r
+        .structured
         .and_then(|v| serde_json::from_value::<ImplementerResult>(v).ok())
-        .ok_or_else(|| anyhow!("the session finished but didn't answer with the result Retaskable asked for"))
+        .ok_or_else(|| anyhow!("the session finished but didn't answer with the result Retaskable asked for"))?;
+    Ok((result, usage))
 }
 
 #[cfg(test)]
@@ -244,7 +249,7 @@ mod tests {
         let it = item(&[], None);
         let cwd = Path::new("repo");
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
-        let r = run_implementer(spec, |spec| async move {
+        let (r, usage) = run_implementer(spec, |spec| async move {
             assert!(!spec.readonly);
             Ok(result(
                 true,
@@ -256,6 +261,7 @@ mod tests {
         .unwrap();
         assert_eq!(r.status, "pr_opened");
         assert_eq!(r.summary, "Wired the session.");
+        assert_eq!(usage, None);
     }
 
     #[tokio::test]

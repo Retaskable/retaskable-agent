@@ -145,6 +145,9 @@ pub struct StartRequest {
     pub item: Item,
     /// Where the session reports how it ended; the loop reads it on its next wake.
     pub outcomes: OutcomeSender,
+    /// The project's latest `state.usage` reading (section 7.1), for picking the implementer's
+    /// model tier. `None` when there's no reading yet, which is treated as a full window.
+    pub usage: Option<Value>,
 }
 
 mod report;
@@ -403,6 +406,7 @@ impl ProjectLoop {
                     token: self.leases.get(item_id).cloned().unwrap_or_default(),
                     item,
                     outcomes: self.outcomes.clone(),
+                    usage: self.store.usage(),
                 };
                 match starter.start(request) {
                     Ok(()) => {

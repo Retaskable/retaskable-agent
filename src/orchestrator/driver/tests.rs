@@ -452,6 +452,7 @@ impl SessionStarter for Fake {
                 item_id: request.item_id,
                 lane: request.lane,
                 result: script.remove(0),
+                usage: None,
             });
         }
         Ok(())
@@ -556,6 +557,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             token: "lease-1".into(),
             item: rig.lp(0).items["a"].clone(),
             outcomes: rig.machine.outcome_sender(),
+            usage: None,
         }]
     );
     assert_eq!(

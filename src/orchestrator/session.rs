@@ -2,19 +2,22 @@
 //! `agent/src/steps.ts`): prepares the lane, builds the prompt, runs `claude -p` and turns what it
 //! answered into the [`SessionOutcome`] the loop settles. Claude only; any other engine refuses.
 //! Left out: "Where to start" in the prompt, resuming a session (only fresh ones start, and the session
-//! id is not kept in the state file), the usage-window model tier (always `sonnet`), Claude's sandbox,
-//! and the decisions a person already gave (the claimed item doesn't carry them).
+//! id is not kept in the state file), Claude's sandbox, and the decisions a person already gave (the
+//! claimed item doesn't carry them). The usage-window model tier (section 7.1) is picked for the
+//! implementer ([`crate::tiers::implementer_tier`]); the other roles it covers have no sessions here yet.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::future::BoxFuture;
+use serde_json::Value;
 
 use super::driver::{SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
@@ -22,6 +25,7 @@ use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, e
 use crate::env::Env;
 use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
+use crate::tiers::implementer_tier;
 use crate::{lanes, paths};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
@@ -33,6 +37,7 @@ pub struct ClaudeStarter {
     choice: EngineChoiceConfig,
     env: Env,
     max_turns: u32,
+    models: ModelsConfig,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     running: Arc<AtomicU32>,
 }
@@ -44,6 +49,7 @@ impl ClaudeStarter {
         choice: EngineChoiceConfig,
         env: Env,
         max_turns: u32,
+        models: ModelsConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -51,6 +57,7 @@ impl ClaudeStarter {
             choice,
             env,
             max_turns,
+            models,
             running: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -83,6 +90,7 @@ impl SessionStarter for ClaudeStarter {
             lane,
             item,
             outcomes,
+            usage,
             ..
         } = request;
         let job = Job {
@@ -93,15 +101,17 @@ impl SessionStarter for ClaudeStarter {
             max_turns: self.max_turns,
             lane,
             item,
+            usage,
+            models: self.models,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
-            let result = match tokio::spawn(run(job)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
-                Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
+            let (result, usage) = match tokio::spawn(run(job)).await {
+                Ok(Ok((result, usage))) => (result, usage),
+                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None),
+                Err(e) => (SessionResult::Failed(format!("the session task crashed: {e}")), None),
             };
             running.fetch_sub(1, Ordering::SeqCst);
             outcomes.send(SessionOutcome {
@@ -109,6 +119,7 @@ impl SessionStarter for ClaudeStarter {
                 item_id,
                 lane,
                 result,
+                usage,
             });
         });
         Ok(())
@@ -143,6 +154,9 @@ struct Job {
     max_turns: u32,
     lane: u32,
     item: Item,
+    /// The latest `state.usage` reading, for picking the implementer's model tier.
+    usage: Option<Value>,
+    models: ModelsConfig,
 }
 
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`.
@@ -160,7 +174,7 @@ fn branch_name(item: &Item) -> String {
     format!("retaskable/{}-{}-s{}", item.id, slug.trim_end_matches('-'), item.slice)
 }
 
-async fn run(job: Job) -> Result<SessionResult> {
+async fn run(job: Job) -> Result<(SessionResult, Option<Value>)> {
     let Job {
         data_dir,
         project,
@@ -169,7 +183,11 @@ async fn run(job: Job) -> Result<SessionResult> {
         max_turns,
         lane,
         item,
+        usage,
+        models,
     } = job;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let model = implementer_tier(usage.as_ref(), now, &models).to_string();
     let branch = branch_name(&item);
     let (repo, worktrees, base) = (
         PathBuf::from(&project.repo_path),
@@ -194,7 +212,7 @@ async fn run(job: Job) -> Result<SessionResult> {
             code_gates: project.code_gates,
             where_to_start: "",
             cwd: &cwd,
-            model: "sonnet".to_string(),
+            model,
             budget_usd: project.budget.implementer_usd,
             max_turns: Some(max_turns),
             engine: Some(EngineId::Claude),
@@ -218,8 +236,8 @@ async fn run(job: Job) -> Result<SessionResult> {
     })
     .await;
     Ok(match answer {
-        Err(e) => SessionResult::Failed(format!("{e:#}")),
-        Ok(r) => classify(&r),
+        Err(e) => (SessionResult::Failed(format!("{e:#}")), None),
+        Ok((r, usage)) => (classify(&r), usage),
     })
 }
 
@@ -306,7 +324,14 @@ mod tests {
         project.budget.implementer_usd = 5.0;
         let bin = bin.to_string_lossy().into_owned();
         let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
-        let starter = ClaudeStarter::new(root.join("data"), vec![project], choice, env, 50);
+        let starter = ClaudeStarter::new(
+            root.join("data"),
+            vec![project],
+            choice,
+            env,
+            50,
+            ModelsConfig::default(),
+        );
         Rig {
             _dir: dir,
             root,
@@ -365,6 +390,7 @@ mod tests {
             token: "t".into(),
             item: item(&[], Some("Wire it.")),
             outcomes,
+            usage: None,
         };
         (request, rx)
     }
@@ -467,6 +493,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_usage_reading_yet_starts_the_implementer_on_opus() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let (mut request, mut rx) = request();
+        request.usage = None;
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
+        assert_eq!(model, Some("opus"), "{args}");
+    }
+
+    #[tokio::test]
+    async fn a_usage_reading_below_opus_above_pct_starts_the_implementer_on_sonnet() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let (mut request, mut rx) = request();
+        request.usage = Some(serde_json::json!({"status": "allowed_warning", "resetsAt": i64::MAX}));
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
+        assert_eq!(model, Some("sonnet"), "{args}");
+    }
+
+    #[tokio::test]
     async fn a_lane_that_cannot_be_prepared_fails() {
         let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
         let mut projects = rig.starter.projects.clone();
@@ -477,6 +527,7 @@ mod tests {
             EngineChoiceConfig::default(),
             rig.starter.env.clone(),
             50,
+            ModelsConfig::default(),
         );
         let (request, mut rx) = request();
         starter.start(request).unwrap();

@@ -310,6 +310,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::engine_choice(cfg, env),
                 env.clone(),
                 cfg.machine.max_turns,
+                cfg.machine.models,
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
     });

@@ -2,6 +2,7 @@
 //! settled on the next wake), a step's end through the project's `Running` set, and what either means for the
 //! item's lane and lease (freed, parked, or given back to the store, with the releases and parks the store
 //! hasn't taken yet sent again later: the TS agent's `unreleased`).
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{Links, Machine, ProjectLoop, SessionStarter};
@@ -30,6 +31,9 @@ pub struct SessionOutcome {
     pub item_id: String,
     pub lane: u32,
     pub result: SessionResult,
+    /// The session's latest usage reading, if any, saved as `state.usage` once settled
+    /// (docs/specs/agent/07-orchestrator-loop.md section 7.1).
+    pub usage: Option<Value>,
 }
 
 /// The sending end of the outcome channel: cloned into every [`StartRequest`](super::StartRequest).
@@ -207,6 +211,12 @@ impl ProjectLoop {
             );
             return;
         };
+        if let Some(usage) = outcome.usage.clone() {
+            self.store.set_usage(usage);
+            if let Err(e) = self.store.save() {
+                tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
+            }
+        }
         self.events.add_in(
             &self.id,
             Event::SessionEnd(event::SessionEnd {
