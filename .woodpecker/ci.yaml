@@ -32,10 +32,13 @@ steps:
       # Pipeline 140: rustc SIGSEGV'd deep in rustc_monomorphize::collector::items_of_instance
       # compiling `syn` (a proc-macro dependency several crates pull in), with rustc's own crash
       # report suggesting exactly this: "you can increase rustc's stack size by setting
-      # RUST_MIN_STACK=33554432". `syn`'s "full" feature set builds deeply recursive generated
-      # code that can overrun the default thread stack; this is the compiler's own documented
-      # workaround, not a memory or cache problem.
-      RUST_MIN_STACK: "33554432"
+      # RUST_MIN_STACK=...". `syn`'s "full" feature set builds deeply recursive generated code
+      # that can overrun the default thread stack; this is the compiler's own documented
+      # workaround, not a memory or cache problem. Pipeline 141 hit the same SIGSEGV compiling
+      # `serde_derive` (another proc-macro crate) with 32MiB still not enough, rustc's crash
+      # report that time suggesting 64MiB, so this is set a step above that suggestion to leave
+      # headroom for whichever proc-macro crate needs it next.
+      RUST_MIN_STACK: "134217728"
     volumes: &cargo_volumes
       - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
       - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
