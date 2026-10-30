@@ -34,7 +34,7 @@
 | Class | Matches |
 |---|---|
 | Smart | `opus`, `*-sol`, `gpt-N` with no suffix, `grok-N`, `gemini-*-pro`, `*-max` |
-| Fast | `sonnet`, `*mini*`, `*flash*`, `*-fast`, `haiku`, and anything not matched |
+| Fast | `sonnet`, `mini` as a whole word (`gpt-6.1-mini`, not `gemini`), `*flash*`, `*-fast`, `haiku`, and anything not matched |
 
 - The person's **Move** wins over the catalog, and is saved (section 15.9).
 - `auto` (Cursor's own pick) is a Fast model on Cursor.
@@ -86,9 +86,9 @@ Looked up when the session starts, after it gets its slot, in plain code (`model
   | Claude plan (`rateLimitTier`) | Lanes |
   |---|---|
   | Max 20x (`*_max_20x`) | 4 |
-  | Max 5x (`*_max_5x`) | 3 |
+  | Max 5x (`*_max_5x`), or Max with any other tier | 3 |
   | Pro (`subscriptionType` `pro`) | 2 |
-  | Free, or `rateLimitTier` none of the above | 1 |
+  | Free | 1 |
   | No reading: an API key, not signed in, or a file that doesn't read | 2, as before |
 
   - **Where the plan comes from.** Claude Code's sign-in file, `~/.claude/.credentials.json` (`claudeAiOauth.subscriptionType` and `.rateLimitTier`; `CLAUDE_CONFIG_DIR` moves it). It's undocumented, so like Cursor's reading (section 7) anything unexpected is "no reading", never an error. `claudePlan()` in `agent/src/engines/claudePlan.ts` reads those two fields and nothing else: the tokens beside them are never kept, logged or sent. Seen 2026-10-29 with `default_claude_max_5x`; `claude auth status` gives only `subscriptionType` (`max`), not 5x or 20x.
