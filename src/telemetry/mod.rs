@@ -1,9 +1,12 @@
-//! The agent's event log and (later) watchdog (docs/specs/agent-telemetry.md).
+//! The agent's event log and watchdog (docs/specs/agent-telemetry.md).
+pub mod debounce;
 pub mod event;
 pub mod events;
 pub mod report;
 pub mod start_stats;
+pub mod watchdog;
 
+pub use debounce::Telemetry;
 pub use event::{Body, Entry, Event};
 pub use events::{EventLog, KEEP_DAYS, MAX_TEXT, RECENT_MS, clean, day_file, now_ms, prune, read_events, scrub};
 pub use report::{find_item, flag, parse_since, read_all, report_text, why_text};
