@@ -120,6 +120,27 @@ fn default_min_scout_diff_lines() -> u32 {
     2000
 }
 
+/// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). 0 turns the
+/// quiet watchdog off.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningConfig {
+    #[serde(default = "default_session_quiet_minutes")]
+    pub session_quiet_minutes: u32,
+}
+
+impl Default for TuningConfig {
+    fn default() -> Self {
+        Self {
+            session_quiet_minutes: default_session_quiet_minutes(),
+        }
+    }
+}
+
+fn default_session_quiet_minutes() -> u32 {
+    20
+}
+
 /// Checked before every push (agent.md section 6.2). 0 turns one off.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -270,6 +291,8 @@ pub struct ProjectConfig {
     /// Claude Code vs. Cursor per role (engines.md, not yet ported here): kept as written.
     #[serde(default)]
     pub engines: Option<Value>,
+    #[serde(default)]
+    pub tuning: TuningConfig,
 }
 
 impl ProjectConfig {
@@ -464,6 +487,7 @@ mod tests {
             deploy: DeployConfig::default(),
             phone: None,
             engines: None,
+            tuning: TuningConfig::default(),
         }
     }
 }

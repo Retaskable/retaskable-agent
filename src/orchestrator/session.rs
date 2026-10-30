@@ -145,6 +145,11 @@ struct Job {
     item: Item,
 }
 
+/// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
+fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
+    (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
+}
+
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`.
 fn branch_name(item: &Item) -> String {
     let slug: String = item
@@ -212,9 +217,10 @@ async fn run(job: Job) -> Result<SessionResult> {
         lane: Some(lane),
     };
     let engine = engine_of(Some(EngineId::Claude))?;
+    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
     let answer = run_implementer(spec, |spec| async move {
-        run_session(engine, bin, &spec, id, Some(sink)).await
+        run_session(engine, bin, &spec, id, Some(sink), quiet).await
     })
     .await;
     Ok(match answer {
@@ -517,5 +523,11 @@ mod tests {
             branch_name(&item(&[], None)),
             "retaskable/implementer-session-have-a-session-write-the-code-s2"
         );
+    }
+
+    #[test]
+    fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
+        assert_eq!(quiet_timeout(0), None);
+        assert_eq!(quiet_timeout(20), Some(Duration::from_secs(20 * 60)));
     }
 }
