@@ -21,10 +21,13 @@ pub struct Candidate<'a> {
 
 /// What each project would do this pass (`None` for a project not taking part), and who was served last.
 /// Nothing real changes: starts are applied to a copy of `pool` only, so a lane one project is given is
-/// already gone when the next one is asked. `last_served` is an index into `candidates`.
+/// already gone when the next one is asked. `last_served` is an index into `candidates`. `slots` is how
+/// many more sessions may start (`concurrency` less `activeSessions`): each start takes one, and with none
+/// left nothing more starts and nobody asks the store.
 pub fn plan(
     pool: &LanePool,
     last_served: Option<usize>,
+    slots: u32,
     candidates: &mut [Option<Candidate>],
 ) -> (Vec<Vec<Action>>, Option<usize>) {
     let n = candidates.len();
@@ -32,13 +35,15 @@ pub fn plan(
     let mut log = EventLog::new();
     let mut actions = vec![Vec::new(); n];
     let mut last = last_served;
-    'turns: loop {
+    let mut slots = slots;
+    'turns: while slots > 0 {
         let first = last.map_or(0, |l| l + 1);
         for i in (0..n).map(|k| (first + k) % n) {
             let Some(c) = candidates[i].as_mut() else { continue };
             if let Some(start) = next_start(c, &mut scratch, &mut log) {
                 actions[i].push(start);
                 last = Some(i);
+                slots -= 1;
                 continue 'turns;
             }
         }
@@ -47,6 +52,7 @@ pub fn plan(
     // What is left once nobody can start: a project with a lane still free asks the store.
     for (i, c) in candidates.iter().enumerate() {
         if let Some(c) = c
+            && slots > 0
             && decide(c.id, c.paused, &c.runs, &scratch, c.cfg).contains(&Action::AskForWork)
         {
             actions[i].push(Action::AskForWork);

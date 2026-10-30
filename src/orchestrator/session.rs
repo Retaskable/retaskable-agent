@@ -6,10 +6,13 @@
 //! and the decisions a person already gave (the claimed item doesn't carry them).
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use futures_util::future::BoxFuture;
 
 use super::driver::{SessionOutcome, SessionResult, SessionStarter, StartRequest};
+use super::steps::StepRequest;
 use crate::backlog::Item;
 use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
@@ -18,7 +21,7 @@ use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
 use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
-use crate::item_lifecycle::ImplementerOutcome;
+use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::{lanes, paths};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
@@ -30,6 +33,8 @@ pub struct ClaudeStarter {
     choice: EngineChoiceConfig,
     env: Env,
     max_turns: u32,
+    /// Sessions started and not yet ended (the loop's `activeSessions`).
+    running: Arc<AtomicU32>,
 }
 
 impl ClaudeStarter {
@@ -46,6 +51,7 @@ impl ClaudeStarter {
             choice,
             env,
             max_turns,
+            running: Arc::new(AtomicU32::new(0)),
         })
     }
 }
@@ -88,13 +94,16 @@ impl SessionStarter for ClaudeStarter {
             lane,
             item,
         };
-        // The inner task is joined, so even a panic in it ends in exactly one outcome.
+        // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
+        let running = self.running.clone();
+        running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             let result = match tokio::spawn(run(job)).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
                 Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
             };
+            running.fetch_sub(1, Ordering::SeqCst);
             outcomes.send(SessionOutcome {
                 project: project_id,
                 item_id,
@@ -103,6 +112,15 @@ impl SessionStarter for ClaudeStarter {
             });
         });
         Ok(())
+    }
+
+    fn active(&self) -> u32 {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
+    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+        None
     }
 }
 
