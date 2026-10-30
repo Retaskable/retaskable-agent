@@ -26,16 +26,18 @@ use tokio::time::MissedTickBehavior;
 use super::guard::PortGuard;
 use super::live::{HeldLane, LiveHandle, now_iso8601};
 use super::round_robin::{Candidate, plan};
-use super::steps::{Running, StepRequest};
+use super::session::branch_name;
+use super::steps::{Running, StepRequest, state_name};
 use super::{Action, ProjectRuns, apply, decide, tick_payload};
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::env::Env;
-use crate::item_lifecycle::ItemRun;
+use crate::implementer::new_session_id;
+use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool, PoolRules};
 use crate::lanes;
 use crate::link::TokenStore;
-use crate::store::Store;
+use crate::store::{RunRecord, Store};
 use crate::telemetry::{Event, EventLog, event};
 use crate::view::PauseState;
 
@@ -143,6 +145,11 @@ pub struct StartRequest {
     pub token: String,
     /// The claimed item as the store handed it out (title, slice, remaining, spec refs).
     pub item: Item,
+    /// The session's id, saved in the state file before it starts: the one `--session-id` names for a new
+    /// session, or the saved one `--resume` continues.
+    pub session_id: String,
+    /// Whether to resume `session_id` (a restart cut it off) rather than start it.
+    pub resume: bool,
     /// Where the session reports how it ended; the loop reads it on its next wake.
     pub outcomes: OutcomeSender,
     /// `None` starts the session fresh in a prepared lane, as a newly claimed item does. `Some` restarts an
@@ -150,6 +157,17 @@ pub struct StartRequest {
     /// turns"): the lane is reused as-is, keeping any uncommitted work, and this text is the session's prompt
     /// verbatim.
     pub follow_up: Option<String>,
+}
+
+/// How `ProjectLoop::launch` starts an implementer session.
+enum Launch {
+    /// A newly claimed item: a fresh session id in a freshly prepared lane.
+    Fresh,
+    /// A session a restart of this computer cut off: resumes the saved session id in its existing lane.
+    Resume(String),
+    /// A session that ran out of turns (06.2-implementer.md "at most maxTurns turns"): a fresh session id,
+    /// reusing the existing lane as-is, with this text as the picking-up prompt.
+    Continuing(String),
 }
 
 mod report;
@@ -190,6 +208,11 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     unparked: BTreeMap<String, (String, String, String)>,
+    /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
+    /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
+    records: BTreeMap<String, RunRecord>,
+    /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
+    to_resume: Vec<String>,
     /// The item the store handed out for each lease held, by id, for the session that starts on it.
     items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`Machine::add`].
@@ -226,6 +249,8 @@ impl ProjectLoop {
             leases: store.leases(),
             unreleased: store.unreleased(),
             unparked: store.unparked(),
+            records: store.runs(),
+            to_resume: Vec::new(),
             items: BTreeMap::new(),
             outcomes: OutcomeSender(mpsc::unbounded_channel().0),
             store,
@@ -337,14 +362,18 @@ impl ProjectLoop {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
         self.store.set_unparked(&self.unparked);
+        self.records.retain(|id, _| self.leases.contains_key(id));
+        self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
         }
     }
 
-    /// Takes a lease into `runs` as a queued item, with the `lease` event the TS agent's store writes.
-    fn take_lease(&mut self, item: &Item, token: String) {
+    /// Takes a lease into `runs` in `state` (queued for a new claim), with the `lease` event the TS agent's
+    /// store writes.
+    fn take_lease(&mut self, item: &Item, token: String, state: ItemState) {
         let mut run = ItemRun::new();
+        run.state = state;
         run.slice = item.slice;
         self.runs.insert(item.id.clone(), run);
         self.items.insert(item.id.clone(), item.clone());
@@ -355,29 +384,188 @@ impl ProjectLoop {
             Event::Lease(event::Lease {
                 item: Some(item.id.clone()),
                 change: Some("taken".into()),
-                state: Some("queued".into()),
+                state: Some(state_name(state).into()),
                 ..Default::default()
             }),
         );
     }
 
-    /// On the first pass, takes back the items this computer still holds a lease on (the TS agent keeps the
-    /// token in its state file, so a restart carries on with them). One the store no longer shows as handed
-    /// out (taken by another agent, finished, gone) is dropped; the rest start again as queued.
-    fn readopt(&mut self, items: &[Item]) {
+    /// On the first pass, takes back the items this computer still holds a lease on, each as its saved run
+    /// says (the TS agent's `recover`: items keep their state and lane across a restart). An implementing item
+    /// takes its lane again and has its session resumed (on the next schedule, as its running step: the
+    /// starter counts it, and the loop never starts a second); one in checking takes its lane and the loop
+    /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
+    /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
+    /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
+    /// holds no lease and isn't here: the store hands it back when it is answered.
+    fn readopt(&mut self, items: &[Item], pool: &mut LanePool) {
         if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
             return;
         }
         for (id, token) in std::mem::take(&mut self.leases) {
-            match items.iter().find(|i| i.id == id) {
-                Some(item) if matches!(item.status, ItemStatus::Claimed | ItemStatus::Building) => {
-                    tracing::info!("{}: still holds {id}, carrying on", self.id);
-                    self.take_lease(item, token);
-                }
-                _ => tracing::info!("{}: no longer holds {id}, dropping its lease", self.id),
+            let record = self.records.remove(&id);
+            let Some(item) = items.iter().find(|i| i.id == id) else {
+                tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
+                continue;
+            };
+            let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
+            let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
+                Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
+                Some("checking") => (ItemState::Checking, handed || item.status == ItemStatus::InReview),
+                Some("implementing") => (ItemState::Implementing, handed),
+                _ => (ItemState::Queued, handed),
+            };
+            if !ok {
+                tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
+                continue;
             }
+            tracing::info!("{}: still holds {id} ({}), carrying on", self.id, state_name(state));
+            self.take_lease(item, token, state);
+            let Some(record) = record else { continue };
+            let session = record.impl_session_id.clone();
+            let mut lane = None;
+            if matches!(state, ItemState::Checking | ItemState::Implementing) {
+                lane = record.lane.filter(|&k| self.retake_lane(pool, &id, k));
+                // Its lane is gone (fewer lanes now, or taken), or it was cut off before a session id was saved:
+                // it starts again as queued. TS can't get here, since a lane belongs to its item until freed.
+                if lane.is_none() || (state == ItemState::Implementing && session.is_none()) {
+                    self.free_lane(pool, &id, "queued", "nothing to resume");
+                    self.runs.get_mut(&id).expect("just taken").state = ItemState::Queued;
+                    continue;
+                }
+            }
+            if state == ItemState::Implementing {
+                self.to_resume.push(id.clone());
+            }
+            self.remember(&id, lane, session);
         }
         self.save_leases();
+    }
+
+    /// Takes `lane` back for an item that held it before the restart, if it is still free.
+    fn retake_lane(&mut self, pool: &mut LanePool, item_id: &str, lane: u32) -> bool {
+        let holder = Holder::Item {
+            project: self.id.clone(),
+            item: item_id.to_string(),
+        };
+        let taken = pool.take(lane, holder);
+        if taken {
+            self.events.add_in(
+                &self.id,
+                Event::LaneTaken(event::LaneTaken {
+                    item: Some(item_id.to_string()),
+                    lane: Some(lane),
+                    ..Default::default()
+                }),
+            );
+        }
+        taken
+    }
+
+    /// Writes the item's run into its record: its state now, `lane`, its branch and slice, and `session` (or
+    /// the one saved before). Does nothing for an item with no lease. Call `save_leases` after.
+    fn remember(&mut self, item_id: &str, lane: Option<u32>, session: Option<String>) {
+        let (Some(run), Some(item)) = (self.runs.get(item_id), self.items.get(item_id)) else {
+            return;
+        };
+        if !self.leases.contains_key(item_id) {
+            return;
+        }
+        let session = session.or_else(|| self.records.get(item_id).and_then(|r| r.impl_session_id.clone()));
+        let record = RunRecord {
+            state: state_name(run.state).into(),
+            lane,
+            impl_session_id: session,
+            branch: Some(branch_name(item)),
+            slice: run.slice,
+        };
+        self.records.insert(item_id.to_string(), record);
+    }
+
+    /// Refreshes the saved run of an item whose state just moved. A run that was parked or given back has no
+    /// lease or record now; the rest are saved as they stand.
+    pub(super) fn refresh_record(&mut self, pool: &LanePool, item_id: &str) {
+        if self.records.contains_key(item_id) && self.leases.contains_key(item_id) {
+            self.remember(item_id, pool.lane_of(&self.id, item_id), None);
+            self.save_leases();
+        }
+    }
+
+    /// Resumes the sessions the first pass took back mid-run, each as its item's running step.
+    async fn resume_sessions(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter, links: &Links) {
+        for id in std::mem::take(&mut self.to_resume) {
+            let record = self.records.get(&id).cloned();
+            if let Some(RunRecord {
+                lane: Some(lane),
+                impl_session_id: Some(session),
+                ..
+            }) = record
+            {
+                tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
+                self.launch(pool, &id, lane, Launch::Resume(session), starter, links)
+                    .await;
+            }
+        }
+    }
+
+    /// Starts (or, with a saved `resume` session id, resumes) the implementer session for an item that holds
+    /// its lane. The session id is saved before the session starts. A start the starter refuses gives the
+    /// lane and the claim straight back. Whether a session started that takes a session slot.
+    async fn launch(
+        &mut self,
+        pool: &mut LanePool,
+        item_id: &str,
+        lane: u32,
+        kind: Launch,
+        starter: &dyn SessionStarter,
+        links: &Links,
+    ) -> bool {
+        let Some(item) = self.items.get(item_id).cloned() else {
+            let why = "the session didn't start: the item is unknown here";
+            self.hand_back(pool, item_id, "queued", why, links).await;
+            return false;
+        };
+        let (resume, follow_up) = match kind {
+            Launch::Fresh => (None, None),
+            Launch::Resume(session_id) => (Some(session_id), None),
+            Launch::Continuing(follow_up) => (None, Some(follow_up)),
+        };
+        let session_id = resume.clone().unwrap_or_else(new_session_id);
+        self.remember(item_id, Some(lane), Some(session_id.clone()));
+        self.save_leases();
+        let request = StartRequest {
+            project: self.id.clone(),
+            item_id: item_id.to_string(),
+            lane,
+            token: self.leases.get(item_id).cloned().unwrap_or_default(),
+            item,
+            session_id,
+            resume: resume.is_some(),
+            outcomes: self.outcomes.clone(),
+            follow_up,
+        };
+        match starter.start(request) {
+            Ok(()) => {
+                self.events.add_in(
+                    &self.id,
+                    Event::SessionStart(event::SessionStart {
+                        item: Some(item_id.to_string()),
+                        lane: Some(lane),
+                        role: Some("implementer".into()),
+                        engine: Some("claude".into()),
+                        ..Default::default()
+                    }),
+                );
+                // A "do next" item's session takes no slot (section 7).
+                !self.items.get(item_id).is_some_and(|i| i.do_next)
+            }
+            Err(why) => {
+                tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);
+                let why = format!("the session didn't start: {why}");
+                self.hand_back(pool, item_id, "queued", &why, links).await;
+                false
+            }
+        }
     }
 
     /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its
@@ -396,41 +584,7 @@ impl ProjectLoop {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
-                let Some(item) = self.items.get(item_id).cloned() else {
-                    let why = "the session didn't start: the item is unknown here";
-                    self.hand_back(pool, item_id, "queued", why, links).await;
-                    continue;
-                };
-                let request = StartRequest {
-                    project: self.id.clone(),
-                    item_id: item_id.clone(),
-                    lane: *lane,
-                    token: self.leases.get(item_id).cloned().unwrap_or_default(),
-                    item,
-                    outcomes: self.outcomes.clone(),
-                    follow_up: None,
-                };
-                match starter.start(request) {
-                    Ok(()) => {
-                        // A "do next" item's session takes no slot (section 7).
-                        started += u32::from(!self.items.get(item_id).is_some_and(|i| i.do_next));
-                        self.events.add_in(
-                            &self.id,
-                            Event::SessionStart(event::SessionStart {
-                                item: Some(item_id.clone()),
-                                lane: Some(*lane),
-                                role: Some("implementer".into()),
-                                engine: Some("claude".into()),
-                                ..Default::default()
-                            }),
-                        );
-                    }
-                    Err(why) => {
-                        tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);
-                        let why = format!("the session didn't start: {why}");
-                        self.hand_back(pool, item_id, "queued", &why, links).await;
-                    }
-                }
+                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, links).await);
             }
         }
         started
@@ -509,7 +663,7 @@ impl ProjectLoop {
                 (item.id, false)
             }
             Ok(ClaimNextAnswer::Item { item, token }) => {
-                self.take_lease(&item, token);
+                self.take_lease(&item, token, ItemState::Queued);
                 let actions = decide(&self.id, false, &self.runs, pool, &self.project);
                 *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, links).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
@@ -807,7 +961,7 @@ impl Machine {
             if let Some(items) = items
                 && self.live(&self.projects[i])
             {
-                self.projects[i].readopt(items);
+                self.projects[i].readopt(items, &mut self.pool);
             }
         }
         if self.starter.is_some() {
@@ -841,6 +995,7 @@ impl Machine {
             self.settle_outcomes(starter).await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
+                    lp.resume_sessions(&mut self.pool, starter, &self.links).await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     if !paused {
                         lp.advance(&self.pool, starter);

@@ -4,7 +4,7 @@
 //! hasn't taken yet sent again later: the TS agent's `unreleased`).
 use tokio::sync::mpsc;
 
-use super::{Links, Machine, ProjectLoop, SessionStarter, StartRequest};
+use super::{Launch, Links, Machine, ProjectLoop, SessionStarter};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
@@ -112,7 +112,7 @@ impl ProjectLoop {
     }
 
     /// Frees the item's lane, if it holds one, and writes `lane_freed` (`<state>: <note>`).
-    fn free_lane(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str) {
+    pub(super) fn free_lane(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str) {
         let holder = Holder::Item {
             project: self.id.clone(),
             item: item_id.to_string(),
@@ -202,6 +202,7 @@ impl ProjectLoop {
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
+        self.refresh_record(pool, item);
     }
 
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
@@ -260,8 +261,10 @@ impl ProjectLoop {
     }
 
     /// Starts a fresh session in the same lane with the picking-up follow-up, bypassing the claim pipeline: the
-    /// lane and lease are already held by this item, so there's nothing to decide or claim again. A starter that
-    /// refuses gives the lane and lease back, exactly as a refused fresh start does in `apply_starts`.
+    /// lane and lease are already held by this item, so there's nothing to decide or claim again. Never resumes
+    /// the old session id: a session that ran out of turns gets a fresh one, as `launch` does for any other
+    /// fresh start. A starter that refuses gives the lane and lease back, exactly as a refused fresh start does
+    /// in `apply_starts`.
     async fn restart_after_max_turns(
         &mut self,
         pool: &mut LanePool,
@@ -270,25 +273,15 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         links: &Links,
     ) {
-        let Some(item) = self.items.get(item_id).cloned() else {
-            let why = "the restart didn't start: the item is unknown here";
-            self.hand_back(pool, item_id, "queued", why, links).await;
-            return;
-        };
-        let request = StartRequest {
-            project: self.id.clone(),
-            item_id: item_id.to_string(),
+        self.launch(
+            pool,
+            item_id,
             lane,
-            token: self.leases.get(item_id).cloned().unwrap_or_default(),
-            item,
-            outcomes: self.outcomes.clone(),
-            follow_up: Some(MAX_TURNS_FOLLOW_UP.to_string()),
-        };
-        if let Err(why) = starter.start(request) {
-            tracing::warn!("{}: the restart for {item_id} didn't start: {why}", self.id);
-            let why = format!("the session didn't start: {why}");
-            self.hand_back(pool, item_id, "queued", &why, links).await;
-        }
+            Launch::Continuing(MAX_TURNS_FOLLOW_UP.to_string()),
+            starter,
+            links,
+        )
+        .await;
     }
 
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means
