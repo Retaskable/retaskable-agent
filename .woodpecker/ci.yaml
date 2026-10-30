@@ -31,13 +31,12 @@ steps:
       CARGO_BUILD_JOBS: "1"
     volumes: &cargo_volumes
       - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
-      # -target-2: pipelines 134 and 136 (2026-10-30) still segfaulted compiling retaskable_agent's own
-      # lib.rs with CARGO_INCREMENTAL=0 already set, and a plain retrigger (no code change) didn't clear
-      # it either. CARGO_INCREMENTAL=0 only disables the incremental cache, not the cached, already-built
-      # dependency artifacts the shared target dir keeps regardless — one of those going bad outlives
-      # incremental being off. Couldn't reproduce either crash on a clean target dir with the pinned
-      # toolchain (rust:1-bookworm, including under a tight 900MB memory cap, which rules out the box
-      # just being short on RAM), so the fix is a fresh cache path rather than a fix to the source.
+      # -target-2: tried as a fix for pipelines 134/136's SIGSEGVs (2026-10-30) compiling retaskable_agent's
+      # own lib, on the theory that the original target dir's shared, persistent cache held a corrupted
+      # dependency artifact CARGO_INCREMENTAL=0 doesn't protect against. Ruled out by pipeline 137: a totally
+      # fresh -target-2 cache (every dependency compiling from scratch, nothing reused) still segfaulted at
+      # the exact same spot. The real fix is Cargo.toml's profile.dev.debug — kept on this path anyway since
+      # it's now a warm, known-good cache.
       - /var/cache/woodpecker/retaskable-agent-target-2:/cargo-target
     commands:
       - rustup component add rustfmt clippy

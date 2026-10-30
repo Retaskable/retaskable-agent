@@ -42,3 +42,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+# Line tables only, not full debug info: CI's check step (clippy and test, both built with this
+# profile) has repeatedly SIGSEGV'd in LLVM finalizing full (level 2) debug info for this crate's
+# test build, the project's single largest compilation unit once every #[cfg(test)] fn across the
+# whole crate is included. Line tables still carry file:line for panics and backtraces; only the
+# much larger per-variable/per-type debug metadata is dropped.
+[profile.dev]
+debug = "line-tables-only"
