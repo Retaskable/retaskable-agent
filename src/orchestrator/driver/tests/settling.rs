@@ -133,6 +133,32 @@ async fn a_failed_session_gives_the_item_back() {
 }
 
 #[tokio::test]
+async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
+    let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
+    rig.machine.pass().await;
+    assert!(rig.lp(0).claim_paused_until.is_some());
+    let events = rig.lp(0).events().recent();
+    let error = events.iter().find(|e| e.kind() == "error").unwrap().to_value();
+    assert_eq!(
+        (error["where"].clone(), error["item"].clone()),
+        (json!("start"), json!("a"))
+    );
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn a_claim_pause_that_has_passed_lets_claiming_resume() {
+    let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
+    rig.machine.pass().await;
+    rig.lp(0).claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
 async fn a_release_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
     let fail = Arc::new(AtomicBool::new(true));
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("x".into()), &fail).await;

@@ -272,7 +272,9 @@ async fn run(job: Job) -> Result<SessionResult> {
             continue;
         }
         return Ok(match answer {
-            Err(e) => SessionResult::Failed(format!("{e:#}")),
+            // A session ran (even if it crashed or answered with nothing usable), so this needs a person
+            // rather than going back to the queue: it may have left real work behind (section 7.3).
+            Err(e) => SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
             Ok(r) => classify(&r),
         });
     }
@@ -281,7 +283,8 @@ async fn run(job: Job) -> Result<SessionResult> {
 /// What the loop does with a session's answer (`implement` in `steps.ts`). `failed` is `needsHuman("Implementer
 /// gave up")`, `person_steps` is `waitForSteps` (a needs_human with the steps), `waits_on` records the dependency
 /// and gives the item back (no `depends` op here yet, so it goes to a person), and `nothing_left` marks the item
-/// done and merged (not built here yet, so it goes to a person too).
+/// done and merged (not built here yet, so it goes to a person too). A status this agent doesn't recognize also
+/// needs a person: the session ran, so this is never the before-work own failure that goes back to the queue.
 fn classify(r: &ImplementerResult) -> SessionResult {
     match r.status.as_str() {
         "pr_opened" => SessionResult::Implementer(ImplementerOutcome::Finished),
@@ -316,7 +319,12 @@ fn classify(r: &ImplementerResult) -> SessionResult {
                 r.summary
             ))
         }
-        other => SessionResult::Failed(format!("the session ended with {other}: {}", r.summary)),
+        // An answer in a shape this agent doesn't know: a session ran, so this needs a person rather
+        // than going back to the queue.
+        other => SessionResult::NeedsHuman(format!(
+            "The session answered with {other}, which needs a person: {}",
+            r.summary
+        )),
     }
 }
 
@@ -489,9 +497,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_exits_without_an_answer_fails() {
+    async fn a_session_that_exits_without_an_answer_needs_a_human() {
         let rig = rig(None, EngineChoiceConfig::default(), true);
-        assert!(matches!(outcome_of(&rig).await, SessionResult::Failed(_)));
+        assert!(matches!(outcome_of(&rig).await, SessionResult::NeedsHuman(_)));
     }
 
     fn classified(json: &str) -> SessionResult {
@@ -513,10 +521,7 @@ mod tests {
         assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
         let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
         assert!(waits.contains("a, b"), "{waits}");
-        assert!(matches!(
-            classified(r#"{"status":"odd","summary":"s"}"#),
-            SessionResult::Failed(_)
-        ));
+        assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
     }
 
     #[test]

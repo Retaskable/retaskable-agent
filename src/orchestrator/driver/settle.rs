@@ -2,6 +2,8 @@
 //! settled on the next wake), a step's end through the project's `Running` set, and what either means for the
 //! item's lane and lease (freed, parked, or given back to the store, with the releases and parks the store
 //! hasn't taken yet sent again later: the TS agent's `unreleased`).
+use std::time::{Duration, Instant};
+
 use tokio::sync::mpsc;
 
 use super::{Links, Machine, ProjectLoop, SessionStarter};
@@ -10,16 +12,24 @@ use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
 
+/// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses this project's
+/// claiming of new work (section 7.3): a problem with this computer, not the item, so hammering the
+/// store for more work would likely just fail the same way.
+pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
+
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionResult {
     /// The implementer exited normally (it finished, synced main, or asked questions).
     Implementer(ImplementerOutcome),
-    /// The session couldn't run or crashed through no fault of the item's (the TS `ownFailure`): the
-    /// item is given back to the store's queue. The text says why.
+    /// A failure before any session ran (lane prep, or the session wouldn't even start): this computer's own
+    /// problem, not the item's (the TS `ownFailure`), so the item is given back to the store's queue and
+    /// this project's claiming pauses ([`hand_back`](ProjectLoop::hand_back)). The text says why.
     Failed(String),
-    /// The session ended in a way that needs a person (it gave up, found nothing left to build, or left steps only
-    /// a person can do): the run goes to `needs_human`, freeing its lane and keeping its lease. The text says why.
+    /// A session ran but ended in a way that needs a person: it crashed, exited without an answer, gave up,
+    /// found nothing left to build, left steps only a person can do, or answered with a status this agent
+    /// doesn't know — any of these may have left real work behind, so the run goes to `needs_human` instead
+    /// of back to the queue, freeing its lane and keeping its lease. The text says why.
     NeedsHuman(String),
 }
 
@@ -61,7 +71,9 @@ impl ProjectLoop {
     /// Gives an item's lane and lease back: its run is dropped, the lane freed (`lane_freed`), and the lease
     /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
     /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
-    /// TS agent's `lane_freed` (`<state>: <note>`).
+    /// TS agent's `lane_freed` (`<state>: <note>`). An own failure before any session ran, so the error goes
+    /// in the local event log (not the item's: it isn't the item's fault) and this project's claiming pauses
+    /// for [`CLAIM_PAUSE`] (section 7.3), restarting cleared.
     pub(super) async fn hand_back(
         &mut self,
         pool: &mut LanePool,
@@ -73,6 +85,16 @@ impl ProjectLoop {
         self.runs.remove(item_id);
         self.items.remove(item_id);
         self.free_lane(pool, item_id, state, why);
+        self.claim_paused_until = Some(Instant::now() + CLAIM_PAUSE);
+        self.events.add_in(
+            &self.id,
+            Event::Error(event::Error {
+                item: Some(item_id.to_string()),
+                r#where: Some("start".into()),
+                error: Some(why.to_string()),
+                ..Default::default()
+            }),
+        );
         if let Some(token) = self.leases.remove(item_id) {
             self.unreleased.insert(item_id.to_string(), token);
             self.save_leases();

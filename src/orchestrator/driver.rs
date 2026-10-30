@@ -215,6 +215,9 @@ pub struct ProjectLoop {
     running: Running,
     /// What the fetch saw that the store was told last (`report`).
     seen: report::Seen,
+    /// Set by an own failure before any session ran ([`settle::hand_back`]): no `claim_next` on this
+    /// project until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared by a restart.
+    claim_paused_until: Option<std::time::Instant>,
 }
 
 impl ProjectLoop {
@@ -248,6 +251,7 @@ impl ProjectLoop {
             repo: None,
             running: Running::default(),
             seen: report::Seen::default(),
+            claim_paused_until: None,
         }
     }
 
@@ -569,7 +573,8 @@ impl ProjectLoop {
 
     /// Asks the store for work while a lane is free and a session slot is left (`slots`, used up as work
     /// starts), and starts what it hands out. The tick's `claim`, the last answer: the item id, `none` or
-    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, or no link).
+    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, an own failure's claim pause, or
+    /// no link).
     async fn claim(
         &mut self,
         pool: &mut LanePool,
@@ -577,6 +582,12 @@ impl ProjectLoop {
         links: &Links,
         starter: &dyn SessionStarter,
     ) -> Option<String> {
+        if self
+            .claim_paused_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+        {
+            return None;
+        }
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
