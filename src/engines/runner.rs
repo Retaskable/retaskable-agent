@@ -349,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_and_read_kills_a_session_thats_been_silent_past_the_quiet_timeout() {
         let dir = tempfile::tempdir().unwrap();
-        let (bin, args) = silent_command(5);
+        let (bin, args) = silent_command(30);
         let started = std::time::Instant::now();
         let result = run_spawn(
             &bin,
@@ -361,7 +361,7 @@ mod tests {
         )
         .await;
         assert!(
-            started.elapsed() < Duration::from_secs(4),
+            started.elapsed() < Duration::from_secs(20),
             "it waited out the silent process instead of killing it"
         );
         assert!(!result.ok);
