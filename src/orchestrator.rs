@@ -16,6 +16,7 @@ pub mod driver;
 pub mod guard;
 pub mod live;
 pub mod round_robin;
+pub mod session;
 
 use std::collections::BTreeMap;
 

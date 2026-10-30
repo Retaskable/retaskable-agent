@@ -135,6 +135,8 @@ pub struct StartRequest {
     pub item_id: String,
     pub lane: u32,
     pub token: String,
+    /// The claimed item as the store handed it out (title, slice, remaining, spec refs).
+    pub item: Item,
     /// Where the session reports how it ended; the loop reads it at the start of its next pass.
     pub outcomes: OutcomeSender,
 }
@@ -147,6 +149,9 @@ pub enum SessionResult {
     /// The session couldn't run or crashed through no fault of the item's (the TS `ownFailure`): the
     /// item is given back to the store's queue. The text says why.
     Failed(String),
+    /// The session ended in a way that needs a person (it gave up, found nothing left to build, or left steps only
+    /// a person can do): the run goes to `needs_human`, freeing its lane and keeping its lease. The text says why.
+    NeedsHuman(String),
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -163,6 +168,12 @@ pub struct SessionOutcome {
 pub struct OutcomeSender(mpsc::UnboundedSender<SessionOutcome>);
 
 impl OutcomeSender {
+    /// A sender and the receiving end of its channel.
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<SessionOutcome>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self(sender), receiver)
+    }
+
     /// Reports a session's end. A loop that has stopped hears nothing, which is fine: nothing is left to settle.
     pub fn send(&self, outcome: SessionOutcome) {
         let _ = self.0.send(outcome);
@@ -201,6 +212,8 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     unparked: BTreeMap<String, (String, String, String)>,
+    /// The item the store handed out for each lease held, by id, for the session that starts on it.
+    items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`Machine::add`].
     outcomes: OutcomeSender,
     /// Whether the held leases were matched against the backlog yet (once, on the first pass).
@@ -231,6 +244,7 @@ impl ProjectLoop {
             leases: store.leases(),
             unreleased: store.unreleased(),
             unparked: store.unparked(),
+            items: BTreeMap::new(),
             outcomes: OutcomeSender(mpsc::unbounded_channel().0),
             store,
             runs: ProjectRuns::new(),
@@ -349,6 +363,7 @@ impl ProjectLoop {
         let mut run = ItemRun::new();
         run.slice = item.slice;
         self.runs.insert(item.id.clone(), run);
+        self.items.insert(item.id.clone(), item.clone());
         self.leases.insert(item.id.clone(), token);
         self.save_leases();
         self.events.add_in(
@@ -387,6 +402,7 @@ impl ProjectLoop {
     /// TS agent's `lane_freed` (`<state>: <note>`).
     async fn hand_back(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str, links: &Links) {
         self.runs.remove(item_id);
+        self.items.remove(item_id);
         self.free_lane(pool, item_id, state, why);
         if let Some(token) = self.leases.remove(item_id) {
             self.unreleased.insert(item_id.to_string(), token);
@@ -498,23 +514,27 @@ impl ProjectLoop {
             );
             return;
         };
+        self.events.add_in(
+            &self.id,
+            Event::SessionEnd(event::SessionEnd {
+                item: Some(item.clone()),
+                lane: Some(outcome.lane),
+                role: Some("implementer".into()),
+                engine: Some("claude".into()),
+                ok: Some(!matches!(outcome.result, SessionResult::Failed(_))),
+                ..Default::default()
+            }),
+        );
         match outcome.result {
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, links).await,
+            SessionResult::NeedsHuman(why) => {
+                run.escalate();
+                self.needs_human(pool, &item, &why);
+            }
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
                 match run.state {
-                    ItemState::NeedsHuman => {
-                        self.events.add_in(
-                            &self.id,
-                            Event::ItemState(event::ItemState {
-                                item: Some(item.clone()),
-                                from: Some("implementing".into()),
-                                to: Some("needs_human".into()),
-                                ..Default::default()
-                            }),
-                        );
-                        self.free_lane(pool, &item, "needs_human", "the session needs a human");
-                    }
+                    ItemState::NeedsHuman => self.needs_human(pool, &item, "the session needs a human"),
                     ItemState::NeedsClarification => {
                         self.park(pool, &item, "needs_clarification", "answer", links).await
                     }
@@ -532,6 +552,21 @@ impl ProjectLoop {
         }
     }
 
+    /// An implementing run that needs a person: the lane is freed and the lease kept, as the TS agent's
+    /// `needsHuman` does for an item with a session and no PR.
+    fn needs_human(&mut self, pool: &mut LanePool, item: &str, why: &str) {
+        self.events.add_in(
+            &self.id,
+            Event::ItemState(event::ItemState {
+                item: Some(item.to_string()),
+                from: Some("implementing".into()),
+                to: Some("needs_human".into()),
+                ..Default::default()
+            }),
+        );
+        self.free_lane(pool, item, "needs_human", why);
+    }
+
     /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its
     /// lane. A start the starter refuses gives the lane and the claim straight back.
     async fn apply_starts(
@@ -546,11 +581,23 @@ impl ProjectLoop {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
+                let Some(item) = self.items.get(item_id).cloned() else {
+                    self.hand_back(
+                        pool,
+                        item_id,
+                        "queued",
+                        "the session didn't start: the item is unknown here",
+                        links,
+                    )
+                    .await;
+                    continue;
+                };
                 let request = StartRequest {
                     project: self.id.clone(),
                     item_id: item_id.clone(),
                     lane: *lane,
                     token: self.leases.get(item_id).cloned().unwrap_or_default(),
+                    item,
                     outcomes: self.outcomes.clone(),
                 };
                 if let Err(why) = starter.start(request) {
@@ -563,6 +610,17 @@ impl ProjectLoop {
                         links,
                     )
                     .await;
+                } else {
+                    self.events.add_in(
+                        &self.id,
+                        Event::SessionStart(event::SessionStart {
+                            item: Some(item_id.clone()),
+                            lane: Some(*lane),
+                            role: Some("implementer".into()),
+                            engine: Some("claude".into()),
+                            ..Default::default()
+                        }),
+                    );
                 }
             }
         }
@@ -1472,6 +1530,7 @@ mod tests {
                 item_id: "a".into(),
                 lane: 1,
                 token: "lease-1".into(),
+                item: rig.lp(0).items["a"].clone(),
                 outcomes: rig.machine.outcome_sender(),
             }]
         );
@@ -1486,9 +1545,12 @@ mod tests {
             (held[0].lane, held[0].item_id.as_str(), held[0].title.as_deref()),
             (1, "a", Some("A"))
         );
-        assert_eq!(kinds(&mut rig), ["lease", "lane_taken", "claim", "tick"]);
-        assert_eq!(rig.lp(0).events().recent()[2].to_value()["answer"], "a");
-        assert_eq!(rig.lp(0).events().recent()[3].to_value()["claim"], "a");
+        assert_eq!(
+            kinds(&mut rig),
+            ["lease", "lane_taken", "session_start", "claim", "tick"]
+        );
+        assert_eq!(rig.lp(0).events().recent()[3].to_value()["answer"], "a");
+        assert_eq!(rig.lp(0).events().recent()[4].to_value()["claim"], "a");
         assert_eq!(
             rig.lp(0).store.leases()["a"],
             "lease-1",
@@ -1690,6 +1752,16 @@ mod tests {
         rig.machine.pass().await;
         assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
         assert_eq!(rig.machine.pool.held_lanes().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_needs_a_human_frees_its_lane_and_keeps_the_lease() {
+        let (mut rig, _fake, asked) = ended(SessionResult::NeedsHuman("gave up".into()), &Default::default()).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+        assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+        assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+        assert!(!ops(&asked).contains(&"release".to_string()));
     }
 
     #[tokio::test]
