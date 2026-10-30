@@ -3,13 +3,15 @@
 //! waiting, a small read-only Sonnet **planner** session sorts them into themed groups of about
 //! 3 to 6, by where in the project they happen, ordered to flow in one sitting.
 //!
-//! [`crate::backlog::Client`] now has the shared queue's own operations (`tryout_add`,
-//! `tryout_result`, `tryout_groups`, the [`TRYOUT_GROUPS_LOCK`] lock), but nothing yet calls them
-//! periodically: there's no orchestrator loop (section 7, not ported yet) to notice 4 or more
-//! waiting, run [`plan`] on this round's [`PlaytestEntry`]s, and send its [`PlaytestGroup`]s on
-//! under the lock. A caller puts the planning half together the same way as [`crate::triage`]:
-//! gather the waiting entries, build a [`Planner`] with the project's words and
-//! `budget.plannerUsd`, and run [`plan`] with [`crate::engines::runner::run_session`].
+//! [`crate::backlog::Client`] now has the shared queue's own operations (`tryouts_list`,
+//! `tryout_add`, `tryout_result`, `tryout_groups`, the [`TRYOUT_GROUPS_LOCK`] lock), and
+//! [`signature`]/[`should_group`] are the pure gate `agent/src/playtestGroups.ts`'s `maybeGroup`
+//! runs before planning (06.4's "regrouping... at most every 30 minutes"), but nothing yet calls
+//! any of it periodically: there's no orchestrator loop (section 7, not ported yet) to poll
+//! `tryouts_list`, run [`plan`] on this round's [`PlaytestEntry`]s under the lock, and send its
+//! [`PlaytestGroup`]s on with `tryout_groups`. A caller puts the planning half together the same
+//! way as [`crate::triage`]: gather the waiting entries, build a [`Planner`] with the project's
+//! words and `budget.plannerUsd`, and run [`plan`] with [`crate::engines::runner::run_session`].
 use std::collections::HashSet;
 use std::future::Future;
 
@@ -44,6 +46,47 @@ pub struct PlaytestGroup {
     pub title: String,
     pub why: String,
     pub keys: Vec<String>,
+}
+
+/// How many must be waiting before the first grouping round runs (playtestGroups.ts's
+/// `MIN_TO_GROUP`).
+pub const MIN_TO_GROUP: usize = 4;
+
+/// At most this often the queue is regrouped once it's changed again (playtestGroups.ts's
+/// `REGROUP_EVERY_MS`; 06.4's "at most every 30 minutes").
+pub const REGROUP_EVERY_MS: i64 = 30 * 60_000;
+
+/// The grouping last sent, as far as [`should_group`] needs to know about it
+/// ([`crate::backlog::TryoutGrouping`]'s own `signature`/`at`, kept separate so this module stays
+/// decoupled from the wire type).
+#[derive(Debug, Clone, Copy)]
+pub struct LastGrouped<'a> {
+    pub signature: &'a str,
+    pub at_ms: i64,
+}
+
+/// `signature` (playtestGroups.ts): every waiting key, sorted and joined with `|`, so a caller can
+/// tell whether the queue actually changed since the last grouping rather than re-running the
+/// planner session on every tick.
+pub fn signature(keys: &[String]) -> String {
+    let mut sorted: Vec<&str> = keys.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.join("|")
+}
+
+/// Whether to run another grouping round now (playtestGroups.ts's `maybeGroup`): at least
+/// [`MIN_TO_GROUP`] waiting, and either nothing's been sent yet, or the queue's signature changed
+/// and [`REGROUP_EVERY_MS`] has passed since the last round. A signature that hasn't changed never
+/// triggers a round on its own, no matter how long ago the last one ran.
+pub fn should_group(waiting: usize, signature: &str, last: Option<LastGrouped<'_>>, now_ms: i64) -> bool {
+    if waiting < MIN_TO_GROUP {
+        return false;
+    }
+    match last {
+        None => true,
+        Some(last) if last.signature == signature => false,
+        Some(last) => now_ms - last.at_ms >= REGROUP_EVERY_MS,
+    }
 }
 
 /// For `SessionSpec.schema`.
@@ -261,6 +304,51 @@ mod tests {
                 sandbox: false,
             },
         }
+    }
+
+    // signature
+
+    #[test]
+    fn signature_sorts_the_keys_and_joins_them() {
+        assert_eq!(signature(&["b".to_string(), "a".to_string()]), "a|b");
+        assert_eq!(signature(&[]), "");
+    }
+
+    // should_group
+
+    #[test]
+    fn should_group_is_false_under_the_minimum() {
+        assert!(!should_group(3, "a|b|c", None, 0));
+    }
+
+    #[test]
+    fn should_group_is_true_on_the_first_round_once_the_minimum_is_met() {
+        assert!(should_group(4, "a|b|c|d", None, 0));
+    }
+
+    #[test]
+    fn should_group_is_false_when_the_signature_hasnt_changed_no_matter_the_age() {
+        let last = LastGrouped {
+            signature: "a|b|c|d",
+            at_ms: 0,
+        };
+        assert!(!should_group(4, "a|b|c|d", Some(last), REGROUP_EVERY_MS * 10));
+    }
+
+    #[test]
+    fn should_group_waits_out_the_regroup_interval_on_a_changed_signature() {
+        let last = LastGrouped {
+            signature: "a|b|c|d",
+            at_ms: 0,
+        };
+        assert!(
+            !should_group(4, "a|b|c|e", Some(last), REGROUP_EVERY_MS - 1),
+            "changed, but too soon"
+        );
+        assert!(
+            should_group(4, "a|b|c|e", Some(last), REGROUP_EVERY_MS),
+            "changed, and the wait is over"
+        );
     }
 
     // clean_groups

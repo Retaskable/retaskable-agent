@@ -1,8 +1,9 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
 //! never falls back to a local list."): `list`, `claim_next`, `drafts`, the after-merge try-out
-//! queue (`tryout_add`, `tryout_result`, `tryout_groups`, `reopen`, docs/specs/agent/06.4-playtests.md)
-//! and a named project-wide lock (`chore_lock`), each read over `POST <store>/v1/repos/<repo id>/ops`
+//! queue (`tryouts_list`, `tryout_add`, `tryout_result`, `tryout_groups`, `reopen`,
+//! docs/specs/agent/06.4-playtests.md) and a named project-wide lock (`chore_lock`), each read over
+//! `POST <store>/v1/repos/<repo id>/ops`
 //! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2, and backlog/06.6-handing-out-work.md
 //! for `claim_next`), and `auto_link`, this machine's own link to the store
 //! (docs/specs/installers/04-every-agent-on-the-shared-backlog-shared.md). A repo's numeric GitHub
@@ -162,6 +163,53 @@ pub struct TryoutAdd {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
     pub machine: String,
+}
+
+/// `onBranch` on a [`Tryout`] still waiting on its PR to merge (docs/specs/agent/06.4-playtests.md's
+/// `"on"` mode): present only before the item merges, keyed by branch and sha instead of `mergedAt`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OnBranch {
+    pub branch: String,
+    pub sha: String,
+}
+
+/// One entry in the shared try-out queue, as `tryouts_list` answers it (shared/backlogTypes.ts's
+/// `Tryout`), trimmed to what grouping needs: whether it's still on a branch (not grouped until it
+/// merges, docs/specs/agent/06.4-playtests.md) and what a playtester would be told. The fields a
+/// played-out row carries (`status`, `result`, `addedBy`, `fix`, ...) aren't modelled yet — nothing
+/// in this port reads the done queue — and serde leaves them alone.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tryout {
+    pub key: String,
+    pub item_id: String,
+    pub title: String,
+    pub what: String,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default)]
+    pub on_branch: Option<OnBranch>,
+}
+
+/// The grouping last sent for the waiting queue (shared/backlogTypes.ts's `TryoutGrouping`),
+/// trimmed to what [`crate::playtest_groups::should_group`] needs to decide whether to run another
+/// round: its `groups` themselves aren't read back here, only sent (`tryout_groups`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TryoutGrouping {
+    pub signature: String,
+    pub at: i64,
+}
+
+/// What `tryouts_list` answers (backlog/06-data-and-operations.md section 6.2,
+/// docs/specs/agent/06.4-playtests.md): the after-merge try-outs still waiting on a person, and the
+/// grouping last sent for them, if any. `done` and `more` (the played-out page) aren't read here
+/// yet, matching `agent/src/storeTryouts.ts`'s own `readTryouts`, which calls this with no
+/// arguments and reads only these two fields back.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TryoutsList {
+    pub waiting: Vec<Tryout>,
+    #[serde(default)]
+    pub groups: Option<TryoutGrouping>,
 }
 
 /// A person's answer to one try-out, sent with `tryout_result` (backlog/06-data-and-operations.md
@@ -379,6 +427,13 @@ impl Client {
                 message: format!("couldn't read the specs commit it sent: {other}"),
             }),
         }
+    }
+
+    /// `tryouts_list` (backlog/06-data-and-operations.md section 6.2): the shared after-merge
+    /// try-out queue still waiting on a person, and the grouping last sent for it, if any.
+    pub async fn tryouts_list(&self, repo_id: u64, token: Option<&str>) -> Result<TryoutsList, BacklogError> {
+        self.op(repo_id, token, "tryouts_list", json!({}), "try-out queue")
+            .await
     }
 
     /// `tryout_add` (backlog/06-data-and-operations.md section 6.2): adds (or, on a repeat, no-ops) one
