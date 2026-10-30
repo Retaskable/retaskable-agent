@@ -103,7 +103,7 @@ impl ProjectLoop {
     }
 
     /// Frees the item's lane, if it holds one, and writes `lane_freed` (`<state>: <note>`).
-    fn free_lane(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str) {
+    pub(super) fn free_lane(&mut self, pool: &mut LanePool, item_id: &str, state: &str, why: &str) {
         let holder = Holder::Item {
             project: self.id.clone(),
             item: item_id.to_string(),
@@ -193,6 +193,7 @@ impl ProjectLoop {
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
+        self.refresh_record(pool, item);
     }
 
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
