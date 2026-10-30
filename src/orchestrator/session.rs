@@ -19,7 +19,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
+use crate::implementer::{ImplementerFailure, ImplementerResult, Session, Start, run_implementer, session_spec};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::telemetry::now_ms;
 use crate::{lanes, paths};
@@ -85,6 +85,7 @@ impl SessionStarter for ClaudeStarter {
             outcomes,
             session_id,
             resume,
+            follow_up,
             ..
         } = request;
         let job = Job {
@@ -97,15 +98,16 @@ impl SessionStarter for ClaudeStarter {
             item,
             session_id,
             resume,
+            follow_up,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
-            let result = match tokio::spawn(run(job)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
-                Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
+            let (result, context_tokens) = match tokio::spawn(run(job)).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None),
+                Err(e) => (SessionResult::Failed(format!("the session task crashed: {e}")), None),
             };
             running.fetch_sub(1, Ordering::SeqCst);
             outcomes.send(SessionOutcome {
@@ -113,6 +115,7 @@ impl SessionStarter for ClaudeStarter {
                 item_id,
                 lane,
                 result,
+                context_tokens,
             });
         });
         Ok(())
@@ -150,6 +153,9 @@ struct Job {
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
     resume: bool,
+    /// `None` prepares the lane fresh, as a newly claimed item does. `Some` is the picking-up prompt for a
+    /// restart after the lane's prior session ran out of turns: the lane is reused as-is instead.
+    follow_up: Option<String>,
 }
 
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
@@ -170,7 +176,7 @@ pub(super) fn branch_name(item: &Item) -> String {
     format!("retaskable/{}-{}-s{}", item.id, slug.trim_end_matches('-'), item.slice)
 }
 
-async fn run(job: Job) -> Result<SessionResult> {
+async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
     let Job {
         data_dir,
         project,
@@ -181,6 +187,7 @@ async fn run(job: Job) -> Result<SessionResult> {
         item,
         session_id,
         resume,
+        follow_up,
     } = job;
     let branch = branch_name(&item);
     let (repo, worktrees, base) = (
@@ -188,10 +195,64 @@ async fn run(job: Job) -> Result<SessionResult> {
         PathBuf::from(&project.worktrees_dir),
         project.base_branch.clone(),
     );
+    if let Some(follow_up) = &follow_up {
+        // A restart after running out of turns reuses the lane exactly as it was left: `lanes::prepare`
+        // would hard-reset the branch, discarding the prior session's uncommitted work. Never resumes: a
+        // maxed-out session has nothing left to resume into, so this always runs under a fresh id.
+        let cwd = lanes::lane_path(&worktrees, lane);
+        let mut spec = session_spec(
+            &Session {
+                template: IMPLEMENTER_TEMPLATE,
+                project_type: project.project_type,
+                item: &item,
+                branch: &branch,
+                base_branch: &project.base_branch,
+                github_repo: &project.github_repo,
+                checks: &project.checks,
+                code_gates: project.code_gates,
+                where_to_start: "",
+                cwd: &cwd,
+                model: "sonnet".to_string(),
+                budget_usd: project.budget.implementer_usd,
+                max_turns: Some(max_turns),
+                engine: Some(EngineId::Claude),
+                cursor: None,
+                local: None,
+                sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+            },
+            Start::Continuing {
+                follow_up: follow_up.as_str(),
+            },
+        )?;
+        // The driver chose the id and saved it, so a restart of this restart can resume it.
+        spec.start = SessionStart::Fresh(session_id.clone());
+        let sink = TranscriptSink {
+            path: paths::run_dir(&data_dir, &project_id, &item.id).join(format!("{session_id}.jsonl")),
+            lane: Some(lane),
+        };
+        let engine = engine_of(Some(EngineId::Claude))?;
+        let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
+        let mut context_tokens = None;
+        let ctx = &mut context_tokens;
+        let answer = run_implementer(spec, |spec| async move {
+            let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
+            *ctx = r.context_tokens;
+            Ok(r)
+        })
+        .await;
+        return Ok((
+            match answer {
+                Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
+                Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
+                Ok(r) => classify(&r),
+            },
+            context_tokens,
+        ));
+    }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
-    // reset away the work), and anything the old session left running in it is stopped. Not ported: the
-    // TS rules that start fresh instead when the session has grown past `maxResumeContextTokens` or ran
-    // out of turns (neither is tracked here yet); a transcript Claude Code no longer has is handled below.
+    // reset away the work), and anything the old session left running in it is stopped. The driver decides
+    // whether to resume at all, weighing the record's last known size against `maxResumeContextTokens` before
+    // ever calling this with `resume: true`; a transcript Claude Code no longer has is handled below.
     let mut resuming = resume
         .then(|| lanes::lane_path(&worktrees, lane))
         .filter(|d| d.is_dir());
@@ -261,8 +322,12 @@ async fn run(job: Job) -> Result<SessionResult> {
         };
         let engine = engine_of(Some(EngineId::Claude))?;
         let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
+        let mut context_tokens = None;
+        let ctx = &mut context_tokens;
         let answer = run_implementer(spec, |spec| async move {
-            run_session(engine, bin, &spec, id, Some(sink)).await
+            let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
+            *ctx = r.context_tokens;
+            Ok(r)
         })
         .await;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
@@ -271,10 +336,14 @@ async fn run(job: Job) -> Result<SessionResult> {
             resuming = None;
             continue;
         }
-        return Ok(match answer {
-            Err(e) => SessionResult::Failed(format!("{e:#}")),
-            Ok(r) => classify(&r),
-        });
+        return Ok((
+            match answer {
+                Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
+                Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
+                Ok(r) => classify(&r),
+            },
+            context_tokens,
+        ));
     }
 }
 
@@ -422,6 +491,7 @@ mod tests {
             session_id: "sess-1".into(),
             resume: false,
             outcomes,
+            follow_up: None,
         };
         (request, rx)
     }

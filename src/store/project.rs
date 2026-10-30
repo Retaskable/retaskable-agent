@@ -34,6 +34,12 @@ pub struct RunRecord {
     /// The implementer session's id, to resume it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_session_id: Option<String>,
+    /// That session's size as of its last turn (06.2-implementer.md "A session that's grown starts
+    /// fresh"; the TS agent's `implContextTokens`), kept so a resume across a restart can still tell
+    /// a grown session from a small one. `None` until a session reports one, and cleared whenever
+    /// `impl_session_id` is: a fresh or picking-up session starts with no reading of its own yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_context_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default)]
