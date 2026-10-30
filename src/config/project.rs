@@ -376,16 +376,12 @@ mod tests {
     fn project_id_of_a_parent_directory_repo_path_names_the_parent_not_project() {
         // Exercises the exact ".." example the doc comment on project_id promises, through a
         // path shape (trailing "..") that std::path::absolute leaves unresolved on POSIX.
-        let parent_name = std::env::current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_lowercase();
-        let expected = kebab_case(&parent_name);
-        assert_eq!(project_id(".."), expected);
+        // A temp folder stands in for the current directory's parent, which has no name when the
+        // checkout is mounted at the root of a container (`/work`).
+        let parent = tempfile::tempdir().unwrap();
+        let parent_name = parent.path().file_name().unwrap().to_string_lossy().to_lowercase();
+        let up = parent.path().join("child").join("..");
+        assert_eq!(project_id(&up.to_string_lossy()), kebab_case(&parent_name));
     }
 
     #[test]
