@@ -118,7 +118,7 @@ fn poll_once(
 }
 
 /// `{"sha": "..."}`'s `sha`.
-fn parse_deployed_sha(body: &str) -> Option<String> {
+pub(crate) fn parse_deployed_sha(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()?
         .get("sha")?

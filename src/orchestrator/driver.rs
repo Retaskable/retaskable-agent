@@ -147,6 +147,7 @@ pub struct StartRequest {
     pub outcomes: OutcomeSender,
 }
 
+mod report;
 mod settle;
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 
@@ -200,6 +201,8 @@ pub struct ProjectLoop {
     repo: Option<u64>,
     /// The steps running for this project's items.
     running: Running,
+    /// What the fetch saw that the store was told last (`report`).
+    seen: report::Seen,
 }
 
 impl ProjectLoop {
@@ -230,6 +233,7 @@ impl ProjectLoop {
             live,
             repo: None,
             running: Running::default(),
+            seen: report::Seen::default(),
         }
     }
 
@@ -372,7 +376,8 @@ impl ProjectLoop {
     }
 
     /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its
-    /// lane. A start the starter refuses gives the lane and the claim straight back. How many sessions started.
+    /// lane. A start the starter refuses gives the lane and the claim straight back. How many sessions started
+    /// that take a session slot.
     async fn apply_starts(
         &mut self,
         actions: &[Action],
@@ -401,7 +406,8 @@ impl ProjectLoop {
                 };
                 match starter.start(request) {
                     Ok(()) => {
-                        started += 1;
+                        // A "do next" item's session takes no slot (section 7).
+                        started += u32::from(!self.items.get(item_id).is_some_and(|i| i.do_next));
                         self.events.add_in(
                             &self.id,
                             Event::SessionStart(event::SessionStart {
@@ -689,7 +695,8 @@ impl Machine {
     }
 
     /// The minute's `git fetch` of every live project's repo, paused or not (section 7: the fetch runs while
-    /// paused too), each in parallel. A failed fetch is logged and an `error` event; the loop goes on.
+    /// paused too), each in parallel, and then what it saw told to the store (`report`). A failed fetch is
+    /// logged and an `error` event; the loop goes on.
     pub async fn fetch(&mut self) {
         let jobs: Vec<_> = (self.projects.iter())
             .filter(|lp| self.live(lp))
@@ -702,15 +709,18 @@ impl Machine {
             })
             .collect();
         for (id, job) in jobs {
+            let Some(lp) = self.projects.iter_mut().find(|lp| lp.id == id) else {
+                continue;
+            };
             let failed = match job.await {
-                Ok(Ok(_)) => continue,
+                Ok(Ok(_)) => {
+                    lp.report(&self.links).await;
+                    continue;
+                }
                 Ok(Err(e)) => format!("{e:#}"),
                 Err(e) => e.to_string(),
             };
             tracing::warn!("{id}: git fetch failed: {failed}");
-            let Some(lp) = self.projects.iter_mut().find(|lp| lp.id == id) else {
-                continue;
-            };
             let error = event::Error {
                 r#where: Some("fetch".into()),
                 error: Some(failed),
@@ -840,6 +850,10 @@ impl Machine {
                     paused,
                     runs: lp.runs.clone(),
                     cfg: &lp.project,
+                    rush: (lp.items.values())
+                        .filter(|i| i.do_next)
+                        .map(|i| i.id.clone())
+                        .collect(),
                 })
             })
             .collect();

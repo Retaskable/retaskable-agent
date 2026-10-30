@@ -788,6 +788,28 @@ async fn concurrency_caps_starts_and_claims() {
 }
 
 #[tokio::test]
+async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(3, &[&base]);
+    let fake = rig.go_live();
+    rig.machine.concurrency = 1;
+    rig.queue(0, &["plain", "rush"]);
+    rig.lp(0).items.get_mut("rush").unwrap().do_next = true;
+    fake.active.store(1, Ordering::SeqCst);
+    rig.machine.poll().await;
+    let started: Vec<_> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
+    assert_eq!(started, ["rush"], "only the do-next item skips the full slots");
+    assert!(ops(&asked).is_empty(), "and nothing is claimed without a slot");
+    fake.active.store(0, Ordering::SeqCst);
+    rig.machine.poll().await;
+    assert_eq!(
+        fake.started.lock().unwrap().len(),
+        2,
+        "the rush start took no slot from the plain item"
+    );
+}
+
+#[tokio::test]
 async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base, &base]);
@@ -808,4 +830,5 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
     assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
 }
 
+mod reporting;
 mod settling;
