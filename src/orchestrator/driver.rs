@@ -8,21 +8,24 @@
 //! can't be reached, or answers something unreadable, is a `store_error` event and a skipped tick, never
 //! an empty backlog (docs/specs/agent/02-principles.md: fail closed).
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use tokio::time::MissedTickBehavior;
 
 use super::guard::PortGuard;
 use super::live::{HeldLane, LiveHandle, now_iso8601};
 use super::round_robin::{Candidate, plan};
-use super::{Action, ProjectRuns, tick_payload};
-use crate::backlog::{BacklogError, Client, Item};
+use super::{Action, ProjectRuns, apply, decide, tick_payload};
+use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::env::Env;
+use crate::item_lifecycle::ItemRun;
 use crate::lane_pool::{Holder, LanePool, PoolRules};
 use crate::link::TokenStore;
 use crate::store::Store;
@@ -44,8 +47,8 @@ pub enum OrchestratorMode {
     Off,
     /// Reads the backlog and writes `tick` events saying what a tick would do. Takes no action.
     Dry,
-    /// Will claim and run work. Not built yet: behaves exactly like `Dry`, and only while the port guard
-    /// (`guard.rs`) sees no other agent on this computer.
+    /// Claims work and applies starts, but only with a [`SessionStarter`] and while the port guard
+    /// (`guard.rs`) sees no other agent on this computer. With no starter it behaves exactly like `Dry`.
     Claim,
 }
 
@@ -90,7 +93,9 @@ impl OrchestratorMode {
             Self::Dry => {
                 tracing::info!("orchestrator: dry (reads the backlog, logs tick events, never claims or starts work)")
             }
-            Self::Claim => tracing::warn!("orchestrator: claim isn't implemented yet, so it runs dry: it never claims"),
+            Self::Claim => tracing::warn!(
+                "orchestrator: claim (claims work only once a session runner is given; until then it runs dry)"
+            ),
         }
         mode
     }
@@ -121,14 +126,35 @@ pub async fn effective_mode(mode: OrchestratorMode, guard: &PortGuard) -> Orches
     }
 }
 
+/// What a started implementer needs: the item, the lane it holds and its lease token (the TS agent's
+/// `hosted.lease`, which every later store write about the item carries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRequest {
+    pub project: String,
+    pub item_id: String,
+    pub lane: u32,
+    pub token: String,
+}
+
+/// Runs the implementer session for an item that took a lane. Built in a later piece; until one is given to
+/// the [`Machine`], `claim` mode claims nothing, so no claimed item is left with nothing working on it.
+pub trait SessionStarter: Send + Sync {
+    /// Called once the item is `implementing` and its lane held. Must not block: start the session and return.
+    fn start(&self, request: StartRequest);
+}
+
 /// One project's orchestrator state, kept for as long as the agent runs. The lanes are not here: they
 /// are the computer's, held by the [`Machine`].
 pub struct ProjectLoop {
     id: String,
     project: ProjectConfig,
-    /// Loaded so a project whose state file can't be read doesn't loop; nothing in the dry loop writes it.
-    _store: Store,
+    /// Loaded so a project whose state file can't be read doesn't loop; only `claim` mode writes it (the leases).
+    store: Store,
     runs: ProjectRuns,
+    /// Lease token of each item this computer holds, by id; kept in the state file so a restart still holds them.
+    leases: BTreeMap<String, String>,
+    /// Whether the held leases were matched against the backlog yet (once, on the first pass).
+    adopted: bool,
     mode: OrchestratorMode,
     /// Present in `claim` mode: asked again before each claim.
     guard: Option<PortGuard>,
@@ -152,8 +178,10 @@ impl ProjectLoop {
         Self {
             id,
             project,
-            _store: store,
+            leases: store.leases(),
+            store,
             runs: ProjectRuns::new(),
+            adopted: false,
             mode: live.snapshot().mode,
             guard: None,
             events,
@@ -191,7 +219,14 @@ impl ProjectLoop {
 
     /// The pass's second half for a project whose items were read: records what its turns decided
     /// (`actions`, from `round_robin::plan`) against the computer's `pool`, and writes the `tick` event.
-    async fn record(&mut self, items: Vec<Item>, paused: bool, actions: Vec<Action>, pool: &LanePool) -> Step {
+    fn record(
+        &mut self,
+        items: Vec<Item>,
+        paused: bool,
+        actions: Vec<Action>,
+        pool: &LanePool,
+        live: Option<Option<String>>,
+    ) -> Step {
         let mut states: BTreeMap<String, u32> = BTreeMap::new();
         for item in &items {
             if let Ok(Value::String(s)) = serde_json::to_value(item.status) {
@@ -215,36 +250,144 @@ impl ProjectLoop {
             .collect();
         let payload = tick_payload(paused, pool);
         let would: Vec<String> = actions.iter().map(describe).collect();
-        if self.mode == OrchestratorMode::Claim && actions.contains(&Action::AskForWork) {
-            // Asked before every claim, so a TS agent started since is noticed at once. Claiming isn't
-            // built, so a pass that gets this far only says so.
-            // The guard is cloned out so no borrow of the loop is held across the await.
-            let refusal = match self.guard.clone() {
-                Some(guard) => guard.refusal().await,
-                None => None,
-            };
-            match refusal {
-                Some(why) => tracing::error!("{}: not claiming: {why}", self.id),
-                None => tracing::warn!("{}: claim isn't built yet: not claiming", self.id),
-            }
-        }
         let decision = match actions.first() {
             None if paused => "paused: would do nothing".to_string(),
             None => "would do nothing".to_string(),
+            Some(Action::AskForWork) if live.is_some() => "asked for work".to_string(),
             Some(Action::AskForWork) => "would ask for work".to_string(),
+            Some(Action::StartImplementer { item_id, lane }) if live.is_some() => {
+                format!("started {item_id} on lane {lane}")
+            }
             Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
             Some(Action::NeedsHuman { .. }) => unreachable!("the plan lists no needs_human"),
         };
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
         let mut payload = payload;
         payload.states = Some(json!(states));
-        payload.claim = Some(json!("not asked"));
-        payload.extra.insert("dry".into(), json!(would));
+        // `live` is the claim answer when this pass really applied its decisions (`claim` mode with a starter).
+        payload.claim = Some(json!(live.clone().flatten().unwrap_or_else(|| "not asked".into())));
+        if live.is_none() {
+            payload.extra.insert("dry".into(), json!(would));
+        }
         self.events.add_in(&self.id, Event::Tick(payload));
         if !would.is_empty() {
-            tracing::debug!("{}: dry tick would: {}", self.id, would.join(", "));
+            tracing::debug!(
+                "{}: tick {}: {}",
+                self.id,
+                if live.is_some() { "did" } else { "would" },
+                would.join(", ")
+            );
         }
         Step::Ticked { would }
+    }
+
+    /// Writes the held leases to the state file.
+    fn save_leases(&mut self) {
+        self.store.set_leases(&self.leases);
+        if let Err(e) = self.store.save() {
+            tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
+        }
+    }
+
+    /// Takes a lease into `runs` as a queued item, with the `lease` event the TS agent's store writes.
+    fn take_lease(&mut self, item: &Item, token: String) {
+        let mut run = ItemRun::new();
+        run.slice = item.slice;
+        self.runs.insert(item.id.clone(), run);
+        self.leases.insert(item.id.clone(), token);
+        self.save_leases();
+        self.events.add_in(
+            &self.id,
+            Event::Lease(event::Lease {
+                item: Some(item.id.clone()),
+                change: Some("taken".into()),
+                state: Some("queued".into()),
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// On the first pass, takes back the items this computer still holds a lease on (the TS agent keeps the
+    /// token in its state file, so a restart carries on with them). One the store no longer shows as handed
+    /// out (taken by another agent, finished, gone) is dropped; the rest start again as queued.
+    fn readopt(&mut self, items: &[Item]) {
+        if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
+            return;
+        }
+        for (id, token) in std::mem::take(&mut self.leases) {
+            match items.iter().find(|i| i.id == id) {
+                Some(item) if matches!(item.status, ItemStatus::Claimed | ItemStatus::Building) => {
+                    tracing::info!("{}: still holds {id}, carrying on", self.id);
+                    self.take_lease(item, token);
+                }
+                _ => tracing::info!("{}: no longer holds {id}, dropping its lease", self.id),
+            }
+        }
+        self.save_leases();
+    }
+
+    /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its lane.
+    fn apply_starts(&mut self, actions: &[Action], pool: &mut LanePool, starter: &dyn SessionStarter) {
+        for action in actions.iter().filter(|a| **a != Action::AskForWork) {
+            if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
+                continue;
+            }
+            if let Action::StartImplementer { item_id, lane } = action {
+                starter.start(StartRequest {
+                    project: self.id.clone(),
+                    item_id: item_id.clone(),
+                    lane: *lane,
+                    token: self.leases.get(item_id).cloned().unwrap_or_default(),
+                });
+            }
+        }
+    }
+
+    /// Asks the store for work (at most once per pass) and starts what it hands out. The answer for the
+    /// `claim` event: the item id, `none` or `failed`; `None` when it wasn't asked (the guard, or no link).
+    async fn claim(&mut self, pool: &mut LanePool, links: &Links, starter: &dyn SessionStarter) -> Option<String> {
+        // Asked before every claim, so a TS agent started since is noticed at once.
+        if let Some(guard) = self.guard.clone()
+            && let Some(why) = guard.refusal().await
+        {
+            tracing::error!("{}: not claiming: {why}", self.id);
+            return None;
+        }
+        let repo = self.repo?;
+        let token = match links.keychain.get(&links.backlog_url) {
+            Ok(Some(token)) => token,
+            Ok(None) => return None,
+            Err(e) => {
+                self.cant_start(format!("reading the backlog link: {e:#}"));
+                return None;
+            }
+        };
+        let agent = ClaimNextAgent {
+            machine: links.machine.clone(),
+            environment: links.environment.clone(),
+            base_branch: self.project.base_branch.clone(),
+        };
+        let answer = match self.client.claim_next(repo, Some(&token), &agent).await {
+            Err(e) => {
+                self.store_error("claim_next", &e);
+                "failed".to_string()
+            }
+            Ok(ClaimNextAnswer::Nothing) => "none".to_string(),
+            Ok(ClaimNextAnswer::Item { item, token }) => {
+                self.take_lease(&item, token);
+                let actions = decide(&self.id, false, &self.runs, pool, &self.project);
+                self.apply_starts(&actions, pool, starter);
+                item.id.clone()
+            }
+        };
+        self.events.add_in(
+            &self.id,
+            Event::Claim(event::Claim {
+                answer: Some(json!(answer)),
+                ..Default::default()
+            }),
+        );
+        Some(answer)
     }
 
     /// A pass that couldn't even ask the store (no repo id, no link): the page hears of it too.
@@ -253,7 +396,7 @@ impl ProjectLoop {
     }
 
     fn store_error(&mut self, op: &str, e: &BacklogError) {
-        tracing::warn!("{}: dry tick skipped: {e}", self.id);
+        tracing::warn!("{}: {op} failed: {e}", self.id);
         self.live.failed(&self.id, now_iso8601(), e.to_string());
         self.events.add_in(
             &self.id,
@@ -311,6 +454,9 @@ pub struct Links {
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
     pub paused: PauseState,
+    /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
+    pub machine: String,
+    pub environment: String,
 }
 
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
@@ -360,6 +506,8 @@ pub struct Machine {
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     last_served: Option<usize>,
     links: Links,
+    /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
+    starter: Option<Arc<dyn SessionStarter>>,
 }
 
 impl Machine {
@@ -372,7 +520,14 @@ impl Machine {
             projects: Vec::new(),
             last_served: None,
             links,
+            starter: None,
         }
+    }
+
+    /// Lets `claim` mode claim and start work.
+    pub fn with_starter(mut self, starter: Arc<dyn SessionStarter>) -> Self {
+        self.starter = Some(starter);
+        self
     }
 
     pub fn add(&mut self, project: ProjectLoop) {
@@ -423,6 +578,36 @@ impl Machine {
             .iter()
             .map(|lp| self.links.paused.reason(&lp.id).is_some())
             .collect();
+        let n = self.projects.len();
+        // A panic deciding or recording costs this pass only: it is logged and the next pass runs.
+        match AssertUnwindSafe(self.decide_and_record(read_items, paused))
+            .catch_unwind()
+            .await
+        {
+            Ok(steps) => steps,
+            Err(panic) => {
+                let why = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                tracing::error!("orchestrator: a pass panicked, skipping it: {why}");
+                vec![Step::Skipped; n]
+            }
+        }
+    }
+
+    /// The pass after the reads: plans the starts, and in `claim` mode with a starter applies them, asks
+    /// for work and starts what comes back, then records each project's pass.
+    async fn decide_and_record(&mut self, read_items: Vec<Option<Vec<Item>>>, paused: Vec<bool>) -> Vec<Step> {
+        let starter = self.starter.clone();
+        for (lp, items) in self.projects.iter_mut().zip(&read_items) {
+            if let (Some(items), Some(_)) = (items, &starter)
+                && lp.mode == OrchestratorMode::Claim
+            {
+                lp.readopt(items);
+            }
+        }
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(&read_items).zip(&paused))
             .map(|((lp, items), &paused)| {
                 items.as_ref().map(|_| Candidate {
@@ -438,10 +623,22 @@ impl Machine {
         self.last_served = last;
         let mut steps = Vec::new();
         for (((lp, items), paused), actions) in self.projects.iter_mut().zip(read_items).zip(paused).zip(plans) {
-            steps.push(match items {
-                Some(items) => lp.record(items, paused, actions, &self.pool).await,
-                None => Step::Skipped,
-            });
+            let Some(items) = items else {
+                steps.push(Step::Skipped);
+                continue;
+            };
+            let mut live = None;
+            if let Some(starter) = starter.as_deref()
+                && lp.mode == OrchestratorMode::Claim
+            {
+                lp.apply_starts(&actions, &mut self.pool, starter);
+                live = Some(if actions.contains(&Action::AskForWork) {
+                    lp.claim(&mut self.pool, &self.links, starter).await
+                } else {
+                    None
+                });
+            }
+            steps.push(lp.record(items, paused, actions, &self.pool, live));
         }
         steps
     }
@@ -457,6 +654,10 @@ pub struct SpawnArgs<'a> {
     pub paused: &'a PauseState,
     pub live: &'a LiveHandle,
     pub guard: Option<&'a PortGuard>,
+    pub machine: String,
+    pub environment: String,
+    /// Runs sessions for claimed work. None in production until the implementer session is built.
+    pub starter: Option<Arc<dyn SessionStarter>>,
 }
 
 /// Starts the computer's one orchestrator task when the mode isn't `Off`. A project that can't loop (no
@@ -471,8 +672,15 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             keychain: args.keychain.clone(),
             paused: args.paused.clone(),
+            machine: args.machine,
+            environment: args.environment,
         },
     );
+    if let Some(starter) = args.starter {
+        machine = machine.with_starter(starter);
+    } else if args.live.snapshot().mode == OrchestratorMode::Claim {
+        tracing::warn!("claim mode: no session runner yet, running dry");
+    }
     for project in args.projects {
         let id = project.id_or_derived();
         if project.github_repo.is_empty() {
@@ -584,6 +792,16 @@ mod tests {
             self.machine.links.paused.set(project, on.then(|| "test".to_string()));
         }
 
+        /// Puts every project in `claim` mode with a fake session starter.
+        fn go_live(&mut self) -> Arc<Fake> {
+            let fake = Arc::new(Fake::default());
+            self.machine.starter = Some(fake.clone());
+            for lp in &mut self.machine.projects {
+                lp.mode = OrchestratorMode::Claim;
+            }
+            fake
+        }
+
         /// Gives a project `ids` as queued items, to be started.
         fn queue(&mut self, i: usize, ids: &[&str]) {
             for id in ids {
@@ -604,6 +822,8 @@ mod tests {
             backlog_url: "https://backlog.example".into(),
             keychain: keys.clone(),
             paused: PauseState::default(),
+            machine: "my-pc".into(),
+            environment: "retaskable.com".into(),
         };
         let mut machine = Machine::new(lanes, links);
         for (i, base) in bases.iter().enumerate() {
@@ -882,5 +1102,177 @@ mod tests {
             );
             assert_eq!(*asked.lock().unwrap(), vec!["list".to_string()]);
         }
+    }
+
+    /// A session starter that records what it was asked to start, and can panic once.
+    #[derive(Default)]
+    struct Fake {
+        started: Mutex<Vec<StartRequest>>,
+        panic_once: AtomicBool,
+    }
+
+    impl SessionStarter for Fake {
+        fn start(&self, request: StartRequest) {
+            self.started.lock().unwrap().push(request);
+            if self.panic_once.swap(false, Ordering::SeqCst) {
+                panic!("a starter that goes wrong");
+            }
+        }
+    }
+
+    type Asked = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// A store that answers `list` with `listed` and `claim_next` with `claim` (a value) or, for `None`, an error.
+    async fn claim_stub(listed: Value, claim: Option<Value>) -> (String, Asked) {
+        use axum::http::StatusCode;
+        let asked: Asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let app = Router::new().route(
+            "/v1/repos/{id}/ops",
+            post(move |Json(body): Json<Value>| {
+                let (seen, listed, claim) = (seen.clone(), listed.clone(), claim.clone());
+                async move {
+                    let op = body["op"].as_str().unwrap_or("").to_string();
+                    seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                    match (op.as_str(), claim) {
+                        ("claim_next", None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
+                        ("claim_next", Some(v)) => (StatusCode::OK, Json(json!({ "value": v }))),
+                        _ => (StatusCode::OK, Json(json!({ "value": listed }))),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), asked)
+    }
+
+    fn item(id: &str, status: &str) -> Value {
+        json!({ "id": id, "title": id.to_uppercase(), "status": status, "rank": 0 })
+    }
+
+    fn ops(asked: &Asked) -> Vec<String> {
+        asked.lock().unwrap().iter().map(|(op, _)| op.clone()).collect()
+    }
+
+    fn kinds(rig: &mut Rig) -> Vec<String> {
+        rig.lp(0).events().recent().iter().map(|e| e.kind()).collect()
+    }
+
+    fn handed_out() -> Option<Value> {
+        Some(json!({ "item": item("a", "claimed"), "token": "lease-1" }))
+    }
+
+    #[tokio::test]
+    async fn claim_mode_claims_once_queues_then_starts_and_holds_the_lane() {
+        let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        let steps = rig.machine.pass().await;
+        assert_eq!(would(&steps[0]), ["ask_for_work"]);
+        assert_eq!(
+            ops(&asked),
+            ["list", "claim_next"],
+            "one claim for the project, though two lanes were free"
+        );
+        let agent = asked.lock().unwrap()[1].1["agent"].clone();
+        assert_eq!(
+            agent,
+            json!({ "machine": "my-pc", "environment": "retaskable.com", "baseBranch": "" })
+        );
+        assert_eq!(
+            *fake.started.lock().unwrap(),
+            vec![StartRequest {
+                project: "p0".into(),
+                item_id: "a".into(),
+                lane: 1,
+                token: "lease-1".into()
+            }]
+        );
+        assert_eq!(
+            rig.lp(0).runs["a"].state,
+            crate::item_lifecycle::ItemState::Implementing
+        );
+        assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+        let held = rig.live.snapshot().projects["p0"].held.clone();
+        assert_eq!(held.len(), 1);
+        assert_eq!(
+            (held[0].lane, held[0].item_id.as_str(), held[0].title.as_deref()),
+            (1, "a", Some("A"))
+        );
+        assert_eq!(kinds(&mut rig), ["lease", "lane_taken", "claim", "tick"]);
+        assert_eq!(rig.lp(0).events().recent()[2].to_value()["answer"], "a");
+        assert_eq!(rig.lp(0).events().recent()[3].to_value()["claim"], "a");
+        assert_eq!(
+            rig.lp(0).store.leases()["a"],
+            "lease-1",
+            "the lease is kept for a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_mode_without_a_starter_sends_no_claim() {
+        let (base, asked) = claim_stub(json!([]), handed_out()).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).mode = OrchestratorMode::Claim;
+        rig.machine.pass().await;
+        assert_eq!(ops(&asked), ["list"]);
+        assert_eq!(rig.machine.pool.held_lanes().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_guard_block_means_no_claim_next() {
+        let (base, asked) = claim_stub(json!([]), handed_out()).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        rig.lp(0).guard = Some(PortGuard::new(closed_port(), [ts_agent_port().await]));
+        assert!(matches!(rig.machine.pass().await[..], [Step::Ticked { .. }]));
+        assert_eq!(ops(&asked), ["list"]);
+        assert!(fake.started.lock().unwrap().is_empty() && rig.lp(0).runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_store_error_on_claim_is_logged_and_never_read_as_nothing() {
+        let (base, asked) = claim_stub(json!([]), None).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        rig.machine.pass().await;
+        assert_eq!(ops(&asked), ["list", "claim_next"]);
+        assert_eq!(kinds(&mut rig), ["store_error", "claim", "tick"]);
+        assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "claim_next");
+        assert_eq!(rig.lp(0).events().recent()[1].to_value()["answer"], "failed");
+        assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
+        assert!(fake.started.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_restart_takes_back_the_items_it_still_holds_and_drops_the_rest() {
+        let listed = json!([item("a", "building"), item("b", "on_main")]);
+        let (base, asked) = claim_stub(listed, Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        let held = [("a", "old"), ("b", "older"), ("gone", "x")];
+        rig.lp(0).leases = held.iter().map(|(i, t)| (i.to_string(), t.to_string())).collect();
+        rig.machine.pass().await;
+        let started = fake.started.lock().unwrap().clone();
+        assert_eq!(
+            (started.len(), started[0].item_id.as_str(), started[0].token.as_str()),
+            (1, "a", "old")
+        );
+        assert_eq!(rig.lp(0).store.leases().keys().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(ops(&asked), ["list", "claim_next"], "the other lane may still claim");
+        assert_eq!(rig.lp(0).events().recent().last().unwrap().to_value()["claim"], "none");
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_the_pass_is_caught_and_the_next_pass_runs() {
+        let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+        let mut rig = rig(2, &[&base]);
+        let fake = rig.go_live();
+        fake.panic_once.store(true, Ordering::SeqCst);
+        assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
+        assert!(matches!(rig.machine.pass().await[..], [Step::Ticked { .. }]));
+        assert_eq!(ops(&asked).iter().filter(|o| *o == "list").count(), 2);
     }
 }
