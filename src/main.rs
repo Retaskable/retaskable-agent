@@ -289,6 +289,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         dir,
         projects: &cfg.projects,
         lane_count,
+        concurrency: cfg.machine.concurrency,
+        poll_every: std::time::Duration::from_secs(config::poll_interval_sec(cfg, env).into()),
         backlog_url: &backlog::url(env),
         keychain: &keychain,
         paused: &view.paused,

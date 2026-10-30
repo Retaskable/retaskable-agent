@@ -1,21 +1,21 @@
 //! The orchestrator's tick: decides what each lane works on next (docs/specs/agent/07-orchestrator-loop.md),
 //! one project at a time (`Pool.tick`/`Orchestrator.step` in Retaskable.com's `agent/src/pool.ts` and
-//! `agent/src/orchestrator.ts`). The pseudocode's first half — the watchdog, the once-a-minute fetch,
-//! and advancing every non-terminal item a step — needs a running session, a git checkout and the CI/
-//! checks/review/merge steps to call into, none of which exist in this crate yet (those are other,
-//! not-yet-built pieces: implementer-session, review-stage1/2/3, post-merge-smoke-test, ...). This
+//! `agent/src/orchestrator.ts`). The rest of the pseudocode (the poll clock, the once-a-minute fetch, advancing
+//! every non-terminal item a step, the `claim_next` loop and the `concurrency` cap) is the machine-wide driver's
+//! (`driver`, `steps`); the watchdog and the steps themselves (implementer-session, review-stage1/2/3, ...) are
+//! not built yet. This
 //! module is only the pseudocode's last two lines: a `queued` item (one the store already handed out,
 //! `item_lifecycle::ItemState::Queued`) takes a free lane, and only once nothing local is ready to
 //! start does the caller get told to ask the store for more (`claim_next`, `backlog::Client`) — kept
 //! as its own action rather than called here, since that's a network round trip. Deciding (`decide`) is
 //! pure and returns actions; the caller applies each one itself (`apply`), or none of them (the dry driver). What's deliberately left out:
-//! actually starting a session (implementer-session), the pause flag's real source (today it's
-//! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`), and `activeSessions` /
-//! `concurrency` (no session pool exists yet to count).
+//! actually starting a session (implementer-session), and the pause flag's real source (today it's
+//! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`).
 pub mod driver;
 pub mod guard;
 pub mod live;
 pub mod round_robin;
+pub mod steps;
 
 use std::collections::BTreeMap;
 
