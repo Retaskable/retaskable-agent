@@ -338,12 +338,7 @@ mod tests {
                     fixture.display()
                 ));
             }
-            std::fs::write(path, script).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            crate::test_support::write_executable(path, &script);
         }
     }
 

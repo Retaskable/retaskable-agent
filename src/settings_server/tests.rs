@@ -8,6 +8,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use super::*;
+use crate::password;
 
 const HOST: &str = "127.0.0.1:4700";
 
