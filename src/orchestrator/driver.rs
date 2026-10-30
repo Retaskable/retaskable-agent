@@ -3,7 +3,7 @@
 //! `RETASKABLE_ORCHESTRATOR`. Today only the **dry** loop exists: each minute (the TS agent's `minute()`
 //! writes the `tick` event and its fetch of the store's items on that cadence; its 10 second poll drives
 //! `step()`, which has no counterpart here yet) it reads the project's items from the shared backlog,
-//! decides what a tick would do on scratch copies of its state, and writes a `tick` event saying so.
+//! decides what a tick would do (`decide` is pure, and nothing is applied), and writes a `tick` event saying so.
 //! It never starts a session, takes a lane, asks the store for work or writes to it. A store that
 //! can't be reached, or answers something unreadable, is a `store_error` event and a skipped tick, never
 //! an empty backlog (docs/specs/agent/02-principles.md: fail closed).
@@ -16,8 +16,9 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tokio::time::MissedTickBehavior;
 
+use super::guard::PortGuard;
 use super::live::{HeldLane, LiveHandle, now_iso8601};
-use super::{Action, ProjectRuns, tick, tick_payload};
+use super::{Action, ProjectRuns, decide, tick_payload};
 use crate::backlog::{BacklogError, Client};
 use crate::config::ProjectConfig;
 use crate::env::Env;
@@ -42,7 +43,8 @@ pub enum OrchestratorMode {
     Off,
     /// Reads the backlog and writes `tick` events saying what a tick would do. Takes no action.
     Dry,
-    /// Will claim and run work. Not built yet: behaves exactly like `Dry`.
+    /// Will claim and run work. Not built yet: behaves exactly like `Dry`, and only while the port guard
+    /// (`guard.rs`) sees no other agent on this computer.
     Claim,
 }
 
@@ -103,6 +105,21 @@ pub enum Step {
     Skipped,
 }
 
+/// The mode the loops really run in. `claim` with another agent on this computer runs dry instead,
+/// logged loudly, so two agents never claim from one backlog.
+pub async fn effective_mode(mode: OrchestratorMode, guard: &PortGuard) -> OrchestratorMode {
+    if mode != OrchestratorMode::Claim {
+        return mode;
+    }
+    match guard.refusal().await {
+        Some(why) => {
+            tracing::error!("orchestrator: claim refused, running dry instead: {why}");
+            OrchestratorMode::Dry
+        }
+        None => mode,
+    }
+}
+
 /// One project's orchestrator state, kept for as long as the agent runs.
 pub struct ProjectLoop {
     id: String,
@@ -111,6 +128,9 @@ pub struct ProjectLoop {
     _store: Store,
     runs: ProjectRuns,
     pool: LanePool,
+    mode: OrchestratorMode,
+    /// Present in `claim` mode: asked again before each claim.
+    guard: Option<PortGuard>,
     events: EventLog,
     client: Client,
     live: LiveHandle,
@@ -136,6 +156,8 @@ impl ProjectLoop {
                 lanes: lane_count,
                 ..Default::default()
             }),
+            mode: live.snapshot().mode,
+            guard: None,
             events,
             client,
             live,
@@ -149,13 +171,20 @@ impl ProjectLoop {
         project: &ProjectConfig,
         client: Client,
         live: LiveHandle,
+        guard: Option<PortGuard>,
     ) -> Result<Self> {
         let id = project.id_or_derived();
         let project_dir = dir.join("projects").join(&id);
         let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
         let mut events = EventLog::new();
         events.open(&project_dir.join("events"));
-        Ok(Self::new(id, project.clone(), store, lane_count, events, client, live))
+        Ok(Self::new(id, project.clone(), store, lane_count, events, client, live).with_guard(guard))
+    }
+
+    /// Asks the port guard before each claim (set in `claim` mode).
+    pub fn with_guard(mut self, guard: Option<PortGuard>) -> Self {
+        self.guard = guard;
+        self
     }
 
     pub fn events(&self) -> &EventLog {
@@ -182,30 +211,51 @@ impl ProjectLoop {
                 *states.entry(s).or_default() += 1;
             }
         }
-        // The decision runs on scratch copies, so nothing it would claim is claimed: the real runs,
-        // pool and log see only the `tick` event below.
-        let (mut runs, mut pool, mut scratch) = (self.runs.clone(), self.pool.clone(), EventLog::new());
-        let actions = tick(&self.id, paused, &mut runs, &mut pool, &self.project, &mut scratch);
-        let would: Vec<String> = actions.iter().map(describe).collect();
-        let held = self
-            .pool
-            .held_lanes()
-            .filter_map(|lane| match self.pool.holder(lane)? {
-                Holder::Item { item, .. } | Holder::Play { item, .. } => Some(HeldLane {
-                    lane,
-                    title: items.iter().find(|i| &i.id == item).map(|i| i.title.clone()),
-                    item_id: item.clone(),
-                }),
-            })
+        // Decide on the real state; the dry loop applies nothing, so the real runs, pool and log see
+        // only the `tick` event below. The pool is locked just for this read.
+        let (actions, held, payload) = {
+            let pool = &self.pool;
+            let actions = decide(&self.id, paused, &self.runs, pool, &self.project);
+            let held: Vec<HeldLane> = pool
+                .held_lanes()
+                .filter_map(|lane| match pool.holder(lane)? {
+                    Holder::Item { item, .. } | Holder::Play { item, .. } => Some(HeldLane {
+                        lane,
+                        title: items.iter().find(|i| &i.id == item).map(|i| i.title.clone()),
+                        item_id: item.clone(),
+                    }),
+                })
+                .collect();
+            (actions, held, tick_payload(paused, pool))
+        };
+        // A queued item past its slice limit is no start and no ask: the dry tick never listed it.
+        let actions: Vec<Action> = actions
+            .into_iter()
+            .filter(|a| !matches!(a, Action::NeedsHuman { .. }))
             .collect();
+        let would: Vec<String> = actions.iter().map(describe).collect();
+        if self.mode == OrchestratorMode::Claim && actions.contains(&Action::AskForWork) {
+            // Asked before every claim, so a TS agent started since is noticed at once. Claiming isn't
+            // built, so a pass that gets this far only says so.
+            // The guard is cloned out so no borrow of the loop is held across the await.
+            let refusal = match self.guard.clone() {
+                Some(guard) => guard.refusal().await,
+                None => None,
+            };
+            match refusal {
+                Some(why) => tracing::error!("{}: not claiming: {why}", self.id),
+                None => tracing::warn!("{}: claim isn't built yet: not claiming", self.id),
+            }
+        }
         let decision = match actions.first() {
             None if paused => "paused: would do nothing".to_string(),
             None => "would do nothing".to_string(),
             Some(Action::AskForWork) => "would ask for work".to_string(),
             Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
+            Some(Action::NeedsHuman { .. }) => unreachable!("filtered out above"),
         };
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
-        let mut payload = tick_payload(paused, &self.pool);
+        let mut payload = payload;
         payload.states = Some(json!(states));
         payload.claim = Some(json!("not asked"));
         payload.extra.insert("dry".into(), json!(would));
@@ -240,6 +290,7 @@ impl ProjectLoop {
 fn describe(action: &Action) -> String {
     match action {
         Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
+        Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
         Action::AskForWork => "ask_for_work".into(),
     }
 }
@@ -265,6 +316,7 @@ async fn repo_id(github_repo: &str) -> Option<u64> {
 /// Starts one task per project when the mode isn't `Off`. A project that can't loop (no GitHub repo,
 /// unreadable state) is logged and left out; the others go on. Each task is its own, so one failing
 /// never stops another.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_all(
     dir: &Path,
     projects: &[ProjectConfig],
@@ -273,6 +325,7 @@ pub fn spawn_all(
     keychain: &Arc<dyn TokenStore>,
     paused: &PauseState,
     live: &LiveHandle,
+    guard: Option<&PortGuard>,
 ) {
     if live.snapshot().mode == OrchestratorMode::Off {
         return;
@@ -284,7 +337,7 @@ pub fn spawn_all(
             continue;
         }
         let client = Client::new(backlog_url);
-        let lp = match ProjectLoop::open(dir, lane_count, project, client, live.clone()) {
+        let lp = match ProjectLoop::open(dir, lane_count, project, client, live.clone(), guard.cloned()) {
             Ok(lp) => lp,
             Err(e) => {
                 tracing::warn!("{id}: orchestrator skipped: {e:#}");
@@ -482,5 +535,60 @@ mod tests {
         assert_eq!(lp.step(7, None, false).await, Step::Skipped);
         assert!(asked.lock().unwrap().is_empty());
         assert_eq!(lp.events().recent()[0].kind(), "store_error");
+    }
+
+    async fn ts_agent_port() -> u16 {
+        let app = Router::new().route(
+            "/api/health",
+            axum::routing::get(|| async { Json(json!({ "ok": true, "version": "1" })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        port
+    }
+
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn claim_runs_dry_while_another_agent_answers_and_stays_claim_otherwise() {
+        let guard = PortGuard::new(closed_port(), [ts_agent_port().await]);
+        assert_eq!(
+            effective_mode(OrchestratorMode::Claim, &guard).await,
+            OrchestratorMode::Dry
+        );
+        let quiet = PortGuard::new(closed_port(), [closed_port()]);
+        assert_eq!(
+            effective_mode(OrchestratorMode::Claim, &quiet).await,
+            OrchestratorMode::Claim
+        );
+        assert_eq!(
+            effective_mode(OrchestratorMode::Dry, &guard).await,
+            OrchestratorMode::Dry
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claim_mode_tick_still_only_lists_with_or_without_the_guard_blocking() {
+        for blocked in [true, false] {
+            let (base, asked) = stub().await;
+            let (lp, _dir) = project_loop(&base);
+            let port = if blocked { ts_agent_port().await } else { closed_port() };
+            let mut lp = lp.with_guard(Some(PortGuard::new(closed_port(), [port])));
+            lp.mode = OrchestratorMode::Claim;
+            assert_eq!(
+                lp.step(7, Some("tok"), false).await,
+                Step::Ticked {
+                    would: vec!["ask_for_work".into()]
+                }
+            );
+            assert_eq!(*asked.lock().unwrap(), vec!["list".to_string()]);
+        }
     }
 }
