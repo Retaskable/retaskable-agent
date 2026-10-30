@@ -209,3 +209,44 @@ async fn a_step_that_leaves_questions_for_a_person_parks_the_item() {
     );
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
 }
+
+#[tokio::test]
+async fn a_session_that_needs_a_human_frees_its_lane_and_keeps_the_lease() {
+    let (mut rig, _fake, asked) = ended(SessionResult::NeedsHuman("gave up".into()), &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(!ops(&asked).contains(&"release".to_string()));
+    let freed = (rig.lp(0).events().recent().iter())
+        .find(|e| e.kind() == "lane_freed")
+        .unwrap()
+        .to_value();
+    assert_eq!(freed["why"], "needs_human: gave up");
+}
+
+#[tokio::test]
+async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
+    struct NoSteps;
+    impl SessionStarter for NoSteps {
+        fn start(&self, _request: StartRequest) -> Result<(), String> {
+            Ok(())
+        }
+        fn active(&self) -> u32 {
+            0
+        }
+        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+            None
+        }
+    }
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    rig.machine.starter = Some(Arc::new(NoSteps));
+    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
+    rig.machine.poll().await;
+    rig.machine.poll().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Checking);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert!(!kinds(&mut rig).contains(&"step_start".to_string()));
+}

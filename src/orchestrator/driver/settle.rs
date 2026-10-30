@@ -18,6 +18,9 @@ pub enum SessionResult {
     /// The session couldn't run or crashed through no fault of the item's (the TS `ownFailure`): the
     /// item is given back to the store's queue. The text says why.
     Failed(String),
+    /// The session ended in a way that needs a person (it gave up, found nothing left to build, or left steps only
+    /// a person can do): the run goes to `needs_human`, freeing its lane and keeping its lease. The text says why.
+    NeedsHuman(String),
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -34,6 +37,12 @@ pub struct SessionOutcome {
 pub struct OutcomeSender(pub(super) mpsc::UnboundedSender<SessionOutcome>);
 
 impl OutcomeSender {
+    /// A sender and the receiving end of its channel.
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<SessionOutcome>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self(sender), receiver)
+    }
+
     /// Reports a session's end. A loop that has stopped hears nothing, which is fine: nothing is left to settle.
     pub fn send(&self, outcome: SessionOutcome) {
         let _ = self.0.send(outcome);
@@ -62,6 +71,7 @@ impl ProjectLoop {
         links: &Links,
     ) {
         self.runs.remove(item_id);
+        self.items.remove(item_id);
         self.free_lane(pool, item_id, state, why);
         if let Some(token) = self.leases.remove(item_id) {
             self.unreleased.insert(item_id.to_string(), token);
@@ -197,8 +207,23 @@ impl ProjectLoop {
             );
             return;
         };
+        self.events.add_in(
+            &self.id,
+            Event::SessionEnd(event::SessionEnd {
+                item: Some(item.clone()),
+                lane: Some(outcome.lane),
+                role: Some("implementer".into()),
+                engine: Some("claude".into()),
+                ok: Some(!matches!(outcome.result, SessionResult::Failed(_))),
+                ..Default::default()
+            }),
+        );
         match outcome.result {
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, links).await,
+            SessionResult::NeedsHuman(why) => {
+                run.escalate();
+                self.moved(pool, &item, ItemState::Implementing, &why, links).await;
+            }
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
                 let note = format!("the session on lane {} ended", outcome.lane);
@@ -242,14 +267,16 @@ impl ProjectLoop {
                 step: Some(state_name(run.state).into()),
                 ..Default::default()
             };
-            self.events.add_in(&self.id, Event::StepStart(start));
-            let step = starter.advance(StepRequest {
+            let request = StepRequest {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),
                 token: self.leases.get(&item_id).cloned().unwrap_or_default(),
                 item_id: item_id.clone(),
                 run,
-            });
+            };
+            // No step built for this state yet: the item waits where it is, and nothing is logged.
+            let Some(step) = starter.advance(request) else { continue };
+            self.events.add_in(&self.id, Event::StepStart(start));
             self.running.spawn(item_id, step);
         }
     }

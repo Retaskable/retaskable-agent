@@ -141,6 +141,8 @@ pub struct StartRequest {
     pub item_id: String,
     pub lane: u32,
     pub token: String,
+    /// The claimed item as the store handed it out (title, slice, remaining, spec refs).
+    pub item: Item,
     /// Where the session reports how it ended; the loop reads it on its next wake.
     pub outcomes: OutcomeSender,
 }
@@ -159,10 +161,11 @@ pub trait SessionStarter: Send + Sync {
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
     /// The item's next step for its state (`steps::has_step`, except `implementing`, whose step is its session),
-    /// run as its own task: the run as the step left it.
+    /// run as its own task: the run as the step left it. `None` when no step is built for that state yet: the item
+    /// waits where it is, and the loop asks again on its next wake.
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
-    fn advance(&self, request: StepRequest) -> BoxFuture<'static, ItemRun>;
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
 }
 
 /// One project's orchestrator state, kept for as long as the agent runs. The lanes are not here: they
@@ -181,6 +184,8 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     unparked: BTreeMap<String, (String, String, String)>,
+    /// The item the store handed out for each lease held, by id, for the session that starts on it.
+    items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`Machine::add`].
     outcomes: OutcomeSender,
     /// Whether the held leases were matched against the backlog yet (once, on the first pass).
@@ -213,6 +218,7 @@ impl ProjectLoop {
             leases: store.leases(),
             unreleased: store.unreleased(),
             unparked: store.unparked(),
+            items: BTreeMap::new(),
             outcomes: OutcomeSender(mpsc::unbounded_channel().0),
             store,
             runs: ProjectRuns::new(),
@@ -332,6 +338,7 @@ impl ProjectLoop {
         let mut run = ItemRun::new();
         run.slice = item.slice;
         self.runs.insert(item.id.clone(), run);
+        self.items.insert(item.id.clone(), item.clone());
         self.leases.insert(item.id.clone(), token);
         self.save_leases();
         self.events.add_in(
@@ -379,15 +386,33 @@ impl ProjectLoop {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
+                let Some(item) = self.items.get(item_id).cloned() else {
+                    let why = "the session didn't start: the item is unknown here";
+                    self.hand_back(pool, item_id, "queued", why, links).await;
+                    continue;
+                };
                 let request = StartRequest {
                     project: self.id.clone(),
                     item_id: item_id.clone(),
                     lane: *lane,
                     token: self.leases.get(item_id).cloned().unwrap_or_default(),
+                    item,
                     outcomes: self.outcomes.clone(),
                 };
                 match starter.start(request) {
-                    Ok(()) => started += 1,
+                    Ok(()) => {
+                        started += 1;
+                        self.events.add_in(
+                            &self.id,
+                            Event::SessionStart(event::SessionStart {
+                                item: Some(item_id.clone()),
+                                lane: Some(*lane),
+                                role: Some("implementer".into()),
+                                engine: Some("claude".into()),
+                                ..Default::default()
+                            }),
+                        );
+                    }
                     Err(why) => {
                         tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);
                         let why = format!("the session didn't start: {why}");

@@ -95,6 +95,8 @@ impl Rig {
     fn queue(&mut self, i: usize, ids: &[&str]) {
         for id in ids {
             self.lp(i).runs.insert(id.to_string(), ItemRun::new());
+            let item = json!({"id": id, "title": id, "status": "claimed", "rank": 1});
+            (self.lp(i).items).insert(id.to_string(), serde_json::from_value(item).unwrap());
         }
     }
 }
@@ -459,10 +461,10 @@ impl SessionStarter for Fake {
         self.active.load(Ordering::SeqCst)
     }
 
-    fn advance(&self, request: StepRequest) -> BoxFuture<'static, ItemRun> {
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
         let run = request.run;
         self.stepped.lock().unwrap().push(request);
-        self.step(run)
+        Some(self.step(run))
     }
 }
 
@@ -552,6 +554,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             item_id: "a".into(),
             lane: 1,
             token: "lease-1".into(),
+            item: rig.lp(0).items["a"].clone(),
             outcomes: rig.machine.outcome_sender(),
         }]
     );
@@ -566,11 +569,14 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
         (held[0].lane, held[0].item_id.as_str(), held[0].title.as_deref()),
         (1, "a", Some("A"))
     );
-    assert_eq!(kinds(&mut rig), ["lease", "lane_taken", "claim", "claim", "tick"]);
-    assert_eq!(rig.lp(0).events().recent()[2].to_value()["answer"], "a");
-    assert_eq!(rig.lp(0).events().recent()[3].to_value()["answer"], "none");
     assert_eq!(
-        rig.lp(0).events().recent()[4].to_value()["claim"],
+        kinds(&mut rig),
+        ["lease", "lane_taken", "session_start", "claim", "claim", "tick"]
+    );
+    assert_eq!(rig.lp(0).events().recent()[3].to_value()["answer"], "a");
+    assert_eq!(rig.lp(0).events().recent()[4].to_value()["answer"], "none");
+    assert_eq!(
+        rig.lp(0).events().recent()[5].to_value()["claim"],
         "none",
         "the tick shows the last answer"
     );

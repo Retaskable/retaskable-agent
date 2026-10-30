@@ -303,7 +303,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .and_then(|u| reqwest::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default(),
-        starter: None,
+        starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::session::ClaudeStarter::new(
+                dir.to_path_buf(),
+                cfg.projects.clone(),
+                config::engine_choice(cfg, env),
+                env.clone(),
+                cfg.machine.max_turns,
+            ) as Arc<dyn orchestrator::driver::SessionStarter>
+        }),
     });
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
