@@ -12,6 +12,7 @@ by piece.
 - `GET /api/health` answers `{"ok": true, "version": "..."}`. Every other path is a 404.
 - It reads `config.json` from `RETASKABLE_DATA_DIR`, or from `.retaskable/` in the working folder.
 - Logging is set by `RETASKABLE_LOG` (default `info`).
+- `RETASKABLE_ORCHESTRATOR` switches the orchestrator loop: `off` (the default), `dry` or `claim`. `dry` reads each project's backlog once a minute and writes a `tick` event to `projects/<id>/events/*.jsonl` with `status`, `states` and `dry` (what a tick would do); it never claims, takes a lane or starts a session. `claim` isn't built yet and runs dry. An unreachable store is a `store_error` event and a skipped tick.
 
 ## Run
 
