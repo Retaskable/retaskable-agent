@@ -190,6 +190,16 @@ impl ItemRun {
         }
     }
 
+    fn fail_review(&mut self, cfg: &ProjectConfig) -> ItemState {
+        self.approved_at_head = false;
+        self.review_rounds += 1;
+        if self.review_rounds > cfg.max_review_rounds {
+            ItemState::NeedsHuman
+        } else {
+            ItemState::Implementing
+        }
+    }
+
     /// Scouts and the reviewer finished looking at the diff.
     pub fn review_finished(&mut self, outcome: ReviewOutcome, cfg: &ProjectConfig) {
         self.state = match outcome {
@@ -205,15 +215,7 @@ impl ItemRun {
                     merge_entry(cfg)
                 }
             }
-            ReviewOutcome::ChangesRequested => {
-                self.approved_at_head = false;
-                self.review_rounds += 1;
-                if self.review_rounds > cfg.max_review_rounds {
-                    ItemState::NeedsHuman
-                } else {
-                    ItemState::Implementing
-                }
-            }
+            ReviewOutcome::ChangesRequested => self.fail_review(cfg),
             ReviewOutcome::Escalated => ItemState::NeedsHuman,
         };
     }
@@ -222,15 +224,7 @@ impl ItemRun {
     pub fn playtest_finished(&mut self, outcome: PlaytestOutcome, cfg: &ProjectConfig) {
         self.state = match outcome {
             PlaytestOutcome::Passed => merge_entry(cfg),
-            PlaytestOutcome::Failed => {
-                self.approved_at_head = false;
-                self.review_rounds += 1;
-                if self.review_rounds > cfg.max_review_rounds {
-                    ItemState::NeedsHuman
-                } else {
-                    ItemState::Implementing
-                }
-            }
+            PlaytestOutcome::Failed => self.fail_review(cfg),
         };
     }
 
