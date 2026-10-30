@@ -31,6 +31,7 @@ pub(crate) fn item(
         branch: None,
         kind: None,
         milestone: milestone.map(|s| s.to_string()),
+        reopened: None,
     }
 }
 

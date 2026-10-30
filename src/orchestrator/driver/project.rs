@@ -25,7 +25,8 @@ use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, decide, tick_payload};
 use crate::store::{RunRecord, Store};
-use crate::telemetry::{Event, EventLog, event};
+use crate::telemetry::events::parse_iso_ms;
+use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
 
 /// The variable that switches the orchestrator on.
 pub const MODE_VAR: &str = "RETASKABLE_ORCHESTRATOR";
@@ -134,6 +135,9 @@ pub struct StartRequest {
     pub resume: bool,
     /// Where the session reports how it ended; the loop reads it on its next wake.
     pub outcomes: super::OutcomeSender,
+    /// The project's latest `state.usage` reading (section 7.1), for picking the implementer's
+    /// model tier. `None` when there's no reading yet, which is treated as a full window.
+    pub usage: Option<Value>,
 }
 
 /// Runs the sessions and steps for the work the loop schedules. Built in a later piece (implementer-session and
@@ -196,6 +200,9 @@ pub struct ProjectLoop {
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
+    /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
+    /// finding has held, across minutes.
+    pub(super) telemetry: Telemetry,
 }
 
 impl ProjectLoop {
@@ -230,6 +237,7 @@ impl ProjectLoop {
             running: Running::default(),
             seen: report::Seen::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
+            telemetry: Telemetry::new(),
         }
     }
 
@@ -320,7 +328,41 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
+        self.check_watchdog(paused, &actions, pool);
         Step::Ticked { would }
+    }
+
+    /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
+    /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
+    /// from minutes before.
+    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool) {
+        let recent: Vec<watchdog::RecentEvent> = self
+            .events
+            .recent()
+            .iter()
+            .filter_map(|e| {
+                let at_ms = parse_iso_ms(&e.at)?;
+                let event = e.event()?;
+                Some(watchdog::RecentEvent { at_ms, event })
+            })
+            .collect();
+        let now_ms = now_ms();
+        let found = watchdog::check(&watchdog::Input {
+            project: &self.id,
+            paused,
+            runs: &self.runs,
+            leases: &self.leases,
+            records: &self.records,
+            running: &self.running,
+            pool,
+            actions,
+            recent: &recent,
+            now_ms,
+            lease_idle_minutes: self.project.tuning.lease_idle_minutes,
+            idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
+            no_progress_minutes: self.project.tuning.no_progress_minutes,
+        });
+        self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
     }
 
     /// Writes the held and the unreleased leases to the state file.
@@ -512,6 +554,7 @@ impl ProjectLoop {
             session_id,
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
+            usage: self.store.usage(),
         };
         match starter.start(request) {
             Ok(()) => {

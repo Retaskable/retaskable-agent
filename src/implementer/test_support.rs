@@ -17,6 +17,7 @@ pub(crate) fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         branch: None,
         kind: None,
         milestone: None,
+        reopened: None,
     }
 }
 

@@ -312,6 +312,7 @@ mod tests {
             branch: None,
             kind: None,
             milestone: None,
+            reopened: None,
         }
     }
 

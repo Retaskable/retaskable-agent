@@ -222,7 +222,8 @@ pub struct SessionResult {
     /// The last turn's own context size (prompt + cache), not counting subagents' turns.
     pub context_tokens: Option<u64>,
     /// The latest `rate_limit_info` the stream reported (07-orchestrator-loop.md section 7.1),
-    /// kept whole and ready to save as `state.usage`. `None` when the stream never sent one.
+    /// kept whole and saved as `state.usage` once the implementer session settles. `None` when
+    /// the stream never sent one.
     pub usage: Option<Value>,
     /// A result's own token counts (`tokensOf` in `cursor.ts`): Cursor's stand-in for a cost,
     /// since it never reports one. `None` when the engine doesn't report tokens, or reported none.

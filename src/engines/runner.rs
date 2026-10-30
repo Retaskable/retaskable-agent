@@ -154,7 +154,7 @@ async fn spawn_and_read(
                 Ok(next) => next,
                 Err(_) => {
                     if let Some(pid) = pid {
-                        let _ = crate::lanes::kill_tree(pid);
+                        let _ = tokio::task::spawn_blocking(move || crate::lanes::kill_tree(pid)).await;
                     }
                     let _ = child.start_kill();
                     break;
@@ -165,7 +165,7 @@ async fn spawn_and_read(
                     Ok(next) => next,
                     Err(_) => {
                         if let Some(pid) = pid {
-                            let _ = crate::lanes::kill_tree(pid);
+                            let _ = tokio::task::spawn_blocking(move || crate::lanes::kill_tree(pid)).await;
                         }
                         let _ = child.start_kill();
                         silenced = true;

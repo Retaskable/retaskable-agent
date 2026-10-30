@@ -91,6 +91,12 @@ impl Store {
         self.data.insert("usage".to_string(), usage);
     }
 
+    /// The last-saved `state.usage`, if any (`None` when there's no reading yet, which
+    /// [`crate::tiers::implementer_tier`] treats as a full window).
+    pub fn usage(&self) -> Option<Value> {
+        self.data.get("usage").cloned()
+    }
+
     /// Replaces `state.smoke` with the post-merge smoke's latest result
     /// (docs/specs/agent/06.3-review.md: "`State.smoke = {sha, status, at, url, tail?}`").
     /// Doesn't save on its own; call `save` after, as every other change here does.
@@ -247,6 +253,18 @@ mod tests {
         Store::load(dir.path()).unwrap();
         // Not re-saved (compacted or otherwise): trimming found nothing to change.
         assert_eq!(read(dir.path()), original);
+    }
+
+    #[test]
+    fn usage_reads_back_the_last_saved_value_and_is_none_before_any_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.usage(), None);
+        store.set_usage(serde_json::json!({"status": "allowed", "resetsAt": 1000}));
+        assert_eq!(
+            store.usage(),
+            Some(serde_json::json!({"status": "allowed", "resetsAt": 1000}))
+        );
     }
 
     #[test]
