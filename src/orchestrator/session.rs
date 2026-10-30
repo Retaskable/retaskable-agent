@@ -118,7 +118,10 @@ impl SessionStarter for ClaudeStarter {
             // real work behind, and needs a person instead.
             let (result, usage) = match tokio::spawn(run(job)).await {
                 Ok(Ok((result, usage))) => (result, usage),
-                Ok(Err(e)) if resume => (SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")), None),
+                Ok(Err(e)) if resume => (
+                    SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")),
+                    None,
+                ),
                 Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None),
                 Err(e) if resume => (
                     SessionResult::NeedsHuman(format!("the session's task crashed while resuming: {e}")),
@@ -367,7 +370,10 @@ fn session_result_for_answer(answer: Result<(ImplementerResult, Option<Value>)>)
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => {
             (SessionResult::Failed(format!("went quiet and was killed: {e:#}")), None)
         }
-        Err(e) => (SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")), None),
+        Err(e) => (
+            SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
+            None,
+        ),
         Ok((r, usage)) => (classify(&r), usage),
     }
 }
