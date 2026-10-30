@@ -7,6 +7,7 @@
 //! with `--output-format stream-json`, parse the events, capture the final structured result,
 //! resume a session that already has history, read the 5-hour usage limit out of the stream, and
 //! classify a signed-out Claude (`signed_out` / `describe_failure`).
+use crate::env::Env;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -344,7 +345,7 @@ impl Engine for ClaudeEngine {
         EngineId::Claude
     }
 
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
         resolve_claude(env, windows, path_dirs).context("resolving the claude binary")
     }
 

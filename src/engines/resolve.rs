@@ -2,6 +2,7 @@
 //! (it reads only [`crate::env_path`]), so `setup_check` and the engines both depend on it and it
 //! depends on neither. Each `resolve_*` takes the environment, the platform and the `PATH`
 //! directories as arguments so it can be tested; each `resolve_*_on_path` reads them itself.
+use crate::env::Env;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -10,8 +11,8 @@ use anyhow::Result;
 /// 04-architecture.md's "Finding Claude" — on Windows the `claude` on PATH is an npm shim batch
 /// file, so this looks behind it for the `claude.exe` it wraps, since spawning a `.cmd` directly
 /// from a piped child process is unreliable. `RETASKABLE_CLAUDE` always wins when set.
-pub fn resolve_claude(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
-    if let Some(over) = env("RETASKABLE_CLAUDE") {
+pub fn resolve_claude(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
+    if let Some(over) = env.get("RETASKABLE_CLAUDE") {
         return Ok(PathBuf::from(over));
     }
     if !windows {
@@ -39,15 +40,15 @@ pub fn resolve_claude(env: impl Fn(&str) -> Option<String>, windows: bool, path_
 }
 
 /// `resolve_claude`, reading PATH itself the way the real agent does.
-pub fn resolve_claude_on_path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
-    let dirs = crate::env_path::path_dirs(&env);
+pub fn resolve_claude_on_path(env: &Env) -> Result<PathBuf> {
+    let dirs = crate::env_path::path_dirs(env);
     resolve_claude(env, cfg!(windows), &dirs)
 }
 
 /// `resolveCodex()`: `RETASKABLE_CODEX` always wins; otherwise the first `codex[.exe]` on `PATH`,
 /// falling back to the bare name so a missing Codex is reported by the spawn itself.
-pub fn resolve_codex(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_CODEX") {
+pub fn resolve_codex(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
+    if let Some(over) = env.get("RETASKABLE_CODEX") {
         return PathBuf::from(over);
     }
     let name = if windows { "codex.exe" } else { "codex" };
@@ -61,16 +62,16 @@ pub fn resolve_codex(env: impl Fn(&str) -> Option<String>, windows: bool, path_d
 }
 
 /// `resolve_codex`, reading `PATH` itself the way the real agent does.
-pub fn resolve_codex_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    resolve_codex(&env, cfg!(windows), &dirs)
+pub fn resolve_codex_on_path(env: &Env) -> PathBuf {
+    let dirs = crate::env_path::path_dirs(env);
+    resolve_codex(env, cfg!(windows), &dirs)
 }
 
 /// `resolvePi()`: `RETASKABLE_PI` always wins; otherwise the first `pi[.exe]` on `PATH`. Never
 /// errors (unlike `resolve_claude`): a missing pi isn't fatal, so this falls back to the bare name
 /// and lets the spawn itself report "not installed".
-pub fn resolve_pi(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_PI") {
+pub fn resolve_pi(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
+    if let Some(over) = env.get("RETASKABLE_PI") {
         return PathBuf::from(over);
     }
     let name = if windows { "pi.exe" } else { "pi" };
@@ -84,22 +85,17 @@ pub fn resolve_pi(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs
 }
 
 /// `resolve_pi`, reading `PATH` itself the way the real agent does.
-pub fn resolve_pi_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    resolve_pi(&env, cfg!(windows), &dirs)
+pub fn resolve_pi_on_path(env: &Env) -> PathBuf {
+    let dirs = crate::env_path::path_dirs(env);
+    resolve_pi(env, cfg!(windows), &dirs)
 }
 
 /// `resolveCursor()` (`agent/src/engines/cursor.ts`): `RETASKABLE_CURSOR` always wins; otherwise
 /// the first `cursor-agent[.exe]` (or, on Windows, `cursor-agent.cmd`) on PATH, then
 /// `~/.local/bin`. Never errors (unlike `resolve_claude`): a missing Cursor isn't fatal, so this
 /// falls back to the bare name and lets the spawn itself report "not installed".
-pub fn resolve_cursor(
-    env: impl Fn(&str) -> Option<String>,
-    windows: bool,
-    path_dirs: &[PathBuf],
-    home: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_CURSOR") {
+pub fn resolve_cursor(env: &Env, windows: bool, path_dirs: &[PathBuf], home: Option<PathBuf>) -> PathBuf {
+    if let Some(over) = env.get("RETASKABLE_CURSOR") {
         return PathBuf::from(over);
     }
     let name = if windows { "cursor-agent.exe" } else { "cursor-agent" };
@@ -125,10 +121,10 @@ pub fn resolve_cursor(
 }
 
 /// `resolve_cursor`, reading PATH and the home directory itself the way the real agent does.
-pub fn resolve_cursor_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
-    resolve_cursor(&env, cfg!(windows), &dirs, home)
+pub fn resolve_cursor_on_path(env: &Env) -> PathBuf {
+    let dirs = crate::env_path::path_dirs(env);
+    let home = env.get("HOME").or_else(|| env.get("USERPROFILE")).map(PathBuf::from);
+    resolve_cursor(env, cfg!(windows), &dirs, home)
 }
 
 #[cfg(test)]
@@ -137,29 +133,29 @@ mod tests {
 
     #[test]
     fn resolve_claude_prefers_the_env_override_on_any_platform() {
-        let env = |k: &str| (k == "RETASKABLE_CLAUDE").then(|| "C:/custom/claude.exe".to_string());
+        let env = Env::from_pairs([("RETASKABLE_CLAUDE", "C:/custom/claude.exe")]);
         assert_eq!(
-            resolve_claude(env, true, &[]).unwrap(),
+            resolve_claude(&env, true, &[]).unwrap(),
             PathBuf::from("C:/custom/claude.exe")
         );
         assert_eq!(
-            resolve_claude(env, false, &[]).unwrap(),
+            resolve_claude(&env, false, &[]).unwrap(),
             PathBuf::from("C:/custom/claude.exe")
         );
     }
 
     #[test]
     fn resolve_claude_is_plain_claude_off_windows() {
-        let no_env = |_: &str| None;
-        assert_eq!(resolve_claude(no_env, false, &[]).unwrap(), PathBuf::from("claude"));
+        let no_env = Env::empty();
+        assert_eq!(resolve_claude(&no_env, false, &[]).unwrap(), PathBuf::from("claude"));
     }
 
     #[test]
     fn resolve_claude_finds_claude_exe_directly_on_the_path_on_windows() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("claude.exe"), "").unwrap();
-        let no_env = |_: &str| None;
-        let got = resolve_claude(no_env, true, &[dir.path().to_path_buf()]).unwrap();
+        let no_env = Env::empty();
+        let got = resolve_claude(&no_env, true, &[dir.path().to_path_buf()]).unwrap();
         assert_eq!(got, dir.path().join("claude.exe"));
     }
 
@@ -175,15 +171,15 @@ mod tests {
             .join("bin");
         std::fs::create_dir_all(&behind).unwrap();
         std::fs::write(behind.join("claude.exe"), "").unwrap();
-        let no_env = |_: &str| None;
-        let got = resolve_claude(no_env, true, &[dir.path().to_path_buf()]).unwrap();
+        let no_env = Env::empty();
+        let got = resolve_claude(&no_env, true, &[dir.path().to_path_buf()]).unwrap();
         assert_eq!(got, behind.join("claude.exe"));
     }
 
     #[test]
     fn resolve_claude_fails_naming_the_fix_when_nothing_matches_on_windows() {
-        let no_env = |_: &str| None;
-        let err = resolve_claude(no_env, true, &[]).unwrap_err();
+        let no_env = Env::empty();
+        let err = resolve_claude(&no_env, true, &[]).unwrap_err();
         assert!(err.to_string().contains("RETASKABLE_CLAUDE"));
     }
 
@@ -195,43 +191,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("claude.exe"), "").unwrap();
         let path_value = dir.path().to_string_lossy().into_owned();
-        let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-        assert_eq!(resolve_claude_on_path(env).unwrap(), dir.path().join("claude.exe"));
+        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        assert_eq!(resolve_claude_on_path(&env).unwrap(), dir.path().join("claude.exe"));
     }
 
     #[test]
     fn resolve_codex_prefers_the_env_then_the_path_then_the_bare_name() {
-        let env = |k: &str| (k == "RETASKABLE_CODEX").then(|| "C:/custom/codex.exe".to_string());
-        assert_eq!(resolve_codex(env, false, &[]), PathBuf::from("C:/custom/codex.exe"));
+        let env = Env::from_pairs([("RETASKABLE_CODEX", "C:/custom/codex.exe")]);
+        assert_eq!(resolve_codex(&env, false, &[]), PathBuf::from("C:/custom/codex.exe"));
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("codex"), "").unwrap();
-        let none = |_: &str| None;
+        let none = Env::empty();
         assert_eq!(
-            resolve_codex(none, false, &[dir.path().to_path_buf()]),
+            resolve_codex(&none, false, &[dir.path().to_path_buf()]),
             dir.path().join("codex")
         );
-        assert_eq!(resolve_codex(none, false, &[]), PathBuf::from("codex"));
-        assert_eq!(resolve_codex(none, true, &[]), PathBuf::from("codex.exe"));
+        assert_eq!(resolve_codex(&none, false, &[]), PathBuf::from("codex"));
+        assert_eq!(resolve_codex(&none, true, &[]), PathBuf::from("codex.exe"));
     }
 
     #[test]
     fn resolve_pi_prefers_the_env_override_on_any_platform() {
-        let env = |k: &str| (k == "RETASKABLE_PI").then(|| "C:/custom/pi.exe".to_string());
-        assert_eq!(resolve_pi(env, true, &[]), PathBuf::from("C:/custom/pi.exe"));
-        assert_eq!(resolve_pi(env, false, &[]), PathBuf::from("C:/custom/pi.exe"));
+        let env = Env::from_pairs([("RETASKABLE_PI", "C:/custom/pi.exe")]);
+        assert_eq!(resolve_pi(&env, true, &[]), PathBuf::from("C:/custom/pi.exe"));
+        assert_eq!(resolve_pi(&env, false, &[]), PathBuf::from("C:/custom/pi.exe"));
     }
 
     #[test]
     fn resolve_pi_finds_it_on_the_path_or_falls_back_to_the_bare_name() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("pi"), "").unwrap();
-        let no_env = |_: &str| None;
+        let no_env = Env::empty();
         assert_eq!(
-            resolve_pi(no_env, false, &[dir.path().to_path_buf()]),
+            resolve_pi(&no_env, false, &[dir.path().to_path_buf()]),
             dir.path().join("pi")
         );
-        assert_eq!(resolve_pi(no_env, false, &[]), PathBuf::from("pi"));
-        assert_eq!(resolve_pi(no_env, true, &[]), PathBuf::from("pi.exe"));
+        assert_eq!(resolve_pi(&no_env, false, &[]), PathBuf::from("pi"));
+        assert_eq!(resolve_pi(&no_env, true, &[]), PathBuf::from("pi.exe"));
     }
 
     #[test]
@@ -240,19 +236,19 @@ mod tests {
         let name = if cfg!(windows) { "pi.exe" } else { "pi" };
         std::fs::write(dir.path().join(name), "").unwrap();
         let path_value = dir.path().to_string_lossy().into_owned();
-        let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-        assert_eq!(resolve_pi_on_path(env), dir.path().join(name));
+        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        assert_eq!(resolve_pi_on_path(&env), dir.path().join(name));
     }
 
     #[test]
     fn resolve_cursor_prefers_the_env_override_on_any_platform() {
-        let env = |k: &str| (k == "RETASKABLE_CURSOR").then(|| "C:/custom/cursor-agent.exe".to_string());
+        let env = Env::from_pairs([("RETASKABLE_CURSOR", "C:/custom/cursor-agent.exe")]);
         assert_eq!(
-            resolve_cursor(env, true, &[], None),
+            resolve_cursor(&env, true, &[], None),
             PathBuf::from("C:/custom/cursor-agent.exe")
         );
         assert_eq!(
-            resolve_cursor(env, false, &[], None),
+            resolve_cursor(&env, false, &[], None),
             PathBuf::from("C:/custom/cursor-agent.exe")
         );
     }
@@ -266,8 +262,8 @@ mod tests {
             "cursor-agent"
         };
         std::fs::write(dir.path().join(name), "").unwrap();
-        let no_env = |_: &str| None;
-        let got = resolve_cursor(no_env, cfg!(windows), &[dir.path().to_path_buf()], None);
+        let no_env = Env::empty();
+        let got = resolve_cursor(&no_env, cfg!(windows), &[dir.path().to_path_buf()], None);
         assert_eq!(got, dir.path().join(name));
     }
 
@@ -278,8 +274,8 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("cursor-agent.cmd"), "").unwrap();
-        let no_env = |_: &str| None;
-        let got = resolve_cursor(no_env, true, &[dir.path().to_path_buf()], None);
+        let no_env = Env::empty();
+        let got = resolve_cursor(&no_env, true, &[dir.path().to_path_buf()], None);
         assert_eq!(got, dir.path().join("cursor-agent.cmd"));
     }
 
@@ -294,20 +290,20 @@ mod tests {
         let bin_dir = home.path().join(".local").join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::write(bin_dir.join(name), "").unwrap();
-        let no_env = |_: &str| None;
-        let got = resolve_cursor(no_env, cfg!(windows), &[], Some(home.path().to_path_buf()));
+        let no_env = Env::empty();
+        let got = resolve_cursor(&no_env, cfg!(windows), &[], Some(home.path().to_path_buf()));
         assert_eq!(got, bin_dir.join(name));
     }
 
     #[test]
     fn resolve_cursor_falls_back_to_the_bare_name_when_nothing_matches() {
-        let no_env = |_: &str| None;
+        let no_env = Env::empty();
         let name = if cfg!(windows) {
             "cursor-agent.exe"
         } else {
             "cursor-agent"
         };
-        assert_eq!(resolve_cursor(no_env, cfg!(windows), &[], None), PathBuf::from(name));
+        assert_eq!(resolve_cursor(&no_env, cfg!(windows), &[], None), PathBuf::from(name));
     }
 
     #[test]
@@ -320,7 +316,7 @@ mod tests {
         };
         std::fs::write(dir.path().join(name), "").unwrap();
         let path_value = dir.path().to_string_lossy().into_owned();
-        let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-        assert_eq!(resolve_cursor_on_path(env), dir.path().join(name));
+        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        assert_eq!(resolve_cursor_on_path(&env), dir.path().join(name));
     }
 }

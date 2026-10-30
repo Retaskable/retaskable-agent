@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use retaskable_agent::env::Env;
 use retaskable_agent::release::{self, Environment};
 
 fn main() {
@@ -226,15 +227,15 @@ fn start_check(placed: &Path, build: &release::Build) -> Result<(), String> {
 
     let scratch_env = {
         let scratch = scratch.clone();
-        move |k: &str| {
+        Env::new(move |k: &str| {
             matches!(
                 k,
                 "HOME" | "USERPROFILE" | "LOCALAPPDATA" | "XDG_DATA_HOME" | "XDG_STATE_HOME"
             )
             .then(|| scratch.to_string_lossy().to_string())
-        }
+        })
     };
-    let log_path = release::logs_dir(build, scratch_env).join("retaskable.log");
+    let log_path = release::logs_dir(build, &scratch_env).join("retaskable.log");
     let log = match std::fs::read_to_string(&log_path) {
         Ok(log) => log,
         Err(e) => return cleanup(Err(format!("reading {}: {e}", log_path.display()))),

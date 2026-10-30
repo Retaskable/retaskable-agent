@@ -5,6 +5,7 @@ mod credentials;
 #[cfg(test)]
 mod tests;
 
+use crate::env::Env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -54,15 +55,12 @@ fn fixed_environment_url(build: Option<&crate::release::Build>) -> Option<&'stat
 /// The cloud this agent links to: `build.json`'s environment in a release build (section 3.8), else
 /// `RETASKABLE_CLOUD_URL`, else `cloud.url`, else retaskable.com. No trailing slash. Errors on an address
 /// that isn't http or https, before anything is sent.
-pub fn cloud_url(
-    cfg: &ConfigFile,
-    env: impl Fn(&str) -> Option<String>,
-    build: Option<&crate::release::Build>,
-) -> Result<String> {
+pub fn cloud_url(cfg: &ConfigFile, env: &Env, build: Option<&crate::release::Build>) -> Result<String> {
     if let Some(fixed) = fixed_environment_url(build) {
         return Ok(fixed.to_string());
     }
-    let url = env("RETASKABLE_CLOUD_URL")
+    let url = env
+        .get("RETASKABLE_CLOUD_URL")
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty())
         .or_else(|| {
@@ -113,11 +111,7 @@ pub fn open_url(url: &str) -> Result<()> {
 /// Every cloud this agent connects to (environments.md section 3.4): the three environments, then the agent's own
 /// cloud URL when it's none of them, the Custom one. A bad `cloud.url` is logged, and the three still connect. A
 /// release build (section 3.8) has only its one, fixed environment, never the other two or a Custom one.
-pub fn cloud_urls(
-    cfg: &ConfigFile,
-    env: impl Fn(&str) -> Option<String>,
-    build: Option<&crate::release::Build>,
-) -> Vec<String> {
+pub fn cloud_urls(cfg: &ConfigFile, env: &Env, build: Option<&crate::release::Build>) -> Vec<String> {
     if let Some(fixed) = fixed_environment_url(build) {
         return vec![fixed.to_string()];
     }
@@ -154,8 +148,8 @@ pub const BACKLOG_TARGET: LinkTarget = LinkTarget {
 
 /// The name this machine goes by on retaskable.com: `RETASKABLE_MACHINE` when set (a container's hostname is a random
 /// id, docker.md section 3), else the hostname.
-pub fn machine_name(env: impl Fn(&str) -> Option<String>) -> String {
-    env("RETASKABLE_MACHINE")
+pub fn machine_name(env: &Env) -> String {
+    env.get("RETASKABLE_MACHINE")
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
         .or_else(|| Some(gethostname::gethostname().to_string_lossy().to_string()).filter(|h| !h.is_empty()))
@@ -164,7 +158,7 @@ pub fn machine_name(env: impl Fn(&str) -> Option<String>) -> String {
 
 /// What the `/link` page shows about this machine. `version` is this crate's own in a checkout,
 /// or a release build's `build.json` one.
-pub fn machine_info(env: impl Fn(&str) -> Option<String>, version: &str) -> Value {
+pub fn machine_info(env: &Env, version: &str) -> Value {
     let os = match std::env::consts::OS {
         "windows" => "Windows",
         "macos" => "macOS",

@@ -18,7 +18,7 @@ impl SettingsServer {
     /// Saves a typed tag list as changes to the found tags (added, removed), the same as setup
     /// will (agent-settings.md section 3.1).
     pub(super) fn save_tags(&self, typed: &[String]) -> Result<()> {
-        let env = |k: &str| self.env(k);
+        let env = &self.env;
         let found = tags::found_tags(&tags::machine_facts(env));
         let cleaned = tags::clean_tags(Value::Array(typed.iter().cloned().map(Value::String).collect()));
         let added = cleaned.iter().filter(|t| !found.contains(t)).cloned().collect();
@@ -31,7 +31,7 @@ impl SettingsServer {
     /// `Err` when `var` sets this setting (section 3.2): a save must refuse the same way the
     /// page greys the field out.
     pub(super) fn env_gate(&self, var: &str) -> Result<(), SaveError> {
-        if self.env(var).is_some() {
+        if self.env.get(var).is_some() {
             return Err(SaveError::Invalid(format!("Set by {var}: change it there.")));
         }
         Ok(())

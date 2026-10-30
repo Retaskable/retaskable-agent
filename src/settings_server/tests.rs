@@ -256,7 +256,7 @@ async fn settings_without_a_session_are_refused() {
 #[tokio::test]
 async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
     let dir = tempfile::tempdir().unwrap();
-    let env = |k: &str| (k == "RETASKABLE_TAGS").then(|| "linux".to_string());
+    let env = Env::from_pairs([("RETASKABLE_TAGS", "linux")]);
     let settings = Arc::new(SettingsServer::new(
         dir.path().to_path_buf(),
         4700,
@@ -299,14 +299,14 @@ async fn saving_a_typed_tag_list_keeps_only_what_changes_and_round_trips() {
         4700,
         4700,
         false,
-        |_: &str| None,
+        Env::empty(),
         || 1_700_000_000,
         |_: i32| {},
         test_keychain(dir.path()),
     ));
     let app = app(settings.clone());
     let (cookie, csrf) = sign_in(&app, &settings).await;
-    let found = tags::found_tags(&tags::machine_facts(|_: &str| None));
+    let found = tags::found_tags(&tags::machine_facts(&Env::empty()));
     let mut typed = found.clone();
     typed.push("games".to_string());
     let res = app
@@ -374,7 +374,7 @@ async fn restart_calls_exit_with_75_once_signed_in_with_csrf() {
         4700,
         4700,
         false,
-        |_: &str| None,
+        Env::empty(),
         || 1_700_000_000,
         move |code: i32| exits_clone.lock().unwrap().push(code),
         test_keychain(dir.path()),
@@ -406,7 +406,7 @@ async fn five_wrong_tries_wait_a_minute_then_longer_even_for_the_right_one() {
         4700,
         4700,
         false,
-        |_: &str| None,
+        Env::empty(),
         move || *now_clone.lock().unwrap(),
         |_: i32| {},
         test_keychain(dir.path()),
@@ -473,7 +473,7 @@ async fn a_wait_still_in_force_doubles_the_next_one() {
             4700,
             4700,
             false,
-            |_: &str| None,
+            Env::empty(),
             move || *now_clone.lock().unwrap(),
             |_: i32| {},
             test_keychain(dir.path()),
@@ -597,7 +597,7 @@ fn settings_with_network(dir: &Path, network_enabled: bool, stored: Option<Netwo
         4700,
         4700,
         network_enabled,
-        |_: &str| None,
+        Env::empty(),
         || 1_700_000_000,
         |_: i32| {},
         test_keychain(dir),
@@ -739,7 +739,7 @@ async fn saving_the_port_is_refused_when_set_by_env() {
         4700,
         4700,
         false,
-        |k: &str| (k == "RETASKABLE_PORT").then(|| "4900".to_string()),
+        Env::from_pairs([("RETASKABLE_PORT", "4900")]),
         || 1_700_000_000,
         |_: i32| {},
         test_keychain(dir.path()),

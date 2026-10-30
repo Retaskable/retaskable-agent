@@ -193,6 +193,7 @@ pub async fn run_session(
 
 #[cfg(test)]
 mod tests {
+    use crate::env::Env;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -369,12 +370,7 @@ mod tests {
         fn id(&self) -> EngineId {
             EngineId::Claude
         }
-        fn binary(
-            &self,
-            _env: &dyn Fn(&str) -> Option<String>,
-            _windows: bool,
-            _path_dirs: &[PathBuf],
-        ) -> Result<PathBuf> {
+        fn binary(&self, _env: &Env, _windows: bool, _path_dirs: &[PathBuf]) -> Result<PathBuf> {
             unreachable!("not exercised by run_session")
         }
         fn args(&self, _spec: &SessionSpec) -> Vec<String> {

@@ -294,7 +294,7 @@ impl SettingsServer {
     pub(super) fn current_status(&self) -> Option<Result<ComputerStatus>> {
         let source = self.status.get()?;
         Some((|| {
-            let env = |k: &str| self.env(k);
+            let env = &self.env;
             let cfg = config::load(&self.dir)?;
             let machine = MachineStore::load(&self.dir)?;
             let settled = Settled {

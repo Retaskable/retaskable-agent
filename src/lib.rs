@@ -12,6 +12,7 @@ pub mod config;
 pub mod connector;
 pub mod decisions;
 pub mod engines;
+pub mod env;
 pub mod env_path;
 pub mod fs_util;
 pub mod galleries;

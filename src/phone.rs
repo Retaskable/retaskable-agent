@@ -2,6 +2,7 @@
 //! plugged-in Android phone, and the first-install warning. The button's build-and-install command
 //! (section 5) and reporting to retaskable.com (section 6) are later slices; for now a found phone
 //! is only logged, and nothing here is wired to a command yet.
+use crate::env::Env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -159,13 +160,11 @@ pub fn check_play(
 /// on Windows, `~/Library/Android/sdk` on macOS, `~/Android/Sdk` on Linux). Only a path that
 /// exists is returned; the caller's `exe_name` carries the platform's extension (`adb.exe` on
 /// Windows).
-pub fn find_adb(
-    env: impl Fn(&str) -> Option<String>,
-    exe_name: &str,
-    path_dirs: &[PathBuf],
-    default_sdk: Option<&Path>,
-) -> Option<PathBuf> {
-    for sdk in [env("ANDROID_HOME"), env("ANDROID_SDK_ROOT")].into_iter().flatten() {
+pub fn find_adb(env: &Env, exe_name: &str, path_dirs: &[PathBuf], default_sdk: Option<&Path>) -> Option<PathBuf> {
+    for sdk in [env.get("ANDROID_HOME"), env.get("ANDROID_SDK_ROOT")]
+        .into_iter()
+        .flatten()
+    {
         let candidate = Path::new(&sdk).join("platform-tools").join(exe_name);
         if candidate.is_file() {
             return Some(candidate);
@@ -188,19 +187,21 @@ pub fn find_adb(
 
 /// `find_adb`, reading `PATH`, `LOCALAPPDATA` and the home directory itself the way the real
 /// agent does.
-pub fn find_adb_on_path(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+pub fn find_adb_on_path(env: &Env) -> Option<PathBuf> {
     let windows = cfg!(windows);
     let exe_name = if windows { "adb.exe" } else { "adb" };
-    let dirs = crate::env_path::path_dirs(&env);
-    let default_sdk = default_sdk_dir(&env, windows);
+    let dirs = crate::env_path::path_dirs(env);
+    let default_sdk = default_sdk_dir(env, windows);
     find_adb(env, exe_name, &dirs, default_sdk.as_deref())
 }
 
-fn default_sdk_dir(env: &impl Fn(&str) -> Option<String>, windows: bool) -> Option<PathBuf> {
+fn default_sdk_dir(env: &Env, windows: bool) -> Option<PathBuf> {
     if windows {
-        return env("LOCALAPPDATA").map(|p| Path::new(&p).join("Android").join("Sdk"));
+        return env
+            .get("LOCALAPPDATA")
+            .map(|p| Path::new(&p).join("Android").join("Sdk"));
     }
-    let home = env("HOME")?;
+    let home = env.get("HOME")?;
     let home = Path::new(&home);
     Some(if cfg!(target_os = "macos") {
         home.join("Library").join("Android").join("sdk")
@@ -349,23 +350,21 @@ mod tests {
         std::fs::create_dir_all(&platform_tools).unwrap();
         std::fs::write(platform_tools.join("adb"), "").unwrap();
         let home = dir.path().to_string_lossy().to_string();
-        let env = move |k: &str| (k == "ANDROID_HOME").then(|| home.clone());
+        let env = Env::from_pairs([("ANDROID_HOME", home.clone())]);
 
-        assert_eq!(find_adb(env, "adb", &[], None), Some(platform_tools.join("adb")));
+        assert_eq!(find_adb(&env, "adb", &[], None), Some(platform_tools.join("adb")));
     }
 
     #[test]
     fn find_adb_falls_back_to_android_sdk_root_then_path_then_the_default_sdk() {
-        use crate::test_support::no_env;
-
         // Nothing anywhere: not found.
-        assert_eq!(find_adb(no_env, "adb", &[], None), None);
+        assert_eq!(find_adb(&Env::empty(), "adb", &[], None), None);
 
         // On PATH.
         let path_dir = tempfile::tempdir().unwrap();
         std::fs::write(path_dir.path().join("adb"), "").unwrap();
         assert_eq!(
-            find_adb(no_env, "adb", &[path_dir.path().to_path_buf()], None),
+            find_adb(&Env::empty(), "adb", &[path_dir.path().to_path_buf()], None),
             Some(path_dir.path().join("adb"))
         );
 
@@ -375,7 +374,7 @@ mod tests {
         std::fs::create_dir_all(&platform_tools).unwrap();
         std::fs::write(platform_tools.join("adb"), "").unwrap();
         assert_eq!(
-            find_adb(no_env, "adb", &[], Some(sdk_dir.path())),
+            find_adb(&Env::empty(), "adb", &[], Some(sdk_dir.path())),
             Some(platform_tools.join("adb"))
         );
     }
@@ -388,9 +387,9 @@ mod tests {
         let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
         std::fs::write(platform_tools.join(exe_name), "").unwrap();
         let sdk_root = dir.path().to_string_lossy().to_string();
-        let env = move |k: &str| (k == "ANDROID_SDK_ROOT").then(|| sdk_root.clone());
+        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root.clone())]);
 
-        assert_eq!(find_adb_on_path(env), Some(platform_tools.join(exe_name)));
+        assert_eq!(find_adb_on_path(&env), Some(platform_tools.join(exe_name)));
     }
 
     // install_warning / uninstall_warning

@@ -83,13 +83,13 @@ fn a_production_release_build_and_a_checkout_default_to_4700() {
 #[test]
 #[cfg(windows)]
 fn windows_keeps_data_and_logs_under_local_app_data() {
-    let env = |k: &str| (k == "LOCALAPPDATA").then(|| "C:/Users/j/AppData/Local".to_string());
+    let env = Env::from_pairs([("LOCALAPPDATA", "C:/Users/j/AppData/Local")]);
     assert_eq!(
-        data_dir(&build(Environment::Production), env),
+        data_dir(&build(Environment::Production), &env),
         std::path::PathBuf::from("C:/Users/j/AppData/Local/Retaskable")
     );
     assert_eq!(
-        logs_dir(&build(Environment::Staging), env),
+        logs_dir(&build(Environment::Staging), &env),
         std::path::PathBuf::from("C:/Users/j/AppData/Local/Retaskable Staging/logs")
     );
 }
@@ -97,7 +97,7 @@ fn windows_keeps_data_and_logs_under_local_app_data() {
 #[test]
 #[cfg(target_os = "macos")]
 fn macos_keeps_data_under_application_support_and_logs_under_logs() {
-    let env = |k: &str| (k == "HOME").then(|| "/Users/j".to_string());
+    let env = Env::from_pairs([("HOME", "/Users/j")]);
     assert_eq!(
         data_dir(&build(Environment::Production), env),
         std::path::PathBuf::from("/Users/j/Library/Application Support/Retaskable")
@@ -124,7 +124,7 @@ fn linux_uses_xdg_dirs_or_falls_back_under_home() {
         logs_dir(&build(Environment::Production), xdg),
         std::path::PathBuf::from("/x/state/retaskable/logs")
     );
-    let home = |k: &str| (k == "HOME").then(|| "/home/j".to_string());
+    let home = Env::from_pairs([("HOME", "/home/j")]);
     assert_eq!(
         data_dir(&build(Environment::Production), home),
         std::path::PathBuf::from("/home/j/.local/share/retaskable")

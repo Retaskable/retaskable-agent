@@ -3,6 +3,7 @@
 //! /api/settings/restart`. Every request's Host must be this computer's own, a POST's Origin its
 //! own, and a change the session's CSRF token (section 4.3); signing in is by a one-time tray
 //! token, or, once network access is on, this computer's password (section 4.2).
+use crate::env::Env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -47,9 +48,6 @@ const AGENT_ENV_VARS: [&str; 8] = [
 
 static SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
 
-/// How `SettingsServer` reads an environment variable, injectable for tests.
-type EnvFn = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
-
 /// The settings page's server-side state: one instance shared (behind an `Arc`) by every request.
 pub struct SettingsServer {
     dir: PathBuf,
@@ -67,7 +65,7 @@ pub struct SettingsServer {
     /// on every request: scrypt is deliberately slow, and the env var can't change while this
     /// process runs.
     env_network_access: Option<NetworkAccess>,
-    env: EnvFn,
+    env: Env,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
     /// This machine's stored cloud tokens, for `GET /api/link` (section 9.2's "computer's link
@@ -85,19 +83,19 @@ impl SettingsServer {
         port: u16,
         default_port: u16,
         network_enabled: bool,
-        env: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+        env: Env,
         now: impl Fn() -> u64 + Send + Sync + 'static,
         exit: impl Fn(i32) + Send + Sync + 'static,
         keychain: Arc<dyn TokenStore>,
     ) -> Self {
-        let env_network_access = network::env_network_access(|k| env(k));
+        let env_network_access = network::env_network_access(&env);
         Self {
             dir,
             port,
             default_port,
             network_enabled,
             env_network_access,
-            env: Box::new(env),
+            env,
             now: Box::new(now),
             exit: Box::new(exit),
             keychain,
@@ -106,12 +104,8 @@ impl SettingsServer {
         }
     }
 
-    fn env(&self, key: &str) -> Option<String> {
-        (self.env)(key)
-    }
-
     fn current_settings(&self) -> Result<Value> {
-        let env = |k: &str| self.env(k);
+        let env = &self.env;
         let cfg = config::load(&self.dir)?;
         let machine = MachineStore::load(&self.dir)?;
         let facts = tags::machine_facts(env);
@@ -158,7 +152,7 @@ impl SettingsServer {
             "envVars": Value::Object(
                 AGENT_ENV_VARS
                     .iter()
-                    .map(|name| ((*name).to_string(), Value::Bool(env(name).is_some())))
+                    .map(|name| ((*name).to_string(), Value::Bool(env.get(name).is_some())))
                     .collect(),
             ),
         }))
@@ -169,7 +163,7 @@ impl SettingsServer {
     /// machine already holds a stored token for it. The in-progress "Waiting: code" state isn't
     /// here: only the `retaskable link` terminal command tracks it, and nothing persists it.
     fn link_view(&self) -> Result<Value> {
-        let env = |k: &str| self.env(k);
+        let env = &self.env;
         let cfg = config::load(&self.dir)?;
         let environments: Vec<Value> = link::cloud_urls(&cfg, env, None)
             .into_iter()
@@ -375,7 +369,7 @@ pub(crate) fn test_server_with_keychain(dir: &std::path::Path, keychain: Arc<dyn
         4700,
         4700,
         false,
-        |_: &str| None,
+        Env::empty(),
         || 1_700_000_000,
         |_: i32| {},
         keychain,

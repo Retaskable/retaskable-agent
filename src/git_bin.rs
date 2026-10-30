@@ -7,6 +7,7 @@
 //! are still found as before; git itself sets `HOME` when it's missing, as the launcher would).
 //! Any other git first on PATH, and every other platform, runs plain `git`. `RETASKABLE_PLAIN_GIT`
 //! turns this off. Ported from `agent/src/gitBin.ts`.
+use crate::env::Env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -25,8 +26,8 @@ pub enum GitLauncher {
 /// Finds the launcher to use, given `windows` and the already-split `PATH` directories so this is
 /// testable without touching the real environment. `RETASKABLE_PLAIN_GIT` (any value) always
 /// answers [`GitLauncher::Plain`].
-pub fn resolve_git(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> GitLauncher {
-    if env("RETASKABLE_PLAIN_GIT").is_some() || !windows {
+pub fn resolve_git(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> GitLauncher {
+    if env.get("RETASKABLE_PLAIN_GIT").is_some() || !windows {
         return GitLauncher::Plain;
     }
     let Some(dir) = path_dirs.iter().find(|dir| dir.join("git.exe").is_file()) else {
@@ -50,13 +51,13 @@ pub fn resolve_git(env: impl Fn(&str) -> Option<String>, windows: bool, path_dir
 }
 
 /// `resolve_git`, reading PATH itself the way the real agent does.
-pub fn resolve_git_on_path(env: impl Fn(&str) -> Option<String>) -> GitLauncher {
-    let dirs = crate::env_path::path_dirs(&env);
+pub fn resolve_git_on_path(env: &Env) -> GitLauncher {
+    let dirs = crate::env_path::path_dirs(env);
     resolve_git(env, cfg!(windows), &dirs)
 }
 
 /// The launcher for this process's PATH, looked up once ("It's looked up once per PATH").
-static LAUNCHER: LazyLock<GitLauncher> = LazyLock::new(|| resolve_git_on_path(|k| std::env::var(k).ok()));
+static LAUNCHER: LazyLock<GitLauncher> = LazyLock::new(|| resolve_git_on_path(&Env::from_process_raw()));
 
 /// A `Command` for running git in `dir`: the real git.exe directly when [`LAUNCHER`] found Git for
 /// Windows' launcher first on PATH, otherwise plain `git`. This is the one place the agent's own
@@ -86,7 +87,6 @@ pub fn command(dir: &Path) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::no_env;
 
     fn write_exe(path: &Path) {
         if let Some(parent) = path.parent() {
@@ -102,7 +102,7 @@ mod tests {
         write_exe(&cmd.join("git.exe"));
         write_exe(&dir.path().join("mingw64").join("bin").join("git.exe"));
 
-        assert_eq!(resolve_git(no_env, false, &[cmd]), GitLauncher::Plain);
+        assert_eq!(resolve_git(&Env::empty(), false, &[cmd]), GitLauncher::Plain);
     }
 
     #[test]
@@ -111,9 +111,9 @@ mod tests {
         let cmd = dir.path().join("cmd");
         write_exe(&cmd.join("git.exe"));
         write_exe(&dir.path().join("mingw64").join("bin").join("git.exe"));
-        let env = |k: &str| (k == "RETASKABLE_PLAIN_GIT").then(|| "1".to_string());
+        let env = Env::from_pairs([("RETASKABLE_PLAIN_GIT", "1")]);
 
-        assert_eq!(resolve_git(env, true, &[cmd]), GitLauncher::Plain);
+        assert_eq!(resolve_git(&env, true, &[cmd]), GitLauncher::Plain);
     }
 
     #[test]
@@ -124,7 +124,7 @@ mod tests {
         let real = dir.path().join("mingw64").join("bin").join("git.exe");
         write_exe(&real);
 
-        let launcher = resolve_git(no_env, true, &[cmd]);
+        let launcher = resolve_git(&Env::empty(), true, &[cmd]);
 
         assert_eq!(
             launcher,
@@ -146,7 +146,7 @@ mod tests {
         write_exe(&cmd.join("git.exe"));
         // No mingw64\bin\git.exe behind it.
 
-        assert_eq!(resolve_git(no_env, true, &[cmd]), GitLauncher::Plain);
+        assert_eq!(resolve_git(&Env::empty(), true, &[cmd]), GitLauncher::Plain);
     }
 
     #[test]
@@ -155,7 +155,7 @@ mod tests {
         write_exe(&dir.path().join("git.exe"));
 
         assert_eq!(
-            resolve_git(no_env, true, &[dir.path().to_path_buf()]),
+            resolve_git(&Env::empty(), true, &[dir.path().to_path_buf()]),
             GitLauncher::Plain
         );
     }
@@ -171,10 +171,10 @@ mod tests {
         let real = dir.path().join("mingw64").join("bin").join("git.exe");
         write_exe(&real);
         let path_value = cmd.to_string_lossy().into_owned();
-        let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
+        let env = Env::from_pairs([("PATH", path_value.clone())]);
 
         assert_eq!(
-            resolve_git_on_path(env),
+            resolve_git_on_path(&env),
             GitLauncher::Real {
                 exe: real,
                 prepend_path: vec![
