@@ -387,3 +387,64 @@ async fn default_branch(github_repo: &str) -> Option<String> {
 fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(url: Option<&str>, version_path: Option<&str>) -> DeployTarget {
+        DeployTarget {
+            branch: "main".into(),
+            url: url.map(str::to_string),
+            smoke: None,
+            version_path: version_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn no_url_is_no_version_url() {
+        assert_eq!(version_url(&target(None, None)), None);
+    }
+
+    #[test]
+    fn a_blank_or_slash_only_url_is_no_version_url() {
+        assert_eq!(version_url(&target(Some("   "), None)), None);
+        assert_eq!(version_url(&target(Some("///"), None)), None);
+    }
+
+    #[test]
+    fn the_default_path_joins_a_trimmed_url_with_no_double_slash() {
+        assert_eq!(
+            version_url(&target(Some("https://example.com/"), None)),
+            Some("https://example.com/version.json".into())
+        );
+        assert_eq!(
+            version_url(&target(Some("https://example.com"), None)),
+            Some("https://example.com/version.json".into())
+        );
+    }
+
+    #[test]
+    fn a_custom_path_is_trimmed_and_joined() {
+        assert_eq!(
+            version_url(&target(Some("https://example.com"), Some(" /status.json "))),
+            Some("https://example.com/status.json".into())
+        );
+    }
+
+    #[test]
+    fn a_custom_path_with_no_leading_slash_still_joins_with_one() {
+        assert_eq!(
+            version_url(&target(Some("https://example.com"), Some("status.json"))),
+            Some("https://example.com/status.json".into())
+        );
+    }
+
+    #[test]
+    fn a_blank_path_falls_back_to_the_default() {
+        assert_eq!(
+            version_url(&target(Some("https://example.com"), Some("   "))),
+            Some("https://example.com/version.json".into())
+        );
+    }
+}
