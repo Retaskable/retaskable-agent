@@ -31,6 +31,7 @@ pub mod paths;
 pub mod phone;
 pub mod playtest_groups;
 pub mod proc;
+pub mod process_tree;
 pub mod profile;
 pub mod prompt;
 pub mod release;

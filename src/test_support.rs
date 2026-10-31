@@ -207,6 +207,60 @@ pub(crate) fn kill_unrelated_process(pid: u32) {
     }
 }
 
+/// A command that starts a grandchild which keeps appending to a file forever, so a kill that
+/// only reaches the direct child (not the whole tree) would leave it running. Shared by
+/// `process_tree.rs`'s and `engines/runner.rs`'s own tests that check a kill reaches the whole
+/// tree, not just the process it was given. Returns the command to run and the file the
+/// grandchild keeps touching; the caller still has to wait for the first tick before trusting the
+/// grandchild has actually started.
+pub(crate) fn grandchild_tick_command(dir: &Path) -> (PathBuf, Vec<String>, PathBuf) {
+    let ticks = dir.join("ticks.txt");
+    #[cfg(windows)]
+    {
+        let tick_script = dir.join("tick.cmd");
+        std::fs::write(
+            &tick_script,
+            format!(
+                "@echo off\n:loop\n>>\"{}\" echo tick\nping -n 1 127.0.0.1 >nul\ngoto loop\n",
+                ticks.display()
+            ),
+        )
+        .unwrap();
+        let hold_script = dir.join("hold_tick.cmd");
+        std::fs::write(
+            &hold_script,
+            format!(
+                "@echo off\nstart /B \"\" cmd /C call \"{}\"\nping -n 60 127.0.0.1 >nul\n",
+                tick_script.display()
+            ),
+        )
+        .unwrap();
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/C".to_string(),
+                "call".to_string(),
+                hold_script.to_string_lossy().into_owned(),
+            ],
+            ticks,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let script = dir.join("hold_tick.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n(while true; do date +%s%N >> '{}'; sleep 0.05; done) &\nsleep 60\n",
+                ticks.display()
+            ),
+        )
+        .unwrap();
+        let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
+        (PathBuf::from("sh"), vec![script.to_string_lossy().into_owned()], ticks)
+    }
+}
+
 pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir);
