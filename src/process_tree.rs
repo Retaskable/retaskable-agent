@@ -371,8 +371,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn was_cut_is_false_until_cut_is_called() {
+    /// A command that exits right away, already joined to a tree: for tests that only care what
+    /// happens once a session has ended.
+    fn spawn_exited_tree() -> (tempfile::TempDir, tokio::process::Child, Arc<ProcessTree>) {
         let dir = tempfile::tempdir().unwrap();
         let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "true" });
         if cfg!(windows) {
@@ -383,8 +384,14 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         ProcessTree::prepare(&mut cmd);
-        let mut child = cmd.spawn().unwrap();
+        let child = cmd.spawn().unwrap();
         let tree = ProcessTree::join(&child).unwrap();
+        (dir, child, tree)
+    }
+
+    #[tokio::test]
+    async fn was_cut_is_false_until_cut_is_called() {
+        let (_dir, mut child, tree) = spawn_exited_tree();
         let _ = child.wait().await;
 
         assert!(!tree.was_cut());
@@ -448,18 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_tree_that_ended_on_its_own_leaves_the_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "true" });
-        if cfg!(windows) {
-            cmd.args(["/C", "exit 0"]);
-        }
-        cmd.current_dir(dir.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        ProcessTree::prepare(&mut cmd);
-        let mut child = cmd.spawn().unwrap();
-        let tree = ProcessTree::join(&child).unwrap();
+        let (_dir, mut child, tree) = spawn_exited_tree();
         let weak = Arc::downgrade(&tree);
         let _ = child.wait().await;
 
