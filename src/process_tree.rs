@@ -212,11 +212,24 @@ mod platform {
         let _ = Command::new("kill").args([flag, "--", &format!("-{pgid}")]).output();
     }
 
+    /// Whether anything in `pgid` is still actually running. A killed process whose parent never
+    /// reaps it (nothing here waits on the grandchildren the direct child spawned, nor, while
+    /// this is polling, on the direct child itself) lingers as a zombie: still in the process
+    /// table with `pgid` intact, so `kill -0` on the group keeps succeeding forever even once
+    /// every process in it is dead. A zombie can't run anything, so it's excluded here by
+    /// checking each process's state instead of just whether the group still resolves to one.
     fn group_alive(pgid: u32) -> bool {
-        Command::new("kill")
-            .args(["-0", "--", &format!("-{pgid}")])
+        let pgid = pgid.to_string();
+        Command::new("ps")
+            .args(["-axo", "pid=,pgid=,state="])
             .output()
-            .map(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                    let mut columns = line.split_whitespace();
+                    let _pid = columns.next();
+                    columns.next() == Some(pgid.as_str()) && columns.next().is_some_and(|state| !state.starts_with('Z'))
+                })
+            })
             .unwrap_or(false)
     }
 
