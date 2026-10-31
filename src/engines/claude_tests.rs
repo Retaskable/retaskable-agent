@@ -3,6 +3,7 @@ use std::path::Path;
 use serde_json::json;
 
 use super::*;
+use crate::text::tail;
 
 fn base_spec(cwd: &Path) -> SessionSpec {
     crate::engines::engine::test_spec(cwd, "do the thing")

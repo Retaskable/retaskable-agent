@@ -252,6 +252,39 @@ pub struct Tokens {
     pub output: u64,
 }
 
+/// The common shape of every engine's `no_result`: a process that exited with no `result` event
+/// at all. Builds the "{name} exited with code N and no result. <stderr tail>" error and a
+/// `SessionResult` for it, with every field an individual engine might know better (`limit_hit`,
+/// `signed_out`, `cost_usd`, `context_tokens`, `usage`, `session_id`) left at its "unknown"
+/// default for the caller to override.
+pub fn exited_without_result(
+    name: &str,
+    exit_code: Option<i32>,
+    stderr: &str,
+    known_session_id: &str,
+) -> SessionResult {
+    let code = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let error = format!(
+        "{name} exited with code {code} and no result. {}",
+        crate::text::tail(stderr.trim(), 1500)
+    );
+    SessionResult {
+        ok: false,
+        subtype: "exited".to_string(),
+        structured: None,
+        error: Some(error),
+        cost_usd: None,
+        session_id: known_session_id.to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
+    }
+}
+
 /// "hit its $5 budget", "found Claude signed out on this computer (…)", "ended with …"
 /// (`describeFailure` in `engine.ts`).
 pub fn describe_failure(r: &SessionResult, budget_usd: f64) -> String {
