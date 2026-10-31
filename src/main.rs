@@ -267,7 +267,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
-    let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone());
+    let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone(), cfg.projects.clone());
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry (or claim, which
@@ -358,6 +358,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }
+    // docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`: Quit cuts every
+    // other session the same way a restart does (runtime::restart_handler), just on this path
+    // instead, since Quit exits by returning from `main` rather than by `std::process::exit`.
+    let projects = cfg.projects.clone();
+    tokio::task::spawn_blocking(move || retaskable_agent::shutdown::stop_other_sessions(&projects))
+        .await
+        .ok();
     Ok(())
 }
 
@@ -609,7 +616,20 @@ fn filter() -> tracing_subscriber::EnvFilter {
 }
 
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(not(windows))]
+    {
+        // Linux/macOS's own Quit path (a service stop, a `kill`) as well as Ctrl+C.
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing a SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
     tracing::info!("Stopping");
 }
 

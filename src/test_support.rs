@@ -5,7 +5,7 @@
 //! escalate to `needs_human` on the very first failure or claim.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::ProjectConfig;
 use crate::triage::{KnownBug, TriageContext};
@@ -74,6 +74,136 @@ pub(crate) fn write_executable(path: &Path, contents: &str) {
                 Err(e) => panic!("starting {}: {e}", path.display()),
             }
         }
+    }
+}
+
+/// Starts a long-lived process whose command line contains `dir`, so a scan for processes inside
+/// it (`lanes::processes_in`) finds it. Shared by `lanes.rs`'s and `shutdown.rs`'s own tests.
+pub(crate) fn hold_process(dir: &Path) -> std::process::Child {
+    #[cfg(windows)]
+    {
+        let script = dir.join("hold.cmd");
+        // Absolute path in the script body so CIM's CommandLine matches even when the
+        // launcher rewrites argv.
+        let marker = dir.to_string_lossy().replace('"', "");
+        std::fs::write(
+            &script,
+            format!("@echo off\nrem retaskable-lane {marker}\n:loop\nping -n 60 127.0.0.1 >nul\ngoto loop\n"),
+        )
+        .unwrap();
+        Command::new("cmd")
+            .args(["/C", "call", script.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        let script = dir.join("hold.sh");
+        std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 3600; done\n").unwrap();
+        let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
+        Command::new("sh")
+            .arg(&script)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+}
+
+/// Starts a long-lived process whose command line contains `dir`, the same way [`hold_process`]
+/// does, but detached from the test binary's own process tree: on Windows it's created through
+/// WMI (`Win32_Process::Create`) rather than as this process's child, and on Unix the shell that
+/// starts it backgrounds it and exits right away, which the OS then reparents to init. Either way
+/// it isn't a descendant of the test process, so it stands in for a person's own process that
+/// happens to sit in the same folder the agent scans — one `lanes::descendants_of` must not
+/// reach. Returns its pid; the caller stops it with [`kill_unrelated_process`].
+pub(crate) fn hold_unrelated_process(dir: &Path) -> u32 {
+    #[cfg(windows)]
+    {
+        // `processes_in` matches on the directory plus a trailing separator, to tell `lane-1`
+        // apart from `lane-10`; a bare directory with nothing after it never has one, so the
+        // marker names a file under it instead, the same way the real command line a script's own
+        // path produces always does. `rem` eats the rest of its line, so this goes after the ping
+        // it would otherwise swallow; CIM still reports the whole command line verbatim either way.
+        let marker = dir.join("marker.txt").to_string_lossy().replace('"', "");
+        let command_line = format!("cmd.exe /c \"ping -n 120 127.0.0.1 >nul & rem retaskable-lane {marker}\"");
+        // The command line is embedded in a single-quoted PowerShell string, so its own single
+        // quotes (there are none in a Windows path, but keep this safe) must be doubled.
+        let script = format!(
+            "(Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='{}'}}).ProcessId",
+            command_line.replace('\'', "''")
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "starting an unrelated process: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        let script = dir.join("hold_unrelated.sh");
+        let pidfile = dir.join("hold_unrelated.pid");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nwhile true; do sleep 3600; done\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
+        // The backgrounded process stays alive after this shell exits, which the wait below
+        // confirms; the OS has then already reparented it to init, off this test's own tree.
+        let mut launcher = Command::new("sh")
+            .arg("-c")
+            .arg(format!("'{}' &", script.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let _ = launcher.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&pidfile)
+                && let Ok(pid) = contents.trim().parse()
+            {
+                return pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the unrelated process's pid file"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+/// Stops a process started by [`hold_unrelated_process`] by pid, since it isn't a `Child` this
+/// process holds a handle to.
+pub(crate) fn kill_unrelated_process(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).output();
     }
 }
 
