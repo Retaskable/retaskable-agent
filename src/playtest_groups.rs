@@ -6,12 +6,13 @@
 //! [`crate::backlog::Client`] now has the shared queue's own operations (`tryouts_list`,
 //! `tryout_add`, `tryout_result`, `tryout_groups`, the [`TRYOUT_GROUPS_LOCK`] lock), and
 //! [`signature`]/[`should_group`] are the pure gate `agent/src/playtestGroups.ts`'s `maybeGroup`
-//! runs before planning (06.4's "regrouping... at most every 30 minutes"), but nothing yet calls
-//! any of it periodically: there's no orchestrator loop (section 7, not ported yet) to poll
-//! `tryouts_list`, run [`plan`] on this round's [`PlaytestEntry`]s under the lock, and send its
-//! [`PlaytestGroup`]s on with `tryout_groups`. A caller puts the planning half together the same
-//! way as [`crate::triage`]: gather the waiting entries, build a [`Planner`] with the project's
-//! words and `budget.plannerUsd`, and run [`plan`] with [`crate::engines::runner::run_session`].
+//! runs before planning (06.4's "regrouping... at most every 30 minutes"). The round itself runs
+//! from `crate::orchestrator::driver::playtest_round`, once a minute for every live project
+//! ([`crate::orchestrator::driver::Machine::playtest_rounds`]): it polls `tryouts_list`, runs
+//! [`plan`] on this round's [`PlaytestEntry`]s under the lock, and sends its [`PlaytestGroup`]s on
+//! with `tryout_groups`. Still not ported: sending `tryout_add` once a slice merges (what puts
+//! anything in the queue this reads), forwarding a person's answer with `tryout_result`, and
+//! reopening the item on a **Problem**.
 use std::collections::HashSet;
 use std::future::Future;
 
