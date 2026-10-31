@@ -6,6 +6,8 @@
 //! `.cursor/cli.json` sound), [`result`] (turning cursor-agent's own output into a structured
 //! result or a transcript line), and [`reader`] (the per-session `EngineReader` built on `result`).
 use crate::env::Env;
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -81,12 +83,13 @@ fn shell_programs(spec: &SessionSpec) -> String {
     if !spec.readonly {
         base.extend(from_allow);
     }
-    dedupe_refs(base).join(", ")
+    dedupe(base).join(", ")
 }
 
-fn dedupe_refs(items: Vec<&str>) -> Vec<&str> {
-    let mut seen = std::collections::HashSet::new();
-    items.into_iter().filter(|i| seen.insert(*i)).collect()
+/// Dedupes while keeping first-seen order.
+pub(super) fn dedupe<T: Eq + Hash + Clone>(items: Vec<T>) -> Vec<T> {
+    let mut seen = HashSet::new();
+    items.into_iter().filter(|i| seen.insert(i.clone())).collect()
 }
 
 /// `cursorPrompt(spec)`: the prompt plus the result instructions. Cursor has no `--json-schema`,
