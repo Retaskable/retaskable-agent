@@ -302,6 +302,7 @@ mod tests {
                 engine: None,
                 cursor: None,
                 sandbox: false,
+                shell: false,
             },
         }
     }
@@ -434,6 +435,7 @@ mod tests {
         assert_eq!(spec.model, "sonnet");
         assert_eq!(spec.budget_usd, 0.5);
         assert!(spec.readonly);
+        assert!(!spec.shell);
         assert_eq!(spec.schema, groups_result_schema());
         assert!(spec.prompt.contains("k1"));
     }

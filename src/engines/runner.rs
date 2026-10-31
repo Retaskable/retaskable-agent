@@ -563,6 +563,7 @@ mod tests {
             budget_usd: 0.0,
             start: SessionStart::Ephemeral,
             readonly: false,
+            shell: true,
             cursor: None,
             local: None,
             sandbox: false,

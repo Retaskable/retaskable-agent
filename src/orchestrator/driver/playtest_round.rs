@@ -127,6 +127,7 @@ pub(super) async fn run(job: Job) {
             engine: Some(EngineId::Claude),
             cursor: None,
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
+            shell: false,
         },
     };
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);

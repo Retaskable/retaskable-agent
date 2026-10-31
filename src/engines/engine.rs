@@ -63,6 +63,12 @@ pub struct SessionSpec {
     /// `READONLY_DISALLOWED_TOOLS`). `--permission-mode` itself never changes — that flag is about
     /// not prompting for approval, not about which tools are available.
     pub readonly: bool,
+    /// Whether a readonly session may still use Bash (e.g. a scout's or the final reviewer's own
+    /// `git diff`). Ignored unless `readonly` is set; a writing session always has Bash. `false`
+    /// for a role with no reason to run anything at all (e.g. the playtest planner), so
+    /// `claude.rs` disallows Bash outright instead of trusting a pattern denylist to catch every
+    /// way a shell command can still write a file.
+    pub shell: bool,
     /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
     pub cursor: Option<CursorOptions>,
     /// Where this session's local server is, set alongside `model == "local"`
@@ -91,6 +97,7 @@ pub fn ephemeral_readonly_spec(
     cursor: Option<CursorOptions>,
     local: Option<LocalTarget>,
     sandbox: bool,
+    shell: bool,
 ) -> SessionSpec {
     SessionSpec {
         engine,
@@ -102,6 +109,7 @@ pub fn ephemeral_readonly_spec(
         budget_usd,
         start: SessionStart::Ephemeral,
         readonly: true,
+        shell,
         cursor,
         local,
         sandbox,
@@ -124,6 +132,9 @@ pub struct EphemeralSessionConfig<'a> {
     pub engine: Option<EngineId>,
     pub cursor: Option<CursorOptions>,
     pub sandbox: bool,
+    /// [`SessionSpec::shell`]: `false` only for a role whose prompt never asks it to run
+    /// anything, like the playtest planner.
+    pub shell: bool,
 }
 
 impl EphemeralSessionConfig<'_> {
@@ -139,6 +150,7 @@ impl EphemeralSessionConfig<'_> {
             self.cursor.clone(),
             self.local.clone(),
             self.sandbox,
+            self.shell,
         )
     }
 }
@@ -342,6 +354,7 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
         budget_usd: 0.0,
         start: SessionStart::Ephemeral,
         readonly: false,
+        shell: true,
         cursor: None,
         local: None,
         sandbox: false,

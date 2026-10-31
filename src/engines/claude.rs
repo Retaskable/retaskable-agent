@@ -125,6 +125,13 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
         for tool in READONLY_DISALLOWED_TOOLS {
             args.push(tool.to_string());
         }
+        // `SessionSpec::shell`: a role with no reason to run anything at all (the playtest
+        // planner) also loses Bash, since a shell command can write a file just as well as
+        // Edit/Write/NotebookEdit can. A role that still needs read-only shell access (a
+        // scout's or the reviewer's own `git diff`) keeps it.
+        if !spec.shell {
+            args.push("Bash".to_string());
+        }
     }
     if spec.sandbox {
         args.push("--settings".to_string());
