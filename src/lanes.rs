@@ -176,10 +176,11 @@ pub fn kill_processes_in(dir: &Path) -> Result<usize> {
 /// Relative dependency paths in a Cargo.toml or package.json that climb out of the file's folder
 /// (`path = "../…"`, `"file:../…"`, `"link:../…"`).
 pub fn outside_paths(manifest: &str) -> Vec<String> {
+    let manifest = strip_line_comments(manifest);
     let mut found = Vec::new();
-    for path in path_eq_values(manifest)
+    for path in path_eq_values(&manifest)
         .into_iter()
-        .chain(file_or_link_values(manifest))
+        .chain(file_or_link_values(&manifest))
     {
         if path.starts_with("..") && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
             found.push(path);
@@ -433,6 +434,29 @@ fn add_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
 
 fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "remove", "--force"]).arg(lane_path))
+}
+
+/// Drops `# …` to end of line (a TOML comment) outside a quoted string, so a commented-out
+/// `path = "../…"` isn't scanned as a live dependency.
+fn strip_line_comments(manifest: &str) -> String {
+    let mut out = String::with_capacity(manifest.len());
+    for line in manifest.split('\n') {
+        let mut in_string = false;
+        let mut end = line.len();
+        for (idx, ch) in line.char_indices() {
+            match ch {
+                '"' => in_string = !in_string,
+                '#' if !in_string => {
+                    end = idx;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
 }
 
 fn path_eq_values(manifest: &str) -> Vec<String> {
@@ -763,6 +787,12 @@ mod tests {
         let non_ascii =
             "[package]\nauthors = [\"José 🚀\"]\n\n[dependencies]\nvoid_engine = { path = \"../void-engine\" }\n";
         assert_eq!(outside_paths(non_ascii), vec!["../void-engine"]);
+    }
+
+    #[test]
+    fn outside_paths_ignores_a_commented_out_dependency() {
+        let cargo = "[dependencies]\n# void_engine = { path = \"../void-engine\" }\nserde = \"1\" # path = \"../x\"\n";
+        assert_eq!(outside_paths(cargo), Vec::<String>::new());
     }
 
     #[test]
