@@ -21,6 +21,7 @@ use crate::orchestrator::Action;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
+use crate::process_tree;
 use crate::telemetry::{Event, event};
 use crate::view::PauseState;
 
@@ -82,6 +83,10 @@ pub struct Shared<'a> {
     pub links: &'a Links,
     pub claim_paused_until: &'a mut Option<Instant>,
     pub claude_signed_out_until: &'a mut Option<Instant>,
+    /// [`process_tree::stopping`] as of this pass's start: a restart or Quit cutting every
+    /// session, so no project claims or starts new work either
+    /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
+    pub stopping: bool,
 }
 
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
@@ -146,6 +151,11 @@ pub struct Machine {
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
     pub(super) outcome_sender: OutcomeSender,
+    /// Stands in for [`process_tree::stopping`] in a test, which can't set that process-wide
+    /// flag itself without also exposing every other test in the binary to it. `None` outside
+    /// tests, always: production always reads the real flag.
+    #[cfg(test)]
+    pub(super) stopping_override: Option<bool>,
 }
 
 impl Machine {
@@ -165,7 +175,18 @@ impl Machine {
             concurrency,
             outcomes,
             outcome_sender: OutcomeSender(sender),
+            #[cfg(test)]
+            stopping_override: None,
         }
+    }
+
+    /// [`process_tree::stopping`], unless a test has overridden it.
+    pub(super) fn stopping(&self) -> bool {
+        #[cfg(test)]
+        if let Some(stopping) = self.stopping_override {
+            return stopping;
+        }
+        process_tree::stopping()
     }
 
     /// The sender every started session gets (inside its [`super::StartRequest`]).
@@ -371,6 +392,7 @@ impl Machine {
     /// session slots left (`concurrency` less the starter's `active`), and the live ones apply them and ask the
     /// store for the lanes and slots still free. Each project's actions, and for a live one its claim answer.
     async fn schedule(&mut self, ready: &[bool], paused: &[bool]) -> Vec<(Vec<Action>, Option<Option<String>>)> {
+        let stopping = self.stopping();
         let starter = self.starter.clone();
         let live: Vec<bool> = (self.projects.iter().zip(ready))
             .map(|(lp, &ready)| ready && self.live(lp))
@@ -386,6 +408,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            stopping,
                         },
                     )
                     .await;
@@ -427,6 +450,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            stopping,
                         },
                     )
                     .await,
@@ -440,6 +464,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            stopping,
                         },
                     )
                     .await

@@ -7,7 +7,6 @@
 //! only makes the write side of the format `transcripts.rs` already reads real.
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -133,7 +132,7 @@ async fn spawn_and_read(
     let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", spec.bin.display()))?;
-    let tree = Arc::new(ProcessTree::join(&child).context("putting the session in its own process tree")?);
+    let tree = ProcessTree::join(&child).context("putting the session in its own process tree")?;
 
     let mut stdin = child.stdin.take().context("session has no stdin")?;
     let prompt = spec.prompt.to_string();

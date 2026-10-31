@@ -9,8 +9,8 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use crate::{app_menu, start_at_login};
 use crate::{
-    config, engines, lane_pool, lanes, phone, release, release_install, release_update, setup_check, shutdown, store,
-    telemetry, view,
+    config, engines, lane_pool, lanes, phone, process_tree, release, release_install, release_update, setup_check,
+    shutdown, store, telemetry, view,
 };
 
 /// Where the restart handler finds the updater. The updater's `on_ready` asks for a restart and
@@ -42,14 +42,32 @@ pub fn restart_handler(
         // none in flight on its own HTTP thread, but the response still deserves to flush).
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
-            shutdown::stop_other_sessions(&projects);
-            let installed = code == 75 && updater.get().is_some_and(|updater| updater.install_now());
-            if code == 75 && is_release && !installed {
-                relaunch(exe_path.as_deref());
-            }
-            std::process::exit(code);
+            cut_every_session_then_exit(code, &projects, &updater, is_release, exe_path.as_deref(), |code| {
+                std::process::exit(code)
+            });
         });
     })
+}
+
+/// What `restart_handler`'s exit thread does once its delay is up: cut every other session
+/// first (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`), then
+/// install an update or relaunch, then exit. `exit` is a parameter so a test can see what's true
+/// right before it's called, without actually ending the process.
+fn cut_every_session_then_exit(
+    code: i32,
+    projects: &[config::ProjectConfig],
+    updater: &UpdaterSlot,
+    is_release: bool,
+    exe_path: Option<&Path>,
+    exit: impl FnOnce(i32),
+) {
+    process_tree::cut_all();
+    shutdown::stop_other_sessions(projects);
+    let installed = code == 75 && updater.get().is_some_and(|updater| updater.install_now());
+    if code == 75 && is_release && !installed {
+        relaunch(exe_path);
+    }
+    exit(code);
 }
 
 /// The plain relaunch a release build falls back to when no update was installed.
@@ -259,4 +277,22 @@ fn log_engines(project: &config::ProjectConfig, engine_choice: &config::EngineCh
         engines::engine_for(engine_choice, legacy, engines::Role::Assistant, None),
         engines::engine_for(engine_choice, legacy, engines::Role::Writer, None),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[test]
+    fn cuts_every_session_before_the_injected_exit_runs() {
+        process_tree::reset_for_tests();
+        let seen_stopping = Mutex::new(None);
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, |_code| {
+            *seen_stopping.lock().unwrap() = Some(process_tree::stopping());
+        });
+        assert_eq!(*seen_stopping.lock().unwrap(), Some(true));
+        process_tree::reset_for_tests();
+    }
 }

@@ -362,9 +362,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // other session the same way a restart does (runtime::restart_handler), just on this path
     // instead, since Quit exits by returning from `main` rather than by `std::process::exit`.
     let projects = cfg.projects.clone();
-    tokio::task::spawn_blocking(move || retaskable_agent::shutdown::stop_other_sessions(&projects))
-        .await
-        .ok();
+    tokio::task::spawn_blocking(move || {
+        retaskable_agent::process_tree::cut_all();
+        retaskable_agent::shutdown::stop_other_sessions(&projects);
+    })
+    .await
+    .ok();
     Ok(())
 }
 

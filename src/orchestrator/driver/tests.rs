@@ -846,6 +846,18 @@ async fn concurrency_caps_starts_and_claims() {
 }
 
 #[tokio::test]
+async fn stopping_blocks_new_claims_and_starts() {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.queue(0, &["q"]);
+    rig.machine.stopping_override = Some(true);
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty(), "no start while stopping");
+    assert!(ops(&asked).is_empty(), "no claim_next while stopping");
+}
+
+#[tokio::test]
 async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
     let (base, asked) = claim_stub(json!([]), handed_out()).await;
     let mut rig = rig(3, &[&base]);
