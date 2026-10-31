@@ -9,8 +9,8 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use crate::{app_menu, start_at_login};
 use crate::{
-    config, engines, lane_pool, lanes, phone, release, release_install, release_update, setup_check, store, telemetry,
-    view,
+    config, engines, lane_pool, lanes, phone, release, release_install, release_update, setup_check, shutdown, store,
+    telemetry, view,
 };
 
 /// Where the restart handler finds the updater. The updater's `on_ready` asks for a restart and
@@ -24,16 +24,25 @@ pub type UpdaterSlot = Arc<OnceLock<Arc<release_update::ReleaseUpdater>>>;
 /// `ReleaseUpdater.installNow` runs "instead of relaunch"). When it doesn't install anything
 /// (nothing ready, or the install failed), a release build falls back to the plain relaunch
 /// section 3.8 describes; a checkout has none to fall back to, since nothing here supervises it
-/// the way a release build's own exit does.
-pub fn restart_handler(is_release: bool, exe_path: Option<PathBuf>, updater: UpdaterSlot) -> Arc<view::Exit> {
+/// the way a release build's own exit does. Before any of that, it cuts every other session
+/// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`): a restart doesn't
+/// go through `main.rs`'s own graceful shutdown, so this is the only place that happens for it.
+pub fn restart_handler(
+    is_release: bool,
+    exe_path: Option<PathBuf>,
+    updater: UpdaterSlot,
+    projects: Vec<config::ProjectConfig>,
+) -> Arc<view::Exit> {
     Arc::new(move |code: i32| {
         let updater = updater.clone();
         let exe_path = exe_path.clone();
+        let projects = projects.clone();
         // Restarting answers the request first: the process exit happens on another thread, a
         // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
         // none in flight on its own HTTP thread, but the response still deserves to flush).
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
+            shutdown::stop_other_sessions(&projects);
             let installed = code == 75 && updater.get().is_some_and(|updater| updater.install_now());
             if code == 75 && is_release && !installed {
                 relaunch(exe_path.as_deref());

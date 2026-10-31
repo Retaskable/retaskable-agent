@@ -46,6 +46,7 @@ pub mod scan;
 pub mod scouts;
 pub mod settings_server;
 pub mod setup_check;
+pub mod shutdown;
 pub mod smoke;
 pub mod spec_items;
 pub mod start_at_login;
