@@ -707,4 +707,12 @@ mod tests {
         assert_eq!(iso_utc_millis(t0), "2026-10-15T23:59:30.000Z");
         assert_eq!(parse_iso_ms("2026-10-15T23:59:30.000Z"), Some(t0));
     }
+
+    #[test]
+    fn iso_timestamp_handles_the_epoch_boundary_and_fractional_seconds() {
+        assert_eq!(iso_utc_millis(-1), "1969-12-31T23:59:59.999Z");
+        assert_eq!(parse_iso_ms("1969-12-31T23:59:59.999Z"), Some(-1));
+        assert_eq!(parse_iso_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso_ms("1970-01-01T00:00:00.4Z"), Some(400));
+    }
 }
