@@ -159,7 +159,7 @@ async fn spawn_and_read(
     let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", spec.bin.display()))?;
-    let tree = Arc::new(ProcessTree::join(&child).context("putting the session in its own process tree")?);
+    let tree = ProcessTree::join(&child).context("putting the session in its own process tree")?;
     if let Some(tx) = spec.tree_tx {
         let _ = tx.send(tree.clone());
     }

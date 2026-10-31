@@ -369,6 +369,7 @@ impl Machine {
     /// Settles the sessions that ended since the last wake.
     pub(super) async fn settle_outcomes(&mut self) {
         while let Ok(outcome) = self.outcomes.try_recv() {
+            let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
                 Some(lp) => {
                     lp.settle(
@@ -378,6 +379,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            stopping,
                         },
                     )
                     .await

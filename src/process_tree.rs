@@ -8,9 +8,10 @@
 //! whole thing down in one go, not just the direct child.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 
 /// How long a graceful stop waits for a tree's kill before giving up on it (07.4's "A graceful
@@ -24,6 +25,67 @@ pub const KILL_LIMIT: Duration = Duration::from_secs(5);
 pub struct ProcessTree {
     cut: AtomicBool,
     group: platform::Group,
+    pid: u32,
+}
+
+/// Every live [`ProcessTree`], so [`cut_all`] can reach them all: each tree adds itself in
+/// [`ProcessTree::join`] and is pruned once it's gone, by its own `Drop` or by [`cut_all`]
+/// walking the list.
+fn registry() -> &'static Mutex<Vec<Weak<ProcessTree>>> {
+    static REGISTRY: OnceLock<Mutex<Vec<Weak<ProcessTree>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Set by [`cut_all`]; read back by [`stopping`].
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Whether a restart or Quit is cutting every session right now. The orchestrator loop checks
+/// this so it neither starts nor claims new work once it's true
+/// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::SeqCst)
+}
+
+/// Cuts every live process tree at once: sets [`stopping`], then calls `cut()` on every
+/// registered tree and waits for all of them in parallel, [`KILL_LIMIT`] at most each (07.4's
+/// "A graceful stop waits for the kills"). Logs the pid of any tree that stayed past the limit.
+pub fn cut_all() {
+    STOPPING.store(true, Ordering::SeqCst);
+    let trees: Vec<Arc<ProcessTree>> = {
+        let mut reg = registry().lock().unwrap();
+        reg.retain(|w| w.strong_count() > 0);
+        reg.iter().filter_map(Weak::upgrade).collect()
+    };
+    for tree in &trees {
+        tree.cut();
+    }
+    let waits: Vec<_> = trees
+        .into_iter()
+        .map(|tree| std::thread::spawn(move || (tree.pid, tree.kill_and_wait(KILL_LIMIT))))
+        .collect();
+    for wait in waits {
+        if let Ok((pid, gone)) = wait.join()
+            && !gone
+        {
+            tracing::warn!("process tree {pid} stayed after the kill");
+        }
+    }
+}
+
+/// Resets the process-wide flag and registry `cut_all` uses, so a test that exercises it
+/// doesn't leave `stopping()` true, or stale entries behind, for whatever runs after it.
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    STOPPING.store(false, Ordering::SeqCst);
+    registry().lock().unwrap().clear();
+}
+
+/// How many live trees the registry currently holds, pruning dead entries first.
+#[cfg(test)]
+pub(crate) fn registered_count() -> usize {
+    let mut reg = registry().lock().unwrap();
+    reg.retain(|w| w.strong_count() > 0);
+    reg.len()
 }
 
 impl ProcessTree {
@@ -40,14 +102,20 @@ impl ProcessTree {
     }
 
     /// Puts `child` in a fresh tree, right after it's spawned: a Job object on Windows, assigned
-    /// to it now; the process group [`prepare`] already put it in on Linux and macOS.
+    /// to it now; the process group [`prepare`] already put it in on Linux and macOS. Registers
+    /// the tree so [`cut_all`] can reach it for as long as it stays alive.
     ///
     /// [`prepare`]: ProcessTree::prepare
-    pub fn join(child: &Child) -> Result<Self> {
-        Ok(Self {
+    pub fn join(child: &Child) -> Result<Arc<Self>> {
+        let pid = child.id().context("the session has already exited")?;
+        let group = platform::Group::join(child)?;
+        let tree = Arc::new(Self {
             cut: AtomicBool::new(false),
-            group: platform::Group::join(child)?,
-        })
+            group,
+            pid,
+        });
+        registry().lock().unwrap().push(Arc::downgrade(&tree));
+        Ok(tree)
     }
 
     /// The same as [`prepare`], for a plain `std::process::Command` spawned synchronously —
@@ -72,6 +140,7 @@ impl ProcessTree {
         Ok(Self {
             cut: AtomicBool::new(false),
             group: platform::Group::join_sync(child)?,
+            pid: child.id(),
         })
     }
 
@@ -94,6 +163,12 @@ impl ProcessTree {
     /// it went within that time.
     pub fn kill_and_wait(&self, limit: Duration) -> bool {
         self.group.kill_and_wait(limit)
+    }
+}
+
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        registry().lock().unwrap().retain(|w| w.strong_count() > 0);
     }
 }
 
@@ -340,8 +415,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn was_cut_is_false_until_cut_is_called() {
+    /// A command that exits right away, already joined to a tree: for tests that only care what
+    /// happens once a session has ended.
+    fn spawn_exited_tree() -> (tempfile::TempDir, tokio::process::Child, Arc<ProcessTree>) {
         let dir = tempfile::tempdir().unwrap();
         let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "true" });
         if cfg!(windows) {
@@ -352,12 +428,91 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         ProcessTree::prepare(&mut cmd);
-        let mut child = cmd.spawn().unwrap();
+        let child = cmd.spawn().unwrap();
         let tree = ProcessTree::join(&child).unwrap();
+        (dir, child, tree)
+    }
+
+    #[tokio::test]
+    async fn was_cut_is_false_until_cut_is_called() {
+        let (_dir, mut child, tree) = spawn_exited_tree();
         let _ = child.wait().await;
 
         assert!(!tree.was_cut());
         tree.cut();
         assert!(tree.was_cut());
+    }
+
+    #[tokio::test]
+    async fn cut_all_takes_every_registered_tree_including_grandchildren_and_sets_stopping() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let (bin_a, args_a, ticks_a) = crate::test_support::grandchild_tick_command(dir_a.path());
+        let (bin_b, args_b, ticks_b) = crate::test_support::grandchild_tick_command(dir_b.path());
+
+        let mut cmd_a = Command::new(bin_a);
+        cmd_a
+            .args(&args_a)
+            .current_dir(dir_a.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        ProcessTree::prepare(&mut cmd_a);
+        let child_a = cmd_a.spawn().unwrap();
+        let tree_a = ProcessTree::join(&child_a).unwrap();
+
+        let mut cmd_b = Command::new(bin_b);
+        cmd_b
+            .args(&args_b)
+            .current_dir(dir_b.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        ProcessTree::prepare(&mut cmd_b);
+        let child_b = cmd_b.spawn().unwrap();
+        let tree_b = ProcessTree::join(&child_b).unwrap();
+
+        wait_for_first_tick(&ticks_a);
+        wait_for_first_tick(&ticks_b);
+
+        cut_all();
+        assert!(stopping());
+        assert!(tree_a.was_cut());
+        assert!(tree_b.was_cut());
+
+        let size_a_right_after = std::fs::metadata(&ticks_a).unwrap().len();
+        let size_b_right_after = std::fs::metadata(&ticks_b).unwrap().len();
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            size_a_right_after,
+            std::fs::metadata(&ticks_a).unwrap().len(),
+            "a's grandchild kept ticking after cut_all"
+        );
+        assert_eq!(
+            size_b_right_after,
+            std::fs::metadata(&ticks_b).unwrap().len(),
+            "b's grandchild kept ticking after cut_all"
+        );
+
+        reset_for_tests();
+    }
+
+    #[tokio::test]
+    async fn a_tree_that_ended_on_its_own_leaves_the_registry() {
+        let (_dir, mut child, tree) = spawn_exited_tree();
+        let weak = Arc::downgrade(&tree);
+        let _ = child.wait().await;
+
+        let before = registered_count();
+        assert!(weak.strong_count() > 0, "the tree is still registered while it's held");
+        drop(tree);
+        let after = registered_count();
+
+        assert_eq!(weak.strong_count(), 0);
+        assert_eq!(
+            after,
+            before - 1,
+            "dropping the tree removed exactly it from the registry"
+        );
     }
 }

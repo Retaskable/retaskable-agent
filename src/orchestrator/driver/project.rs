@@ -593,10 +593,10 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> u32 {
-        let signed_out = signed_out(shared);
+        let blocked_from_starting = signed_out(shared) || shared.stopping;
         let mut started = 0;
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
-            if signed_out && matches!(action, Action::StartImplementer { .. }) {
+            if blocked_from_starting && matches!(action, Action::StartImplementer { .. }) {
                 continue;
             }
             if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
@@ -624,6 +624,7 @@ impl ProjectLoop {
             .claim_paused_until
             .is_some_and(|until| std::time::Instant::now() < until)
             || signed_out(shared)
+            || shared.stopping
         {
             return None;
         }
