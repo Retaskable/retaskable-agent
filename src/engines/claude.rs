@@ -14,11 +14,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::engine::{
-    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
-    signed_out_text,
+    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart,
+    exited_without_result, is_signed_out, signed_out_text,
 };
 use super::resolve::resolve_claude;
-use crate::text::tail;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.
@@ -318,28 +317,13 @@ impl EngineReader for SessionReader {
     /// The process exited with no `result` event at all (a crash, or killed before it could
     /// finish): report that as a failure naming the exit code, with the end of stderr attached.
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult {
-        let code = exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let error = format!(
-            "claude exited with code {code} and no result. {}",
-            tail(stderr.trim(), 1500)
-        );
-        let limit_hit = !self.local && self.usage_rejected();
-        let signed_out = !self.local && !limit_hit && signed_out_text(Some(&error));
-        SessionResult {
-            ok: false,
-            subtype: "exited".to_string(),
-            structured: None,
-            error: Some(error),
-            cost_usd: Some(0.0),
-            session_id: known_session_id.to_string(),
-            limit_hit,
-            signed_out,
-            context_tokens: self.context_tokens,
-            usage: self.usage.clone(),
-            tokens: None,
-        }
+        let mut result = exited_without_result("claude", exit_code, stderr, known_session_id);
+        result.limit_hit = !self.local && self.usage_rejected();
+        result.signed_out = !self.local && !result.limit_hit && signed_out_text(result.error.as_deref());
+        result.cost_usd = Some(0.0);
+        result.context_tokens = self.context_tokens;
+        result.usage = self.usage.clone();
+        result
     }
 }
 

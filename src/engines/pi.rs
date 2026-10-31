@@ -12,10 +12,12 @@ use anyhow::Result;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use super::engine::{Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec};
+use super::engine::{
+    Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, exited_without_result,
+};
 use super::json_result::{check_schema, extract_json};
 use super::resolve::resolve_pi;
-use crate::text::{clip, collapse_and_clip, tail};
+use crate::text::{clip, collapse_and_clip};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
@@ -223,26 +225,9 @@ impl EngineReader for PiReader {
     /// The process exited with no `agent_settled` marker at all: report that as a failure, naming
     /// the exit code, with the end of stderr attached (`noResult`).
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult {
-        let code = exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let error = format!(
-            "pi exited with code {code} and no result. {}",
-            tail(stderr.trim(), 1500)
-        );
-        SessionResult {
-            ok: false,
-            subtype: "exited".to_string(),
-            structured: None,
-            error: Some(error),
-            cost_usd: None,
-            session_id: known_session_id.to_string(),
-            limit_hit: LIMIT_TEXT.is_match(stderr),
-            signed_out: false,
-            context_tokens: None,
-            usage: None,
-            tokens: None,
-        }
+        let mut result = exited_without_result("pi", exit_code, stderr, known_session_id);
+        result.limit_hit = LIMIT_TEXT.is_match(stderr);
+        result
     }
 }
 
