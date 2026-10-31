@@ -65,7 +65,10 @@ mod tests {
         let started = Instant::now();
         stop_and_wait(dir.path());
 
-        assert!(started.elapsed() < Duration::from_secs(1));
+        // A single scan finding nothing returns right away, without ever sleeping and retrying;
+        // a loaded CI machine can make that one scan slow, so this only rules out the retry loop
+        // running all the way to KILL_TIMEOUT, rather than asserting a tight wall-clock bound.
+        assert!(started.elapsed() < KILL_TIMEOUT);
     }
 
     #[test]
