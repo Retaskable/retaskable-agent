@@ -132,6 +132,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         paused: PauseState::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
+        tags: Vec::new(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
     };
@@ -609,6 +610,17 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
         "lease-1",
         "the lease is kept for a restart"
     );
+}
+
+#[tokio::test]
+async fn claim_next_sends_this_computers_tags() {
+    let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(1, &[&base]);
+    rig.go_live();
+    rig.machine.links.tags = vec!["windows".into(), "gpu".into()];
+    rig.machine.pass().await;
+    let agent = asked.lock().unwrap()[1].1["agent"].clone();
+    assert_eq!(agent["tags"], json!(["windows", "gpu"]));
 }
 
 #[tokio::test]

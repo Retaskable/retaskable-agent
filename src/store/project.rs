@@ -122,9 +122,10 @@ impl Store {
         self.data.insert("leases".to_string(), serde_json::json!(leases));
     }
 
-    /// Leases given back here that the store hasn't taken yet, by item id (the TS agent's per-item
-    /// `unreleased`, trimmed to the lease token): sent again on later passes. Empty when missing.
-    pub fn unreleased(&self) -> std::collections::BTreeMap<String, String> {
+    /// Leases given back here that the store hasn't taken yet, by item id: its lease token and the
+    /// give-back's note (agent/07.5-what-a-claim-and-a-give-back-send.md's `report`, sent again with
+    /// `release` on later passes). Empty when missing.
+    pub fn unreleased(&self) -> std::collections::BTreeMap<String, (String, String)> {
         self.data
             .get("unreleased")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -132,7 +133,7 @@ impl Store {
     }
 
     /// Replaces `state.unreleased`. Doesn't save on its own; call `save` after.
-    pub fn set_unreleased(&mut self, unreleased: &std::collections::BTreeMap<String, String>) {
+    pub fn set_unreleased(&mut self, unreleased: &std::collections::BTreeMap<String, (String, String)>) {
         self.data
             .insert("unreleased".to_string(), serde_json::json!(unreleased));
     }

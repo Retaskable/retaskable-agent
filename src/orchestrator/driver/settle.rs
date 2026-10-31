@@ -24,6 +24,9 @@ pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
 /// before the next retry, short enough that work resumes soon after they do.
 pub(super) const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(60);
 
+/// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
+const MAX_NOTE_CHARS: usize = 4000;
+
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionResult {
@@ -107,7 +110,8 @@ impl ProjectLoop {
             }),
         );
         if let Some(token) = self.leases.remove(item_id) {
-            self.unreleased.insert(item_id.to_string(), token);
+            let note: String = why.chars().take(MAX_NOTE_CHARS).collect();
+            self.unreleased.insert(item_id.to_string(), (token, note));
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -168,7 +172,17 @@ impl ProjectLoop {
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
             return;
         };
-        for (id, lease) in self.unreleased.clone() {
+        for (id, (lease, note)) in self.unreleased.clone() {
+            // report then release (section 7.5): the note lands in the item's history while the
+            // lease still holds. A refusal of either keeps both for the next pass.
+            match self.client.report(repo, Some(&token), &id, &lease, &note).await {
+                Ok(()) => {}
+                Err(e) if e.code() == Some("stale_lease") => {}
+                Err(e) => {
+                    self.store_error("report", &e);
+                    continue;
+                }
+            }
             match self.client.release(repo, Some(&token), &id, &lease).await {
                 Ok(()) => {}
                 Err(e) if e.code() == Some("stale_lease") => {}
