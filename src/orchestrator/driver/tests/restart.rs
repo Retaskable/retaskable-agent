@@ -14,6 +14,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         paused: PauseState::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
+        tags: Vec::new(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
     };

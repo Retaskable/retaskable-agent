@@ -67,6 +67,8 @@ pub struct Links {
     /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
     pub machine: String,
     pub environment: String,
+    /// This computer's tags, as `claim_next` is told them (agent-settings.md section 3.1).
+    pub tags: Vec<String>,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -474,6 +476,7 @@ pub struct SpawnArgs<'a> {
     pub guard: Option<&'a PortGuard>,
     pub machine: String,
     pub environment: String,
+    pub tags: Vec<String>,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
@@ -497,6 +500,7 @@ pub fn spawn_all(args: SpawnArgs) {
             paused: args.paused.clone(),
             machine: args.machine,
             environment: args.environment,
+            tags: args.tags,
             env: args.env,
             engine_choice: args.engine_choice,
         },

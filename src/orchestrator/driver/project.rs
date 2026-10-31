@@ -168,9 +168,10 @@ pub struct ProjectLoop {
     pub(super) runs: ProjectRuns,
     /// Lease token of each item this computer holds, by id; kept in the state file so a restart still holds them.
     pub(super) leases: BTreeMap<String, String>,
-    /// Leases given back here that the store hasn't taken yet (item id to token), kept in the state file
-    /// and sent again on later passes (the TS agent's `unreleased`).
-    pub(super) unreleased: BTreeMap<String, String>,
+    /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
+    /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
+    /// agent's `unreleased`).
+    pub(super) unreleased: BTreeMap<String, (String, String)>,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
@@ -672,6 +673,7 @@ impl ProjectLoop {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
+            tags: shared.links.tags.clone(),
         };
         let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
             Err(e) => {
