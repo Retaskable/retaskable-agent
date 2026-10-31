@@ -111,7 +111,7 @@ async fn a_start_the_starter_refuses_releases_the_item_at_once() {
     let fake = rig.go_live();
     *fake.refuse.lock().unwrap() = Some("no room".into());
     rig.machine.pass().await;
-    assert_eq!(ops(&asked), ["list", "claim_next", "release"]);
+    assert_eq!(ops(&asked), ["list", "claim_next", "report", "release"]);
     assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
     assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unreleased().is_empty());
     let freed = rig
@@ -243,7 +243,7 @@ async fn a_release_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
     let fail = Arc::new(AtomicBool::new(true));
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("x".into()), &fail).await;
     rig.machine.pass().await;
-    assert_eq!(rig.lp(0).store.unreleased()["a"], "lease-1");
+    assert_eq!(rig.lp(0).store.unreleased()["a"].0, "lease-1");
     assert!(rig.lp(0).store.leases().is_empty());
     assert_eq!(rig.machine.pool.held_lanes().count(), 0, "the lane is free either way");
     fail.store(false, Ordering::SeqCst);
@@ -260,7 +260,7 @@ async fn the_unreleased_list_survives_a_restart() {
     rig.machine.pass().await;
     let dir = rig._dir.path().join("0");
     let reloaded = Store::load(&dir).unwrap();
-    assert_eq!(reloaded.unreleased()["a"], "lease-1");
+    assert_eq!(reloaded.unreleased()["a"], ("lease-1".to_string(), "x".to_string()));
     assert!(reloaded.leases().is_empty());
 }
 

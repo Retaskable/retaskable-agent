@@ -262,7 +262,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(agent_view(cfg, tag_list, version, env));
+    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
@@ -303,6 +303,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .and_then(|u| reqwest::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default(),
+        tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {

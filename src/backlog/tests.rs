@@ -27,6 +27,7 @@ fn test_agent() -> ClaimNextAgent {
         machine: "box-1".to_string(),
         environment: "Production".to_string(),
         base_branch: "main".to_string(),
+        tags: Vec::new(),
     }
 }
 
@@ -118,6 +119,10 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
         assert_eq!(req["op"], "claim_next");
         assert_eq!(req["args"]["agent"]["machine"], "box-1");
         assert_eq!(req["args"]["agent"]["baseBranch"], "main");
+        assert!(
+            req["args"]["agent"].as_object().unwrap().get("tags").is_none(),
+            "left out when this computer has none"
+        );
         Json(json!({
             "value": {
                 "item": { "id": "a", "title": "First", "status": "claimed", "rank": 0 },
@@ -136,6 +141,21 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
         }
         ClaimNextAnswer::Nothing => panic!("expected an item"),
     }
+}
+
+#[tokio::test]
+async fn claim_next_sends_this_computers_tags_when_it_has_any() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["args"]["agent"]["tags"], json!(["windows", "gpu"]));
+        Json(json!({ "value": null }))
+    }))
+    .await;
+
+    let agent = ClaimNextAgent {
+        tags: vec!["windows".to_string(), "gpu".to_string()],
+        ..test_agent()
+    };
+    Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
 }
 
 #[tokio::test]
@@ -269,6 +289,24 @@ async fn release_sends_the_item_id_and_its_lease_token() {
     .await;
 
     Client::new(base).release(1, Some("tok"), "a", "lease-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn report_sends_the_item_id_its_lease_token_and_the_note() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "report");
+        assert_eq!(
+            req["args"],
+            json!({ "id": "a", "token": "lease-1", "note": "a computer's own failure" })
+        );
+        Json(json!({}))
+    }))
+    .await;
+
+    Client::new(base)
+        .report(1, Some("tok"), "a", "lease-1", "a computer's own failure")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

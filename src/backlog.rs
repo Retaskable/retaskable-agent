@@ -147,13 +147,17 @@ pub struct Draft {
 }
 
 /// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its
-/// machine name, the host of the retaskable.com it links to, and the project's base branch.
+/// machine name, the host of the retaskable.com it links to, the project's base branch, and this
+/// computer's tags (agent/07.5-what-a-claim-and-a-give-back-send.md), left out when it has none so
+/// the store matches them against the project's `settings.needs`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimNextAgent {
     pub machine: String,
     pub environment: String,
     pub base_branch: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// What `claim_next` answers: an item claimed, with the lease token that goes with it, or nothing
@@ -407,6 +411,26 @@ impl Client {
     pub async fn release(&self, repo_id: u64, token: Option<&str>, id: &str, lease: &str) -> Result<(), BacklogError> {
         self.send(repo_id, token, "release", json!({ "id": id, "token": lease }))
             .await?;
+        Ok(())
+    }
+
+    /// `report` (agent/07.5-what-a-claim-and-a-give-back-send.md): adds `note`, one plain sentence, to
+    /// item `id`'s history, sent while the lease `lease` still holds, before a give-back's `release`.
+    pub async fn report(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        lease: &str,
+        note: &str,
+    ) -> Result<(), BacklogError> {
+        self.send(
+            repo_id,
+            token,
+            "report",
+            json!({ "id": id, "token": lease, "note": note }),
+        )
+        .await?;
         Ok(())
     }
 
