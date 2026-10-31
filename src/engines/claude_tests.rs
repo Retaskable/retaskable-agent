@@ -44,6 +44,47 @@ fn build_args_never_omits_the_no_deploy_tools() {
 }
 
 #[test]
+fn build_args_disallows_every_write_tool_on_a_readonly_session_but_not_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.readonly = true;
+    spec.shell = true;
+    let args = build_args(&spec);
+    let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        assert!(args[idx..].contains(&tool.to_string()), "missing {tool} in {args:?}");
+    }
+    assert!(
+        !args.contains(&"Bash".to_string()),
+        "a readonly role that still needs shell access (e.g. a scout's `git diff`) keeps Bash: {args:?}"
+    );
+    assert!(args.contains(&"--permission-mode".to_string()));
+    let idx = args.iter().position(|a| a == "--permission-mode").unwrap();
+    assert_eq!(args[idx + 1], "auto");
+
+    let not_readonly = build_args(&base_spec(dir.path()));
+    for tool in ["Edit", "Write", "NotebookEdit", "Bash"] {
+        assert!(!not_readonly.contains(&tool.to_string()));
+    }
+}
+
+#[test]
+fn build_args_also_disallows_bash_on_a_readonly_session_with_no_need_for_shell() {
+    // The playtest planner's own prompt says it needs nothing at all: `spec.shell = false`
+    // closes the gap a Bash shell command leaves in Edit/Write/NotebookEdit alone (round-2
+    // reviewer finding — the planner could still write files via shell).
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.readonly = true;
+    spec.shell = false;
+    let args = build_args(&spec);
+    let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    for tool in ["Edit", "Write", "NotebookEdit", "Bash"] {
+        assert!(args[idx..].contains(&tool.to_string()), "missing {tool} in {args:?}");
+    }
+}
+
+#[test]
 fn build_args_adds_the_budget_cap_only_when_positive() {
     let dir = tempfile::tempdir().unwrap();
     let mut spec = base_spec(dir.path());

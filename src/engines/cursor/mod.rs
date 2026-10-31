@@ -171,6 +171,7 @@ fn base_spec(cwd: &Path) -> SessionSpec {
         budget_usd: 0.0,
         start: SessionStart::Ephemeral,
         readonly: true,
+        shell: true,
         cursor: None,
         local: None,
         sandbox: false,

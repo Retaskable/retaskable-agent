@@ -152,7 +152,7 @@ impl SessionStarter for ClaudeStarter {
 }
 
 /// Whether the resolved binary is there: a path by itself, a bare name somewhere on `PATH`.
-fn exists(bin: &Path, env: &Env) -> bool {
+pub(super) fn exists(bin: &Path, env: &Env) -> bool {
     if bin.components().count() > 1 {
         return bin.is_file();
     }
@@ -179,7 +179,7 @@ struct Job {
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
-fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
+pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
     (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 

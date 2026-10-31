@@ -3,15 +3,17 @@
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use super::{OrchestratorMode, OutcomeSender, ProjectLoop, SessionStarter, Step};
+use super::{OrchestratorMode, OutcomeSender, ProjectLoop, SessionStarter, Step, playtest_round};
 use crate::backlog::{BacklogError, Client, Item};
-use crate::config::ProjectConfig;
+use crate::config::{EngineChoiceConfig, ProjectConfig};
+use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
 use crate::link::TokenStore;
@@ -65,6 +67,10 @@ pub struct Links {
     /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
     pub machine: String,
     pub environment: String,
+    /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
+    pub env: Env,
+    /// Which engine a playtest grouping round's `Role::Planner` session runs on.
+    pub engine_choice: EngineChoiceConfig,
 }
 
 /// `links` and the computer-wide gates ([`Machine::claim_paused_until`], [`Machine::claude_signed_out_until`]),
@@ -223,6 +229,46 @@ impl Machine {
                 ..Default::default()
             };
             lp.events.add_in(&id, Event::Error(error));
+        }
+    }
+
+    /// Runs one playtest-grouping round for every live project that isn't already running one
+    /// (`playtest_round::run`), each as its own task so a slow or stuck planner session costs that
+    /// project's round only. Does nothing with no starter (`dry` never groups playtests either).
+    pub async fn playtest_rounds(&mut self) {
+        let jobs: Vec<_> = self
+            .projects
+            .iter()
+            .filter(|lp| self.live(lp))
+            .filter_map(|lp| {
+                if lp.playtest_round_running.swap(true, Ordering::SeqCst) {
+                    tracing::debug!(
+                        "{}: a playtest grouping round is still running, skipping this one",
+                        lp.id
+                    );
+                    return None;
+                }
+                Some((
+                    lp.playtest_round_running.clone(),
+                    playtest_round::Job {
+                        id: lp.id.clone(),
+                        client: lp.client.clone(),
+                        repo: lp.repo,
+                        project: lp.project.clone(),
+                        env: self.links.env.clone(),
+                        engine_choice: self.links.engine_choice.clone(),
+                        machine: self.links.machine.clone(),
+                        backlog_url: self.links.backlog_url.clone(),
+                        keychain: self.links.keychain.clone(),
+                    },
+                ))
+            })
+            .collect();
+        for (running, job) in jobs {
+            tokio::spawn(async move {
+                playtest_round::run(job).await;
+                running.store(false, Ordering::SeqCst);
+            });
         }
     }
 
@@ -430,6 +476,10 @@ pub struct SpawnArgs<'a> {
     pub environment: String,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
+    /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
+    pub env: Env,
+    /// Which engine a playtest grouping round's `Role::Planner` session runs on.
+    pub engine_choice: EngineChoiceConfig,
 }
 
 /// Starts the computer's one orchestrator task when the mode isn't `Off`. A project that can't loop (no
@@ -447,6 +497,8 @@ pub fn spawn_all(args: SpawnArgs) {
             paused: args.paused.clone(),
             machine: args.machine,
             environment: args.environment,
+            env: args.env,
+            engine_choice: args.engine_choice,
         },
     );
     if let Some(starter) = args.starter {
@@ -489,6 +541,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             minute_at = Some(now);
             machine.fetch().await;
             machine.pass().await;
+            machine.playtest_rounds().await;
         } else {
             machine.poll().await;
         }

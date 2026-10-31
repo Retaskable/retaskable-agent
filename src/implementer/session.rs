@@ -115,6 +115,7 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
         budget_usd: s.budget_usd,
         start: session_start,
         readonly: false,
+        shell: true,
         cursor: s.cursor.clone(),
         local: s.local.clone(),
         sandbox: s.sandbox,

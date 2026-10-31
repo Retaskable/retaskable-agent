@@ -29,6 +29,13 @@ steps:
       # for that many at a time, especially for bundle's release build. One rustc/LLVM at a time costs build time,
       # not memory, so cap it instead of hoping the box grows more room.
       CARGO_BUILD_JOBS: "1"
+      # Several tests spawn a real subprocess and wait on a real wall-clock margin (a quiet-timeout
+      # kill, a setup-check timeout, a session outcome, the gallery shoot's background write) sized
+      # for a box that can actually schedule them promptly. Cargo's test harness default (one thread
+      # per core) lets dozens of those run at once on this same tight box, and under that load several
+      # miss their margin together even though none of them is wrong on its own. Capped for the same
+      # reason as CARGO_BUILD_JOBS above: less parallel work per run, not a looser check.
+      RUST_TEST_THREADS: "4"
       # A third proc-macro crate in a row (syn, then serde_derive, then zerofrom-derive) has stack-overflowed deep
       # in codegen on this host, rustc's own crash report naming this exact fix each time at a higher size (32MiB,
       # then 64MiB). 256MiB still wasn't enough for zerofrom-derive: it crashed again, later in LLVM codegen this
