@@ -63,7 +63,9 @@ fn is_tag(s: &str) -> bool {
     !s.is_empty() && s.len() <= 20 && s.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
 }
 
-/// A computer's tags: what it found, with your own added and the ones you removed taken away.
+/// A computer's tags: what it found, with your own added and the ones you removed taken away,
+/// then capped at `MAX_TAGS` (computer-tags.md: a removed tag never takes a place from one that
+/// stays, so removal has to happen before the cap, not after).
 pub fn computer_tags(found: &[String], overrides: Option<&TagOverrides>) -> Vec<String> {
     let removed: Vec<String> = overrides
         .map(|o| clean_tags(Value::Array(o.removed.iter().cloned().map(Value::String).collect())))
@@ -71,9 +73,14 @@ pub fn computer_tags(found: &[String], overrides: Option<&TagOverrides>) -> Vec<
     let added = overrides
         .map(|o| clean_tags(Value::Array(o.added.iter().cloned().map(Value::String).collect())))
         .unwrap_or_default();
-    let mut combined: Vec<Value> = found.iter().chain(added.iter()).cloned().map(Value::String).collect();
-    let cleaned = clean_tags(Value::Array(std::mem::take(&mut combined)));
-    cleaned.into_iter().filter(|t| !removed.contains(t)).collect()
+    let combined: Vec<Value> = found
+        .iter()
+        .chain(added.iter())
+        .filter(|t| !removed.contains(&t.trim().to_ascii_lowercase()))
+        .cloned()
+        .map(Value::String)
+        .collect();
+    clean_tags(Value::Array(combined))
 }
 
 /// Your changes, kept only where they change something: an added tag it didn't find, a removed
@@ -200,6 +207,22 @@ mod tests {
             removed: vec!["gpu".into()],
         };
         assert_eq!(computer_tags(&found, Some(&over)), vec!["windows", "display", "games"]);
+    }
+
+    #[test]
+    fn a_removed_tag_never_takes_a_place_from_one_that_stays() {
+        // found + added together already hit MAX_TAGS once "gpu" is dropped; removing "gpu"
+        // before the cap (not after) must leave room for the last added tag, "a17".
+        let found = vec!["windows".into(), "gpu".into(), "display".into(), "docker".into()];
+        let added: Vec<String> = (1..=20).map(|i| format!("a{i}")).collect();
+        let over = TagOverrides {
+            added,
+            removed: vec!["gpu".into()],
+        };
+        let result = computer_tags(&found, Some(&over));
+        assert_eq!(result.len(), MAX_TAGS);
+        assert!(!result.contains(&"gpu".to_string()));
+        assert!(result.contains(&"a17".to_string()));
     }
 
     #[test]
