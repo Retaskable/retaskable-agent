@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::lanes;
+use crate::process_tree::{KILL_LIMIT, ProcessTree};
 use crate::sync::lock;
 
 /// How much of a running command's combined output is kept in memory at once.
@@ -52,16 +53,23 @@ pub fn npm_install_command(dir: &Path) -> &'static str {
 /// Runs `command` in a shell under `cwd`, with no input, for up to `timeout`. Returns its exit
 /// code (-1 if it couldn't be read), combined stdout/stderr (capped at [`OUTPUT_CAP`] bytes), and
 /// whether it was killed for running too long. `PATH` is scrubbed of every other checkout's
-/// `node_modules/.bin` first, with `cwd`'s own put first (06.8 bullet 10).
+/// `node_modules/.bin` first, with `cwd`'s own put first (06.8 bullet 10). The shell starts in its
+/// own [`ProcessTree`] (07.4), so a timeout kills everything it spawned — a build, a test run, a
+/// dev server — not just the shell itself; `lanes::kill_processes_in` then sweeps `cwd` for
+/// anything that still left the tree.
 pub fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) -> Result<(i32, String, bool)> {
-    let mut child = shell_command(command)
+    let mut command_builder = shell_command(command);
+    command_builder
         .current_dir(cwd)
         .env("PATH", scrub_path(&path_env(), cwd))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    ProcessTree::prepare_sync(&mut command_builder);
+    let mut child = command_builder
         .spawn()
         .with_context(|| format!("starting `{command}`"))?;
+    let tree = ProcessTree::join_sync(&child).context("putting the command in its own process tree")?;
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
     let buf = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -81,6 +89,7 @@ pub fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) ->
         }
         if Instant::now() >= deadline {
             timed_out = true;
+            let _ = tree.kill_and_wait(KILL_LIMIT);
             let _ = lanes::kill_processes_in(cwd);
             let _ = child.kill();
             let _ = child.wait();
@@ -161,6 +170,44 @@ pub fn tail_lines(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Waits for `path` to exist and be non-empty, so a test only starts timing a kill once the
+    /// grandchild it's watching has actually ticked at least once.
+    fn wait_for_first_tick(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the grandchild never ticked");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn run_command_with_timeout_kills_the_whole_tree_including_a_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let (command, ticks) = crate::test_support::grandchild_tick_shell_command(dir.path());
+        let cwd = dir.path().to_path_buf();
+        // `run_command_with_timeout` blocks until it times out, so the grandchild it starts is
+        // only watchable from another thread.
+        let call = std::thread::spawn(move || run_command_with_timeout(&command, &cwd, Duration::from_millis(300)));
+
+        wait_for_first_tick(&ticks);
+        let size_before_timeout = std::fs::metadata(&ticks).unwrap().len();
+
+        let (_, _, timed_out) = call.join().unwrap().unwrap();
+
+        assert!(timed_out);
+        let size_right_after = std::fs::metadata(&ticks).unwrap().len();
+        std::thread::sleep(Duration::from_millis(400));
+        let size_later = std::fs::metadata(&ticks).unwrap().len();
+        assert!(size_right_after >= size_before_timeout);
+        assert_eq!(
+            size_right_after, size_later,
+            "the grandchild kept touching its file after the timeout"
+        );
+    }
 
     #[test]
     fn needs_npm_install_is_false_without_a_package_json() {

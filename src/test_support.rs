@@ -207,13 +207,11 @@ pub(crate) fn kill_unrelated_process(pid: u32) {
     }
 }
 
-/// A command that starts a grandchild which keeps appending to a file forever, so a kill that
-/// only reaches the direct child (not the whole tree) would leave it running. Shared by
-/// `process_tree.rs`'s and `engines/runner.rs`'s own tests that check a kill reaches the whole
-/// tree, not just the process it was given. Returns the command to run and the file the
-/// grandchild keeps touching; the caller still has to wait for the first tick before trusting the
-/// grandchild has actually started.
-pub(crate) fn grandchild_tick_command(dir: &Path) -> (PathBuf, Vec<String>, PathBuf) {
+/// Writes the scripts [`grandchild_tick_command`] and [`grandchild_tick_shell_command`] both
+/// start: one that keeps appending to a file forever, held by a wrapper that backgrounds it as a
+/// grandchild and then itself hangs. Returns the wrapper to run and the file the grandchild keeps
+/// touching.
+fn write_grandchild_tick_scripts(dir: &Path) -> (PathBuf, PathBuf) {
     let ticks = dir.join("ticks.txt");
     #[cfg(windows)]
     {
@@ -235,15 +233,7 @@ pub(crate) fn grandchild_tick_command(dir: &Path) -> (PathBuf, Vec<String>, Path
             ),
         )
         .unwrap();
-        (
-            PathBuf::from("cmd"),
-            vec![
-                "/C".to_string(),
-                "call".to_string(),
-                hold_script.to_string_lossy().into_owned(),
-            ],
-            ticks,
-        )
+        (hold_script, ticks)
     }
     #[cfg(not(windows))]
     {
@@ -257,8 +247,52 @@ pub(crate) fn grandchild_tick_command(dir: &Path) -> (PathBuf, Vec<String>, Path
         )
         .unwrap();
         let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
-        (PathBuf::from("sh"), vec![script.to_string_lossy().into_owned()], ticks)
+        (script, ticks)
     }
+}
+
+/// A command that starts a grandchild which keeps appending to a file forever, so a kill that
+/// only reaches the direct child (not the whole tree) would leave it running. Shared by
+/// `process_tree.rs`'s and `engines/runner.rs`'s own tests that check a kill reaches the whole
+/// tree, not just the process it was given. Returns the command to run and the file the
+/// grandchild keeps touching; the caller still has to wait for the first tick before trusting the
+/// grandchild has actually started.
+pub(crate) fn grandchild_tick_command(dir: &Path) -> (PathBuf, Vec<String>, PathBuf) {
+    let (hold_script, ticks) = write_grandchild_tick_scripts(dir);
+    #[cfg(windows)]
+    {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/C".to_string(),
+                "call".to_string(),
+                hold_script.to_string_lossy().into_owned(),
+            ],
+            ticks,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            PathBuf::from("sh"),
+            vec![hold_script.to_string_lossy().into_owned()],
+            ticks,
+        )
+    }
+}
+
+/// The same grandchild-starting command as [`grandchild_tick_command`], but as a single shell
+/// command string — what `proc::run_command_with_timeout` takes, instead of a `bin`/`args` pair.
+pub(crate) fn grandchild_tick_shell_command(dir: &Path) -> (String, PathBuf) {
+    let (hold_script, ticks) = write_grandchild_tick_scripts(dir);
+    // No `"` and no space in the Windows command: `shell_command` passes it as a single
+    // Windows command-line argument, and `Command` re-quotes and escapes any argument that
+    // has either, which would mangle a quoted path before cmd.exe ever saw it.
+    #[cfg(windows)]
+    let command = hold_script.to_string_lossy().into_owned();
+    #[cfg(not(windows))]
+    let command = format!("sh \"{}\"", hold_script.display());
+    (command, ticks)
 }
 
 pub(crate) fn git(dir: &Path) -> Command {

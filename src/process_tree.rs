@@ -118,6 +118,32 @@ impl ProcessTree {
         Ok(tree)
     }
 
+    /// The same as [`prepare`], for a plain `std::process::Command` spawned synchronously —
+    /// `proc::run_command_with_timeout`'s shell has no Tokio runtime to spawn a [`Command`] into.
+    ///
+    /// [`prepare`]: ProcessTree::prepare
+    pub fn prepare_sync(command: &mut std::process::Command) {
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        let _ = command;
+    }
+
+    /// The same as [`join`], for the `std::process::Child` [`prepare_sync`] set up.
+    ///
+    /// [`join`]: ProcessTree::join
+    /// [`prepare_sync`]: ProcessTree::prepare_sync
+    pub fn join_sync(child: &std::process::Child) -> Result<Self> {
+        Ok(Self {
+            cut: AtomicBool::new(false),
+            group: platform::Group::join_sync(child)?,
+            pid: child.id(),
+        })
+    }
+
     /// Marks this tree as cut by the agent itself (a restart or Quit), not something that died
     /// or crashed on its own — read back by [`was_cut`]. Call before killing it.
     ///
@@ -174,6 +200,21 @@ mod platform {
 
     impl Group {
         pub(super) fn join(child: &Child) -> Result<Self> {
+            let process = child.raw_handle().context("the session has already exited")? as HANDLE;
+            Self::join_handle(process)
+        }
+
+        pub(super) fn join_sync(child: &std::process::Child) -> Result<Self> {
+            use std::os::windows::io::AsRawHandle;
+            Self::join_handle(child.as_raw_handle() as HANDLE)
+        }
+
+        /// Creates a Job object, sets its kill-on-close limit, and assigns `process` to it — the
+        /// part [`join`] and [`join_sync`] share once each has its own child's raw handle.
+        ///
+        /// [`join`]: Group::join
+        /// [`join_sync`]: Group::join_sync
+        fn join_handle(process: HANDLE) -> Result<Self> {
             let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
             if job.is_null() {
                 bail!("creating the job object: {}", std::io::Error::last_os_error());
@@ -202,7 +243,6 @@ mod platform {
                 );
             }
 
-            let process = child.raw_handle().context("the session has already exited")? as HANDLE;
             let ok = unsafe { AssignProcessToJobObject(job, process) };
             if ok == 0 {
                 bail!(
@@ -269,6 +309,10 @@ mod platform {
     impl Group {
         pub(super) fn join(child: &Child) -> Result<Self> {
             Ok(Self(child.id().context("the session has already exited")?))
+        }
+
+        pub(super) fn join_sync(child: &std::process::Child) -> Result<Self> {
+            Ok(Self(child.id()))
         }
 
         pub(super) fn kill_and_wait(&self, limit: Duration) -> bool {
