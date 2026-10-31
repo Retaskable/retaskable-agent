@@ -646,7 +646,6 @@ fn descendants_of(pid: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Stdio;
 
     /// A bare repo with one commit, so `git worktree add` has a HEAD to check out.
     fn init_repo(dir: &Path) {
@@ -931,8 +930,8 @@ mod tests {
         std::fs::create_dir_all(&lane).unwrap();
         std::fs::create_dir_all(&other).unwrap();
 
-        let mut in_lane = hold_process(&lane);
-        let mut outside = hold_process(&other);
+        let mut in_lane = crate::test_support::hold_process(&lane);
+        let mut outside = crate::test_support::hold_process(&other);
         // Wait until the OS lists the in-lane process (CIM can lag on a busy machine).
         let deadline = Instant::now() + Duration::from_secs(10);
         while processes_in(&lane).unwrap().is_empty() {
@@ -949,42 +948,5 @@ mod tests {
         assert!(outside.try_wait().unwrap().is_none(), "lane-10 keeps running");
         let _ = outside.kill();
         let _ = outside.wait();
-    }
-
-    /// Starts a long-lived process whose command line contains `dir`, so `processes_in` finds it.
-    fn hold_process(dir: &Path) -> std::process::Child {
-        #[cfg(windows)]
-        {
-            let script = dir.join("hold.cmd");
-            // Absolute path in the script body so CIM's CommandLine matches even when the
-            // launcher rewrites argv.
-            let marker = dir.to_string_lossy().replace('"', "");
-            std::fs::write(
-                &script,
-                format!("@echo off\nrem retaskable-lane {marker}\n:loop\nping -n 60 127.0.0.1 >nul\ngoto loop\n"),
-            )
-            .unwrap();
-            Command::new("cmd")
-                .args(["/C", "call", script.to_str().unwrap()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap()
-        }
-        #[cfg(not(windows))]
-        {
-            let script = dir.join("hold.sh");
-            std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 3600; done\n").unwrap();
-            let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
-            Command::new("sh")
-                .arg(&script)
-                .current_dir(dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap()
-        }
     }
 }

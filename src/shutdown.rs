@@ -56,42 +56,7 @@ pub fn stop_other_sessions(projects: &[ProjectConfig]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
-
-    /// Starts a long-lived process whose command line contains `dir`, so `kill_processes_in` finds it.
-    fn hold_process(dir: &Path) -> std::process::Child {
-        #[cfg(windows)]
-        {
-            let script = dir.join("hold.cmd");
-            let marker = dir.to_string_lossy().replace('"', "");
-            std::fs::write(
-                &script,
-                format!("@echo off\nrem retaskable-shutdown {marker}\n:loop\nping -n 60 127.0.0.1 >nul\ngoto loop\n"),
-            )
-            .unwrap();
-            Command::new("cmd")
-                .args(["/C", "call", script.to_str().unwrap()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap()
-        }
-        #[cfg(not(windows))]
-        {
-            let script = dir.join("hold.sh");
-            std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 3600; done\n").unwrap();
-            let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
-            Command::new("sh")
-                .arg(&script)
-                .current_dir(dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap()
-        }
-    }
+    use crate::test_support::hold_process;
 
     #[test]
     fn stop_and_wait_returns_at_once_for_a_directory_with_nothing_running() {
