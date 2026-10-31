@@ -298,9 +298,32 @@ mod tests {
         (PathBuf::from("cat"), vec![file.to_string_lossy().into_owned()])
     }
 
-    /// Runs `spawn_and_read` with the shape every test below shares (no envs, prompt "hi", known
-    /// session id "known", and no transcript sink), varying only the command, its reader, and the
-    /// two watchdog timeouts under test.
+    /// The `SpawnSpec` every test below shares (no envs, prompt "hi", known session id "known"),
+    /// varying only the command, its two watchdog timeouts, and (when a test needs one) its
+    /// `tree_tx`.
+    fn spec<'a>(
+        bin: &'a Path,
+        args: &'a [String],
+        cwd: &'a Path,
+        end_after_result: Option<Duration>,
+        quiet: Option<Duration>,
+        tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
+    ) -> SpawnSpec<'a> {
+        SpawnSpec {
+            bin,
+            args,
+            envs: &[],
+            cwd,
+            prompt: "hi",
+            known_session_id: "known",
+            end_after_result,
+            quiet,
+            tree_tx,
+        }
+    }
+
+    /// Runs `spawn_and_read` with [`spec`]'s shared shape and no transcript sink, varying only the
+    /// command, its reader, and the two watchdog timeouts under test.
     async fn run_spawn(
         bin: &Path,
         args: &[String],
@@ -309,23 +332,9 @@ mod tests {
         quiet: Option<Duration>,
         reader: Box<dyn super::super::engine::EngineReader>,
     ) -> SessionResult {
-        spawn_and_read(
-            SpawnSpec {
-                bin,
-                args,
-                envs: &[],
-                cwd,
-                prompt: "hi",
-                known_session_id: "known",
-                end_after_result,
-                quiet,
-                tree_tx: None,
-            },
-            reader,
-            None,
-        )
-        .await
-        .unwrap()
+        spawn_and_read(spec(bin, args, cwd, end_after_result, quiet, None), reader, None)
+            .await
+            .unwrap()
     }
 
     /// Runs `spawn_and_read` against a command that prints `out`'s contents, the shared shape
@@ -451,17 +460,7 @@ mod tests {
         let (bin, args) = silent_command(20);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let run = spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir.path(),
-                prompt: "hi",
-                known_session_id: "known",
-                end_after_result: None,
-                quiet: None,
-                tree_tx: Some(tx),
-            },
+            spec(&bin, &args, dir.path(), None, None, Some(tx)),
             Box::new(SessionReader::new(false)),
             None,
         );
@@ -701,17 +700,7 @@ mod tests {
         .unwrap();
 
         spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir.path(),
-                prompt: "hi",
-                known_session_id: "known",
-                end_after_result: None,
-                quiet: None,
-                tree_tx: None,
-            },
+            spec(&bin, &args, dir.path(), None, None, None),
             Box::new(SessionReader::new(false)),
             Some(file),
         )
