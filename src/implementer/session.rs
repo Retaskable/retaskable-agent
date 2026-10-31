@@ -137,6 +137,23 @@ impl std::fmt::Display for SilenceKilled {
 
 impl std::error::Error for SilenceKilled {}
 
+/// Marks a failed run's error as a cut session's own kill (`interrupted`, `engines::runner`'s
+/// `spawn_and_read`, set when its `ProcessTree` reports `was_cut()`): something outside this
+/// session — a restart or Quit (07.4-stopping-and-restarting.md) — killed it before it answered,
+/// not the implementer giving up. The caller (`orchestrator::session::run`'s `downcast_ref`) keeps
+/// the item's run record and lease exactly as they were rather than treating this like an ordinary
+/// failure or escalating to a person.
+#[derive(Debug)]
+pub struct Interrupted(pub String);
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer, alongside the latest usage reading the session's stream reported — set
 /// whenever the stream sent one, whether the session went on to succeed or fail, since that
@@ -163,6 +180,8 @@ where
         let why = describe_failure(&r, budget_usd);
         let err = if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))
+        } else if r.subtype == "interrupted" {
+            anyhow::Error::new(Interrupted(why))
         } else {
             anyhow!(why)
         };
@@ -369,6 +388,21 @@ mod tests {
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
         let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "error_during_execution", None)) }).await;
         let err = err.unwrap_err();
+        assert!(err.downcast_ref::<SilenceKilled>().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cut_session_is_tagged_as_interrupted_not_a_plain_failure() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "interrupted", None)) }).await;
+        let err = err.unwrap_err();
+        assert!(
+            err.downcast_ref::<Interrupted>().is_some(),
+            "a cut session should be distinguishable from an ordinary failure, got {err:#}"
+        );
         assert!(err.downcast_ref::<SilenceKilled>().is_none());
     }
 }

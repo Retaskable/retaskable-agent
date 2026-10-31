@@ -41,6 +41,11 @@ pub enum SessionResult {
     /// doesn't know — any of these may have left real work behind, so the run goes to `needs_human` instead
     /// of back to the queue, freeing its lane and keeping its lease. The text says why.
     NeedsHuman(String),
+    /// Something outside the session — a restart or Quit (07.4-stopping-and-restarting.md) — cut its
+    /// process tree and killed it before it answered, not the implementer giving up. The run stays
+    /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
+    /// the store): the next restart readopts it and resumes the same session by id.
+    Interrupted,
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -269,10 +274,14 @@ impl ProjectLoop {
                 role: Some("implementer".into()),
                 engine: Some("claude".into()),
                 ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
+                subtype: matches!(outcome.result, SessionResult::Interrupted).then(|| "interrupted".into()),
                 ..Default::default()
             }),
         );
         match outcome.result {
+            // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
+            // nothing is posted to the store. The next restart readopts it and resumes the same session.
+            SessionResult::Interrupted => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) => {
                 run.escalate();

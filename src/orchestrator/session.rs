@@ -23,7 +23,9 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{ImplementerResult, Session, SilenceKilled, Start, run_implementer, session_spec};
+use crate::implementer::{
+    ImplementerResult, Interrupted, Session, SilenceKilled, Start, run_implementer, session_spec,
+};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::telemetry::now_ms;
 use crate::tiers::{implementer_model, implementer_tier};
@@ -362,16 +364,19 @@ fn classify(r: &ImplementerResult) -> SessionResult {
 
 /// What `run_implementer`'s answer means for the item (`run`'s return): the watchdog's own kill
 /// ([`SilenceKilled`]) is this computer's problem, so the item goes back to the queue for a healthy
-/// lane to claim again, the same as any other own failure (07-orchestrator-loop.md's watchdog). Any
-/// other error means a session ran and didn't come back clean, so it needs a person instead (it may
-/// have left real work behind, section 7.3). `usage` travels alongside whatever `answer` is: a
-/// session that failed may still have reported a usage reading before it did, and that reading is
-/// often exactly the one section 7.1's tier needs most.
+/// lane to claim again, the same as any other own failure (07-orchestrator-loop.md's watchdog). A
+/// cut session ([`Interrupted`], 07.4-stopping-and-restarting.md) keeps its lease and run record as
+/// they are, with nothing posted to the store, so it's resumed by id on the next restart. Any other
+/// error means a session ran and didn't come back clean, so it needs a person instead (it may have
+/// left real work behind, section 7.3). `usage` travels alongside whatever `answer` is: a session
+/// that failed may still have reported a usage reading before it did, and that reading is often
+/// exactly the one section 7.1's tier needs most.
 fn session_result_for_answer(
     answer: Result<ImplementerResult>,
     usage: Option<Value>,
 ) -> (SessionResult, Option<Value>) {
     match answer {
+        Err(e) if e.downcast_ref::<Interrupted>().is_some() => (SessionResult::Interrupted, usage),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
             SessionResult::Failed(format!("went quiet and was killed: {e:#}")),
             usage,
@@ -598,6 +603,26 @@ mod tests {
             matches!(session_result_for_answer(killed, None).0, SessionResult::Failed(_)),
             "a session the watchdog killed should requeue, not need a person"
         );
+        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
+        assert!(matches!(
+            session_result_for_answer(crashed, None).0,
+            SessionResult::NeedsHuman(_)
+        ));
+    }
+
+    #[test]
+    fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
+        let cut = Err(anyhow::Error::new(Interrupted("ended with interrupted".into())));
+        assert_eq!(session_result_for_answer(cut, None).0, SessionResult::Interrupted);
+
+        let killed = Err(anyhow::Error::new(SilenceKilled(
+            "ended with killed_for_silence: no output".into(),
+        )));
+        assert!(matches!(
+            session_result_for_answer(killed, None).0,
+            SessionResult::Failed(_)
+        ));
+
         let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
         assert!(matches!(
             session_result_for_answer(crashed, None).0,

@@ -90,6 +90,11 @@ struct SpawnSpec<'a> {
     /// turns it off. Only watches while no result has been read yet: once one has, `end_after_result`
     /// (a much shorter wait) takes over instead.
     quiet: Option<Duration>,
+    /// Given the session's process tree right after it joins, so a caller outside this loop — a
+    /// restart or Quit (07.4-stopping-and-restarting.md), or this module's own test — can mark it
+    /// `cut` and kill it while this loop is still reading its output. `None` when nothing needs to
+    /// reach in, which is every real session today: nothing yet calls `ProcessTree::cut` on one.
+    tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 }
 
 /// What a silent session's own `SessionResult` says, once the watchdog has killed it
@@ -102,6 +107,27 @@ fn killed_for_silence(known_session_id: &str, quiet: Duration) -> SessionResult 
         subtype: "killed_for_silence".to_string(),
         structured: None,
         error: Some(format!("killed after {} minutes with no output", quiet.as_secs() / 60)),
+        cost_usd: None,
+        session_id: known_session_id.to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
+    }
+}
+
+/// What a cut session's own `SessionResult` says, in the same shape as [`killed_for_silence`]
+/// (07.4-stopping-and-restarting.md's "A cut session ends as `interrupted`, not `failed`"):
+/// something outside this session — a restart or Quit — called [`ProcessTree::cut`] and killed
+/// its tree before it answered. `implementer::run_implementer` passes this on as a typed error
+/// (`Interrupted`), the way a watchdog kill already is as `SilenceKilled`.
+fn interrupted(known_session_id: &str) -> SessionResult {
+    SessionResult {
+        ok: false,
+        subtype: "interrupted".to_string(),
+        structured: None,
+        error: Some("interrupted".to_string()),
         cost_usd: None,
         session_id: known_session_id.to_string(),
         limit_hit: false,
@@ -134,6 +160,9 @@ async fn spawn_and_read(
         .spawn()
         .with_context(|| format!("starting {}", spec.bin.display()))?;
     let tree = Arc::new(ProcessTree::join(&child).context("putting the session in its own process tree")?);
+    if let Some(tx) = spec.tree_tx {
+        let _ = tx.send(tree.clone());
+    }
 
     let mut stdin = child.stdin.take().context("session has no stdin")?;
     let prompt = spec.prompt.to_string();
@@ -195,7 +224,9 @@ async fn spawn_and_read(
     let stderr_text = drain_stderr.await.unwrap_or_default();
     let status = child.wait().await.context("waiting for the session to exit")?;
 
-    Ok(if silenced {
+    Ok(if tree.was_cut() {
+        interrupted(spec.known_session_id)
+    } else if silenced {
         killed_for_silence(spec.known_session_id, spec.quiet.expect("set when silenced"))
     } else {
         result.unwrap_or_else(|| reader.no_result(status.code(), &stderr_text, spec.known_session_id))
@@ -231,6 +262,7 @@ pub async fn run_session(
             known_session_id,
             end_after_result: engine.ends_on_result().then_some(END_AFTER_RESULT),
             quiet,
+            tree_tx: None,
         },
         engine.reader(spec),
         file,
@@ -287,6 +319,7 @@ mod tests {
                 known_session_id: "known",
                 end_after_result,
                 quiet,
+                tree_tx: None,
             },
             reader,
             None,
@@ -406,6 +439,42 @@ mod tests {
             size_right_after, size_later,
             "the grandchild kept touching its file after the watchdog's kill"
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_reports_interrupted_when_something_outside_cuts_the_tree_mid_session() {
+        // Something outside this session's own loop (a restart or Quit, 07.4-stopping-and-
+        // restarting.md) cuts its tree and kills it while it's still running, before it ever
+        // printed a result: that must come back as `interrupted`, not a watchdog silence-kill or
+        // a plain no-result crash.
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, args) = silent_command(20);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let run = spawn_and_read(
+            SpawnSpec {
+                bin: &bin,
+                args: &args,
+                envs: &[],
+                cwd: dir.path(),
+                prompt: "hi",
+                known_session_id: "known",
+                end_after_result: None,
+                quiet: None,
+                tree_tx: Some(tx),
+            },
+            Box::new(SessionReader::new(false)),
+            None,
+        );
+        let cut = async move {
+            let tree = rx.await.unwrap();
+            tree.cut();
+            let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
+        };
+        let (result, ()) = tokio::join!(run, cut);
+        let result = result.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "interrupted");
+        assert_eq!(result.session_id, "known");
     }
 
     /// A command that prints a line, waits `secs` seconds, then prints `out`'s contents —
@@ -641,6 +710,7 @@ mod tests {
                 known_session_id: "known",
                 end_after_result: None,
                 quiet: None,
+                tree_tx: None,
             },
             Box::new(SessionReader::new(false)),
             Some(file),
