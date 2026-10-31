@@ -7,6 +7,7 @@
 //! only makes the write side of the format `transcripts.rs` already reads real.
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -19,6 +20,7 @@ use super::codex::CodexEngine;
 use super::cursor::CursorEngine;
 use super::engine::{Engine, EngineId, SessionResult, SessionSpec};
 use super::pi::PiEngine;
+use crate::process_tree::{KILL_LIMIT, ProcessTree};
 use crate::telemetry::events::now_ms;
 
 /// How long an `ends_on_result` engine's process has to exit on its own after its result.
@@ -119,15 +121,19 @@ async fn spawn_and_read(
     mut reader: Box<dyn super::engine::EngineReader>,
     mut sink: Option<std::fs::File>,
 ) -> Result<SessionResult> {
-    let mut child = Command::new(spec.bin)
+    let mut command = Command::new(spec.bin);
+    command
         .args(spec.args)
         .current_dir(spec.cwd)
         .envs(spec.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    ProcessTree::prepare(&mut command);
+    let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", spec.bin.display()))?;
+    let tree = Arc::new(ProcessTree::join(&child).context("putting the session in its own process tree")?);
 
     let mut stdin = child.stdin.take().context("session has no stdin")?;
     let prompt = spec.prompt.to_string();
@@ -143,7 +149,6 @@ async fn spawn_and_read(
     });
 
     let stdout = child.stdout.take().context("session has no stdout")?;
-    let pid = child.id();
     let mut lines = BufReader::new(stdout).lines();
     let mut result = None;
     let mut ends_at = None;
@@ -153,10 +158,8 @@ async fn spawn_and_read(
             Some(at) => match tokio::time::timeout_at(at, lines.next_line()).await {
                 Ok(next) => next,
                 Err(_) => {
-                    if let Some(pid) = pid {
-                        let _ = tokio::task::spawn_blocking(move || crate::lanes::kill_tree(pid)).await;
-                    }
-                    let _ = child.start_kill();
+                    let tree = tree.clone();
+                    let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
                     break;
                 }
             },
@@ -164,10 +167,8 @@ async fn spawn_and_read(
                 Some(quiet) => match tokio::time::timeout(quiet, lines.next_line()).await {
                     Ok(next) => next,
                     Err(_) => {
-                        if let Some(pid) = pid {
-                            let _ = tokio::task::spawn_blocking(move || crate::lanes::kill_tree(pid)).await;
-                        }
-                        let _ = child.start_kill();
+                        let tree = tree.clone();
+                        let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
                         silenced = true;
                         break;
                     }
@@ -372,6 +373,39 @@ mod tests {
         assert_eq!(result.subtype, "killed_for_silence");
         assert_eq!(result.session_id, "known");
         assert!(result.error.unwrap().contains("no output"));
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_kills_a_silent_sessions_grandchild_too() {
+        // A silent session that itself started a grandchild (e.g. a build or a dev server): the
+        // watchdog's kill has to take the whole tree with it, not just the direct child it was
+        // handed, which `crate::lanes::kill_tree(pid)` alone (walking only that pid's own
+        // descendants at kill time) could still miss if the grandchild had reparented.
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, args, ticks) = crate::test_support::grandchild_tick_command(dir.path());
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
+            None,
+            Some(Duration::from_millis(600)),
+            Box::new(SessionReader::new(false)),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "killed_for_silence");
+
+        let size_right_after = std::fs::metadata(&ticks).unwrap().len();
+        assert!(
+            size_right_after > 0,
+            "the grandchild never ticked before the watchdog's kill"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        let size_later = std::fs::metadata(&ticks).unwrap().len();
+        assert_eq!(
+            size_right_after, size_later,
+            "the grandchild kept touching its file after the watchdog's kill"
+        );
     }
 
     /// A command that prints a line, waits `secs` seconds, then prints `out`'s contents —
