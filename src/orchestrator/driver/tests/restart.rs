@@ -92,6 +92,18 @@ async fn a_restart_resumes_an_implementing_item_in_its_saved_lane() {
 }
 
 #[tokio::test]
+async fn an_interrupted_session_is_readopted_and_resumed_by_its_id() {
+    let (mut rig, fake, saved) = after_restart(Some(SessionResult::Interrupted), "building").await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        (started[0].resume, Some(&started[0].session_id), Some(started[0].lane)),
+        (true, saved.impl_session_id.as_ref(), saved.lane)
+    );
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+}
+
+#[tokio::test]
 async fn a_resumed_session_is_not_started_twice() {
     let (mut rig, fake, _) = after_restart(None, "building").await;
     rig.machine.pass().await;

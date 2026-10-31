@@ -134,6 +134,24 @@ async fn a_failed_session_gives_the_item_back() {
 }
 
 #[tokio::test]
+async fn an_interrupted_session_keeps_the_item_implementing_and_sends_no_release_or_park() {
+    let (mut rig, _fake, asked) = ended(SessionResult::Interrupted, &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(
+        !ops(&asked)
+            .iter()
+            .any(|o| o == "release" || o == "park" || o == "report")
+    );
+    let events = rig.lp(0).events().recent();
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["ok"], false);
+    assert_eq!(ended["subtype"], "interrupted");
+}
+
+#[tokio::test]
 async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
     rig.machine.pass().await;
