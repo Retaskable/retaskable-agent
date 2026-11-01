@@ -86,7 +86,7 @@ impl LiveHandle {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, LiveState> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner())
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

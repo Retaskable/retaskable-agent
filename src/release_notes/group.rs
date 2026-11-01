@@ -744,7 +744,7 @@ mod tests {
     fn spec_links_link_each_markdown_ref_once_at_the_base_branch() {
         let refs: Vec<String> = ["docs/specs/agent/09 web.md", "docs/specs/agent/09 web.md", "src/x.rs"]
             .iter()
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
             .collect();
         assert_eq!(
             spec_links(&refs, "x/y", "main"),
@@ -774,7 +774,7 @@ mod tests {
             "retaskable/draft-1",
             "2026-09-25T00:00:00Z",
         );
-        p.files = files.iter().map(|s| s.to_string()).collect();
+        p.files = files.iter().map(ToString::to_string).collect();
         p
     }
 

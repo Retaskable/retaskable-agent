@@ -10,6 +10,7 @@ use crate::orchestrator::live::{HeldLane, LiveHandle};
 use crate::orchestrator::steps::StepRequest;
 use crate::store::{RunRecord, Store};
 use crate::telemetry::EventLog;
+use crate::telemetry::event::Entry;
 use crate::test_support::item_lifecycle_cfg;
 use crate::view::PauseState;
 use anyhow::Result;
@@ -186,7 +187,7 @@ async fn one_dry_tick_writes_a_tick_event_and_asks_the_store_only_to_list() {
             .events()
             .recent()
             .iter()
-            .map(|e| e.to_value())
+            .map(Entry::to_value)
             .collect::<Vec<_>>(),
         vec![json!({
             "at": "1970-01-01T00:00:00.000Z",
@@ -250,7 +251,7 @@ async fn an_unreachable_backlog_is_a_store_error_and_no_tick() {
     // Port 1 on loopback refuses connections.
     let mut rig = rig(2, &["http://127.0.0.1:1"]);
     assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
-    let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(|e| e.kind()).collect();
+    let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(Entry::kind).collect();
     assert_eq!(kinds, vec!["store_error"]);
     assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "list");
 }
@@ -544,7 +545,7 @@ fn ops(asked: &Asked) -> Vec<String> {
 }
 
 fn kinds(rig: &mut Rig) -> Vec<String> {
-    rig.lp(0).events().recent().iter().map(|e| e.kind()).collect()
+    rig.lp(0).events().recent().iter().map(Entry::kind).collect()
 }
 
 fn handed_out() -> Option<Value> {
@@ -817,7 +818,7 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Checking);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     let error = (rig.lp(0).events().recent().iter())
-        .map(|e| e.to_value())
+        .map(Entry::to_value)
         .find(|e| e["where"] == "step")
         .expect("an error event");
     assert_eq!(error["item"], "a");
@@ -896,7 +897,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
         rig.lp(0).events().recent().is_empty(),
         "a paused project is fetched too, and it worked"
     );
-    let errors: Vec<_> = rig.lp(1).events().recent().iter().map(|e| e.to_value()).collect();
+    let errors: Vec<_> = rig.lp(1).events().recent().iter().map(Entry::to_value).collect();
     assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
 }
 

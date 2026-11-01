@@ -139,7 +139,7 @@ fn lane_section(ticks: &[TickAt], to: i64) -> Vec<String> {
                 ));
             }
         }
-        let busy_len = t.busy.as_ref().map(|b| b.len()).unwrap_or(0);
+        let busy_len = t.busy.as_ref().map(Vec::len).unwrap_or(0);
         let running = t.status.as_deref() == Some("running");
         let idle = running && busy_len == 0;
         if idle && idle_from.is_none() {

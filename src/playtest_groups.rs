@@ -287,7 +287,7 @@ mod tests {
         PlaytestGroup {
             title: title.to_string(),
             why: "because".to_string(),
-            keys: keys.iter().map(|k| k.to_string()).collect(),
+            keys: keys.iter().map(ToString::to_string).collect(),
         }
     }
 

@@ -305,7 +305,7 @@ mod tests {
             rank: 0,
             do_next: false,
             depends_on: Vec::new(),
-            spec_refs: spec_refs.iter().map(|s| s.to_string()).collect(),
+            spec_refs: spec_refs.iter().map(ToString::to_string).collect(),
             slice: 1,
             remaining: None,
             pr_url: None,

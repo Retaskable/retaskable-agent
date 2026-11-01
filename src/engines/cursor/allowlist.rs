@@ -109,13 +109,13 @@ fn allowlist(readonly: bool, extra: &[String], cli: Option<&str>) -> Value {
     if let Some(cli) = cli {
         read.push(format!("Shell({cli})"));
     }
-    read.extend(READ[2..].iter().map(|s| s.to_string()));
+    read.extend(READ[2..].iter().map(ToString::to_string));
 
     let allow = if readonly {
         read
     } else {
         let mut combined = read;
-        combined.extend(WRITE.iter().map(|s| s.to_string()));
+        combined.extend(WRITE.iter().map(ToString::to_string));
         combined.extend(extra.iter().cloned());
         super::dedupe(combined)
     };
