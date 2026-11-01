@@ -20,7 +20,7 @@ use super::engine::{
     Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart, Tokens,
     exited_without_result,
 };
-use super::json_result::{check_schema, extract_json};
+use super::json_result::{check_schema, extract_json, fenced_json_instructions};
 use super::resolve::resolve_codex;
 use crate::text::clip;
 
@@ -113,11 +113,7 @@ fn windows_sandbox(cwd: &Path) -> Vec<String> {
 
 /// `codexPrompt(spec)`: the same result instructions as the other schema-checked engines.
 fn codex_prompt(spec: &SessionSpec) -> String {
-    format!(
-        "{}\n\nWhen you've finished, end your final message with exactly one fenced ```json block holding your result, \
-         matching this schema. Nothing after it.\n\n{}",
-        spec.prompt, spec.schema,
-    )
+    format!("{}\n\n{}", spec.prompt, fenced_json_instructions(&spec.schema))
 }
 
 fn event(at: i64, kind: EventKind, text: String) -> Vec<SessionEvent> {
