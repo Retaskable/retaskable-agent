@@ -16,6 +16,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::engine::{Engine, EngineId, EngineReader, SessionEvent, SessionSpec, SessionStart};
+use super::json_result::fenced_json_instructions;
 
 mod allowlist;
 mod reader;
@@ -101,10 +102,9 @@ fn cursor_prompt(spec: &SessionSpec) -> String {
          Shell commands must start with an allowed program ({shells}). Match is the first word only: type `git status`, \
          never a personal wrapper, pager or shell launcher in front. If a Shell call is refused with an empty reason, \
          the first word was not on that list — retry the bare program, do not try other wrappers.\n\n\
-         When you've finished, end your final message with exactly one fenced ```json block holding your result, \
-         matching this schema. Nothing after it.\n\n\
          {}",
-        spec.prompt, spec.schema,
+        spec.prompt,
+        fenced_json_instructions(&spec.schema),
     )
 }
 

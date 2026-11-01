@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use super::engine::{
     Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, exited_without_result,
 };
-use super::json_result::{check_schema, extract_json};
+use super::json_result::{check_schema, extract_json, fenced_json_instructions};
 use super::resolve::resolve_pi;
 use crate::text::{clip, collapse_and_clip};
 
@@ -44,11 +44,7 @@ fn pi_args(spec: &SessionSpec) -> Vec<String> {
 /// `--json-schema` either, so the schema is spelled out and the result must be the final
 /// message's own fenced block.
 fn pi_prompt(spec: &SessionSpec) -> String {
-    format!(
-        "{}\n\nWhen you've finished, end your final message with exactly one fenced ```json block holding your result, \
-         matching this schema. Nothing after it.\n\n{}",
-        spec.prompt, spec.schema,
-    )
+    format!("{}\n\n{}", spec.prompt, fenced_json_instructions(&spec.schema))
 }
 
 /// The assistant message's text: pi sends it as a string or as an array of content blocks
