@@ -2,6 +2,9 @@
 //! link and [`commands`](crate::commands) read, its [`ProjectView`]s, the [`PauseState`] they share,
 //! and the [`Exit`] callback a restart runs. A leaf both `connector` and `commands` depend on, so
 //! neither depends on the other for these.
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
