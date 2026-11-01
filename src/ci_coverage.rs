@@ -137,7 +137,7 @@ pub fn read_workflows(repo: &Path, git_ref: &str) -> Vec<WorkflowFile> {
     String::from_utf8_lossy(&ls.stdout)
         .lines()
         .map(str::trim)
-        .filter(|f| f.ends_with(".yml") || f.ends_with(".yaml"))
+        .filter(|f| crate::fs_util::is_yaml_file(f))
         .map(|file| {
             let show = crate::git_bin::command(repo)
                 .args(["show", &format!("{git_ref}:.github/workflows/{file}")])

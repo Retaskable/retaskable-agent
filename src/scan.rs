@@ -99,11 +99,9 @@ pub fn has_workflows(repo: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(repo.join(".github").join("workflows")) else {
         return false;
     };
-    entries.flatten().any(|e| {
-        e.file_name()
-            .to_str()
-            .is_some_and(|n| n.ends_with(".yml") || n.ends_with(".yaml"))
-    })
+    entries
+        .flatten()
+        .any(|e| e.file_name().to_str().is_some_and(crate::fs_util::is_yaml_file))
 }
 
 fn check(name: &str, command: &str, blocking: bool, timeout_sec: u64) -> CheckConfig {

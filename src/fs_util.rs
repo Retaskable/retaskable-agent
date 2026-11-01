@@ -4,6 +4,15 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+/// Whether `name` has a `.yml` or `.yaml` extension, case-insensitively: CI tools (and `git`,
+/// which can preserve whatever case a workflow file was committed with) don't care about the
+/// case of a YAML extension, so neither should we.
+pub fn is_yaml_file(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
+}
+
 /// `writeJsonAtomic(file, data, compact)`: compact (`JSON.stringify` with no whitespace) when
 /// `compact`, indented otherwise. The files people may read or edit stay indented; only
 /// `state.json` and `machine.json` are written compact.
@@ -29,6 +38,17 @@ pub fn write_json_atomic(file: &Path, data: &Value, compact: bool) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_yaml_file_accepts_yml_and_yaml_in_any_case() {
+        assert!(is_yaml_file("ci.yml"));
+        assert!(is_yaml_file("ci.yaml"));
+        assert!(is_yaml_file("CI.YML"));
+        assert!(is_yaml_file("CI.YAML"));
+        assert!(!is_yaml_file("ci.yml.bak"));
+        assert!(!is_yaml_file("README.md"));
+        assert!(!is_yaml_file("yml"));
+    }
 
     #[test]
     fn creates_missing_parent_directories() {
