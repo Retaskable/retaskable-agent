@@ -191,7 +191,16 @@ mod tests {
         let cwd = dir.path().to_path_buf();
         // `run_command_with_timeout` blocks until it times out, so the grandchild it starts is
         // only watchable from another thread.
-        let call = std::thread::spawn(move || run_command_with_timeout(&command, &cwd, Duration::from_millis(300)));
+        //
+        // On Windows the grandchild is two process hops down (`cmd /C` the shell command, which
+        // itself does `start /B` another `cmd /C`), so a too-short timeout here races the kill
+        // against the grandchild ever being spawned at all: under occasional scheduling jitter
+        // the shell command gets killed before it reaches its own `start /B` line, the grandchild
+        // never exists, and `wait_for_first_tick` below then waits out its own full 10s for a tick
+        // that can never come (seen failing locally with `ticks.txt` never created). 1s leaves
+        // the same margin `engines/runner.rs`'s own grandchild-timeout test already relies on
+        // (600ms) plus headroom, while still being well under `wait_for_first_tick`'s 10s budget.
+        let call = std::thread::spawn(move || run_command_with_timeout(&command, &cwd, Duration::from_millis(1000)));
 
         wait_for_first_tick(&ticks);
         let size_before_timeout = std::fs::metadata(&ticks).unwrap().len();
