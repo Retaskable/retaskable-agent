@@ -362,7 +362,7 @@ async fn git(repo_path: &Path, args: &[&str]) -> Option<String> {
 /// [`git`]'s output as git wrote it.
 async fn git_out(repo_path: &Path, args: &[&str]) -> Option<String> {
     let repo_path = repo_path.to_path_buf();
-    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
     let out = tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         lanes::git_output_in_worktree(&repo_path, &args)

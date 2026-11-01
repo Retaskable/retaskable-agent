@@ -261,7 +261,7 @@ fn duplicates_ignores_noise_and_merges_a_block_repeated_twice() {
         "* more",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(ToString::to_string)
     .collect();
     let mut boiler = noise.clone();
     boiler.extend(noise.clone());

@@ -24,13 +24,13 @@ pub(crate) fn item(
         rank: 0,
         do_next: false,
         depends_on: Vec::new(),
-        spec_refs: spec_refs.iter().map(|s| s.to_string()).collect(),
+        spec_refs: spec_refs.iter().map(ToString::to_string).collect(),
         slice: 0,
         remaining: None,
-        pr_url: pr_url.map(|s| s.to_string()),
+        pr_url: pr_url.map(ToString::to_string),
         branch: None,
         kind: None,
-        milestone: milestone.map(|s| s.to_string()),
+        milestone: milestone.map(ToString::to_string),
         reopened: None,
     }
 }

@@ -463,7 +463,7 @@ mod tests {
                 "sessions": 2
             })
         );
-        let kinds: Vec<_> = log.recent().iter().map(|e| e.kind()).collect();
+        let kinds: Vec<_> = log.recent().iter().map(Entry::kind).collect();
         assert_eq!(
             kinds,
             ["lease", "item_state", "tick"],
@@ -568,7 +568,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let kinds: Vec<_> = read_events(dir.path(), 0, i64::MAX).iter().map(|e| e.kind()).collect();
+        let kinds: Vec<_> = read_events(dir.path(), 0, i64::MAX).iter().map(Entry::kind).collect();
         assert_eq!(kinds, ["old", "late", "a", "b"]);
         let window: Vec<_> = read_events(
             dir.path(),
@@ -576,7 +576,7 @@ mod tests {
             parse_iso_ms("2026-10-15T08:30:00Z").unwrap(),
         )
         .iter()
-        .map(|e| e.kind())
+        .map(Entry::kind)
         .collect();
         assert_eq!(window, ["late", "a"]);
 
@@ -587,7 +587,7 @@ mod tests {
             heard_c.lock().unwrap().push(e.kind());
         });
         log.open(dir.path());
-        let kinds: Vec<_> = log.recent().iter().map(|e| e.kind()).collect();
+        let kinds: Vec<_> = log.recent().iter().map(Entry::kind).collect();
         assert_eq!(kinds, ["late", "a", "b"], "the last 24 hours");
         assert_eq!(
             *heard.lock().unwrap(),
@@ -682,7 +682,7 @@ mod tests {
         }
         std::fs::write(dir.path().join("2026-10-15.jsonl"), text).unwrap();
         let read = read_events(dir.path(), 0, i64::MAX);
-        assert_eq!(read.iter().map(|e| e.kind()).collect::<Vec<_>>(), ["mystery", "ci"]);
+        assert_eq!(read.iter().map(Entry::kind).collect::<Vec<_>>(), ["mystery", "ci"]);
     }
 
     #[test]

@@ -198,7 +198,7 @@ pub fn markdown(sections: &[Section], range: &Range, result: Option<&ReleaseNote
         .filter_map(|e| {
             texts
                 .get(e.key.as_str())
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .or_else(|| e.item.as_ref().map(|item| item.title.clone()))
         })
         .collect();
