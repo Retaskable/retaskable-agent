@@ -124,12 +124,23 @@ impl Store {
 
     /// Leases given back here that the store hasn't taken yet, by item id: its lease token and the
     /// give-back's note (agent/07.5-what-a-claim-and-a-give-back-send.md's `report`, sent again with
-    /// `release` on later passes). Empty when missing.
+    /// `release` on later passes). Empty when missing. Also reads the bare lease-token strings an
+    /// agent before #185 saved here (as an empty note), so upgrading past that change doesn't drop
+    /// a release still owed to the store.
     pub fn unreleased(&self) -> std::collections::BTreeMap<String, (String, String)> {
-        self.data
-            .get("unreleased")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
+        let Some(Value::Object(map)) = self.data.get("unreleased") else {
+            return std::collections::BTreeMap::new();
+        };
+        map.iter()
+            .filter_map(|(id, v)| {
+                let pair = match v {
+                    Value::String(token) => (token.clone(), String::new()),
+                    Value::Array(a) if a.len() == 2 => (a[0].as_str()?.to_string(), a[1].as_str()?.to_string()),
+                    _ => return None,
+                };
+                Some((id.clone(), pair))
+            })
+            .collect()
     }
 
     /// Replaces `state.unreleased`. Doesn't save on its own; call `save` after.
@@ -309,6 +320,36 @@ mod tests {
 
         let reloaded = Store::load(dir.path()).unwrap();
         assert_eq!(reloaded.smoke(), Some(state));
+    }
+
+    #[test]
+    fn unreleased_reads_back_a_pre_report_note_agents_bare_lease_token() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"unreleased": {"item-1": "lease-abc"}}"#,
+        )
+        .unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        assert_eq!(
+            store.unreleased(),
+            std::collections::BTreeMap::from([("item-1".to_string(), ("lease-abc".to_string(), String::new()))])
+        );
+    }
+
+    #[test]
+    fn unreleased_round_trips_a_token_and_note_once_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        let unreleased = std::collections::BTreeMap::from([(
+            "item-1".to_string(),
+            ("lease-abc".to_string(), "it crashed".to_string()),
+        )]);
+        store.set_unreleased(&unreleased);
+        store.save().unwrap();
+
+        let reloaded = Store::load(dir.path()).unwrap();
+        assert_eq!(reloaded.unreleased(), unreleased);
     }
 
     #[test]
