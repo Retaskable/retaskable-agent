@@ -208,3 +208,114 @@ fn platform() -> &'static str {
         other => other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(id: &str, github_repo: &str) -> ProjectView {
+        ProjectView {
+            id: id.into(),
+            github_repo: github_repo.into(),
+            backlog_path: "backlog".into(),
+            repo_path: PathBuf::new(),
+            worktrees_dir: PathBuf::new(),
+            base_branch: String::new(),
+            galleries: vec![],
+        }
+    }
+
+    fn view(projects: Vec<ProjectView>) -> AgentView {
+        AgentView {
+            machine: "pc".into(),
+            tags: vec![],
+            projects,
+            version: "9.9.9".into(),
+            lanes: 1,
+            chore_lane: None,
+            lane_sizes: LaneSizes::default(),
+            paused: PauseState::default(),
+        }
+    }
+
+    #[test]
+    fn keys_is_the_agents_own_hub_before_any_project() {
+        assert_eq!(view(vec![]).keys(), [""]);
+    }
+
+    #[test]
+    fn keys_is_each_projects_id_once_there_are_any() {
+        assert_eq!(
+            view(vec![project("one", "o/one"), project("two", "o/two")]).keys(),
+            ["one", "two"]
+        );
+    }
+
+    #[test]
+    fn hello_has_no_project_before_setup() {
+        let v = view(vec![]);
+        assert_eq!(v.hello("")["project"], Value::Null);
+    }
+
+    #[test]
+    fn hello_has_no_project_while_its_repo_is_still_unset() {
+        // A project can exist (and so appear in `keys`) before Setup has given it a repo.
+        let v = view(vec![project("one", "")]);
+        assert_eq!(v.hello("one")["project"], Value::Null);
+    }
+
+    #[test]
+    fn hello_names_the_matching_projects_repo_and_backlog() {
+        let v = view(vec![project("one", "o/one"), project("two", "o/two")]);
+        assert_eq!(
+            v.hello("two")["project"],
+            json!({ "githubRepo": "o/two", "backlogPath": "backlog" })
+        );
+    }
+
+    #[test]
+    fn hello_truncates_the_version_and_machine() {
+        let mut v = view(vec![]);
+        v.version = "v".repeat(60);
+        v.machine = "m".repeat(250);
+        let hello = v.hello("");
+        assert_eq!(hello["agentVersion"].as_str().unwrap().len(), 50);
+        assert_eq!(hello["machine"].as_str().unwrap().len(), 200);
+    }
+
+    #[test]
+    fn pause_state_starts_with_no_reason() {
+        assert_eq!(PauseState::default().reason("a"), None);
+    }
+
+    #[test]
+    fn pause_state_set_and_clear_round_trip() {
+        let paused = PauseState::default();
+        paused.set("a", Some("why".into()));
+        assert_eq!(paused.reason("a"), Some("why".into()));
+        paused.set("a", None);
+        assert_eq!(paused.reason("a"), None);
+    }
+
+    #[test]
+    fn pause_state_only_signals_a_change_when_the_reason_actually_changes() {
+        let paused = PauseState::default();
+        let mut rx = paused.subscribe();
+        assert!(!rx.has_changed().unwrap());
+
+        paused.set("a", Some("why".into()));
+        assert!(rx.has_changed().unwrap());
+        rx.mark_unchanged();
+
+        // Setting the same reason again is a no-op: nothing watching should resend.
+        paused.set("a", Some("why".into()));
+        assert!(!rx.has_changed().unwrap());
+
+        // Clearing a project that was never paused is also a no-op.
+        paused.set("b", None);
+        assert!(!rx.has_changed().unwrap());
+
+        paused.set("a", None);
+        assert!(rx.has_changed().unwrap());
+    }
+}
