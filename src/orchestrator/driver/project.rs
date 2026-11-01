@@ -682,8 +682,11 @@ impl ProjectLoop {
                 ("failed".to_string(), false)
             }
             Ok(ClaimNextAnswer::Nothing) => ("none".to_string(), false),
-            // Handed out again while this computer still has it: it isn't taken twice.
-            Ok(ClaimNextAnswer::Item { item, .. }) if self.runs.contains_key(&item.id) => {
+            // Handed out again while this computer still holds its lease: it isn't taken twice. A
+            // parked item (needs_clarification) has no lease, even though its run stays in `self.runs`
+            // (`park`'s doc comment), so the store handing it back out once answered is a fresh claim,
+            // not a duplicate.
+            Ok(ClaimNextAnswer::Item { item, .. }) if self.leases.contains_key(&item.id) => {
                 tracing::warn!(
                     "{}: the store handed out {} again, which this computer has",
                     self.id,

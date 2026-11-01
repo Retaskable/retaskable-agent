@@ -82,6 +82,73 @@ async fn a_park_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
     );
 }
 
+/// A stub that answers `claim_next` with `first` once, then with nothing until `offer_second` is
+/// set, after which it answers with `second` on every call. For a scenario where "a" parks waiting
+/// on a person, nothing is on offer while it waits, and only once it is answered does the store hand
+/// "a" out again.
+async fn parked_then_reclaimed_stub(listed: Value, first: Value, second: Value) -> (String, Arc<AtomicBool>) {
+    use axum::http::StatusCode;
+    let served_first = Arc::new(AtomicBool::new(false));
+    let offer_second = Arc::new(AtomicBool::new(false));
+    let returned = offer_second.clone();
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(move |Json(body): Json<Value>| {
+            let (served_first, offer_second, listed, first, second) = (
+                served_first.clone(),
+                offer_second.clone(),
+                listed.clone(),
+                first.clone(),
+                second.clone(),
+            );
+            async move {
+                let op = body["op"].as_str().unwrap_or("").to_string();
+                match op.as_str() {
+                    "release" | "park" | "report" => (StatusCode::OK, Json(json!({}))),
+                    "claim_next" if !served_first.swap(true, Ordering::SeqCst) => {
+                        (StatusCode::OK, Json(json!({ "value": first })))
+                    }
+                    "claim_next" if offer_second.load(Ordering::SeqCst) => {
+                        (StatusCode::OK, Json(json!({ "value": second })))
+                    }
+                    "claim_next" => (StatusCode::OK, Json(json!({ "value": null }))),
+                    _ => (StatusCode::OK, Json(json!({ "value": listed }))),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), returned)
+}
+
+#[tokio::test]
+async fn an_item_parked_for_an_answer_takes_a_fresh_lease_when_the_store_hands_it_out_again() {
+    let first = json!({ "item": item("a", "claimed"), "token": "lease-1" });
+    let second = json!({ "item": item("a", "claimed"), "token": "lease-2" });
+    let (base, offer_second) = parked_then_reclaimed_stub(json!([item("a", "claimed")]), first, second).await;
+    let mut rig = rig(1, &[&base]);
+    let fake = rig.go_live();
+    let asking = ImplementerOutcome::Questions {
+        all_already_answered: false,
+    };
+    fake.script.lock().unwrap().push(done(asking));
+    rig.machine.pass().await; // claims "a" (lease-1) and starts its session
+    rig.machine.pass().await; // the session asks a question: "a" parks, freeing its lane and lease
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
+    assert!(rig.lp(0).store.leases().is_empty());
+
+    offer_second.store(true, Ordering::SeqCst); // the person answers; the store can hand "a" out again
+    rig.machine.pass().await;
+
+    assert_eq!(
+        rig.lp(0).store.leases().get("a"),
+        Some(&"lease-2".to_string()),
+        "a parked item's fresh lease should be taken, not dropped as a duplicate of the one it already gave up"
+    );
+}
+
 #[tokio::test]
 async fn a_session_that_needs_a_human_frees_its_lane_but_keeps_its_lease_as_ts_does() {
     let questions = ImplementerOutcome::Questions {
