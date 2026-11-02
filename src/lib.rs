@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config;
 pub mod connector;
 pub mod decisions;
+pub mod draft_worktree;
 pub mod drafts;
 pub mod engines;
 pub mod env;
