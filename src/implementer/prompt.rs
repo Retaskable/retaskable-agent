@@ -5,7 +5,7 @@
 //! so `{{pr}}`/`{{change}}` are hardcoded to GitHub's words rather than built from a config.
 use anyhow::Result;
 
-use crate::backlog::Item;
+use crate::backlog::{Item, ItemStatus};
 use crate::config::{CheckConfig, CodeGates, ProjectType};
 use crate::prompt::{project_words, render_prompt};
 
@@ -105,6 +105,33 @@ pub struct Prompt<'a> {
     pub code_gates: CodeGates,
     /// [`super::start_files::render`]'s output, appended after the rules; empty for none.
     pub where_to_start: &'a str,
+    /// The project's items as the store listed them: [`not_built_yet`] names the unbuilt others.
+    pub items: &'a [Item],
+}
+
+/// The ids of `items` other than `this` that aren't built yet: the only ones `waitsOn` may name.
+pub fn not_built_yet<'a>(items: &'a [Item], this: &str) -> impl Iterator<Item = &'a Item> {
+    items.iter().filter(move |i| {
+        i.id != this
+            && !matches!(
+                i.status,
+                ItemStatus::OnMain | ItemStatus::InProduction | ItemStatus::Skipped
+            )
+    })
+}
+
+/// The `## Items not built yet` section (`- <id>: <title>` lines), or empty when none are left.
+pub fn items_not_built_text(items: &[Item], this: &str) -> String {
+    let lines: Vec<String> = not_built_yet(items, this)
+        .map(|i| format!("- {}: {}", i.id, i.title))
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## Items not built yet\n\nThe backlog's other items not built yet (id: title), for `waitsOn`:\n{}",
+        lines.join("\n")
+    )
 }
 
 /// Fills `prompts/implementer.md` for a fresh session on `p.item`.
@@ -155,17 +182,46 @@ pub fn build_prompt(template: &str, p: &Prompt<'_>) -> Result<String> {
             ("projectSteps", words.steps.to_string()),
         ],
     )?;
-    if p.where_to_start.is_empty() {
-        Ok(filled)
-    } else {
-        Ok(format!("{filled}\n\n{}", p.where_to_start))
+    let mut out = filled;
+    for extra in [p.where_to_start.to_string(), items_not_built_text(p.items, &p.item.id)] {
+        if !extra.is_empty() {
+            out = format!("{out}\n\n{extra}");
+        }
     }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::implementer::test_support::{checks, item};
+
+    fn other(id: &str, status: ItemStatus) -> Item {
+        Item {
+            id: id.into(),
+            title: format!("Title of {id}"),
+            status,
+            ..item(&[], None)
+        }
+    }
+
+    #[test]
+    fn items_not_built_text_leaves_out_this_item_and_built_ones() {
+        let this = item(&[], None);
+        let items = vec![
+            this.clone(),
+            other("a", ItemStatus::Todo),
+            other("b", ItemStatus::OnMain),
+            other("c", ItemStatus::InProduction),
+            other("d", ItemStatus::Building),
+        ];
+        let text = items_not_built_text(&items, &this.id);
+        assert!(text.starts_with("## Items not built yet"));
+        assert!(text.ends_with("- a: Title of a\n- d: Title of d"), "{text}");
+        assert!(!text.contains(&format!("- {}:", this.id)) && !text.contains("- b:") && !text.contains("- c:"));
+        assert_eq!(items_not_built_text(&items[..1], &this.id), "");
+        assert!(!items_not_built_text(&items[..1], "zzz").is_empty());
+    }
 
     #[test]
     fn checks_text_lists_each_check_and_marks_non_blocking() {
@@ -232,6 +288,7 @@ mod tests {
                 checks: &checks(),
                 code_gates: CodeGates::default(),
                 where_to_start: "## Where to start\n\n- `src/implementer/mod.rs`",
+                items: &[],
             },
         )
         .unwrap();
@@ -261,6 +318,7 @@ mod tests {
                 checks: &[],
                 code_gates: CodeGates::default(),
                 where_to_start: "",
+                items: &[],
             },
         )
         .unwrap();

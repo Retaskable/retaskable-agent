@@ -62,6 +62,9 @@ steps:
       - event: push
       - event: pull_request
         path:
-          include: [src/bin/bundle.rs, "src/release*.rs", "src/release*/**", Cargo.toml, Cargo.lock, .woodpecker/ci.yaml]
+          include: [src/bin/bundle.rs, src/bin/package.rs, src/package.rs, "src/package/**", src/app_menu.rs, assets/*.png, "src/release*.rs", "src/release*/**", Cargo.toml, Cargo.lock, .woodpecker/ci.yaml]
     commands:
+      - apt-get update && apt-get install -y --no-install-recommends squashfs-tools
       - cargo run --release --bin bundle
+      # installers/06-macos-and-linux.md section 6.2: the bundle as an AppImage, start-checked (no FUSE here).
+      - cargo run --release --bin package

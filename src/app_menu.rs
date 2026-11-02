@@ -20,7 +20,7 @@ pub fn app_id(build: &Build) -> String {
 }
 
 /// A desktop entry for this build, `exec` quoted the same way `start_at_login::login_entry`'s is.
-fn desktop_entry(build: &Build, icon: &str, exec: &str) -> String {
+pub(crate) fn desktop_entry(build: &Build, icon: &str, exec: &str) -> String {
     format!(
         "[Desktop Entry]\nType=Application\nName={}\nComment=Runs your Retaskable backlog on this computer\nExec={exec}\nIcon={icon}\nTerminal=false\nCategories=Development;\n",
         release_name(build.environment)

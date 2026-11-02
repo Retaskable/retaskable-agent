@@ -588,6 +588,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             outcomes: rig.machine.outcome_sender(),
             follow_up: None,
             usage: None,
+            items: rig.lp(0).items.values().cloned().collect(),
         }]
     );
     assert_eq!(
@@ -912,4 +913,5 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
 mod playtests;
 mod reporting;
 mod restart;
+mod runs;
 mod settling;

@@ -10,7 +10,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -100,6 +99,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             resume,
             follow_up,
+            items,
             ..
         } = request;
         let job = Job {
@@ -115,6 +115,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             resume,
             follow_up,
+            items,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -198,6 +199,9 @@ struct Job {
     /// restart after the lane's prior session ran out of turns or had grown too large: the lane is reused
     /// as-is instead.
     follow_up: Option<String>,
+    /// Every item in the project's backlog; the unbuilt ones are listed in a fresh prompt, and a `waits_on`
+    /// result is checked against them.
+    items: Vec<Item>,
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
@@ -246,9 +250,10 @@ async fn attempt(
         usage,
         models,
         session_id,
+        items,
         ..
     } = job;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = crate::telemetry::now_ms() / 1000;
     let tier = implementer_tier(usage.as_ref(), now, models);
     let model = implementer_model(tier, item).to_string();
     let branch = branch_name(item);
@@ -264,6 +269,7 @@ async fn attempt(
             checks: &project.checks,
             code_gates: project.code_gates,
             where_to_start,
+            items,
             cwd,
             model,
             budget_usd: project.budget.implementer_usd,

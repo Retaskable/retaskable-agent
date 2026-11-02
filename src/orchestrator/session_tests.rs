@@ -96,6 +96,15 @@ fn fake_claude(bin: &Path, out: &Path, args: &Path, ok: bool) {
     }
 }
 
+fn queued_item() -> Item {
+    Item {
+        id: "queued-one".into(),
+        title: "Another queued item".into(),
+        status: ItemStatus::Todo,
+        ..item(&[], None)
+    }
+}
+
 fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let request = StartRequest {
@@ -109,6 +118,7 @@ fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         outcomes,
         usage: None,
         follow_up: None,
+        items: vec![item(&[], None), queued_item()],
     };
     (request, rx)
 }
@@ -256,6 +266,25 @@ async fn gates_that_cannot_run_are_noted_and_the_session_still_finishes() {
     assert_eq!(runs_of(&rig), 1);
     assert_eq!(got.notes.len(), 1);
     assert!(got.notes[0].starts_with("Code gates couldn't run"), "{:?}", got.notes);
+}
+
+#[tokio::test]
+async fn a_fresh_prompt_lists_the_unbuilt_items_and_a_resumed_one_does_not() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    outcome_of(&rig).await;
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(args.contains("Items not built yet"), "{args}");
+    assert!(args.contains("- queued-one: Another queued item"), "{args}");
+    assert!(!args.contains("- implementer-session: Have"), "{args}");
+    let (mut request, mut rx) = request();
+    request.resume = true;
+    rig.starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(
+        !args.contains("Items not built yet") && !args.contains("queued-one"),
+        "{args}"
+    );
 }
 
 #[tokio::test]

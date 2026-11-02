@@ -31,6 +31,8 @@ pub struct Session<'a> {
     /// [`super::start_files::render`]'s output, or empty for a session that needs none yet. Only
     /// read on a [`Start::Fresh`] session: a follow-up's prompt is just the new message.
     pub where_to_start: &'a str,
+    /// The project's items, for the fresh prompt's **Items not built yet** list.
+    pub items: &'a [Item],
     pub cwd: &'a Path,
     pub model: String,
     pub budget_usd: f64,
@@ -98,6 +100,7 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
                     checks: s.checks,
                     code_gates: s.code_gates,
                     where_to_start: s.where_to_start,
+                    items: s.items,
                 },
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
@@ -237,6 +240,7 @@ mod tests {
             checks: chks,
             code_gates: CodeGates::default(),
             where_to_start: "## Where to start\n\n- `src/implementer/mod.rs`",
+            items: &[],
             cwd,
             model: "sonnet".to_string(),
             budget_usd: 5.0,
