@@ -63,3 +63,7 @@ This spec is split: each section below is its own file in [engines/](engines/). 
 ## 14. The Codex engine
 
 - [engines/14-the-codex-engine.md](engines/14-the-codex-engine.md)
+
+## 15. Smart and Fast models
+
+- [engines/15-smart-and-fast-models.md](engines/15-smart-and-fast-models.md): 15.1 Decisions · 15.2 The models a computer has · 15.3 The catalog · 15.4 Kinds of work · 15.5 Which model a session gets · 15.6 Lanes, and lanes from the plan · 15.7 Basic · 15.8 Expert · 15.9 Where it's saved · 15.10 Moving over · 15.11 Open questions · 15.12 What goes · 15.13 Build order and tests
