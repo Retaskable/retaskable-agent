@@ -40,6 +40,7 @@ pub mod release_check;
 pub mod release_install;
 pub mod release_notes;
 pub mod release_update;
+pub mod release_upload;
 pub mod reopen;
 pub mod repo;
 pub mod review_context;

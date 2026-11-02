@@ -24,10 +24,10 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::start_files;
 use crate::implementer::{
-    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, run_implementer, session_spec,
+    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, run_implementer, session_spec,
 };
+use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::telemetry::now_ms;
 use crate::tiers::{implementer_model, implementer_tier};
@@ -107,6 +107,10 @@ impl SessionStarter for ClaudeStarter {
             project,
             project_id: project_id.clone(),
             bin,
+            gh: self
+                .env
+                .get("RETASKABLE_GH")
+                .map_or_else(|| PathBuf::from("gh"), PathBuf::from),
             max_turns: self.max_turns,
             lane,
             item,
@@ -124,23 +128,26 @@ impl SessionStarter for ClaudeStarter {
             // A fresh start's failure here is before any session ran (an own failure, section 7.3): it goes
             // back to the queue. A resumed session already ran once, so the same failure here may have left
             // real work behind, and needs a person instead.
-            let (result, usage, context_tokens) = match tokio::spawn(run(job)).await {
+            let (result, usage, context_tokens, notes) = match tokio::spawn(run(job)).await {
                 Ok(Ok(ran)) => ran,
                 Ok(Err(e)) if resume => (
                     SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")),
                     None,
                     None,
+                    vec![],
                 ),
-                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None, None),
+                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None, None, vec![]),
                 Err(e) if resume => (
                     SessionResult::NeedsHuman(format!("the session's task crashed while resuming: {e}")),
                     None,
                     None,
+                    vec![],
                 ),
                 Err(e) => (
                     SessionResult::Failed(format!("the session task crashed: {e}")),
                     None,
                     None,
+                    vec![],
                 ),
             };
             running.fetch_sub(1, Ordering::SeqCst);
@@ -151,6 +158,7 @@ impl SessionStarter for ClaudeStarter {
                 result,
                 context_tokens,
                 usage,
+                notes,
             });
         });
         Ok(())
@@ -182,6 +190,8 @@ struct Job {
     project: ProjectConfig,
     project_id: String,
     bin: PathBuf,
+    /// The `gh` program (`RETASKABLE_GH`, or `gh` on PATH).
+    gh: PathBuf,
     max_turns: u32,
     lane: u32,
     item: Item,
@@ -308,8 +318,9 @@ struct Attempt {
     context_tokens: Option<u64>,
 }
 
-/// What `run` returns: the result, the stream's usage reading and the session's last context size.
-type Ran = (SessionResult, Option<Value>, Option<u64>);
+/// What `run` returns: the result, the stream's usage reading, the session's last context size and the lines
+/// for the item's timeline (the code gates' notes).
+type Ran = (SessionResult, Option<Value>, Option<u64>, Vec<String>);
 
 fn settled(a: Attempt, max_turns: u32) -> Ran {
     let Attempt {
@@ -318,10 +329,10 @@ fn settled(a: Attempt, max_turns: u32) -> Ran {
         context_tokens,
     } = a;
     if matches!(&answer, Err(e) if e.downcast_ref::<MaxTurns>().is_some()) {
-        return (SessionResult::MaxTurns(max_turns), usage, context_tokens);
+        return (SessionResult::MaxTurns(max_turns), usage, context_tokens, vec![]);
     }
     let (result, usage) = session_result_for_answer(answer, usage);
-    (result, usage, context_tokens)
+    (result, usage, context_tokens, vec![])
 }
 
 /// The folder a session runs in: an `existing` lane kept as it is, after stopping anything the old session left
@@ -350,9 +361,98 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Code gates before the push (06.2-implementer.md): while the session answers `pr_opened`, the gates check the
+/// lane's change against `origin/<baseBranch>`. A finding resumes the same session with it, in a new transcript,
+/// and gates its next answer too; every such round counts against `maxCheckRounds`, and past it a person is
+/// needed. Gates that can't run (a git error) are noted and the answer stands. Any other answer is `settled`.
+async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
+    let mut notes = Vec::new();
+    let mut rounds = 0;
+    loop {
+        if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
+            break;
+        }
+        let (dir, base, gates) = (
+            cwd.to_path_buf(),
+            job.project.base_branch.clone(),
+            job.project.code_gates,
+        );
+        let found = tokio::task::spawn_blocking(move || code_gates::run(&dir, &base, &gates))
+            .await
+            .context("running the code gates")?;
+        let found = match found {
+            Ok(Some(found)) => found,
+            Ok(None) => break,
+            Err(e) => {
+                notes.push(format!("Code gates couldn't run, so the push goes ahead: {e:#}"));
+                break;
+            }
+        };
+        notes.push(found.note.clone());
+        rounds += 1;
+        if rounds > job.project.max_check_rounds {
+            let (usage, context_tokens) = (a.usage, a.context_tokens);
+            let why = format!(
+                "The code gates still found problems after {} rounds: {}",
+                job.project.max_check_rounds, found.note
+            );
+            return Ok((SessionResult::NeedsHuman(why), usage, context_tokens, notes));
+        }
+        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
+        let start = Start::Resume {
+            session_id: job.session_id.clone(),
+            follow_up: &follow_up,
+            decisions: &[],
+        };
+        let name = format!("{}-resumed-{}.jsonl", job.session_id, now_ms());
+        a = attempt(job, cwd, start, false, name, "").await?;
+    }
+    let titles = match &a.answer {
+        Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
+        _ => None,
+    };
+    let mut ran = settled(a, job.max_turns);
+    if let Some((title, body, summary)) = titles {
+        // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
+        // failure here means a session ran and its work is committed, so a person is needed, not the queue.
+        let title = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| format!("{}: {}", job.item.id, job.item.title));
+        let body = body
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or(summary);
+        let (gh, dir, branch, base) = (
+            job.gh.clone(),
+            cwd.to_path_buf(),
+            branch_name(&job.item),
+            job.project.base_branch.clone(),
+        );
+        let published = tokio::task::spawn_blocking(move || {
+            publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
+        })
+        .await
+        .context("publishing the change")?;
+        match published {
+            Ok(p) => notes.push(format!(
+                "{} PR #{}: {}",
+                if p.created { "Opened" } else { "Pushed to the open" },
+                p.number,
+                p.url
+            )),
+            Err(e) => {
+                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"))
+            }
+        }
+    }
+    ran.3 = notes;
+    Ok(ran)
+}
+
 async fn run(job: Job) -> Result<Ran> {
     let worktrees = PathBuf::from(&job.project.worktrees_dir);
-    let (lane, max_turns) = (job.lane, job.max_turns);
+    let lane = job.lane;
     if let Some(follow_up) = &job.follow_up {
         // A restart after running out of turns, or of a session that had grown too large, reuses the lane
         // exactly as it was left (stopping what the old session left running in it): `lanes::prepare` would
@@ -364,7 +464,8 @@ async fn run(job: Job) -> Result<Ran> {
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
         };
-        return Ok(settled(attempt(&job, &cwd, start, true, name, "").await?, max_turns));
+        let a = attempt(&job, &cwd, start, true, name, "").await?;
+        return gated(&job, &cwd, a).await;
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
     // reset away the work), and anything the old session left running in it is stopped. The driver decides
@@ -407,7 +508,7 @@ async fn run(job: Job) -> Result<Ran> {
             resuming = None;
             continue;
         }
-        return Ok(settled(a, max_turns));
+        return gated(&job, &cwd, a).await;
     }
 }
 
@@ -487,508 +588,5 @@ fn session_result_for_answer(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use tokio::sync::mpsc::UnboundedReceiver;
-
-    use super::*;
-    use crate::backlog::ItemStatus;
-    use crate::config::RoleEngines;
-    use crate::orchestrator::driver::OutcomeSender;
-
-    const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
-
-    struct Rig {
-        _dir: tempfile::TempDir,
-        root: PathBuf,
-        starter: Arc<ClaudeStarter>,
-        args: PathBuf,
-    }
-
-    /// A project over a real repo, whose `claude` prints `lines` (or, with `None`, exits 3 at once).
-    fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let repo = crate::test_support::repo_with_origin(&root);
-        let (out, args, bin) = (root.join("out.jsonl"), root.join("args.txt"), root.join(fake_name()));
-        std::fs::write(&out, lines.unwrap_or("")).unwrap();
-        if claude {
-            fake_claude(&bin, &out, &args, lines.is_some());
-        }
-        let mut project = ProjectConfig {
-            id: Some("p".into()),
-            repo_path: repo.to_string_lossy().into_owned(),
-            worktrees_dir: root.join("worktrees").to_string_lossy().into_owned(),
-            base_branch: "main".into(),
-            github_repo: "o/p".into(),
-            ..Default::default()
-        };
-        project.budget.implementer_usd = 5.0;
-        let bin = bin.to_string_lossy().into_owned();
-        let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
-        let starter = ClaudeStarter::new(
-            root.join("data"),
-            vec![project],
-            choice,
-            env,
-            50,
-            ModelsConfig::default(),
-        );
-        Rig {
-            _dir: dir,
-            root,
-            starter,
-            args,
-        }
-    }
-
-    fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
-        Item {
-            id: "implementer-session".into(),
-            title: "Have a session write the code".into(),
-            status: ItemStatus::Building,
-            rank: 1,
-            do_next: false,
-            depends_on: Vec::new(),
-            spec_refs: spec_refs.iter().map(ToString::to_string).collect(),
-            slice: 2,
-            remaining: remaining.map(str::to_string),
-            pr_url: None,
-            branch: None,
-            kind: None,
-            milestone: None,
-            reopened: None,
-        }
-    }
-
-    fn fake_name() -> &'static str {
-        if cfg!(windows) { "claude.cmd" } else { "claude.sh" }
-    }
-
-    fn fake_claude(bin: &Path, out: &Path, args: &Path, ok: bool) {
-        let code = if ok { 0 } else { 3 };
-        if cfg!(windows) {
-            let script = format!(
-                "@echo off\r\necho %* > \"{0}\"\r\nfindstr \"^\" >> \"{0}\"\r\ntype \"{1}\"\r\nexit /b {code}\r\n",
-                args.display(),
-                out.display()
-            );
-            std::fs::write(bin, script).unwrap();
-        } else {
-            let script = format!(
-                "#!/bin/sh\necho \"$@\" > \"{0}\"\ncat >> \"{0}\"\ncat \"{1}\"\nexit {code}\n",
-                args.display(),
-                out.display()
-            );
-            crate::test_support::write_executable(bin, &script);
-        }
-    }
-
-    fn queued_item() -> Item {
-        Item {
-            id: "queued-one".into(),
-            title: "Another queued item".into(),
-            status: ItemStatus::Todo,
-            ..item(&[], None)
-        }
-    }
-
-    fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
-        let (outcomes, rx) = OutcomeSender::channel();
-        let request = StartRequest {
-            project: "p".into(),
-            item_id: "implementer-session".into(),
-            lane: 1,
-            token: "t".into(),
-            item: item(&[], Some("Wire it.")),
-            session_id: "sess-1".into(),
-            resume: false,
-            outcomes,
-            usage: None,
-            follow_up: None,
-            items: vec![item(&[], None), queued_item()],
-        };
-        (request, rx)
-    }
-
-    /// Starts one session and waits for its outcome, checking that no second one follows.
-    async fn outcome_of(rig: &Rig) -> SessionResult {
-        let (request, mut rx) = request();
-        rig.starter.start(request).unwrap();
-        let got = tokio::time::timeout(Duration::from_secs(120), rx.recv())
-            .await
-            .expect("an outcome")
-            .expect("the channel stays open");
-        assert_eq!((got.project.as_str(), got.lane), ("p", 1));
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(rx.try_recv().is_err(), "exactly one outcome per start");
-        got.result
-    }
-
-    fn answer(status: &str, questions: &str) -> String {
-        format!(
-            r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"status":"{status}","summary":"s","questions":{questions}}},"session_id":"s"}}"#
-        )
-    }
-
-    #[tokio::test]
-    async fn a_finished_session_sends_finished_and_keeps_its_transcript_locally() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        assert_eq!(
-            outcome_of(&rig).await,
-            SessionResult::Implementer(ImplementerOutcome::Finished)
-        );
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains("--permission-mode auto"), "{args}");
-        assert!(!args.contains("--dangerously-skip-permissions"), "{args}");
-        let runs = paths::run_dir(&rig.root.join("data"), "p", "implementer-session");
-        let files: Vec<_> = std::fs::read_dir(runs).unwrap().collect();
-        assert_eq!(files.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_fresh_prompt_lists_the_unbuilt_items_and_a_resumed_one_does_not() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        outcome_of(&rig).await;
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains("Items not built yet"), "{args}");
-        assert!(args.contains("- queued-one: Another queued item"), "{args}");
-        assert!(!args.contains("- implementer-session: Have"), "{args}");
-        let (mut request, mut rx) = request();
-        request.resume = true;
-        rig.starter.start(request).unwrap();
-        tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(
-            !args.contains("Items not built yet") && !args.contains("queued-one"),
-            "{args}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_fresh_session_runs_under_the_given_id_and_a_resumed_one_continues_it() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        outcome_of(&rig).await;
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(
-            args.contains("--session-id sess-1") && !args.contains("--resume"),
-            "{args}"
-        );
-        let (mut request, mut rx) = request();
-        request.resume = true;
-        rig.starter.start(request).unwrap();
-        let got = tokio::time::timeout(Duration::from_secs(120), rx.recv()).await;
-        assert!(matches!(got, Ok(Some(_))));
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(
-            args.contains("--resume sess-1") && !args.contains("--session-id"),
-            "{args}"
-        );
-        let runs = paths::run_dir(&rig.root.join("data"), "p", "implementer-session");
-        assert_eq!(
-            std::fs::read_dir(runs).unwrap().count(),
-            2,
-            "the first transcript is kept"
-        );
-    }
-
-    /// Commits a spec that names `src/lib.rs`, and that file, to the rig's repo and origin.
-    fn commit_spec(rig: &Rig) {
-        let repo = rig.root.join("repo");
-        std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        std::fs::write(repo.join("docs/specs/a.md"), "Touches `src/lib.rs`.\n").unwrap();
-        std::fs::write(repo.join("src/lib.rs"), "").unwrap();
-        for args in [
-            vec!["add", "."],
-            vec!["commit", "--quiet", "-m", "spec"],
-            vec!["push", "--quiet", "origin", "main"],
-        ] {
-            let ok = crate::test_support::git(&repo).args(args).status().unwrap().success();
-            assert!(ok);
-        }
-    }
-
-    async fn start_with(rig: &Rig, spec_refs: &[&str], resume: bool) {
-        let (mut request, mut rx) = request();
-        request.item.spec_refs = spec_refs.iter().map(ToString::to_string).collect();
-        request.resume = resume;
-        rig.starter.start(request).unwrap();
-        let got = tokio::time::timeout(Duration::from_secs(120), rx.recv()).await;
-        assert!(matches!(got, Ok(Some(_))));
-    }
-
-    #[tokio::test]
-    async fn a_fresh_session_is_pointed_at_the_items_specs_and_the_code_they_name() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        commit_spec(&rig);
-        start_with(&rig, &["docs/specs/a.md"], false).await;
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains("## Where to start"), "{args}");
-        assert!(
-            args.contains("docs/specs/a.md") && args.contains("src/lib.rs"),
-            "{args}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_resumed_session_gets_only_the_follow_up() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        commit_spec(&rig);
-        start_with(&rig, &["docs/specs/a.md"], false).await;
-        start_with(&rig, &["docs/specs/a.md"], true).await;
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains("--resume sess-1"), "{args}");
-        assert!(
-            !args.contains("## Where to start") && !args.contains("docs/specs/a.md"),
-            "{args}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_session_still_starts_when_git_gives_nothing_to_list() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        // Break the lane's view of origin after it's prepared is not possible, so name specs git can't show.
-        start_with(&rig, &["docs/specs/missing.md"], false).await;
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains("--session-id sess-1"), "{args}");
-        assert!(!args.contains("## Where to start"), "{args}");
-    }
-
-    #[tokio::test]
-    async fn a_session_that_exits_without_an_answer_needs_a_human() {
-        let rig = rig(None, EngineChoiceConfig::default(), true);
-        assert!(matches!(outcome_of(&rig).await, SessionResult::NeedsHuman(_)));
-    }
-
-    fn classified(json: &str) -> SessionResult {
-        classify(&serde_json::from_str(json).unwrap())
-    }
-
-    #[test]
-    fn each_status_maps_to_what_the_ts_agent_does() {
-        let why = |r: SessionResult| match r {
-            SessionResult::NeedsHuman(why) => why,
-            other => panic!("{other:?}"),
-        };
-        assert!(why(classified(r#"{"status":"failed","summary":"stuck"}"#)).contains("Implementer gave up: stuck"));
-        assert!(why(classified(r#"{"status":"nothing_left","summary":"built"}"#)).contains("Nothing left to build"));
-        let steps = why(classified(
-            r#"{"status":"person_steps","personSteps":["Press go"],"summary":"s"}"#,
-        ));
-        assert!(steps.contains("1. Press go"), "{steps}");
-        assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
-        let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
-        assert!(waits.contains("a, b"), "{waits}");
-        assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
-    }
-
-    #[test]
-    fn a_watchdog_kill_is_an_own_failure_not_a_needs_human() {
-        let killed = Err(anyhow::Error::new(SilenceKilled(
-            "ended with killed_for_silence: no output".into(),
-        )));
-        assert!(
-            matches!(session_result_for_answer(killed, None).0, SessionResult::Failed(_)),
-            "a session the watchdog killed should requeue, not need a person"
-        );
-        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
-        assert!(matches!(
-            session_result_for_answer(crashed, None).0,
-            SessionResult::NeedsHuman(_)
-        ));
-    }
-
-    #[test]
-    fn running_out_of_turns_maps_to_max_turns_carrying_the_cap_and_the_context_size() {
-        let out = Attempt {
-            answer: Err(anyhow::Error::new(MaxTurns("ended with error_max_turns".into()))),
-            usage: None,
-            context_tokens: Some(7),
-        };
-        assert_eq!(settled(out, 300), (SessionResult::MaxTurns(300), None, Some(7)));
-    }
-
-    #[test]
-    fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
-        let cut = Err(anyhow::Error::new(Interrupted("ended with interrupted".into())));
-        assert_eq!(session_result_for_answer(cut, None).0, SessionResult::Interrupted);
-
-        let killed = Err(anyhow::Error::new(SilenceKilled(
-            "ended with killed_for_silence: no output".into(),
-        )));
-        assert!(matches!(
-            session_result_for_answer(killed, None).0,
-            SessionResult::Failed(_)
-        ));
-
-        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
-        assert!(matches!(
-            session_result_for_answer(crashed, None).0,
-            SessionResult::NeedsHuman(_)
-        ));
-    }
-
-    #[test]
-    fn the_usage_reading_travels_with_the_result_whichever_way_the_session_ended() {
-        let usage = serde_json::json!({"status": "rejected", "resetsAt": i64::MAX});
-        let killed = Err(anyhow::Error::new(SilenceKilled(
-            "ended with killed_for_silence".into(),
-        )));
-        assert_eq!(
-            session_result_for_answer(killed, Some(usage.clone())).1,
-            Some(usage.clone())
-        );
-        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
-        assert_eq!(session_result_for_answer(crashed, Some(usage.clone())).1, Some(usage));
-    }
-
-    #[test]
-    fn the_sandbox_follows_the_platform() {
-        use crate::config::SandboxMode;
-        assert!(sandbox_enabled(SandboxMode::Auto, false));
-        assert!(!sandbox_enabled(SandboxMode::Auto, true));
-        assert!(!sandbox_enabled(SandboxMode::Off, false));
-    }
-
-    #[tokio::test]
-    async fn a_sandboxed_platform_passes_the_sandbox_settings() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        outcome_of(&rig).await;
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert_eq!(args.contains("--settings"), !cfg!(windows), "{args}");
-    }
-
-    #[tokio::test]
-    async fn a_session_with_questions_sends_questions() {
-        let rig = rig(
-            Some(&answer("needs_clarification", r#"[{"question":"Which one?"}]"#)),
-            EngineChoiceConfig::default(),
-            true,
-        );
-        assert_eq!(
-            outcome_of(&rig).await,
-            SessionResult::Implementer(ImplementerOutcome::Questions {
-                all_already_answered: false
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        let (mut request, mut rx) = request();
-        request.usage = None;
-        rig.starter.start(request).unwrap();
-        rx.recv().await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-        assert_eq!(model, Some("sonnet"), "{args}");
-    }
-
-    #[tokio::test]
-    async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        let (mut request, mut rx) = request();
-        request.usage = None;
-        request.item.reopened = Some(crate::backlog::Reopened {
-            notes: Some("The list is empty".into()),
-            at: Some("2026-10-29T00:00:00Z".into()),
-            by: None,
-        });
-        rig.starter.start(request).unwrap();
-        rx.recv().await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-        assert_eq!(model, Some("opus"), "{args}");
-    }
-
-    #[tokio::test]
-    async fn a_usage_reading_below_opus_above_pct_starts_the_implementer_on_sonnet() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        let (mut request, mut rx) = request();
-        request.usage = Some(serde_json::json!({"status": "allowed_warning", "resetsAt": i64::MAX}));
-        rig.starter.start(request).unwrap();
-        rx.recv().await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-        assert_eq!(model, Some("sonnet"), "{args}");
-    }
-
-    /// A starter like `rig`'s, but whose only project's repo path is missing, so preparing its lane fails.
-    fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
-        let mut projects = rig.starter.projects.clone();
-        projects[0].repo_path = rig.root.join("missing").to_string_lossy().into_owned();
-        ClaudeStarter::new(
-            rig.root.join("data"),
-            projects,
-            EngineChoiceConfig::default(),
-            rig.starter.env.clone(),
-            50,
-            ModelsConfig::default(),
-        )
-    }
-
-    #[tokio::test]
-    async fn a_lane_that_cannot_be_prepared_fails() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        let starter = starter_with_unpreparable_lane(&rig);
-        let (request, mut rx) = request();
-        starter.start(request).unwrap();
-        let got = rx.recv().await.unwrap();
-        assert!(matches!(got.result, SessionResult::Failed(_)), "{got:?}");
-    }
-
-    #[tokio::test]
-    async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_queue() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-        let starter = starter_with_unpreparable_lane(&rig);
-        let (mut request, mut rx) = request();
-        request.resume = true;
-        starter.start(request).unwrap();
-        let got = rx.recv().await.unwrap();
-        assert!(matches!(got.result, SessionResult::NeedsHuman(_)), "{got:?}");
-    }
-
-    #[tokio::test]
-    async fn another_engine_refuses_to_start() {
-        let choice = EngineChoiceConfig {
-            roles: RoleEngines {
-                implementer: Some(Engine::Cursor),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let rig = rig(Some(FINISHED), choice, true);
-        let (request, mut rx) = request();
-        assert_eq!(
-            rig.starter.start(request),
-            Err("only Claude sessions run in the Rust agent yet".to_string())
-        );
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn a_missing_binary_refuses_to_start() {
-        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), false);
-        let (request, mut rx) = request();
-        let err = rig.starter.start(request).unwrap_err();
-        assert!(err.contains("wasn't found"), "{err}");
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn the_branch_is_the_id_a_short_slug_and_the_slice() {
-        assert_eq!(
-            branch_name(&item(&[], None)),
-            "retaskable/implementer-session-have-a-session-write-the-code-s2"
-        );
-    }
-
-    #[test]
-    fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
-        assert_eq!(quiet_timeout(0), None);
-        assert_eq!(quiet_timeout(20), Some(Duration::from_secs(20 * 60)));
-    }
-}
+#[path = "session_tests.rs"]
+mod tests;

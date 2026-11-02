@@ -10,7 +10,7 @@
 //! answer ([`ImplementerResult`]), [`prompt`] fills `prompts/implementer.md` from an item and a
 //! project's config, [`session`] builds the `SessionSpec` either piece runs with and parses the
 //! result back, and [`code_gates`] is the plain-code check on a lane's committed change before the
-//! push.
+//! push, and [`publish`] pushes the branch and opens (or finds) its PR.
 //!
 //! `src/orchestrator/session.rs`'s `ClaudeStarter` is the orchestrator-level step that runs real
 //! sessions with the prompt template, `IMPLEMENTER_RESULT_SCHEMA` and [`run_implementer`], restarting
@@ -20,10 +20,12 @@
 //! wired in there: a context-size-driven
 //! fresh restart, resuming a session for any other kind of follow-up, and the orchestrator-level
 //! handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends all three to a person
-//! today), and [`code_gates::run`], which nothing calls yet.
+//! today). A `pr_opened` answer is gated by [`code_gates::run`] there: a finding resumes the session
+//! (counting against `max_check_rounds`, then a person), and gates that can't run are noted.
 pub mod code_gates;
 pub mod model;
 pub mod prompt;
+pub mod publish;
 pub mod session;
 pub mod start_files;
 #[cfg(test)]

@@ -82,6 +82,9 @@ pub struct SessionOutcome {
     /// The session's latest usage reading, if any, saved as `state.usage` once settled
     /// (docs/specs/agent/07-orchestrator-loop.md section 7.1).
     pub usage: Option<Value>,
+    /// Lines for the item's timeline (the code gates' note, 06.2-implementer.md), logged as the session's
+    /// end settles.
+    pub notes: Vec<String>,
 }
 
 /// The sending end of the outcome channel: cloned into every [`StartRequest`](super::StartRequest).
@@ -303,6 +306,19 @@ impl ProjectLoop {
             if let Err(e) = self.store.save() {
                 tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
             }
+        }
+        for note in &outcome.notes {
+            self.events.add_in(
+                &self.id,
+                Event::ItemState(event::ItemState {
+                    item: Some(item.clone()),
+                    from: Some("implementing".into()),
+                    to: Some("implementing".into()),
+                    note: Some(note.clone()),
+                    lane: Some(lane),
+                    ..Default::default()
+                }),
+            );
         }
         self.events.add_in(
             &self.id,

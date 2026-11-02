@@ -33,6 +33,7 @@ fn the_mode_defaults_to_off_and_reads_the_three_names() {
     assert_eq!(mode(Some("off")), (OrchestratorMode::Off, None));
     assert_eq!(mode(Some("dry")), (OrchestratorMode::Dry, None));
     assert_eq!(mode(Some(" Claim ")), (OrchestratorMode::Claim, None));
+    assert_eq!(mode(Some("RUNS")), (OrchestratorMode::Runs, None));
 }
 
 #[test]
@@ -400,6 +401,20 @@ async fn claim_runs_dry_while_another_agent_answers_and_stays_claim_otherwise() 
 }
 
 #[tokio::test]
+async fn runs_runs_dry_while_another_agent_answers_and_stays_runs_otherwise() {
+    let guard = PortGuard::new(closed_port(), [ts_agent_port().await]);
+    assert_eq!(
+        effective_mode(OrchestratorMode::Runs, &guard).await,
+        OrchestratorMode::Dry
+    );
+    let quiet = PortGuard::new(closed_port(), [closed_port()]);
+    assert_eq!(
+        effective_mode(OrchestratorMode::Runs, &quiet).await,
+        OrchestratorMode::Runs
+    );
+}
+
+#[tokio::test]
 async fn a_claim_mode_tick_still_only_lists_with_or_without_the_guard_blocking() {
     for blocked in [true, false] {
         let (base, asked) = stub().await;
@@ -479,6 +494,7 @@ impl SessionStarter for Fake {
                 result: script.remove(0),
                 context_tokens: *self.context_tokens.lock().unwrap(),
                 usage: None,
+                notes: vec![],
             });
         }
         Ok(())
@@ -769,6 +785,7 @@ async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
         result: SessionResult::NeedsHuman("the session ended without answering".into()),
         usage: Some(usage.clone()),
         context_tokens: None,
+        notes: vec![],
     });
     rig.machine.poll().await;
     assert_eq!(

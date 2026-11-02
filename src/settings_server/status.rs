@@ -121,7 +121,7 @@ pub struct ComputerStatus {
 pub struct Orchestrator {
     pub mode: &'static str,
     /// Quiet when off; says plainly that nothing is claimed when dry.
-    pub note: &'static str,
+    pub note: String,
     pub projects: Vec<OrchestratorProject>,
 }
 
@@ -134,11 +134,18 @@ pub struct OrchestratorProject {
     pub decision: Option<String>,
 }
 
-fn orchestrator_note(mode: OrchestratorMode) -> &'static str {
-    match mode {
-        OrchestratorMode::Off => "Orchestrator off",
-        OrchestratorMode::Dry => "Orchestrator running dry: it reads the backlog and claims nothing",
-        OrchestratorMode::Claim => "Orchestrator running dry (claim isn't built yet): it claims nothing",
+fn orchestrator_note(live: &LiveState) -> String {
+    match live.mode {
+        OrchestratorMode::Off => "Orchestrator off".into(),
+        OrchestratorMode::Dry => "Orchestrator running dry: it reads the backlog and claims nothing".into(),
+        OrchestratorMode::Claim => "Orchestrator running dry (claim isn't built yet): it claims nothing".into(),
+        OrchestratorMode::Runs if live.run_kinds.is_empty() => {
+            "Orchestrator running on runs: it can take no kinds of run yet, so it takes nothing".into()
+        }
+        OrchestratorMode::Runs => format!(
+            "Orchestrator running on runs: it can take {} runs",
+            live.run_kinds.join(", ")
+        ),
     }
 }
 
@@ -297,7 +304,7 @@ pub fn build(
         engines,
         orchestrator: Orchestrator {
             mode: live.mode.name(),
-            note: orchestrator_note(live.mode),
+            note: orchestrator_note(live),
             projects: live
                 .projects
                 .iter()

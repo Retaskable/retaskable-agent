@@ -189,6 +189,7 @@ fn the_status_serialises_with_the_typescript_agents_field_names() {
 fn live(mode: OrchestratorMode, projects: &[(&str, ProjectLive)]) -> LiveState {
     LiveState {
         mode,
+        run_kinds: Vec::new(),
         projects: projects.iter().map(|(id, p)| (id.to_string(), p.clone())).collect(),
     }
 }
@@ -203,7 +204,10 @@ fn off_mode_looks_as_before_with_a_quiet_note() {
     assert!(s.alerts.is_empty(), "off is not an error");
     assert_eq!(s.header.lanes_busy, 0);
     assert!(s.lanes.iter().all(|l| l.state == "free" && l.item.is_none()));
-    assert_eq!((s.orchestrator.mode, s.orchestrator.note), ("off", "Orchestrator off"));
+    assert_eq!(
+        (s.orchestrator.mode, s.orchestrator.note.as_str()),
+        ("off", "Orchestrator off")
+    );
     assert!(s.orchestrator.projects.is_empty());
 }
 
@@ -285,4 +289,19 @@ fn a_paused_project_is_paused_in_the_alerts_and_the_orchestrator_block() {
     assert!(s.alerts[0].title.ends_with("is paused"));
     assert!(s.orchestrator.projects[0].paused);
     assert_eq!(s.header.lanes_busy, 0);
+}
+
+#[test]
+fn runs_mode_says_it_runs_on_runs_and_which_kinds() {
+    let mut l = live(OrchestratorMode::Runs, &[]);
+    let s = status_with(&l);
+    assert_eq!(s.orchestrator.mode, "runs");
+    assert!(s.orchestrator.note.contains("running on runs"));
+    assert!(s.orchestrator.note.contains("no kinds"), "{}", s.orchestrator.note);
+    l.run_kinds = vec!["build".into(), "watch".into()];
+    let s = status_with(&l);
+    assert_eq!(
+        s.orchestrator.note,
+        "Orchestrator running on runs: it can take build, watch runs"
+    );
 }

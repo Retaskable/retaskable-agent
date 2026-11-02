@@ -65,6 +65,36 @@ steps:
           include: [src/bin/bundle.rs, src/bin/package.rs, src/package.rs, "src/package/**", src/app_menu.rs, assets/*.png, "src/release*.rs", "src/release*/**", Cargo.toml, Cargo.lock, .woodpecker/ci.yaml]
     commands:
       - apt-get update && apt-get install -y --no-install-recommends squashfs-tools
-      - cargo run --release --bin bundle
+      # Each build is later than the one before it: Cargo.toml's major.minor with the pipeline number (0.1.812).
+      - MAJOR_MINOR=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml | head -n 1)
+      - cargo run --release --bin bundle -- --version "$MAJOR_MINOR.$CI_PIPELINE_NUMBER"
       # installers/06-macos-and-linux.md section 6.2: the bundle as an AppImage, start-checked (no FUSE here).
       - cargo run --release --bin package
+
+  # installers/03-the-bundle-agent-bundle.md section 3.16: staging's AppImage published on each merge to main, the
+  # package before its feed entry. A push to main only, never a pull request, so a PR's code can't publish. It does
+  # nothing until the `macos-linux-packaging` release flag is on: the Woodpecker secret `macos_linux_packaging` set to
+  # `on` (the human turns it on once this agent replaces the TypeScript one, whose AppImage staging's Linux users
+  # keep getting until then). Credentials are the two secrets only.
+  - name: publish
+    image: rust:1-bookworm
+    depends_on: [bundle]
+    volumes: *cargo_volumes
+    when:
+      - event: push
+        branch: main
+    environment:
+      <<: *cargo_env
+      CLOUDFLARE_API_TOKEN:
+        from_secret: cloudflare_r2_token
+      CLOUDFLARE_ACCOUNT_ID:
+        from_secret: cloudflare_account_id
+      MACOS_LINUX_PACKAGING:
+        from_secret: macos_linux_packaging
+    commands:
+      - |
+        if [ "$MACOS_LINUX_PACKAGING" != "on" ]; then
+          echo "Release flag macos-linux-packaging is off: not publishing."
+          exit 0
+        fi
+        cargo run --release --bin upload-release -- --environment staging

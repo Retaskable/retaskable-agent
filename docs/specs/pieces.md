@@ -42,6 +42,8 @@ The agent keeps no copy of a piece's state:
 
 `state.json` keeps only the computer's own settings and caches: no runs, no tokens, no items.
 
+`RETASKABLE_ORCHESTRATOR=runs` drives each project with this loop instead of the claim loop. It has the same port guard as `claim`: while another agent answers on this computer's ports it runs dry. It asks only for the kinds of the runners it is given; with none it drops old runs on start and asks for nothing. The settings page's status line and the Now tab say it is running on runs, and which kinds it can take.
+
 ### 3.2 The kinds
 
 | Kind | Starts from | Does | Lane | Ends |
