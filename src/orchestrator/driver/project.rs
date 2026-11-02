@@ -236,6 +236,10 @@ pub struct ProjectLoop {
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     max_resume_context_tokens: u32,
+    /// Continues waiting for a free lane (`item_commands.rs`).
+    pub(super) continuing: Vec<super::item_commands::PendingContinue>,
+    /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
+    pub(super) last_lane: BTreeMap<String, u32>,
 }
 
 impl ProjectLoop {
@@ -275,6 +279,8 @@ impl ProjectLoop {
             playtest_round_running: Arc::new(AtomicBool::new(false)),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
+            continuing: Vec::new(),
+            last_lane: BTreeMap::new(),
         }
     }
 
@@ -814,7 +820,7 @@ impl ProjectLoop {
 
 /// Whether Claude Code was found signed out on this computer recently enough that no new or resumed
 /// session should start yet ([`Machine::claude_signed_out_until`](super::Machine), section 7.3).
-fn signed_out(shared: &Shared<'_>) -> bool {
+pub(super) fn signed_out(shared: &Shared<'_>) -> bool {
     shared
         .claude_signed_out_until
         .is_some_and(|until| std::time::Instant::now() < until)

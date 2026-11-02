@@ -180,6 +180,7 @@ impl ProjectLoop {
         if let Some(lane) = pool.lane_of(&self.id, item_id)
             && pool.release(lane, &holder)
         {
+            self.last_lane.insert(item_id.to_string(), lane);
             self.events.add_in(
                 &self.id,
                 Event::LaneFreed(event::LaneFreed {

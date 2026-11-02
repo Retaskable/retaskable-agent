@@ -285,6 +285,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = orchestrator::live::LiveHandle::new(mode);
+    view.item_commands
+        .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
         dir,
         projects: &cfg.projects,
@@ -294,6 +296,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         backlog_url: &backlog::url(env),
         keychain: &keychain,
         paused: &view.paused,
+        item_commands: &view.item_commands,
         live: &live,
         guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
         machine: link::machine_name(env),
@@ -384,6 +387,7 @@ fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &
         chore_lane: cfg.machine.chore_lane,
         lane_sizes: lane_pool::LaneSizes::default(),
         paused: view::PauseState::default(),
+        item_commands: Default::default(),
     }
 }
 

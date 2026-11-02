@@ -37,6 +37,68 @@ pub struct AgentView {
     /// Each paused project's reason, Pause and Resume's (orchestrator.ts's `paused`/`pausedReason`); a change
     /// sends that project's snapshot again, as a lane-size change does.
     pub paused: PauseState,
+    /// Item commands (Continue) the connector's thread hands to the orchestrator loop.
+    pub item_commands: ItemCommands,
+}
+
+/// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
+/// its next pass (agent/09-web-ui.md section 9.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemCommand {
+    /// **Continue** on a stopped item: `notes` (with any picture paths) are the implementer's next message.
+    Continue {
+        project: String,
+        item: String,
+        notes: Option<String>,
+    },
+}
+
+impl ItemCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Continue { project, .. } => project,
+        }
+    }
+}
+
+/// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
+/// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
+/// that carries them out.
+#[derive(Debug, Clone, Default)]
+pub struct ItemCommands {
+    claim: Arc<std::sync::atomic::AtomicBool>,
+    queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
+}
+
+impl PartialEq for ItemCommands {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.queue, &other.queue)
+    }
+}
+
+impl ItemCommands {
+    /// Set once at start: whether the orchestrator really runs in `claim` mode.
+    pub fn set_claim(&self, claim: bool) {
+        self.claim.store(claim, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn claim(&self) -> bool {
+        self.claim.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn push(&self, command: ItemCommand) {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns `project`'s queued commands, oldest first.
+    pub fn take(&self, project: &str) -> Vec<ItemCommand> {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project() == project);
+        *queue = rest;
+        mine
+    }
 }
 
 /// A project's pause, Pause and Resume's (`{ computer: true }` only; the project-wide pause is the shared
@@ -235,6 +297,7 @@ mod tests {
             chore_lane: Some(3),
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
+            item_commands: Default::default(),
         }
     }
 

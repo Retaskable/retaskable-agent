@@ -16,7 +16,9 @@
 //! and what starts the whole loop running; [`report`] is what the minute's fetch tells the store; [`settle`]
 //! is how work the loop started comes back to it; [`playtest_round`] is a project's try-out grouping round,
 //! started in the background after each full pass for the live, unpaused projects whose read succeeded and
-//! whose `playtests` isn't `off`, one round at a time per project, holding no lane.
+//! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
+//! the site's item commands (Continue) that the connector queued.
+mod item_commands;
 mod machine;
 mod playtest_round;
 mod project;

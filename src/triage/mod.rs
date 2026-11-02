@@ -6,9 +6,11 @@
 //! waiting on a person's own steps.
 //!
 //! Not wired to anything yet: [`crate::orchestrator`]'s tick only claims a lane for a `queued`
-//! item so far, nothing notices a `needs_human` item and runs this on it; [`crate::commands`]'s
-//! Continue, Start over and Skip (the buttons this decision would be carried out through) still
-//! need the orchestrator loop and lanes too. [`schedule`] has the cap on automatic decisions and
+//! item so far, nothing notices a `needs_human` item and runs this on it. [`crate::commands`]'s
+//! **Continue** is carried out (queued, then done by the orchestrator loop in `claim` mode,
+//! `orchestrator::driver::item_commands`, with [`schedule::nothing_to_continue`] deciding an item has nothing to
+//! carry on from and is left for Start over); Start over and Skip (the other buttons this decision would
+//! be carried out through) are not built yet. [`schedule`] has the cap on automatic decisions and
 //! the `claudeOnIt` predicate (06.9 bullets 16 and 20) as pure functions over the few item facts
 //! they need, named after the shared backlog's own fields — there is still no item-record data
 //! model in this port for a caller to read those facts from. Also still missing: actually sending

@@ -26,7 +26,7 @@ use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
 use crate::process_tree;
 use crate::telemetry::{Event, event};
-use crate::view::PauseState;
+use crate::view::{ItemCommands, PauseState};
 
 /// How often the loop reads every project's backlog and writes its `tick` events: the TS agent's once a
 /// minute (`MINUTE_MS` in `agent/src/pool.ts`).
@@ -68,6 +68,8 @@ pub struct Links {
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
     pub paused: PauseState,
+    /// Item commands (Continue) queued by the connector's thread, drained on each pass.
+    pub item_commands: ItemCommands,
     /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
     pub machine: String,
     pub environment: String,
@@ -463,6 +465,19 @@ impl Machine {
                     .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     if !paused {
+                        let room = self.concurrency.saturating_sub(starter.active());
+                        lp.carry_out_commands(
+                            &mut self.pool,
+                            starter,
+                            room,
+                            &mut Shared {
+                                links: &self.links,
+                                claim_paused_until: &mut self.claim_paused_until,
+                                claude_signed_out_until: &mut self.claude_signed_out_until,
+                                stopping,
+                            },
+                        )
+                        .await;
                         lp.advance(&self.pool, starter);
                     }
                 }
@@ -569,6 +584,7 @@ pub struct SpawnArgs<'a> {
     pub backlog_url: &'a str,
     pub keychain: &'a Arc<dyn TokenStore>,
     pub paused: &'a PauseState,
+    pub item_commands: &'a ItemCommands,
     pub live: &'a LiveHandle,
     pub guard: Option<&'a PortGuard>,
     pub machine: String,
@@ -599,6 +615,7 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             keychain: args.keychain.clone(),
             paused: args.paused.clone(),
+            item_commands: args.item_commands.clone(),
             machine: args.machine,
             environment: args.environment,
             tags: args.tags,

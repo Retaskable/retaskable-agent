@@ -114,6 +114,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         chore_lane: Some(2),
         lane_sizes: LaneSizes::default(),
         paused: PauseState::default(),
+        item_commands: Default::default(),
     })
 }
 

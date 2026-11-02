@@ -4,12 +4,12 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
+//! So far this runs **Continue** (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
+//! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
-//! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3). Continue
-//! and Start over still need a real running implementer session (milestone 3 of
-//! 11-build-milestones.md); Play still needs the build-and-install command play-on-phone.md
+//! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3). Start
+//! over is not built yet; Play still needs the build-and-install command play-on-phone.md
 //! section 5 describes. Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::galleries;
 use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, Exit};
+use crate::view::{AgentView, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -103,8 +103,97 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "shoot" => shoot(cmd, project, view, data_dir),
+        "continue" => continue_item(cmd, project, view, data_dir),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
+}
+
+/// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4).
+const MAX_PICTURES: usize = 4;
+const MAX_PICTURE_BYTES: usize = 1 << 20;
+const MAX_PICTURES_BYTES: usize = 4 << 20;
+
+/// Checks `args.pictures` (`[{ type, data }]`, base64) and saves them under `<data_dir>/attachments/` as
+/// `<uuid>.<ext>`. All are checked before any is written; one that fails fails them all. The paths, in order.
+fn save_pictures(args: &Value, data_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    use base64::Engine;
+    let list = match args.get("pictures") {
+        None | Some(Value::Null) => return Ok(vec![]),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err("pictures must be a list.".into()),
+    };
+    if list.len() > MAX_PICTURES {
+        return Err(format!("At most {MAX_PICTURES} pictures to a message."));
+    }
+    let mut decoded = Vec::new();
+    let mut total = 0;
+    for (i, p) in list.iter().enumerate() {
+        let ext = match p.get("type").and_then(Value::as_str) {
+            Some("image/png") => "png",
+            Some("image/jpeg") => "jpg",
+            Some("image/gif") => "gif",
+            Some("image/webp") => "webp",
+            _ => return Err(format!("Picture {} isn't a PNG, JPEG, GIF or WebP.", i + 1)),
+        };
+        let bytes = (p.get("data").and_then(Value::as_str))
+            .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| format!("Picture {} isn't valid base64.", i + 1))?;
+        if bytes.len() > MAX_PICTURE_BYTES {
+            return Err(format!("Picture {} is over 1 MiB.", i + 1));
+        }
+        total += bytes.len();
+        decoded.push((ext, bytes));
+    }
+    if total > MAX_PICTURES_BYTES {
+        return Err("The pictures are over 4 MiB in all.".into());
+    }
+    let dir = data_dir.join("attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the pictures: {e}"))?;
+    let mut paths = Vec::new();
+    for (ext, bytes) in decoded {
+        let path = dir.join(format!("{}.{ext}", crate::implementer::new_session_id()));
+        std::fs::write(&path, bytes).map_err(|e| format!("Couldn't save the pictures: {e}"))?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// **Continue** (`continue { id, notes?, pictures? }`): saves the pictures, adds their paths after the notes, and
+/// queues the command for the orchestrator loop (`orchestrator::driver::item_commands`), which carries it out on its
+/// next pass. Refused outside `claim` mode, the only mode that runs sessions.
+fn continue_item(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    if id.is_empty() {
+        return nack(&cmd.id, "Continue needs the item's id.".into());
+    }
+    if !view.item_commands.claim() {
+        return nack(
+            &cmd.id,
+            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
+        );
+    }
+    let pictures = match save_pictures(&cmd.args, data_dir) {
+        Ok(p) => p,
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    let mut notes = cmd
+        .args
+        .get("notes")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    for path in &pictures {
+        notes.push_str(if notes.is_empty() { "Picture: " } else { "\nPicture: " });
+        notes.push_str(&path.display().to_string());
+    }
+    view.item_commands.push(ItemCommand::Continue {
+        project: project.to_string(),
+        item: id.to_string(),
+        notes: (!notes.is_empty()).then_some(notes),
+    });
+    ack(&cmd.id)
 }
 
 /// Finds `cmd`'s gallery by its `gallery` slug (`GalleryConfig::slug`) among `project`'s own, runs
@@ -151,6 +240,19 @@ fn nack(id: &str, reason: String) -> Value {
     json!({ "type": "nack", "id": id, "reason": reason })
 }
 
+/// A command's args for the log: pictures as `{ count, bytes }` only, never their data (tray/05.3 section 5.3.4).
+fn audit_args(args: &Value) -> Value {
+    let mut args = args.clone();
+    if let Some(Value::Array(list)) = args.get("pictures") {
+        let bytes: usize = (list.iter())
+            .filter_map(|p| p.get("data").and_then(Value::as_str))
+            .map(str::len)
+            .sum();
+        args["pictures"] = json!({ "count": list.len(), "bytes": bytes });
+    }
+    args
+}
+
 /// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
 /// ones and replays included, never a `read_file`'s content — moot so far, since no read command
 /// is ported yet. `answerBytes` and `auditArgs`'s release_edit/ci_link/picture-count sanitising
@@ -163,7 +265,7 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     entry.insert("id".into(), json!(cmd.id));
     entry.insert("name".into(), json!(cmd.name));
     entry.insert("issuedBy".into(), json!(cmd.issued_by));
-    entry.insert("args".into(), cmd.args.clone());
+    entry.insert("args".into(), audit_args(&cmd.args));
     entry.insert("outcome".into(), json!(outcome));
     if outcome == "nack" {
         entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));
@@ -207,6 +309,7 @@ mod tests {
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            item_commands: Default::default(),
         }
     }
 
@@ -333,17 +436,11 @@ mod tests {
 
     #[test]
     fn an_unported_command_is_named_in_its_nack() {
+        let cmd = |name| cmd(name, json!({}));
         let v = view();
         let noop = |_: i32| {};
-        let answer = run(
-            &cmd("continue", json!({})),
-            "one",
-            &mut Seen::default(),
-            &v,
-            &noop,
-            &data_dir(),
-        );
-        assert_eq!(answer["reason"], "Not a command this agent takes yet: continue");
+        let answer = run(&cmd("play"), "one", &mut Seen::default(), &v, &noop, &data_dir());
+        assert_eq!(answer["reason"], "Not a command this agent takes yet: play");
     }
 
     #[test]
@@ -434,5 +531,111 @@ mod tests {
             galleries::status("commands-shoot-happy-path", "models"),
             galleries::GalleryStatus::Idle
         );
+    }
+
+    fn claiming() -> AgentView {
+        let v = view();
+        v.item_commands.set_claim(true);
+        v
+    }
+
+    fn go(v: &AgentView, args: Value, dir: &Path) -> Value {
+        run(&cmd("continue", args), "one", &mut Seen::default(), v, &|_| {}, dir)
+    }
+
+    fn picture(bytes: usize) -> Value {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(vec![7u8; bytes]);
+        json!({ "type": "image/png", "data": data })
+    }
+
+    #[test]
+    fn continue_queues_the_notes_and_acks() {
+        let v = claiming();
+        let answer = go(&v, json!({ "id": "a", "notes": " Try again. " }), &data_dir());
+        assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
+        assert_eq!(
+            v.item_commands.take("one"),
+            vec![ItemCommand::Continue {
+                project: "one".into(),
+                item: "a".into(),
+                notes: Some("Try again.".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn continue_without_notes_queues_none() {
+        let v = claiming();
+        go(&v, json!({ "id": "a" }), &data_dir());
+        let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0);
+        assert_eq!(notes, None);
+    }
+
+    #[test]
+    fn continue_needs_an_id_and_claim_mode() {
+        let v = claiming();
+        assert!(
+            go(&v, json!({}), &data_dir())["reason"]
+                .as_str()
+                .unwrap()
+                .contains("id")
+        );
+        assert!(go(&v, json!({ "id": "  " }), &data_dir())["type"] == "nack");
+        let off = view();
+        let answer = go(&off, json!({ "id": "a" }), &data_dir());
+        assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
+        assert!(off.item_commands.take("one").is_empty());
+    }
+
+    #[test]
+    fn continue_saves_pictures_under_attachments_and_adds_their_paths_after_the_notes() {
+        let v = claiming();
+        let dir = tempfile::tempdir().unwrap();
+        let answer = go(
+            &v,
+            json!({ "id": "a", "notes": "See this.", "pictures": [picture(10), picture(20)] }),
+            dir.path(),
+        );
+        assert_eq!(answer["type"], "ack");
+        let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0);
+        let notes = notes.unwrap();
+        let files: Vec<_> = std::fs::read_dir(dir.path().join("attachments")).unwrap().collect();
+        assert_eq!(files.len(), 2);
+        for f in files {
+            let path = f.unwrap().path();
+            assert!(notes.contains(&path.display().to_string()));
+            assert_eq!(path.extension().unwrap(), "png");
+        }
+        assert!(notes.starts_with("See this.\nPicture: "));
+    }
+
+    #[test]
+    fn a_bad_or_oversized_picture_nacks_and_saves_nothing() {
+        let v = claiming();
+        let dir = tempfile::tempdir().unwrap();
+        let too_many = json!([picture(1), picture(1), picture(1), picture(1), picture(1)]);
+        let bad_type = json!([picture(1), { "type": "image/bmp", "data": "AAAA" }]);
+        let bad_data = json!([picture(1), { "type": "image/png", "data": "***" }]);
+        let big = json!([picture(1), picture((1 << 20) + 1)]);
+        let in_all = json!([
+            picture(1 << 20),
+            picture(1 << 20),
+            picture(1 << 20),
+            picture(1 << 20),
+            picture(1)
+        ]);
+        for pictures in [too_many, bad_type, bad_data, big, in_all] {
+            let answer = go(&v, json!({ "id": "a", "pictures": pictures }), dir.path());
+            assert_eq!(answer["type"], "nack", "{answer}");
+        }
+        assert!(!dir.path().join("attachments").exists());
+        assert!(v.item_commands.take("one").is_empty());
+    }
+
+    #[test]
+    fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
+        let args = json!({ "id": "a", "pictures": [{ "type": "image/png", "data": "AAAA" }] });
+        assert_eq!(audit_args(&args)["pictures"], json!({ "count": 1, "bytes": 4 }));
     }
 }
