@@ -59,6 +59,15 @@ pub fn resolve_git_on_path(env: &Env) -> GitLauncher {
 /// The launcher for this process's PATH, looked up once ("It's looked up once per PATH").
 static LAUNCHER: LazyLock<GitLauncher> = LazyLock::new(|| resolve_git_on_path(&Env::from_process_raw()));
 
+/// The program [`command`] starts, for code that takes a git binary path: the real git.exe when
+/// [`LAUNCHER`] found one, otherwise `git`.
+pub fn program() -> &'static Path {
+    match &*LAUNCHER {
+        GitLauncher::Plain => Path::new("git"),
+        GitLauncher::Real { exe, .. } => exe,
+    }
+}
+
 /// A `Command` for running git in `dir`: the real git.exe directly when [`LAUNCHER`] found Git for
 /// Windows' launcher first on PATH, otherwise plain `git`. This is the one place the agent's own
 /// code should build a git `Command` from.

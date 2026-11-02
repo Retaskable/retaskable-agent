@@ -92,7 +92,11 @@ fn decode_file(file: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = file.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
+            // `from_str_radix` accepts a leading `+`, which isn't a percent-escape.
+            let hex = file
+                .get(i + 1..i + 3)
+                .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .and_then(|h| u8::from_str_radix(h, 16).ok());
             let Some(b) = hex else { return file.to_string() };
             out.push(b);
             i += 3;
@@ -421,5 +425,11 @@ mod tests {
             ["docs/x.md", "docs/specs/sub/My Spec.md"]
         );
         assert_eq!(decode_file("a%zz.md"), "a%zz.md");
+    }
+
+    #[test]
+    fn a_plus_sign_is_not_a_percent_escape() {
+        assert_eq!(decode_file("a%+1.md"), "a%+1.md");
+        assert_eq!(decode_file("a%41.md"), "aA.md");
     }
 }
