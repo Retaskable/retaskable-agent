@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -234,7 +233,7 @@ async fn attempt(job: &Job, cwd: &Path, start: Start<'_>, fresh: bool, name: Str
         session_id,
         ..
     } = job;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = crate::telemetry::now_ms() / 1000;
     let tier = implementer_tier(usage.as_ref(), now, models);
     let model = implementer_model(tier, item).to_string();
     let branch = branch_name(item);
