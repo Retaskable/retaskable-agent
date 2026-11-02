@@ -255,19 +255,42 @@ fn settled(
     )
 }
 
+/// The folder a session runs in: an `existing` lane kept as it is, after stopping anything the old session left
+/// running in it, or else the lane prepared on the item's branch (the branch keeps the commits).
+async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
+    match existing {
+        Some(dir) => {
+            let stop = dir.clone();
+            tokio::task::spawn_blocking(move || lanes::kill_processes_in(&stop))
+                .await
+                .context("stopping what the old session left running")?
+                .context("stopping what the old session left running")?;
+            Ok(dir)
+        }
+        None => {
+            let (repo, worktrees) = (
+                PathBuf::from(&job.project.repo_path),
+                PathBuf::from(&job.project.worktrees_dir),
+            );
+            let (base, branch, lane) = (job.project.base_branch.clone(), branch_name(&job.item), job.lane);
+            tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base))
+                .await
+                .context("preparing the lane")?
+                .context("preparing the lane")
+        }
+    }
+}
+
 async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
-    let branch = branch_name(&job.item);
-    let (repo, worktrees, base) = (
-        PathBuf::from(&job.project.repo_path),
-        PathBuf::from(&job.project.worktrees_dir),
-        job.project.base_branch.clone(),
-    );
+    let worktrees = PathBuf::from(&job.project.worktrees_dir);
     let (lane, max_turns) = (job.lane, job.max_turns);
     if let Some(follow_up) = &job.follow_up {
-        // A restart after running out of turns reuses the lane exactly as it was left: `lanes::prepare`
-        // would hard-reset the branch, discarding the prior session's uncommitted work. Never resumes: a
-        // maxed-out session has nothing left to resume into, so this always runs under a fresh id.
-        let cwd = lanes::lane_path(&worktrees, lane);
+        // A restart after running out of turns, or of a session that had grown too large, reuses the lane
+        // exactly as it was left (stopping what the old session left running in it): `lanes::prepare` would
+        // hard-reset the branch, discarding the prior session's uncommitted work. It's only prepared if the
+        // folder is gone. Never resumes: it always runs under a fresh id.
+        let existing = Some(lanes::lane_path(&worktrees, lane)).filter(|d| d.is_dir());
+        let cwd = lane_for(&job, existing).await?;
         let name = format!("{}.jsonl", job.session_id);
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
@@ -284,23 +307,7 @@ async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
         .then(|| lanes::lane_path(&worktrees, lane))
         .filter(|d| d.is_dir());
     loop {
-        let cwd = match resuming.clone() {
-            Some(dir) => {
-                let stop = dir.clone();
-                tokio::task::spawn_blocking(move || lanes::kill_processes_in(&stop))
-                    .await
-                    .context("stopping what the old session left running")?
-                    .context("stopping what the old session left running")?;
-                dir
-            }
-            None => {
-                let (repo, worktrees, base, branch) = (repo.clone(), worktrees.clone(), base.clone(), branch.clone());
-                tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base))
-                    .await
-                    .context("preparing the lane")?
-                    .context("preparing the lane")?
-            }
-        };
+        let cwd = lane_for(&job, resuming.clone()).await?;
         let resumed = resuming.is_some();
         let start = if resumed {
             Start::Resume {

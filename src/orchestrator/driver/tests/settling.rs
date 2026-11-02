@@ -289,3 +289,21 @@ async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     assert!(!kinds(&mut rig).contains(&"step_start".to_string()));
 }
+
+#[tokio::test]
+async fn a_session_ending_saves_its_context_size_and_a_fresh_start_clears_it() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    *fake.context_tokens.lock().unwrap() = Some(42_000);
+    fake.script.lock().unwrap().push(done(ImplementerOutcome::Finished));
+    rig.machine.pass().await;
+    assert_eq!(
+        rig.lp(0).records["a"].impl_context_tokens,
+        None,
+        "a fresh start has no size"
+    );
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).records["a"].impl_context_tokens, Some(42_000));
+    assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, Some(42_000));
+}
