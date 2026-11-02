@@ -19,6 +19,7 @@ Only the specs whose subject is the computer itself:
 - [local-state-diet.md](local-state-diet.md): the per-computer state file.
 - [pieces.md](pieces.md): taking work as short runs on pieces, instead of claiming whole items.
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
+- [agent-ci.md](agent-ci.md): CI run on the agent computer, in Docker, on its own slot.
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
 
 ## What was cut
