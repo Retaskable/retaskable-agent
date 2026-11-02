@@ -148,3 +148,63 @@ pub fn check_not_linked_log(build: &Build, scratch: &Path) -> Result<(), String>
     }
     Ok(())
 }
+
+/// Section 3.10's start check, shared by `bundle` and `package`: starts `exe` with a scratch home
+/// (so its folders are new and its secrets go to a file there), then fails unless, within 60
+/// seconds, `GET /api/health` answers `build`'s version, nothing reached the terminal and the log
+/// has the `Links:` line saying not linked. `extra_env` is set too (an AppImage's
+/// `APPIMAGE_EXTRACT_AND_RUN`). With `own_group` (Unix) the child leads its own process group and
+/// the whole group is stopped, for an AppImage whose runtime runs the agent as its child; else just
+/// the child is.
+pub fn start_check(
+    exe: &Path,
+    build: &Build,
+    prefix: &str,
+    extra_env: &[(&str, &str)],
+    own_group: bool,
+) -> Result<(), String> {
+    let scratch = ScratchDir::new(prefix)?;
+    let port = free_port().map_err(|e| format!("finding a free port for the start check: {e}"))?;
+
+    let mut cmd = std::process::Command::new(exe);
+    for key in ["HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_DATA_HOME", "XDG_STATE_HOME"] {
+        cmd.env(key, scratch.path());
+    }
+    cmd.env("RETASKABLE_PORT", port.to_string())
+        .env("RETASKABLE_CREDENTIALS_FILE", scratch.path().join("credentials.json"))
+        .envs(extra_env.iter().copied())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    if own_group {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("running {}: {e}", exe.display()))?;
+
+    let health = wait_for_health(port, &build.version);
+    stop(&mut child, own_group);
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting for {}: {e}", exe.display()))?;
+    health?;
+    check_silent_terminal(exe, &output)?;
+    check_not_linked_log(build, scratch.path())
+}
+
+#[cfg(unix)]
+fn stop(child: &mut std::process::Child, own_group: bool) {
+    if own_group {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &format!("-{}", child.id())])
+            .status();
+    } else {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn stop(child: &mut std::process::Child, _own_group: bool) {
+    let _ = child.kill();
+}

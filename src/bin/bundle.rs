@@ -14,11 +14,11 @@
 //! all four. A cross-built target gets no `--version` or start check: it can't be run on this machine.
 //! Nor does this check the Windows executable's PE subsystem (section 3.2/3.9): it isn't set to hide
 //! the console yet, which needs the tray this port doesn't have.
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use retaskable_agent::release;
-use retaskable_agent::release_check::{self, arg, free_port, wait_for_health};
+use retaskable_agent::release_check::{self, arg};
 
 fn main() {
     release_check::run_main(run);
@@ -146,7 +146,7 @@ fn run() -> Result<(), String> {
         version: version.clone(),
         commit: commit.clone(),
     };
-    start_check(&placed, &build)?;
+    release_check::start_check(&placed, &build, "retaskable-bundle-check", &[], false)?;
 
     println!("Built {target} {version} ({commit}) at {}", out.display());
     Ok(())
@@ -157,39 +157,6 @@ fn run() -> Result<(), String> {
 /// both). Any other combination needs a cross toolchain this port doesn't wire up yet (section 3.9).
 fn buildable_here(host: &str, requested: &str) -> bool {
     requested == host || (host.starts_with("mac-") && requested.starts_with("mac-"))
-}
-
-/// Section 3.10's start check: starts `placed` as an installed agent is started — a scratch home, so its
-/// folders are new, and its secrets go to a file there rather than this machine's own credential store
-/// (section 3.10's 2026-10-18 incident, when a scratch run spent and lost this machine's own refresh token
-/// by sharing its credential store instead). Fails unless, within 60 seconds, `GET /api/health` answers
-/// `build`'s version, the log has the `Links:` line saying not linked, and nothing reached the terminal.
-fn start_check(placed: &Path, build: &release::Build) -> Result<(), String> {
-    let scratch = release_check::ScratchDir::new("retaskable-bundle-check")?;
-    let port = free_port().map_err(|e| format!("finding a free port for the start check: {e}"))?;
-
-    let mut child = Command::new(placed)
-        .env("HOME", scratch.path())
-        .env("USERPROFILE", scratch.path())
-        .env("LOCALAPPDATA", scratch.path())
-        .env("XDG_DATA_HOME", scratch.path())
-        .env("XDG_STATE_HOME", scratch.path())
-        .env("RETASKABLE_PORT", port.to_string())
-        .env("RETASKABLE_CREDENTIALS_FILE", scratch.path().join("credentials.json"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("running {}: {e}", placed.display()))?;
-
-    let health = wait_for_health(port, &build.version);
-    let _ = child.kill();
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("waiting for {}: {e}", placed.display()))?;
-    health?;
-    release_check::check_silent_terminal(placed, &output)?;
-    release_check::check_not_linked_log(build, scratch.path())
 }
 
 fn git_short_head(dir: &std::path::Path) -> Result<String, String> {
