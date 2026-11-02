@@ -27,6 +27,7 @@ fn test_agent() -> ClaimNextAgent {
         machine: "box-1".to_string(),
         environment: "Production".to_string(),
         base_branch: "main".to_string(),
+        tags: Vec::new(),
     }
 }
 
@@ -118,6 +119,10 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
         assert_eq!(req["op"], "claim_next");
         assert_eq!(req["args"]["agent"]["machine"], "box-1");
         assert_eq!(req["args"]["agent"]["baseBranch"], "main");
+        assert!(
+            req["args"]["agent"].as_object().unwrap().get("tags").is_none(),
+            "left out when this computer has none"
+        );
         Json(json!({
             "value": {
                 "item": { "id": "a", "title": "First", "status": "claimed", "rank": 0 },
@@ -136,6 +141,21 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
         }
         ClaimNextAnswer::Nothing => panic!("expected an item"),
     }
+}
+
+#[tokio::test]
+async fn claim_next_sends_this_computers_tags_when_it_has_any() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["args"]["agent"]["tags"], json!(["windows", "gpu"]));
+        Json(json!({ "value": null }))
+    }))
+    .await;
+
+    let agent = ClaimNextAgent {
+        tags: vec!["windows".to_string(), "gpu".to_string()],
+        ..test_agent()
+    };
+    Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
 }
 
 #[tokio::test]
@@ -193,6 +213,50 @@ async fn tryout_add_leaves_out_pr_url_when_there_is_none() {
 }
 
 #[tokio::test]
+async fn tryouts_list_sends_no_args_and_reads_the_waiting_queue_and_its_last_grouping() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "tryouts_list");
+        assert_eq!(req["args"], json!({}));
+        Json(json!({
+            "value": {
+                "waiting": [
+                    { "key": "a@2026-10-28T00:00:00Z", "itemId": "a", "title": "Charts",
+                      "what": "Open the charts page", "steps": ["Open it"] },
+                    { "key": "b@main@sha1", "itemId": "b", "title": "Second", "what": "Look at it",
+                      "steps": [], "onBranch": { "branch": "main", "sha": "sha1" } },
+                ],
+                "groups": { "signature": "a@2026-10-28T00:00:00Z", "at": 1000 },
+            }
+        }))
+    }))
+    .await;
+
+    let list = Client::new(base).tryouts_list(1, Some("tok")).await.unwrap();
+    assert_eq!(list.waiting.len(), 2);
+    assert_eq!(list.waiting[0].steps, vec!["Open it".to_string()]);
+    assert!(list.waiting[0].on_branch.is_none());
+    assert_eq!(
+        list.waiting[1].on_branch,
+        Some(OnBranch {
+            branch: "main".to_string(),
+            sha: "sha1".to_string(),
+        })
+    );
+    let groups = list.groups.unwrap();
+    assert_eq!(groups.signature, "a@2026-10-28T00:00:00Z");
+    assert_eq!(groups.at, 1000);
+}
+
+#[tokio::test]
+async fn tryouts_list_reads_no_groups_as_none() {
+    let base = fake_store(post(|| async { Json(json!({ "value": { "waiting": [] } })) })).await;
+
+    let list = Client::new(base).tryouts_list(1, Some("tok")).await.unwrap();
+    assert!(list.waiting.is_empty());
+    assert!(list.groups.is_none());
+}
+
+#[tokio::test]
 async fn tryout_result_sends_the_key_outcome_and_notes() {
     let base = fake_store(post(|Json(req): Json<Value>| async move {
         assert_eq!(req["op"], "tryout_result");
@@ -225,6 +289,24 @@ async fn release_sends_the_item_id_and_its_lease_token() {
     .await;
 
     Client::new(base).release(1, Some("tok"), "a", "lease-1").await.unwrap();
+}
+
+#[tokio::test]
+async fn report_sends_the_item_id_its_lease_token_and_the_note() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "report");
+        assert_eq!(
+            req["args"],
+            json!({ "id": "a", "token": "lease-1", "note": "a computer's own failure" })
+        );
+        Json(json!({}))
+    }))
+    .await;
+
+    Client::new(base)
+        .report(1, Some("tok"), "a", "lease-1", "a computer's own failure")
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

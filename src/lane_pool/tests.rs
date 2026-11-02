@@ -179,6 +179,29 @@ fn running_work_keeps_a_lane_past_the_limit_and_a_cursor_lane_is_never_held_back
 }
 
 #[test]
+fn lane_scaling_holds_back_the_chore_lane_too() {
+    // The chore lane is new work like any other: once scaling narrows lanes to `base`, a chore
+    // lane past that limit shouldn't be handed out either, same as a roadmap lane past it.
+    let mut pool = LanePool::new(PoolRules {
+        chore_lane: Some(3),
+        scaling: Some(LaneScaling {
+            base: 1,
+            below_used_pct: 50.0,
+        }),
+        ..rules(3)
+    });
+    pool.set_used_pct(Some(60.0));
+    assert!(pool.scaled_out(3));
+    let mut chore = want("p", "chore-1");
+    chore.chore = true;
+    assert_eq!(
+        pool.claim_lane(&chore),
+        None,
+        "the chore lane is past the scaled-down limit"
+    );
+}
+
+#[test]
 fn free_lane_leaves_out_a_lane_whose_engine_cant_start() {
     let pool = LanePool::new(rules(2));
     assert_eq!(pool.free_lane(false, None, None, |k| k != 1), Some(2));
@@ -256,4 +279,48 @@ fn lane_sizes_are_kept_per_project_and_heard_only_on_a_change() {
     sizes.set("q", BTreeMap::from([(1, 3.3)]));
     assert_eq!(sizes.gb("q", 1), 3.3);
     assert_eq!(sizes.gb("p", 1), 0.0);
+}
+
+fn run(project: &str, piece: &str) -> Holder {
+    Holder::Run {
+        project: project.into(),
+        piece: piece.into(),
+    }
+}
+
+#[test]
+fn a_run_takes_a_free_lane_and_gives_it_back_whatever_the_outcome() {
+    let mut pool = LanePool::new(rules(2));
+    assert_eq!(pool.claim_run("p", "a"), Some(1));
+    assert_eq!(pool.holder(1), Some(&run("p", "a")));
+    assert!(pool.release(1, &run("p", "a")));
+    assert_eq!(pool.holder(1), None);
+}
+
+#[test]
+fn a_run_on_the_same_piece_gets_its_last_lane_when_free_else_another() {
+    let mut pool = LanePool::new(rules(3));
+    assert_eq!(pool.claim_run("p", "x"), Some(1));
+    assert_eq!(pool.claim_run("p", "a"), Some(2));
+    assert!(pool.release(2, &run("p", "a")));
+    assert_eq!(pool.claim_run("p", "a"), Some(2), "its build is warm there");
+    assert!(pool.release(2, &run("p", "a")));
+    assert_eq!(pool.claim_run("p", "y"), Some(2));
+    assert_eq!(pool.claim_run("p", "a"), Some(3), "its last lane is taken");
+}
+
+#[test]
+fn the_lane_limit_caps_runs() {
+    let mut pool = LanePool::new(rules(3));
+    pool.set_rules(PoolRules {
+        lanes: 3,
+        scaling: Some(LaneScaling {
+            base: 1,
+            below_used_pct: 50.0,
+        }),
+        ..PoolRules::default()
+    });
+    pool.set_used_pct(Some(90.0));
+    assert_eq!(pool.claim_run("p", "a"), Some(1));
+    assert_eq!(pool.claim_run("p", "b"), None);
 }

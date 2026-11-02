@@ -176,10 +176,11 @@ pub fn kill_processes_in(dir: &Path) -> Result<usize> {
 /// Relative dependency paths in a Cargo.toml or package.json that climb out of the file's folder
 /// (`path = "../…"`, `"file:../…"`, `"link:../…"`).
 pub fn outside_paths(manifest: &str) -> Vec<String> {
+    let manifest = strip_line_comments(manifest);
     let mut found = Vec::new();
-    for path in path_eq_values(manifest)
+    for path in path_eq_values(&manifest)
         .into_iter()
-        .chain(file_or_link_values(manifest))
+        .chain(file_or_link_values(&manifest))
     {
         if path.starts_with("..") && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
             found.push(path);
@@ -373,7 +374,7 @@ fn is_worktree(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
-fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
+pub(crate) fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
     let mut found = Vec::new();
     let entries = match std::fs::read_dir(worktrees_dir) {
         Ok(entries) => entries,
@@ -435,6 +436,29 @@ fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "remove", "--force"]).arg(lane_path))
 }
 
+/// Drops `# …` to end of line (a TOML comment) outside a quoted string, so a commented-out
+/// `path = "../…"` isn't scanned as a live dependency.
+fn strip_line_comments(manifest: &str) -> String {
+    let mut out = String::with_capacity(manifest.len());
+    for line in manifest.split('\n') {
+        let mut in_string = false;
+        let mut end = line.len();
+        for (idx, ch) in line.char_indices() {
+            match ch {
+                '"' => in_string = !in_string,
+                '#' if !in_string => {
+                    end = idx;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        out.push_str(&line[..end]);
+        out.push('\n');
+    }
+    out
+}
+
 fn path_eq_values(manifest: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = manifest.as_bytes();
@@ -485,7 +509,7 @@ fn quoted_string(s: &str) -> Option<&str> {
     Some(&s[..end])
 }
 
-fn processes_in(dir: &Path) -> Result<Vec<u32>> {
+pub(crate) fn processes_in(dir: &Path) -> Result<Vec<u32>> {
     // Command lines may use either the path as given or its resolved form: on macOS, /var and
     // /tmp are symlinks to /private/..., so a process started as `/var/folders/.../lane-1/...`
     // never matches a root resolved to `/private/var/folders/.../lane-1/`.
@@ -588,14 +612,24 @@ pub(crate) fn kill_tree(pid: u32) -> Result<()> {
     }
 }
 
-#[cfg(not(windows))]
-fn descendants_of(pid: u32) -> Vec<u32> {
-    let output = match Command::new("ps").args(["-axo", "pid=,ppid="]).output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
+/// Every running pid paired with its parent pid, for [`descendants_of`].
+fn process_parent_pairs() -> Vec<(u32, u32)> {
+    #[cfg(windows)]
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }"#,
+        ])
+        .output();
+    #[cfg(not(windows))]
+    let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output();
+    let Ok(output) = output else {
+        return Vec::new();
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut pairs = Vec::new();
     for line in stdout.lines() {
         let mut parts = line.split_whitespace();
         let (Some(child), Some(parent)) = (parts.next(), parts.next()) else {
@@ -604,6 +638,19 @@ fn descendants_of(pid: u32) -> Vec<u32> {
         let (Ok(child), Ok(parent)) = (child.parse::<u32>(), parent.parse::<u32>()) else {
             continue;
         };
+        pairs.push((child, parent));
+    }
+    pairs
+}
+
+/// Every pid descending from `pid` (children, grandchildren, ...), by walking the live process
+/// tree. Used both by [`kill_tree`] on Linux/macOS, where stopping only the matched pid misses a
+/// relocated child, and by `shutdown::stop_other_sessions` to tell the agent's own sessions apart
+/// from someone else's unrelated process that happens to share a command line path
+/// (docs/specs/agent/07.4-stopping-and-restarting.md, the restart-cuts-sessions review).
+pub(crate) fn descendants_of(pid: u32) -> Vec<u32> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (child, parent) in process_parent_pairs() {
         children.entry(parent).or_default().push(child);
     }
     let mut out = Vec::new();
@@ -622,7 +669,6 @@ fn descendants_of(pid: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Stdio;
 
     /// A bare repo with one commit, so `git worktree add` has a HEAD to check out.
     fn init_repo(dir: &Path) {
@@ -766,6 +812,12 @@ mod tests {
     }
 
     #[test]
+    fn outside_paths_ignores_a_commented_out_dependency() {
+        let cargo = "[dependencies]\n# void_engine = { path = \"../void-engine\" }\nserde = \"1\" # path = \"../x\"\n";
+        assert_eq!(outside_paths(cargo), Vec::<String>::new());
+    }
+
+    #[test]
     fn lexically_normalize_folds_parent_dir_components_with_no_filesystem_access() {
         // The POSIX bug this guards against: `std::path::absolute` leaves `..` in place, so a
         // path through a lane that climbs out must be folded by hand instead.
@@ -901,8 +953,8 @@ mod tests {
         std::fs::create_dir_all(&lane).unwrap();
         std::fs::create_dir_all(&other).unwrap();
 
-        let mut in_lane = hold_process(&lane);
-        let mut outside = hold_process(&other);
+        let mut in_lane = crate::test_support::hold_process(&lane);
+        let mut outside = crate::test_support::hold_process(&other);
         // Wait until the OS lists the in-lane process (CIM can lag on a busy machine).
         let deadline = Instant::now() + Duration::from_secs(10);
         while processes_in(&lane).unwrap().is_empty() {
@@ -919,42 +971,5 @@ mod tests {
         assert!(outside.try_wait().unwrap().is_none(), "lane-10 keeps running");
         let _ = outside.kill();
         let _ = outside.wait();
-    }
-
-    /// Starts a long-lived process whose command line contains `dir`, so `processes_in` finds it.
-    fn hold_process(dir: &Path) -> std::process::Child {
-        #[cfg(windows)]
-        {
-            let script = dir.join("hold.cmd");
-            // Absolute path in the script body so CIM's CommandLine matches even when the
-            // launcher rewrites argv.
-            let marker = dir.to_string_lossy().replace('"', "");
-            std::fs::write(
-                &script,
-                format!("@echo off\nrem retaskable-lane {marker}\n:loop\nping -n 60 127.0.0.1 >nul\ngoto loop\n"),
-            )
-            .unwrap();
-            Command::new("cmd")
-                .args(["/C", "call", script.to_str().unwrap()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap()
-        }
-        #[cfg(not(windows))]
-        {
-            let script = dir.join("hold.sh");
-            std::fs::write(&script, "#!/bin/sh\nwhile true; do sleep 3600; done\n").unwrap();
-            let _ = Command::new("chmod").args(["+x", script.to_str().unwrap()]).status();
-            Command::new("sh")
-                .arg(&script)
-                .current_dir(dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap()
-        }
     }
 }

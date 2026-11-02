@@ -278,7 +278,7 @@ mod tests {
         );
         assert_eq!(runs["a"].state, ItemState::NeedsHuman);
         assert_eq!(pool.lane_of("proj", "a"), None);
-        let kinds: Vec<_> = events.recent().iter().map(|e| e.kind()).collect();
+        let kinds: Vec<_> = events.recent().iter().map(event::Entry::kind).collect();
         assert_eq!(
             kinds,
             vec!["item_state"],

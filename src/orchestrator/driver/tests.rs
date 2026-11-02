@@ -1,9 +1,27 @@
 use super::*;
+use crate::backlog::Client;
+use crate::config::EngineChoiceConfig;
+use crate::env::Env;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
+use crate::lane_pool::Holder;
+use crate::link::TokenStore;
+use crate::orchestrator::guard::PortGuard;
+use crate::orchestrator::live::{HeldLane, LiveHandle};
+use crate::orchestrator::steps::StepRequest;
+use crate::store::{RunRecord, Store};
+use crate::telemetry::EventLog;
+use crate::telemetry::event::Entry;
 use crate::test_support::item_lifecycle_cfg;
+use crate::view::PauseState;
+use anyhow::Result;
 use axum::{Json, Router, routing::post};
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
+use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
 
 #[test]
 fn the_mode_defaults_to_off_and_reads_the_three_names() {
@@ -115,6 +133,9 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         paused: PauseState::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
+        tags: Vec::new(),
+        env: Env::empty(),
+        engine_choice: EngineChoiceConfig::default(),
     };
     let mut machine = Machine::new(lanes, 8, links);
     for (i, base) in bases.iter().enumerate() {
@@ -167,7 +188,7 @@ async fn one_dry_tick_writes_a_tick_event_and_asks_the_store_only_to_list() {
             .events()
             .recent()
             .iter()
-            .map(|e| e.to_value())
+            .map(Entry::to_value)
             .collect::<Vec<_>>(),
         vec![json!({
             "at": "1970-01-01T00:00:00.000Z",
@@ -231,7 +252,7 @@ async fn an_unreachable_backlog_is_a_store_error_and_no_tick() {
     // Port 1 on loopback refuses connections.
     let mut rig = rig(2, &["http://127.0.0.1:1"]);
     assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
-    let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(|e| e.kind()).collect();
+    let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(Entry::kind).collect();
     assert_eq!(kinds, vec!["store_error"]);
     assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "list");
 }
@@ -456,6 +477,7 @@ impl SessionStarter for Fake {
                 lane: request.lane,
                 result: script.remove(0),
                 context_tokens: *self.context_tokens.lock().unwrap(),
+                usage: None,
             });
         }
         Ok(())
@@ -527,7 +549,7 @@ fn ops(asked: &Asked) -> Vec<String> {
 }
 
 fn kinds(rig: &mut Rig) -> Vec<String> {
-    rig.lp(0).events().recent().iter().map(|e| e.kind()).collect()
+    rig.lp(0).events().recent().iter().map(Entry::kind).collect()
 }
 
 fn handed_out() -> Option<Value> {
@@ -564,6 +586,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             resume: false,
             outcomes: rig.machine.outcome_sender(),
             follow_up: None,
+            usage: None,
         }]
     );
     assert_eq!(
@@ -593,6 +616,17 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
         "lease-1",
         "the lease is kept for a restart"
     );
+}
+
+#[tokio::test]
+async fn claim_next_sends_this_computers_tags() {
+    let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(1, &[&base]);
+    rig.go_live();
+    rig.machine.links.tags = vec!["windows".into(), "gpu".into()];
+    rig.machine.pass().await;
+    let agent = asked.lock().unwrap()[1].1["agent"].clone();
+    assert_eq!(agent["tags"], json!(["windows", "gpu"]));
 }
 
 #[tokio::test]
@@ -720,6 +754,29 @@ async fn a_finished_step_moves_the_item_and_frees_a_lane_it_no_longer_needs() {
 }
 
 #[tokio::test]
+async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
+    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    let usage = json!({"status": "rejected", "resetsAt": i64::MAX});
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::NeedsHuman("the session ended without answering".into()),
+        usage: Some(usage.clone()),
+        context_tokens: None,
+    });
+    rig.machine.poll().await;
+    assert_eq!(
+        rig.lp(0).store.usage(),
+        Some(usage),
+        "a session that needs a person may still have reported the reading section 7.1 needs most"
+    );
+}
+
+#[tokio::test]
 async fn an_item_gets_one_step_at_a_time() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
@@ -767,7 +824,7 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Checking);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     let error = (rig.lp(0).events().recent().iter())
-        .map(|e| e.to_value())
+        .map(Entry::to_value)
         .find(|e| e["where"] == "step")
         .expect("an error event");
     assert_eq!(error["item"], "a");
@@ -793,6 +850,18 @@ async fn concurrency_caps_starts_and_claims() {
     rig.machine.poll().await;
     assert_eq!(fake.started.lock().unwrap().len(), 1);
     assert!(ops(&asked).is_empty(), "the one slot went to the queued item");
+}
+
+#[tokio::test]
+async fn stopping_blocks_new_claims_and_starts() {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.queue(0, &["q"]);
+    rig.machine.stopping_override = Some(true);
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty(), "no start while stopping");
+    assert!(ops(&asked).is_empty(), "no claim_next while stopping");
 }
 
 #[tokio::test]
@@ -834,10 +903,11 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
         rig.lp(0).events().recent().is_empty(),
         "a paused project is fetched too, and it worked"
     );
-    let errors: Vec<_> = rig.lp(1).events().recent().iter().map(|e| e.to_value()).collect();
+    let errors: Vec<_> = rig.lp(1).events().recent().iter().map(Entry::to_value).collect();
     assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
 }
 
+mod playtests;
 mod reporting;
 mod restart;
 mod settling;

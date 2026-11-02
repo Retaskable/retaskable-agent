@@ -34,14 +34,25 @@ pub struct PoolRules {
 /// What holds a lane: an item's running work, or a Play of the build in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Holder {
-    Item { project: String, item: String },
-    Play { project: String, item: String },
+    Item {
+        project: String,
+        item: String,
+    },
+    Play {
+        project: String,
+        item: String,
+    },
+    /// A run on a piece (docs/specs/pieces.md section 3.1).
+    Run {
+        project: String,
+        piece: String,
+    },
 }
 
 impl Holder {
     pub fn project(&self) -> &str {
         match self {
-            Holder::Item { project, .. } | Holder::Play { project, .. } => project,
+            Holder::Item { project, .. } | Holder::Play { project, .. } | Holder::Run { project, .. } => project,
         }
     }
 
@@ -71,6 +82,8 @@ pub struct LanePool {
     /// The item holding the merge turn while it waits for a lane (section 5 `merging`): the next free lane is kept
     /// for it, from everything else.
     merge_turn: Option<Want>,
+    /// The lane each piece's last run took here, by project and piece: in memory only, never sent or saved.
+    run_lanes: BTreeMap<(String, String), u32>,
 }
 
 impl LanePool {
@@ -155,7 +168,7 @@ impl LanePool {
         }
         let allowed = |k: u32| exempt(k) || (!full && k <= limit);
         if let (Some(c), true) = (chore, side) {
-            return ((exempt(c) || !full) && open(c)).then_some(c);
+            return (allowed(c) && open(c)).then_some(c);
         }
         if let Some(p) = prefer
             && p <= r.lanes
@@ -177,6 +190,30 @@ impl LanePool {
                 .then(|| self.free_lane(true, None, me, |_| true))
                 .flatten()
         })
+    }
+
+    /// The `Want` of a run on `piece`: its last lane here when that is free, else any free lane. The chore lane
+    /// follows `claim_lane`'s rules for an item.
+    pub fn run_want(&self, project: &str, piece: &str) -> Want {
+        Want {
+            project: project.into(),
+            item: piece.into(),
+            chore: false,
+            last_lane: self.run_lanes.get(&(project.into(), piece.into())).copied(),
+            fix_queued: false,
+        }
+    }
+
+    /// Picks a lane for a run on `piece` and holds it for the run, remembering it as the piece's last lane.
+    pub fn claim_run(&mut self, project: &str, piece: &str) -> Option<u32> {
+        let k = self.claim_lane(&self.run_want(project, piece))?;
+        let holder = Holder::Run {
+            project: project.into(),
+            piece: piece.into(),
+        };
+        self.held.insert(k, holder);
+        self.run_lanes.insert((project.into(), piece.into()), k);
+        Some(k)
     }
 
     /// `laneForMerge`: the free lane kept for the item holding the merge turn; `None` when nothing waits for one,

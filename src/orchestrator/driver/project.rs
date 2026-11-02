@@ -1,9 +1,306 @@
-//! `ProjectLoop`'s pass bookkeeping: recording a pass's decisions, its lane and lease state, starting or
-//! resuming implementer sessions in held lanes, and asking the store for work.
-use super::*;
+//! One project's orchestrator state and loop: the mode switch, the per-pass decision, and claiming and
+//! starting work for that project alone. The lanes and the sessions across every project are the
+//! [`super::Machine`]'s.
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-/// The pass's second half for a project whose items were read: records what its turns decided
+use anyhow::{Context, Result};
+use futures_util::future::BoxFuture;
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
+
+use super::Shared;
+use super::report;
+use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
+use crate::config::ProjectConfig;
+use crate::env::Env;
+use crate::implementer::new_session_id;
+use crate::item_lifecycle::{ItemRun, ItemState};
+use crate::lane_pool::{Holder, LanePool};
+use crate::orchestrator::guard::PortGuard;
+use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
+use crate::orchestrator::session::branch_name;
+use crate::orchestrator::steps::{Running, StepRequest, state_name};
+use crate::orchestrator::{Action, ProjectRuns, apply, decide, tick_payload};
+use crate::store::{RunRecord, Store};
+use crate::telemetry::events::parse_iso_ms;
+use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
+
+/// The variable that switches the orchestrator on.
+pub const MODE_VAR: &str = "RETASKABLE_ORCHESTRATOR";
+
+/// What the orchestrator may do. Off by default, so installing a build never starts it by surprise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrchestratorMode {
+    /// Nothing runs.
+    #[default]
+    Off,
+    /// Reads the backlog and writes `tick` events saying what a tick would do. Takes no action.
+    Dry,
+    /// Claims work and applies starts, but only with a [`SessionStarter`] and while the port guard
+    /// (`guard.rs`) sees no other agent on this computer. With no starter it behaves exactly like `Dry`.
+    Claim,
+}
+
+impl OrchestratorMode {
+    /// The mode `RETASKABLE_ORCHESTRATOR` names (`off`, `dry` or `claim`, any case), and a warning
+    /// for a value that is none of them, which counts as `off`.
+    pub fn from_env(env: &Env) -> (Self, Option<String>) {
+        let Some(raw) = env.get(MODE_VAR) else {
+            return (Self::Off, None);
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" => (Self::Off, None),
+            "dry" => (Self::Dry, None),
+            "claim" => (Self::Claim, None),
+            other => (
+                Self::Off,
+                Some(format!(
+                    "{MODE_VAR}={other:?} isn't off, dry or claim, so the orchestrator stays off."
+                )),
+            ),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Dry => "dry",
+            Self::Claim => "claim",
+        }
+    }
+
+    /// Reads the mode and logs it once, with the warning or the note that `claim` isn't built.
+    pub fn read_and_log(env: &Env) -> Self {
+        let (mode, warning) = Self::from_env(env);
+        if let Some(w) = warning {
+            tracing::warn!("{w}");
+        }
+        match mode {
+            Self::Off => {
+                tracing::info!("orchestrator: off (set {MODE_VAR}=dry to read the backlog and log what it would do)")
+            }
+            Self::Dry => {
+                tracing::info!("orchestrator: dry (reads the backlog, logs tick events, never claims or starts work)")
+            }
+            Self::Claim => tracing::warn!(
+                "orchestrator: claim (claims work only once a session runner is given; until then it runs dry)"
+            ),
+        }
+        mode
+    }
+}
+
+/// What one pass of a project's loop did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    /// The backlog was read and a `tick` event written; `would` is what the tick decided to do, which
+    /// nothing did.
+    Ticked { would: Vec<String> },
+    /// The pass was skipped after a `store_error` event.
+    Skipped,
+}
+
+/// The mode the loops really run in. `claim` with another agent on this computer runs dry instead,
+/// logged loudly, so two agents never claim from one backlog.
+pub async fn effective_mode(mode: OrchestratorMode, guard: &PortGuard) -> OrchestratorMode {
+    if mode != OrchestratorMode::Claim {
+        return mode;
+    }
+    match guard.refusal().await {
+        Some(why) => {
+            tracing::error!("orchestrator: claim refused, running dry instead: {why}");
+            OrchestratorMode::Dry
+        }
+        None => mode,
+    }
+}
+
+/// What a started implementer needs: the item, the lane it holds and its lease token (the TS agent's
+/// `hosted.lease`, which every later store write about the item carries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRequest {
+    pub project: String,
+    pub item_id: String,
+    pub lane: u32,
+    pub token: String,
+    /// The claimed item as the store handed it out (title, slice, remaining, spec refs).
+    pub item: Item,
+    /// The session's id, saved in the state file before it starts: the one `--session-id` names for a new
+    /// session, or the saved one `--resume` continues.
+    pub session_id: String,
+    /// Whether to resume `session_id` (a restart cut it off) rather than start it.
+    pub resume: bool,
+    /// Where the session reports how it ended; the loop reads it on its next wake.
+    pub outcomes: super::OutcomeSender,
+    /// The project's latest `state.usage` reading (section 7.1), for picking the implementer's
+    /// model tier. `None` when there's no reading yet, which is treated as a full window.
+    pub usage: Option<Value>,
+    /// `None` starts the session fresh in a prepared lane, as a newly claimed item does. `Some` restarts an
+    /// implementer in its existing lane after it ran out of turns or had grown too large (06.2-implementer.md
+    /// "at most maxTurns turns"): the lane is reused as-is, keeping any uncommitted work, and this text is the
+    /// session's prompt verbatim.
+    pub follow_up: Option<String>,
+}
+
+/// How `ProjectLoop::launch` starts an implementer session.
+pub(super) enum Launch {
+    /// A newly claimed item: a fresh session id in a freshly prepared lane.
+    Fresh,
+    /// A session a restart of this computer cut off: resumes the saved session id in its existing lane.
+    Resume(String),
+    /// A session that ran out of turns or had grown too large: a fresh session id, reusing the existing lane
+    /// as-is, with this text as the picking-up prompt.
+    Continuing(String),
+}
+
+/// Runs the sessions and steps for the work the loop schedules. Built in a later piece (implementer-session and
+/// the review stages); until one is given to the [`super::Machine`], `claim` mode claims nothing, so no claimed item is
+/// left with nothing working on it.
+pub trait SessionStarter: Send + Sync {
+    /// Called once the item is `implementing` and its lane held. Must not block: start the session and return;
+    /// it reports its end through `request.outcomes`. An `Err` (the session was refused or couldn't start)
+    /// gives the lane and the claim straight back.
+    fn start(&self, request: StartRequest) -> Result<(), String>;
+    /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
+    fn active(&self) -> u32;
+    /// The item's next step for its state (`steps::has_step`, except `implementing`, whose step is its session),
+    /// run as its own task: the run as the step left it. `None` when no step is built for that state yet: the item
+    /// waits where it is, and the loop asks again on its next wake.
+    /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
+    /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
+}
+
+/// One project's orchestrator state, kept for as long as the agent runs. The lanes are not here: they
+/// are the computer's, held by the [`super::Machine`].
+pub struct ProjectLoop {
+    pub(super) id: String,
+    pub(super) project: ProjectConfig,
+    /// Loaded so a project whose state file can't be read doesn't loop; only `claim` mode writes it (the leases).
+    pub(super) store: Store,
+    pub(super) runs: ProjectRuns,
+    /// Lease token of each item this computer holds, by id; kept in the state file so a restart still holds them.
+    pub(super) leases: BTreeMap<String, String>,
+    /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
+    /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
+    /// agent's `unreleased`).
+    pub(super) unreleased: BTreeMap<String, (String, String)>,
+    /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
+    /// waits for, the item's state). Kept in the state file and sent again on later passes.
+    pub(super) unparked: BTreeMap<String, (String, String, String)>,
+    /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
+    /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
+    pub(super) records: BTreeMap<String, RunRecord>,
+    /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
+    pub(super) to_resume: Vec<String>,
+    /// The item the store handed out for each lease held, by id, for the session that starts on it.
+    pub(super) items: BTreeMap<String, Item>,
+    /// Where this project's sessions report their end; replaced with the machine's by [`super::Machine::add`].
+    pub(super) outcomes: super::OutcomeSender,
+    /// Whether the held leases were matched against the backlog yet (once, on the first pass).
+    pub(super) adopted: bool,
+    pub(super) mode: OrchestratorMode,
+    /// Present in `claim` mode: asked again before each claim.
+    pub(super) guard: Option<PortGuard>,
+    pub(super) events: EventLog,
+    pub(super) client: Arc<Client>,
+    pub(super) live: LiveHandle,
+    /// GitHub's numeric id of `project.github_repo`, asked of `gh` until it answers and then kept.
+    pub(super) repo: Option<u64>,
+    /// The steps running for this project's items.
+    pub(super) running: Running,
+    /// What the fetch saw that the store was told last (`report`).
+    pub(super) seen: report::Seen,
+    /// Set while this project's playtest grouping round is running, so the next minute's pass
+    /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
+    pub(super) playtest_round_running: Arc<AtomicBool>,
+    /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
+    /// finding has held, across minutes.
+    pub(super) telemetry: Telemetry,
+    /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
+    /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
+    max_resume_context_tokens: u32,
+}
+
 impl ProjectLoop {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: String,
+        project: ProjectConfig,
+        store: Store,
+        events: EventLog,
+        client: Client,
+        live: LiveHandle,
+        max_resume_context_tokens: u32,
+    ) -> Self {
+        live.register(&id);
+        Self {
+            id,
+            project,
+            leases: store.leases(),
+            unreleased: store.unreleased(),
+            unparked: store.unparked(),
+            records: store.runs(),
+            to_resume: Vec::new(),
+            items: BTreeMap::new(),
+            outcomes: super::OutcomeSender(mpsc::unbounded_channel().0),
+            store,
+            runs: ProjectRuns::new(),
+            adopted: false,
+            mode: live.snapshot().mode,
+            guard: None,
+            events,
+            client: Arc::new(client),
+            live,
+            repo: None,
+            running: Running::default(),
+            seen: report::Seen::default(),
+            playtest_round_running: Arc::new(AtomicBool::new(false)),
+            telemetry: Telemetry::new(),
+            max_resume_context_tokens,
+        }
+    }
+
+    /// Loads the project's state and opens its event log under `<data dir>/projects/<id>`.
+    pub fn open(
+        dir: &Path,
+        project: &ProjectConfig,
+        client: Client,
+        live: LiveHandle,
+        guard: Option<PortGuard>,
+        max_resume_context_tokens: u32,
+    ) -> Result<Self> {
+        let id = project.id_or_derived();
+        let project_dir = dir.join("projects").join(&id);
+        let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
+        let mut events = EventLog::new();
+        events.open(&project_dir.join("events"));
+        Ok(Self::new(
+            id,
+            project.clone(),
+            store,
+            events,
+            client,
+            live,
+            max_resume_context_tokens,
+        )
+        .with_guard(guard))
+    }
+
+    /// Asks the port guard before each claim (set in `claim` mode).
+    pub fn with_guard(mut self, guard: Option<PortGuard>) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    pub fn events(&self) -> &EventLog {
+        &self.events
+    }
+
+    /// The pass's second half for a project whose items were read: records what its turns decided
     /// (`actions`, from `round_robin::plan`) against the computer's `pool`, and writes the `tick` event.
     pub(super) fn record(
         &mut self,
@@ -64,7 +361,41 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
+        self.check_watchdog(paused, &actions, pool);
         Step::Ticked { would }
+    }
+
+    /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
+    /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
+    /// from minutes before.
+    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool) {
+        let recent: Vec<watchdog::RecentEvent> = self
+            .events
+            .recent()
+            .iter()
+            .filter_map(|e| {
+                let at_ms = parse_iso_ms(&e.at)?;
+                let event = e.event()?;
+                Some(watchdog::RecentEvent { at_ms, event })
+            })
+            .collect();
+        let now_ms = now_ms();
+        let found = watchdog::check(&watchdog::Input {
+            project: &self.id,
+            paused,
+            runs: &self.runs,
+            leases: &self.leases,
+            records: &self.records,
+            running: &self.running,
+            pool,
+            actions,
+            recent: &recent,
+            now_ms,
+            lease_idle_minutes: self.project.tuning.lease_idle_minutes,
+            idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
+            no_progress_minutes: self.project.tuning.no_progress_minutes,
+        });
+        self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
     }
 
     /// Writes the held and the unreleased leases to the state file.
@@ -212,8 +543,18 @@ impl ProjectLoop {
 
     /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
     /// known size is over `max_resume_context_tokens` starts fresh instead (06.2-implementer.md "A session
-    /// that's grown starts fresh"), keeping its lane as-is.
-    pub(super) async fn resume_sessions(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter, links: &Links) {
+    /// that's grown starts fresh"), keeping its lane as-is. Left for a
+    /// later pass, untouched, while Claude Code is signed out on this computer (section 7.3): resuming now
+    /// would only fail the same way.
+    pub(super) async fn resume_sessions(
+        &mut self,
+        pool: &mut LanePool,
+        starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
+    ) {
+        if signed_out(shared) {
+            return;
+        }
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
             if let Some(RunRecord {
@@ -229,14 +570,14 @@ impl ProjectLoop {
                             "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
                             self.id
                         );
-                        Launch::Continuing(settle::grown_follow_up(tokens))
+                        Launch::Continuing(super::settle::grown_follow_up(tokens))
                     }
                     _ => {
                         tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
                         Launch::Resume(session)
                     }
                 };
-                self.launch(pool, &id, lane, kind, starter, links).await;
+                self.launch(pool, &id, lane, kind, starter, shared).await;
             }
         }
     }
@@ -251,11 +592,11 @@ impl ProjectLoop {
         lane: u32,
         kind: Launch,
         starter: &dyn SessionStarter,
-        links: &Links,
+        shared: &mut Shared<'_>,
     ) -> bool {
         let Some(item) = self.items.get(item_id).cloned() else {
             let why = "the session didn't start: the item is unknown here";
-            self.hand_back(pool, item_id, "queued", why, links).await;
+            self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
         let (resume, follow_up) = match kind {
@@ -280,6 +621,7 @@ impl ProjectLoop {
             session_id,
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
+            usage: self.store.usage(),
             follow_up,
         };
         match starter.start(request) {
@@ -300,29 +642,35 @@ impl ProjectLoop {
             Err(why) => {
                 tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);
                 let why = format!("the session didn't start: {why}");
-                self.hand_back(pool, item_id, "queued", &why, links).await;
+                self.hand_back(pool, item_id, "queued", &why, shared).await;
                 false
             }
         }
     }
 
     /// Applies the starts decided to the real runs and pool, and calls the starter for each that took its
-    /// lane. A start the starter refuses gives the lane and the claim straight back. How many sessions started
-    /// that take a session slot.
+    /// lane. A start the starter refuses gives the lane and the claim straight back. A start left for a
+    /// later pass, untouched, while Claude Code is signed out on this computer (section 7.3): the item stays
+    /// queued with its lane free, so `decide` plans the same start again once someone signs back in. How many
+    /// sessions started that take a session slot.
     pub(super) async fn apply_starts(
         &mut self,
         actions: &[Action],
         pool: &mut LanePool,
         starter: &dyn SessionStarter,
-        links: &Links,
+        shared: &mut Shared<'_>,
     ) -> u32 {
+        let blocked_from_starting = signed_out(shared) || shared.stopping;
         let mut started = 0;
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
+            if blocked_from_starting && matches!(action, Action::StartImplementer { .. }) {
+                continue;
+            }
             if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
-                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, links).await);
+                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
             }
         }
         started
@@ -330,14 +678,23 @@ impl ProjectLoop {
 
     /// Asks the store for work while a lane is free and a session slot is left (`slots`, used up as work
     /// starts), and starts what it hands out. The tick's `claim`, the last answer: the item id, `none` or
-    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, or no link).
+    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, an own failure's claim pause,
+    /// Claude signed out on this computer, or no link).
     pub(super) async fn claim(
         &mut self,
         pool: &mut LanePool,
         slots: &mut u32,
-        links: &Links,
         starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
     ) -> Option<String> {
+        if shared
+            .claim_paused_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+            || signed_out(shared)
+            || shared.stopping
+        {
+            return None;
+        }
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
@@ -345,7 +702,7 @@ impl ProjectLoop {
             if *slots == 0 || !asks {
                 break;
             }
-            let Some((answer, more)) = self.claim_once(pool, slots, links, starter).await else {
+            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared).await else {
                 break;
             };
             last = Some(answer);
@@ -361,8 +718,8 @@ impl ProjectLoop {
         &mut self,
         pool: &mut LanePool,
         slots: &mut u32,
-        links: &Links,
         starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
     ) -> Option<(String, bool)> {
         // Asked before every claim, so a TS agent started since is noticed at once.
         if let Some(guard) = self.guard.clone()
@@ -372,7 +729,7 @@ impl ProjectLoop {
             return None;
         }
         let repo = self.repo?;
-        let token = match links.keychain.get(&links.backlog_url) {
+        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
             Ok(None) => return None,
             Err(e) => {
@@ -381,9 +738,10 @@ impl ProjectLoop {
             }
         };
         let agent = ClaimNextAgent {
-            machine: links.machine.clone(),
-            environment: links.environment.clone(),
+            machine: shared.links.machine.clone(),
+            environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
+            tags: shared.links.tags.clone(),
         };
         let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
             Err(e) => {
@@ -403,7 +761,7 @@ impl ProjectLoop {
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.take_lease(&item, token, ItemState::Queued);
                 let actions = decide(&self.id, false, &self.runs, pool, &self.project);
-                *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, links).await);
+                *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
                 let kept = self.runs.contains_key(&item.id);
                 (item.id, kept)
@@ -439,7 +797,15 @@ impl ProjectLoop {
     }
 }
 
-pub(super) fn describe(action: &Action) -> String {
+/// Whether Claude Code was found signed out on this computer recently enough that no new or resumed
+/// session should start yet ([`Machine::claude_signed_out_until`](super::Machine), section 7.3).
+fn signed_out(shared: &Shared<'_>) -> bool {
+    shared
+        .claude_signed_out_until
+        .is_some_and(|until| std::time::Instant::now() < until)
+}
+
+fn describe(action: &Action) -> String {
     match action {
         Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
         Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),

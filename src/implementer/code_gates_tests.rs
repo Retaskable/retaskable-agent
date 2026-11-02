@@ -261,7 +261,7 @@ fn duplicates_ignores_noise_and_merges_a_block_repeated_twice() {
         "* more",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(ToString::to_string)
     .collect();
     let mut boiler = noise.clone();
     boiler.extend(noise.clone());
@@ -327,6 +327,22 @@ fn added_lines_lists_each_files_added_line_numbers_a_deleted_file_isnt_there() {
             ("my file.ts".to_string(), vec![1])
         ]
     );
+}
+
+#[test]
+fn added_lines_unescapes_a_c_quoted_path_with_an_embedded_quote() {
+    // git -c core.quotepath=false still quotes and backslash-escapes a path that itself
+    // contains a quote or backslash; only non-ASCII text is left unquoted by that setting.
+    let diff = [
+        "diff --git \"a/foo\\\"bar.ts\" \"b/foo\\\"bar.ts\"",
+        "--- \"a/foo\\\"bar.ts\"",
+        "+++ \"b/foo\\\"bar.ts\"",
+        "@@ -0,0 +1 @@",
+        "+x",
+    ]
+    .join("\n");
+    let got: Vec<String> = added_lines(&diff).into_iter().map(|(f, _)| f).collect();
+    assert_eq!(got, vec!["foo\"bar.ts".to_string()]);
 }
 
 #[test]

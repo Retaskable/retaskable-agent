@@ -6,6 +6,8 @@
 //! `.cursor/cli.json` sound), [`result`] (turning cursor-agent's own output into a structured
 //! result or a transcript line), and [`reader`] (the per-session `EngineReader` built on `result`).
 use crate::env::Env;
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -14,6 +16,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::engine::{Engine, EngineId, EngineReader, SessionEvent, SessionSpec, SessionStart};
+use super::json_result::fenced_json_instructions;
 
 mod allowlist;
 mod reader;
@@ -81,12 +84,13 @@ fn shell_programs(spec: &SessionSpec) -> String {
     if !spec.readonly {
         base.extend(from_allow);
     }
-    dedupe_refs(base).join(", ")
+    dedupe(base).join(", ")
 }
 
-fn dedupe_refs(items: Vec<&str>) -> Vec<&str> {
-    let mut seen = std::collections::HashSet::new();
-    items.into_iter().filter(|i| seen.insert(*i)).collect()
+/// Dedupes while keeping first-seen order.
+pub(super) fn dedupe<T: Eq + Hash + Clone>(items: Vec<T>) -> Vec<T> {
+    let mut seen = HashSet::new();
+    items.into_iter().filter(|i| seen.insert(i.clone())).collect()
 }
 
 /// `cursorPrompt(spec)`: the prompt plus the result instructions. Cursor has no `--json-schema`,
@@ -98,10 +102,9 @@ fn cursor_prompt(spec: &SessionSpec) -> String {
          Shell commands must start with an allowed program ({shells}). Match is the first word only: type `git status`, \
          never a personal wrapper, pager or shell launcher in front. If a Shell call is refused with an empty reason, \
          the first word was not on that list — retry the bare program, do not try other wrappers.\n\n\
-         When you've finished, end your final message with exactly one fenced ```json block holding your result, \
-         matching this schema. Nothing after it.\n\n\
          {}",
-        spec.prompt, spec.schema,
+        spec.prompt,
+        fenced_json_instructions(&spec.schema),
     )
 }
 
@@ -171,6 +174,7 @@ fn base_spec(cwd: &Path) -> SessionSpec {
         budget_usd: 0.0,
         start: SessionStart::Ephemeral,
         readonly: true,
+        shell: true,
         cursor: None,
         local: None,
         sandbox: false,

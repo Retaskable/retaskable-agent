@@ -156,6 +156,7 @@ mod tests {
                 engine: None,
                 cursor: None,
                 sandbox: false,
+                shell: true,
             },
         }
     }

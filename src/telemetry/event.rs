@@ -317,3 +317,86 @@ impl Entry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn item_reads_the_variants_own_field_when_it_has_one() {
+        let e = Event::ItemState(ItemState {
+            item: Some("R-1".into()),
+            ..Default::default()
+        });
+        assert_eq!(e.item(), Some("R-1"));
+        let e = Event::Merged(Merged::default());
+        assert_eq!(e.item(), None, "no item named and no extra to fall back to");
+    }
+
+    #[test]
+    fn item_falls_back_to_extra_for_kinds_that_name_none_of_their_own() {
+        let mut named = Map::new();
+        named.insert("item".into(), Value::String("R-2".into()));
+        assert_eq!(
+            Event::Tick(Tick {
+                extra: named.clone(),
+                ..Default::default()
+            })
+            .item(),
+            Some("R-2")
+        );
+        assert_eq!(
+            Event::RestartAsked(RestartAsked {
+                extra: named,
+                ..Default::default()
+            })
+            .item(),
+            Some("R-2"),
+            "restart_* events name no item, but a line may still carry one"
+        );
+        assert_eq!(Event::Claim(Claim::default()).item(), None);
+
+        let mut wrong_type = Map::new();
+        wrong_type.insert("item".into(), json!(5));
+        assert_eq!(
+            Event::HostCallUndefined(HostCallUndefined {
+                extra: wrong_type,
+                ..Default::default()
+            })
+            .item(),
+            None,
+            "an extra item that isn't a string is not an item"
+        );
+    }
+
+    #[test]
+    fn kind_is_the_snake_case_tag_for_each_shape() {
+        assert_eq!(Event::LaneTaken(LaneTaken::default()).kind(), "lane_taken");
+        assert_eq!(
+            Event::HostCallUndefined(HostCallUndefined::default()).kind(),
+            "host_call_undefined"
+        );
+        assert_eq!(Event::Anomaly(Anomaly::default()).kind(), "anomaly");
+    }
+
+    #[test]
+    fn fields_excludes_kind_but_keeps_named_and_extra_fields() {
+        let mut ci = Ci {
+            item: Some("R-9".into()),
+            state: Some("passed".into()),
+            ..Default::default()
+        };
+        ci.extra.insert("runner".into(), json!("woodpecker"));
+        let fields = Event::Ci(ci).fields();
+        assert!(!fields.contains_key("kind"));
+        assert_eq!(fields.get("item"), Some(&json!("R-9")));
+        assert_eq!(fields.get("state"), Some(&json!("passed")));
+        assert_eq!(
+            fields.get("runner"),
+            Some(&json!("woodpecker")),
+            "a field this type does not name"
+        );
+        assert_eq!(fields.get("ms"), None, "unset fields are left out, not written as null");
+    }
+}

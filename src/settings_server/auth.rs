@@ -247,3 +247,6 @@ pub(super) fn random_hex(bytes_len: usize) -> String {
         .map(|_| format!("{:02x}", rand::random::<u8>()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

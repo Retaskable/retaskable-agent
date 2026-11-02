@@ -102,6 +102,7 @@ pub fn session_spec(w: &Writer<'_>, sections: &[Section], range: &Range) -> Resu
         w.cursor.clone(),
         w.local.clone(),
         w.sandbox,
+        true, // shell: its facts are gathered before the session runs, but nothing stops it reading more with one
     ))
 }
 

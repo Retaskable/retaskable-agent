@@ -1,6 +1,6 @@
 # Engines: Claude Code, Cursor, pi and Codex — Spec
 
-Status: v0.3, draft (2026-10-26, section 12 only). Builds on [agent.md](agent.md) sections 2, 4, 6 and 7 (sessions, the orchestrator and model tiers) and section 9 (the Agents tab and Setup). Also builds on [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md) (per-project settings) and [estimates.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/estimates.md) / [spec-map.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-map.md) section 4 (the recorded cost).
+Status: v0.4, draft (2026-10-26, section 12 only; 2026-10-31: section 6's Rust port fleshed out — new lines there are marked **[Proposal]**). Builds on [agent.md](agent.md) sections 2, 4, 6 and 7 (sessions, the orchestrator and model tiers) and section 9 (the Agents tab and Setup). Also builds on [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md) (per-project settings) and [estimates.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/estimates.md) / [spec-map.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/spec-map.md) section 4 (the recorded cost).
 
 Theme: Orchestration
 

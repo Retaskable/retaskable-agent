@@ -120,6 +120,51 @@ fn default_min_scout_diff_lines() -> u32 {
     2000
 }
 
+/// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). 0 turns the
+/// quiet watchdog off.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuningConfig {
+    #[serde(default = "default_session_quiet_minutes")]
+    pub session_quiet_minutes: u32,
+    /// `watchdog.lease_idle`'s threshold (docs/specs/agent-telemetry.md section 4).
+    #[serde(default = "default_lease_idle_minutes")]
+    pub lease_idle_minutes: u32,
+    /// `watchdog.idle_lanes`'s threshold.
+    #[serde(default = "default_idle_lanes_minutes")]
+    pub idle_lanes_minutes: u32,
+    /// `watchdog.no_progress`'s threshold.
+    #[serde(default = "default_no_progress_minutes")]
+    pub no_progress_minutes: u32,
+}
+
+impl Default for TuningConfig {
+    fn default() -> Self {
+        Self {
+            session_quiet_minutes: default_session_quiet_minutes(),
+            lease_idle_minutes: default_lease_idle_minutes(),
+            idle_lanes_minutes: default_idle_lanes_minutes(),
+            no_progress_minutes: default_no_progress_minutes(),
+        }
+    }
+}
+
+fn default_session_quiet_minutes() -> u32 {
+    20
+}
+
+fn default_lease_idle_minutes() -> u32 {
+    crate::telemetry::watchdog::LEASE_IDLE_MINUTES
+}
+
+fn default_idle_lanes_minutes() -> u32 {
+    crate::telemetry::watchdog::IDLE_LANES_MINUTES
+}
+
+fn default_no_progress_minutes() -> u32 {
+    crate::telemetry::watchdog::NO_PROGRESS_MINUTES
+}
+
 /// Checked before every push (agent.md section 6.2). 0 turns one off.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -270,6 +315,8 @@ pub struct ProjectConfig {
     /// Claude Code vs. Cursor per role (engines.md, not yet ported here): kept as written.
     #[serde(default)]
     pub engines: Option<Value>,
+    #[serde(default)]
+    pub tuning: TuningConfig,
 }
 
 impl ProjectConfig {
@@ -464,6 +511,7 @@ mod tests {
             deploy: DeployConfig::default(),
             phone: None,
             engines: None,
+            tuning: TuningConfig::default(),
         }
     }
 }

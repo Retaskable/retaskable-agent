@@ -97,7 +97,7 @@ fn since_takes_an_iso_time_or_a_span_back_from_now() {
 
 #[test]
 fn find_item_skips_flags_and_their_values_and_a_bare_double_dash() {
-    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let args = |a: &[&str]| a.iter().map(ToString::to_string).collect::<Vec<_>>();
     let r12 = Some("R-12".to_string());
     assert_eq!(find_item(&args(&["--", "R-12"])), r12);
     assert_eq!(find_item(&args(&["--since", "6h", "R-12"])), r12);

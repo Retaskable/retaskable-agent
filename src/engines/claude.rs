@@ -14,11 +14,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::engine::{
-    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
-    signed_out_text,
+    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart,
+    exited_without_result, is_signed_out, signed_out_text,
 };
 use super::resolve::resolve_claude;
-use crate::text::tail;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.
@@ -36,6 +35,12 @@ const NO_DEPLOY_TOOLS: [&str; 8] = [
     "Bash(*deploy:staging*)",
     "Bash(*git push*production*)",
 ];
+
+/// 06-sessions.md: "Rows marked read-only are launched with `--disallowedTools "Edit Write
+/// NotebookEdit"`" — the only three tools Claude Code itself can write a file with, on top of
+/// `--permission-mode auto`, which never changes for readonly (that mode is about not prompting,
+/// not about what's allowed).
+const READONLY_DISALLOWED_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
 
 /// `claude.ts` `COMPACT_AT`: how many tokens of context Claude Code is told to auto-compact at.
 const COMPACT_AT: &str = "200000";
@@ -114,6 +119,18 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
     args.push("--disallowedTools".to_string());
     for tool in NO_DEPLOY_TOOLS {
         args.push(tool.to_string());
+    }
+    if spec.readonly {
+        for tool in READONLY_DISALLOWED_TOOLS {
+            args.push(tool.to_string());
+        }
+        // `SessionSpec::shell`: a role with no reason to run anything at all (the playtest
+        // planner) also loses Bash, since a shell command can write a file just as well as
+        // Edit/Write/NotebookEdit can. A role that still needs read-only shell access (a
+        // scout's or the reviewer's own `git diff`) keeps it.
+        if !spec.shell {
+            args.push("Bash".to_string());
+        }
     }
     if spec.sandbox {
         args.push("--settings".to_string());
@@ -300,28 +317,13 @@ impl EngineReader for SessionReader {
     /// The process exited with no `result` event at all (a crash, or killed before it could
     /// finish): report that as a failure naming the exit code, with the end of stderr attached.
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult {
-        let code = exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let error = format!(
-            "claude exited with code {code} and no result. {}",
-            tail(stderr.trim(), 1500)
-        );
-        let limit_hit = !self.local && self.usage_rejected();
-        let signed_out = !self.local && !limit_hit && signed_out_text(Some(&error));
-        SessionResult {
-            ok: false,
-            subtype: "exited".to_string(),
-            structured: None,
-            error: Some(error),
-            cost_usd: Some(0.0),
-            session_id: known_session_id.to_string(),
-            limit_hit,
-            signed_out,
-            context_tokens: self.context_tokens,
-            usage: self.usage.clone(),
-            tokens: None,
-        }
+        let mut result = exited_without_result("claude", exit_code, stderr, known_session_id);
+        result.limit_hit = !self.local && self.usage_rejected();
+        result.signed_out = !self.local && !result.limit_hit && signed_out_text(result.error.as_deref());
+        result.cost_usd = Some(0.0);
+        result.context_tokens = self.context_tokens;
+        result.usage = self.usage.clone();
+        result
     }
 }
 

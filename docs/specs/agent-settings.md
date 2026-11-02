@@ -56,6 +56,7 @@ The Agents page on the site (one card per computer, which settings are editable 
 
 - **Port**: a whole number from 1024 to 65535. Changes once the agent restarts.
 - **Lanes**: a whole number from 1 to 64, 2 until set: how many items the computer works on at once, across all its projects (the projects share them: lane k is one lane, and a project can't start work in one another holds). `MACHINE_KEYS` has it, at the top of `config.json`. A config whose projects still have their own `lanes` (or `migrated.lanes`) reads the computer's as the largest of them; those keys are then ignored, noted once on startup (`retiredKeysNote`) and dropped by the next save. The engine of each lane is `engines.lanes` below, and the page shows that many selects.
+- **CI slots** (**[Proposal]**, [agent-ci.md](agent-ci.md)): a whole number from 0 to 8, 1 until set: how many pull requests' CI the computer runs at once in Docker, apart from the lanes. `MACHINE_KEYS` has it.
 - **Local model**: on or off; its model's name (up to 100 letters, digits and `. _ : / -`); its address, `http` or `https`, with no user or password in it.
 - **How often it checks**: 2 to 3600 seconds.
 - **Tags**: [computer-tags.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/computer-tags.md)'s rules. A list typed in is saved as your changes to the found tags (`added`, `removed`), as before. Which work a computer with these tags takes is the store's to decide.
@@ -73,6 +74,7 @@ For a computer with no screen, each can be set by a variable, read through `envV
 | `RETASKABLE_LOCAL_MODEL` | the local model on, with this model; `off`, `false`, `0` or `no` turns it off |
 | `RETASKABLE_LOCAL_URL` | the local model's address |
 | `RETASKABLE_LANES` | the lanes, a whole number from 1 to 64 |
+| `RETASKABLE_CI_SLOTS` | the CI slots, a whole number from 0 to 8 |
 | `RETASKABLE_POLL_SEC` | how often it checks |
 | `RETASKABLE_TAGS` | the tags, comma between, instead of the found ones and your changes |
 | `RETASKABLE_CURSOR_MODELS` | one model for every tier (`gpt-5`), or each by name (`top=gpt-5,implementer=sonnet,scout=gpt-5-mini`) |
@@ -115,6 +117,7 @@ The page has two tabs, **Now** (the first) and **Settings**, kept in the address
 - `GET /api/settings/status` is read-only and answers exactly as the page does: the session cookie, the Host and loopback checks of 4.3, and 401 when signed out. It gives `ComputerStatus` (`src/settings_server/status.rs`, built from the config, the latest setup checks, the agent's own view and `machine.json`): the header (name, state, version, uptime in seconds, projects, lanes busy of total), alerts, lanes, sessions without a lane, and engines. Names and numbers only.
 - **Needs attention**: Claude Code signed out, and a paused project with its reason. Nothing is listed when nothing is wrong.
 - **Lanes** are the computer's, across every project, each with its engine (its own, or the default followed). This agent has no session pool yet, so every lane reads free and no session is listed.
+  - **Live sessions (item `live-sessions-reporting`).** Once the orchestrator runs sessions, each lane shows the session on it, and a session with no lane (an ask, a spec draft, a scout) is listed apart. A row has the project, the item or draft, the role, the engine and model, how long it has run and how long it has been quiet. It has no transcript text or prompt. The header's "lanes busy" counts lanes with a session on them. `GET /api/settings/status` gives the same rows. The cloud tick's `sessions` count is the number of rows.
 - **Engines**: found and its version (from the setup checks, re-run every ten minutes), signed in (Claude Code only), what it is used for (kinds of work and lanes), its limit ("Not reported": nothing here reads one), and today's tokens for Cursor and Codex when something records them (`machine.json`, by local day, seven days kept).
 - The page polls the status every 5 seconds while the Now tab is showing and the page is visible; a failed poll says it isn't updating and keeps the last picture. Times show in the viewer's clock.
 - The **Settings** tab holds the same fields as before, regrouped, with a save per group. Every field keeps its id and the save of 4.1. The lanes number is shown, not saved, here.
