@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -509,18 +509,36 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// A PNG's name with its extension (case-insensitively) swapped for `.jpg`.
+/// The `.jpg` name a PNG is stored under: its extension (case-insensitively) swapped for `.jpg`, and
+/// anything `valid_picture_file` (the whole name, `.jpg` included, at most 100 chars of `[\w.-]`)
+/// wouldn't accept (a space, say, or a very long name) made `-` or cut, so `gallery_image` can serve every picture the index lists.
 fn png_to_jpg_name(file: &str) -> String {
-    if file.len() >= 4 && file[file.len() - 4..].eq_ignore_ascii_case(".png") {
-        format!("{}.jpg", &file[..file.len() - 4])
-    } else {
-        file.to_string()
+    let stem = match file.char_indices().rev().nth(3) {
+        Some((i, _)) if file[i..].eq_ignore_ascii_case(".png") => &file[..i],
+        _ => file,
+    };
+    let mut name: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(96)
+        .collect();
+    if name.is_empty() {
+        name.push_str("picture");
     }
+    format!("{name}.jpg")
 }
 
 /// The pictures in shoot order (numeric-aware, as filenames are usually numbered), named from the
-/// game's manifest where it names them, else from the file name.
-fn list_images(pngs: &[String], manifest: Option<&[ManifestEntry]>) -> Vec<GalleryImage> {
+/// game's manifest where it names them, else from the file name, each beside the PNG it came from.
+/// Two PNGs that would share a `.jpg` name (`a.png` and `A.PNG`, or `a b.png` and `a-b.png`) get a
+/// `-2`, `-3`... so neither overwrites the other.
+fn list_images(pngs: &[String], manifest: Option<&[ManifestEntry]>) -> Vec<(String, GalleryImage)> {
     let by_file: HashMap<&str, &ManifestEntry> = manifest
         .unwrap_or_default()
         .iter()
@@ -528,6 +546,7 @@ fn list_images(pngs: &[String], manifest: Option<&[ManifestEntry]>) -> Vec<Galle
         .collect();
     let mut sorted = pngs.to_vec();
     sorted.sort_by(|a, b| natural_cmp(a, b));
+    let mut taken: HashSet<String> = HashSet::new();
     sorted
         .into_iter()
         .map(|f| {
@@ -537,11 +556,17 @@ fn list_images(pngs: &[String], manifest: Option<&[ManifestEntry]>) -> Vec<Galle
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| title_from_file(&f));
             let group = entry.and_then(|m| m.group.clone()).filter(|g| !g.is_empty());
-            GalleryImage {
-                file: png_to_jpg_name(&f),
-                title,
-                group,
+            let base = png_to_jpg_name(&f);
+            let stem = &base[..base.len() - 4];
+            let mut file = base.clone();
+            let mut n = 2;
+            while !taken.insert(file.to_ascii_lowercase()) {
+                let suffix = format!("-{n}");
+                let keep = 96usize.saturating_sub(suffix.len()).min(stem.len());
+                file = format!("{}{suffix}.jpg", &stem[..keep]);
+                n += 1;
             }
+            (f, GalleryImage { file, title, group })
         })
         .collect()
 }
@@ -614,8 +639,7 @@ fn convert(out: &Path, name: &str, sha: &str, dest: &Path) -> Result<GalleryInde
         bail!("The command finished but wrote no PNGs to {}.", out.display());
     }
     let manifest = read_manifest(out);
-    let images = list_images(&pngs, manifest.as_deref());
-    let png_for: HashMap<String, String> = pngs.iter().map(|f| (png_to_jpg_name(f), f.clone())).collect();
+    let listed = list_images(&pngs, manifest.as_deref());
 
     let mut tmp_name = dest.as_os_str().to_os_string();
     tmp_name.push(".new");
@@ -623,8 +647,7 @@ fn convert(out: &Path, name: &str, sha: &str, dest: &Path) -> Result<GalleryInde
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
 
-    for img in &images {
-        let png_name = png_for.get(&img.file).expect("every image came from a png in pngs");
+    for (png_name, img) in &listed {
         let src = out.join(png_name);
         let decoded = image::open(&src).with_context(|| format!("reading {}", src.display()))?;
         let resized = shrink_to(decoded, MAX_WIDTH);
@@ -640,7 +663,7 @@ fn convert(out: &Path, name: &str, sha: &str, dest: &Path) -> Result<GalleryInde
         name: name.to_string(),
         shot_at: now_iso8601(),
         sha: sha.to_string(),
-        images,
+        images: listed.into_iter().map(|(_, img)| img).collect(),
     };
     let index_json = serde_json::to_string_pretty(&idx).context("writing index.json")?;
     std::fs::write(tmp.join("index.json"), index_json).context("writing index.json")?;
