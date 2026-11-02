@@ -24,10 +24,10 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::start_files;
 use crate::implementer::{
     ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, run_implementer, session_spec,
 };
+use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::telemetry::now_ms;
 use crate::tiers::{implementer_model, implementer_tier};
@@ -107,6 +107,10 @@ impl SessionStarter for ClaudeStarter {
             project,
             project_id: project_id.clone(),
             bin,
+            gh: self
+                .env
+                .get("RETASKABLE_GH")
+                .map_or_else(|| PathBuf::from("gh"), PathBuf::from),
             max_turns: self.max_turns,
             lane,
             item,
@@ -186,6 +190,8 @@ struct Job {
     project: ProjectConfig,
     project_id: String,
     bin: PathBuf,
+    /// The `gh` program (`RETASKABLE_GH`, or `gh` on PATH).
+    gh: PathBuf,
     max_turns: u32,
     lane: u32,
     item: Item,
@@ -401,7 +407,45 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
         let name = format!("{}-resumed-{}.jsonl", job.session_id, now_ms());
         a = attempt(job, cwd, start, false, name, "").await?;
     }
+    let titles = match &a.answer {
+        Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
+        _ => None,
+    };
     let mut ran = settled(a, job.max_turns);
+    if let Some((title, body, summary)) = titles {
+        // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
+        // failure here means a session ran and its work is committed, so a person is needed, not the queue.
+        let title = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| format!("{}: {}", job.item.id, job.item.title));
+        let body = body
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or(summary);
+        let (gh, dir, branch, base) = (
+            job.gh.clone(),
+            cwd.to_path_buf(),
+            branch_name(&job.item),
+            job.project.base_branch.clone(),
+        );
+        let published = tokio::task::spawn_blocking(move || {
+            publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
+        })
+        .await
+        .context("publishing the change")?;
+        match published {
+            Ok(p) => notes.push(format!(
+                "{} PR #{}: {}",
+                if p.created { "Opened" } else { "Pushed to the open" },
+                p.number,
+                p.url
+            )),
+            Err(e) => {
+                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"))
+            }
+        }
+    }
     ran.3 = notes;
     Ok(ran)
 }
