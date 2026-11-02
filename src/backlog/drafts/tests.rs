@@ -1,29 +1,5 @@
 use super::*;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-use std::sync::{Arc, Mutex};
-
-type Seen = Arc<Mutex<Vec<Value>>>;
-
-async fn store(status: u16, reply: Value) -> (String, Seen) {
-    let seen: Seen = Arc::default();
-    let app = Router::new()
-        .route(
-            "/v1/repos/{id}/ops",
-            post(
-                move |State((seen, reply)): State<(Seen, Value)>, Json(body): Json<Value>| async move {
-                    seen.lock().unwrap().push(body);
-                    (StatusCode::from_u16(status).unwrap(), Json(reply))
-                },
-            ),
-        )
-        .with_state((seen.clone(), reply));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), seen)
-}
+use crate::backlog::tests::store;
 
 fn agent() -> ClaimNextAgent {
     ClaimNextAgent {
