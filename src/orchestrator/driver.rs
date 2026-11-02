@@ -287,10 +287,16 @@ impl ProjectLoop {
         let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
         let mut events = EventLog::new();
         events.open(&project_dir.join("events"));
-        Ok(
-            Self::new(id, project.clone(), store, events, client, live, max_resume_context_tokens)
-                .with_guard(guard),
+        Ok(Self::new(
+            id,
+            project.clone(),
+            store,
+            events,
+            client,
+            live,
+            max_resume_context_tokens,
         )
+        .with_guard(guard))
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
