@@ -1,6 +1,32 @@
 use super::*;
 use axum::{Json, Router, routing::post};
+use axum::{extract::State, http::StatusCode};
 use std::net::TcpListener as StdTcpListener;
+use std::sync::{Arc, Mutex};
+
+pub(crate) type Seen = Arc<Mutex<Vec<Value>>>;
+
+/// A fake store answering every op with `status` and `reply`, recording each request body.
+pub(crate) async fn store(status: u16, reply: Value) -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let app = Router::new()
+        .route(
+            "/v1/repos/{id}/ops",
+            post(
+                move |State((seen, reply)): State<(Seen, Value)>, Json(body): Json<Value>| async move {
+                    seen.lock().unwrap().push(body);
+                    (StatusCode::from_u16(status).unwrap(), Json(reply))
+                },
+            ),
+        )
+        .with_state((seen.clone(), reply));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), seen)
+}
 
 #[test]
 fn url_defaults_then_takes_the_env_and_trims_a_trailing_slash() {
