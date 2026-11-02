@@ -9,7 +9,7 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
-//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]). Start over is not built yet; Play on a lane
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]) and **draft_files** (answered live from the draft's worktree). Start over is not built yet; Play on a lane
 //! is a later piece. Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
@@ -105,6 +105,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => continue_item(cmd, project, view, data_dir),
         "play" | "stop" => play(cmd, project, view),
+        "draft_files" => draft_files(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }
@@ -256,6 +257,30 @@ fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     }
 }
 
+/// `draft_files { id }`: the draft's changed files and patches, listed live from its worktree
+/// (`<worktreesDir>/draft-<id>`) and answered in the ack's `answer.files`; nothing is stored
+/// (06.5-spec-drafts.md). A draft whose worktree is gone is nacked.
+fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
+        return nack(&cmd.id, "draft_files needs the draft's id.".into());
+    }
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return nack(&cmd.id, "Finish setup first.".to_string());
+    };
+    let dir = crate::draft_worktree::path(&p.worktrees_dir, id);
+    if !dir.is_dir() {
+        return nack(
+            &cmd.id,
+            format!("No worktree for draft {id} on this computer (it may be finished or removed)."),
+        );
+    }
+    match crate::drafts::files::draft_files(&dir, &p.base_branch) {
+        Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
+        Err(e) => nack(&cmd.id, format!("Couldn't list draft {id}'s files: {e:#}")),
+    }
+}
+
 fn ack(id: &str) -> Value {
     json!({ "type": "ack", "id": id })
 }
@@ -293,6 +318,9 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     entry.insert("outcome".into(), json!(outcome));
     if outcome == "nack" {
         entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));
+    }
+    if let Some(answer) = answer.get("answer") {
+        entry.insert("answerBytes".into(), json!(answer.to_string().len()));
     }
     entry.insert("cloud".into(), json!(cloud));
     let line = format!("{}\n", Value::Object(entry));
@@ -692,5 +720,50 @@ mod tests {
     fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
         let args = json!({ "id": "a", "pictures": [{ "type": "image/png", "data": "AAAA" }] });
         assert_eq!(audit_args(&args)["pictures"], json!({ "count": 1, "bytes": 4 }));
+    }
+
+    #[test]
+    fn draft_files_answers_from_the_drafts_worktree_and_is_audited() {
+        use crate::test_support::{git, repo_with_origin, run};
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        let wt = crate::draft_worktree::path(&worktrees, "7");
+        run(git(&repo).args(["worktree", "add", "--quiet", "-b", "spec-7"]).arg(&wt));
+        std::fs::write(wt.join("new.md"), "# New\n").unwrap();
+        run(git(&wt).args(["add", "new.md"]));
+        run(git(&wt).args(["commit", "--quiet", "-m", "draft"]));
+        let mut v = view();
+        v.projects[0].worktrees_dir = worktrees;
+        v.projects[0].base_branch = "main".into();
+        let noop = |_: i32| {};
+        let c = cmd("draft_files", json!({ "id": "7" }));
+        let answer = run_cmd(&c, &v, &noop);
+        assert_eq!(answer["type"], "ack", "{answer}");
+        assert_eq!(
+            answer["answer"]["files"],
+            json!([{ "path": "new.md", "content": "# New\n" }])
+        );
+
+        audit(tmp.path(), &c, &answer, "wss://x");
+        let log = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
+        assert!(log.contains("\"name\":\"draft_files\"") && log.contains("\"outcome\":\"ack\""));
+        assert!(!log.contains("# New"));
+    }
+
+    #[test]
+    fn draft_files_nacks_an_unknown_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = view();
+        v.projects[0].worktrees_dir = tmp.path().to_path_buf();
+        let noop = |_: i32| {};
+        for args in [json!({ "id": "9" }), json!({}), json!({ "id": "../x" })] {
+            let answer = run_cmd(&cmd("draft_files", args), &v, &noop);
+            assert_eq!(answer["type"], "nack", "{answer}");
+        }
+    }
+
+    fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {
+        run(c, "one", &mut Seen::default(), v, exit, &data_dir())
     }
 }
