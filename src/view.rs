@@ -37,6 +37,8 @@ pub struct AgentView {
     /// Each paused project's reason, Pause and Resume's (orchestrator.ts's `paused`/`pausedReason`); a change
     /// sends that project's snapshot again, as a lane-size change does.
     pub paused: PauseState,
+    /// Each project's `work_available` wake-up for its run loop.
+    pub work: crate::work_signal::WorkSignals,
 }
 
 /// A project's pause, Pause and Resume's (`{ computer: true }` only; the project-wide pause is the shared
@@ -235,6 +237,7 @@ mod tests {
             chore_lane: Some(3),
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
+            work: Default::default(),
         }
     }
 

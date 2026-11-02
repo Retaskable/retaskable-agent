@@ -207,6 +207,7 @@ mod tests {
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            work: Default::default(),
         }
     }
 
