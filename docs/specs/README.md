@@ -20,6 +20,7 @@ Only the specs whose subject is the computer itself:
 - [pieces.md](pieces.md): taking work as short runs on pieces, instead of claiming whole items.
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
+- [agent-ci.md](agent-ci.md): the agent as the CI for any project on Retaskable (draft; the source is to be decided in Retaskable.com first).
 
 ## What was cut
 
