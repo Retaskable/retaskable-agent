@@ -201,7 +201,10 @@ fn list_images_sorts_numerically_and_prefers_the_manifests_name_and_group() {
         group: Some("Group A".to_string()),
     }];
 
-    let images = list_images(&pngs, Some(&manifest));
+    let images: Vec<GalleryImage> = list_images(&pngs, Some(&manifest))
+        .into_iter()
+        .map(|(_, i)| i)
+        .collect();
 
     assert_eq!(
         images.iter().map(|i| i.file.as_str()).collect::<Vec<_>>(),
@@ -555,4 +558,22 @@ fn info_reports_a_failed_shoots_error_alongside_its_previous_set() {
     assert_eq!(info.error, Some("`cmd` failed (1):\nboom".to_string()));
     // The old set's picture count stays visible while the new shoot's failure is reported.
     assert_eq!(info.count, Some(1));
+}
+
+#[test]
+fn list_images_gives_every_picture_a_servable_unique_jpg_name() {
+    let pngs = vec![
+        "Icy Tree.png".to_string(),
+        "icy-tree.PNG".to_string(),
+        "a.png".to_string(),
+        "A.PNG".to_string(),
+        format!("{}.png", "x".repeat(150)),
+    ];
+    let listed = list_images(&pngs, None);
+    let mut files: Vec<&str> = listed.iter().map(|(_, i)| i.file.as_str()).collect();
+    assert!(files.iter().all(|f| valid_picture_file(f)), "{files:?}");
+    files.sort_by_key(|f| f.to_ascii_lowercase());
+    files.dedup_by_key(|f| f.to_ascii_lowercase());
+    assert_eq!(files.len(), 5);
+    assert_eq!(png_to_jpg_name("é.png"), "-.jpg");
 }
