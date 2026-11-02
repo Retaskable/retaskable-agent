@@ -41,13 +41,14 @@ pub fn offerable(state: &str) -> bool {
 }
 
 /// Parses `adb devices -l`'s output into its device lines, skipping the header and any blank
-/// line. The model comes from the `model:` field, underscores as spaces, or the serial when
+/// line and adb's own `* daemon …` notices (printed on stdout when a poll starts the adb server).
+/// The model comes from the `model:` field, underscores as spaces, or the serial when
 /// there's none.
 pub fn parse_devices(output: &str) -> Vec<Phone> {
     output
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && *line != "List of devices attached")
+        .filter(|line| !line.is_empty() && !line.starts_with("* ") && *line != "List of devices attached")
         .filter_map(parse_line)
         .collect()
 }
@@ -312,6 +313,15 @@ mod tests {
                 state: "unauthorized".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn parse_devices_skips_adbs_daemon_start_notices() {
+        let output = "* daemon not running; starting now at tcp:5037\n* daemon started successfully\n\
+                       List of devices attached\n0A1B2C3D       device model:Pixel_8\n";
+        let phones = parse_devices(output);
+        assert_eq!(phones.len(), 1);
+        assert_eq!(phones[0].serial, "0A1B2C3D");
     }
 
     #[test]
