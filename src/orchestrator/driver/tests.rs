@@ -132,6 +132,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        item_commands: Default::default(),
         work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
@@ -926,6 +927,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
     assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
 }
 
+mod commands;
 mod playtests;
 mod reporting;
 mod restart;

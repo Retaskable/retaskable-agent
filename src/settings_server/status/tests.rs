@@ -50,6 +50,7 @@ fn source(projects: &[&str]) -> StatusSource {
             chore_lane: Some(3),
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
+            item_commands: Default::default(),
             work: Default::default(),
         },
         started: Instant::now(),
