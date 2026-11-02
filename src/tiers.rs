@@ -52,6 +52,12 @@ pub fn is_five_hour_reading(usage: &Value) -> bool {
     }
 }
 
+/// `midTier` (agent/src/tiers.ts, section 7.1): `tier`, but never Opus. The drafter and the triager
+/// write and read; Opus is kept for the planner and the final review.
+pub fn mid_tier(tier: &'static str) -> &'static str {
+    if tier == OPUS { SONNET } else { tier }
+}
+
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
 /// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
 /// kept for retries, reopened items and the bigger ones. Only a tier of `opus` is ever moved; a tier

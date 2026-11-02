@@ -4,6 +4,7 @@
 //! prompt ([`prompt`]).
 pub mod model;
 pub mod prompt;
+pub mod session;
 
-pub use model::{Breakdown, BuildPiece, DrafterResult, DrafterStatus, Fix, PeopleStep, drafter_result_schema};
+pub use model::{Breakdown, BuildPiece, DrafterResult, DrafterStatus, Fix, PeopleStep, Piece, drafter_result_schema};
 pub use prompt::{build_prompt, titles_text};

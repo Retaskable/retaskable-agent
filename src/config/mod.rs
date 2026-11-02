@@ -25,8 +25,8 @@ pub(crate) use machine::{
     valid_model_name,
 };
 pub use project::{
-    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, Playtests, ProjectConfig, ProjectType,
-    SandboxMode,
+    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, Playtests, ProjectBudget, ProjectConfig,
+    ProjectType, SandboxMode,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
