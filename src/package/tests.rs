@@ -98,8 +98,67 @@ fn build_app_dir_makes_an_app_run_symlink_and_a_desktop_entry() {
         Path::new("retaskable")
     );
     let desktop = std::fs::read_to_string(app_dir.join("retaskable-staging.desktop")).unwrap();
-    assert!(desktop.contains("Exec=retaskable"), "{desktop}");
+    assert_eq!(desktop, desktop_entry(&build, "retaskable-staging", "retaskable"));
+    assert!(desktop.contains("Terminal=false"), "{desktop}");
+    assert!(desktop.contains("Icon=retaskable-staging\n"), "{desktop}");
     assert!(desktop.contains("Name=Retaskable Staging"), "{desktop}");
+    assert_eq!(
+        std::fs::read(app_dir.join("retaskable-staging.png")).unwrap(),
+        include_bytes!("../../assets/retaskable-staging.png")
+    );
+    assert_eq!(
+        std::fs::read_link(app_dir.join(".DirIcon")).unwrap(),
+        Path::new("retaskable-staging.png")
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&app_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ".DirIcon",
+            "AppRun",
+            "build.json",
+            "retaskable",
+            "retaskable-staging.desktop",
+            "retaskable-staging.png"
+        ]
+    );
+}
+
+#[test]
+fn production_has_its_own_desktop_file_and_icon() {
+    let build = build("linux-x64", Environment::Production);
+    assert_eq!(app_id(&build), "retaskable");
+    assert_eq!(icon_bytes(&build), include_bytes!("../../assets/retaskable.png"));
+    assert_ne!(
+        icon_bytes(&build),
+        icon_bytes(&self::build("linux-x64", Environment::Staging))
+    );
+}
+
+#[test]
+fn the_icons_are_256_pixel_pngs() {
+    for environment in [Environment::Production, Environment::Staging] {
+        let png = icon_bytes(&build("linux-x64", environment));
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&png[16..24], &[0, 0, 1, 0, 0, 0, 1, 0]);
+    }
+}
+
+#[test]
+fn the_squashfs_is_made_when_mksquashfs_is_installed() {
+    if Command::new("mksquashfs").arg("-version").output().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("retaskable"), b"exe").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let squashfs = out.path().join("app.squashfs");
+    make_squashfs(dir.path(), &squashfs).unwrap();
+    assert_eq!(&std::fs::read(&squashfs).unwrap()[..4], b"hsqs");
 }
 
 #[cfg(not(unix))]

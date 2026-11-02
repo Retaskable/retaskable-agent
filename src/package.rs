@@ -14,7 +14,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::app_menu::{app_id, desktop_entry};
-use crate::release::Build;
+use crate::release::{Build, Environment};
 use crate::release_update::sha256_file;
 
 /// The pinned AppImage runtime (type 2, x86_64): `scripts/package.ts`'s `APPIMAGE_RUNTIME`. A
@@ -83,9 +83,17 @@ fn make_executable(_file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Section 3.15's AppDir: the bundle's files, an `AppRun` symlink to `retaskable` and a desktop
-/// entry naming it — no icon yet, since no copy of this agent has one to embed (the tray that
-/// would supply one, 06-macos-and-linux.md section 6.2, isn't ported).
+/// This build's 256-pixel icon: the tray's "connected" icon (Staging's with its "S"), drawn by the
+/// TypeScript agent's `trayIcons.ts` and kept under `assets/`.
+fn icon_bytes(build: &Build) -> &'static [u8] {
+    match build.environment {
+        Environment::Production => include_bytes!("../assets/retaskable.png"),
+        Environment::Staging => include_bytes!("../assets/retaskable-staging.png"),
+    }
+}
+
+/// Section 3.15's AppDir: the bundle's files, an `AppRun` symlink to `retaskable`, a desktop entry
+/// naming it (the same one the app menu writes) and its icon, which is also the `.DirIcon`.
 fn build_app_dir(bundle: &Path, build: &Build, dir: &Path) -> Result<()> {
     copy_dir(bundle, dir)?;
     make_symlink("retaskable", &dir.join("AppRun"))?;
@@ -95,6 +103,9 @@ fn build_app_dir(bundle: &Path, build: &Build, dir: &Path) -> Result<()> {
         desktop_entry(build, &id, "retaskable"),
     )
     .with_context(|| format!("writing {id}.desktop"))?;
+    let icon = format!("{id}.png");
+    std::fs::write(dir.join(&icon), icon_bytes(build)).with_context(|| format!("writing {icon}"))?;
+    make_symlink(&icon, &dir.join(".DirIcon"))?;
     Ok(())
 }
 

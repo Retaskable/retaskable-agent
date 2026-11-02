@@ -6,11 +6,10 @@
 //! start check when this machine is itself `linux-x64`, the same scratch-home approach as
 //! `bundle`'s own check.
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use retaskable_agent::package;
 use retaskable_agent::release;
-use retaskable_agent::release_check::{self, arg, free_port, wait_for_health};
+use retaskable_agent::release_check::{self, arg};
 
 fn main() {
     release_check::run_main(run);
@@ -62,7 +61,12 @@ fn run() -> Result<(), String> {
     let host_target = release::target_slug(std::env::consts::OS, std::env::consts::ARCH);
     if host_target == Some("linux-x64") {
         println!("Starting {} for its start check…", file.display());
-        start_check(&file, &build)?;
+        // Its own process group: an AppImage's runtime runs the agent as its child, which would
+        // otherwise keep running once the runtime itself is stopped. `/dev/fuse` is missing in most
+        // CI containers, so the runtime extracts instead of mounting.
+        let extract = [("APPIMAGE_EXTRACT_AND_RUN", "1")];
+        let env: &[(&str, &str)] = if Path::new("/dev/fuse").exists() { &[] } else { &extract };
+        release_check::start_check(&file, &build, "retaskable-package-check", env, true)?;
         println!("Packaged {} {} ({})", build.os, build.version, build.commit);
     } else {
         println!(
@@ -71,51 +75,4 @@ fn run() -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-/// The AppImage's own start check (section 3.15): same scratch-home approach as `bundle`'s, but
-/// its own process group — an AppImage's runtime runs the agent as its child, which would
-/// otherwise keep running once the runtime itself is stopped — and `APPIMAGE_EXTRACT_AND_RUN=1`
-/// when `/dev/fuse` isn't there to mount it (most CI containers).
-fn start_check(file: &Path, build: &release::Build) -> Result<(), String> {
-    let scratch = release_check::ScratchDir::new("retaskable-package-check")?;
-    let port = free_port().map_err(|e| format!("finding a free port for the start check: {e}"))?;
-
-    let mut cmd = Command::new(file);
-    cmd.env("HOME", scratch.path())
-        .env("XDG_DATA_HOME", scratch.path())
-        .env("XDG_STATE_HOME", scratch.path())
-        .env("RETASKABLE_PORT", port.to_string())
-        .env("RETASKABLE_CREDENTIALS_FILE", scratch.path().join("credentials.json"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if !Path::new("/dev/fuse").exists() {
-        cmd.env("APPIMAGE_EXTRACT_AND_RUN", "1");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    #[allow(unused_mut)]
-    let mut child = cmd.spawn().map_err(|e| format!("running {}: {e}", file.display()))?;
-
-    let health = wait_for_health(port, &build.version);
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{}", child.id())])
-            .status();
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("waiting for {}: {e}", file.display()))?;
-    health?;
-    release_check::check_silent_terminal(file, &output)?;
-    release_check::check_not_linked_log(build, scratch.path())
 }
