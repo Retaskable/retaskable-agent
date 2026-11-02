@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "retaskable"
 path = "src/main.rs"
 
+[[bin]]
+name = "upload-release"
+path = "src/bin/upload_release.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 axum = "0.8"
