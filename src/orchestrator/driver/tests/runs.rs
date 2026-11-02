@@ -258,3 +258,53 @@ async fn a_finished_run_sends_its_end_and_frees_its_lane_and_refusals_are_handle
     pass(&mut rig, &starter, t0 + Duration::from_secs(190)).await;
     assert_eq!(done(&script.lock().unwrap()).len(), 3, "a stale run is dropped");
 }
+
+/// A machine in `runs` mode: `run_passes` drives the run loop, and the claim loop never runs.
+async fn runs_machine(starter: Option<Arc<dyn RunStarter>>) -> (Rig, Shared_) {
+    let (mut rig, script) = setup(1).await;
+    rig.machine.projects[0].mode = OrchestratorMode::Runs;
+    if let Some(s) = starter {
+        rig.machine = rig.machine.with_run_starters(vec![s]);
+    }
+    (rig, script)
+}
+
+/// The project's saved state has none of the claim loop's keys (pieces.md section 3.1).
+fn assert_no_item_keys(rig: &Rig) {
+    let Ok(text) = std::fs::read_to_string(rig._dir.path().join("0").join("state.json")) else {
+        return;
+    };
+    let state: Value = serde_json::from_str(&text).unwrap();
+    for key in ["leases", "runs", "unreleased", "unparked"] {
+        assert!(state.get(key).is_none(), "{key} in {state}");
+    }
+}
+
+#[tokio::test]
+async fn runs_mode_with_no_runner_drops_old_runs_and_asks_for_nothing() {
+    let (mut rig, script) = runs_machine(None).await;
+    rig.machine.run_passes().await;
+    rig.machine.run_passes().await;
+    assert_eq!(script.lock().unwrap().ops(), vec!["runs_drop"]);
+    assert_no_item_keys(&rig);
+}
+
+#[tokio::test]
+async fn runs_mode_sends_runs_drop_then_run_take_and_never_claim_next() {
+    let starter = Arc::new(FakeRuns::new(&[RunKind::Build]));
+    let (mut rig, script) = runs_machine(Some(starter.clone())).await;
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
+    rig.machine.run_passes().await;
+    let ops = script.lock().unwrap().ops();
+    assert_eq!(ops[..2], ["runs_drop", "run_take"]);
+    assert!(!ops.contains(&"claim_next".to_string()), "{ops:?}");
+    assert_eq!(starter.started(), vec!["b1"]);
+    assert_no_item_keys(&rig);
+}
+
+#[tokio::test]
+async fn a_claim_project_is_left_to_the_claim_loop() {
+    let (mut rig, script) = setup(1).await;
+    rig.machine.run_passes().await;
+    assert!(script.lock().unwrap().ops().is_empty());
+}

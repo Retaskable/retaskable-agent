@@ -270,10 +270,10 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone(), cfg.projects.clone());
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
-    // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry (or claim, which
-    // isn't built and runs dry). Read and logged once, here.
+    // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
+    // session runner exists) or runs (short runs on pieces). Read and logged once, here.
     // Where the TS agent may be listening: its default for this build, the shared default and the
-    // configured port. `claim` runs dry instead while one of them answers (port guard, guard.rs).
+    // configured port. `claim` and `runs` run dry instead while one of them answers (port guard, guard.rs).
     let guard = orchestrator::guard::PortGuard::new(
         port,
         [
@@ -306,6 +306,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        run_starters: Vec::new(),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),

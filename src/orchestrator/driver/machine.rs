@@ -10,7 +10,10 @@ use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use super::{OrchestratorMode, OutcomeSender, ProjectLoop, SessionStarter, Step, playtest_round};
+use super::{
+    OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, playtest_round,
+};
+use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::config::{EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
@@ -146,6 +149,8 @@ pub struct Machine {
     pub(super) links: Links,
     /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
+    /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
+    pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
     pub(super) concurrency: u32,
     /// Sessions report their end here; the receiver is read on each wake.
@@ -172,6 +177,7 @@ impl Machine {
             last_served: None,
             links,
             starter: None,
+            run_starters: RunStarters::default(),
             concurrency,
             outcomes,
             outcome_sender: OutcomeSender(sender),
@@ -302,6 +308,39 @@ impl Machine {
                 playtest_round::run(job).await;
                 running.store(false, Ordering::SeqCst);
             });
+        }
+    }
+
+    /// Gives `runs` mode the starters of the kinds it can run.
+    pub fn with_run_starters(mut self, starters: Vec<Arc<dyn RunStarter>>) -> Self {
+        self.run_starters = RunStarters(starters);
+        self
+    }
+
+    /// One pass of the run loop for every project in `runs` mode. A paused project or a stopping computer
+    /// asks for nothing but still drops, ends and beats. A panic costs this pass only.
+    pub async fn run_passes(&mut self) {
+        let stopping = self.stopping();
+        let paused = self.paused();
+        let (mut claim_paused_until, mut signed_out_until) = (None, None);
+        for (lp, paused) in self.projects.iter_mut().zip(paused) {
+            if lp.mode != OrchestratorMode::Runs {
+                continue;
+            }
+            let shared = Shared {
+                links: &self.links,
+                claim_paused_until: &mut claim_paused_until,
+                claude_signed_out_until: &mut signed_out_until,
+                stopping: stopping || paused,
+            };
+            let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
+            if let Err(panic) = AssertUnwindSafe(pass).catch_unwind().await {
+                tracing::error!(
+                    "{}: a run pass panicked, skipping it: {}",
+                    lp.id,
+                    panic_message(&*panic)
+                );
+            }
         }
     }
 
@@ -488,6 +527,29 @@ impl Machine {
     }
 }
 
+/// The starters `runs` mode has, as one: asks for the kinds any of them can run and hands a run to the one that can.
+#[derive(Default)]
+pub(super) struct RunStarters(Vec<Arc<dyn RunStarter>>);
+
+impl RunStarter for RunStarters {
+    fn kinds(&self) -> Vec<RunKind> {
+        let mut kinds: Vec<RunKind> = Vec::new();
+        for kind in self.0.iter().flat_map(|s| s.kinds()) {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        kinds
+    }
+
+    fn start(&self, request: RunRequest) -> Result<(), String> {
+        match self.0.iter().find(|s| s.kinds().contains(&request.kind)) {
+            Some(starter) => starter.start(request),
+            None => Err(format!("no runner for {:?} runs", request.kind)),
+        }
+    }
+}
+
 /// What a caught panic said.
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     (panic.downcast_ref::<&str>().map(ToString::to_string))
@@ -514,6 +576,8 @@ pub struct SpawnArgs<'a> {
     pub tags: Vec<String>,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
+    /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
+    pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
     pub max_resume_context_tokens: u32,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
@@ -542,6 +606,16 @@ pub fn spawn_all(args: SpawnArgs) {
             engine_choice: args.engine_choice,
         },
     );
+    if args.live.snapshot().mode == OrchestratorMode::Runs {
+        machine = machine.with_run_starters(args.run_starters);
+        let kinds = machine.run_starters.kinds();
+        args.live.set_run_kinds(
+            kinds
+                .iter()
+                .filter_map(|k| serde_json::to_value(k).ok()?.as_str().map(String::from))
+                .collect(),
+        );
+    }
     if let Some(starter) = args.starter {
         machine = machine.with_starter(starter);
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
@@ -593,5 +667,6 @@ async fn run(mut machine: Machine, poll_every: Duration) {
         } else {
             machine.poll().await;
         }
+        machine.run_passes().await;
     }
 }
