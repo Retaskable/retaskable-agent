@@ -2,6 +2,9 @@
 //! section 3.3). Pure: time is passed in, and the store calls (`run_take`, `run_beat`, `run_done`) are the caller's;
 //! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
 //! state.json.
+mod wind;
+pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +73,11 @@ impl Runs {
             live: Vec::new(),
             ends: Vec::new(),
         }
+    }
+
+    /// What still has to be said to the store: live runs and ends not yet accepted.
+    pub fn held(&self) -> usize {
+        self.live.len() + self.ends.len()
     }
 
     pub fn live(&self) -> &[LiveRun] {

@@ -151,6 +151,7 @@ impl ProjectLoop {
                 break;
             }
         }
+        crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
 
     /// One `run_take`, with its `claim` event. Whether to ask again: a run was handed out and started.

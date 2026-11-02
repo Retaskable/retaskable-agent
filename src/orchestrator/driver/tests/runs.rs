@@ -308,3 +308,30 @@ async fn a_claim_project_is_left_to_the_claim_loop() {
     rig.machine.run_passes().await;
     assert!(script.lock().unwrap().ops().is_empty());
 }
+
+#[tokio::test]
+async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_in_state() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    pass(&mut rig, &starter, t0).await;
+    assert_eq!(starter.started(), ["a"]);
+    let takes = script.lock().unwrap().args("run_take").len();
+
+    let m = &mut rig.machine;
+    let shared = Shared {
+        links: &m.links,
+        claim_paused_until: &mut None,
+        claude_signed_out_until: &mut None,
+        stopping: true,
+    };
+    m.projects[0]
+        .run_pass(&mut m.pool, &starter, &shared, t0 + Duration::from_secs(60))
+        .await;
+    let s = script.lock().unwrap();
+    assert_eq!(s.args("run_take").len(), takes, "no run_take while stopping");
+    assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["a"] })]);
+    drop(s);
+    assert_no_item_keys(&rig);
+}
