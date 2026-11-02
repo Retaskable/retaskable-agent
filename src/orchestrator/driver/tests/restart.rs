@@ -24,6 +24,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         EventLog::with_now(|| 0),
         Client::new(base),
         live.clone(),
+        150_000,
     );
     lp.repo = Some(7);
     machine.add(lp);
