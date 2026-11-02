@@ -568,12 +568,15 @@ fn list_images_gives_every_picture_a_servable_unique_jpg_name() {
         "a.png".to_string(),
         "A.PNG".to_string(),
         format!("{}.png", "x".repeat(150)),
+        format!("{}1.png", "y".repeat(150)),
+        format!("{}2.png", "y".repeat(150)),
+        format!("{}3.png", "y".repeat(150)),
     ];
     let listed = list_images(&pngs, None);
     let mut files: Vec<&str> = listed.iter().map(|(_, i)| i.file.as_str()).collect();
     assert!(files.iter().all(|f| valid_picture_file(f)), "{files:?}");
     files.sort_by_key(|f| f.to_ascii_lowercase());
     files.dedup_by_key(|f| f.to_ascii_lowercase());
-    assert_eq!(files.len(), 5);
+    assert_eq!(files.len(), 8);
     assert_eq!(png_to_jpg_name("é.png"), "-.jpg");
 }

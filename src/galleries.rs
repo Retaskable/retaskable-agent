@@ -510,8 +510,8 @@ fn capitalize(s: &str) -> String {
 }
 
 /// The `.jpg` name a PNG is stored under: its extension (case-insensitively) swapped for `.jpg`, and
-/// anything `PICTURE_FILE` (`/^[\w.-]{1,100}\.jpg$/i`) wouldn't accept (a space, say, or a very long
-/// name) made `-` or cut, so `gallery_image` can serve every picture the index lists.
+/// anything `valid_picture_file` (the whole name, `.jpg` included, at most 100 chars of `[\w.-]`)
+/// wouldn't accept (a space, say, or a very long name) made `-` or cut, so `gallery_image` can serve every picture the index lists.
 fn png_to_jpg_name(file: &str) -> String {
     let stem = match file.char_indices().rev().nth(3) {
         Some((i, _)) if file[i..].eq_ignore_ascii_case(".png") => &file[..i],
@@ -561,7 +561,9 @@ fn list_images(pngs: &[String], manifest: Option<&[ManifestEntry]>) -> Vec<(Stri
             let mut file = base.clone();
             let mut n = 2;
             while !taken.insert(file.to_ascii_lowercase()) {
-                file = format!("{stem}-{n}.jpg");
+                let suffix = format!("-{n}");
+                let keep = 96usize.saturating_sub(suffix.len()).min(stem.len());
+                file = format!("{}{suffix}.jpg", &stem[..keep]);
                 n += 1;
             }
             (f, GalleryImage { file, title, group })
