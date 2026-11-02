@@ -542,6 +542,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            work: Default::default(),
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),

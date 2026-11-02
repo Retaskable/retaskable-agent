@@ -65,6 +65,8 @@ pub struct Links {
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
     pub paused: PauseState,
+    /// The cloud link's `work_available` wake-ups, one per project.
+    pub work: crate::work_signal::WorkSignals,
     /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
     pub machine: String,
     pub environment: String,
@@ -507,6 +509,7 @@ pub struct SpawnArgs<'a> {
     pub backlog_url: &'a str,
     pub keychain: &'a Arc<dyn TokenStore>,
     pub paused: &'a PauseState,
+    pub work: &'a crate::work_signal::WorkSignals,
     pub live: &'a LiveHandle,
     pub guard: Option<&'a PortGuard>,
     pub machine: String,
@@ -535,6 +538,7 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             keychain: args.keychain.clone(),
             paused: args.paused.clone(),
+            work: args.work.clone(),
             machine: args.machine,
             environment: args.environment,
             tags: args.tags,

@@ -114,6 +114,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         chore_lane: Some(2),
         lane_sizes: LaneSizes::default(),
         paused: PauseState::default(),
+        work: Default::default(),
     })
 }
 
@@ -602,4 +603,36 @@ fn the_socket_url_swaps_the_scheme_and_names_the_project() {
     );
     assert_eq!(why(close::UNLINKED, ""), "the agent was unlinked");
     assert_eq!(why(1011, "oops"), "closed (1011: oops)");
+}
+
+#[tokio::test]
+async fn work_available_wakes_the_projects_loop_and_is_not_answered() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let v = view(&["one"]);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v.clone(),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    read(&mut a).await; // snapshot
+    let signal = v.work.signal("one");
+    a.ws.send(Message::text(json!({ "type": "work_available" }).to_string()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), signal.notified())
+        .await
+        .expect("the loop was woken");
+    // No answer: the next thing sent is the answer to a command sent after it.
+    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(read(&mut a).await["id"], "c1");
+    c.stop(Duration::from_secs(1)).await;
 }

@@ -64,3 +64,4 @@ pub mod text;
 pub mod tiers;
 pub mod triage;
 pub mod view;
+pub mod work_signal;
