@@ -1,0 +1,9 @@
+## 13. Restarts, going offline, and what is never reported as a pass
+
+- **A CI run is a run**: it has a lease and a beat to the store (pieces.md section 3.3). A restart kills the run's whole process tree with every other session (`restart-cuts-sessions`), the run ends `interrupted` and its job returns to the queue in the store. A computer going away is the same after `RUN_STALE_MS` (3 minutes without a beat), when the store ends it `lost`.
+- **Never `success`**: a run that did not finish every blocking check on the exact sha cannot post `success`. The status for an interrupted run is left `pending`, with its description updated by the computer that restarts (on start the agent lists its own unfinished runs, posts "Interrupted: running again" for each, and ends them) or, if that computer does not come back, by the next one to take the job. A restart never posts `failure` for the cut run either: it is a machine event, not the code's.
+- **Rerun**: the requeued job is taken by any eligible computer (the warm-affinity grace applies for the one that restarted). A job interrupted three times is `error` ("Cut by a restart three times"), and the run page says so, so a restart loop cannot hang a merge forever.
+- **Order of checks after a restart**: none is resumed; the job starts again from the clean worktree. A check is not assumed idempotent.
+- **A pass on one computer is a pass on that sha**: if the commit changes (a push), the old run is superseded (section 8).
+- **A status the agent cannot read back**: the agent's merge treats a `pending` or missing `retaskable/ci` as not passed.
+- **The store being unreachable** fails closed (README: every project has a shared backlog and the agent fails closed): no run is claimed, and no status is posted from a run that cannot record its result.
