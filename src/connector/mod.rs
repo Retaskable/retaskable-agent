@@ -283,6 +283,8 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
     sizes.mark_unchanged();
     let mut paused = view.paused.subscribe();
     paused.mark_unchanged();
+    let mut restart = view.restart.subscribe();
+    restart.mark_unchanged();
     let mut gallery_status = galleries::subscribe_status_changes();
     gallery_status.mark_unchanged();
     let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
@@ -299,6 +301,7 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = gallery_status.changed() => {
                 let count = gallery_status.borrow().get(project).copied().unwrap_or(0);

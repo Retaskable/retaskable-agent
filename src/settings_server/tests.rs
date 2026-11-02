@@ -544,6 +544,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
             paused: Default::default(),
             item_commands: Default::default(),
             work: Default::default(),
+            restart: Default::default(),
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),

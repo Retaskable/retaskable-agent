@@ -52,6 +52,7 @@ fn source(projects: &[&str]) -> StatusSource {
             paused: PauseState::default(),
             item_commands: Default::default(),
             work: Default::default(),
+            restart: Default::default(),
         },
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),

@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::telemetry::event::{Event, RestartAsked, RestartExit, RestartWaiting};
 #[cfg(target_os = "linux")]
 use crate::{app_menu, start_at_login};
 use crate::{
-    config, engines, lane_pool, lanes, phone, process_tree, release, release_install, release_update, setup_check,
-    shutdown, store, telemetry, view,
+    config, engines, lane_pool, lanes, phone, process_tree, release, release_install, release_update, restart,
+    setup_check, shutdown, store, telemetry, view,
 };
 
 /// Where the restart handler finds the updater. The updater's `on_ready` asks for a restart and
@@ -33,8 +34,30 @@ pub fn restart_handler(
     exe_path: Option<PathBuf>,
     updater: UpdaterSlot,
     projects: Vec<config::ProjectConfig>,
+    data_dir: PathBuf,
+    state: Arc<restart::RestartState>,
 ) -> Arc<view::Exit> {
     Arc::new(move |code: i32| {
+        let state = state.clone();
+        // The commands that know who asked have recorded it; any other caller (the settings page's button, a
+        // release update) is "this computer". Asking again keeps the first, and starts nothing more.
+        state.ask(restart::Why {
+            at: telemetry::now_ms(),
+            by: "this computer".into(),
+            reason: "asked".into(),
+        });
+        if !state.start() {
+            return;
+        }
+        let log = restart_log(&projects, &data_dir);
+        if let Some(why) = state.why() {
+            log(Event::RestartAsked(RestartAsked {
+                reason: Some(why.reason),
+                by: Some(why.by),
+                waiting_on: Some(state.held()),
+                ..Default::default()
+            }));
+        }
         let updater = updater.clone();
         let exe_path = exe_path.clone();
         let projects = projects.clone();
@@ -43,6 +66,14 @@ pub fn restart_handler(
         // none in flight on its own HTTP thread, but the response still deserves to flush).
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
+            let clock = restart::Clock::real();
+            let flush = |max: Duration| std::thread::sleep(max.min(Duration::from_millis(200)));
+            let seq = Sequence {
+                state: &state,
+                clock: &clock,
+                log: &log,
+                flush: &flush,
+            };
             cut_every_session_then_exit(
                 code,
                 &projects,
@@ -50,6 +81,7 @@ pub fn restart_handler(
                 is_release,
                 exe_path.as_deref(),
                 &RunWait::real(),
+                &seq,
                 |code| std::process::exit(code),
             );
         });
@@ -61,6 +93,7 @@ pub fn restart_handler(
 /// install an update or relaunch, then exit. With the `runs` loop holding runs, it first waits for them to
 /// end (docs/specs/pieces.md section 3.1, up to `wait.limit`), taking no new ones meanwhile. `exit` is a parameter so a test can see what's true
 /// right before it's called, without actually ending the process.
+#[allow(clippy::too_many_arguments)]
 fn cut_every_session_then_exit(
     code: i32,
     projects: &[config::ProjectConfig],
@@ -68,16 +101,48 @@ fn cut_every_session_then_exit(
     is_release: bool,
     exe_path: Option<&Path>,
     wait: &RunWait,
+    seq: &Sequence,
     exit: impl FnOnce(i32),
 ) {
     wait.wait();
+    if seq.state.why().is_some() {
+        // Lanes keep claiming and starting meanwhile: `stopping()` is only set by the cut below.
+        seq.state.finish_first(seq.clock, &mut |on, ms| {
+            let why = seq.state.why().expect("a pending restart has a why");
+            (seq.log)(Event::RestartWaiting(RestartWaiting {
+                reason: Some(why.reason),
+                waiting_on: Some(on),
+                ms: Some(ms as f64),
+                ..Default::default()
+            }));
+        });
+    }
     process_tree::cut_all();
     shutdown::stop_other_sessions(projects);
     let installed = code == 75 && updater.get().is_some_and(|updater| updater.install_now());
     if code == 75 && is_release && !installed {
         relaunch(exe_path);
     }
+    if let Some(why) = seq.state.why() {
+        (seq.flush)(restart::FLUSH);
+        let drain = (seq.clock.now_ms)() - why.at;
+        (seq.log)(Event::RestartExit(RestartExit {
+            reason: Some(why.reason),
+            by: Some(why.by),
+            drain_ms: Some(drain.max(0) as f64),
+            ..Default::default()
+        }));
+    }
     exit(code);
+}
+
+/// What the restart sequence needs besides the sessions: the pending restart, time, the event log and the cloud
+/// link's flush (given the most it may take).
+pub struct Sequence<'a> {
+    pub state: &'a restart::RestartState,
+    pub clock: &'a restart::Clock,
+    pub log: &'a dyn Fn(Event),
+    pub flush: &'a dyn Fn(Duration),
 }
 
 /// The plain relaunch a release build falls back to when no update was installed.
@@ -89,6 +154,21 @@ fn relaunch(exe_path: Option<&Path>) {
     let target = release_install::relaunch_target(exe);
     if let Err(e) = release_install::relaunch_with_same_args(&target) {
         tracing::error!("starting the next copy ({e}), so this copy stays down.");
+    }
+}
+
+/// Writes a `restart_*` event to every project's event log (agent-telemetry.md section 3.1).
+fn restart_log(projects: &[config::ProjectConfig], data_dir: &Path) -> impl Fn(Event) + use<> {
+    let dirs: Vec<PathBuf> = projects
+        .iter()
+        .map(|p| data_dir.join("projects").join(p.id_or_derived()).join("events"))
+        .collect();
+    move |event| {
+        for dir in &dirs {
+            let mut log = telemetry::EventLog::new();
+            log.open(dir);
+            log.add(event.clone());
+        }
     }
 }
 
@@ -306,10 +386,158 @@ mod tests {
         process_tree::reset_for_tests();
         let seen_stopping = Mutex::new(None);
         let wait = idle_wait();
-        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_code| {
-            *seen_stopping.lock().unwrap() = Some(process_tree::stopping());
-        });
+        cut_every_session_then_exit(
+            0,
+            &[],
+            &UpdaterSlot::default(),
+            false,
+            None,
+            &wait,
+            &idle_seq(),
+            |_code| {
+                *seen_stopping.lock().unwrap() = Some(process_tree::stopping());
+            },
+        );
         assert_eq!(*seen_stopping.lock().unwrap(), Some(true));
+        process_tree::reset_for_tests();
+    }
+
+    fn idle_seq() -> Sequence<'static> {
+        seq_on(
+            Box::leak(Box::default()),
+            Box::leak(Box::new(fake_clock(|_| {}))),
+            Box::leak(Box::default()),
+        )
+    }
+
+    type Logged = Mutex<Vec<Event>>;
+
+    fn seq_on(
+        state: &'static restart::RestartState,
+        clock: &'static restart::Clock,
+        logged: &'static Logged,
+    ) -> Sequence<'static> {
+        let log: &'static dyn Fn(Event) = Box::leak(Box::new(move |e| logged.lock().unwrap().push(e)));
+        let flush: &'static dyn Fn(Duration) = Box::leak(Box::new(move |d| {
+            assert!(d <= restart::FLUSH);
+            logged.lock().unwrap().push(Event::RestartBack(Default::default())); // marks the flush
+        }));
+        Sequence {
+            state,
+            clock,
+            log,
+            flush,
+        }
+    }
+
+    /// A clock that moves only when slept, running `each` (with the time) at every sleep.
+    fn fake_clock(each: impl Fn(i64) + Send + Sync + 'static) -> restart::Clock {
+        let t = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let t2 = t.clone();
+        restart::Clock {
+            now_ms: Box::new(move || t.load(Ordering::SeqCst)),
+            sleep: Box::new(move |d| each(t2.fetch_add(d.as_millis() as i64, Ordering::SeqCst) + d.as_millis() as i64)),
+        }
+    }
+
+    fn why() -> restart::Why {
+        restart::Why {
+            at: 0,
+            by: "ann".into(),
+            reason: "asked".into(),
+        }
+    }
+
+    fn kinds(logged: &Logged) -> Vec<&'static str> {
+        logged
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| match e {
+                Event::RestartWaiting(_) => "waiting",
+                Event::RestartExit(_) => "exit",
+                Event::RestartBack(_) => "flush",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_restart_with_nothing_held_cuts_and_exits_75_at_once() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        process_tree::reset_for_tests();
+        let (state, logged): (&'static restart::RestartState, &'static Logged) =
+            (Box::leak(Box::default()), Box::leak(Box::default()));
+        state.ask(why());
+        let seq = seq_on(state, Box::leak(Box::new(fake_clock(|_| panic!("it slept")))), logged);
+        let exited = Mutex::new(None);
+        cut_every_session_then_exit(75, &[], &UpdaterSlot::default(), false, None, &idle_wait(), &seq, |c| {
+            *exited.lock().unwrap() = Some((c, process_tree::stopping()));
+        });
+        assert_eq!(*exited.lock().unwrap(), Some((75, true)));
+        assert_eq!(state.report().unwrap()["step"], "now");
+        assert_eq!(kinds(logged), ["flush", "exit"]);
+        process_tree::reset_for_tests();
+    }
+
+    #[test]
+    fn a_held_guard_is_waited_on_without_cutting_until_released_and_lanes_keep_going() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        process_tree::reset_for_tests();
+        let (state, logged): (&'static Arc<restart::RestartState>, &'static Logged) =
+            (Box::leak(Box::default()), Box::leak(Box::default()));
+        state.ask(why());
+        let guard = Mutex::new(Some(state.hold("a merge")));
+        let stopping_while_waiting = Arc::new(Mutex::new(Vec::new()));
+        let (s2, w2) = (stopping_while_waiting.clone(), state.clone());
+        let clock = fake_clock(move |now| {
+            s2.lock()
+                .unwrap()
+                .push((process_tree::stopping(), w2.report().unwrap()["waitingOn"].clone()));
+            if now >= 300 {
+                guard.lock().unwrap().take();
+            }
+        });
+        let seq = seq_on(state, Box::leak(Box::new(clock)), logged);
+        cut_every_session_then_exit(
+            75,
+            &[],
+            &UpdaterSlot::default(),
+            false,
+            None,
+            &idle_wait(),
+            &seq,
+            |_| {},
+        );
+        let seen = stopping_while_waiting.lock().unwrap();
+        assert!(
+            seen.iter()
+                .all(|(stopping, on)| !stopping && on == &serde_json::json!(["a merge"]))
+        );
+        assert_eq!(state.report().unwrap()["step"], "now");
+        assert_eq!(kinds(logged), ["waiting", "flush", "exit"]);
+        process_tree::reset_for_tests();
+    }
+
+    #[test]
+    fn a_guard_never_released_is_given_up_on_after_two_minutes() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        process_tree::reset_for_tests();
+        let (state, logged): (&'static Arc<restart::RestartState>, &'static Logged) =
+            (Box::leak(Box::default()), Box::leak(Box::default()));
+        state.ask(why());
+        let _held = state.hold("a promote");
+        let seq = seq_on(state, Box::leak(Box::new(fake_clock(|_| {}))), logged);
+        let exited = Mutex::new(None);
+        cut_every_session_then_exit(75, &[], &UpdaterSlot::default(), false, None, &idle_wait(), &seq, |c| {
+            *exited.lock().unwrap() = Some(c)
+        });
+        assert_eq!(*exited.lock().unwrap(), Some(75));
+        let waited = match &logged.lock().unwrap()[0] {
+            Event::RestartWaiting(w) => w.ms,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(waited, Some(restart::FINISH_FIRST.as_millis() as f64));
         process_tree::reset_for_tests();
     }
 
@@ -340,7 +568,7 @@ mod tests {
         let wait = wait_on(0, Duration::from_secs(60), &end, &begun);
         let started = Instant::now();
         let exited = AtomicBool::new(false);
-        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_| {
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, &idle_seq(), |_| {
             exited.store(true, Ordering::SeqCst)
         });
         assert!(exited.load(Ordering::SeqCst) && !begun.load(Ordering::SeqCst));
@@ -361,7 +589,7 @@ mod tests {
         });
         let started = Instant::now();
         let stopping_while_waiting = Mutex::new(None);
-        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_| {
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, &idle_seq(), |_| {
             *stopping_while_waiting.lock().unwrap() = Some(begun.load(Ordering::SeqCst));
         });
         fake_run.join().unwrap();
@@ -386,7 +614,7 @@ mod tests {
         let wait = wait_on(1, Duration::from_millis(300), &end, &begun);
         let started = Instant::now();
         let seen = Mutex::new(None);
-        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_| {
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, &idle_seq(), |_| {
             *seen.lock().unwrap() = Some(process_tree::stopping());
         });
         assert!(started.elapsed() >= Duration::from_millis(300));
