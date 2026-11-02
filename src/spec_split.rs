@@ -1,6 +1,7 @@
 //! Splits a long spec into an index plus section files (docs/specs/agent/06.10-spec-layout.md,
 //! "A split spec" and "Splitting one"). Port of `scripts/splitSpec.ts`; `spec_parts` reads the
 //! result back. Nothing is written unless every file fits the limit.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -159,6 +160,105 @@ fn plan(text: &str, limit: usize) -> (String, Vec<(String, Vec<Entry>)>) {
     (opening, planned)
 }
 
+static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"`[^`\n]*`|\]\(([^)\s]+)(\s+"[^"]*")?\)"#).unwrap());
+static SCHEME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([A-Za-z][A-Za-z0-9+.-]*:|/)").unwrap());
+static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ {0,3}#{1,6}[ \t]+(.+?)[ \t#]*\r?\n?$").unwrap());
+
+/// GitHub's anchor for a heading: lowercase, punctuation dropped, spaces to hyphens.
+fn gh_slug(title: &str) -> String {
+    title
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+/// Lines outside code fences, each with whether it is a fence line's inside (false) or not.
+fn prose_lines(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    let mut fenced = false;
+    text.split_inclusive('\n').map(move |line| {
+        let fence = FENCE.is_match(line);
+        if fence {
+            fenced = !fenced;
+        }
+        (line, !fenced && !fence)
+    })
+}
+
+/// Each heading's anchor and the file holding it (`""` for the index), in GitHub's order, so
+/// repeats get `-1`, `-2`.
+fn anchors(opening: &str, planned: &[(String, Vec<Entry>)]) -> HashMap<String, String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut out = HashMap::new();
+    let texts = std::iter::once(("", opening)).chain(
+        planned
+            .iter()
+            .flat_map(|(_, l)| l)
+            .map(|e| (e.file.as_str(), e.text.as_str())),
+    );
+    for (file, text) in texts {
+        for (line, prose) in prose_lines(text) {
+            let Some(c) = prose.then(|| HEADING.captures(line)).flatten() else {
+                continue;
+            };
+            let base = gh_slug(&c[1]);
+            let n = seen.entry(base.clone()).or_insert(0);
+            let a = if *n == 0 { base } else { format!("{base}-{n}") };
+            *n += 1;
+            out.entry(a).or_insert_with(|| file.to_string());
+        }
+    }
+    out
+}
+
+/// Where a link written in the file `here` (`""` for the index) points once the spec is split.
+fn retarget(t: &str, here: &str, stem: &str, anchors: &HashMap<String, String>) -> String {
+    if SCHEME.is_match(t) {
+        return t.to_string();
+    }
+    let (path, anchor) = t.split_once('#').map_or((t, None), |(p, a)| (p, Some(a)));
+    if path.is_empty() || path == format!("{stem}.md") {
+        if let Some((a, f)) = anchor.and_then(|a| Some((a, anchors.get(&a.to_lowercase())?))) {
+            return match (f.as_str(), here) {
+                (f, h) if f == h => format!("#{a}"),
+                (f, "") => format!("{stem}/{f}#{a}"),
+                ("", _) => format!("../{stem}.md#{a}"),
+                (f, _) => format!("{f}#{a}"),
+            };
+        }
+        if path.is_empty() {
+            return t.to_string();
+        }
+    }
+    if here.is_empty() {
+        t.to_string()
+    } else {
+        format!("../{t}")
+    }
+}
+
+/// Fixes the links in `text`, which moves from the index to the file `here` (`""`: stays in the
+/// index). Code fences and inline code are left alone.
+fn rewrite(text: &str, here: &str, stem: &str, anchors: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    for (line, prose) in prose_lines(text) {
+        if !prose {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&LINK.replace_all(line, |c: &regex::Captures| match c.get(1) {
+            None => c[0].to_string(),
+            Some(t) => format!(
+                "]({}{})",
+                retarget(t.as_str(), here, stem, anchors),
+                c.get(2).map_or("", |m| m.as_str())
+            ),
+        }));
+    }
+    out
+}
+
 fn index_text(opening: &str, folder: &str, planned: &[(String, Vec<Entry>)], text: &str) -> String {
     let mut out = opening.to_string();
     if !out.is_empty() && !out.ends_with("\n\n") {
@@ -195,11 +295,16 @@ pub fn split_spec(root: &Path, index_path: &Path, limit: usize) -> Result<Outcom
     if spec_chars(&text) <= limit {
         return Ok(Outcome::Fits);
     }
-    let (opening, planned) = plan(&text, limit);
+    let (opening, mut planned) = plan(&text, limit);
     if planned.is_empty() {
         bail!("{} has no `##` sections to split at", index_path.display());
     }
     let stem = index_path.file_stem().and_then(|s| s.to_str()).unwrap_or("spec");
+    let found = anchors(&opening, &planned);
+    let opening = rewrite(&opening, "", stem, &found);
+    for e in planned.iter_mut().flat_map(|(_, l)| l) {
+        e.text = rewrite(&e.text, &e.file, stem, &found);
+    }
     let dir = index_path.parent().unwrap_or(Path::new(""));
     let folder = dir.join(stem);
     let index = index_text(&opening, stem, &planned, &text);
@@ -327,5 +432,70 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(std::fs::read_to_string(dir.path().join("docs/s.md")).unwrap(), spec);
         assert!(!dir.path().join("docs/s").exists());
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    fn split(spec: &str) -> (tempfile::TempDir, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/s.md"), spec).unwrap();
+        let Outcome::Split(files) = split_spec(dir.path(), Path::new("docs/s.md"), 500).unwrap() else {
+            panic!("not split")
+        };
+        (dir, files)
+    }
+
+    fn read(dir: &Path, f: &str) -> String {
+        std::fs::read_to_string(dir.join(f)).unwrap()
+    }
+
+    #[test]
+    fn links_in_moved_text_keep_working() {
+        let pad = "p".repeat(120);
+        let spec = format!(
+            "# S\n\nSee [o](#1-alpha) and [d](s.md#2-gamma) and [x](cloud.md).\n\n\
+## 1. Alpha\n\n{pad}\n\n[x](cloud.md) [w](https://a.b/c.md) [m](mailto:a@b.c) [l](#1-alpha) \
+[g](#2-gamma) [s](s.md#1-alpha) `[c](cloud.md)` [t](cloud.md#h \"T\")\n\n```\n[f](cloud.md)\n```\n\n\
+## 2. Gamma\n\n{pad}\n\n[a](#1-alpha) [i](s.md) [e](#nope)\n"
+        );
+        let (dir, files) = split(&spec);
+        let alpha = read(dir.path(), "docs/s/01-alpha.md");
+        assert!(alpha.contains("[x](../cloud.md) [w](https://a.b/c.md) [m](mailto:a@b.c) [l](#1-alpha)"));
+        assert!(alpha.contains("[g](02-gamma.md#2-gamma) [s](#1-alpha) `[c](cloud.md)` [t](../cloud.md#h \"T\")"));
+        assert!(alpha.contains("```\n[f](cloud.md)\n```"));
+        let gamma = read(dir.path(), "docs/s/02-gamma.md");
+        assert!(gamma.contains("[a](01-alpha.md#1-alpha) [i](../s.md) [e](#nope)"));
+        let index = read(dir.path(), "docs/s.md");
+        assert!(index.contains("[o](s/01-alpha.md#1-alpha) and [d](s/02-gamma.md#2-gamma) and [x](cloud.md)."));
+        // Every relative link between the split files resolves.
+        for f in files {
+            let text = read(dir.path(), &f.to_string_lossy());
+            for (line, prose) in prose_lines(&text) {
+                for c in LINK.captures_iter(line).filter(|_| prose) {
+                    let Some(t) = c.get(1).map(|m| m.as_str()) else {
+                        continue;
+                    };
+                    let path = t.split('#').next().unwrap();
+                    if path.is_empty() || SCHEME.is_match(path) || path.contains("cloud.md") {
+                        continue;
+                    }
+                    let at = dir.path().join(f.parent().unwrap()).join(path);
+                    assert!(at.exists(), "{} links to {t}", f.display());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anchors_follow_github_slugs() {
+        assert_eq!(gh_slug("6.2 Implementer (v2)"), "62-implementer-v2");
+        let planned = vec![];
+        let a = anchors("# A\n\n## A\n", &planned);
+        assert_eq!(a.get("a").map(String::as_str), Some(""));
+        assert!(a.contains_key("a-1"));
     }
 }
