@@ -10,7 +10,7 @@ use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
     api, backlog, config, connector, lane_pool, link, local_model, network, orchestrator, release, runtime,
-    setup_check, store, tags, telemetry, view,
+    setup_check, spec_split, store, tags, telemetry, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -91,6 +91,33 @@ async fn main() -> Result<()> {
         let from = to - (hours * 3_600_000.0) as i64;
         let events = telemetry::read_all(&dir, from, to, telemetry::flag(&args, "project").as_deref());
         println!("{}", telemetry::report_text(&events, from, to));
+        std::process::exit(0);
+    }
+    // docs/specs/agent/06.10-spec-layout.md "Splitting one".
+    if std::env::args().nth(1).as_deref() == Some("split-spec") {
+        let args: Vec<String> = std::env::args().skip(2).filter(|a| a != "--").collect();
+        let max = telemetry::flag(&args, "max");
+        let limit = max
+            .as_deref()
+            .map_or(Some(40_000), |m| m.parse::<usize>().ok().filter(|n| *n > 0));
+        let path = args.iter().find(|a| !a.starts_with("--") && Some(*a) != max.as_ref());
+        let (Some(path), Some(limit)) = (path, limit) else {
+            eprintln!("Usage: retaskable split-spec -- docs/specs/<name>.md [--max 40000]");
+            std::process::exit(2);
+        };
+        match spec_split::split_spec(Path::new("."), Path::new(path), limit) {
+            Ok(spec_split::Outcome::Split(files)) => {
+                for f in files {
+                    println!("wrote {}", f.display());
+                }
+            }
+            Ok(spec_split::Outcome::AlreadySplit) => println!("{path} is already split: skipped."),
+            Ok(spec_split::Outcome::Fits) => println!("{path} is within {limit} characters: nothing to split."),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         std::process::exit(0);
     }
     if std::env::args().nth(1).as_deref() == Some("start-report") {
