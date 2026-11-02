@@ -11,6 +11,8 @@
 //! operation can fail — no address, no network, a refused or unreadable answer — comes back as a
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
+pub mod runs;
+
 use crate::env::Env;
 use std::sync::Arc;
 use std::time::Duration;
