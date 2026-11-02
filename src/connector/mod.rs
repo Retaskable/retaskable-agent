@@ -3,13 +3,16 @@
 //! one access token for that cloud. Each says hello, sends a snapshot, and says it's alive in a quiet minute; it
 //! reconnects with backoff. Outbound only: nothing listens on a public port.
 //!
-//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, and an
-//! orchestrator that runs no work yet (`AgentView`). Every command from the site is refused, since none is ported.
+//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, its
+//! galleries' real status and last shoot, and an orchestrator that runs no work yet (`AgentView`). A command from
+//! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause, Resume
+//! and Shoot — and refused otherwise.
 #[cfg(test)]
 mod tests;
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,8 +23,10 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
-use crate::config::ProjectConfig;
+use crate::commands::{self, Seen};
+use crate::galleries;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
+use crate::view::{AgentView, Exit};
 
 /// The name a socket that signs in with a token offers beside it (shared/cloud.ts `SUBPROTOCOL`).
 pub const SUBPROTOCOL: &str = "retaskable";
@@ -72,105 +77,6 @@ fn random() -> f64 {
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// What the agent says about itself and its projects over the link.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentView {
-    /// `link::machine_name`.
-    pub machine: String,
-    /// This computer's tags (computer-tags.md section 3.1).
-    pub tags: Vec<String>,
-    /// The projects, the first first; none before Setup.
-    pub projects: Vec<ProjectView>,
-    /// This crate's version in a checkout, or a release build's `build.json` one
-    /// (installers/03-the-bundle-agent-bundle.md section 3.7).
-    pub version: String,
-}
-
-/// A project as its hub knows it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProjectView {
-    pub id: String,
-    pub github_repo: String,
-    pub backlog_path: String,
-}
-
-impl From<&ProjectConfig> for ProjectView {
-    fn from(p: &ProjectConfig) -> Self {
-        Self {
-            id: p.id_or_derived(),
-            github_repo: p.github_repo.clone(),
-            backlog_path: p.backlog_path.clone(),
-        }
-    }
-}
-
-impl AgentView {
-    /// The hubs to connect to: each project's by its id, or the agent's own ("") before the first project.
-    fn keys(&self) -> Vec<String> {
-        if self.projects.is_empty() {
-            vec![String::new()]
-        } else {
-            self.projects.iter().map(|p| p.id.clone()).collect()
-        }
-    }
-
-    /// `hello` (cloud.md section 5.3): the agent's version, OS and machine, and the project's repo and backlog, or
-    /// null until Setup is done.
-    pub fn hello(&self, project: &str) -> Value {
-        let repo = self
-            .projects
-            .iter()
-            .find(|p| p.id == project && !p.github_repo.is_empty());
-        json!({
-            "type": "hello",
-            "agentVersion": truncate(&self.version, 50),
-            "os": platform(),
-            "machine": truncate(&self.machine, 200),
-            "capabilities": [],
-            "policy": {},
-            "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
-            "tags": self.tags,
-        })
-    }
-
-    /// The project's snapshot (cloud.md section 5.2): every list the hub needs, empty, since this agent runs no work
-    /// yet, and an orchestrator that says so.
-    pub fn snapshot(&self, project: &str) -> Value {
-        let orchestrator = if project.is_empty() {
-            json!({ "status": "setup", "machine": self.machine })
-        } else {
-            json!({ "status": "paused", "machine": self.machine, "pausedReason": NO_WORK_YET })
-        };
-        json!({
-            "type": "snapshot",
-            "state": {
-                "orchestrator": orchestrator,
-                "usage": {},
-                "milestones": [],
-                "items": [],
-                "sessions": [],
-                "lanes": [],
-                "mainPlaying": false,
-                "galleries": [],
-                "drafts": [],
-                "asks": [],
-            },
-        })
-    }
-}
-
-/// Why a project's orchestrator reads as paused.
-pub const NO_WORK_YET: &str = "This computer's agent doesn't run work yet.";
-
-/// `process.platform`'s name for this OS, as the hub keeps it.
-fn platform() -> &'static str {
-    match std::env::consts::OS {
-        "windows" => "win32",
-        "macos" => "darwin",
-        other => other,
-    }
-}
-
 /// One cloud's link: one access token shared by every project's connection, and those connections.
 pub struct Connector {
     tokens: Arc<DeviceTokens>,
@@ -184,17 +90,26 @@ struct Cloud {
     tokens: Arc<DeviceTokens>,
     view: Arc<AgentView>,
     timing: Timing,
+    exit: Arc<Exit>,
+    /// Where `.retaskable/remote.log` goes (cloud.md section 6.3).
+    dir: PathBuf,
+    /// For the audit log's `cloud` field: the same url every connection's token answer carries.
+    url: String,
 }
 
 impl Connector {
     /// Starts a connection for each of `view`'s projects to the cloud at `url`. Projects after the first wait until
     /// the first has connected once, so the first is the one that keeps the agent's own hub (projects.md section 9.2).
+    /// `exit` is Restart's (the same one the settings page's restart button uses). `dir` is the agent's own data
+    /// directory, where every command answered gets logged (`commands::audit`).
     pub fn start(
         url: &str,
         store: Arc<dyn TokenStore>,
         http: reqwest::Client,
         view: Arc<AgentView>,
         timing: Timing,
+        exit: Arc<Exit>,
+        dir: &Path,
     ) -> Self {
         let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
@@ -203,6 +118,9 @@ impl Connector {
             tokens: tokens.clone(),
             view,
             timing,
+            exit,
+            dir: dir.to_path_buf(),
+            url: url.to_string(),
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -270,6 +188,9 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
         wait
     };
     let mut stale: Option<String> = None;
+    // One project's commands, so a replay is caught across reconnects (commands.ts's `Commands` is one per
+    // project's connection too).
+    let mut seen = Seen::default();
     loop {
         // A token that never comes (a refresh hanging on the network) is a failed try, not a link that stops.
         let answer = tokio::time::timeout(t.connect, cloud.tokens.access_token(stale.as_deref()))
@@ -288,7 +209,7 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
                             let _ = opened.send(true); // the other projects may connect now
                         }
                         let since = Instant::now();
-                        let (code, reason) = connected(ws, &cloud.view, &project, t, &log).await;
+                        let (code, reason) = connected(ws, &cloud, &project, &log, &mut seen).await;
                         if since.elapsed() >= t.stable {
                             attempt = 0;
                         }
@@ -347,18 +268,28 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 
 /// Runs an open connection: hello and a snapshot, then answers what the hub sends, and says it's alive in a quiet
 /// minute (sync-health.md section 3.1). The close code and reason when it closes.
-async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: &impl Fn(String)) -> (u16, String) {
+async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(String), seen: &mut Seen) -> (u16, String) {
+    let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    for msg in [view.hello(project), view.snapshot(project)] {
+    for msg in [view.hello(project), view.snapshot(project, &cloud.dir)] {
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
     }
+    let t = cloud.timing;
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
+    // The snapshot just sent has the sizes, pause and galleries as they are now; a later change sends it again.
+    let mut sizes = view.lane_sizes.subscribe();
+    sizes.mark_unchanged();
+    let mut paused = view.paused.subscribe();
+    paused.mark_unchanged();
+    let mut gallery_status = galleries::subscribe_status_changes();
+    gallery_status.mark_unchanged();
+    let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
-                Some(Ok(Message::Text(text))) => receive(&text, log),
+                Some(Ok(Message::Text(text))) => receive(&text, cloud, project, seen, log),
                 Some(Ok(Message::Close(frame))) => {
                     return frame.map_or((1005, String::new()), |f| (u16::from(f.code), f.reason.to_string()));
                 }
@@ -367,6 +298,17 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
                 None => return (1006, String::new()),
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
+            Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = gallery_status.changed() => {
+                let count = gallery_status.borrow().get(project).copied().unwrap_or(0);
+                if count != gallery_changes {
+                    gallery_changes = count;
+                    Some(view.snapshot(project, &cloud.dir))
+                } else {
+                    None
+                }
+            },
         };
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await
@@ -376,9 +318,9 @@ async fn connected(ws: Socket, view: &AgentView, project: &str, t: Timing, log: 
     }
 }
 
-/// The answer to a message from the hub, if it needs one. A command is refused with a `nack`, since none is ported
-/// yet; `watch` finds no session to send; everything else is nothing to act on yet.
-fn receive(text: &str, log: &impl Fn(String)) -> Option<Value> {
+/// The answer to a message from the hub, if it needs one. A command is checked, run (commands.rs) and audited;
+/// `watch` finds no session to send; everything else is nothing to act on yet.
+fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl Fn(String)) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
     if msg.get("type").and_then(Value::as_str) != Some("command") {
         return None;
@@ -393,8 +335,21 @@ fn receive(text: &str, log: &impl Fn(String)) -> Option<Value> {
             .map(|s| truncate(s, 100))
             .unwrap_or_else(|| "?".into())
     };
-    let (name, by) = (field("name"), field("issuedBy"));
-    let reason = format!("Not a command this agent takes yet: {name}");
-    log(format!("{name} from {by}: {reason}"));
-    Some(json!({ "type": "nack", "id": id, "reason": reason }))
+    let cmd = commands::Command {
+        id: id.to_string(),
+        name: field("name"),
+        args: msg.get("args").cloned().unwrap_or(Value::Null),
+        issued_by: field("issuedBy"),
+        issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
+        expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
+    };
+    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir);
+    let outcome = if answer.get("type").and_then(Value::as_str) == Some("ack") {
+        "done".to_string()
+    } else {
+        answer.get("reason").and_then(Value::as_str).unwrap_or("?").to_string()
+    };
+    log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
+    commands::audit(&cloud.dir, &cmd, &answer, &cloud.url);
+    Some(answer)
 }

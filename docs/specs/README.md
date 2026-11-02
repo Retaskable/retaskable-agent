@@ -9,7 +9,7 @@ Start with [agent.md](agent.md), an index of sections in [agent/](agent/). Read 
 Only the specs whose subject is the computer itself:
 
 - [agent.md](agent.md) and [agent/](agent/): the agent, its sessions, lanes, the orchestrator loop, its port and its config.
-- [engines.md](engines.md): Claude Code, Cursor and pi as the engines sessions run on.
+- [engines.md](engines.md): Claude Code, Cursor, pi and Codex as the engines sessions run on.
 - [agent-settings.md](agent-settings.md): the computer's own settings page.
 - [agent-telemetry.md](agent-telemetry.md): the watchdog and the metadata the agent records.
 - [tray.md](tray.md): the tray, linking the computer, the terminal menu.
@@ -17,7 +17,9 @@ Only the specs whose subject is the computer itself:
 - [docker.md](docker.md): the agent in Docker.
 - [first-run-check.md](first-run-check.md) and [claude-signed-out.md](claude-signed-out.md): the checks the computer runs on itself.
 - [local-state-diet.md](local-state-diet.md): the per-computer state file.
+- [pieces.md](pieces.md): taking work as short runs on pieces, instead of claiming whole items.
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
+- [agent-ci.md](agent-ci.md): CI run on the agent computer, in Docker, on its own slot.
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
 
 ## What was cut
@@ -41,3 +43,5 @@ Synced with Retaskable.com PR #1848 at commit 844314cf172b71774ab5cff10229f6f10f
 Synced with Retaskable.com PR #1850 at commit c825f06e15c8ce4025715208a57666ecc84f0220 (lanes are the computer's, shared by all its projects).
 
 Synced with Retaskable.com PR #1860 at commit 8a682e8c8ea5f8badc1289933563e43eba926540 (Cursor's token use on the Usage card).
+
+Synced with Retaskable.com PR #2008 at commit ee32ff7bf3c4cc5962904ce0af07aefb23741ad6 (triage: a second look that can carry out a clear suggestion, bug-report dedup via `sameAs`, not retrying a slice blocked on another item's unbuilt infrastructure, and retrying a failed triage look before waiting for a human).

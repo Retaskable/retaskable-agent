@@ -8,7 +8,11 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
 use super::*;
+use crate::config::GalleryConfig;
+use crate::lane_pool::LaneSizes;
 use crate::link::FileStore;
+use crate::telemetry::events::now_ms;
+use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState, ProjectView};
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {
@@ -99,10 +103,56 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
                 id: id.to_string(),
                 github_repo: format!("o/{id}"),
                 backlog_path: "backlog".into(),
+                repo_path: PathBuf::new(),
+                worktrees_dir: PathBuf::new(),
+                base_branch: String::new(),
+                galleries: vec![],
             })
             .collect(),
         version: "9.9.9".into(),
+        lanes: 2,
+        chore_lane: Some(2),
+        lane_sizes: LaneSizes::default(),
+        paused: PauseState::default(),
     })
+}
+
+fn view_with_models_gallery(project: &str) -> Arc<AgentView> {
+    let mut v = view(&[project]);
+    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    }];
+    v
+}
+
+/// Starts a connector for `project` with a Models gallery, reads its hello and first snapshot,
+/// and checks the gallery starts `idle`: the shared setup for the gallery-status-resend tests,
+/// which then each send their own `galleries::set_status` calls and read what arrives next.
+async fn gallery_resend_setup(project: &str) -> (tempfile::TempDir, Connector, Accepted) {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let v = view_with_models_gallery(project);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let galleries = read(&mut first).await["state"]["galleries"].clone();
+    assert_eq!(galleries[0]["status"], "idle");
+    (dir, c, first)
+}
+
+/// An `exit` that does nothing, for tests that don't send Restart.
+fn noop_exit() -> Arc<Exit> {
+    Arc::new(|_: i32| {})
 }
 
 fn linked(url: &str) -> (tempfile::TempDir, Arc<dyn TokenStore>) {
@@ -141,13 +191,15 @@ async fn close(a: &mut Accepted, code: u16) {
 #[tokio::test]
 async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() {
     let (url, refreshes, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
+    let (dir, store) = linked(&url);
     let c = Connector::start(
         &url,
         store.clone(),
         reqwest::Client::new(),
         view(&["one", "two"]),
         timing(),
+        noop_exit(),
+        dir.path(),
     );
     let mut first = next(&mut rx).await;
     assert_eq!(first.uri, "/api/agents/connect?project=one");
@@ -179,10 +231,135 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
 }
 
 #[tokio::test]
+async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_changes() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one"]);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view.clone(),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    let lanes = read(&mut first).await["state"]["lanes"].clone();
+    assert_eq!(
+        lanes,
+        json!([
+            { "k": 1, "diskGb": 0.0, "playing": false },
+            { "k": 2, "diskGb": 0.0, "playing": false, "note": CHORE_LANE_NOTE },
+        ])
+    );
+    view.lane_sizes.set("one", std::collections::BTreeMap::from([(1, 3.3)]));
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["lanes"][0]["diskGb"], 3.3);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_snapshot_reports_a_projects_gallery_info() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    // As `galleries::shoot` would leave it after a shoot.
+    let dest = crate::paths::gallery_dir(dir.path(), "one", "models");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+        dest.join("index.json"),
+        json!({
+            "name": "Models",
+            "shotAt": "2026-01-01T00:00:00Z",
+            "sha": "deadbeef",
+            "images": [{ "file": "01-first.jpg", "title": "First" }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let v = view_with_models_gallery("one");
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    let galleries = read(&mut a).await["state"]["galleries"].clone();
+
+    assert_eq!(
+        galleries,
+        json!([{
+            "slug": "models",
+            "name": "Models",
+            "status": "idle",
+            "shotAt": "2026-01-01T00:00:00Z",
+            "sha": "deadbeef",
+            "count": 1,
+        }])
+    );
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
+    // A project id of its own: `galleries::set_status` broadcasts across the whole process, and
+    // "one" is shared by plenty of other tests that never expect an extra snapshot.
+    let project = "connector-gallery-resend";
+    let (_dir, c, mut first) = gallery_resend_setup(project).await;
+
+    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_status_change_still_arrives_when_another_projects_changes_right_after() {
+    // Two project ids of their own, as above: this test means to prove that a change on
+    // `other`, landing right after this project's own change, doesn't make the connector miss
+    // its own (the watch channel the two share keeps only the latest value).
+    let project = "connector-gallery-resend-own";
+    let other = "connector-gallery-resend-other";
+    let (_dir, c, mut first) = gallery_resend_setup(project).await;
+
+    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
+    galleries::set_status(other, "models", galleries::GalleryStatus::Shooting);
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&[]), timing());
+    let (dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&[]),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
     let mut a = next(&mut rx).await;
     assert_eq!(a.uri, "/api/agents/connect");
     assert_eq!(read(&mut a).await["project"], Value::Null);
@@ -190,31 +367,179 @@ async fn before_setup_it_connects_to_its_own_hub() {
     c.stop(Duration::from_secs(1)).await;
 }
 
-#[tokio::test]
-async fn a_command_is_refused_with_a_nack() {
+/// A fresh, still-valid command: callers override `name`/`args` as needed.
+fn command(id: &str, name: &str, args: Value) -> Value {
+    let now = now_ms();
+    json!({
+        "type": "command",
+        "id": id,
+        "name": name,
+        "args": args,
+        "issuedBy": "jc",
+        "issuedAt": now,
+        "expiresAt": now + 60_000,
+    })
+}
+
+/// Starts a connector for one project ("one") with `exit`, and returns it once its hello and
+/// snapshot have been read, ready for a test to send it a command. The returned `TempDir` must
+/// be kept (as `_dir`): dropping it removes the credentials file the connector's still using.
+async fn connected_project(exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
     let (url, _, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store, reqwest::Client::new(), view(&["one"]), timing());
+    let (dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        exit,
+        dir.path(),
+    );
     let mut a = next(&mut rx).await;
-    read(&mut a).await;
-    read(&mut a).await;
-    let command = json!({ "type": "command", "id": "c1", "name": "pause", "args": {}, "issuedBy": "jc" });
+    read(&mut a).await; // hello
+    read(&mut a).await; // snapshot
+    (c, a, dir)
+}
+
+#[tokio::test]
+async fn an_unported_command_is_refused_with_a_nack() {
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
     a.ws.send(Message::text(json!({ "type": "ping" }).to_string()))
         .await
         .unwrap();
-    a.ws.send(Message::text(command.to_string())).await.unwrap();
+    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
+        .await
+        .unwrap();
     let nack = read(&mut a).await;
     assert_eq!(nack["type"], "nack");
     assert_eq!(nack["id"], "c1");
-    assert_eq!(nack["reason"], "Not a command this agent takes yet: pause");
+    assert_eq!(nack["reason"], "Not a command this agent takes yet: continue");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn every_command_answered_is_logged_to_remote_log() {
+    let (c, mut a, dir) = connected_project(noop_exit()).await;
+    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
+        .await
+        .unwrap();
+    read(&mut a).await; // the nack
+    a.ws.send(Message::text(command("c2", "restart", json!({})).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c2" }));
+    c.stop(Duration::from_secs(1)).await;
+
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let lines: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["id"], "c1");
+    assert_eq!(lines[0]["name"], "continue");
+    assert_eq!(lines[0]["issuedBy"], "jc");
+    assert_eq!(lines[0]["outcome"], "nack");
+    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: continue");
+    assert!(lines[0]["at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(lines[1]["id"], "c2");
+    assert_eq!(lines[1]["outcome"], "ack");
+    assert_eq!(lines[1].get("reason"), None);
+}
+
+#[tokio::test]
+async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
+
+    a.ws.send(Message::text(command("c1", "pause", json!({})).to_string()))
+        .await
+        .unwrap();
+    let nack = read(&mut a).await;
+    assert_eq!(
+        nack["reason"],
+        "retaskable.com answers this one itself; it doesn't take a computer."
+    );
+
+    a.ws.send(Message::text(
+        command("c2", "pause", json!({ "computer": true })).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c2" }));
+    let snapshot = read(&mut a).await;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(
+        snapshot["state"]["orchestrator"]["pausedReason"],
+        "Paused from retaskable.com by jc"
+    );
+
+    a.ws.send(Message::text(
+        command("c3", "resume", json!({ "computer": true })).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c3" }));
+    let snapshot = read(&mut a).await;
+    assert_eq!(snapshot["state"]["orchestrator"]["pausedReason"], NO_WORK_YET);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn restart_acks_and_calls_exit_with_75() {
+    let calls: Arc<StdMutex<Vec<i32>>> = Arc::new(StdMutex::new(Vec::new()));
+    let kept = calls.clone();
+    let exit: Arc<Exit> = Arc::new(move |code: i32| kept.lock().unwrap().push(code));
+    let (c, mut a, _dir) = connected_project(exit).await;
+    a.ws.send(Message::text(command("c1", "restart", json!({})).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c1" }));
+    assert_eq!(*calls.lock().unwrap(), vec![75]);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_replayed_command_id_is_refused_the_second_time() {
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
+    let cmd = command("c1", "restart", json!({}));
+    a.ws.send(Message::text(cmd.to_string())).await.unwrap();
+    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c1" }));
+    a.ws.send(Message::text(cmd.to_string())).await.unwrap();
+    let nack = read(&mut a).await;
+    assert_eq!(nack["reason"], "Already received: a command runs once.");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn an_expired_command_is_refused() {
+    let (c, mut a, _dir) = connected_project(noop_exit()).await;
+    let issued_at = now_ms() - 61_000;
+    let old = json!({
+        "type": "command",
+        "id": "c1",
+        "name": "restart",
+        "args": {},
+        "issuedBy": "jc",
+        "issuedAt": issued_at,
+        "expiresAt": issued_at + 60_000,
+    });
+    a.ws.send(Message::text(old.to_string())).await.unwrap();
+    let nack = read(&mut a).await;
+    assert!(nack["reason"].as_str().unwrap().starts_with("Expired"));
     c.stop(Duration::from_secs(1)).await;
 }
 
 #[tokio::test]
 async fn it_reconnects_after_a_close_and_takes_a_fresh_token_when_its_one_expired() {
     let (url, refreshes, mut rx) = cloud().await;
-    let (_dir, store) = linked(&url);
-    let c = Connector::start(&url, store.clone(), reqwest::Client::new(), view(&["one"]), timing());
+    let (dir, store) = linked(&url);
+    let c = Connector::start(
+        &url,
+        store.clone(),
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
     let mut a = next(&mut rx).await;
     close(&mut a, close::REPLACED).await;
     // Same token, after a backoff.
@@ -233,7 +558,15 @@ async fn an_unlinked_agent_waits_and_connects_once_linked() {
     let (url, _, mut rx) = cloud().await;
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn TokenStore> = Arc::new(FileStore::new(dir.path().join("credentials.json"), "retaskable"));
-    let c = Connector::start(&url, store.clone(), reqwest::Client::new(), view(&["one"]), timing());
+    let c = Connector::start(
+        &url,
+        store.clone(),
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(300), rx.recv())
             .await

@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use crate::env::Env;
 use crate::release::{self, Build, Environment};
 
 /// `main`'s usual body for these CLIs: run `body`, printing a one-line error and exiting 1 on
@@ -130,14 +131,14 @@ pub fn check_silent_terminal(exe: &Path, output: &Output) -> Result<(), String> 
 /// install step a start check must never actually exercise.
 pub fn check_not_linked_log(build: &Build, scratch: &Path) -> Result<(), String> {
     let scratch = scratch.to_path_buf();
-    let scratch_env = move |k: &str| {
+    let scratch_env = Env::new(move |k: &str| {
         matches!(
             k,
             "HOME" | "USERPROFILE" | "LOCALAPPDATA" | "XDG_DATA_HOME" | "XDG_STATE_HOME"
         )
         .then(|| scratch.to_string_lossy().to_string())
-    };
-    let log_path = release::logs_dir(build, scratch_env).join("retaskable.log");
+    });
+    let log_path = release::logs_dir(build, &scratch_env).join("retaskable.log");
     let log = std::fs::read_to_string(&log_path).map_err(|e| format!("reading {}: {e}", log_path.display()))?;
     if !log.lines().any(|l| l.contains("Links:") && l.contains("not linked")) {
         return Err(format!(

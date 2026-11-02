@@ -2,6 +2,7 @@
 //! back (`SessionResult`), the `Engine` interface each AI tool implements behind
 //! `runner::run_session`, and `describe_failure` — following `agent/src/engines/engine.ts` in
 //! Retaskable.com (the ground truth this is porting) and docs/specs/engines/02-the-engine-layer.md.
+use crate::env::Env;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -16,6 +17,7 @@ pub enum EngineId {
     Claude,
     Cursor,
     Pi,
+    Codex,
 }
 
 impl std::fmt::Display for EngineId {
@@ -24,6 +26,7 @@ impl std::fmt::Display for EngineId {
             EngineId::Claude => "claude",
             EngineId::Cursor => "cursor",
             EngineId::Pi => "pi",
+            EngineId::Codex => "codex",
         })
     }
 }
@@ -34,6 +37,7 @@ pub fn engine_id_from_str(id: Option<&str>) -> EngineId {
     match id {
         Some("cursor") => EngineId::Cursor,
         Some("pi") => EngineId::Pi,
+        Some("codex") => EngineId::Codex,
         _ => EngineId::Claude,
     }
 }
@@ -54,9 +58,17 @@ pub struct SessionSpec {
     /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check.
     pub budget_usd: f64,
     pub start: SessionStart,
-    /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist.
-    /// Claude Code's own permission mode doesn't change on this (that's a later slice).
+    /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist,
+    /// Claude Code's `--disallowedTools "Edit Write NotebookEdit"` (`claude.rs`'s
+    /// `READONLY_DISALLOWED_TOOLS`). `--permission-mode` itself never changes — that flag is about
+    /// not prompting for approval, not about which tools are available.
     pub readonly: bool,
+    /// Whether a readonly session may still use Bash (e.g. a scout's or the final reviewer's own
+    /// `git diff`). Ignored unless `readonly` is set; a writing session always has Bash. `false`
+    /// for a role with no reason to run anything at all (e.g. the playtest planner), so
+    /// `claude.rs` disallows Bash outright instead of trusting a pattern denylist to catch every
+    /// way a shell command can still write a file.
+    pub shell: bool,
     /// Cursor-only settings; `None` means none of a project's `cursor.*` config was given.
     pub cursor: Option<CursorOptions>,
     /// Where this session's local server is, set alongside `model == "local"`
@@ -64,6 +76,83 @@ pub struct SessionSpec {
     /// that reads `model` and `local` together to decide whether a session is actually local, so
     /// the args, the environment and the reader can't disagree about it.
     pub local: Option<LocalTarget>,
+    /// Whether this session should run inside Claude Code's own sandbox
+    /// (04-architecture.md section 4.2): `cfg.sandbox == Auto` and the platform supports it
+    /// (`claude.rs`'s `sandbox_supported`/`sandbox_enabled`). Cursor and pi have no sandbox of
+    /// their own, so they ignore this field.
+    pub sandbox: bool,
+}
+
+/// A `SessionSpec` for a read-only session with nothing to resume (a `writer`, e.g. release notes'
+/// or ideas', both interactive-like-an-ask and run once): no `max_turns` cap, `start:
+/// SessionStart::Ephemeral`, `readonly: true`.
+#[allow(clippy::too_many_arguments)]
+pub fn ephemeral_readonly_spec(
+    engine: Option<EngineId>,
+    model: String,
+    prompt: String,
+    schema: Value,
+    cwd: PathBuf,
+    budget_usd: f64,
+    cursor: Option<CursorOptions>,
+    local: Option<LocalTarget>,
+    sandbox: bool,
+    shell: bool,
+) -> SessionSpec {
+    SessionSpec {
+        engine,
+        model,
+        prompt,
+        schema,
+        cwd,
+        max_turns: None,
+        budget_usd,
+        start: SessionStart::Ephemeral,
+        readonly: true,
+        shell,
+        cursor,
+        local,
+        sandbox,
+    }
+}
+
+/// The engine/model/budget/local/cursor/sandbox bundle every read-only `writer`-style role
+/// (release notes, ideas, scouts, the triager) carries alongside its own prompt inputs —
+/// factored out so each role's struct holds one `session: EphemeralSessionConfig` field instead
+/// of repeating these seven fields and the [`ephemeral_readonly_spec`] call that reads them back
+/// off.
+#[derive(Debug, Clone)]
+pub struct EphemeralSessionConfig<'a> {
+    /// A checkout where the session may read specs/diffs/code, per the role's own doc comment.
+    pub cwd: &'a std::path::Path,
+    pub budget_usd: f64,
+    pub model: String,
+    pub local: Option<LocalTarget>,
+    /// [`crate::engines::engine_for`] with the role's own [`crate::engines::Role`].
+    pub engine: Option<EngineId>,
+    pub cursor: Option<CursorOptions>,
+    pub sandbox: bool,
+    /// [`SessionSpec::shell`]: `false` only for a role whose prompt never asks it to run
+    /// anything, like the playtest planner.
+    pub shell: bool,
+}
+
+impl EphemeralSessionConfig<'_> {
+    /// [`ephemeral_readonly_spec`] for this bundle, with the caller's own `prompt` and `schema`.
+    pub fn spec(&self, prompt: String, schema: Value) -> SessionSpec {
+        ephemeral_readonly_spec(
+            self.engine,
+            self.model.clone(),
+            prompt,
+            schema,
+            self.cwd.to_path_buf(),
+            self.budget_usd,
+            self.cursor.clone(),
+            self.local.clone(),
+            self.sandbox,
+            self.shell,
+        )
+    }
 }
 
 /// `spec.cursor` in `engine.ts`: the Cursor-specific knobs a `SessionSpec` can carry.
@@ -147,7 +236,8 @@ pub struct SessionResult {
     /// The last turn's own context size (prompt + cache), not counting subagents' turns.
     pub context_tokens: Option<u64>,
     /// The latest `rate_limit_info` the stream reported (07-orchestrator-loop.md section 7.1),
-    /// kept whole and ready to save as `state.usage`. `None` when the stream never sent one.
+    /// kept whole and saved as `state.usage` once the implementer session settles. `None` when
+    /// the stream never sent one.
     pub usage: Option<Value>,
     /// A result's own token counts (`tokensOf` in `cursor.ts`): Cursor's stand-in for a cost,
     /// since it never reports one. `None` when the engine doesn't report tokens, or reported none.
@@ -160,6 +250,39 @@ pub struct SessionResult {
 pub struct Tokens {
     pub input: u64,
     pub output: u64,
+}
+
+/// The common shape of every engine's `no_result`: a process that exited with no `result` event
+/// at all. Builds the "{name} exited with code N and no result. <stderr tail>" error and a
+/// `SessionResult` for it, with every field an individual engine might know better (`limit_hit`,
+/// `signed_out`, `cost_usd`, `context_tokens`, `usage`, `session_id`) left at its "unknown"
+/// default for the caller to override.
+pub fn exited_without_result(
+    name: &str,
+    exit_code: Option<i32>,
+    stderr: &str,
+    known_session_id: &str,
+) -> SessionResult {
+    let code = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let error = format!(
+        "{name} exited with code {code} and no result. {}",
+        crate::text::tail(stderr.trim(), 1500)
+    );
+    SessionResult {
+        ok: false,
+        subtype: "exited".to_string(),
+        structured: None,
+        error: Some(error),
+        cost_usd: None,
+        session_id: known_session_id.to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
+    }
 }
 
 /// "hit its $5 budget", "found Claude signed out on this computer (…)", "ended with …"
@@ -222,7 +345,7 @@ pub trait Engine: Send + Sync {
     fn id(&self) -> EngineId;
     /// Finds this engine's binary on the computer (`resolveClaude()`/`resolveCursor()`), given the
     /// environment and `PATH` to search, so the search stays pure and testable.
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf>;
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf>;
     /// The invocation's argument list for `spec` (the prompt itself goes in on stdin, so it's
     /// never here — docs/specs/agent/04-architecture.md, clear of Windows's command-line length
     /// limit).
@@ -242,6 +365,11 @@ pub trait Engine: Send + Sync {
     /// Turns one stored transcript line back into events, for reading a run back
     /// (`summarize(ev, at)` in `engine.ts`; `readTranscripts`).
     fn summarize(&self, event: &Value, at: i64) -> Vec<SessionEvent>;
+    /// Its process can linger after the result (a sandboxed child still running), so the runner ends
+    /// it a moment after one, and the result stands (`endsOnResult`; Codex).
+    fn ends_on_result(&self) -> bool {
+        false
+    }
 }
 
 /// A `SessionSpec` test fixture shared by every engine module's tests: cloud, ephemeral, no
@@ -259,8 +387,29 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
         budget_usd: 0.0,
         start: SessionStart::Ephemeral,
         readonly: false,
+        shell: true,
         cursor: None,
         local: None,
+        sandbox: false,
+    }
+}
+
+/// A `SessionResult` test fixture shared by `write_note`'s and `run_round`'s own tests: a result
+/// with a cost, and nothing else interesting. Callers set `ok`, `subtype`, `structured` and `error`.
+#[cfg(test)]
+pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
+    SessionResult {
+        ok,
+        subtype: subtype.to_string(),
+        structured,
+        error: error.map(str::to_string),
+        cost_usd: Some(0.12),
+        session_id: "s".to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
     }
 }
 
@@ -334,11 +483,13 @@ mod tests {
         assert_eq!(EngineId::Claude.to_string(), "claude");
         assert_eq!(EngineId::Cursor.to_string(), "cursor");
         assert_eq!(EngineId::Pi.to_string(), "pi");
+        assert_eq!(EngineId::Codex.to_string(), "codex");
     }
 
     #[test]
     fn engine_id_from_str_reads_pi_and_falls_back_to_claude() {
         assert_eq!(engine_id_from_str(Some("pi")), EngineId::Pi);
+        assert_eq!(engine_id_from_str(Some("codex")), EngineId::Codex);
         assert_eq!(engine_id_from_str(Some("cursor")), EngineId::Cursor);
         assert_eq!(engine_id_from_str(Some("steam")), EngineId::Claude);
         assert_eq!(engine_id_from_str(None), EngineId::Claude);

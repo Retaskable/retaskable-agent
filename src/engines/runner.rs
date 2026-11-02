@@ -7,6 +7,8 @@
 //! only makes the write side of the format `transcripts.rs` already reads real.
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -14,9 +16,15 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::claude::ClaudeEngine;
+use super::codex::CodexEngine;
 use super::cursor::CursorEngine;
 use super::engine::{Engine, EngineId, SessionResult, SessionSpec};
 use super::pi::PiEngine;
+use crate::process_tree::{KILL_LIMIT, ProcessTree};
+use crate::telemetry::events::now_ms;
+
+/// How long an `ends_on_result` engine's process has to exit on its own after its result.
+const END_AFTER_RESULT: Duration = Duration::from_secs(5);
 
 /// `engineOf(id)`: the `Engine` a session's `SessionSpec.engine` names; missing means Claude Code.
 pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
@@ -24,6 +32,7 @@ pub fn engine_of(id: Option<EngineId>) -> Result<Box<dyn Engine>> {
         EngineId::Claude => Ok(Box::new(ClaudeEngine)),
         EngineId::Cursor => Ok(Box::new(CursorEngine)),
         EngineId::Pi => Ok(Box::new(PiEngine)),
+        EngineId::Codex => Ok(Box::new(CodexEngine)),
     }
 }
 
@@ -36,13 +45,6 @@ pub struct TranscriptSink {
     pub path: PathBuf,
     /// The implementer's lane, when this session has one (`started_on`'s `lane`).
     pub lane: Option<u32>,
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// The transcript's own header line, following `transcripts.rs`'s `started_on`/`read_transcripts`:
@@ -73,7 +75,7 @@ fn open_sink(sink: &TranscriptSink, spec: &SessionSpec) -> Result<std::fs::File>
 }
 
 /// What [`spawn_and_read`] needs to start the process and feed it its prompt, bundled so the
-/// function takes one argument instead of six.
+/// function takes one argument instead of seven.
 struct SpawnSpec<'a> {
     bin: &'a Path,
     args: &'a [String],
@@ -81,6 +83,59 @@ struct SpawnSpec<'a> {
     cwd: &'a Path,
     prompt: &'a str,
     known_session_id: &'a str,
+    /// Ends the process tree this long after a result, when the engine's process can linger.
+    end_after_result: Option<Duration>,
+    /// Kills the process tree once this long passes with no output line at all (the watchdog,
+    /// 07-orchestrator-loop.md's `tuning.sessionQuietMinutes`), resetting on every line. `None`
+    /// turns it off. Only watches while no result has been read yet: once one has, `end_after_result`
+    /// (a much shorter wait) takes over instead.
+    quiet: Option<Duration>,
+    /// Given the session's process tree right after it joins, so a caller outside this loop — a
+    /// restart or Quit (07.4-stopping-and-restarting.md), or this module's own test — can mark it
+    /// `cut` and kill it while this loop is still reading its output. `None` when nothing needs to
+    /// reach in, which is every real session today: nothing yet calls `ProcessTree::cut` on one.
+    tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
+}
+
+/// What a silent session's own `SessionResult` says, once the watchdog has killed it
+/// (07-orchestrator-loop.md's "a session that prints nothing ... is killed"). Reusing the
+/// existing `SessionResult::Failed` path (via `classify`), this is handed back to the project's
+/// queue the same as any other crash, so the item gets picked up and retried.
+fn killed_for_silence(known_session_id: &str, quiet: Duration) -> SessionResult {
+    SessionResult {
+        ok: false,
+        subtype: "killed_for_silence".to_string(),
+        structured: None,
+        error: Some(format!("killed after {} minutes with no output", quiet.as_secs() / 60)),
+        cost_usd: None,
+        session_id: known_session_id.to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
+    }
+}
+
+/// What a cut session's own `SessionResult` says, in the same shape as [`killed_for_silence`]
+/// (07.4-stopping-and-restarting.md's "A cut session ends as `interrupted`, not `failed`"):
+/// something outside this session — a restart or Quit — called [`ProcessTree::cut`] and killed
+/// its tree before it answered. `implementer::run_implementer` passes this on as a typed error
+/// (`Interrupted`), the way a watchdog kill already is as `SilenceKilled`.
+fn interrupted(known_session_id: &str) -> SessionResult {
+    SessionResult {
+        ok: false,
+        subtype: "interrupted".to_string(),
+        structured: None,
+        error: Some("interrupted".to_string()),
+        cost_usd: None,
+        session_id: known_session_id.to_string(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: None,
+    }
 }
 
 /// Spawns `spec.bin` with `spec.args`, feeds `spec.prompt` in on stdin, and reads the engine's
@@ -92,15 +147,22 @@ async fn spawn_and_read(
     mut reader: Box<dyn super::engine::EngineReader>,
     mut sink: Option<std::fs::File>,
 ) -> Result<SessionResult> {
-    let mut child = Command::new(spec.bin)
+    let mut command = Command::new(spec.bin);
+    command
         .args(spec.args)
         .current_dir(spec.cwd)
         .envs(spec.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    ProcessTree::prepare(&mut command);
+    let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", spec.bin.display()))?;
+    let tree = ProcessTree::join(&child).context("putting the session in its own process tree")?;
+    if let Some(tx) = spec.tree_tx {
+        let _ = tx.send(tree.clone());
+    }
 
     let mut stdin = child.stdin.take().context("session has no stdin")?;
     let prompt = spec.prompt.to_string();
@@ -118,13 +180,43 @@ async fn spawn_and_read(
     let stdout = child.stdout.take().context("session has no stdout")?;
     let mut lines = BufReader::new(stdout).lines();
     let mut result = None;
-    while let Some(line) = lines.next_line().await.context("reading the session's output")? {
+    let mut ends_at = None;
+    let mut silenced = false;
+    loop {
+        let next = match ends_at {
+            Some(at) => match tokio::time::timeout_at(at, lines.next_line()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    let tree = tree.clone();
+                    let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
+                    break;
+                }
+            },
+            None => match spec.quiet {
+                Some(quiet) => match tokio::time::timeout(quiet, lines.next_line()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        let tree = tree.clone();
+                        let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
+                        silenced = true;
+                        break;
+                    }
+                },
+                None => lines.next_line().await,
+            },
+        };
+        let Some(line) = next.context("reading the session's output")? else {
+            break;
+        };
         if let Some(file) = sink.as_mut() {
             use std::io::Write as _;
             let _ = writeln!(file, "{line}");
         }
         if let Some(r) = reader.line(&line, spec.known_session_id) {
             result = Some(r);
+            if let Some(wait) = spec.end_after_result {
+                ends_at.get_or_insert_with(|| tokio::time::Instant::now() + wait);
+            }
         }
     }
 
@@ -132,7 +224,13 @@ async fn spawn_and_read(
     let stderr_text = drain_stderr.await.unwrap_or_default();
     let status = child.wait().await.context("waiting for the session to exit")?;
 
-    Ok(result.unwrap_or_else(|| reader.no_result(status.code(), &stderr_text, spec.known_session_id)))
+    Ok(if tree.was_cut() {
+        interrupted(spec.known_session_id)
+    } else if silenced {
+        killed_for_silence(spec.known_session_id, spec.quiet.expect("set when silenced"))
+    } else {
+        result.unwrap_or_else(|| reader.no_result(status.code(), &stderr_text, spec.known_session_id))
+    })
 }
 
 /// Runs one session end to end on `engine`: builds its invocation for `spec`, runs it, and reads
@@ -143,12 +241,14 @@ async fn spawn_and_read(
 /// reason for existing); given one, its file is created (or replaced) before the session starts.
 /// Calls `engine.prepare(spec)` first (a no-op for Claude Code; Cursor's own allowlist and isolate
 /// config, sections 4 and 6), so a failed prepare never leaves an empty transcript file behind.
+/// `quiet` is the project's watchdog timeout (`tuning.sessionQuietMinutes`); `None` leaves it off.
 pub async fn run_session(
     engine: &dyn Engine,
     bin: &Path,
     spec: &SessionSpec,
     known_session_id: &str,
     sink: Option<&TranscriptSink>,
+    quiet: Option<Duration>,
 ) -> Result<SessionResult> {
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;
@@ -160,6 +260,9 @@ pub async fn run_session(
             cwd: &spec.cwd,
             prompt: &engine.prompt(spec),
             known_session_id,
+            end_after_result: engine.ends_on_result().then_some(END_AFTER_RESULT),
+            quiet,
+            tree_tx: None,
         },
         engine.reader(spec),
         file,
@@ -169,6 +272,7 @@ pub async fn run_session(
 
 #[cfg(test)]
 mod tests {
+    use crate::env::Env;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -194,24 +298,50 @@ mod tests {
         (PathBuf::from("cat"), vec![file.to_string_lossy().into_owned()])
     }
 
+    /// The `SpawnSpec` every test below shares (no envs, prompt "hi", known session id "known"),
+    /// varying only the command, its two watchdog timeouts, and (when a test needs one) its
+    /// `tree_tx`.
+    fn spec<'a>(
+        bin: &'a Path,
+        args: &'a [String],
+        cwd: &'a Path,
+        end_after_result: Option<Duration>,
+        quiet: Option<Duration>,
+        tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
+    ) -> SpawnSpec<'a> {
+        SpawnSpec {
+            bin,
+            args,
+            envs: &[],
+            cwd,
+            prompt: "hi",
+            known_session_id: "known",
+            end_after_result,
+            quiet,
+            tree_tx,
+        }
+    }
+
+    /// Runs `spawn_and_read` with [`spec`]'s shared shape and no transcript sink, varying only the
+    /// command, its reader, and the two watchdog timeouts under test.
+    async fn run_spawn(
+        bin: &Path,
+        args: &[String],
+        cwd: &Path,
+        end_after_result: Option<Duration>,
+        quiet: Option<Duration>,
+        reader: Box<dyn super::super::engine::EngineReader>,
+    ) -> SessionResult {
+        spawn_and_read(spec(bin, args, cwd, end_after_result, quiet, None), reader, None)
+            .await
+            .unwrap()
+    }
+
     /// Runs `spawn_and_read` against a command that prints `out`'s contents, the shared shape
     /// both "a session printed this" tests below spawn.
     async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
         let (bin, args) = print_file_command(out);
-        spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir,
-                prompt: "hi",
-                known_session_id: "known",
-            },
-            Box::new(SessionReader::new(false)),
-            None,
-        )
-        .await
-        .unwrap()
+        run_spawn(&bin, &args, dir, None, None, Box::new(SessionReader::new(false))).await
     }
 
     #[tokio::test]
@@ -245,6 +375,160 @@ mod tests {
         assert!(result.error.unwrap().contains("exited with code 0"));
     }
 
+    /// A command that waits `secs` seconds and prints nothing at all, like a session gone quiet.
+    #[cfg(windows)]
+    fn silent_command(secs: u32) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("cmd"),
+            vec!["/C".to_string(), format!("ping -n {} 127.0.0.1 >nul", secs + 1)],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn silent_command(secs: u32) -> (PathBuf, Vec<String>) {
+        (PathBuf::from("sleep"), vec![secs.to_string()])
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_kills_a_session_thats_been_silent_past_the_quiet_timeout() {
+        // The silent command runs far longer than the quiet timeout so a slow `taskkill`/`kill`
+        // under a loaded CI box (RUST_TEST_THREADS is capped, but still shares the host with
+        // other tests' own subprocesses) still finishes well before the command would have
+        // exited on its own, instead of the margin itself flaking the assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, args) = silent_command(20);
+        let started = std::time::Instant::now();
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
+            None,
+            Some(Duration::from_millis(300)),
+            Box::new(SessionReader::new(false)),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it waited out the silent process instead of killing it"
+        );
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "killed_for_silence");
+        assert_eq!(result.session_id, "known");
+        assert!(result.error.unwrap().contains("no output"));
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_kills_a_silent_sessions_grandchild_too() {
+        // A silent session that itself started a grandchild (e.g. a build or a dev server): the
+        // watchdog's kill has to take the whole tree with it, not just the direct child it was
+        // handed, which `crate::lanes::kill_tree(pid)` alone (walking only that pid's own
+        // descendants at kill time) could still miss if the grandchild had reparented.
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, args, ticks) = crate::test_support::grandchild_tick_command(dir.path());
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
+            None,
+            Some(Duration::from_millis(600)),
+            Box::new(SessionReader::new(false)),
+        )
+        .await;
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "killed_for_silence");
+
+        let size_right_after = std::fs::metadata(&ticks).unwrap().len();
+        assert!(
+            size_right_after > 0,
+            "the grandchild never ticked before the watchdog's kill"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        let size_later = std::fs::metadata(&ticks).unwrap().len();
+        assert_eq!(
+            size_right_after, size_later,
+            "the grandchild kept touching its file after the watchdog's kill"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_reports_interrupted_when_something_outside_cuts_the_tree_mid_session() {
+        // Something outside this session's own loop (a restart or Quit, 07.4-stopping-and-
+        // restarting.md) cuts its tree and kills it while it's still running, before it ever
+        // printed a result: that must come back as `interrupted`, not a watchdog silence-kill or
+        // a plain no-result crash.
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, args) = silent_command(20);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let run = spawn_and_read(
+            spec(&bin, &args, dir.path(), None, None, Some(tx)),
+            Box::new(SessionReader::new(false)),
+            None,
+        );
+        let cut = async move {
+            let tree = rx.await.unwrap();
+            tree.cut();
+            let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
+        };
+        let (result, ()) = tokio::join!(run, cut);
+        let result = result.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "interrupted");
+        assert_eq!(result.session_id, "known");
+    }
+
+    /// A command that prints a line, waits `secs` seconds, then prints `out`'s contents —
+    /// proving the quiet timer resets on any output, not just a result.
+    #[cfg(windows)]
+    fn print_wait_then_print_file_command(secs: u32, file: &Path) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/C".to_string(),
+                format!(
+                    "echo still here & ping -n {} 127.0.0.1 >nul & type {}",
+                    secs + 1,
+                    file.display()
+                ),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn print_wait_then_print_file_command(secs: u32, file: &Path) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("sh"),
+            vec![
+                "-c".to_string(),
+                format!("echo still here; sleep {secs}; cat '{}'", file.display()),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_resets_the_quiet_timer_on_every_line_not_just_a_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.jsonl");
+        std::fs::write(
+            &out,
+            r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"sess-1"}"#,
+        )
+        .unwrap();
+        // Each individual gap (the startup print, then before the file's contents) is well under
+        // the quiet timeout, even though their sum isn't — proving the timer resets per line.
+        let (bin, args) = print_wait_then_print_file_command(1, &out);
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
+            None,
+            Some(Duration::from_secs(3)),
+            Box::new(SessionReader::new(false)),
+        )
+        .await;
+        assert!(result.ok, "{:?}", result.error);
+        assert_eq!(result.session_id, "sess-1");
+    }
+
     #[test]
     fn engine_of_defaults_a_missing_id_to_claude_code() {
         assert_eq!(engine_of(None).unwrap().id(), EngineId::Claude);
@@ -261,6 +545,74 @@ mod tests {
         assert_eq!(engine_of(Some(EngineId::Pi)).unwrap().id(), EngineId::Pi);
     }
 
+    #[test]
+    fn engine_of_resolves_the_codex_engine_by_id() {
+        assert_eq!(engine_of(Some(EngineId::Codex)).unwrap().id(), EngineId::Codex);
+    }
+
+    /// A command that prints `out`'s contents and then lingers for 30 seconds, like a Codex whose
+    /// sandboxed child is still running after the turn is done.
+    #[cfg(windows)]
+    fn print_then_linger_command(file: &Path) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("cmd"),
+            vec![
+                "/C".to_string(),
+                format!("type {} & ping -n 30 127.0.0.1 >nul", file.display()),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn print_then_linger_command(file: &Path) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("sh"),
+            vec!["-c".to_string(), format!("cat '{}'; sleep 30", file.display())],
+        )
+    }
+
+    #[tokio::test]
+    async fn a_process_that_lingers_after_its_result_is_ended_and_the_result_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("codex.jsonl");
+        std::fs::write(
+            &out,
+            [
+                json!({"type": "thread.started", "thread_id": "t-linger"}),
+                json!({"type": "item.completed", "item": {"type": "agent_message", "text": "```json
+{\"ok\":true}
+```"}}),
+                json!({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 2}}),
+            ]
+            .iter()
+            .map(|line| {
+                format!(
+                    "{line}
+"
+                )
+            })
+            .collect::<String>(),
+        )
+        .unwrap();
+        let (bin, args) = print_then_linger_command(&out);
+        let started = std::time::Instant::now();
+        let result = run_spawn(
+            &bin,
+            &args,
+            dir.path(),
+            Some(Duration::from_millis(300)),
+            None,
+            Box::new(crate::engines::codex::CodexReader::new(json!({"type": "object"}))),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "it didn't wait out the lingering process"
+        );
+        assert!(result.ok, "{:?}", result.error);
+        assert_eq!(result.structured, Some(json!({"ok": true})));
+    }
+
     /// Stands in for an engine's own `args`/`env`/`prompt`/`reader`: whatever `args` it's given is
     /// exactly what the runner spawns, proving `run_session` never special-cases an engine.
     struct ArgsEngine {
@@ -270,12 +622,7 @@ mod tests {
         fn id(&self) -> EngineId {
             EngineId::Claude
         }
-        fn binary(
-            &self,
-            _env: &dyn Fn(&str) -> Option<String>,
-            _windows: bool,
-            _path_dirs: &[PathBuf],
-        ) -> Result<PathBuf> {
+        fn binary(&self, _env: &Env, _windows: bool, _path_dirs: &[PathBuf]) -> Result<PathBuf> {
             unreachable!("not exercised by run_session")
         }
         fn args(&self, _spec: &SessionSpec) -> Vec<String> {
@@ -322,10 +669,12 @@ mod tests {
             budget_usd: 0.0,
             start: SessionStart::Ephemeral,
             readonly: false,
+            shell: true,
             cursor: None,
             local: None,
+            sandbox: false,
         };
-        let result = run_session(&engine, &bin, &spec, "known", None).await.unwrap();
+        let result = run_session(&engine, &bin, &spec, "known", None, None).await.unwrap();
         assert!(result.ok);
         assert_eq!(result.session_id, "sess-1");
     }
@@ -351,14 +700,7 @@ mod tests {
         .unwrap();
 
         spawn_and_read(
-            SpawnSpec {
-                bin: &bin,
-                args: &args,
-                envs: &[],
-                cwd: dir.path(),
-                prompt: "hi",
-                known_session_id: "known",
-            },
+            spec(&bin, &args, dir.path(), None, None, None),
             Box::new(SessionReader::new(false)),
             Some(file),
         )
@@ -387,7 +729,7 @@ mod tests {
             lane: Some(2),
         };
 
-        let result = run_session(&engine, &bin, &base_spec(dir.path()), "sess-1", Some(&sink))
+        let result = run_session(&engine, &bin, &base_spec(dir.path()), "sess-1", Some(&sink), None)
             .await
             .unwrap();
         assert!(result.ok);

@@ -198,13 +198,13 @@ pub fn remote_repo(url: &str) -> Option<String> {
     GITHUB_REMOTE.captures(url.trim()).map(|c| c[1].to_string())
 }
 
+fn git(repo_path: &Path) -> Command {
+    crate::git_bin::command(repo_path)
+}
+
 /// `repo_path`'s `origin` remote, or `None` without one.
 fn origin_url(repo_path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()?;
+    let output = git(repo_path).args(["remote", "get-url", "origin"]).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -254,8 +254,7 @@ pub fn dev_branch(login: &str) -> String {
 /// (`createBranchIfMissing` in `setup.ts`). `Ok(true)` when it created the branch, `Ok(false)`
 /// when `origin` already had it.
 pub fn create_branch_if_missing(repo_path: &Path, branch: &str, from: &str) -> Result<bool> {
-    let ls = Command::new("git")
-        .current_dir(repo_path)
+    let ls = git(repo_path)
         .args([
             "ls-remote",
             "--exit-code",
@@ -274,8 +273,7 @@ pub fn create_branch_if_missing(repo_path: &Path, branch: &str, from: &str) -> R
             String::from_utf8_lossy(&ls.stderr).trim()
         );
     }
-    let fetch = Command::new("git")
-        .current_dir(repo_path)
+    let fetch = git(repo_path)
         .args(["fetch", "origin", from])
         .output()
         .context("running git fetch")?;
@@ -285,8 +283,7 @@ pub fn create_branch_if_missing(repo_path: &Path, branch: &str, from: &str) -> R
             String::from_utf8_lossy(&fetch.stderr).trim()
         );
     }
-    let push = Command::new("git")
-        .current_dir(repo_path)
+    let push = git(repo_path)
         .args([
             "push",
             "origin",
@@ -307,8 +304,7 @@ pub fn create_branch_if_missing(repo_path: &Path, branch: &str, from: &str) -> R
 /// `origin/<base_branch>`: the "backlog file that isn't on origin/<baseBranch>" problem in
 /// docs/specs/agent/09-web-ui.md section 9.1.
 pub fn backlog_on_origin(repo_path: &Path, base_branch: &str, backlog_path: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .current_dir(repo_path)
+    let output = git(repo_path)
         .args(["cat-file", "-e", &format!("origin/{base_branch}:{backlog_path}")])
         .output()
         .context("running git cat-file")?;

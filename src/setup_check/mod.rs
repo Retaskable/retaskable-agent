@@ -2,7 +2,8 @@
 //! before their first session, ported from `agent/src/setupCheck.ts` and
 //! `agent/src/engines/probe.ts`. This agent has no Node runtime to check, so `node` isn't
 //! ported; everything else (`git`, `ghInstalled`, `gh`, `claude`, `claudeSignedIn`, `cursor`) is.
-use std::path::{Path, PathBuf};
+use crate::env::Env;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -12,7 +13,9 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::engines::resolve_claude_on_path;
+use crate::engines::resolve::{
+    resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
+};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -69,6 +72,10 @@ pub struct SetupChecks {
     pub claude: SetupCheck,
     pub claude_signed_in: SetupCheck,
     pub cursor: SetupCheck,
+    /// `pi --version`, present only when the binary ran; never counted by `setup_checks_pass`.
+    pub pi: Option<SetupCheck>,
+    /// `codex --version`, same rules as `pi`.
+    pub codex: Option<SetupCheck>,
 }
 
 struct RunOutput {
@@ -109,48 +116,6 @@ async fn run_opt(bin: Option<&Path>, args: &[&str]) -> Option<RunOutput> {
         Some(bin) => run(bin, args).await,
         None => None,
     }
-}
-
-/// `resolveCursor()` (`agent/src/engines/cursor.ts`): `RETASKABLE_CURSOR` always wins; otherwise
-/// the first `cursor-agent[.exe]` (or, on Windows, `cursor-agent.cmd`) on PATH, then
-/// `~/.local/bin`. Never errors (unlike `resolve_claude`): a missing Cursor isn't fatal, so this
-/// falls back to the bare name and lets the spawn itself report "not installed".
-pub fn resolve_cursor(
-    env: impl Fn(&str) -> Option<String>,
-    windows: bool,
-    path_dirs: &[PathBuf],
-    home: Option<PathBuf>,
-) -> PathBuf {
-    if let Some(over) = env("RETASKABLE_CURSOR") {
-        return PathBuf::from(over);
-    }
-    let name = if windows { "cursor-agent.exe" } else { "cursor-agent" };
-    for dir in path_dirs {
-        let exe = dir.join(name);
-        if exe.is_file() {
-            return exe;
-        }
-        if windows {
-            let shim = dir.join("cursor-agent.cmd");
-            if shim.is_file() {
-                return shim;
-            }
-        }
-    }
-    if let Some(home) = home {
-        let fallback = home.join(".local").join("bin").join(name);
-        if fallback.is_file() {
-            return fallback;
-        }
-    }
-    PathBuf::from(name)
-}
-
-/// `resolve_cursor`, reading PATH and the home directory itself the way the real agent does.
-pub fn resolve_cursor_on_path(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dirs = crate::env_path::path_dirs(&env);
-    let home = env("HOME").or_else(|| env("USERPROFILE")).map(PathBuf::from);
-    resolve_cursor(&env, cfg!(windows), &dirs, home)
 }
 
 fn git_check(r: Option<&RunOutput>) -> SetupCheck {
@@ -250,20 +215,35 @@ fn cursor_check(installed: bool, status: Option<&RunOutput>) -> SetupCheck {
     }
 }
 
+/// `optionalEngineCheck`: a pass naming the first line of `--version`, only when the binary ran.
+fn optional_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck> {
+    let r = r?;
+    if r.code != Some(0) {
+        return None;
+    }
+    let line = first_line(&r.stdout);
+    Some(SetupCheck::pass(if line.is_empty() { name.to_string() } else { line }))
+}
+
 /// `runSetupChecks()`: runs every probe, never through a shell, the git/`gh`/engine probes
 /// concurrently the same way the TypeScript agent does so a missing binary's 20s timeout doesn't
 /// stack with the others.
-pub async fn run_setup_checks(env: impl Fn(&str) -> Option<String>) -> SetupChecks {
-    let claude_bin = resolve_claude_on_path(&env).ok();
-    let cursor_bin = resolve_cursor_on_path(&env);
-    let api_key = env("ANTHROPIC_API_KEY").is_some();
+pub async fn run_setup_checks(env: &Env) -> SetupChecks {
+    let claude_bin = resolve_claude_on_path(env).ok();
+    let cursor_bin = resolve_cursor_on_path(env);
+    let api_key = env.get("ANTHROPIC_API_KEY").is_some();
 
-    let (git, gh_version, gh_auth, claude_version, cursor_version) = tokio::join!(
+    let pi_bin = resolve_pi_on_path(env);
+    let codex_bin = resolve_codex_on_path(env);
+
+    let (git, gh_version, gh_auth, claude_version, cursor_version, pi_version, codex_version) = tokio::join!(
         run("git", &["--version"]),
         run("gh", &["--version"]),
         run("gh", &["auth", "status"]),
         run_opt(claude_bin.as_deref(), &["--version"]),
         run(&cursor_bin, &["--version"]),
+        run(&pi_bin, &["--version"]),
+        run(&codex_bin, &["--version"]),
     );
     let git = git_check(git.as_ref());
     let claude = claude_check(claude_version.as_ref());
@@ -294,6 +274,8 @@ pub async fn run_setup_checks(env: impl Fn(&str) -> Option<String>) -> SetupChec
         claude,
         claude_signed_in: claude_signed_in_check(claude_ok, claude_auth.as_ref(), api_key),
         cursor: cursor_check(cursor_installed, cursor_status.as_ref()),
+        pi: optional_engine_check("pi", pi_version.as_ref()),
+        codex: optional_engine_check("Codex", codex_version.as_ref()),
     }
 }
 

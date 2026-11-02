@@ -2,7 +2,6 @@
 //! `.cursor/cli.json` (or the person's own `~/.cursor/cli-config.json`) is sound, and writing the
 //! lane's own allowlist and Claude isolate before every session (`prepareCursor`,
 //! `shared/cursorAllow.ts` and `check.ts` in Retaskable.com).
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -110,22 +109,17 @@ fn allowlist(readonly: bool, extra: &[String], cli: Option<&str>) -> Value {
     if let Some(cli) = cli {
         read.push(format!("Shell({cli})"));
     }
-    read.extend(READ[2..].iter().map(|s| s.to_string()));
+    read.extend(READ[2..].iter().map(ToString::to_string));
 
     let allow = if readonly {
         read
     } else {
         let mut combined = read;
-        combined.extend(WRITE.iter().map(|s| s.to_string()));
+        combined.extend(WRITE.iter().map(ToString::to_string));
         combined.extend(extra.iter().cloned());
-        dedupe_owned(combined)
+        super::dedupe(combined)
     };
     json!({ "permissions": { "allow": allow, "deny": DENY } })
-}
-
-fn dedupe_owned(items: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    items.into_iter().filter(|i| seen.insert(i.clone())).collect()
 }
 
 /// Why the repo's own tracked `.cursor/cli.json` in `cwd` would be refused, or none.
@@ -138,9 +132,7 @@ fn repo_allowlist_problem(cwd: &Path) -> Option<String> {
 }
 
 fn git_cwd(cwd: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(cwd);
-    cmd
+    crate::git_bin::command(cwd)
 }
 
 /// True when the repo tracks `.cursor/cli.json`, so a session uses that file instead of ours.

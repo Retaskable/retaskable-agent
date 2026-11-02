@@ -65,6 +65,16 @@ fn top_level_objects(text: &str) -> Vec<String> {
     out
 }
 
+/// The closing instructions an engine with no native `--json-schema` flag (codex, pi, cursor)
+/// appends to its prompt: end the final message with exactly one fenced ```json block holding
+/// the result, matching `schema`.
+pub(super) fn fenced_json_instructions(schema: &Value) -> String {
+    format!(
+        "When you've finished, end your final message with exactly one fenced ```json block holding your result, \
+         matching this schema. Nothing after it.\n\n{schema}",
+    )
+}
+
 /// Short lines, like "`status`: must be one of pr_opened, needs_clarification, failed"
 /// (`checkSchema`): only the keywords a `--json-schema` result schema uses.
 pub(super) fn check_schema(schema: &Value, value: &Value, at: &str) -> Vec<String> {

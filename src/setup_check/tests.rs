@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::*;
 
 fn out(code: i32, stdout: &str) -> RunOutput {
@@ -205,88 +207,6 @@ fn cursor_check_passes_with_the_status_line_and_strips_its_own_checkmark() {
     );
 }
 
-// resolve_cursor / resolve_cursor_on_path
-
-#[test]
-fn resolve_cursor_prefers_the_env_override_on_any_platform() {
-    let env = |k: &str| (k == "RETASKABLE_CURSOR").then(|| "C:/custom/cursor-agent.exe".to_string());
-    assert_eq!(
-        resolve_cursor(env, true, &[], None),
-        PathBuf::from("C:/custom/cursor-agent.exe")
-    );
-    assert_eq!(
-        resolve_cursor(env, false, &[], None),
-        PathBuf::from("C:/custom/cursor-agent.exe")
-    );
-}
-
-#[test]
-fn resolve_cursor_finds_cursor_agent_directly_on_the_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    std::fs::write(dir.path().join(name), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_cursor(no_env, cfg!(windows), &[dir.path().to_path_buf()], None);
-    assert_eq!(got, dir.path().join(name));
-}
-
-#[test]
-fn resolve_cursor_falls_back_to_the_cmd_shim_on_windows() {
-    if !cfg!(windows) {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("cursor-agent.cmd"), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_cursor(no_env, true, &[dir.path().to_path_buf()], None);
-    assert_eq!(got, dir.path().join("cursor-agent.cmd"));
-}
-
-#[test]
-fn resolve_cursor_falls_back_to_home_local_bin() {
-    let home = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    let bin_dir = home.path().join(".local").join("bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    std::fs::write(bin_dir.join(name), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_cursor(no_env, cfg!(windows), &[], Some(home.path().to_path_buf()));
-    assert_eq!(got, bin_dir.join(name));
-}
-
-#[test]
-fn resolve_cursor_falls_back_to_the_bare_name_when_nothing_matches() {
-    let no_env = |_: &str| None;
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    assert_eq!(resolve_cursor(no_env, cfg!(windows), &[], None), PathBuf::from(name));
-}
-
-#[test]
-fn resolve_cursor_on_path_reads_dirs_from_the_path_env() {
-    let dir = tempfile::tempdir().unwrap();
-    let name = if cfg!(windows) {
-        "cursor-agent.exe"
-    } else {
-        "cursor-agent"
-    };
-    std::fs::write(dir.path().join(name), "").unwrap();
-    let path_value = dir.path().to_string_lossy().into_owned();
-    let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-    assert_eq!(resolve_cursor_on_path(env), dir.path().join(name));
-}
-
 // claude_ready / engine_ready / show_cursor / setup_checks_pass
 
 fn checks(claude: SetupCheck, claude_signed_in: SetupCheck, cursor: SetupCheck) -> SetupChecks {
@@ -297,6 +217,8 @@ fn checks(claude: SetupCheck, claude_signed_in: SetupCheck, cursor: SetupCheck) 
         claude,
         claude_signed_in,
         cursor,
+        pi: None,
+        codex: None,
     }
 }
 
@@ -402,8 +324,7 @@ fn setup_check_report_has_the_setup_check_header_and_indented_lines() {
 
 #[tokio::test]
 async fn run_setup_checks_completes_promptly_and_builds_every_field() {
-    let no_env = |_: &str| None;
-    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(no_env)).await;
+    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(&Env::empty())).await;
     let c = result.expect("run_setup_checks should finish within its own 20s check budget");
     for check in [
         &c.git,
@@ -468,4 +389,20 @@ async fn run_timeout_kills_a_hung_process_once_the_budget_runs_out() {
     let result = run_timeout(&bin, &args, Duration::from_millis(100)).await;
     assert!(result.is_none());
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+// optional_engine_check
+
+#[test]
+fn optional_engine_check_passes_with_the_version_line_only_when_the_binary_ran() {
+    assert_eq!(optional_engine_check("pi", None), None);
+    assert_eq!(optional_engine_check("pi", Some(&out(1, "oops"))), None);
+    assert_eq!(
+        optional_engine_check("Codex", Some(&out(0, "codex-cli 0.5.0\n"))),
+        Some(SetupCheck::pass("codex-cli 0.5.0"))
+    );
+    assert_eq!(
+        optional_engine_check("pi", Some(&out(0, "\n"))),
+        Some(SetupCheck::pass("pi"))
+    );
 }

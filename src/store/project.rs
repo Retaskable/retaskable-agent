@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-use super::write_json_atomic;
+use super::SmokeState;
+use crate::fs_util::write_json_atomic;
 
 const STATE_FILE: &str = "state.json";
 
@@ -19,6 +20,31 @@ const STATE_FILE: &str = "state.json";
 /// time-based trimming left to do here (timelines and merged drafts' files are the store's), so,
 /// unlike the TypeScript `trimState(data, now)`, this takes no `now`.
 const LEGACY_KEYS: [&str; 2] = ["items", "drafts"];
+
+/// One leased item's run, as the TS agent's item record keeps it (`state`, `lane`, `implSessionId`,
+/// `branch`, `slice`): enough to take the item back after a restart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRecord {
+    /// `implementing`, `checking`, `needs_human` or `queued` (`item_lifecycle::ItemState`, snake case).
+    pub state: String,
+    /// The lane it holds; none once it needs a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<u32>,
+    /// The implementer session's id, to resume it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_session_id: Option<String>,
+    /// That session's size as of its last turn (06.2-implementer.md "A session that's grown starts
+    /// fresh"; the TS agent's `implContextTokens`), kept so a resume across a restart can still tell
+    /// a grown session from a small one. `None` until a session reports one, and cleared whenever
+    /// `impl_session_id` is: a fresh or picking-up session starts with no reading of its own yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_context_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub slice: u32,
+}
 
 /// A project's own on-disk state.
 #[derive(Debug)]
@@ -69,6 +95,89 @@ impl Store {
     /// does.
     pub fn set_usage(&mut self, usage: Value) {
         self.data.insert("usage".to_string(), usage);
+    }
+
+    /// The last-saved `state.usage`, if any (`None` when there's no reading yet, which
+    /// [`crate::tiers::implementer_tier`] treats as a full window).
+    pub fn usage(&self) -> Option<Value> {
+        self.data.get("usage").cloned()
+    }
+
+    /// Replaces `state.smoke` with the post-merge smoke's latest result
+    /// (docs/specs/agent/06.3-review.md: "`State.smoke = {sha, status, at, url, tail?}`").
+    /// Doesn't save on its own; call `save` after, as every other change here does.
+    pub fn set_smoke(&mut self, smoke: &SmokeState) {
+        self.data.insert(
+            "smoke".to_string(),
+            serde_json::to_value(smoke).expect("SmokeState always serializes"),
+        );
+    }
+
+    /// The lease token of each item this computer holds in the shared backlog, by item id
+    /// (`state.leases`; the TS agent keeps it on the item record as `hosted.lease`). Empty when
+    /// missing or unreadable.
+    pub fn leases(&self) -> std::collections::BTreeMap<String, String> {
+        self.data
+            .get("leases")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.leases`. Doesn't save on its own; call `save` after.
+    pub fn set_leases(&mut self, leases: &std::collections::BTreeMap<String, String>) {
+        self.data.insert("leases".to_string(), serde_json::json!(leases));
+    }
+
+    /// Leases given back here that the store hasn't taken yet, by item id: its lease token and the
+    /// give-back's note (agent/07.5-what-a-claim-and-a-give-back-send.md's `report`, sent again with
+    /// `release` on later passes). Empty when missing.
+    pub fn unreleased(&self) -> std::collections::BTreeMap<String, (String, String)> {
+        self.data
+            .get("unreleased")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.unreleased`. Doesn't save on its own; call `save` after.
+    pub fn set_unreleased(&mut self, unreleased: &std::collections::BTreeMap<String, (String, String)>) {
+        self.data
+            .insert("unreleased".to_string(), serde_json::json!(unreleased));
+    }
+
+    /// Leases let go while their item waits, which the store hasn't taken yet: item id to
+    /// (lease token, what it waits for, the item's state). Sent again on later passes.
+    pub fn unparked(&self) -> std::collections::BTreeMap<String, (String, String, String)> {
+        self.data
+            .get("unparked")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.unparked`. Doesn't save on its own; call `save` after.
+    pub fn set_unparked(&mut self, unparked: &std::collections::BTreeMap<String, (String, String, String)>) {
+        self.data.insert("unparked".to_string(), serde_json::json!(unparked));
+    }
+
+    /// What each item in `leases` is doing, by item id (`state.runs`), so a restart can carry on: the
+    /// TS agent keeps these on its item record. Empty when missing or unreadable.
+    pub fn runs(&self) -> std::collections::BTreeMap<String, RunRecord> {
+        self.data
+            .get("runs")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.runs`. Doesn't save on its own; call `save` after.
+    pub fn set_runs(&mut self, runs: &std::collections::BTreeMap<String, RunRecord>) {
+        self.data.insert("runs".to_string(), serde_json::json!(runs));
+    }
+
+    /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses
+    /// (an older agent's file, say) rather than erroring.
+    pub fn smoke(&self) -> Option<SmokeState> {
+        self.data
+            .get("smoke")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 }
 
@@ -154,6 +263,18 @@ mod tests {
     }
 
     #[test]
+    fn usage_reads_back_the_last_saved_value_and_is_none_before_any_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.usage(), None);
+        store.set_usage(serde_json::json!({"status": "allowed", "resetsAt": 1000}));
+        assert_eq!(
+            store.usage(),
+            Some(serde_json::json!({"status": "allowed", "resetsAt": 1000}))
+        );
+    }
+
+    #[test]
     fn set_usage_replaces_the_usage_key_once_saved() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::load(dir.path()).unwrap();
@@ -172,6 +293,28 @@ mod tests {
             saved,
             serde_json::json!({"usage": {"status": "rejected", "resetsAt": 2000}})
         );
+    }
+
+    #[test]
+    fn set_smoke_replaces_the_smoke_key_once_saved_and_reads_back_the_same_state() {
+        use super::super::SmokeStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert!(store.smoke().is_none());
+
+        let state = SmokeState {
+            sha: "abc123".to_string(),
+            status: SmokeStatus::Running,
+            at: "2026-10-28T00:00:00.000Z".to_string(),
+            url: Some("https://staging.example.com".to_string()),
+            tail: None,
+        };
+        store.set_smoke(&state);
+        store.save().unwrap();
+
+        let reloaded = Store::load(dir.path()).unwrap();
+        assert_eq!(reloaded.smoke(), Some(state));
     }
 
     #[test]

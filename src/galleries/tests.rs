@@ -201,7 +201,10 @@ fn list_images_sorts_numerically_and_prefers_the_manifests_name_and_group() {
         group: Some("Group A".to_string()),
     }];
 
-    let images = list_images(&pngs, Some(&manifest));
+    let images: Vec<GalleryImage> = list_images(&pngs, Some(&manifest))
+        .into_iter()
+        .map(|(_, i)| i)
+        .collect();
 
     assert_eq!(
         images.iter().map(|i| i.file.as_str()).collect::<Vec<_>>(),
@@ -457,75 +460,6 @@ fn picture_cache_evicts_the_oldest_entry_once_full() {
 }
 
 #[test]
-fn needs_npm_install_is_false_without_a_package_json() {
-    let root = tempfile::tempdir().unwrap();
-    assert!(!needs_npm_install(root.path()));
-}
-
-#[test]
-fn needs_npm_install_is_true_when_node_modules_is_missing() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package.json"), "{}").unwrap();
-    assert!(needs_npm_install(root.path()));
-}
-
-#[test]
-fn needs_npm_install_is_false_once_node_modules_is_up_to_date() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package.json"), "{}").unwrap();
-    std::fs::write(root.path().join("package-lock.json"), "{}").unwrap();
-    std::fs::create_dir_all(root.path().join("node_modules")).unwrap();
-    std::fs::write(root.path().join("node_modules").join(".package-lock.json"), "{}").unwrap();
-    let now = std::time::SystemTime::now();
-    set_mtime(
-        &root.path().join("package-lock.json"),
-        now - std::time::Duration::from_secs(60),
-    );
-    set_mtime(&root.path().join("node_modules").join(".package-lock.json"), now);
-
-    assert!(!needs_npm_install(root.path()));
-}
-
-fn set_mtime(path: &Path, when: std::time::SystemTime) {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(when)
-        .unwrap();
-}
-
-#[test]
-fn needs_npm_install_is_true_once_the_lockfile_is_newer_than_the_installed_copy() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package.json"), "{}").unwrap();
-    std::fs::write(root.path().join("package-lock.json"), "{}").unwrap();
-    std::fs::create_dir_all(root.path().join("node_modules")).unwrap();
-    std::fs::write(root.path().join("node_modules").join(".package-lock.json"), "{}").unwrap();
-    let now = std::time::SystemTime::now();
-    set_mtime(
-        &root.path().join("node_modules").join(".package-lock.json"),
-        now - std::time::Duration::from_secs(60),
-    );
-    set_mtime(&root.path().join("package-lock.json"), now);
-
-    assert!(needs_npm_install(root.path()));
-}
-
-#[test]
-fn npm_install_command_prefers_ci_when_theres_a_lockfile() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("package-lock.json"), "{}").unwrap();
-    assert_eq!(npm_install_command(root.path()), "npm ci");
-}
-
-#[test]
-fn npm_install_command_falls_back_to_install_without_a_lockfile() {
-    let root = tempfile::tempdir().unwrap();
-    assert_eq!(npm_install_command(root.path()), "npm install");
-}
-
-#[test]
 fn npm_install_if_needed_with_skips_the_runner_when_nothing_is_needed() {
     let root = tempfile::tempdir().unwrap();
     let ran = std::cell::Cell::new(false);
@@ -554,28 +488,95 @@ fn npm_install_if_needed_with_runs_npm_ci_and_passes_on_its_failure() {
 
     assert_eq!(seen.borrow().as_ref().unwrap().0, "npm ci");
     assert_eq!(seen.borrow().as_ref().unwrap().1, root.path());
-    assert_eq!(seen.borrow().as_ref().unwrap().2, NPM_INSTALL_TIMEOUT);
+    assert_eq!(seen.borrow().as_ref().unwrap().2, proc::NPM_INSTALL_TIMEOUT);
     assert!(err.to_string().contains("failed (1)"), "{err}");
     assert!(err.to_string().contains("boom"), "{err}");
 }
 
 #[test]
-fn scrub_path_drops_every_node_modules_bin_and_puts_this_checkouts_first() {
-    let dir = Path::new("checkout");
-    let other_sep = if cfg!(windows) { ';' } else { ':' };
-    let other = std::env::join_paths([
-        Path::new("checkout").join("node_modules").join(".bin"),
-        Path::new("other-checkout").join("node_modules").join(".bin"),
-        Path::new("usr").join("bin"),
-    ])
-    .unwrap()
-    .to_string_lossy()
-    .into_owned();
+fn info_reports_idle_with_nothing_set_before_the_first_shoot() {
+    let root = tempfile::tempdir().unwrap();
+    let gallery = GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    };
 
-    let scrubbed = scrub_path(&other, dir);
+    let info = info(root.path(), "galleries-info-never-shot", &gallery);
 
-    let parts: Vec<&str> = scrubbed.split(other_sep).collect();
-    assert_eq!(parts[0], dir.join("node_modules").join(".bin").to_string_lossy());
-    assert_eq!(parts.len(), 2, "{scrubbed}");
-    assert!(parts[1].ends_with("bin"), "{scrubbed}");
+    assert_eq!(
+        info,
+        GalleryInfo {
+            slug: "models".to_string(),
+            name: "Models".to_string(),
+            status: "idle",
+            shot_at: None,
+            sha: None,
+            count: None,
+            error: None,
+        }
+    );
+}
+
+#[test]
+fn info_reports_the_last_shoots_shot_at_sha_and_count() {
+    let root = tempfile::tempdir().unwrap();
+    let idx = write_test_gallery(root.path(), "galleries-info-idle", "models", "01-first.jpg", 10, 10);
+    let gallery = GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    };
+
+    let info = info(root.path(), "galleries-info-idle", &gallery);
+
+    assert_eq!(info.status, "idle");
+    assert_eq!(info.shot_at, Some(idx.shot_at));
+    assert_eq!(info.sha, Some(idx.sha));
+    assert_eq!(info.count, Some(1));
+    assert_eq!(info.error, None);
+}
+
+#[test]
+fn info_reports_a_failed_shoots_error_alongside_its_previous_set() {
+    let root = tempfile::tempdir().unwrap();
+    write_test_gallery(root.path(), "galleries-info-failed", "models", "01-first.jpg", 10, 10);
+    set_status(
+        "galleries-info-failed",
+        "models",
+        GalleryStatus::Failed("`cmd` failed (1):\nboom".to_string()),
+    );
+    let gallery = GalleryConfig {
+        name: "Models".to_string(),
+        command: "echo hi".to_string(),
+        out_dir: "out".to_string(),
+    };
+
+    let info = info(root.path(), "galleries-info-failed", &gallery);
+
+    assert_eq!(info.status, "failed");
+    assert_eq!(info.error, Some("`cmd` failed (1):\nboom".to_string()));
+    // The old set's picture count stays visible while the new shoot's failure is reported.
+    assert_eq!(info.count, Some(1));
+}
+
+#[test]
+fn list_images_gives_every_picture_a_servable_unique_jpg_name() {
+    let pngs = vec![
+        "Icy Tree.png".to_string(),
+        "icy-tree.PNG".to_string(),
+        "a.png".to_string(),
+        "A.PNG".to_string(),
+        format!("{}.png", "x".repeat(150)),
+        format!("{}1.png", "y".repeat(150)),
+        format!("{}2.png", "y".repeat(150)),
+        format!("{}3.png", "y".repeat(150)),
+    ];
+    let listed = list_images(&pngs, None);
+    let mut files: Vec<&str> = listed.iter().map(|(_, i)| i.file.as_str()).collect();
+    assert!(files.iter().all(|f| valid_picture_file(f)), "{files:?}");
+    files.sort_by_key(|f| f.to_ascii_lowercase());
+    files.dedup_by_key(|f| f.to_ascii_lowercase());
+    assert_eq!(files.len(), 8);
+    assert_eq!(png_to_jpg_name("é.png"), "-.jpg");
 }

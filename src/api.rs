@@ -4,15 +4,15 @@
 //! everything else, and never a command here: every other path is a 404.
 use std::sync::Arc;
 
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::{
     Json, Router,
-    http::{Method, StatusCode, Uri},
+    http::{Method, Uri},
     routing::get,
 };
 use serde_json::json;
 
-use crate::settings_server::{self, SettingsServer};
+use crate::settings_server::{self, SettingsServer, not_found_response};
 
 pub fn router(version: String, settings: Arc<SettingsServer>) -> Router {
     Router::new()
@@ -29,12 +29,6 @@ pub fn router(version: String, settings: Arc<SettingsServer>) -> Router {
         .fallback(not_found)
 }
 
-/// Shared with `settings_server`, so a request its Host/Origin checks refuse gives away nothing
-/// about which paths exist: the same 404 as a path this agent doesn't serve at all.
-pub(crate) fn not_found_response() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "Not found" }))).into_response()
-}
-
 async fn not_found(_method: Method, _uri: Uri) -> Response {
     not_found_response()
 }
@@ -43,6 +37,7 @@ async fn not_found(_method: Method, _uri: Uri) -> Response {
 mod tests {
     use axum::body::Body;
     use axum::http::Request;
+    use axum::http::StatusCode;
     use http_body_util::BodyExt;
     use serde_json::Value;
     use tower::ServiceExt;

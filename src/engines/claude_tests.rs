@@ -3,75 +3,10 @@ use std::path::Path;
 use serde_json::json;
 
 use super::*;
+use crate::text::tail;
 
 fn base_spec(cwd: &Path) -> SessionSpec {
     crate::engines::engine::test_spec(cwd, "do the thing")
-}
-
-// resolve_claude / resolve_claude_on_path
-
-#[test]
-fn resolve_claude_prefers_the_env_override_on_any_platform() {
-    let env = |k: &str| (k == "RETASKABLE_CLAUDE").then(|| "C:/custom/claude.exe".to_string());
-    assert_eq!(
-        resolve_claude(env, true, &[]).unwrap(),
-        PathBuf::from("C:/custom/claude.exe")
-    );
-    assert_eq!(
-        resolve_claude(env, false, &[]).unwrap(),
-        PathBuf::from("C:/custom/claude.exe")
-    );
-}
-
-#[test]
-fn resolve_claude_is_plain_claude_off_windows() {
-    let no_env = |_: &str| None;
-    assert_eq!(resolve_claude(no_env, false, &[]).unwrap(), PathBuf::from("claude"));
-}
-
-#[test]
-fn resolve_claude_finds_claude_exe_directly_on_the_path_on_windows() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("claude.exe"), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_claude(no_env, true, &[dir.path().to_path_buf()]).unwrap();
-    assert_eq!(got, dir.path().join("claude.exe"));
-}
-
-#[test]
-fn resolve_claude_goes_behind_the_npm_shim_on_windows() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("claude.cmd"), "").unwrap();
-    let behind = dir
-        .path()
-        .join("node_modules")
-        .join("@anthropic-ai")
-        .join("claude-code")
-        .join("bin");
-    std::fs::create_dir_all(&behind).unwrap();
-    std::fs::write(behind.join("claude.exe"), "").unwrap();
-    let no_env = |_: &str| None;
-    let got = resolve_claude(no_env, true, &[dir.path().to_path_buf()]).unwrap();
-    assert_eq!(got, behind.join("claude.exe"));
-}
-
-#[test]
-fn resolve_claude_fails_naming_the_fix_when_nothing_matches_on_windows() {
-    let no_env = |_: &str| None;
-    let err = resolve_claude(no_env, true, &[]).unwrap_err();
-    assert!(err.to_string().contains("RETASKABLE_CLAUDE"));
-}
-
-#[test]
-fn resolve_claude_on_path_reads_dirs_from_the_path_env_on_windows() {
-    if !cfg!(windows) {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("claude.exe"), "").unwrap();
-    let path_value = dir.path().to_string_lossy().into_owned();
-    let env = move |k: &str| (k == "PATH").then(|| path_value.clone());
-    assert_eq!(resolve_claude_on_path(env).unwrap(), dir.path().join("claude.exe"));
 }
 
 // build_args
@@ -106,6 +41,47 @@ fn build_args_never_omits_the_no_deploy_tools() {
     let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
     for tool in NO_DEPLOY_TOOLS {
         assert!(args[idx..].contains(&tool.to_string()));
+    }
+}
+
+#[test]
+fn build_args_disallows_every_write_tool_on_a_readonly_session_but_not_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.readonly = true;
+    spec.shell = true;
+    let args = build_args(&spec);
+    let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        assert!(args[idx..].contains(&tool.to_string()), "missing {tool} in {args:?}");
+    }
+    assert!(
+        !args.contains(&"Bash".to_string()),
+        "a readonly role that still needs shell access (e.g. a scout's `git diff`) keeps Bash: {args:?}"
+    );
+    assert!(args.contains(&"--permission-mode".to_string()));
+    let idx = args.iter().position(|a| a == "--permission-mode").unwrap();
+    assert_eq!(args[idx + 1], "auto");
+
+    let not_readonly = build_args(&base_spec(dir.path()));
+    for tool in ["Edit", "Write", "NotebookEdit", "Bash"] {
+        assert!(!not_readonly.contains(&tool.to_string()));
+    }
+}
+
+#[test]
+fn build_args_also_disallows_bash_on_a_readonly_session_with_no_need_for_shell() {
+    // The playtest planner's own prompt says it needs nothing at all: `spec.shell = false`
+    // closes the gap a Bash shell command leaves in Edit/Write/NotebookEdit alone (round-2
+    // reviewer finding — the planner could still write files via shell).
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.readonly = true;
+    spec.shell = false;
+    let args = build_args(&spec);
+    let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    for tool in ["Edit", "Write", "NotebookEdit", "Bash"] {
+        assert!(args[idx..].contains(&tool.to_string()), "missing {tool} in {args:?}");
     }
 }
 
@@ -283,6 +259,57 @@ fn session_env_points_a_local_session_at_the_local_server_and_skips_cloud_only_v
             .any(|(k, v)| k == "CLOUDFLARE_API_TOKEN" && v == NO_DEPLOY_TOKEN)
     );
     assert!(!env.iter().any(|(k, _)| k == "CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+}
+
+// sandbox_supported / sandbox_enabled / sandbox_settings / build_args sandbox
+
+#[test]
+fn sandbox_is_supported_on_every_platform_except_windows() {
+    assert!(!sandbox_supported(true));
+    assert!(sandbox_supported(false));
+}
+
+#[test]
+fn sandbox_enabled_needs_both_auto_and_a_supporting_platform() {
+    use crate::config::SandboxMode;
+    assert!(sandbox_enabled(SandboxMode::Auto, false));
+    assert!(!sandbox_enabled(SandboxMode::Auto, true));
+    assert!(!sandbox_enabled(SandboxMode::Off, false));
+    assert!(!sandbox_enabled(SandboxMode::Off, true));
+}
+
+#[test]
+fn sandbox_settings_allows_only_the_macos_certificate_checker() {
+    assert_eq!(
+        sandbox_settings(false),
+        json!({"enabled": true, "autoAllowBashIfSandboxed": true})
+    );
+    assert_eq!(
+        sandbox_settings(true),
+        json!({
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "network": {"allowMachLookup": ["com.apple.trustd.agent"]},
+        })
+    );
+}
+
+#[test]
+fn build_args_omits_settings_when_the_session_is_not_sandboxed() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!build_args(&base_spec(dir.path())).contains(&"--settings".to_string()));
+}
+
+#[test]
+fn build_args_turns_on_the_sandbox_as_the_very_last_flag_when_the_session_is_sandboxed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.sandbox = true;
+    let args = build_args(&spec);
+    assert_eq!(args[args.len() - 2], "--settings");
+    let settings: Value = serde_json::from_str(&args[args.len() - 1]).unwrap();
+    assert_eq!(settings["sandbox"]["enabled"], json!(true));
+    assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], json!(true));
 }
 
 #[test]

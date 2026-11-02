@@ -1,0 +1,14 @@
+{
+  "correctness": {
+    "focus": "correctness",
+    "instructions": "Logic bugs, broken edge cases, wrong error handling, off-by-one errors, state that can go inconsistent, and regressions in the code the diff touches. Follow calls into unchanged code where the diff depends on it. Also flag committed secrets or credentials, unsafe handling of input, files or network data, and risky shell commands."
+  },
+  "tests": {
+    "focus": "tests",
+    "instructions": "Whether the slice's new behaviour is tested: unit tests for pure logic, and the project's own scenario or verify runs where it uses them. Report a missing or weak test only where a real bug could ship unnoticed without it, and say what the test should assert. Don't ask for tests of trivial code, pure wiring, layout, or things the project doesn't test anywhere else. Use `major` only when untested behaviour is likely to break; everything else is `minor`. An empty list is a fine answer."
+  },
+  "spec": {
+    "focus": "whether the diff matches the specs",
+    "instructions": "Read the linked specs: for a large one, its index (`<name>.md`) and then only the section files (`<name>/NN-<slug>.md`) the diff touches. Check the diff does what they say, and flag anything it does differently. Flag any change to something the specs mark as decided. Check any backlog update matches what the diff actually built, and that it doesn't mark the item done while work is left. Also check the specs the item links to describe the code as it is after this PR, including work that landed earlier without a spec update (`git log` on the relevant files): a stale spec is a finding."
+  }
+}

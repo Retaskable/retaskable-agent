@@ -10,20 +10,24 @@
 mod machine;
 mod project;
 
+use crate::env::Env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
 pub use machine::{
-    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, MachineConfig, RoleEngines,
-    cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
+    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
+    ModelsConfig, RoleEngines, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
 };
 pub(crate) use machine::{
     lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
     valid_model_name,
 };
-pub use project::{CheckConfig, GalleryConfig, ProjectConfig, ProjectType};
+pub use project::{
+    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, Playtests, ProjectConfig, ProjectType,
+    SandboxMode,
+};
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -33,8 +37,8 @@ pub struct ConfigFile {
 }
 
 /// `RETASKABLE_DATA_DIR`, or the working folder's `.retaskable/`, as a checkout of the TypeScript agent uses.
-pub fn data_dir(env: impl Fn(&str) -> Option<String>) -> PathBuf {
-    env("RETASKABLE_DATA_DIR")
+pub fn data_dir(env: &Env) -> PathBuf {
+    env.get("RETASKABLE_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".retaskable"))
 }
@@ -72,7 +76,7 @@ pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Val
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
     patch(&mut obj);
-    crate::store::write_json_atomic(&file, &Value::Object(obj), false)
+    crate::fs_util::write_json_atomic(&file, &Value::Object(obj), false)
 }
 
 /// A version 2 file as it is; a version 1 one (no `"version"` key) as one project, its id made when it has none
@@ -138,10 +142,6 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
 mod tests {
     use super::project::{Playtests, ProjectType, SandboxMode};
     use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
 
     #[test]
     fn a_missing_file_is_the_defaults_and_no_projects() {
@@ -395,8 +395,8 @@ mod tests {
 
     #[test]
     fn the_data_dir_comes_from_the_env_or_the_working_folder() {
-        assert_eq!(data_dir(no_env), PathBuf::from(".retaskable"));
-        let env = |k: &str| (k == "RETASKABLE_DATA_DIR").then(|| "x".to_string());
-        assert_eq!(data_dir(env), PathBuf::from("x"));
+        assert_eq!(data_dir(&Env::empty()), PathBuf::from(".retaskable"));
+        let env = Env::from_pairs([("RETASKABLE_DATA_DIR", "x")]);
+        assert_eq!(data_dir(&env), PathBuf::from("x"));
     }
 }

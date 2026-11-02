@@ -7,16 +7,17 @@
 //! with `--output-format stream-json`, parse the events, capture the final structured result,
 //! resume a session that already has history, read the 5-hour usage limit out of the stream, and
 //! classify a signed-out Claude (`signed_out` / `describe_failure`).
+use crate::env::Env;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::engine::{
-    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, is_signed_out,
-    signed_out_text,
+    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart,
+    exited_without_result, is_signed_out, signed_out_text,
 };
-use super::text::tail;
+use super::resolve::resolve_claude;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.
@@ -35,45 +36,25 @@ const NO_DEPLOY_TOOLS: [&str; 8] = [
     "Bash(*git push*production*)",
 ];
 
+/// 06-sessions.md: "Rows marked read-only are launched with `--disallowedTools "Edit Write
+/// NotebookEdit"`" — the only three tools Claude Code itself can write a file with, on top of
+/// `--permission-mode auto`, which never changes for readonly (that mode is about not prompting,
+/// not about what's allowed).
+const READONLY_DISALLOWED_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+
 /// `claude.ts` `COMPACT_AT`: how many tokens of context Claude Code is told to auto-compact at.
 const COMPACT_AT: &str = "200000";
 
-/// `resolveClaude()`: finds the real `claude` binary to run, following docs/specs/agent/
-/// 04-architecture.md's "Finding Claude" — on Windows the `claude` on PATH is an npm shim batch
-/// file, so this looks behind it for the `claude.exe` it wraps, since spawning a `.cmd` directly
-/// from a piped child process is unreliable. `RETASKABLE_CLAUDE` always wins when set.
-pub fn resolve_claude(env: impl Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
-    if let Some(over) = env("RETASKABLE_CLAUDE") {
-        return Ok(PathBuf::from(over));
-    }
-    if !windows {
-        return Ok(PathBuf::from("claude"));
-    }
-    for dir in path_dirs {
-        let exe = dir.join("claude.exe");
-        if exe.is_file() {
-            return Ok(exe);
-        }
-        let shim = dir.join("claude.cmd");
-        if shim.is_file() {
-            let behind = dir
-                .join("node_modules")
-                .join("@anthropic-ai")
-                .join("claude-code")
-                .join("bin")
-                .join("claude.exe");
-            if behind.is_file() {
-                return Ok(behind);
-            }
-        }
-    }
-    anyhow::bail!("claude.exe wasn't found on PATH behind the npm shim. Set RETASKABLE_CLAUDE to its full path.")
+/// `sandboxSupported()`: Claude Code's own sandbox (04-architecture.md section 4.2) is built for
+/// macOS and Linux only; on native Windows a session runs unsandboxed, as before.
+pub fn sandbox_supported(windows: bool) -> bool {
+    !windows
 }
 
-/// `resolve_claude`, reading PATH itself the way the real agent does.
-pub fn resolve_claude_on_path(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf> {
-    let dirs = crate::env_path::path_dirs(&env);
-    resolve_claude(env, cfg!(windows), &dirs)
+/// `cfg.sandbox == Auto && sandboxSupported()`: whether a session for this project should run
+/// sandboxed, combining the project's own setting with whether this computer can run one at all.
+pub fn sandbox_enabled(mode: crate::config::SandboxMode, windows: bool) -> bool {
+    mode == crate::config::SandboxMode::Auto && sandbox_supported(windows)
 }
 
 /// `spec.model == "local"` with `spec.local` actually naming a server: the one check the args,
@@ -139,7 +120,35 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
     for tool in NO_DEPLOY_TOOLS {
         args.push(tool.to_string());
     }
+    if spec.readonly {
+        for tool in READONLY_DISALLOWED_TOOLS {
+            args.push(tool.to_string());
+        }
+        // `SessionSpec::shell`: a role with no reason to run anything at all (the playtest
+        // planner) also loses Bash, since a shell command can write a file just as well as
+        // Edit/Write/NotebookEdit can. A role that still needs read-only shell access (a
+        // scout's or the reviewer's own `git diff`) keeps it.
+        if !spec.shell {
+            args.push("Bash".to_string());
+        }
+    }
+    if spec.sandbox {
+        args.push("--settings".to_string());
+        args.push(serde_json::json!({"sandbox": sandbox_settings(cfg!(target_os = "macos"))}).to_string());
+    }
     args
+}
+
+/// The sandbox a session runs in (`--settings`'s `sandbox` key), following `sandboxSettings()`.
+/// On macOS it may also reach the system's certificate checker (trustd) and nothing more, so
+/// `gh`, a Go program, can check GitHub's certificate and open the pull request; without it, it
+/// fails with `x509: OSStatus -26276`.
+fn sandbox_settings(macos: bool) -> Value {
+    let mut settings = serde_json::json!({"enabled": true, "autoAllowBashIfSandboxed": true});
+    if macos {
+        settings["network"] = serde_json::json!({"allowMachLookup": ["com.apple.trustd.agent"]});
+    }
+    settings
 }
 
 /// `sessionEnv(spec)`: environment variables layered on top of the agent's own for one session —
@@ -308,28 +317,13 @@ impl EngineReader for SessionReader {
     /// The process exited with no `result` event at all (a crash, or killed before it could
     /// finish): report that as a failure naming the exit code, with the end of stderr attached.
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult {
-        let code = exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let error = format!(
-            "claude exited with code {code} and no result. {}",
-            tail(stderr.trim(), 1500)
-        );
-        let limit_hit = !self.local && self.usage_rejected();
-        let signed_out = !self.local && !limit_hit && signed_out_text(Some(&error));
-        SessionResult {
-            ok: false,
-            subtype: "exited".to_string(),
-            structured: None,
-            error: Some(error),
-            cost_usd: Some(0.0),
-            session_id: known_session_id.to_string(),
-            limit_hit,
-            signed_out,
-            context_tokens: self.context_tokens,
-            usage: self.usage.clone(),
-            tokens: None,
-        }
+        let mut result = exited_without_result("claude", exit_code, stderr, known_session_id);
+        result.limit_hit = !self.local && self.usage_rejected();
+        result.signed_out = !self.local && !result.limit_hit && signed_out_text(result.error.as_deref());
+        result.cost_usd = Some(0.0);
+        result.context_tokens = self.context_tokens;
+        result.usage = self.usage.clone();
+        result
     }
 }
 
@@ -353,7 +347,7 @@ impl Engine for ClaudeEngine {
         EngineId::Claude
     }
 
-    fn binary(&self, env: &dyn Fn(&str) -> Option<String>, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
+    fn binary(&self, env: &Env, windows: bool, path_dirs: &[PathBuf]) -> Result<PathBuf> {
         resolve_claude(env, windows, path_dirs).context("resolving the claude binary")
     }
 

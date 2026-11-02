@@ -5,7 +5,6 @@
 //! ported.
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -126,8 +125,7 @@ pub fn ci_coverage(workflows: &[WorkflowFile], base_branch: &str) -> CiCoverage 
 /// ls-tree`/`git show`; empty when the ref or the directory doesn't exist (not an error: `none` is
 /// a valid answer).
 pub fn read_workflows(repo: &Path, git_ref: &str) -> Vec<WorkflowFile> {
-    let ls = Command::new("git")
-        .current_dir(repo)
+    let ls = crate::git_bin::command(repo)
         .args(["ls-tree", "--name-only", &format!("{git_ref}:.github/workflows")])
         .output();
     let Ok(ls) = ls else {
@@ -141,8 +139,7 @@ pub fn read_workflows(repo: &Path, git_ref: &str) -> Vec<WorkflowFile> {
         .map(str::trim)
         .filter(|f| f.ends_with(".yml") || f.ends_with(".yaml"))
         .map(|file| {
-            let show = Command::new("git")
-                .current_dir(repo)
+            let show = crate::git_bin::command(repo)
                 .args(["show", &format!("{git_ref}:.github/workflows/{file}")])
                 .output();
             let text = match show {

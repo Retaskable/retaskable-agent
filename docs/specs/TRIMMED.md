@@ -8,7 +8,7 @@ Where it belongs:
 - **hub**: the cloud hub (Worker and Durable Objects, [cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md)): commands, notifications, routing, anything the server answers without a computer.
 - **app**: the Expo app ([expo.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/expo.md)), which is the only UI.
 
-Count by destination (the first one named in each row): store op 34, hub 23, app 64. Total 121.
+Count by destination (the first one named in each row): store op 35, hub 23, app 64. Total 122.
 
 Store op names are the ones Retaskable.com's specs use. A few (for example do_next, 	ryout_groups) were inferred from the text and need checking against the store before the agent is thinned.
 
@@ -41,6 +41,7 @@ Store op names are the ones Retaskable.com's specs use. A few (for example do_ne
 | agent/06.8-galleries-the-game-photographs-itself.md | tab and feedback UI | Setup tab, Add a way to take these, feedback box and picture viewer | app: gallery tab and feedback boxes |
 | agent/06.8-galleries-the-game-photographs-itself.md | gallery reads | `gallery_index` and `gallery_image` reading local disk | hub: `gallery_index`, `gallery_image` |
 | agent/06.8-galleries-the-game-photographs-itself.md | do next | Loop marks the merged item do next | store op: `do_next` |
+| agent/06.9-triage-claude-looks-at-needs-you-first.md | It can't loop (restart durability) | How a `human`/`person_steps` finding and the failed-look count survive a restart: write-through timing against the item's lease and park state, and hydrating a finding that beat the store's own answer back | store op: item details flush and hydrate across a restart (item-details-on-server.md, last-local-state.md) |
 | agent/06.9-triage-claude-looks-at-needs-you-first.md | claudeOnIt | UI treatment of an item Claude is looking into | app: under-way display |
 | agent/06.9-triage-claude-looks-at-needs-you-first.md | card and bell | Suggested button on the card, bell and Needs you visibility | app: Needs you and item cards |
 | agent/07-orchestrator-loop.md | 7.1 Auto concurrency | The Agents tab status light's tooltip with the reason for the number | app: Expo app Agents screen |
