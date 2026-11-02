@@ -206,6 +206,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::config::DeployConfig;
+    use crate::test_support::{git, repo_with_origin, run as run_git};
 
     fn cfg(staging: Option<DeployTarget>) -> ProjectConfig {
         ProjectConfig {
@@ -364,7 +365,7 @@ mod tests {
     #[test]
     fn remote_head_sha_reports_origins_head_after_a_push_it_never_fetched_itself() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         // A second clone pushes a commit the first repo's checkout has never fetched.
         let other = root.path().join("other-clone");
         clone_from_origin(&repo, &other);
@@ -384,7 +385,7 @@ mod tests {
     #[test]
     fn is_ancestor_is_true_for_the_same_commit_and_for_a_real_ancestor() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         let first = head_sha(&repo);
         std::fs::write(repo.join("README.md"), "second").unwrap();
         run_git(git(&repo).args(["add", "README.md"]));
@@ -399,7 +400,7 @@ mod tests {
     #[test]
     fn is_ancestor_fetches_first_when_the_descendant_isnt_known_locally_yet() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         let other = root.path().join("other-clone");
         clone_from_origin(&repo, &other);
         run_git(git(&other).args(["config", "user.email", "test@example.com"]));
@@ -421,42 +422,10 @@ mod tests {
     #[test]
     fn is_ancestor_is_false_for_a_commit_no_remote_ever_had() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         let first = head_sha(&repo);
 
         assert!(!is_ancestor(&repo, &first, "0000000000000000000000000000000000000000").unwrap());
-    }
-
-    fn init_repo_with_origin(root: &Path) -> std::path::PathBuf {
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        run_git(git(&repo).args(["init", "--quiet"]));
-        run_git(git(&repo).args(["config", "user.email", "test@example.com"]));
-        run_git(git(&repo).args(["config", "user.name", "Test"]));
-        run_git(git(&repo).args(["checkout", "-b", "main"]));
-        std::fs::write(repo.join("README.md"), "hello").unwrap();
-        run_git(git(&repo).args(["add", "README.md"]));
-        run_git(git(&repo).args(["commit", "--quiet", "-m", "initial"]));
-        let origin = root.join("origin.git");
-        run_git(
-            Command::new("git")
-                .args(["clone", "--bare", "--quiet"])
-                .arg(&repo)
-                .arg(&origin),
-        );
-        run_git(git(&repo).args(["remote", "add", "origin"]).arg(&origin));
-        run_git(git(&repo).args(["push", "-u", "--quiet", "origin", "main"]));
-        repo
-    }
-
-    fn git(dir: &Path) -> Command {
-        let mut c = Command::new("git");
-        c.current_dir(dir);
-        c
-    }
-
-    fn run_git(cmd: &mut Command) {
-        assert!(cmd.status().unwrap().success());
     }
 
     fn head_sha(dir: &Path) -> String {
@@ -489,7 +458,7 @@ mod tests {
     #[test]
     fn run_passes_when_the_deploy_is_already_there_and_the_smoke_command_succeeds() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         let worktrees = root.path().join("worktrees");
         let sha = head_sha(&repo);
         let url = serve_version_json(format!(r#"{{"sha": "{sha}"}}"#));
@@ -510,7 +479,7 @@ mod tests {
     #[test]
     fn run_fails_when_the_deploy_is_there_but_the_smoke_command_fails() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         let worktrees = root.path().join("worktrees");
         let sha = head_sha(&repo);
         let url = serve_version_json(format!(r#"{{"sha": "{sha}"}}"#));
@@ -530,7 +499,7 @@ mod tests {
     #[test]
     fn run_times_out_when_nothing_ever_answers_the_version_endpoint() {
         let root = tempfile::tempdir().unwrap();
-        let repo = init_repo_with_origin(root.path());
+        let repo = repo_with_origin(root.path());
         let sha = head_sha(&repo);
         // A free port nothing listens on: every poll fails to connect.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
