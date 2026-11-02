@@ -132,6 +132,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
         tags: Vec::new(),

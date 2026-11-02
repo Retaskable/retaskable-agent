@@ -195,3 +195,10 @@ fn target_triple_names_a_cargo_target_for_each_slug_and_nothing_else() {
     assert_eq!(target_triple("linux-x64"), Some("x86_64-unknown-linux-gnu"));
     assert_eq!(target_triple("linux-arm64"), None);
 }
+
+#[test]
+fn production_is_called_retaskable_and_staging_retaskable_staging() {
+    // installers/03-the-bundle-agent-bundle.md section 3.18: Production's name on every OS.
+    assert_eq!(release_name(Environment::Production), "Retaskable");
+    assert_eq!(release_name(Environment::Staging), "Retaskable Staging");
+}

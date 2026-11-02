@@ -68,6 +68,8 @@ pub struct Links {
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
     pub paused: PauseState,
+    /// The cloud link's `work_available` wake-ups, one per project.
+    pub work: crate::work_signal::WorkSignals,
     /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
     pub machine: String,
     pub environment: String,
@@ -320,7 +322,7 @@ impl Machine {
     /// One pass of the run loop for every project in `runs` mode. A paused project or a stopping computer
     /// asks for nothing but still drops, ends and beats. A panic costs this pass only.
     pub async fn run_passes(&mut self) {
-        let stopping = self.stopping();
+        let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused();
         let (mut claim_paused_until, mut signed_out_until) = (None, None);
         for (lp, paused) in self.projects.iter_mut().zip(paused) {
@@ -569,6 +571,7 @@ pub struct SpawnArgs<'a> {
     pub backlog_url: &'a str,
     pub keychain: &'a Arc<dyn TokenStore>,
     pub paused: &'a PauseState,
+    pub work: &'a crate::work_signal::WorkSignals,
     pub live: &'a LiveHandle,
     pub guard: Option<&'a PortGuard>,
     pub machine: String,
@@ -599,6 +602,7 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             keychain: args.keychain.clone(),
             paused: args.paused.clone(),
+            work: args.work.clone(),
             machine: args.machine,
             environment: args.environment,
             tags: args.tags,

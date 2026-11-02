@@ -319,11 +319,17 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
 }
 
 /// The answer to a message from the hub, if it needs one. A command is checked, run (commands.rs) and audited;
-/// `watch` finds no session to send; everything else is nothing to act on yet.
+/// `work_available` wakes the project's run loop; `watch` finds no session to send; everything else is nothing to act on yet.
 fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl Fn(String)) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
-    if msg.get("type").and_then(Value::as_str) != Some("command") {
-        return None;
+    match msg.get("type").and_then(Value::as_str) {
+        Some("command") => {}
+        Some("work_available") => {
+            // Only wakes the project's run loop; nothing runs and nothing is answered.
+            cloud.view.work.wake(project);
+            return None;
+        }
+        _ => return None,
     }
     let id = msg
         .get("id")

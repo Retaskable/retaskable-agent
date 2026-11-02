@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 use crate::backlog::Item;
 use crate::release_notes::Commit;
+use crate::spec_parts::{spec_parts, whole_spec};
 
 /// At most this many files across the three parts of "Where to start" (section 6.2).
 pub const MAX_FILES: usize = 15;
@@ -242,8 +243,12 @@ pub async fn build(git_bin: &Path, root: &Path, base_ref: &str, item: &Item) -> 
 
     let mut changed = Vec::new();
     for spec in &spec_files {
-        let content = std::fs::read_to_string(root.join(spec)).unwrap_or_default();
-        let named = named_code_paths(spec, &content, root);
+        // A split spec's index names no code itself: read its whole text, resolving paths from the
+        // repo root or the section files' folder.
+        let content = whole_spec(Path::new(spec), root);
+        let parts = spec_parts(Path::new(spec), root);
+        let from = to_forward_slashes(&parts[0]);
+        let named = named_code_paths(&from, &content, root);
         for f in &named {
             if files.len() >= MAX_FILES {
                 break;
@@ -516,6 +521,37 @@ mod tests {
         assert!(rendered.contains("- src/a.rs"));
         assert!(rendered.contains("### Changed since its specs last did"));
         assert!(rendered.contains("ddd Changed a.rs"));
+    }
+
+    #[tokio::test]
+    async fn build_reads_code_named_only_in_a_split_specs_section_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs/specs/x")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/specs/x.md"),
+            "# X\n\n## 1. A\n\n- [x/01-a.md](x/01-a.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("docs/specs/x/01-a.md"),
+            "Names `src/a.rs` and `local.rs`.",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("docs/specs/x/local.rs"), "").unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
+
+        let missing = dir.path().join("no_git");
+        let it = item("7", &["docs/specs/x.md"]);
+        let start = build(&missing, dir.path(), "origin/main", &it).await;
+        assert_eq!(
+            start.files,
+            vec![
+                "docs/specs/x.md".to_string(),
+                "src/a.rs".to_string(),
+                "docs/specs/x/local.rs".to_string()
+            ]
+        );
     }
 
     #[test]
