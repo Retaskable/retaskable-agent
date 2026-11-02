@@ -1,7 +1,9 @@
 //! The real implementer session starter for `claim` mode (`startItem`/`implement` in Retaskable.com's
 //! `agent/src/steps.ts`): prepares the lane, builds the prompt, runs `claude -p` and turns what it
 //! answered into the [`SessionOutcome`] the loop settles. Claude only; any other engine refuses.
-//! Left out: "Where to start" in the prompt, Claude's sandbox, and the decisions a person already gave
+//! A fresh session's prompt ends with "Where to start" ([`crate::implementer::start_files`]), built in
+//! the prepared lane; a resume or a follow-up restart gets none.
+//! Left out: Claude's sandbox, and the decisions a person already gave
 //! (the claimed item doesn't carry them). The usage-window model tier (section 7.1) is picked for the
 //! implementer ([`crate::tiers::implementer_tier`]), then moved off Opus for a first try
 //! ([`crate::tiers::implementer_model`]); the other roles it covers have no sessions here yet.
@@ -23,6 +25,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
+use crate::implementer::start_files;
 use crate::implementer::{
     ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, run_implementer, session_spec,
 };
@@ -220,7 +223,14 @@ pub(super) fn branch_name(item: &Item) -> String {
 /// `<run folder>/<name>`, and returns its answer with the stream's usage reading and the session's last
 /// context size. A `fresh` start runs under the id the driver chose and saved, so a restart of it can
 /// resume it.
-async fn attempt(job: &Job, cwd: &Path, start: Start<'_>, fresh: bool, name: String) -> Result<Attempt> {
+async fn attempt(
+    job: &Job,
+    cwd: &Path,
+    start: Start<'_>,
+    fresh: bool,
+    name: String,
+    where_to_start: &str,
+) -> Result<Attempt> {
     let Job {
         data_dir,
         project,
@@ -249,7 +259,7 @@ async fn attempt(job: &Job, cwd: &Path, start: Start<'_>, fresh: bool, name: Str
             github_repo: &project.github_repo,
             checks: &project.checks,
             code_gates: project.code_gates,
-            where_to_start: "",
+            where_to_start,
             cwd,
             model,
             budget_usd: project.budget.implementer_usd,
@@ -348,7 +358,7 @@ async fn run(job: Job) -> Result<Ran> {
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
         };
-        return Ok(settled(attempt(&job, &cwd, start, true, name).await?, max_turns));
+        return Ok(settled(attempt(&job, &cwd, start, true, name, "").await?, max_turns));
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
     // reset away the work), and anything the old session left running in it is stopped. The driver decides
@@ -376,7 +386,15 @@ async fn run(job: Job) -> Result<Ran> {
         } else {
             format!("{}.jsonl", job.session_id)
         };
-        let a = attempt(&job, &cwd, start, !resumed, name).await?;
+        // Only a fresh start gets "Where to start". Building it reads the lane's specs and runs git; git
+        // errors leave the list shorter (`build` skips what it can't read), never failing the item.
+        let where_to_start = if resumed {
+            String::new()
+        } else {
+            let base_ref = format!("origin/{}", job.project.base_branch);
+            start_files::render(&start_files::build(crate::git_bin::program(), &cwd, &base_ref, &job.item).await)
+        };
+        let a = attempt(&job, &cwd, start, !resumed, name, &where_to_start).await?;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
         // same id starts a fresh one, as `implement` in `steps.ts` does on "No conversation found".
         if resumed && matches!(&a.answer, Err(e) if format!("{e:#}").contains("No conversation found")) {
@@ -546,14 +564,14 @@ mod tests {
         let code = if ok { 0 } else { 3 };
         if cfg!(windows) {
             let script = format!(
-                "@echo off\r\necho %* > \"{}\"\r\ntype \"{}\"\r\nexit /b {code}\r\n",
+                "@echo off\r\necho %* > \"{0}\"\r\nfindstr \"^\" >> \"{0}\"\r\ntype \"{1}\"\r\nexit /b {code}\r\n",
                 args.display(),
                 out.display()
             );
             std::fs::write(bin, script).unwrap();
         } else {
             let script = format!(
-                "#!/bin/sh\necho \"$@\" > \"{}\"\ncat \"{}\"\nexit {code}\n",
+                "#!/bin/sh\necho \"$@\" > \"{0}\"\ncat >> \"{0}\"\ncat \"{1}\"\nexit {code}\n",
                 args.display(),
                 out.display()
             );
@@ -638,6 +656,69 @@ mod tests {
             2,
             "the first transcript is kept"
         );
+    }
+
+    /// Commits a spec that names `src/lib.rs`, and that file, to the rig's repo and origin.
+    fn commit_spec(rig: &Rig) {
+        let repo = rig.root.join("repo");
+        std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("docs/specs/a.md"), "Touches `src/lib.rs`.\n").unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "spec"],
+            vec!["push", "--quiet", "origin", "main"],
+        ] {
+            let ok = crate::test_support::git(&repo).args(args).status().unwrap().success();
+            assert!(ok);
+        }
+    }
+
+    async fn start_with(rig: &Rig, spec_refs: &[&str], resume: bool) {
+        let (mut request, mut rx) = request();
+        request.item.spec_refs = spec_refs.iter().map(ToString::to_string).collect();
+        request.resume = resume;
+        rig.starter.start(request).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(120), rx.recv()).await;
+        assert!(matches!(got, Ok(Some(_))));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_session_is_pointed_at_the_items_specs_and_the_code_they_name() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        commit_spec(&rig);
+        start_with(&rig, &["docs/specs/a.md"], false).await;
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert!(args.contains("## Where to start"), "{args}");
+        assert!(
+            args.contains("docs/specs/a.md") && args.contains("src/lib.rs"),
+            "{args}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_gets_only_the_follow_up() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        commit_spec(&rig);
+        start_with(&rig, &["docs/specs/a.md"], false).await;
+        start_with(&rig, &["docs/specs/a.md"], true).await;
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert!(args.contains("--resume sess-1"), "{args}");
+        assert!(
+            !args.contains("## Where to start") && !args.contains("docs/specs/a.md"),
+            "{args}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_still_starts_when_git_gives_nothing_to_list() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        // Break the lane's view of origin after it's prepared is not possible, so name specs git can't show.
+        start_with(&rig, &["docs/specs/missing.md"], false).await;
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert!(args.contains("--session-id sess-1"), "{args}");
+        assert!(!args.contains("## Where to start"), "{args}");
     }
 
     #[tokio::test]

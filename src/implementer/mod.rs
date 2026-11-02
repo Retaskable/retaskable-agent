@@ -15,8 +15,9 @@
 //! `src/orchestrator/session.rs`'s `ClaudeStarter` is the orchestrator-level step that runs real
 //! sessions with the prompt template, `IMPLEMENTER_RESULT_SCHEMA` and [`run_implementer`], restarting
 //! a fresh session with [`Start::Continuing`] in the same lane when one ends with
-//! [`MaxTurns`] (escalating to a person on a second one in a row). Still not
-//! wired in there: [`start_files`] (its "Where to start" is passed empty), a context-size-driven
+//! [`MaxTurns`] (escalating to a person on a second one in a row). It also
+//! passes a fresh session [`start_files`]'s "Where to start". Still not
+//! wired in there: a context-size-driven
 //! fresh restart, resuming a session for any other kind of follow-up, and the orchestrator-level
 //! handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends all three to a person
 //! today), and [`code_gates::run`], which nothing calls yet.
