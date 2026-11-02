@@ -37,7 +37,14 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
     };
     project.budget.implementer_usd = 5.0;
     let bin = bin.to_string_lossy().into_owned();
-    let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
+    let gh = root.join(if cfg!(windows) { "gh.cmd" } else { "gh.sh" });
+    fake_gh(&gh, &root);
+    let gh = gh.to_string_lossy().into_owned();
+    let env = Env::new(move |k| match k {
+        "RETASKABLE_CLAUDE" => Some(bin.clone()),
+        "RETASKABLE_GH" => Some(gh.clone()),
+        _ => None,
+    });
     let starter = ClaudeStarter::new(
         root.join("data"),
         vec![project],
@@ -52,6 +59,48 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         starter,
         args,
     }
+}
+
+/// A `gh` that logs its arguments to `gh.log` in `root`, lists the JSON in `gh_list` for `pr list`, and for
+/// `pr create` saves its stdin as `gh_body` and prints a PR URL.
+fn fake_gh(bin: &Path, root: &Path) {
+    std::fs::write(root.join("gh_list"), "[]").unwrap();
+    let r = root.display();
+    if cfg!(windows) {
+        let script = format!(
+            "@echo off\r\necho %* >> \"{r}\\gh.log\"\r\nif \"%1 %2\"==\"pr list\" type \"{r}\\gh_list\"\r\nif \"%1 %2\"==\"pr create\" (findstr \"^\" > \"{r}\\gh_body\" & echo https://github.com/o/p/pull/7)\r\n"
+        );
+        std::fs::write(bin, script).unwrap();
+    } else {
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr list\") cat '{r}/gh_list';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\nesac\n"
+        );
+        crate::test_support::write_executable(bin, &script);
+    }
+}
+
+/// The branches on the rig's bare origin.
+fn origin_branches(rig: &Rig) -> String {
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(rig.root.join("origin.git"))
+        .args(["branch", "--list"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// What the fake `gh` was asked, without the bare run that `write_executable` makes to check the script starts.
+fn gh_log(rig: &Rig) -> String {
+    let log = std::fs::read_to_string(rig.root.join("gh.log")).unwrap_or_default();
+    log.lines()
+        .filter(|l| l.starts_with("pr "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn branch() -> String {
+    branch_name(&item(&[], Some("Wire it.")))
 }
 
 fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
@@ -158,6 +207,76 @@ async fn a_finished_session_sends_finished_and_keeps_its_transcript_locally() {
     assert_eq!(files.len(), 1);
 }
 
+#[cfg(unix)]
+const FINISHED_WITH_TITLE: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done","changeTitle":"item: My title","changeBody":"My body"},"session_id":"s"}"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_finished_session_is_pushed_and_its_pr_opened_with_its_title_body_and_base() {
+    let rig = gated_rig(&[COMMIT_SMALL]);
+    std::fs::write(rig.root.join("out.jsonl"), FINISHED_WITH_TITLE).unwrap();
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    assert!(
+        origin_branches(&rig).contains("retaskable/implementer-session"),
+        "{}",
+        origin_branches(&rig)
+    );
+    let log = gh_log(&rig);
+    assert!(
+        log.contains(&format!("pr list --head {} --state open", branch())),
+        "{log}"
+    );
+    assert!(
+        log.contains(&format!(
+            "pr create --base main --head {} --title item: My title",
+            branch()
+        )),
+        "{log}"
+    );
+    assert_eq!(std::fs::read_to_string(rig.root.join("gh_body")).unwrap(), "My body");
+    assert_eq!(got.notes, vec!["Opened PR #7: https://github.com/o/p/pull/7"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_open_pr_for_the_branch_means_only_the_push_happens() {
+    let rig = gated_rig(&[COMMIT_SMALL]);
+    std::fs::write(
+        rig.root.join("gh_list"),
+        r#"[{"number":4,"url":"https://github.com/o/p/pull/4"}]"#,
+    )
+    .unwrap();
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    assert!(origin_branches(&rig).contains(&branch()));
+    assert!(!gh_log(&rig).contains("pr create"), "{}", gh_log(&rig));
+    assert_eq!(
+        got.notes,
+        vec!["Pushed to the open PR #4: https://github.com/o/p/pull/4"]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_push_failure_needs_a_person_and_opens_nothing() {
+    let rig = gated_rig(&[COMMIT_SMALL]);
+    let url = rig.root.join("nowhere.git");
+    let set = std::process::Command::new("git")
+        .current_dir(rig.root.join("repo"))
+        .args(["remote", "set-url", "--push", "origin"])
+        .arg(&url)
+        .status()
+        .unwrap();
+    assert!(set.success());
+    let got = gated_outcome(&rig).await;
+    match got.result {
+        SessionResult::NeedsHuman(why) => assert!(why.contains("couldn't be published"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(gh_log(&rig), "");
+}
+
 /// A `claude` that, on its `n`th run in the lane, does `steps[n-1]` (shell, run in the lane), saves the
 /// prompt it was given as `prompt<n>.txt` in the rig's folder, and answers `pr_opened`.
 #[cfg(unix)]
@@ -208,7 +327,7 @@ async fn a_change_that_passes_the_gates_finishes_after_one_run() {
     let rig = gated_rig(&[COMMIT_SMALL]);
     let got = gated_outcome(&rig).await;
     assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
-    assert!(got.notes.is_empty(), "{:?}", got.notes);
+    assert_eq!(got.notes, vec!["Opened PR #7: https://github.com/o/p/pull/7"]);
     assert_eq!(runs_of(&rig), 1);
 }
 
@@ -227,7 +346,7 @@ async fn a_file_over_the_limit_resumes_the_session_with_the_finding_until_the_ch
     );
     let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
     assert!(args.lines().nth(1).unwrap().contains("--resume sess-1"), "{args}");
-    assert_eq!(got.notes.len(), 1);
+    assert_eq!(got.notes.len(), 2);
     assert!(
         got.notes[0].starts_with("Code gates: 1 file over 1000 lines"),
         "{:?}",
@@ -254,6 +373,8 @@ async fn findings_past_max_check_rounds_need_a_person() {
         other => panic!("{other:?}"),
     }
     assert_eq!(runs_of(&rig), 4, "the first run and three rounds of fixes");
+    assert!(!origin_branches(&rig).contains("retaskable/"), "nothing is pushed");
+    assert_eq!(gh_log(&rig), "");
     assert_eq!(got.notes.len(), 4);
 }
 
@@ -264,7 +385,7 @@ async fn gates_that_cannot_run_are_noted_and_the_session_still_finishes() {
     let got = gated_outcome(&rig).await;
     assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
     assert_eq!(runs_of(&rig), 1);
-    assert_eq!(got.notes.len(), 1);
+    assert_eq!(got.notes.len(), 2);
     assert!(got.notes[0].starts_with("Code gates couldn't run"), "{:?}", got.notes);
 }
 
