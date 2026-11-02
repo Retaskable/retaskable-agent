@@ -366,6 +366,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // instead, since Quit exits by returning from `main` rather than by `std::process::exit`.
     let projects = cfg.projects.clone();
     tokio::task::spawn_blocking(move || {
+        // Runs the `runs` loop holds get up to 15 minutes to end first (docs/specs/pieces.md section 3.1).
+        retaskable_agent::runs::RunWait::real().wait();
         retaskable_agent::process_tree::cut_all();
         retaskable_agent::shutdown::stop_other_sessions(&projects);
     })

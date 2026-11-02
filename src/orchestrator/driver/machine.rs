@@ -322,7 +322,7 @@ impl Machine {
     /// One pass of the run loop for every project in `runs` mode. A paused project or a stopping computer
     /// asks for nothing but still drops, ends and beats. A panic costs this pass only.
     pub async fn run_passes(&mut self) {
-        let stopping = self.stopping();
+        let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused();
         let (mut claim_paused_until, mut signed_out_until) = (None, None);
         for (lp, paused) in self.projects.iter_mut().zip(paused) {

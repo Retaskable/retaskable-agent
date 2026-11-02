@@ -142,6 +142,7 @@ impl ProjectLoop {
                 break;
             }
         }
+        crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
 
     /// The repo and token the store is asked with, after `runs_drop` went through (once; if it fails nothing is
