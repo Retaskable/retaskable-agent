@@ -354,6 +354,45 @@ async fn a_session_that_needs_a_human_frees_its_lane_and_keeps_the_lease() {
 }
 
 #[tokio::test]
+async fn a_session_that_runs_out_of_turns_restarts_once_in_the_same_lane() {
+    let (mut rig, fake, asked) = ended(SessionResult::MaxTurns(300), &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert!(rig.lp(0).runs["a"].max_turns_hit);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(!ops(&asked).contains(&"release".to_string()));
+    let started = fake.started.lock().unwrap();
+    assert_eq!(started.len(), 2, "the claim's start and the restart");
+    assert_eq!(
+        started[1].follow_up.as_deref(),
+        Some(
+            "An earlier session ran out of turns before it finished. Check `git status` and \
+             `git diff --stat` for its uncommitted work, then carry on with the slice."
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_second_max_turns_in_a_row_escalates_to_needs_human() {
+    let (mut rig, fake, _asked) = ended(SessionResult::MaxTurns(300), &Default::default()).await;
+    fake.script.lock().unwrap().push(SessionResult::MaxTurns(300));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    let freed = (rig.lp(0).events().recent().iter())
+        .find(|e| e.kind() == "lane_freed")
+        .unwrap()
+        .to_value();
+    assert_eq!(
+        freed["why"],
+        "needs_human: Implementer ran out of turns (300) twice in a row"
+    );
+}
+
+#[tokio::test]
 async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
     struct NoSteps;
     impl SessionStarter for NoSteps {
@@ -377,4 +416,22 @@ async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Checking);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     assert!(!kinds(&mut rig).contains(&"step_start".to_string()));
+}
+
+#[tokio::test]
+async fn a_session_ending_saves_its_context_size_and_a_fresh_start_clears_it() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    *fake.context_tokens.lock().unwrap() = Some(42_000);
+    fake.script.lock().unwrap().push(done(ImplementerOutcome::Finished));
+    rig.machine.pass().await;
+    assert_eq!(
+        rig.lp(0).records["a"].impl_context_tokens,
+        None,
+        "a fresh start has no size"
+    );
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).records["a"].impl_context_tokens, Some(42_000));
+    assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, Some(42_000));
 }

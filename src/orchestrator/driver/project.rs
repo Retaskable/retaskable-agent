@@ -138,6 +138,22 @@ pub struct StartRequest {
     /// The project's latest `state.usage` reading (section 7.1), for picking the implementer's
     /// model tier. `None` when there's no reading yet, which is treated as a full window.
     pub usage: Option<Value>,
+    /// `None` starts the session fresh in a prepared lane, as a newly claimed item does. `Some` restarts an
+    /// implementer in its existing lane after it ran out of turns or had grown too large (06.2-implementer.md
+    /// "at most maxTurns turns"): the lane is reused as-is, keeping any uncommitted work, and this text is the
+    /// session's prompt verbatim.
+    pub follow_up: Option<String>,
+}
+
+/// How `ProjectLoop::launch` starts an implementer session.
+pub(super) enum Launch {
+    /// A newly claimed item: a fresh session id in a freshly prepared lane.
+    Fresh,
+    /// A session a restart of this computer cut off: resumes the saved session id in its existing lane.
+    Resume(String),
+    /// A session that ran out of turns or had grown too large: a fresh session id, reusing the existing lane
+    /// as-is, with this text as the picking-up prompt.
+    Continuing(String),
 }
 
 /// Runs the sessions and steps for the work the loop schedules. Built in a later piece (implementer-session and
@@ -204,9 +220,13 @@ pub struct ProjectLoop {
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
+    /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
+    /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
+    max_resume_context_tokens: u32,
 }
 
 impl ProjectLoop {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         project: ProjectConfig,
@@ -214,6 +234,7 @@ impl ProjectLoop {
         events: EventLog,
         client: Client,
         live: LiveHandle,
+        max_resume_context_tokens: u32,
     ) -> Self {
         live.register(&id);
         Self {
@@ -239,6 +260,7 @@ impl ProjectLoop {
             seen: report::Seen::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
             telemetry: Telemetry::new(),
+            max_resume_context_tokens,
         }
     }
 
@@ -249,13 +271,23 @@ impl ProjectLoop {
         client: Client,
         live: LiveHandle,
         guard: Option<PortGuard>,
+        max_resume_context_tokens: u32,
     ) -> Result<Self> {
         let id = project.id_or_derived();
         let project_dir = dir.join("projects").join(&id);
         let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
         let mut events = EventLog::new();
         events.open(&project_dir.join("events"));
-        Ok(Self::new(id, project.clone(), store, events, client, live).with_guard(guard))
+        Ok(Self::new(
+            id,
+            project.clone(),
+            store,
+            events,
+            client,
+            live,
+            max_resume_context_tokens,
+        )
+        .with_guard(guard))
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
@@ -446,7 +478,7 @@ impl ProjectLoop {
             if state == ItemState::Implementing {
                 self.to_resume.push(id.clone());
             }
-            self.remember(&id, lane, session);
+            self.remember(&id, lane, session, record.impl_context_tokens);
         }
         self.save_leases();
     }
@@ -471,9 +503,16 @@ impl ProjectLoop {
         taken
     }
 
-    /// Writes the item's run into its record: its state now, `lane`, its branch and slice, and `session` (or
-    /// the one saved before). Does nothing for an item with no lease. Call `save_leases` after.
-    pub(super) fn remember(&mut self, item_id: &str, lane: Option<u32>, session: Option<String>) {
+    /// Writes the item's run into its record: its state now, `lane`, its branch and slice, `session` and
+    /// `context_tokens` (the implementer session's id and its last known size). Does nothing for an item with
+    /// no lease. Call `save_leases` after.
+    pub(super) fn remember(
+        &mut self,
+        item_id: &str,
+        lane: Option<u32>,
+        session: Option<String>,
+        context_tokens: Option<u64>,
+    ) {
         let (Some(run), Some(item)) = (self.runs.get(item_id), self.items.get(item_id)) else {
             return;
         };
@@ -487,6 +526,7 @@ impl ProjectLoop {
             impl_session_id: session,
             branch: Some(branch_name(item)),
             slice: run.slice,
+            impl_context_tokens: context_tokens,
         };
         self.records.insert(item_id.to_string(), record);
     }
@@ -495,12 +535,15 @@ impl ProjectLoop {
     /// lease or record now; the rest are saved as they stand.
     pub(super) fn refresh_record(&mut self, pool: &LanePool, item_id: &str) {
         if self.records.contains_key(item_id) && self.leases.contains_key(item_id) {
-            self.remember(item_id, pool.lane_of(&self.id, item_id), None);
+            let context_tokens = self.records.get(item_id).and_then(|r| r.impl_context_tokens);
+            self.remember(item_id, pool.lane_of(&self.id, item_id), None, context_tokens);
             self.save_leases();
         }
     }
 
-    /// Resumes the sessions the first pass took back mid-run, each as its item's running step. Left for a
+    /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
+    /// known size is over `max_resume_context_tokens` starts fresh instead (06.2-implementer.md "A session
+    /// that's grown starts fresh"), keeping its lane as-is. Left for a
     /// later pass, untouched, while Claude Code is signed out on this computer (section 7.3): resuming now
     /// would only fail the same way.
     pub(super) async fn resume_sessions(
@@ -517,11 +560,24 @@ impl ProjectLoop {
             if let Some(RunRecord {
                 lane: Some(lane),
                 impl_session_id: Some(session),
+                impl_context_tokens,
                 ..
             }) = record
             {
-                tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
-                self.launch(pool, &id, lane, Some(session), starter, shared).await;
+                let kind = match impl_context_tokens {
+                    Some(tokens) if tokens > u64::from(self.max_resume_context_tokens) => {
+                        tracing::info!(
+                            "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
+                            self.id
+                        );
+                        Launch::Continuing(super::settle::grown_follow_up(tokens))
+                    }
+                    _ => {
+                        tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
+                        Launch::Resume(session)
+                    }
+                };
+                self.launch(pool, &id, lane, kind, starter, shared).await;
             }
         }
     }
@@ -534,7 +590,7 @@ impl ProjectLoop {
         pool: &mut LanePool,
         item_id: &str,
         lane: u32,
-        resume: Option<String>,
+        kind: Launch,
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> bool {
@@ -543,8 +599,18 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        let (resume, follow_up) = match kind {
+            Launch::Fresh => (None, None),
+            Launch::Resume(session_id) => (Some(session_id), None),
+            Launch::Continuing(follow_up) => (None, Some(follow_up)),
+        };
         let session_id = resume.clone().unwrap_or_else(new_session_id);
-        self.remember(item_id, Some(lane), Some(session_id.clone()));
+        // A resumed session keeps its last known size; a fresh or picking-up one starts with none of its own yet.
+        let context_tokens = resume
+            .is_some()
+            .then(|| self.records.get(item_id).and_then(|r| r.impl_context_tokens))
+            .flatten();
+        self.remember(item_id, Some(lane), Some(session_id.clone()), context_tokens);
         self.save_leases();
         let request = StartRequest {
             project: self.id.clone(),
@@ -556,6 +622,7 @@ impl ProjectLoop {
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
             usage: self.store.usage(),
+            follow_up,
         };
         match starter.start(request) {
             Ok(()) => {
@@ -603,7 +670,7 @@ impl ProjectLoop {
                 continue;
             }
             if let Action::StartImplementer { item_id, lane } = action {
-                started += u32::from(self.launch(pool, item_id, *lane, None, starter, shared).await);
+                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
             }
         }
         started

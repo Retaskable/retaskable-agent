@@ -4,9 +4,10 @@
 //! repeat `dup_lines` meaningful lines already somewhere in the project's tracked source; and a
 //! spec it touches mustn't be over `max_spec_chars`. Ported from Retaskable.com's
 //! `agent/src/codeGates.ts`; its `gateRule` is already ported as [`super::prompt::gate_rule`].
-//! Nothing calls [`run`] yet: the call site (`implement()` in `steps.ts`) is the orchestrator-level
-//! implementer step, which doesn't exist in this agent yet — including "if the gates can't run,
-//! that's noted and the push goes ahead anyway", which is the caller's job, not this module's.
+//! Nothing calls [`run`] yet: `src/orchestrator/session.rs`'s `ClaudeStarter` is the
+//! orchestrator-level implementer step (`implement()` in `steps.ts`), but it doesn't push a change
+//! yet, so there's nothing to gate before — including "if the gates can't run, that's noted and the
+//! push goes ahead anyway", which is the caller's job, not this module's.
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::LazyLock;

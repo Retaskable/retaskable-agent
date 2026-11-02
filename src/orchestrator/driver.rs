@@ -24,6 +24,7 @@ mod report;
 mod settle;
 
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
+use project::Launch;
 pub use project::{MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 

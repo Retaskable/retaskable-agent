@@ -53,6 +53,7 @@ fn checking_record(lane: u32) -> RunRecord {
         lane: Some(lane),
         impl_session_id: None,
         branch: None,
+        impl_context_tokens: None,
         slice: 1,
     }
 }

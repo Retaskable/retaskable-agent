@@ -27,6 +27,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         EventLog::with_now(|| 0),
         Client::new(base),
         live.clone(),
+        150_000,
     );
     lp.repo = Some(7);
     machine.add(lp);
@@ -41,12 +42,28 @@ fn restarted(old: Rig, base: &str) -> Rig {
 /// Claims "a" and runs two passes, the session ending with `result` (none: still running). Then the
 /// computer restarts and the store lists "a" as `listed`; the next pass is returned.
 async fn after_restart(result: Option<SessionResult>, listed: &str) -> (Rig, Arc<Fake>, RunRecord) {
+    after_restart_sized(result, listed, None).await
+}
+
+/// `after_restart`, the saved run first noting its session had grown to `tokens`.
+async fn after_restart_sized(
+    result: Option<SessionResult>,
+    listed: &str,
+    tokens: Option<u64>,
+) -> (Rig, Arc<Fake>, RunRecord) {
     let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
     fake.script.lock().unwrap().extend(result);
     rig.machine.pass().await;
     rig.machine.pass().await;
+    if tokens.is_some() {
+        let store = &mut rig.lp(0).store;
+        let mut runs = store.runs();
+        runs.get_mut("a").unwrap().impl_context_tokens = tokens;
+        store.set_runs(&runs);
+        store.save().unwrap();
+    }
     let saved = rig.lp(0).store.runs()["a"].clone();
     let (base, _) = claim_stub(json!([item("a", listed)]), Some(Value::Null)).await;
     let mut rig = restarted(rig, &base);
@@ -151,4 +168,35 @@ async fn a_run_is_removed_when_its_lease_is_given_back() {
     assert!(!rig.lp(0).store.runs().is_empty(), "saved while it runs");
     rig.machine.pass().await;
     assert!(rig.lp(0).store.runs().is_empty() && rig.lp(0).store.leases().is_empty());
+}
+
+#[tokio::test]
+async fn a_restart_starts_a_session_over_the_size_limit_fresh_in_its_lane() {
+    let (_rig, fake, saved) = after_restart_sized(None, "building", Some(150_001)).await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(!started[0].resume);
+    assert_ne!(Some(&started[0].session_id), saved.impl_session_id.as_ref());
+    assert_eq!(started[0].follow_up, Some(settle::grown_follow_up(150_001)));
+    assert_eq!(Some(started[0].lane), saved.lane);
+}
+
+#[tokio::test]
+async fn a_restart_resumes_a_session_at_the_size_limit_or_of_unknown_size() {
+    for tokens in [Some(150_000), None] {
+        let (_rig, fake, saved) = after_restart_sized(None, "building", tokens).await;
+        let started = fake.started.lock().unwrap().clone();
+        assert_eq!(started.len(), 1);
+        assert!(started[0].resume);
+        assert_eq!(Some(&started[0].session_id), saved.impl_session_id.as_ref());
+        assert_eq!(started[0].follow_up, None);
+    }
+}
+
+#[tokio::test]
+async fn a_resume_keeps_the_saved_size_and_a_fresh_start_clears_it() {
+    let (mut rig, _fake, _) = after_restart_sized(None, "building", Some(100_000)).await;
+    assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, Some(100_000));
+    let (mut rig, _fake, _) = after_restart_sized(None, "building", Some(150_001)).await;
+    assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, None);
 }

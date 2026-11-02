@@ -316,6 +316,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 cfg.machine.models,
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
+        max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
     });
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;

@@ -147,6 +147,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
             EventLog::with_now(|| 0),
             Client::new(*base),
             live.clone(),
+            150_000,
         );
         lp.repo = Some(7);
         machine.add(lp);
@@ -425,6 +426,8 @@ struct Fake {
     panic_once: AtomicBool,
     refuse: Mutex<Option<String>>,
     script: Mutex<Vec<SessionResult>>,
+    /// The next scripted outcome's `context_tokens`.
+    context_tokens: Mutex<Option<u64>>,
     /// Sessions it says are running.
     active: AtomicU32,
     /// Where a step leaves its item; `None` keeps its state.
@@ -473,6 +476,7 @@ impl SessionStarter for Fake {
                 item_id: request.item_id,
                 lane: request.lane,
                 result: script.remove(0),
+                context_tokens: *self.context_tokens.lock().unwrap(),
                 usage: None,
             });
         }
@@ -581,6 +585,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             session_id,
             resume: false,
             outcomes: rig.machine.outcome_sender(),
+            follow_up: None,
             usage: None,
         }]
     );
@@ -761,6 +766,7 @@ async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
         lane: 1,
         result: SessionResult::NeedsHuman("the session ended without answering".into()),
         usage: Some(usage.clone()),
+        context_tokens: None,
     });
     rig.machine.poll().await;
     assert_eq!(
@@ -901,7 +907,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
     assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
 }
 
-mod reporting;
 mod playtests;
+mod reporting;
 mod restart;
 mod settling;

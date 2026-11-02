@@ -408,7 +408,7 @@ impl Machine {
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
         if let Some(starter) = starter.as_deref() {
-            self.settle_outcomes().await;
+            self.settle_outcomes(starter).await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     lp.resume_sessions(
@@ -514,6 +514,8 @@ pub struct SpawnArgs<'a> {
     pub tags: Vec<String>,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
+    /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
+    pub max_resume_context_tokens: u32,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -552,7 +554,14 @@ pub fn spawn_all(args: SpawnArgs) {
             continue;
         }
         let client = Client::new(args.backlog_url);
-        match ProjectLoop::open(args.dir, project, client, args.live.clone(), args.guard.cloned()) {
+        match ProjectLoop::open(
+            args.dir,
+            project,
+            client,
+            args.live.clone(),
+            args.guard.cloned(),
+            args.max_resume_context_tokens,
+        ) {
             Ok(lp) => machine.add(lp),
             Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
         }

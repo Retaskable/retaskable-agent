@@ -47,6 +47,12 @@ pub enum Start<'a> {
     /// A brand new session: Retaskable names its id itself ([`new_session_id`]) so a later
     /// follow-up can resume it.
     Fresh,
+    /// A fresh session that picks up where one just ran out of turns left off (06.2-implementer.md
+    /// "at most maxTurns turns"): a new id ([`new_session_id`]), never `--resume` (a maxed-out
+    /// session has nothing left to resume into), and `follow_up` as the whole prompt — never the
+    /// template again, so the caller keeps the lane and its branch exactly as that session left
+    /// them rather than resetting onto a new one.
+    Continuing { follow_up: &'a str },
     /// A follow-up to a session already running: `follow_up` plus whatever a person has decided
     /// since (`decisions_text`) is the whole prompt — never the template again.
     Resume {
@@ -96,6 +102,7 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
         }
+        Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),
         Start::Resume {
             session_id,
             follow_up,
@@ -154,6 +161,21 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
+/// Marks a failed run's error as `error_max_turns` (06.2-implementer.md "at most maxTurns turns"): the
+/// session looped to its turn cap rather than giving up. The orchestrator loop (`orchestrator::session`'s
+/// `downcast_ref`) starts a fresh [`Start::Continuing`] session in the same lane instead of giving the item
+/// back to the queue.
+#[derive(Debug)]
+pub struct MaxTurns(pub String);
+
+impl std::fmt::Display for MaxTurns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MaxTurns {}
+
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer, alongside the latest usage reading the session's stream reported — set
 /// whenever the stream sent one, whether the session went on to succeed or fail, since that
@@ -180,6 +202,8 @@ where
         let why = describe_failure(&r, budget_usd);
         let err = if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))
+        } else if r.subtype == "error_max_turns" {
+            anyhow::Error::new(MaxTurns(why))
         } else if r.subtype == "interrupted" {
             anyhow::Error::new(Interrupted(why))
         } else {
@@ -404,5 +428,32 @@ mod tests {
             "a cut session should be distinguishable from an ordinary failure, got {err:#}"
         );
         assert!(err.downcast_ref::<SilenceKilled>().is_none());
+    }
+
+    #[tokio::test]
+    async fn run_implementer_reports_running_out_of_turns_distinctly() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "error_max_turns", None)) }).await;
+        assert!(err.unwrap_err().downcast_ref::<MaxTurns>().is_some());
+    }
+
+    #[test]
+    fn a_continuing_session_spec_is_just_the_follow_up_under_a_fresh_id() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+        let spec = session_spec(
+            &session(&it, &[], cwd),
+            Start::Continuing {
+                follow_up: "An earlier session ran out of turns before it finished.",
+            },
+        )
+        .unwrap();
+        assert_eq!(spec.prompt, "An earlier session ran out of turns before it finished.");
+        match spec.start {
+            SessionStart::Fresh(id) => assert_eq!(id.len(), 36),
+            other => panic!("expected a fresh session, got {other:?}"),
+        }
     }
 }
