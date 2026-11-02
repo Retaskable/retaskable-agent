@@ -46,6 +46,7 @@ pub mod release_update;
 pub mod release_upload;
 pub mod reopen;
 pub mod repo;
+pub mod restart;
 pub mod review_context;
 pub mod reviewer;
 pub mod runs;

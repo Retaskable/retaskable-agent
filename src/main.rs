@@ -267,7 +267,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
-    let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone(), cfg.projects.clone());
+    let exit = runtime::restart_handler(
+        is_release,
+        exe_path.clone(),
+        updater_slot.clone(),
+        cfg.projects.clone(),
+        dir.to_path_buf(),
+        view.restart.clone(),
+    );
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
@@ -388,6 +395,7 @@ fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &
         lane_sizes: lane_pool::LaneSizes::default(),
         paused: view::PauseState::default(),
         work: Default::default(),
+        restart: Default::default(),
     }
 }
 

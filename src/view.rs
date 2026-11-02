@@ -39,6 +39,8 @@ pub struct AgentView {
     pub paused: PauseState,
     /// Each project's `work_available` wake-up for its run loop.
     pub work: crate::work_signal::WorkSignals,
+    /// A pending Restart, shared with the exit that runs it (`runtime::restart_handler`).
+    pub restart: Arc<crate::restart::RestartState>,
 }
 
 /// A project's pause, Pause and Resume's (`{ computer: true }` only; the project-wide pause is the shared
@@ -153,6 +155,10 @@ impl AgentView {
             let reason = self.paused.reason(project).unwrap_or_else(|| NO_WORK_YET.to_string());
             json!({ "status": "paused", "machine": self.machine, "pausedReason": reason })
         };
+        let mut orchestrator = orchestrator;
+        if let Some(restart) = self.restart.report() {
+            orchestrator["restart"] = restart;
+        }
         json!({
             "type": "snapshot",
             "state": {
@@ -242,6 +248,7 @@ mod tests {
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
             work: Default::default(),
+            restart: Default::default(),
         }
     }
 

@@ -51,6 +51,7 @@ fn source(projects: &[&str]) -> StatusSource {
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
             work: Default::default(),
+            restart: Default::default(),
         },
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),

@@ -87,6 +87,12 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
     let computer = cmd.args.get("computer").and_then(Value::as_bool) == Some(true);
     match cmd.name.as_str() {
         "restart" => {
+            // The first request's `why` stays; the exit is shared with the settings page's button.
+            view.restart.ask(crate::restart::Why {
+                at: now_ms(),
+                by: cmd.issued_by.clone(),
+                reason: "asked from retaskable.com".into(),
+            });
             exit(75);
             ack(&cmd.id)
         }
@@ -233,6 +239,7 @@ mod tests {
             lane_sizes: Default::default(),
             paused: Default::default(),
             work: Default::default(),
+            restart: Default::default(),
         }
     }
 

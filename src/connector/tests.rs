@@ -116,6 +116,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         lane_sizes: LaneSizes::default(),
         paused: PauseState::default(),
         work: Default::default(),
+        restart: Default::default(),
     })
 }
 
@@ -504,6 +505,8 @@ async fn a_replayed_command_id_is_refused_the_second_time() {
     let cmd = command("c1", "restart", json!({}));
     a.ws.send(Message::text(cmd.to_string())).await.unwrap();
     assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c1" }));
+    // The pending restart is a change to the snapshot, sent again.
+    assert_eq!(read(&mut a).await["state"]["orchestrator"]["restart"]["step"], "waiting");
     a.ws.send(Message::text(cmd.to_string())).await.unwrap();
     let nack = read(&mut a).await;
     assert_eq!(nack["reason"], "Already received: a command runs once.");
