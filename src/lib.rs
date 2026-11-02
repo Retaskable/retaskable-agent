@@ -54,6 +54,7 @@ pub mod setup_check;
 pub mod shutdown;
 pub mod smoke;
 pub mod spec_items;
+pub mod spec_parts;
 pub mod start_at_login;
 pub mod store;
 mod sync;
