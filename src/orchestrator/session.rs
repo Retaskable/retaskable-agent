@@ -176,7 +176,16 @@ pub(super) fn branch_name(item: &Item) -> String {
     format!("retaskable/{}-{}-s{}", item.id, slug.trim_end_matches('-'), item.slice)
 }
 
-async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
+/// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at
+/// `<run folder>/<name>`, and returns its answer with the session's last context size. A `fresh` start runs
+/// under the id the driver chose and saved, so a restart of it can resume it.
+async fn attempt(
+    job: &Job,
+    cwd: &Path,
+    start: Start<'_>,
+    fresh: bool,
+    name: String,
+) -> Result<(Result<ImplementerResult, ImplementerFailure>, Option<u64>)> {
     let Job {
         data_dir,
         project,
@@ -186,74 +195,92 @@ async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
         lane,
         item,
         session_id,
-        resume,
-        follow_up,
+        ..
     } = job;
-    let branch = branch_name(&item);
+    let branch = branch_name(item);
+    let mut spec = session_spec(
+        &Session {
+            template: IMPLEMENTER_TEMPLATE,
+            project_type: project.project_type,
+            item,
+            branch: &branch,
+            base_branch: &project.base_branch,
+            github_repo: &project.github_repo,
+            checks: &project.checks,
+            code_gates: project.code_gates,
+            where_to_start: "",
+            cwd,
+            model: "sonnet".to_string(),
+            budget_usd: project.budget.implementer_usd,
+            max_turns: Some(*max_turns),
+            engine: Some(EngineId::Claude),
+            cursor: None,
+            local: None,
+            sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+        },
+        start,
+    )?;
+    if fresh {
+        spec.start = SessionStart::Fresh(session_id.clone());
+    }
+    let sink = TranscriptSink {
+        path: paths::run_dir(data_dir, project_id, &item.id).join(name),
+        lane: Some(*lane),
+    };
+    let engine = engine_of(Some(EngineId::Claude))?;
+    let (engine, id, sink) = (engine.as_ref(), session_id, &sink);
+    let mut context_tokens = None;
+    let ctx = &mut context_tokens;
+    let answer = run_implementer(spec, |spec| async move {
+        let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
+        *ctx = r.context_tokens;
+        Ok(r)
+    })
+    .await;
+    Ok((answer, context_tokens))
+}
+
+fn settled(
+    answer: Result<ImplementerResult, ImplementerFailure>,
+    context_tokens: Option<u64>,
+    max_turns: u32,
+) -> (SessionResult, Option<u64>) {
+    (
+        match answer {
+            Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
+            Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
+            Ok(r) => classify(&r),
+        },
+        context_tokens,
+    )
+}
+
+async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
+    let branch = branch_name(&job.item);
     let (repo, worktrees, base) = (
-        PathBuf::from(&project.repo_path),
-        PathBuf::from(&project.worktrees_dir),
-        project.base_branch.clone(),
+        PathBuf::from(&job.project.repo_path),
+        PathBuf::from(&job.project.worktrees_dir),
+        job.project.base_branch.clone(),
     );
-    if let Some(follow_up) = &follow_up {
+    let (lane, max_turns) = (job.lane, job.max_turns);
+    if let Some(follow_up) = &job.follow_up {
         // A restart after running out of turns reuses the lane exactly as it was left: `lanes::prepare`
         // would hard-reset the branch, discarding the prior session's uncommitted work. Never resumes: a
         // maxed-out session has nothing left to resume into, so this always runs under a fresh id.
         let cwd = lanes::lane_path(&worktrees, lane);
-        let mut spec = session_spec(
-            &Session {
-                template: IMPLEMENTER_TEMPLATE,
-                project_type: project.project_type,
-                item: &item,
-                branch: &branch,
-                base_branch: &project.base_branch,
-                github_repo: &project.github_repo,
-                checks: &project.checks,
-                code_gates: project.code_gates,
-                where_to_start: "",
-                cwd: &cwd,
-                model: "sonnet".to_string(),
-                budget_usd: project.budget.implementer_usd,
-                max_turns: Some(max_turns),
-                engine: Some(EngineId::Claude),
-                cursor: None,
-                local: None,
-                sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
-            },
-            Start::Continuing {
-                follow_up: follow_up.as_str(),
-            },
-        )?;
-        // The driver chose the id and saved it, so a restart of this restart can resume it.
-        spec.start = SessionStart::Fresh(session_id.clone());
-        let sink = TranscriptSink {
-            path: paths::run_dir(&data_dir, &project_id, &item.id).join(format!("{session_id}.jsonl")),
-            lane: Some(lane),
+        let name = format!("{}.jsonl", job.session_id);
+        let start = Start::Continuing {
+            follow_up: follow_up.as_str(),
         };
-        let engine = engine_of(Some(EngineId::Claude))?;
-        let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
-        let mut context_tokens = None;
-        let ctx = &mut context_tokens;
-        let answer = run_implementer(spec, |spec| async move {
-            let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
-            *ctx = r.context_tokens;
-            Ok(r)
-        })
-        .await;
-        return Ok((
-            match answer {
-                Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
-                Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
-                Ok(r) => classify(&r),
-            },
-            context_tokens,
-        ));
+        let (answer, tokens) = attempt(&job, &cwd, start, true, name).await?;
+        return Ok(settled(answer, tokens, max_turns));
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
     // reset away the work), and anything the old session left running in it is stopped. The driver decides
     // whether to resume at all, weighing the record's last known size against `maxResumeContextTokens` before
     // ever calling this with `resume: true`; a transcript Claude Code no longer has is handled below.
-    let mut resuming = resume
+    let mut resuming = job
+        .resume
         .then(|| lanes::lane_path(&worktrees, lane))
         .filter(|d| d.is_dir());
     loop {
@@ -277,73 +304,27 @@ async fn run(job: Job) -> Result<(SessionResult, Option<u64>)> {
         let resumed = resuming.is_some();
         let start = if resumed {
             Start::Resume {
-                session_id: session_id.clone(),
+                session_id: job.session_id.clone(),
                 follow_up: INTERRUPTED,
                 decisions: &[],
             }
         } else {
             Start::Fresh
         };
-        let mut spec = session_spec(
-            &Session {
-                template: IMPLEMENTER_TEMPLATE,
-                project_type: project.project_type,
-                item: &item,
-                branch: &branch,
-                base_branch: &project.base_branch,
-                github_repo: &project.github_repo,
-                checks: &project.checks,
-                code_gates: project.code_gates,
-                where_to_start: "",
-                cwd: &cwd,
-                model: "sonnet".to_string(),
-                budget_usd: project.budget.implementer_usd,
-                max_turns: Some(max_turns),
-                engine: Some(EngineId::Claude),
-                cursor: None,
-                local: None,
-                sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
-            },
-            start,
-        )?;
-        if !resumed {
-            // The driver chose the id and saved it, so a restart can resume this session.
-            spec.start = SessionStart::Fresh(session_id.clone());
-        }
         // A resumed session's transcript is a new file: the run folder keeps the earlier one whole.
         let name = if resumed {
-            format!("{session_id}-resumed-{}.jsonl", now_ms())
+            format!("{}-resumed-{}.jsonl", job.session_id, now_ms())
         } else {
-            format!("{session_id}.jsonl")
+            format!("{}.jsonl", job.session_id)
         };
-        let sink = TranscriptSink {
-            path: paths::run_dir(&data_dir, &project_id, &item.id).join(name),
-            lane: Some(lane),
-        };
-        let engine = engine_of(Some(EngineId::Claude))?;
-        let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
-        let mut context_tokens = None;
-        let ctx = &mut context_tokens;
-        let answer = run_implementer(spec, |spec| async move {
-            let r = run_session(engine, bin, &spec, id, Some(sink)).await?;
-            *ctx = r.context_tokens;
-            Ok(r)
-        })
-        .await;
+        let (answer, tokens) = attempt(&job, &cwd, start, !resumed, name).await?;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
         // same id starts a fresh one, as `implement` in `steps.ts` does on "No conversation found".
         if resumed && matches!(&answer, Err(e) if format!("{e:#}").contains("No conversation found")) {
             resuming = None;
             continue;
         }
-        return Ok((
-            match answer {
-                Err(ImplementerFailure::MaxTurns) => SessionResult::MaxTurns(max_turns),
-                Err(ImplementerFailure::Other(msg)) => SessionResult::Failed(msg),
-                Ok(r) => classify(&r),
-            },
-            context_tokens,
-        ));
+        return Ok(settled(answer, tokens, max_turns));
     }
 }
 
