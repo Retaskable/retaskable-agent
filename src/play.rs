@@ -1,7 +1,7 @@
 //! Play main (docs/specs/agent/04-architecture.md "Play main", 09-web-ui.md section 9.3): the
 //! project's `playCommand` run in the base checkout at `origin/<baseBranch>`, in a visible window
 //! and outside any sandbox (the orchestrator's own commands are never sandboxed, 04.2). It holds
-//! the base checkout ([`lanes::hold_base`]) for as long as it runs, so Shoot is refused meanwhile,
+//! the base checkout ([`crate::base_hold::hold_base`]) for as long as it runs, so Shoot is refused meanwhile,
 //! and it is refused while Shoot holds it. `stop` kills its process tree.
 
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub fn start(project: &str, p: &ProjectView) -> Result<(), String> {
     if running(project) {
         return Err("Play main is already running.".to_string());
     }
-    let hold = lanes::hold_base(project, "Play main")?;
+    let hold = crate::base_hold::hold_base(project, "Play main")?;
     let dir = lanes::prepare_base_checkout(&p.repo_path, &p.worktrees_dir, &p.base_branch)
         .map_err(|e| format!("Couldn't prepare the base checkout: {e:#}"))?;
     let mut command = shell(&p.play_command);

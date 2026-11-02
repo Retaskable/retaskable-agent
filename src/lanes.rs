@@ -100,36 +100,10 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
 /// `<worktrees_dir>/_planner`: the project's shared base checkout (docs/specs/agent/06.1
 /// "Planner (retired)"), detached at `origin/<base_branch>`. Shoot (06.8) is its first user here;
 /// the baseline, Play main, phone builds and main syncs take the same checkout one at a time once
-/// they're ported. Shoot and Play main hold it through [`hold_base`]; a caller of
+/// they're ported. Shoot and Play main hold it through [`crate::base_hold::hold_base`]; a caller of
 /// [`prepare_base_checkout`] for anything else holds it alone until that one takes the lock too.
 pub fn base_checkout_path(worktrees_dir: &Path) -> PathBuf {
     worktrees_dir.join("_planner")
-}
-
-static BASE_HELD: LazyLock<Mutex<HashMap<String, &'static str>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// A project's hold on its base checkout ([`hold_base`]); released on drop.
-pub struct BaseHold(String);
-
-impl Drop for BaseHold {
-    fn drop(&mut self) {
-        lock(&BASE_HELD).remove(&self.0);
-    }
-}
-
-/// Takes `project`'s base checkout for `holder` ("a shoot", "Play main"), or says who has it.
-pub fn hold_base(project: &str, holder: &'static str) -> Result<BaseHold, String> {
-    let mut held = lock(&BASE_HELD);
-    if let Some(who) = held.get(project) {
-        return Err(format!("The base checkout is busy: {who} is using it."));
-    }
-    held.insert(project.to_string(), holder);
-    Ok(BaseHold(project.to_string()))
-}
-
-/// Who holds `project`'s base checkout, if anyone.
-pub fn base_holder(project: &str) -> Option<&'static str> {
-    lock(&BASE_HELD).get(project).copied()
 }
 
 /// Resets the base checkout ([`base_checkout_path`]) onto `origin/<base_branch>`, detached, the

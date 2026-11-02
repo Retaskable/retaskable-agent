@@ -69,7 +69,7 @@ fn play_holds_the_base_checkout_until_stop_ends_its_process_tree() {
     );
 
     stop(id).unwrap();
-    wait_for(|| !running(id) && lanes::base_holder(id).is_none());
+    wait_for(|| !running(id) && crate::base_hold::base_holder(id).is_none());
     assert!(crate::galleries::shoot_refusal(id, &gallery).is_none());
 }
 
@@ -78,7 +78,7 @@ fn play_is_refused_while_a_shoot_holds_the_base_checkout() {
     let root = tempfile::tempdir().unwrap();
     let id = "play-vs-shoot";
     let p = project(id, root.path(), LONG_RUNNING);
-    let _shoot = lanes::hold_base(id, "a shoot").unwrap();
+    let _shoot = crate::base_hold::hold_base(id, "a shoot").unwrap();
     assert_eq!(
         start(id, &p).unwrap_err(),
         "The base checkout is busy: a shoot is using it."
