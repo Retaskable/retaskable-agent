@@ -19,7 +19,8 @@
 //! wired in there: [`start_files`] (its "Where to start" is passed empty), a context-size-driven
 //! fresh restart, resuming a session for any other kind of follow-up, and the orchestrator-level
 //! handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends all three to a person
-//! today), and [`code_gates::run`], which nothing calls yet.
+//! today). A `pr_opened` answer is gated by [`code_gates::run`] there: a finding resumes the session
+//! (counting against `max_check_rounds`, then a person), and gates that can't run are noted.
 pub mod code_gates;
 pub mod model;
 pub mod prompt;
