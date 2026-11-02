@@ -1,0 +1,89 @@
+--- src/orchestrator/session_tests.rs
++++ src/orchestrator/session_tests.rs
+@@ -546,14 +564,14 @@ mod tests {
+     let code = if ok { 0 } else { 3 };
+     if cfg!(windows) {
+         let script = format!(
+-            "@echo off\r\necho %* > \"{}\"\r\ntype \"{}\"\r\nexit /b {code}\r\n",
++            "@echo off\r\necho %* > \"{0}\"\r\nfindstr \"^\" >> \"{0}\"\r\ntype \"{1}\"\r\nexit /b {code}\r\n",
+             args.display(),
+             out.display()
+         );
+         std::fs::write(bin, script).unwrap();
+     } else {
+         let script = format!(
+-            "#!/bin/sh\necho \"$@\" > \"{}\"\ncat \"{}\"\nexit {code}\n",
++            "#!/bin/sh\necho \"$@\" > \"{0}\"\ncat >> \"{0}\"\ncat \"{1}\"\nexit {code}\n",
+             args.display(),
+             out.display()
+         );
+@@ -640,6 +658,69 @@ mod tests {
+     );
+ }
+ 
++/// Commits a spec that names `src/lib.rs`, and that file, to the rig's repo and origin.
++fn commit_spec(rig: &Rig) {
++    let repo = rig.root.join("repo");
++    std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
++    std::fs::create_dir_all(repo.join("src")).unwrap();
++    std::fs::write(repo.join("docs/specs/a.md"), "Touches `src/lib.rs`.\n").unwrap();
++    std::fs::write(repo.join("src/lib.rs"), "").unwrap();
++    for args in [
++        vec!["add", "."],
++        vec!["commit", "--quiet", "-m", "spec"],
++        vec!["push", "--quiet", "origin", "main"],
++    ] {
++        let ok = crate::test_support::git(&repo).args(args).status().unwrap().success();
++        assert!(ok);
++    }
++}
++
++async fn start_with(rig: &Rig, spec_refs: &[&str], resume: bool) {
++    let (mut request, mut rx) = request();
++    request.item.spec_refs = spec_refs.iter().map(ToString::to_string).collect();
++    request.resume = resume;
++    rig.starter.start(request).unwrap();
++    let got = tokio::time::timeout(Duration::from_secs(120), rx.recv()).await;
++    assert!(matches!(got, Ok(Some(_))));
++}
++
++#[tokio::test]
++async fn a_fresh_session_is_pointed_at_the_items_specs_and_the_code_they_name() {
++    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
++    commit_spec(&rig);
++    start_with(&rig, &["docs/specs/a.md"], false).await;
++    let args = std::fs::read_to_string(&rig.args).unwrap();
++    assert!(args.contains("## Where to start"), "{args}");
++    assert!(
++        args.contains("docs/specs/a.md") && args.contains("src/lib.rs"),
++        "{args}"
++    );
++}
++
++#[tokio::test]
++async fn a_resumed_session_gets_only_the_follow_up() {
++    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
++    commit_spec(&rig);
++    start_with(&rig, &["docs/specs/a.md"], false).await;
++    start_with(&rig, &["docs/specs/a.md"], true).await;
++    let args = std::fs::read_to_string(&rig.args).unwrap();
++    assert!(args.contains("--resume sess-1"), "{args}");
++    assert!(
++        !args.contains("## Where to start") && !args.contains("docs/specs/a.md"),
++        "{args}"
++    );
++}
++
++#[tokio::test]
++async fn a_session_still_starts_when_git_gives_nothing_to_list() {
++    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
++    // Break the lane's view of origin after it's prepared is not possible, so name specs git can't show.
++    start_with(&rig, &["docs/specs/missing.md"], false).await;
++    let args = std::fs::read_to_string(&rig.args).unwrap();
++    assert!(args.contains("--session-id sess-1"), "{args}");
++    assert!(!args.contains("## Where to start"), "{args}");
++}
++
+ #[tokio::test]
+ async fn a_session_that_exits_without_an_answer_needs_a_human() {
+     let rig = rig(None, EngineChoiceConfig::default(), true);
