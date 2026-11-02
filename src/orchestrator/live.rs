@@ -96,3 +96,69 @@ pub fn now_iso8601() -> String {
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held(lane: u32, item: &str) -> Vec<HeldLane> {
+        vec![HeldLane {
+            lane,
+            item_id: item.to_string(),
+            title: None,
+        }]
+    }
+
+    #[test]
+    fn register_adds_an_empty_entry_and_keeps_an_existing_one() {
+        let live = LiveHandle::new(OrchestratorMode::default());
+        live.register("p");
+        assert_eq!(live.snapshot().projects["p"], ProjectLive::default());
+        live.ticked("p", true, "t1".into(), held(1, "a"), "d".into());
+        live.register("p");
+        assert_eq!(live.snapshot().projects["p"].last_tick.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn a_tick_replaces_the_entry_and_clears_the_store_error() {
+        let live = LiveHandle::default();
+        live.failed("p", "t0".into(), "no link".into());
+        live.ticked("p", false, "t1".into(), held(2, "item"), "would ask for work".into());
+        let p = &live.snapshot().projects["p"];
+        assert!(p.store_error.is_none() && !p.paused);
+        assert_eq!(p.last_tick.as_deref(), Some("t1"));
+        assert_eq!(p.held, held(2, "item"));
+        assert_eq!(p.decision.as_deref(), Some("would ask for work"));
+    }
+
+    #[test]
+    fn a_failure_keeps_the_last_good_tick_and_the_streaks_start() {
+        let live = LiveHandle::default();
+        live.ticked("p", false, "t1".into(), held(1, "a"), "d".into());
+        live.failed("p", "t2".into(), "first".into());
+        live.failed("p", "t3".into(), "second".into());
+        let p = &live.snapshot().projects["p"];
+        let err = p.store_error.as_ref().unwrap();
+        assert_eq!(err.since, "t2");
+        assert_eq!(err.message, "second");
+        assert_eq!(p.last_tick.as_deref(), Some("t1"));
+        assert_eq!(p.held, held(1, "a"));
+    }
+
+    #[test]
+    fn a_new_failure_after_a_tick_starts_a_new_streak() {
+        let live = LiveHandle::default();
+        live.failed("p", "t1".into(), "x".into());
+        live.ticked("p", false, "t2".into(), vec![], "d".into());
+        live.failed("p", "t3".into(), "y".into());
+        assert_eq!(live.snapshot().projects["p"].store_error.as_ref().unwrap().since, "t3");
+    }
+
+    #[test]
+    fn clones_share_state_and_now_is_rfc3339() {
+        let live = LiveHandle::default();
+        live.clone().register("shared");
+        assert!(live.snapshot().projects.contains_key("shared"));
+        assert!(now_iso8601().ends_with('Z'));
+    }
+}
