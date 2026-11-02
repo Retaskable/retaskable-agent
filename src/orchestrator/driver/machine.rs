@@ -12,7 +12,7 @@ use tokio::time::MissedTickBehavior;
 
 use super::{OrchestratorMode, OutcomeSender, ProjectLoop, SessionStarter, Step, playtest_round};
 use crate::backlog::{BacklogError, Client, Item};
-use crate::config::{EngineChoiceConfig, ProjectConfig};
+use crate::config::{EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -257,12 +257,22 @@ impl Machine {
 
     /// Runs one playtest-grouping round for every live project that isn't already running one
     /// (`playtest_round::run`), each as its own task so a slow or stuck planner session costs that
-    /// project's round only. Does nothing with no starter (`dry` never groups playtests either).
-    pub async fn playtest_rounds(&mut self) {
+    /// project's round only. `steps` is what this minute's [`Machine::pass`] did: a project whose
+    /// read failed (`Step::Skipped`), a paused one, one with `playtests: off`, and every project with no
+    /// starter or in `dry` mode run no round.
+    pub async fn playtest_rounds(&mut self, steps: &[Step]) {
+        let paused = self.paused();
         let jobs: Vec<_> = self
             .projects
             .iter()
-            .filter(|lp| self.live(lp))
+            .enumerate()
+            .filter(|(i, lp)| {
+                self.live(lp)
+                    && !paused[*i]
+                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
+                    && lp.project.playtests != Playtests::Off
+            })
+            .map(|(_, lp)| lp)
             .filter_map(|lp| {
                 if lp.playtest_round_running.swap(true, Ordering::SeqCst) {
                     tracing::debug!(
@@ -569,8 +579,8 @@ async fn run(mut machine: Machine, poll_every: Duration) {
         if minute_at.is_none_or(|at| now.duration_since(at) >= EVERY) {
             minute_at = Some(now);
             machine.fetch().await;
-            machine.pass().await;
-            machine.playtest_rounds().await;
+            let steps = machine.pass().await;
+            machine.playtest_rounds(&steps).await;
         } else {
             machine.poll().await;
         }
