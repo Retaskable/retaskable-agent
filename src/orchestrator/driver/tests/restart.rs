@@ -14,6 +14,9 @@ fn restarted(old: Rig, base: &str) -> Rig {
         paused: PauseState::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
+        tags: Vec::new(),
+        env: Env::empty(),
+        engine_choice: EngineChoiceConfig::default(),
     };
     let mut machine = Machine::new(2, 8, links);
     let store = Store::load(&_dir.path().join("0")).unwrap();
@@ -85,6 +88,18 @@ async fn a_restart_resumes_an_implementing_item_in_its_saved_lane() {
     );
     assert_eq!(started[0].token, "lease-1");
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), saved.lane);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+}
+
+#[tokio::test]
+async fn an_interrupted_session_is_readopted_and_resumed_by_its_id() {
+    let (mut rig, fake, saved) = after_restart(Some(SessionResult::Interrupted), "building").await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        (started[0].resume, Some(&started[0].session_id), Some(started[0].lane)),
+        (true, saved.impl_session_id.as_ref(), saved.lane)
+    );
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
 }
 

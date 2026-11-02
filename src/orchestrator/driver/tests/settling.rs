@@ -1,5 +1,6 @@
 //! How sessions and steps that ended settle their item's lane and lease (`driver/settle.rs`).
 use super::*;
+use crate::orchestrator::driver::machine::poll_period;
 
 fn done(result: ImplementerOutcome) -> SessionResult {
     SessionResult::Implementer(result)
@@ -110,7 +111,7 @@ async fn a_start_the_starter_refuses_releases_the_item_at_once() {
     let fake = rig.go_live();
     *fake.refuse.lock().unwrap() = Some("no room".into());
     rig.machine.pass().await;
-    assert_eq!(ops(&asked), ["list", "claim_next", "release"]);
+    assert_eq!(ops(&asked), ["list", "claim_next", "report", "release"]);
     assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
     assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unreleased().is_empty());
     let freed = rig
@@ -133,11 +134,134 @@ async fn a_failed_session_gives_the_item_back() {
 }
 
 #[tokio::test]
+async fn an_interrupted_session_keeps_the_item_implementing_and_sends_no_release_or_park() {
+    let (mut rig, _fake, asked) = ended(SessionResult::Interrupted, &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(
+        !ops(&asked)
+            .iter()
+            .any(|o| o == "release" || o == "park" || o == "report")
+    );
+    let events = rig.lp(0).events().recent();
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["ok"], false);
+    assert_eq!(ended["subtype"], "interrupted");
+}
+
+#[tokio::test]
+async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
+    let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
+    rig.machine.pass().await;
+    assert!(rig.machine.claim_paused_until.is_some());
+    let events = rig.lp(0).events().recent();
+    let error = events.iter().find(|e| e.kind() == "error").unwrap().to_value();
+    assert_eq!(
+        (error["where"].clone(), error["item"].clone()),
+        (json!("start"), json!("a"))
+    );
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn a_claim_pause_that_has_passed_lets_claiming_resume() {
+    let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
+    rig.machine.pass().await;
+    rig.machine.claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this_computer() {
+    let (base0, asked0) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let (base1, asked1) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base0, &base1]);
+    let fake = rig.go_live();
+    fake.script
+        .lock()
+        .unwrap()
+        .push(SessionResult::Failed("git is gone".into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(rig.machine.claim_paused_until.is_some());
+    asked0.lock().unwrap().clear();
+    asked1.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(
+        !ops(&asked1).contains(&"claim_next".to_string()),
+        "the pause is computer-wide, not just p0's: {:?}",
+        ops(&asked1)
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_finds_claude_signed_out_needs_a_human_and_blocks_new_starts_computer_wide() {
+    let why = "The session ended without answering: found Claude signed out on this computer (Not logged in)";
+    let (base0, asked0) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let (base1, asked1) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base0, &base1]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(SessionResult::NeedsHuman(why.into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(
+        rig.lp(0).runs["a"].state,
+        ItemState::NeedsHuman,
+        "still a person's to look at"
+    );
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1", "kept, not released");
+    assert!(rig.machine.claude_signed_out_until.is_some());
+    asked0.lock().unwrap().clear();
+    asked1.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(
+        !ops(&asked1).contains(&"claim_next".to_string()),
+        "the gate is computer-wide, not just p0's: {:?}",
+        ops(&asked1)
+    );
+}
+
+#[tokio::test]
+async fn a_signed_out_pause_that_has_passed_lets_starts_resume() {
+    let why = "The session ended without answering: found Claude signed out on this computer (Not logged in)";
+    let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(SessionResult::NeedsHuman(why.into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    rig.machine.claude_signed_out_until = Some(std::time::Instant::now() - Duration::from_secs(1));
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn an_ordinary_needs_human_session_leaves_the_signed_out_gate_alone() {
+    let questions = ImplementerOutcome::Questions {
+        all_already_answered: true,
+    };
+    let (mut rig, _fake, _asked) = ended(done(questions), &Default::default()).await;
+    rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::decisions::MAX_REASKS;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert!(rig.machine.claude_signed_out_until.is_none());
+}
+
+#[tokio::test]
 async fn a_release_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
     let fail = Arc::new(AtomicBool::new(true));
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("x".into()), &fail).await;
     rig.machine.pass().await;
-    assert_eq!(rig.lp(0).store.unreleased()["a"], "lease-1");
+    assert_eq!(rig.lp(0).store.unreleased()["a"].0, "lease-1");
     assert!(rig.lp(0).store.leases().is_empty());
     assert_eq!(rig.machine.pool.held_lanes().count(), 0, "the lane is free either way");
     fail.store(false, Ordering::SeqCst);
@@ -154,7 +278,7 @@ async fn the_unreleased_list_survives_a_restart() {
     rig.machine.pass().await;
     let dir = rig._dir.path().join("0");
     let reloaded = Store::load(&dir).unwrap();
-    assert_eq!(reloaded.unreleased()["a"], "lease-1");
+    assert_eq!(reloaded.unreleased()["a"], ("lease-1".to_string(), "x".to_string()));
     assert!(reloaded.leases().is_empty());
 }
 
@@ -218,11 +342,15 @@ async fn a_session_that_needs_a_human_frees_its_lane_and_keeps_the_lease() {
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
     assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
     assert!(!ops(&asked).contains(&"release".to_string()));
-    let freed = (rig.lp(0).events().recent().iter())
-        .find(|e| e.kind() == "lane_freed")
-        .unwrap()
-        .to_value();
+    let events = rig.lp(0).events().recent();
+    let freed = events.iter().find(|e| e.kind() == "lane_freed").unwrap().to_value();
     assert_eq!(freed["why"], "needs_human: gave up");
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["ok"], false);
+    assert!(
+        rig.machine.claim_paused_until.is_none(),
+        "a needs-human outcome never pauses claiming"
+    );
 }
 
 #[tokio::test]

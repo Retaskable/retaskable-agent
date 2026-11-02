@@ -179,6 +179,29 @@ fn running_work_keeps_a_lane_past_the_limit_and_a_cursor_lane_is_never_held_back
 }
 
 #[test]
+fn lane_scaling_holds_back_the_chore_lane_too() {
+    // The chore lane is new work like any other: once scaling narrows lanes to `base`, a chore
+    // lane past that limit shouldn't be handed out either, same as a roadmap lane past it.
+    let mut pool = LanePool::new(PoolRules {
+        chore_lane: Some(3),
+        scaling: Some(LaneScaling {
+            base: 1,
+            below_used_pct: 50.0,
+        }),
+        ..rules(3)
+    });
+    pool.set_used_pct(Some(60.0));
+    assert!(pool.scaled_out(3));
+    let mut chore = want("p", "chore-1");
+    chore.chore = true;
+    assert_eq!(
+        pool.claim_lane(&chore),
+        None,
+        "the chore lane is past the scaled-down limit"
+    );
+}
+
+#[test]
 fn free_lane_leaves_out_a_lane_whose_engine_cant_start() {
     let pool = LanePool::new(rules(2));
     assert_eq!(pool.free_lane(false, None, None, |k| k != 1), Some(2));

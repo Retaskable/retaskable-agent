@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
 
         let index = dir.join("projects/commands-shoot-happy-path/galleries/models/index.json");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         while !index.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }

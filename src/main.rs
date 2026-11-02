@@ -262,12 +262,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(agent_view(cfg, tag_list, version, env));
+    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
-    let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone());
+    let exit = runtime::restart_handler(is_release, exe_path.clone(), updater_slot.clone(), cfg.projects.clone());
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry (or claim, which
@@ -303,6 +303,9 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .and_then(|u| reqwest::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default(),
+        tags: tag_list,
+        env: env.clone(),
+        engine_choice: config::engine_choice(cfg, env),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),
@@ -310,6 +313,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::engine_choice(cfg, env),
                 env.clone(),
                 cfg.machine.max_turns,
+                cfg.machine.models,
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
     });
@@ -354,6 +358,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }
+    // docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`: Quit cuts every
+    // other session the same way a restart does (runtime::restart_handler), just on this path
+    // instead, since Quit exits by returning from `main` rather than by `std::process::exit`.
+    let projects = cfg.projects.clone();
+    tokio::task::spawn_blocking(move || {
+        retaskable_agent::process_tree::cut_all();
+        retaskable_agent::shutdown::stop_other_sessions(&projects);
+    })
+    .await
+    .ok();
     Ok(())
 }
 
@@ -605,7 +619,20 @@ fn filter() -> tracing_subscriber::EnvFilter {
 }
 
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(not(windows))]
+    {
+        // Linux/macOS's own Quit path (a service stop, a `kill`) as well as Ctrl+C.
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("installing a SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
     tracing::info!("Stopping");
 }
 

@@ -135,7 +135,7 @@ pub fn refilled(
     taken.extend(waiting.iter().map(|i| i.title.trim().to_lowercase()));
     taken.extend(was.accepted_titles.iter().map(|t| t.trim().to_lowercase()));
 
-    let known: HashSet<&str> = profiles.iter().map(|s| s.as_str()).collect();
+    let known: HashSet<&str> = profiles.iter().map(String::as_str).collect();
     let room = queue.saturating_sub(waiting.len());
 
     let fresh: Vec<Idea> = res
@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn profiles(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+        names.iter().map(ToString::to_string).collect()
     }
 
     #[test]

@@ -3,9 +3,9 @@
 //! (`cursor.reader(spec, sessionId)` in Retaskable.com).
 use serde_json::Value;
 
-use crate::engines::engine::{EngineReader, SessionResult};
+use crate::engines::engine::{EngineReader, SessionResult, exited_without_result};
 
-use super::result::{LIMIT_TEXT, assistant_text, check_schema, extract_json, limit_text, result_or, tail, tokens_of};
+use super::result::{LIMIT_TEXT, assistant_text, check_schema, extract_json, limit_text, result_or, tokens_of};
 
 pub(super) struct CursorReader {
     schema: Value,
@@ -102,26 +102,9 @@ impl EngineReader for CursorReader {
     }
 
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult {
-        let code = exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let error = format!(
-            "cursor-agent exited with code {code} and no result. {}",
-            tail(stderr.trim(), 1500)
-        );
-        SessionResult {
-            ok: false,
-            subtype: "exited".to_string(),
-            structured: None,
-            error: Some(error),
-            cost_usd: None,
-            session_id: self.session_id(known_session_id),
-            limit_hit: LIMIT_TEXT.is_match(stderr),
-            signed_out: false,
-            context_tokens: None,
-            usage: None,
-            tokens: None,
-        }
+        let mut result = exited_without_result("cursor-agent", exit_code, stderr, &self.session_id(known_session_id));
+        result.limit_hit = LIMIT_TEXT.is_match(stderr);
+        result
     }
 }
 

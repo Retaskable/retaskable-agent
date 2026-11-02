@@ -282,6 +282,7 @@ mod tests {
                 engine: None,
                 cursor: None,
                 sandbox: false,
+                shell: true,
             },
             max_automatic_decisions: 2,
         }

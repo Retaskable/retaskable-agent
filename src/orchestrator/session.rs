@@ -1,27 +1,34 @@
 //! The real implementer session starter for `claim` mode (`startItem`/`implement` in Retaskable.com's
 //! `agent/src/steps.ts`): prepares the lane, builds the prompt, runs `claude -p` and turns what it
 //! answered into the [`SessionOutcome`] the loop settles. Claude only; any other engine refuses.
-//! Left out: "Where to start" in the prompt, the usage-window model tier (always `sonnet`), Claude's sandbox,
-//! and the decisions a person already gave (the claimed item doesn't carry them).
+//! Left out: "Where to start" in the prompt, Claude's sandbox, and the decisions a person already gave
+//! (the claimed item doesn't carry them). The usage-window model tier (section 7.1) is picked for the
+//! implementer ([`crate::tiers::implementer_tier`]), then moved off Opus for a first try
+//! ([`crate::tiers::implementer_model`]); the other roles it covers have no sessions here yet.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
+use serde_json::Value;
 
 use super::driver::{SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{ImplementerResult, Session, Start, run_implementer, session_spec};
+use crate::implementer::{
+    ImplementerResult, Interrupted, Session, SilenceKilled, Start, run_implementer, session_spec,
+};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::telemetry::now_ms;
+use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
@@ -33,6 +40,7 @@ pub struct ClaudeStarter {
     choice: EngineChoiceConfig,
     env: Env,
     max_turns: u32,
+    models: ModelsConfig,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     running: Arc<AtomicU32>,
 }
@@ -44,6 +52,7 @@ impl ClaudeStarter {
         choice: EngineChoiceConfig,
         env: Env,
         max_turns: u32,
+        models: ModelsConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -51,6 +60,7 @@ impl ClaudeStarter {
             choice,
             env,
             max_turns,
+            models,
             running: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -83,6 +93,7 @@ impl SessionStarter for ClaudeStarter {
             lane,
             item,
             outcomes,
+            usage,
             session_id,
             resume,
             ..
@@ -95,6 +106,8 @@ impl SessionStarter for ClaudeStarter {
             max_turns: self.max_turns,
             lane,
             item,
+            usage,
+            models: self.models,
             session_id,
             resume,
         };
@@ -102,10 +115,21 @@ impl SessionStarter for ClaudeStarter {
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
-            let result = match tokio::spawn(run(job)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => SessionResult::Failed(format!("{e:#}")),
-                Err(e) => SessionResult::Failed(format!("the session task crashed: {e}")),
+            // A fresh start's failure here is before any session ran (an own failure, section 7.3): it goes
+            // back to the queue. A resumed session already ran once, so the same failure here may have left
+            // real work behind, and needs a person instead.
+            let (result, usage) = match tokio::spawn(run(job)).await {
+                Ok(Ok((result, usage))) => (result, usage),
+                Ok(Err(e)) if resume => (
+                    SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")),
+                    None,
+                ),
+                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None),
+                Err(e) if resume => (
+                    SessionResult::NeedsHuman(format!("the session's task crashed while resuming: {e}")),
+                    None,
+                ),
+                Err(e) => (SessionResult::Failed(format!("the session task crashed: {e}")), None),
             };
             running.fetch_sub(1, Ordering::SeqCst);
             outcomes.send(SessionOutcome {
@@ -113,6 +137,7 @@ impl SessionStarter for ClaudeStarter {
                 item_id,
                 lane,
                 result,
+                usage,
             });
         });
         Ok(())
@@ -129,7 +154,7 @@ impl SessionStarter for ClaudeStarter {
 }
 
 /// Whether the resolved binary is there: a path by itself, a bare name somewhere on `PATH`.
-fn exists(bin: &Path, env: &Env) -> bool {
+pub(super) fn exists(bin: &Path, env: &Env) -> bool {
     if bin.components().count() > 1 {
         return bin.is_file();
     }
@@ -147,9 +172,17 @@ struct Job {
     max_turns: u32,
     lane: u32,
     item: Item,
+    /// The latest `state.usage` reading, for picking the implementer's model tier.
+    usage: Option<Value>,
+    models: ModelsConfig,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
     resume: bool,
+}
+
+/// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
+pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
+    (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
@@ -170,7 +203,7 @@ pub(super) fn branch_name(item: &Item) -> String {
     format!("retaskable/{}-{}-s{}", item.id, slug.trim_end_matches('-'), item.slice)
 }
 
-async fn run(job: Job) -> Result<SessionResult> {
+async fn run(job: Job) -> Result<(SessionResult, Option<Value>)> {
     let Job {
         data_dir,
         project,
@@ -179,15 +212,21 @@ async fn run(job: Job) -> Result<SessionResult> {
         max_turns,
         lane,
         item,
+        usage,
+        models,
         session_id,
         resume,
     } = job;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let tier = implementer_tier(usage.as_ref(), now, &models);
+    let model = implementer_model(tier, &item).to_string();
     let branch = branch_name(&item);
     let (repo, worktrees, base) = (
         PathBuf::from(&project.repo_path),
         PathBuf::from(&project.worktrees_dir),
         project.base_branch.clone(),
     );
+    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
     // reset away the work), and anything the old session left running in it is stopped. Not ported: the
     // TS rules that start fresh instead when the session has grown past `maxResumeContextTokens` or ran
@@ -235,7 +274,7 @@ async fn run(job: Job) -> Result<SessionResult> {
                 code_gates: project.code_gates,
                 where_to_start: "",
                 cwd: &cwd,
-                model: "sonnet".to_string(),
+                model: model.clone(),
                 budget_usd: project.budget.implementer_usd,
                 max_turns: Some(max_turns),
                 engine: Some(EngineId::Claude),
@@ -261,8 +300,8 @@ async fn run(job: Job) -> Result<SessionResult> {
         };
         let engine = engine_of(Some(EngineId::Claude))?;
         let (engine, bin, id, sink) = (engine.as_ref(), &bin, &session_id, &sink);
-        let answer = run_implementer(spec, |spec| async move {
-            run_session(engine, bin, &spec, id, Some(sink)).await
+        let (answer, usage) = run_implementer(spec, |spec| async move {
+            run_session(engine, bin, &spec, id, Some(sink), quiet).await
         })
         .await;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
@@ -271,17 +310,15 @@ async fn run(job: Job) -> Result<SessionResult> {
             resuming = None;
             continue;
         }
-        return Ok(match answer {
-            Err(e) => SessionResult::Failed(format!("{e:#}")),
-            Ok(r) => classify(&r),
-        });
+        return Ok(session_result_for_answer(answer, usage));
     }
 }
 
 /// What the loop does with a session's answer (`implement` in `steps.ts`). `failed` is `needsHuman("Implementer
 /// gave up")`, `person_steps` is `waitForSteps` (a needs_human with the steps), `waits_on` records the dependency
 /// and gives the item back (no `depends` op here yet, so it goes to a person), and `nothing_left` marks the item
-/// done and merged (not built here yet, so it goes to a person too).
+/// done and merged (not built here yet, so it goes to a person too). A status this agent doesn't recognize also
+/// needs a person: the session ran, so this is never the before-work own failure that goes back to the queue.
 fn classify(r: &ImplementerResult) -> SessionResult {
     match r.status.as_str() {
         "pr_opened" => SessionResult::Implementer(ImplementerOutcome::Finished),
@@ -316,7 +353,39 @@ fn classify(r: &ImplementerResult) -> SessionResult {
                 r.summary
             ))
         }
-        other => SessionResult::Failed(format!("the session ended with {other}: {}", r.summary)),
+        // An answer in a shape this agent doesn't know: a session ran, so this needs a person rather
+        // than going back to the queue.
+        other => SessionResult::NeedsHuman(format!(
+            "The session answered with {other}, which needs a person: {}",
+            r.summary
+        )),
+    }
+}
+
+/// What `run_implementer`'s answer means for the item (`run`'s return): the watchdog's own kill
+/// ([`SilenceKilled`]) is this computer's problem, so the item goes back to the queue for a healthy
+/// lane to claim again, the same as any other own failure (07-orchestrator-loop.md's watchdog). A
+/// cut session ([`Interrupted`], 07.4-stopping-and-restarting.md) keeps its lease and run record as
+/// they are, with nothing posted to the store, so it's resumed by id on the next restart. Any other
+/// error means a session ran and didn't come back clean, so it needs a person instead (it may have
+/// left real work behind, section 7.3). `usage` travels alongside whatever `answer` is: a session
+/// that failed may still have reported a usage reading before it did, and that reading is often
+/// exactly the one section 7.1's tier needs most.
+fn session_result_for_answer(
+    answer: Result<ImplementerResult>,
+    usage: Option<Value>,
+) -> (SessionResult, Option<Value>) {
+    match answer {
+        Err(e) if e.downcast_ref::<Interrupted>().is_some() => (SessionResult::Interrupted, usage),
+        Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
+            SessionResult::Failed(format!("went quiet and was killed: {e:#}")),
+            usage,
+        ),
+        Err(e) => (
+            SessionResult::NeedsHuman(format!("The session ended without answering: {e:#}")),
+            usage,
+        ),
+        Ok(r) => (classify(&r), usage),
     }
 }
 
@@ -361,7 +430,14 @@ mod tests {
         project.budget.implementer_usd = 5.0;
         let bin = bin.to_string_lossy().into_owned();
         let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
-        let starter = ClaudeStarter::new(root.join("data"), vec![project], choice, env, 50);
+        let starter = ClaudeStarter::new(
+            root.join("data"),
+            vec![project],
+            choice,
+            env,
+            50,
+            ModelsConfig::default(),
+        );
         Rig {
             _dir: dir,
             root,
@@ -378,13 +454,14 @@ mod tests {
             rank: 1,
             do_next: false,
             depends_on: Vec::new(),
-            spec_refs: spec_refs.iter().map(|s| s.to_string()).collect(),
+            spec_refs: spec_refs.iter().map(ToString::to_string).collect(),
             slice: 2,
             remaining: remaining.map(str::to_string),
             pr_url: None,
             branch: None,
             kind: None,
             milestone: None,
+            reopened: None,
         }
     }
 
@@ -422,6 +499,7 @@ mod tests {
             session_id: "sess-1".into(),
             resume: false,
             outcomes,
+            usage: None,
         };
         (request, rx)
     }
@@ -489,9 +567,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_exits_without_an_answer_fails() {
+    async fn a_session_that_exits_without_an_answer_needs_a_human() {
         let rig = rig(None, EngineChoiceConfig::default(), true);
-        assert!(matches!(outcome_of(&rig).await, SessionResult::Failed(_)));
+        assert!(matches!(outcome_of(&rig).await, SessionResult::NeedsHuman(_)));
     }
 
     fn classified(json: &str) -> SessionResult {
@@ -513,10 +591,57 @@ mod tests {
         assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
         let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
         assert!(waits.contains("a, b"), "{waits}");
+        assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
+    }
+
+    #[test]
+    fn a_watchdog_kill_is_an_own_failure_not_a_needs_human() {
+        let killed = Err(anyhow::Error::new(SilenceKilled(
+            "ended with killed_for_silence: no output".into(),
+        )));
+        assert!(
+            matches!(session_result_for_answer(killed, None).0, SessionResult::Failed(_)),
+            "a session the watchdog killed should requeue, not need a person"
+        );
+        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
         assert!(matches!(
-            classified(r#"{"status":"odd","summary":"s"}"#),
+            session_result_for_answer(crashed, None).0,
+            SessionResult::NeedsHuman(_)
+        ));
+    }
+
+    #[test]
+    fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
+        let cut = Err(anyhow::Error::new(Interrupted("ended with interrupted".into())));
+        assert_eq!(session_result_for_answer(cut, None).0, SessionResult::Interrupted);
+
+        let killed = Err(anyhow::Error::new(SilenceKilled(
+            "ended with killed_for_silence: no output".into(),
+        )));
+        assert!(matches!(
+            session_result_for_answer(killed, None).0,
             SessionResult::Failed(_)
         ));
+
+        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
+        assert!(matches!(
+            session_result_for_answer(crashed, None).0,
+            SessionResult::NeedsHuman(_)
+        ));
+    }
+
+    #[test]
+    fn the_usage_reading_travels_with_the_result_whichever_way_the_session_ended() {
+        let usage = serde_json::json!({"status": "rejected", "resetsAt": i64::MAX});
+        let killed = Err(anyhow::Error::new(SilenceKilled(
+            "ended with killed_for_silence".into(),
+        )));
+        assert_eq!(
+            session_result_for_answer(killed, Some(usage.clone())).1,
+            Some(usage.clone())
+        );
+        let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
+        assert_eq!(session_result_for_answer(crashed, Some(usage.clone())).1, Some(usage));
     }
 
     #[test]
@@ -551,21 +676,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lane_that_cannot_be_prepared_fails() {
+    async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
         let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let (mut request, mut rx) = request();
+        request.usage = None;
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
+        assert_eq!(model, Some("sonnet"), "{args}");
+    }
+
+    #[tokio::test]
+    async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let (mut request, mut rx) = request();
+        request.usage = None;
+        request.item.reopened = Some(crate::backlog::Reopened {
+            notes: Some("The list is empty".into()),
+            at: Some("2026-10-29T00:00:00Z".into()),
+            by: None,
+        });
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
+        assert_eq!(model, Some("opus"), "{args}");
+    }
+
+    #[tokio::test]
+    async fn a_usage_reading_below_opus_above_pct_starts_the_implementer_on_sonnet() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let (mut request, mut rx) = request();
+        request.usage = Some(serde_json::json!({"status": "allowed_warning", "resetsAt": i64::MAX}));
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
+        assert_eq!(model, Some("sonnet"), "{args}");
+    }
+
+    /// A starter like `rig`'s, but whose only project's repo path is missing, so preparing its lane fails.
+    fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         let mut projects = rig.starter.projects.clone();
         projects[0].repo_path = rig.root.join("missing").to_string_lossy().into_owned();
-        let starter = ClaudeStarter::new(
+        ClaudeStarter::new(
             rig.root.join("data"),
             projects,
             EngineChoiceConfig::default(),
             rig.starter.env.clone(),
             50,
-        );
+            ModelsConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_lane_that_cannot_be_prepared_fails() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let starter = starter_with_unpreparable_lane(&rig);
         let (request, mut rx) = request();
         starter.start(request).unwrap();
         let got = rx.recv().await.unwrap();
         assert!(matches!(got.result, SessionResult::Failed(_)), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_queue() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        let starter = starter_with_unpreparable_lane(&rig);
+        let (mut request, mut rx) = request();
+        request.resume = true;
+        starter.start(request).unwrap();
+        let got = rx.recv().await.unwrap();
+        assert!(matches!(got.result, SessionResult::NeedsHuman(_)), "{got:?}");
     }
 
     #[tokio::test]
@@ -601,5 +784,11 @@ mod tests {
             branch_name(&item(&[], None)),
             "retaskable/implementer-session-have-a-session-write-the-code-s2"
         );
+    }
+
+    #[test]
+    fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
+        assert_eq!(quiet_timeout(0), None);
+        assert_eq!(quiet_timeout(20), Some(Duration::from_secs(20 * 60)));
     }
 }

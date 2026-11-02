@@ -18,10 +18,11 @@ use serde_json::Value;
 
 use super::engine::{
     Engine, EngineId, EngineReader, EventKind, SessionEvent, SessionResult, SessionSpec, SessionStart, Tokens,
+    exited_without_result,
 };
-use super::json_result::{check_schema, extract_json};
+use super::json_result::{check_schema, extract_json, fenced_json_instructions};
 use super::resolve::resolve_codex;
-use crate::text::{clip, tail};
+use crate::text::clip;
 
 /// Codex's own thread id for each of our session ids, learnt from `thread.started`, so a resume can
 /// find it.
@@ -112,11 +113,7 @@ fn windows_sandbox(cwd: &Path) -> Vec<String> {
 
 /// `codexPrompt(spec)`: the same result instructions as the other schema-checked engines.
 fn codex_prompt(spec: &SessionSpec) -> String {
-    format!(
-        "{}\n\nWhen you've finished, end your final message with exactly one fenced ```json block holding your result, \
-         matching this schema. Nothing after it.\n\n{}",
-        spec.prompt, spec.schema,
-    )
+    format!("{}\n\n{}", spec.prompt, fenced_json_instructions(&spec.schema))
 }
 
 fn event(at: i64, kind: EventKind, text: String) -> Vec<SessionEvent> {
@@ -320,25 +317,9 @@ impl EngineReader for CodexReader {
     /// The process exited with no `turn.completed` or `turn.failed`: report that as a failure,
     /// naming the exit code, with the end of stderr attached (`noResult`).
     fn no_result(&self, exit_code: Option<i32>, stderr: &str, known_session_id: &str) -> SessionResult {
-        let code = exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        SessionResult {
-            ok: false,
-            subtype: "exited".to_string(),
-            structured: None,
-            error: Some(format!(
-                "codex exited with code {code} and no result. {}",
-                tail(stderr.trim(), 1500)
-            )),
-            cost_usd: None,
-            session_id: known_session_id.to_string(),
-            limit_hit: LIMIT_TEXT.is_match(stderr),
-            signed_out: false,
-            context_tokens: None,
-            usage: None,
-            tokens: None,
-        }
+        let mut result = exited_without_result("codex", exit_code, stderr, known_session_id);
+        result.limit_hit = LIMIT_TEXT.is_match(stderr);
+        result
     }
 }
 

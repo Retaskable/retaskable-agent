@@ -88,6 +88,71 @@ pub struct GateResult {
     pub note: String,
 }
 
+/// Un-escapes a path git wrote in its C-quoted style (`"..."`, with `\\`, `\"`, `\t`, `\n`, `\r`,
+/// `\a`, `\b`, `\f`, `\v` and `\NNN` octal escapes): the form `git diff` falls back to for a path
+/// containing a quote, backslash or control character even with `core.quotepath=false`, which
+/// only stops *non-ASCII* text from being quoted.
+fn unquote_git_path(quoted: &str) -> String {
+    let inner = &quoted[1..quoted.len() - 1];
+    let bytes = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        match bytes[i + 1] {
+            b'\\' | b'"' => {
+                out.push(bytes[i + 1]);
+                i += 2;
+            }
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'a' => {
+                out.push(0x07);
+                i += 2;
+            }
+            b'b' => {
+                out.push(0x08);
+                i += 2;
+            }
+            b'f' => {
+                out.push(0x0C);
+                i += 2;
+            }
+            b'v' => {
+                out.push(0x0B);
+                i += 2;
+            }
+            d0 @ b'0'..=b'7'
+                if i + 4 <= bytes.len()
+                    && (b'0'..=b'7').contains(&bytes[i + 2])
+                    && (b'0'..=b'7').contains(&bytes[i + 3]) =>
+            {
+                out.push((d0 - b'0') * 64 + (bytes[i + 2] - b'0') * 8 + (bytes[i + 3] - b'0'));
+                i += 4;
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
+}
+
 /// Each changed file's added line numbers (in the new file), from `git diff -U0`, in diff order. A
 /// deleted file isn't included.
 pub fn added_lines(diff: &str) -> Vec<(String, BTreeSet<u32>)> {
@@ -99,13 +164,12 @@ pub fn added_lines(diff: &str) -> Vec<(String, BTreeSet<u32>)> {
             current = if name == "/dev/null" {
                 None
             } else {
-                // With core.quotepath off, only a path with a quote, tab or newline is still quoted.
                 let unquoted = if name.len() >= 2 && name.starts_with('"') && name.ends_with('"') {
-                    &name[1..name.len() - 1]
+                    unquote_git_path(name)
                 } else {
-                    name
+                    name.to_string()
                 };
-                let cleaned = unquoted.strip_prefix("b/").unwrap_or(unquoted);
+                let cleaned = unquoted.strip_prefix("b/").unwrap_or(&unquoted);
                 out.push((cleaned.to_string(), BTreeSet::new()));
                 Some(out.len() - 1)
             };

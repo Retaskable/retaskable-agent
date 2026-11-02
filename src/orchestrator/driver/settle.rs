@@ -2,25 +2,50 @@
 //! settled on the next wake), a step's end through the project's `Running` set, and what either means for the
 //! item's lane and lease (freed, parked, or given back to the store, with the releases and parks the store
 //! hasn't taken yet sent again later: the TS agent's `unreleased`).
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
 use tokio::sync::mpsc;
 
-use super::{Links, Machine, ProjectLoop, SessionStarter};
+use super::{Links, Machine, ProjectLoop, SessionStarter, Shared};
+use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
+
+/// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses claiming of new
+/// work for every project on this computer (section 7.3): a problem with this computer, not the item, so
+/// hammering the store for more work would likely just fail the same way.
+pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
+
+/// How long a session that found Claude Code signed out (section 7.3's `claudeSignedOut`) blocks new or
+/// resumed Claude session starts on this computer: long enough that a person has time to sign back in
+/// before the next retry, short enough that work resumes soon after they do.
+pub(super) const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(60);
+
+/// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
+const MAX_NOTE_CHARS: usize = 4000;
 
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionResult {
     /// The implementer exited normally (it finished, synced main, or asked questions).
     Implementer(ImplementerOutcome),
-    /// The session couldn't run or crashed through no fault of the item's (the TS `ownFailure`): the
-    /// item is given back to the store's queue. The text says why.
+    /// A failure before any session ran (lane prep, or the session wouldn't even start): this computer's own
+    /// problem, not the item's (the TS `ownFailure`), so the item is given back to the store's queue and
+    /// this project's claiming pauses ([`hand_back`](ProjectLoop::hand_back)). The text says why.
     Failed(String),
-    /// The session ended in a way that needs a person (it gave up, found nothing left to build, or left steps only
-    /// a person can do): the run goes to `needs_human`, freeing its lane and keeping its lease. The text says why.
+    /// A session ran but ended in a way that needs a person: it crashed, exited without an answer, gave up,
+    /// found nothing left to build, left steps only a person can do, or answered with a status this agent
+    /// doesn't know — any of these may have left real work behind, so the run goes to `needs_human` instead
+    /// of back to the queue, freeing its lane and keeping its lease. The text says why.
     NeedsHuman(String),
+    /// Something outside the session — a restart or Quit (07.4-stopping-and-restarting.md) — cut its
+    /// process tree and killed it before it answered, not the implementer giving up. The run stays
+    /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
+    /// the store): the next restart readopts it and resumes the same session by id.
+    Interrupted,
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -30,6 +55,9 @@ pub struct SessionOutcome {
     pub item_id: String,
     pub lane: u32,
     pub result: SessionResult,
+    /// The session's latest usage reading, if any, saved as `state.usage` once settled
+    /// (docs/specs/agent/07-orchestrator-loop.md section 7.1).
+    pub usage: Option<Value>,
 }
 
 /// The sending end of the outcome channel: cloned into every [`StartRequest`](super::StartRequest).
@@ -61,20 +89,34 @@ impl ProjectLoop {
     /// Gives an item's lane and lease back: its run is dropped, the lane freed (`lane_freed`), and the lease
     /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
     /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
-    /// TS agent's `lane_freed` (`<state>: <note>`).
+    /// TS agent's `lane_freed` (`<state>: <note>`). An own failure before any session ran, so the error goes
+    /// in the local event log (not the item's: it isn't the item's fault) and claiming pauses, for every
+    /// project on this computer, for [`CLAIM_PAUSE`] (section 7.3, [`Machine::claim_paused_until`]), restarting
+    /// cleared.
     pub(super) async fn hand_back(
         &mut self,
         pool: &mut LanePool,
         item_id: &str,
         state: &str,
         why: &str,
-        links: &Links,
+        shared: &mut Shared<'_>,
     ) {
         self.runs.remove(item_id);
         self.items.remove(item_id);
         self.free_lane(pool, item_id, state, why);
+        *shared.claim_paused_until = Some(Instant::now() + CLAIM_PAUSE);
+        self.events.add_in(
+            &self.id,
+            Event::Error(event::Error {
+                item: Some(item_id.to_string()),
+                r#where: Some("start".into()),
+                error: Some(why.to_string()),
+                ..Default::default()
+            }),
+        );
         if let Some(token) = self.leases.remove(item_id) {
-            self.unreleased.insert(item_id.to_string(), token);
+            let note: String = why.chars().take(MAX_NOTE_CHARS).collect();
+            self.unreleased.insert(item_id.to_string(), (token, note));
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -85,7 +127,7 @@ impl ProjectLoop {
                     ..Default::default()
                 }),
             );
-            self.flush_owed(links).await;
+            self.flush_owed(shared.links).await;
         }
     }
 
@@ -135,7 +177,17 @@ impl ProjectLoop {
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
             return;
         };
-        for (id, lease) in self.unreleased.clone() {
+        for (id, (lease, note)) in self.unreleased.clone() {
+            // report then release (section 7.5): the note lands in the item's history while the
+            // lease still holds. A refusal of either keeps both for the next pass.
+            match self.client.report(repo, Some(&token), &id, &lease, &note).await {
+                Ok(()) => {}
+                Err(e) if e.code() == Some("stale_lease") => {}
+                Err(e) => {
+                    self.store_error("report", &e);
+                    continue;
+                }
+            }
             match self.client.release(repo, Some(&token), &id, &lease).await {
                 Ok(()) => {}
                 Err(e) if e.code() == Some("stale_lease") => {}
@@ -199,7 +251,7 @@ impl ProjectLoop {
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
     /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
-    async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, links: &Links) {
+    async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
         let item = outcome.item_id;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
             tracing::warn!(
@@ -208,6 +260,12 @@ impl ProjectLoop {
             );
             return;
         };
+        if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
+            self.store.set_usage(usage);
+            if let Err(e) = self.store.save() {
+                tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
+            }
+        }
         self.events.add_in(
             &self.id,
             Event::SessionEnd(event::SessionEnd {
@@ -215,20 +273,32 @@ impl ProjectLoop {
                 lane: Some(outcome.lane),
                 role: Some("implementer".into()),
                 engine: Some("claude".into()),
-                ok: Some(!matches!(outcome.result, SessionResult::Failed(_))),
+                ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
+                subtype: matches!(outcome.result, SessionResult::Interrupted).then(|| "interrupted".into()),
                 ..Default::default()
             }),
         );
         match outcome.result {
-            SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, links).await,
+            // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
+            // nothing is posted to the store. The next restart readopts it and resumes the same session.
+            SessionResult::Interrupted => {}
+            SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) => {
                 run.escalate();
-                self.moved(pool, &item, ItemState::Implementing, &why, links).await;
+                // Claude's sign-in running out is this computer's problem, not the item's (section 7.3):
+                // the item still needs a person (it may have left real work behind), but no other item
+                // should start a session here until someone signs back in.
+                if signed_out_text(Some(&why)) {
+                    *shared.claude_signed_out_until = Some(Instant::now() + SIGNED_OUT_PAUSE);
+                }
+                self.moved(pool, &item, ItemState::Implementing, &why, shared.links)
+                    .await;
             }
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
                 let note = format!("the session on lane {} ended", outcome.lane);
-                self.moved(pool, &item, ItemState::Implementing, &note, links).await;
+                self.moved(pool, &item, ItemState::Implementing, &note, shared.links)
+                    .await;
             }
         }
     }
@@ -299,8 +369,21 @@ impl Machine {
     /// Settles the sessions that ended since the last wake.
     pub(super) async fn settle_outcomes(&mut self) {
         while let Ok(outcome) = self.outcomes.try_recv() {
+            let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
-                Some(lp) => lp.settle(outcome, &mut self.pool, &self.links).await,
+                Some(lp) => {
+                    lp.settle(
+                        outcome,
+                        &mut self.pool,
+                        &mut Shared {
+                            links: &self.links,
+                            claim_paused_until: &mut self.claim_paused_until,
+                            claude_signed_out_until: &mut self.claude_signed_out_until,
+                            stopping,
+                        },
+                    )
+                    .await
+                }
                 None => tracing::warn!("a session ended for the unknown project {}", outcome.project),
             }
         }
