@@ -33,6 +33,7 @@ fn the_mode_defaults_to_off_and_reads_the_three_names() {
     assert_eq!(mode(Some("off")), (OrchestratorMode::Off, None));
     assert_eq!(mode(Some("dry")), (OrchestratorMode::Dry, None));
     assert_eq!(mode(Some(" Claim ")), (OrchestratorMode::Claim, None));
+    assert_eq!(mode(Some("RUNS")), (OrchestratorMode::Runs, None));
 }
 
 #[test]
@@ -395,6 +396,20 @@ async fn claim_runs_dry_while_another_agent_answers_and_stays_claim_otherwise() 
     assert_eq!(
         effective_mode(OrchestratorMode::Dry, &guard).await,
         OrchestratorMode::Dry
+    );
+}
+
+#[tokio::test]
+async fn runs_runs_dry_while_another_agent_answers_and_stays_runs_otherwise() {
+    let guard = PortGuard::new(closed_port(), [ts_agent_port().await]);
+    assert_eq!(
+        effective_mode(OrchestratorMode::Runs, &guard).await,
+        OrchestratorMode::Dry
+    );
+    let quiet = PortGuard::new(closed_port(), [closed_port()]);
+    assert_eq!(
+        effective_mode(OrchestratorMode::Runs, &quiet).await,
+        OrchestratorMode::Runs
     );
 }
 

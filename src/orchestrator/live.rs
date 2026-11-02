@@ -40,6 +40,8 @@ pub struct ProjectLive {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveState {
     pub mode: OrchestratorMode,
+    /// In `runs` mode, the kinds of run this computer can take (`plan`, `build`, ...); empty with no runner.
+    pub run_kinds: Vec<String>,
     pub projects: BTreeMap<String, ProjectLive>,
 }
 
@@ -51,8 +53,14 @@ impl LiveHandle {
     pub fn new(mode: OrchestratorMode) -> Self {
         Self(Arc::new(Mutex::new(LiveState {
             mode,
+            run_kinds: Vec::new(),
             projects: BTreeMap::new(),
         })))
+    }
+
+    /// Says which kinds of run `runs` mode can take.
+    pub fn set_run_kinds(&self, kinds: Vec<String>) {
+        self.lock().run_kinds = kinds;
     }
 
     pub fn snapshot(&self) -> LiveState {

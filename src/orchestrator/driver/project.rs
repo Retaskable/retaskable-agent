@@ -42,10 +42,13 @@ pub enum OrchestratorMode {
     /// Claims work and applies starts, but only with a [`SessionStarter`] and while the port guard
     /// (`guard.rs`) sees no other agent on this computer. With no starter it behaves exactly like `Dry`.
     Claim,
+    /// Takes work as short runs on pieces (pieces.md section 3), with the same port guard as `claim`. The kinds
+    /// it can take are the [`RunStarter`](super::RunStarter)s it is given; with none it drops old runs and asks for nothing.
+    Runs,
 }
 
 impl OrchestratorMode {
-    /// The mode `RETASKABLE_ORCHESTRATOR` names (`off`, `dry` or `claim`, any case), and a warning
+    /// The mode `RETASKABLE_ORCHESTRATOR` names (`off`, `dry`, `claim` or `runs`, any case), and a warning
     /// for a value that is none of them, which counts as `off`.
     pub fn from_env(env: &Env) -> (Self, Option<String>) {
         let Some(raw) = env.get(MODE_VAR) else {
@@ -55,10 +58,11 @@ impl OrchestratorMode {
             "off" => (Self::Off, None),
             "dry" => (Self::Dry, None),
             "claim" => (Self::Claim, None),
+            "runs" => (Self::Runs, None),
             other => (
                 Self::Off,
                 Some(format!(
-                    "{MODE_VAR}={other:?} isn't off, dry or claim, so the orchestrator stays off."
+                    "{MODE_VAR}={other:?} isn't off, dry, claim or runs, so the orchestrator stays off."
                 )),
             ),
         }
@@ -69,6 +73,7 @@ impl OrchestratorMode {
             Self::Off => "off",
             Self::Dry => "dry",
             Self::Claim => "claim",
+            Self::Runs => "runs",
         }
     }
 
@@ -88,6 +93,9 @@ impl OrchestratorMode {
             Self::Claim => tracing::warn!(
                 "orchestrator: claim (claims work only once a session runner is given; until then it runs dry)"
             ),
+            Self::Runs => tracing::info!(
+                "orchestrator: runs (takes work as short runs of the kinds it can run; with none it only drops old runs)"
+            ),
         }
         mode
     }
@@ -103,15 +111,15 @@ pub enum Step {
     Skipped,
 }
 
-/// The mode the loops really run in. `claim` with another agent on this computer runs dry instead,
-/// logged loudly, so two agents never claim from one backlog.
+/// The mode the loops really run in. `claim` or `runs` with another agent on this computer runs dry instead,
+/// logged loudly, so two agents never take work from one backlog.
 pub async fn effective_mode(mode: OrchestratorMode, guard: &PortGuard) -> OrchestratorMode {
-    if mode != OrchestratorMode::Claim {
+    if !matches!(mode, OrchestratorMode::Claim | OrchestratorMode::Runs) {
         return mode;
     }
     match guard.refusal().await {
         Some(why) => {
-            tracing::error!("orchestrator: claim refused, running dry instead: {why}");
+            tracing::error!("orchestrator: {} refused, running dry instead: {why}", mode.name());
             OrchestratorMode::Dry
         }
         None => mode,
