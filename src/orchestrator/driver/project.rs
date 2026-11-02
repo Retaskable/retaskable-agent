@@ -220,6 +220,8 @@ pub struct ProjectLoop {
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
+    /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
+    pub(super) run_loop: super::RunLoop,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     max_resume_context_tokens: u32,
@@ -238,6 +240,7 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         Self {
+            run_loop: super::RunLoop::new(&id),
             id,
             project,
             leases: store.leases(),
