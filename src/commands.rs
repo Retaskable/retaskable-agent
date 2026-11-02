@@ -7,10 +7,10 @@
 //! So far this runs **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
-//! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3). Continue
-//! and Start over still need a real running implementer session (milestone 3 of
-//! 11-build-milestones.md); Play still needs the build-and-install command play-on-phone.md
-//! section 5 describes. Every command checked, run or refused is written to
+//! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]). Continue and Start over still need a
+//! real running implementer session (milestone 3 of 11-build-milestones.md); Play on a lane is a
+//! later piece. Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -103,6 +103,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "shoot" => shoot(cmd, project, view, data_dir),
+        "play" | "stop" => play(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }
@@ -141,6 +142,29 @@ fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Val
         );
     });
     ack(&cmd.id)
+}
+
+/// `play { lane: 0 }` / `stop { lane: 0 }`: Play main ([`crate::play`]). Any other lane is a later piece.
+fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let lane = cmd.args.get("lane").and_then(Value::as_i64);
+    if lane != Some(0) {
+        return nack(
+            &cmd.id,
+            format!("Not a command this agent takes yet: {} on a lane", cmd.name),
+        );
+    }
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return nack(&cmd.id, "Finish setup first.".to_string());
+    };
+    let done = if cmd.name == "play" {
+        crate::play::start(project, p)
+    } else {
+        crate::play::stop(project)
+    };
+    match done {
+        Ok(()) => ack(&cmd.id),
+        Err(reason) => nack(&cmd.id, reason),
+    }
 }
 
 fn ack(id: &str) -> Value {
@@ -201,6 +225,7 @@ mod tests {
                 worktrees_dir: PathBuf::new(),
                 base_branch: String::new(),
                 galleries: vec![],
+                play_command: String::new(),
             }],
             version: "9.9.9".into(),
             lanes: 1,
@@ -345,6 +370,35 @@ mod tests {
             &data_dir(),
         );
         assert_eq!(answer["reason"], "Not a command this agent takes yet: continue");
+    }
+
+    #[test]
+    fn play_and_stop_nack_a_lane_other_than_zero_and_a_blank_command() {
+        let v = view();
+        let noop = |_: i32| {};
+        for name in ["play", "stop"] {
+            let answer = run(
+                &cmd(name, json!({ "lane": 2 })),
+                "one",
+                &mut Seen::default(),
+                &v,
+                &noop,
+                &data_dir(),
+            );
+            assert_eq!(
+                answer["reason"],
+                format!("Not a command this agent takes yet: {name} on a lane")
+            );
+        }
+        let answer = run(
+            &cmd("play", json!({ "lane": 0 })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], "No play command set for this project.");
     }
 
     #[test]

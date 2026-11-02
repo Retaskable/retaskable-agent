@@ -42,6 +42,7 @@ fn source(projects: &[&str]) -> StatusSource {
                     worktrees_dir: PathBuf::new(),
                     base_branch: String::new(),
                     galleries: vec![],
+                    play_command: String::new(),
                 })
                 .collect(),
             version: "1.2.3".into(),

@@ -5,6 +5,7 @@
 pub mod api;
 pub mod app_menu;
 pub mod backlog;
+pub mod base_hold;
 pub mod checks;
 pub mod ci_coverage;
 pub mod commands;
@@ -31,6 +32,7 @@ pub mod package;
 pub mod password;
 pub mod paths;
 pub mod phone;
+pub mod play;
 pub mod playtest_groups;
 pub mod proc;
 pub mod process_tree;

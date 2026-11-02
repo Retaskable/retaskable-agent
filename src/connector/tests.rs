@@ -107,6 +107,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
                 worktrees_dir: PathBuf::new(),
                 base_branch: String::new(),
                 galleries: vec![],
+                play_command: String::new(),
             })
             .collect(),
         version: "9.9.9".into(),
