@@ -97,6 +97,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             resume,
             follow_up,
+            items,
             ..
         } = request;
         let job = Job {
@@ -112,6 +113,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             resume,
             follow_up,
+            items,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -191,6 +193,9 @@ struct Job {
     /// restart after the lane's prior session ran out of turns or had grown too large: the lane is reused
     /// as-is instead.
     follow_up: Option<String>,
+    /// Every item in the project's backlog; the unbuilt ones are listed in a fresh prompt, and a `waits_on`
+    /// result is checked against them.
+    items: Vec<Item>,
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
@@ -232,6 +237,7 @@ async fn attempt(job: &Job, cwd: &Path, start: Start<'_>, fresh: bool, name: Str
         usage,
         models,
         session_id,
+        items,
         ..
     } = job;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
@@ -250,6 +256,7 @@ async fn attempt(job: &Job, cwd: &Path, start: Start<'_>, fresh: bool, name: Str
             checks: &project.checks,
             code_gates: project.code_gates,
             where_to_start: "",
+            items,
             cwd,
             model,
             budget_usd: project.budget.implementer_usd,
@@ -546,18 +553,29 @@ mod tests {
         let code = if ok { 0 } else { 3 };
         if cfg!(windows) {
             let script = format!(
-                "@echo off\r\necho %* > \"{}\"\r\ntype \"{}\"\r\nexit /b {code}\r\n",
+                "@echo off\r\necho %* > \"{}\"\r\nfindstr \"^\" > \"{}.stdin\"\r\ntype \"{}\"\r\nexit /b {code}\r\n",
+                args.display(),
                 args.display(),
                 out.display()
             );
             std::fs::write(bin, script).unwrap();
         } else {
             let script = format!(
-                "#!/bin/sh\necho \"$@\" > \"{}\"\ncat \"{}\"\nexit {code}\n",
+                "#!/bin/sh\necho \"$@\" > \"{}\"\ncat > \"{}.stdin\"\ncat \"{}\"\nexit {code}\n",
+                args.display(),
                 args.display(),
                 out.display()
             );
             crate::test_support::write_executable(bin, &script);
+        }
+    }
+
+    fn queued_item() -> Item {
+        Item {
+            id: "queued-one".into(),
+            title: "Another queued item".into(),
+            status: ItemStatus::Todo,
+            ..item(&[], None)
         }
     }
 
@@ -574,6 +592,7 @@ mod tests {
             outcomes,
             usage: None,
             follow_up: None,
+            items: vec![item(&[], None), queued_item()],
         };
         (request, rx)
     }
@@ -611,6 +630,25 @@ mod tests {
         let runs = paths::run_dir(&rig.root.join("data"), "p", "implementer-session");
         let files: Vec<_> = std::fs::read_dir(runs).unwrap().collect();
         assert_eq!(files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_prompt_lists_the_unbuilt_items_and_a_resumed_one_does_not() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        outcome_of(&rig).await;
+        let args = std::fs::read_to_string(format!("{}.stdin", rig.args.display())).unwrap();
+        assert!(args.contains("Items not built yet"), "{args}");
+        assert!(args.contains("- queued-one: Another queued item"), "{args}");
+        assert!(!args.contains("- implementer-session: Have"), "{args}");
+        let (mut request, mut rx) = request();
+        request.resume = true;
+        rig.starter.start(request).unwrap();
+        tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
+        let args = std::fs::read_to_string(format!("{}.stdin", rig.args.display())).unwrap();
+        assert!(
+            !args.contains("Items not built yet") && !args.contains("queued-one"),
+            "{args}"
+        );
     }
 
     #[tokio::test]

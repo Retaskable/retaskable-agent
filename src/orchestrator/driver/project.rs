@@ -143,6 +143,9 @@ pub struct StartRequest {
     /// "at most maxTurns turns"): the lane is reused as-is, keeping any uncommitted work, and this text is the
     /// session's prompt verbatim.
     pub follow_up: Option<String>,
+    /// Every item the store listed, for a fresh session's **Items not built yet** list (and the later
+    /// check of its `waitsOn` against it).
+    pub items: Vec<Item>,
 }
 
 /// How `ProjectLoop::launch` starts an implementer session.
@@ -623,6 +626,7 @@ impl ProjectLoop {
             outcomes: self.outcomes.clone(),
             usage: self.store.usage(),
             follow_up,
+            items: self.items.values().cloned().collect(),
         };
         match starter.start(request) {
             Ok(()) => {
