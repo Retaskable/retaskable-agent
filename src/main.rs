@@ -3,7 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
@@ -340,7 +340,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         default_port,
         network_enabled,
         env.clone(),
-        || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+        || (telemetry::now_ms() / 1000) as u64,
         move |code| exit(code),
         keychain.clone(),
     ));
