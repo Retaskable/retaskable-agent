@@ -12,6 +12,7 @@
 //! actually starting a session (implementer-session), and the pause flag's real source (today it's
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`).
 pub mod driver;
+pub mod fresh_start;
 pub mod guard;
 pub mod live;
 pub mod round_robin;

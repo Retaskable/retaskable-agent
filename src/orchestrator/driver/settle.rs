@@ -11,23 +11,9 @@ use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
+use crate::orchestrator::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
-
-/// The follow-up a restarted session is given after its predecessor ran out of turns
-/// (06.2-implementer.md "at most maxTurns turns").
-const MAX_TURNS_FOLLOW_UP: &str = "An earlier session ran out of turns before it finished. Check \
-    `git status` and `git diff --stat` for its uncommitted work, then carry on with the slice.";
-
-/// The follow-up a session over `max_resume_context_tokens` gets instead of being resumed
-/// (06.2-implementer.md "A session that's grown starts fresh").
-pub(super) fn grown_follow_up(tokens: u64) -> String {
-    format!(
-        "Its session had grown to {tokens} tokens; this one picks up as a fresh session instead of \
-         resuming it. Check `git status` and `git diff --stat` for its uncommitted work, then carry \
-         on with the slice."
-    )
-}
 
 /// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses claiming of new
 /// work for every project on this computer (section 7.3): a problem with this computer, not the item, so
@@ -368,6 +354,24 @@ impl ProjectLoop {
         }
     }
 
+    /// A fresh session on the item's branch for `reason`: the picking-up prompt around `follow_up`, with the
+    /// reason's line added to the item's history.
+    pub(super) fn fresh_launch(&mut self, item_id: &str, lane: u32, reason: FreshStart, follow_up: &str) -> Launch {
+        self.events.add_in(
+            &self.id,
+            Event::ItemState(event::ItemState {
+                item: Some(item_id.to_string()),
+                from: Some("implementing".into()),
+                to: Some("implementing".into()),
+                note: Some(reason.history_line()),
+                lane: Some(lane),
+                ..Default::default()
+            }),
+        );
+        let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
+        Launch::Continuing(picking_up_prompt(has_pr, &self.project.base_branch, follow_up))
+    }
+
     /// Starts a fresh session in the same lane with the picking-up follow-up, bypassing the claim pipeline: the
     /// lane and lease are already held by this item, so there's nothing to decide or claim again. Never resumes
     /// the old session id: a session that ran out of turns gets a fresh one, as `launch` does for any other
@@ -381,15 +385,8 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) {
-        self.launch(
-            pool,
-            item_id,
-            lane,
-            Launch::Continuing(MAX_TURNS_FOLLOW_UP.to_string()),
-            starter,
-            shared,
-        )
-        .await;
+        let kind = self.fresh_launch(item_id, lane, FreshStart::OutOfTurns, MAX_TURNS_FOLLOW_UP);
+        self.launch(pool, item_id, lane, kind, starter, shared).await;
     }
 
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means
