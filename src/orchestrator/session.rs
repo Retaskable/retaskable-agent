@@ -99,6 +99,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             resume,
             follow_up,
+            items,
             ..
         } = request;
         let job = Job {
@@ -114,6 +115,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             resume,
             follow_up,
+            items,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -193,6 +195,9 @@ struct Job {
     /// restart after the lane's prior session ran out of turns or had grown too large: the lane is reused
     /// as-is instead.
     follow_up: Option<String>,
+    /// Every item in the project's backlog; the unbuilt ones are listed in a fresh prompt, and a `waits_on`
+    /// result is checked against them.
+    items: Vec<Item>,
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
@@ -241,6 +246,7 @@ async fn attempt(
         usage,
         models,
         session_id,
+        items,
         ..
     } = job;
     let now = crate::telemetry::now_ms() / 1000;
@@ -259,6 +265,7 @@ async fn attempt(
             checks: &project.checks,
             code_gates: project.code_gates,
             where_to_start,
+            items,
             cwd,
             model,
             budget_usd: project.budget.implementer_usd,
@@ -578,6 +585,15 @@ mod tests {
         }
     }
 
+    fn queued_item() -> Item {
+        Item {
+            id: "queued-one".into(),
+            title: "Another queued item".into(),
+            status: ItemStatus::Todo,
+            ..item(&[], None)
+        }
+    }
+
     fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         let (outcomes, rx) = OutcomeSender::channel();
         let request = StartRequest {
@@ -591,6 +607,7 @@ mod tests {
             outcomes,
             usage: None,
             follow_up: None,
+            items: vec![item(&[], None), queued_item()],
         };
         (request, rx)
     }
@@ -628,6 +645,25 @@ mod tests {
         let runs = paths::run_dir(&rig.root.join("data"), "p", "implementer-session");
         let files: Vec<_> = std::fs::read_dir(runs).unwrap().collect();
         assert_eq!(files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_prompt_lists_the_unbuilt_items_and_a_resumed_one_does_not() {
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        outcome_of(&rig).await;
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert!(args.contains("Items not built yet"), "{args}");
+        assert!(args.contains("- queued-one: Another queued item"), "{args}");
+        assert!(!args.contains("- implementer-session: Have"), "{args}");
+        let (mut request, mut rx) = request();
+        request.resume = true;
+        rig.starter.start(request).unwrap();
+        tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert!(
+            !args.contains("Items not built yet") && !args.contains("queued-one"),
+            "{args}"
+        );
     }
 
     #[tokio::test]

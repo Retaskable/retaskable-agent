@@ -587,6 +587,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             outcomes: rig.machine.outcome_sender(),
             follow_up: None,
             usage: None,
+            items: rig.lp(0).items.values().cloned().collect(),
         }]
     );
     assert_eq!(
