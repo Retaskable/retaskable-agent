@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -70,7 +71,7 @@ pub struct RunLoop {
     runs: Runs,
     /// `runs_drop` went through, so asking is allowed.
     dropped: bool,
-    /// The store said it waits for something this computer lacks: no asking until the next beat.
+    /// The store said it waits for something this computer lacks: no asking until `work_available`.
     waiting: bool,
     last_beat: Option<Instant>,
     ends_tx: RunEndSender,
@@ -99,21 +100,12 @@ impl ProjectLoop {
     /// One pass of the run loop at `now`: `runs_drop` first (once; if it fails nothing is taken), then the
     /// ends that came back, the ceilings, the minute's beat, the ends to send, and asking for runs.
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
-        let Some(repo) = self.repo else { return };
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
-            Ok(Some(token)) => token,
-            Ok(None) => return,
-            Err(e) => {
-                self.cant_start(format!("reading the backlog link: {e:#}"));
-                return;
-            }
+        let Some((repo, token)) = self.run_access(shared).await else {
+            return;
         };
         let token = Some(token.as_str());
-        if !self.run_loop.dropped {
-            match self.client.runs_drop(repo, token).await {
-                Ok(()) => self.run_loop.dropped = true,
-                Err(e) => return self.store_error("runs_drop", &e),
-            }
+        if shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
+            self.run_loop.waiting = false;
         }
         while let Ok(end) = self.run_loop.ends_rx.try_recv() {
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
@@ -125,7 +117,6 @@ impl ProjectLoop {
             .is_none_or(|t| now.duration_since(t) >= BEAT_EVERY)
         {
             self.run_loop.last_beat = Some(now);
-            self.run_loop.waiting = false;
             let tokens = self.run_loop.runs.beat_tokens();
             if !tokens.is_empty() {
                 match self.client.run_beat(repo, token, &tokens).await {
@@ -151,6 +142,51 @@ impl ProjectLoop {
                 break;
             }
         }
+        crate::runs::report_held(&self.id, self.run_loop.runs.held());
+    }
+
+    /// The repo and token the store is asked with, after `runs_drop` went through (once; if it fails nothing is
+    /// taken). `None` when this project can't ask yet.
+    async fn run_access(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
+        let repo = self.repo?;
+        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+            Ok(Some(token)) => token,
+            Ok(None) => return None,
+            Err(e) => {
+                self.cant_start(format!("reading the backlog link: {e:#}"));
+                return None;
+            }
+        };
+        if !self.run_loop.dropped {
+            match self.client.runs_drop(repo, Some(&token)).await {
+                Ok(()) => self.run_loop.dropped = true,
+                Err(e) => {
+                    self.store_error("runs_drop", &e);
+                    return None;
+                }
+            }
+        }
+        Some((repo, token))
+    }
+
+    /// Asks for one piece by name (`run_take { agent, piece }`), for a person's action on this computer, and starts
+    /// the run it gets the same way a kind's run starts. True when a run started.
+    pub async fn run_take_piece(
+        &mut self,
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        shared: &Shared<'_>,
+        piece: &str,
+        now: Instant,
+    ) -> bool {
+        if shared.stopping {
+            return false;
+        }
+        let Some((repo, token)) = self.run_access(shared).await else {
+            return false;
+        };
+        self.ask(repo, Some(&token), pool, starter, shared, RunWant::Piece(piece), now)
+            .await
     }
 
     /// One `run_take`, with its `claim` event. Whether to ask again: a run was handed out and started.
@@ -172,13 +208,29 @@ impl ProjectLoop {
         if kinds.is_empty() {
             return false;
         }
+        self.ask(repo, token, pool, starter, shared, RunWant::Kinds(&kinds), now)
+            .await
+    }
+
+    /// One `run_take` for `want`, with its `claim` event. Whether a run was handed out and started.
+    #[allow(clippy::too_many_arguments)]
+    async fn ask(
+        &mut self,
+        repo: u64,
+        token: Option<&str>,
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        shared: &Shared<'_>,
+        want: RunWant<'_>,
+        now: Instant,
+    ) -> bool {
         let agent = RunTakeAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.clone(),
         };
-        let (answer, more) = match self.client.run_take(repo, token, &agent, RunWant::Kinds(&kinds)).await {
+        let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
                 self.store_error("run_take", &e);
                 (json!("failed"), false)

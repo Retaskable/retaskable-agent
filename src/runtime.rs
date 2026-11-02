@@ -2,6 +2,7 @@
 //! watchers, and one project's startup. Split out of `main.rs`'s `serve` and `start_project`,
 //! which only call these in order.
 use crate::env::Env;
+use crate::runs::RunWait;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -42,16 +43,23 @@ pub fn restart_handler(
         // none in flight on its own HTTP thread, but the response still deserves to flush).
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
-            cut_every_session_then_exit(code, &projects, &updater, is_release, exe_path.as_deref(), |code| {
-                std::process::exit(code)
-            });
+            cut_every_session_then_exit(
+                code,
+                &projects,
+                &updater,
+                is_release,
+                exe_path.as_deref(),
+                &RunWait::real(),
+                |code| std::process::exit(code),
+            );
         });
     })
 }
 
 /// What `restart_handler`'s exit thread does once its delay is up: cut every other session
 /// first (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`), then
-/// install an update or relaunch, then exit. `exit` is a parameter so a test can see what's true
+/// install an update or relaunch, then exit. With the `runs` loop holding runs, it first waits for them to
+/// end (docs/specs/pieces.md section 3.1, up to `wait.limit`), taking no new ones meanwhile. `exit` is a parameter so a test can see what's true
 /// right before it's called, without actually ending the process.
 fn cut_every_session_then_exit(
     code: i32,
@@ -59,8 +67,10 @@ fn cut_every_session_then_exit(
     updater: &UpdaterSlot,
     is_release: bool,
     exe_path: Option<&Path>,
+    wait: &RunWait,
     exit: impl FnOnce(i32),
 ) {
+    wait.wait();
     process_tree::cut_all();
     shutdown::stop_other_sessions(projects);
     let installed = code == 75 && updater.get().is_some_and(|updater| updater.install_now());
@@ -282,17 +292,105 @@ fn log_engines(project: &config::ProjectConfig, engine_choice: &config::EngineCh
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
     use super::*;
 
+    /// These share the process-wide stopping flag, so they run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn cuts_every_session_before_the_injected_exit_runs() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         process_tree::reset_for_tests();
         let seen_stopping = Mutex::new(None);
-        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, |_code| {
+        let wait = idle_wait();
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_code| {
             *seen_stopping.lock().unwrap() = Some(process_tree::stopping());
         });
         assert_eq!(*seen_stopping.lock().unwrap(), Some(true));
+        process_tree::reset_for_tests();
+    }
+
+    fn idle_wait() -> RunWait {
+        RunWait {
+            limit: Duration::from_secs(5),
+            held: Box::new(|| 0),
+            begin: Box::new(|| {}),
+        }
+    }
+
+    /// A wait whose held count is `n`, dropping to 0 once `end` is flipped; `begun` records the wind-down.
+    fn wait_on(n: usize, limit: Duration, end: &Arc<AtomicBool>, begun: &Arc<AtomicBool>) -> RunWait {
+        let (end, begun) = (end.clone(), begun.clone());
+        let begin = begun.clone();
+        RunWait {
+            limit,
+            held: Box::new(move || if end.load(Ordering::SeqCst) { 0 } else { n }),
+            begin: Box::new(move || begin.store(true, Ordering::SeqCst)),
+        }
+    }
+
+    #[test]
+    fn with_no_live_runs_it_exits_at_once_without_winding_down() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        process_tree::reset_for_tests();
+        let (end, begun) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let wait = wait_on(0, Duration::from_secs(60), &end, &begun);
+        let started = Instant::now();
+        let exited = AtomicBool::new(false);
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_| {
+            exited.store(true, Ordering::SeqCst)
+        });
+        assert!(exited.load(Ordering::SeqCst) && !begun.load(Ordering::SeqCst));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        process_tree::reset_for_tests();
+    }
+
+    #[test]
+    fn it_waits_for_the_last_run_to_end_then_exits_before_the_limit_without_cutting_first() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        process_tree::reset_for_tests();
+        let (end, begun) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let wait = wait_on(1, Duration::from_secs(60), &end, &begun);
+        let ender = end.clone();
+        let fake_run = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            ender.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let stopping_while_waiting = Mutex::new(None);
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_| {
+            *stopping_while_waiting.lock().unwrap() = Some(begun.load(Ordering::SeqCst));
+        });
+        fake_run.join().unwrap();
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_secs(10),
+            "{took:?}"
+        );
+        assert_eq!(
+            *stopping_while_waiting.lock().unwrap(),
+            Some(true),
+            "no new runs while it waited"
+        );
+        process_tree::reset_for_tests();
+    }
+
+    #[test]
+    fn a_run_that_never_ends_is_cut_once_the_limit_passes_and_then_it_exits() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        process_tree::reset_for_tests();
+        let (end, begun) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let wait = wait_on(1, Duration::from_millis(300), &end, &begun);
+        let started = Instant::now();
+        let seen = Mutex::new(None);
+        cut_every_session_then_exit(0, &[], &UpdaterSlot::default(), false, None, &wait, |_| {
+            *seen.lock().unwrap() = Some(process_tree::stopping());
+        });
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert_eq!(*seen.lock().unwrap(), Some(true), "the trees were cut before exit");
         process_tree::reset_for_tests();
     }
 }

@@ -42,6 +42,7 @@ fn source(projects: &[&str]) -> StatusSource {
                     worktrees_dir: PathBuf::new(),
                     base_branch: String::new(),
                     galleries: vec![],
+                    play_command: String::new(),
                 })
                 .collect(),
             version: "1.2.3".into(),
@@ -50,6 +51,7 @@ fn source(projects: &[&str]) -> StatusSource {
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
             item_commands: Default::default(),
+            work: Default::default(),
         },
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),

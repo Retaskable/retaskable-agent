@@ -133,6 +133,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         keychain: keys.clone(),
         paused: PauseState::default(),
         item_commands: Default::default(),
+        work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
         tags: Vec::new(),

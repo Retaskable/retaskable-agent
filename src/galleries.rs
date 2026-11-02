@@ -248,6 +248,9 @@ pub fn shoot_refusal(project: &str, gallery: &GalleryConfig) -> Option<String> {
     if busy(project) {
         return Some("Already shooting.".to_string());
     }
+    if let Some(who) = crate::base_hold::base_holder(project) {
+        return Some(format!("The base checkout is busy: {who} is using it."));
+    }
     None
 }
 
@@ -356,6 +359,7 @@ pub fn shoot(
         bail!(reason);
     }
     let out_dir = safe_out_dir(&gallery.out_dir).expect("checked by shoot_refusal");
+    let _hold = crate::base_hold::hold_base(project, "a shoot").map_err(|e| anyhow::anyhow!(e))?;
     lock(&SHOOTING).insert(project.to_string(), gallery.name.clone());
     set_status(project, slug, GalleryStatus::Shooting);
     let result = run_shoot(&ShootContext {

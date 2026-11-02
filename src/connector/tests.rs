@@ -107,6 +107,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
                 worktrees_dir: PathBuf::new(),
                 base_branch: String::new(),
                 galleries: vec![],
+                play_command: String::new(),
             })
             .collect(),
         version: "9.9.9".into(),
@@ -115,6 +116,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         lane_sizes: LaneSizes::default(),
         paused: PauseState::default(),
         item_commands: Default::default(),
+        work: Default::default(),
     })
 }
 
@@ -409,20 +411,20 @@ async fn an_unported_command_is_refused_with_a_nack() {
     a.ws.send(Message::text(json!({ "type": "ping" }).to_string()))
         .await
         .unwrap();
-    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
+    a.ws.send(Message::text(command("c1", "start_over", json!({})).to_string()))
         .await
         .unwrap();
     let nack = read(&mut a).await;
     assert_eq!(nack["type"], "nack");
     assert_eq!(nack["id"], "c1");
-    assert_eq!(nack["reason"], "Not a command this agent takes yet: continue");
+    assert_eq!(nack["reason"], "Not a command this agent takes yet: start_over");
     c.stop(Duration::from_secs(1)).await;
 }
 
 #[tokio::test]
 async fn every_command_answered_is_logged_to_remote_log() {
     let (c, mut a, dir) = connected_project(noop_exit()).await;
-    a.ws.send(Message::text(command("c1", "continue", json!({})).to_string()))
+    a.ws.send(Message::text(command("c1", "start_over", json!({})).to_string()))
         .await
         .unwrap();
     read(&mut a).await; // the nack
@@ -436,10 +438,10 @@ async fn every_command_answered_is_logged_to_remote_log() {
     let lines: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["id"], "c1");
-    assert_eq!(lines[0]["name"], "continue");
+    assert_eq!(lines[0]["name"], "start_over");
     assert_eq!(lines[0]["issuedBy"], "jc");
     assert_eq!(lines[0]["outcome"], "nack");
-    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: continue");
+    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: start_over");
     assert!(lines[0]["at"].as_str().unwrap().ends_with('Z'));
     assert_eq!(lines[1]["id"], "c2");
     assert_eq!(lines[1]["outcome"], "ack");
@@ -603,4 +605,36 @@ fn the_socket_url_swaps_the_scheme_and_names_the_project() {
     );
     assert_eq!(why(close::UNLINKED, ""), "the agent was unlinked");
     assert_eq!(why(1011, "oops"), "closed (1011: oops)");
+}
+
+#[tokio::test]
+async fn work_available_wakes_the_projects_loop_and_is_not_answered() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let v = view(&["one"]);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v.clone(),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    read(&mut a).await; // snapshot
+    let signal = v.work.signal("one");
+    a.ws.send(Message::text(json!({ "type": "work_available" }).to_string()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), signal.notified())
+        .await
+        .expect("the loop was woken");
+    // No answer: the next thing sent is the answer to a command sent after it.
+    a.ws.send(Message::text(command("c1", "start_over", json!({})).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(read(&mut a).await["id"], "c1");
+    c.stop(Duration::from_secs(1)).await;
 }

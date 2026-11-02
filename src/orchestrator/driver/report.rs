@@ -4,7 +4,7 @@
 //! the store as `upsert_from_specs` (backlog.md section 6.4), and the items whose merge commits reached the
 //! default branch or production are sent as `landed` (section 6.5). Plain code: no model reads anything. A
 //! failure is only logged; the next fetch tries again.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ use serde_json::json;
 
 use super::{Links, ProjectLoop};
 use crate::backlog::Client;
+use crate::backlog::drafts::SpecsUpsert;
 use crate::config::DeployTarget;
 use crate::spec_items::{SPECS_DIR, check_spec_items};
 use crate::{lanes, smoke};
@@ -171,21 +172,22 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen) -> Result<String> {
         let id = item.id.clone();
         (item.depends_on).retain(|d| *d != id && (named.contains(d) || known.contains(d)));
     }
-    #[derive(Deserialize)]
-    struct Added {
-        added: Vec<String>,
-    }
     // No spec drafts are approved on this agent yet (spec-drafts), so none start `todo` and none has an asker.
-    let args = json!({ "commit": commit, "previous": previous, "items": items, "approved": [], "askedBy": {} });
-    let answer: Added = (ctx.client)
-        .op(ctx.repo, token, "upsert_from_specs", args, "upsert answer")
+    let added = (ctx.client)
+        .upsert_from_specs(
+            ctx.repo,
+            token,
+            &SpecsUpsert {
+                commit: &commit,
+                previous: previous.as_deref(),
+                items: &items,
+                approved: &[],
+                asked_by: &BTreeMap::new(),
+            },
+        )
         .await?;
     seen.sent_tree = Some(tree);
-    tracing::info!(
-        "sent the Items headers at {}: {} new",
-        short(&commit),
-        answer.added.len()
-    );
+    tracing::info!("sent the Items headers at {}: {} new", short(&commit), added.len());
     Ok("sent".into())
 }
 

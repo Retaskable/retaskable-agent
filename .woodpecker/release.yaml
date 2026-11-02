@@ -1,0 +1,41 @@
+# installers/03-the-bundle-agent-bundle.md section 3.18: Production's AppImage published by each deploy, a push to the
+# `production` branch only. Its own workflow with no `depends_on`: ci.yaml doesn't run on `production` (its commits
+# passed it on `main`), and Woodpecker drops a workflow whose dependency isn't in the pipeline.
+
+when:
+  - event: push
+    branch: production
+
+steps:
+  - name: publish
+    image: rust:1-bookworm
+    # Same cargo env and cache volumes as ci.yaml (see the notes there).
+    environment:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: /cargo-target
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "1"
+      RUST_MIN_STACK: "536870912"
+      CLOUDFLARE_API_TOKEN:
+        from_secret: cloudflare_r2_token
+      CLOUDFLARE_ACCOUNT_ID:
+        from_secret: cloudflare_account_id
+      MACOS_LINUX_PACKAGING:
+        from_secret: macos_linux_packaging
+    volumes:
+      - /var/cache/woodpecker/retaskable-agent-cargo-registry:/usr/local/cargo/registry
+      - /var/cache/woodpecker/retaskable-agent-target:/cargo-target
+    commands:
+      - apt-get update && apt-get install -y --no-install-recommends squashfs-tools
+      # The same version scheme as ci.yaml's bundle step, so each build is later than the one before it.
+      - MAJOR_MINOR=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\)\..*/\1/p' Cargo.toml | head -n 1)
+      - cargo run --release --bin bundle -- --target linux-x64 --environment production --version "$MAJOR_MINOR.$CI_PIPELINE_NUMBER"
+      # The bundle as an AppImage, start-checked (no FUSE here).
+      - cargo run --release --bin package -- --target linux-x64 --environment production
+      # Nothing is published until the `macos-linux-packaging` release flag is on (the secret set to `on`), as staging's.
+      - |
+        if [ "$MACOS_LINUX_PACKAGING" != "on" ]; then
+          echo "Release flag macos-linux-packaging is off: not publishing."
+          exit 0
+        fi
+        cargo run --release --bin upload-release -- --environment production

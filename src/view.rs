@@ -39,6 +39,8 @@ pub struct AgentView {
     pub paused: PauseState,
     /// Item commands (Continue) the connector's thread hands to the orchestrator loop.
     pub item_commands: ItemCommands,
+    /// Each project's `work_available` wake-up for its run loop.
+    pub work: crate::work_signal::WorkSignals,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -155,6 +157,8 @@ pub struct ProjectView {
     pub worktrees_dir: PathBuf,
     pub base_branch: String,
     pub galleries: Vec<GalleryConfig>,
+    /// Play main's command (`commands.rs`'s `play`).
+    pub play_command: String,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -167,6 +171,7 @@ impl From<&ProjectConfig> for ProjectView {
             worktrees_dir: PathBuf::from(&p.worktrees_dir),
             base_branch: p.base_branch.clone(),
             galleries: p.galleries.clone(),
+            play_command: p.play_command.clone(),
         }
     }
 }
@@ -284,6 +289,7 @@ mod tests {
             worktrees_dir: PathBuf::new(),
             base_branch: "main".into(),
             galleries: vec![],
+            play_command: String::new(),
         }
     }
 
@@ -298,6 +304,7 @@ mod tests {
             lane_sizes: LaneSizes::default(),
             paused: PauseState::default(),
             item_commands: Default::default(),
+            work: Default::default(),
         }
     }
 
