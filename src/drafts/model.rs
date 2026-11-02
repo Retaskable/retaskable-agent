@@ -30,6 +30,15 @@ pub struct Fix {
     pub spec_refs: Vec<String>,
 }
 
+/// One piece of the request as the drafter classed it. `kind` is `fix`, `tweak` or `feature`;
+/// missing or anything else means it couldn't be classified.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Piece {
+    pub title: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DrafterResult {
     pub status: DrafterStatus,
@@ -48,6 +57,9 @@ pub struct DrafterResult {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub fixes: Vec<Fix>,
+    /// Every piece with its kind, when the drafter lists them (`sort_fixes` asks about any it couldn't class).
+    #[serde(default)]
+    pub pieces: Vec<Piece>,
     /// As the drafter wrote it; [`checked_breakdown`] decides what's kept.
     #[serde(default)]
     pub breakdown: Option<Value>,

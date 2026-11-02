@@ -216,7 +216,7 @@ pub fn is_signed_out(ok: bool, error: Option<&str>, engine: Option<&str>) -> boo
 }
 
 /// What a session did, following `engine.ts`'s `SessionResult`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SessionResult {
     pub ok: bool,
     /// The `result` event's `subtype` (e.g. "success", "error_during_execution"), or "exited"

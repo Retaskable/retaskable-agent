@@ -15,7 +15,7 @@ pub struct Playtest {
 }
 
 /// One entry of `questions` (schemas.ts): a short, self-contained question with suggested options.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Question {
     #[serde(default)]
     pub header: String,
