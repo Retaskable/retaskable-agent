@@ -294,6 +294,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         backlog_url: &backlog::url(env),
         keychain: &keychain,
         paused: &view.paused,
+        work: &view.work,
         live: &live,
         guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
         machine: link::machine_name(env),
@@ -384,6 +385,7 @@ fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &
         chore_lane: cfg.machine.chore_lane,
         lane_sizes: lane_pool::LaneSizes::default(),
         paused: view::PauseState::default(),
+        work: Default::default(),
     }
 }
 

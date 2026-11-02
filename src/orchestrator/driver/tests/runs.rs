@@ -186,8 +186,15 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
     pass(&mut rig, &starter, t0 + Duration::from_secs(61)).await;
     assert_eq!(
         script.lock().unwrap().args("run_take").len(),
+        2,
+        "a beat doesn't end the wait"
+    );
+    rig.machine.links.work.wake(&rig.machine.projects[0].id);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(62)).await;
+    assert_eq!(
+        script.lock().unwrap().args("run_take").len(),
         3,
-        "the minute's pass asks again"
+        "work_available asks again in the same pass"
     );
 
     let claim = rig
@@ -257,6 +264,31 @@ async fn a_finished_run_sends_its_end_and_frees_its_lane_and_refusals_are_handle
     assert_eq!(done(&script.lock().unwrap()).len(), 3);
     pass(&mut rig, &starter, t0 + Duration::from_secs(190)).await;
     assert_eq!(done(&script.lock().unwrap()).len(), 3, "a stale run is dropped");
+}
+
+#[tokio::test]
+async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([Value::Null, run("b1", "build")]);
+    pass(&mut rig, &starter, t0).await;
+    let m = &mut rig.machine;
+    let shared = Shared {
+        links: &m.links,
+        claim_paused_until: &mut None,
+        claude_signed_out_until: &mut None,
+        stopping: false,
+    };
+    let started = m.projects[0]
+        .run_take_piece(&mut m.pool, &starter, &shared, "piece-b1", t0)
+        .await;
+    assert!(started);
+    assert_eq!(starter.started(), vec!["b1"]);
+    let takes = script.lock().unwrap().args("run_take");
+    assert_eq!(takes[1]["piece"], "piece-b1");
+    assert!(takes[1].get("kinds").is_none());
+    assert!(takes[1]["agent"]["machine"].is_string());
 }
 
 /// A machine in `runs` mode: `run_passes` drives the run loop, and the claim loop never runs.
