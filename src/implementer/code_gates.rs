@@ -48,7 +48,7 @@ static ANCHOR: LazyLock<Regex> = LazyLock::new(|| {
 static SPEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|/)specs/([^/]+/)?[^/]+\.md$").unwrap());
 static HUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@").unwrap());
 static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{2,3}) ").unwrap());
-static FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ {0,3}(```|~~~)").unwrap());
+pub(crate) static FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ {0,3}(```|~~~)").unwrap());
 
 pub fn is_source(file: &str) -> bool {
     SOURCE.is_match(file) && !SKIPPED.is_match(file)
