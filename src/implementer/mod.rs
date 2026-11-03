@@ -22,6 +22,7 @@
 //! handling of `nothing_left`/`person_steps`/`waits_on` (`classify` there sends all three to a person
 //! today). A `pr_opened` answer is gated by [`code_gates::run`] there: a finding resumes the session
 //! (counting against `max_check_rounds`, then a person), and gates that can't run are noted.
+pub mod abandon;
 pub mod code_gates;
 pub mod model;
 pub mod prompt;

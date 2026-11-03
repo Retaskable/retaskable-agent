@@ -11,6 +11,7 @@
 //! pure and returns actions; the caller applies each one itself (`apply`), or none of them (the dry driver). What's deliberately left out:
 //! actually starting a session (implementer-session), and the pause flag's real source (today it's
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`).
+pub mod draft_host;
 pub mod driver;
 pub mod fresh_start;
 pub mod guard;

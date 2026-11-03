@@ -155,6 +155,18 @@ pub struct StartRequest {
     /// Every item the store listed, for a fresh session's **Items not built yet** list (and the later
     /// check of its `waitsOn` against it).
     pub items: Vec<Item>,
+    /// How many times a person started this slice over: the branch is `…-s<slice>-r<attempt>` above 0.
+    pub attempt: u32,
+    /// A Start over's notes, for the fresh session's first prompt as notes from the last attempt.
+    pub notes: Option<String>,
+}
+
+/// What [`SessionStarter::abandon`] lets go of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Abandon {
+    pub project: String,
+    pub branch: Option<String>,
+    pub pr_url: Option<String>,
 }
 
 /// How `ProjectLoop::launch` starts an implementer session.
@@ -166,6 +178,9 @@ pub(super) enum Launch {
     /// A session that ran out of turns or had grown too large: a fresh session id, reusing the existing lane
     /// as-is, with this text as the picking-up prompt.
     Continuing(String),
+    /// A person's Start over: a fresh session in a freshly prepared lane on the new attempt's branch, with these
+    /// notes (if any) in its first prompt.
+    StartOver(Option<String>),
 }
 
 /// Runs the sessions and steps for the work the loop schedules. Built in a later piece (implementer-session and
@@ -178,6 +193,11 @@ pub trait SessionStarter: Send + Sync {
     fn start(&self, request: StartRequest) -> Result<(), String>;
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
+    /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
+    /// no PR. A slice that was merged is never touched. An `Err` stops the Start over, leaving the item as it is.
+    fn abandon(&self, _old: Abandon) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
     /// The item's next step for its state (`steps::has_step`, except `implementing`, whose step is its session),
     /// run as its own task: the run as the step left it. `None` when no step is built for that state yet: the item
     /// waits where it is, and the loop asks again on its next wake.
@@ -260,10 +280,14 @@ pub struct ProjectLoop {
     max_resume_context_tokens: u32,
     /// Continues waiting for a free lane (`item_commands.rs`).
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
+    /// Start overs waiting for a free lane (`item_commands.rs`).
+    pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
     pub(super) last_lane: BTreeMap<String, u32>,
     /// The games running in lanes (`play { lane }`), by lane, with the item each lane was held for.
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
+    /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
+    pub(super) draft: Option<super::drafts::RunningDraft>,
 }
 
 impl ProjectLoop {
@@ -304,8 +328,10 @@ impl ProjectLoop {
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
+            starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
+            draft: None,
         }
     }
 
@@ -551,6 +577,15 @@ impl ProjectLoop {
     /// Writes the item's run into its record: its state now, `lane`, its branch and slice, `session` and
     /// `context_tokens` (the implementer session's id and its last known size). Does nothing for an item with
     /// no lease. Call `save_leases` after.
+    /// The item's Start over attempt on its current slice: 0 until a person starts it over.
+    pub(super) fn attempt_of(&self, item_id: &str) -> u32 {
+        let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
+        self.records
+            .get(item_id)
+            .filter(|r| r.slice == slice)
+            .map_or(0, |r| r.attempt)
+    }
+
     pub(super) fn remember(
         &mut self,
         item_id: &str,
@@ -565,13 +600,15 @@ impl ProjectLoop {
             return;
         }
         let session = session.or_else(|| self.records.get(item_id).and_then(|r| r.impl_session_id.clone()));
+        let attempt = self.attempt_of(item_id);
         let record = RunRecord {
             state: state_name(run.state).into(),
             lane,
             impl_session_id: session,
-            branch: Some(branch_name(item)),
+            branch: Some(branch_name(item, attempt)),
             slice: run.slice,
             impl_context_tokens: context_tokens,
+            attempt,
         };
         self.records.insert(item_id.to_string(), record);
     }
@@ -644,10 +681,15 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        let mut notes = None;
         let (resume, follow_up) = match kind {
             Launch::Fresh => (None, None),
             Launch::Resume(session_id) => (Some(session_id), None),
             Launch::Continuing(follow_up) => (None, Some(follow_up)),
+            Launch::StartOver(text) => {
+                notes = text;
+                (None, None)
+            }
         };
         let session_id = resume.clone().unwrap_or_else(new_session_id);
         // A resumed session keeps its last known size; a fresh or picking-up one starts with none of its own yet.
@@ -669,6 +711,8 @@ impl ProjectLoop {
             usage: self.store.usage(),
             follow_up,
             items: self.items.values().cloned().collect(),
+            attempt: self.attempt_of(item_id),
+            notes,
         };
         match starter.start(request) {
             Ok(()) => {

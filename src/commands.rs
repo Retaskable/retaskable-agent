@@ -4,13 +4,13 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **Continue** (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
+//! So far this runs **Continue** and **Start over** (`retry`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
 //! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
-//! `orchestrator::driver::lane_play`) and **draft_files** (answered live from the draft's worktree). Start over is not built yet. Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`) and **draft_files** (answered live from the draft's worktree). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -109,7 +109,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "shoot" => shoot(cmd, project, view, data_dir),
-        "continue" => continue_item(cmd, project, view, data_dir),
+        "continue" => item_command(cmd, project, view, data_dir, false),
+        "retry" => item_command(cmd, project, view, data_dir, true),
         "play" | "stop" => play(cmd, project, view),
         "draft_files" => draft_files(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
@@ -167,13 +168,15 @@ fn save_pictures(args: &Value, data_dir: &Path) -> Result<Vec<std::path::PathBuf
     Ok(paths)
 }
 
-/// **Continue** (`continue { id, notes?, pictures? }`): saves the pictures, adds their paths after the notes, and
-/// queues the command for the orchestrator loop (`orchestrator::driver::item_commands`), which carries it out on its
-/// next pass. Refused outside `claim` mode, the only mode that runs sessions.
-fn continue_item(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+/// **Continue** (`continue { id, notes?, pictures? }`) and **Start over** (`retry`, same arguments): saves the
+/// pictures, adds their paths after the notes, and queues the command for the orchestrator loop
+/// (`orchestrator::driver::item_commands`), which carries it out on its next pass. Refused outside `claim` mode,
+/// the only mode that runs sessions.
+fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path, start_over: bool) -> Value {
     let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
     if id.is_empty() {
-        return nack(&cmd.id, "Continue needs the item's id.".into());
+        let what = if start_over { "Start over" } else { "Continue" };
+        return nack(&cmd.id, format!("{what} needs the item's id."));
     }
     if !view.item_commands.claim() {
         return nack(
@@ -196,10 +199,15 @@ fn continue_item(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path
         notes.push_str(if notes.is_empty() { "Picture: " } else { "\nPicture: " });
         notes.push_str(&path.display().to_string());
     }
-    view.item_commands.push(ItemCommand::Continue {
-        project: project.to_string(),
-        item: id.to_string(),
-        notes: (!notes.is_empty()).then_some(notes),
+    let (project, item, notes) = (
+        project.to_string(),
+        id.to_string(),
+        (!notes.is_empty()).then_some(notes),
+    );
+    view.item_commands.push(if start_over {
+        ItemCommand::StartOver { project, item, notes }
+    } else {
+        ItemCommand::Continue { project, item, notes }
     });
     ack(&cmd.id)
 }
@@ -716,6 +724,51 @@ mod tests {
             panic!("not a continue")
         };
         assert_eq!(notes, None);
+    }
+
+    #[test]
+    fn retry_queues_start_over_with_the_same_checks_and_pictures() {
+        let v = claiming();
+        let run = |args| {
+            run(
+                &cmd("retry", args),
+                "one",
+                &mut Seen::default(),
+                &v,
+                &|_| {},
+                &data_dir(),
+            )
+        };
+        assert_eq!(run(json!({ "id": "a", "notes": " Go again. " }))["type"], "ack");
+        assert_eq!(
+            v.item_commands.take("one"),
+            vec![ItemCommand::StartOver {
+                project: "one".into(),
+                item: "a".into(),
+                notes: Some("Go again.".into())
+            }]
+        );
+        assert!(
+            run(json!({ "id": " " }))["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Start over")
+        );
+        assert_eq!(run(json!({ "id": "a", "pictures": [picture(10)] }))["type"], "ack");
+        let ItemCommand::StartOver { notes, .. } = v.item_commands.take("one").remove(0) else {
+            panic!()
+        };
+        assert!(notes.unwrap().starts_with("Picture: "));
+        let off = view();
+        let answer = super::run(
+            &cmd("retry", json!({ "id": "a" })),
+            "one",
+            &mut Seen::default(),
+            &off,
+            &|_| {},
+            &data_dir(),
+        );
+        assert_eq!(answer["type"], "nack");
     }
 
     #[test]

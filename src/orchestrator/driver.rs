@@ -17,7 +17,9 @@
 //! is how work the loop started comes back to it; [`playtest_round`] is a project's try-out grouping round,
 //! started in the background after each full pass for the live, unpaused projects whose read succeeded and
 //! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
-//! the site's item commands (Continue) that the connector queued.
+//! the site's item commands (Continue) that the connector queued; [`drafts`] is a project's spec draft, one at a time,
+//! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused.
+mod drafts;
 mod item_commands;
 mod lane_play;
 mod machine;
@@ -27,9 +29,12 @@ mod report;
 mod runs;
 mod settle;
 
+pub use drafts::{DraftHost, DraftJob};
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
 use project::Launch;
-pub use project::{LanePlay, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode};
+pub use project::{
+    Abandon, LanePlay, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
+};
 pub use runs::{BEAT_EVERY, RunEnd, RunEndSender, RunLoop, RunRequest, RunStarter};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 

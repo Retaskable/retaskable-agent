@@ -55,6 +55,12 @@ pub enum ItemCommand {
         item: String,
         notes: Option<String>,
     },
+    /// **Start over** on a stopped item: the slice starts again on a new branch, `notes` in its first prompt.
+    StartOver {
+        project: String,
+        item: String,
+        notes: Option<String>,
+    },
     /// **Play** in lane `lane` (> 0), decided by the loop, which owns the lanes.
     Play { project: String, lane: u32 },
     /// **Stop** the game in lane `lane`.
@@ -64,7 +70,10 @@ pub enum ItemCommand {
 impl ItemCommand {
     fn project(&self) -> &str {
         match self {
-            Self::Continue { project, .. } | Self::Play { project, .. } | Self::Stop { project, .. } => project,
+            Self::Continue { project, .. }
+            | Self::StartOver { project, .. }
+            | Self::Play { project, .. }
+            | Self::Stop { project, .. } => project,
         }
     }
 }
