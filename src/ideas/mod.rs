@@ -17,8 +17,8 @@
 //! store's rows, [`gather_live`] for the live titles (done items, newest PR merge first) and
 //! [`profiles_for`] for the store's audiences (starter set when it has none).
 //!
-//! Still not wired to anything: there's no daily chore that calls [`run_round`] after a merge (needs
-//! the orchestrator loop's locks, so two computers don't run a round at once), no command that calls
+//! `orchestrator::driver::ideas_round` runs one round under the [`IDEAS_LOCK`] lock (so two computers don't
+//! think at once), reading the store and sending `ideas_round`. Still not wired to anything: nothing schedules it (no daily chore, no command that asks for one), no command that calls
 //! [`Ideas::answer`] for Accept/Not now/Never, and nothing calls the context builders yet but tests ([`build_prompt`]
 //! still takes `context` already built). Accept's draft-writing needs the spec-drafts item; person-added ideas
 //! (shared-ideas.md) need their own queue (a `StoreIdea` with `addedBy` set), not ported here.
@@ -27,6 +27,9 @@
 //! [`refilled`]'s fold, `profiles` is the user types and the prompt builder, `store` reads and writes
 //! the shared backlog's own copy of the queue, and `write` runs the session and picks the round.
 //! `test_support` is shared fixtures for this module's own tests.
+/// The store's `chore_lock` name for a round (`IDEAS_LOCK`, shared/storeIdeas.ts).
+pub const IDEAS_LOCK: &str = "ideas";
+
 mod context;
 mod model;
 mod profiles;
