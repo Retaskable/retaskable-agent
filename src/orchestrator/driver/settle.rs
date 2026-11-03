@@ -67,8 +67,8 @@ pub struct SessionOutcome {
     /// Lines for the item's timeline (the code gates' note, 06.2-implementer.md), logged as the session's
     /// end settles.
     pub notes: Vec<String>,
-    /// The id of the fresh session the job restarted in after running out of turns; kept on the item's record
-    /// so a later restart resumes that one.
+    /// The id of a new session this one carried on in (a send-back to one that had grown too large, or a
+    /// restart after running out of turns), saved instead of the old one. `None` when the session kept its id.
     pub session_id: Option<String>,
 }
 
@@ -274,10 +274,15 @@ impl ProjectLoop {
             );
             return;
         };
-        if let Some(tokens) = outcome.context_tokens
-            && let Some(record) = self.records.get_mut(&item)
-        {
-            record.impl_context_tokens = Some(tokens);
+        if let Some(record) = self.records.get_mut(&item) {
+            // A fresh session replaces the old one: its id is saved, and its size starts from none.
+            if let Some(id) = outcome.session_id.clone() {
+                record.impl_session_id = Some(id);
+                record.impl_context_tokens = None;
+            }
+            if let Some(tokens) = outcome.context_tokens {
+                record.impl_context_tokens = Some(tokens);
+            }
         }
         if let Some(id) = outcome.session_id.clone()
             && let Some(record) = self.records.get_mut(&item)

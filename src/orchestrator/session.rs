@@ -46,6 +46,8 @@ pub struct ClaudeStarter {
     env: Env,
     max_turns: u32,
     models: ModelsConfig,
+    /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
+    max_resume_context_tokens: u32,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     running: Arc<AtomicU32>,
 }
@@ -58,6 +60,7 @@ impl ClaudeStarter {
         env: Env,
         max_turns: u32,
         models: ModelsConfig,
+        max_resume_context_tokens: u32,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -66,6 +69,7 @@ impl ClaudeStarter {
             env,
             max_turns,
             models,
+            max_resume_context_tokens,
             running: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -121,6 +125,7 @@ impl SessionStarter for ClaudeStarter {
             item,
             usage,
             models: self.models,
+            max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             resume,
             follow_up,
@@ -236,6 +241,7 @@ struct Job {
     /// The latest `state.usage` reading, for picking the implementer's model tier.
     usage: Option<Value>,
     models: ModelsConfig,
+    max_resume_context_tokens: u32,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
     resume: bool,
@@ -259,11 +265,9 @@ pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
 const INTERRUPTED: &str = "You were interrupted. Continue from where you left off, then return the result.";
 
-/// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
-/// slice over.
-pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
-    let slug: String = item
-        .title
+/// A title as a branch-name slug: lowercase words joined by `-`, at most 40 characters.
+fn title_slug(title: &str) -> String {
+    let slug: String = title
         .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -272,17 +276,26 @@ pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
         .chars()
         .take(40)
         .collect();
+    slug.trim_end_matches('-').to_string()
+}
+
+/// A piece's branch: `retaskable/<piece id>-<slug of the title>` (pieces.md: one branch per piece, kept for its
+/// `fix` runs).
+#[allow(dead_code)] // the piece runs call it
+pub(super) fn piece_branch_name(piece_id: &str, title: &str) -> String {
+    format!("retaskable/{piece_id}-{}", title_slug(title))
+}
+
+/// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
+/// slice over.
+pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
+    let slug = title_slug(&item.title);
     let retry = if attempt > 0 {
         format!("-r{attempt}")
     } else {
         String::new()
     };
-    format!(
-        "retaskable/{}-{}-s{}{retry}",
-        item.id,
-        slug.trim_end_matches('-'),
-        item.slice
-    )
+    format!("retaskable/{}-{}-s{}{retry}", item.id, slug, item.slice)
 }
 
 /// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at
@@ -293,8 +306,8 @@ async fn attempt(
     job: &Job,
     cwd: &Path,
     start: Start<'_>,
+    session_id: &str,
     fresh: bool,
-    sid: &str,
     name: String,
     where_to_start: &str,
 ) -> Result<Attempt> {
@@ -313,7 +326,6 @@ async fn attempt(
         attempt: attempt_no,
         ..
     } = job;
-    let session_id = &sid.to_string();
     let now = crate::telemetry::now_ms() / 1000;
     let tier = implementer_tier(usage.as_ref(), now, models);
     let model = implementer_model(tier, item).to_string();
@@ -344,7 +356,7 @@ async fn attempt(
         start,
     )?;
     if fresh {
-        spec.start = SessionStart::Fresh(session_id.clone());
+        spec.start = SessionStart::Fresh(session_id.to_string());
     }
     let sink = TranscriptSink {
         path: paths::run_dir(data_dir, project_id, &item.id).join(name),
@@ -376,7 +388,7 @@ struct Attempt {
 
 /// What `run` returns: the result, the stream's usage reading, the session's last context size and the lines
 /// for the item's timeline (the code gates' notes).
-/// and the id of the fresh session the job restarted in after running out of turns, if it did.
+/// and the id of the fresh session the job carried on in, if it did.
 type Ran = (SessionResult, Option<Value>, Option<u64>, Vec<String>, Option<String>);
 
 fn ran_out_of_turns(a: &Attempt) -> bool {
@@ -430,7 +442,8 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
 async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
     let mut notes = Vec::new();
     let mut rounds = 0;
-    let mut sid = job.session_id.clone();
+    let mut current = job.session_id.clone();
+    let mut started_fresh = false;
     let mut restarted = false;
     loop {
         // Out of turns (06.2-implementer.md "Fresh-start rules on resume"): once per job, a fresh session
@@ -444,15 +457,16 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
                     a.usage,
                     a.context_tokens,
                     notes,
-                    Some(sid),
+                    Some(current),
                 ));
             }
             restarted = true;
-            sid = new_session_id();
+            started_fresh = true;
+            current = new_session_id();
             notes.push(FreshStart::OutOfTurns.history_line());
             let prompt = picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP);
             let start = Start::Continuing { follow_up: &prompt };
-            a = attempt(job, cwd, start, true, &sid, format!("{sid}.jsonl"), "").await?;
+            a = attempt(job, cwd, start, &current, true, format!("{current}.jsonl"), "").await?;
             continue;
         }
         if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
@@ -487,17 +501,37 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
                 usage,
                 context_tokens,
                 notes,
-                restarted.then_some(sid),
+                started_fresh.then_some(current),
             ));
         }
         let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
-        let start = Start::Resume {
-            session_id: sid.clone(),
-            follow_up: &follow_up,
-            decisions: &[],
+        // A session past `maxResumeContextTokens` isn't resumed: a fresh one picks the branch up in the same lane,
+        // and its size starts from none (06.2-implementer.md "Fresh-start rules on resume").
+        a = match a
+            .context_tokens
+            .filter(|t| *t > u64::from(job.max_resume_context_tokens))
+        {
+            Some(tokens) => {
+                notes.push(FreshStart::Grown(tokens).history_line());
+                let id = new_session_id();
+                let prompt = picking_up_prompt(false, &job.project.base_branch, &follow_up);
+                let start = Start::Continuing { follow_up: &prompt };
+                let name = format!("{id}.jsonl");
+                let next = attempt(job, cwd, start, &id, true, name, "").await?;
+                current = id;
+                started_fresh = true;
+                next
+            }
+            None => {
+                let start = Start::Resume {
+                    session_id: current.clone(),
+                    follow_up: &follow_up,
+                    decisions: &[],
+                };
+                let name = format!("{current}-resumed-{}.jsonl", now_ms());
+                attempt(job, cwd, start, &current, false, name, "").await?
+            }
         };
-        let name = format!("{sid}-resumed-{}.jsonl", now_ms());
-        a = attempt(job, cwd, start, false, &sid, name, "").await?;
     }
     let titles = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
@@ -539,7 +573,7 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
         }
     }
     ran.3 = notes;
-    ran.4 = restarted.then_some(sid);
+    ran.4 = started_fresh.then_some(current);
     Ok(ran)
 }
 
@@ -557,7 +591,7 @@ async fn run(job: Job) -> Result<Ran> {
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
         };
-        let a = attempt(&job, &cwd, start, true, &job.session_id, name, "").await?;
+        let a = attempt(&job, &cwd, start, &job.session_id, true, name, "").await?;
         return gated(&job, &cwd, a).await;
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
@@ -594,7 +628,7 @@ async fn run(job: Job) -> Result<Ran> {
             let base_ref = format!("origin/{}", job.project.base_branch);
             start_files::render(&start_files::build(crate::git_bin::program(), &cwd, &base_ref, &job.item).await)
         };
-        let a = attempt(&job, &cwd, start, !resumed, &job.session_id, name, &where_to_start).await?;
+        let a = attempt(&job, &cwd, start, &job.session_id, !resumed, name, &where_to_start).await?;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
         // same id starts a fresh one, as `implement` in `steps.ts` does on "No conversation found".
         if resumed && matches!(&a.answer, Err(e) if format!("{e:#}").contains("No conversation found")) {

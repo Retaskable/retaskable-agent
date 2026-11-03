@@ -52,6 +52,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         env,
         50,
         ModelsConfig::default(),
+        150_000,
     );
     Rig {
         _dir: dir,
@@ -662,6 +663,7 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         rig.starter.env.clone(),
         50,
         ModelsConfig::default(),
+        150_000,
     )
 }
 
@@ -774,6 +776,35 @@ async fn an_attempt_that_runs_out_of_turns_is_followed_by_a_fresh_session_in_the
 }
 
 #[cfg(unix)]
+const BIG_SESSION: &str = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":%N%,"cache_creation_input_tokens":0}}}
+{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"session_id":"s"}"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_send_back_to_a_grown_session_starts_a_fresh_one_with_the_findings() {
+    let rig = gated_rig(&[COMMIT_BIG, FIX]);
+    std::fs::write(rig.root.join("out.jsonl"), BIG_SESSION.replace("%N%", "200000")).unwrap();
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    let new = got.session_id.expect("the new session's id");
+    assert_ne!(new, "sess-1");
+    let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
+    let second = args.lines().nth(1).unwrap();
+    assert!(second.contains(&format!("--session-id {new}")), "{second}");
+    assert!(!second.contains("--resume"), "{second}");
+    let prompt = std::fs::read_to_string(rig.root.join("prompt2.txt")).unwrap();
+    assert!(prompt.starts_with("You're picking up"), "{prompt}");
+    assert!(prompt.contains("big.rs"), "{prompt}");
+    assert!(
+        got.notes
+            .iter()
+            .any(|n| n == "Its session had grown to 201000 tokens; starting a fresh one"),
+        "{:?}",
+        got.notes
+    );
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn two_attempts_in_a_row_that_run_out_of_turns_need_a_person() {
     let rig = gated_rig(&[OUT_OF_TURNS, OUT_OF_TURNS]);
@@ -801,6 +832,17 @@ async fn a_send_back_that_runs_out_of_turns_also_restarts_fresh() {
         prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
         "{prompt}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_send_back_to_a_session_under_the_limit_still_resumes_it() {
+    let rig = gated_rig(&[COMMIT_BIG, FIX]);
+    std::fs::write(rig.root.join("out.jsonl"), BIG_SESSION.replace("%N%", "1000")).unwrap();
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.session_id, None);
+    let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
+    assert!(args.lines().nth(1).unwrap().contains("--resume sess-1"), "{args}");
 }
 
 fn git_in(rig: &Rig, args: &[&str]) -> String {
@@ -884,4 +926,12 @@ async fn a_start_over_session_is_on_the_attempts_branch_with_the_notes_in_its_fi
     assert!(args.contains("Use the other API."), "{args}");
     assert_eq!(branch_name(&item(&[], None), 0), branch());
     assert!(branch().ends_with("-s2"));
+}
+
+#[test]
+fn a_piece_branch_is_its_id_and_the_title_slug() {
+    assert_eq!(
+        piece_branch_name("p7", "Build the implementer's prompt!"),
+        "retaskable/p7-build-the-implementer-s-prompt"
+    );
 }

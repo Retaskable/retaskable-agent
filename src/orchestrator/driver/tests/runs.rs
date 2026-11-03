@@ -46,6 +46,7 @@ async fn store() -> (String, Shared_) {
                     "runs_drop" if s.drop_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
                     "run_take" => ok(s.takes.pop_front().unwrap_or(Value::Null)),
                     "run_beat" => ok(s.beat.clone()),
+                    "lock_take" => ok(json!({ "held": true, "token": "L1" })),
                     "run_done" if s.done_refused.is_some() => {
                         let code = s.done_refused.unwrap();
                         refuse(StatusCode::CONFLICT, code)
@@ -366,4 +367,31 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
     assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["a"] })]);
     drop(s);
     assert_no_item_keys(&rig);
+}
+
+#[tokio::test]
+async fn a_worker_takes_a_lock_through_its_context_and_the_next_beat_sends_its_token() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Watch]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([run("w1", "watch")]);
+    script.lock().unwrap().beat = json!({});
+    pass(&mut rig, &starter, t0).await;
+
+    let ctx = starter.started.lock().unwrap()[0].context.clone();
+    assert_eq!(ctx.project, rig.machine.projects[0].id);
+    let got = ctx
+        .client
+        .lock_take(ctx.repo, Some(&ctx.token), "merge-main", Some("piece"))
+        .await
+        .unwrap();
+    let crate::backlog::runs::LockTake::Held(lock) = got else {
+        panic!("{got:?}")
+    };
+    ctx.locks.add(&lock, "merge-main", t0);
+    assert!(ctx.locks.held("L1"));
+
+    pass(&mut rig, &starter, t0 + Duration::from_secs(61)).await;
+    let beats = script.lock().unwrap().args("run_beat");
+    assert_eq!(beats.last().unwrap()["tokens"], json!(["w1", "L1"]));
 }

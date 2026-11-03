@@ -44,6 +44,15 @@ impl DraftHost for Host {
         })
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+        Ok(())
+    }
+    fn rebase(&self, _: &ProjectConfig, _: &str, _: &str) -> Result<bool> {
+        Ok(true)
+    }
+    fn fetch(&self, _: &ProjectConfig) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A store whose `draft_claim_next` hands out `draft` once; every op is recorded.
