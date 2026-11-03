@@ -18,7 +18,7 @@ use crate::orchestrator::fresh_start::LIMIT_PAUSE;
 use crate::telemetry::{Event, event};
 use crate::triage::record::needs_human_facts;
 use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, wants_triage};
-use crate::triage::{RetaskableBug, TriageContext, TriageDecision};
+use crate::triage::{TriageContext, TriageDecision};
 
 /// Failed looks at one stop before the item waits for a person with a note.
 const MAX_FAILED_LOOKS: u32 = 3;
@@ -56,8 +56,8 @@ pub enum TriageEnd {
         decision: TriageDecision,
         reason: String,
         steps: Vec<String>,
-        /// The Retaskable bug the triager named, whatever its decision.
-        bug: Option<RetaskableBug>,
+        /// A bug in Retaskable itself the triager named, whatever its decision (06.9 bullet 18).
+        bug: Option<crate::triage::RetaskableBug>,
     },
     Failed {
         note: String,
@@ -107,7 +107,7 @@ impl ProjectLoop {
         room: &mut u32,
         shared: &Shared<'_>,
     ) {
-        self.bug_notes_in();
+        self.bug_answers();
         // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
         self.triage_flag = self.flags.on("triage-session").await;
         if !self.triage_flag
@@ -148,9 +148,7 @@ impl ProjectLoop {
             let Some(mut context) = self.triage_context(&id, std::path::Path::new("")) else {
                 continue;
             };
-            if let Some((link, _)) = &self.bugs {
-                context.known_bugs = link.known();
-            }
+            context.known_bugs = self.known_bugs();
             let lane = pool.lane_of(&self.id, &id);
             self.triaging.insert(id.clone());
             self.look_note(&id, "Claude is looking into it".into());
@@ -197,7 +195,7 @@ impl ProjectLoop {
         );
         match end {
             TriageEnd::Found { reason, steps, bug, .. } => {
-                self.report_bug(item_id, bug.as_ref(), shared);
+                self.report_bug(item_id, bug.as_ref(), shared.links);
                 // Every decision is left to a person for now (`human`), so nothing is lost: the reason and any
                 // steps are listed under the item's.
                 let mut text = format!("Claude looked into it: {reason}");

@@ -344,16 +344,19 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
-        bug_links: cfg
-            .projects
-            .iter()
-            .filter_map(|p| {
-                let id = p.id_or_derived();
-                let link = connectors.iter().find_map(|c| c.bug_link(&id))?;
-                let version = connector::bug_link::bug_version(build, version, Path::new(&p.repo_path));
-                Some((id, (link, version)))
+        // The agent's own cloud is the first one linked.
+        bug_links: connectors
+            .first()
+            .map(|c| {
+                (cfg.projects.iter())
+                    .filter_map(|p| {
+                        let id = p.id_or_derived();
+                        Some((id.clone(), c.bug_link(&id)?))
+                    })
+                    .collect()
             })
-            .collect(),
+            .unwrap_or_default(),
+        bug_version: connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default()),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,

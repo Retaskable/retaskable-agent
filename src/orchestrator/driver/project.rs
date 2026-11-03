@@ -13,95 +13,23 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::Shared;
+pub use super::mode::{MODE_VAR, OrchestratorMode};
 use super::report;
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
-use crate::env::Env;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::fresh_start::{FreshStart, fresh_for_engine};
 use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::{LiveHandle, now_iso8601};
+use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepRequest, state_name};
-use crate::orchestrator::{Action, ProjectRuns, apply, decide};
+use crate::orchestrator::{Action, ProjectRuns, apply, decide, tick_payload};
 use crate::store::{RunRecord, Store};
-use crate::telemetry::{Event, EventLog, Telemetry, event};
-
-/// The variable that switches the orchestrator on.
-pub const MODE_VAR: &str = "RETASKABLE_ORCHESTRATOR";
-
-/// What the orchestrator may do. Off by default, so installing a build never starts it by surprise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OrchestratorMode {
-    /// Nothing runs.
-    #[default]
-    Off,
-    /// Reads the backlog and writes `tick` events saying what a tick would do. Takes no action.
-    Dry,
-    /// Claims work and applies starts, but only with a [`SessionStarter`] and while the port guard
-    /// (`guard.rs`) sees no other agent on this computer. With no starter it behaves exactly like `Dry`.
-    Claim,
-    /// Takes work as short runs on pieces (pieces.md section 3), with the same port guard as `claim`. The kinds
-    /// it can take are the [`RunStarter`](super::RunStarter)s it is given; with none it drops old runs and asks for nothing.
-    Runs,
-}
-
-impl OrchestratorMode {
-    /// The mode `RETASKABLE_ORCHESTRATOR` names (`off`, `dry`, `claim` or `runs`, any case), and a warning
-    /// for a value that is none of them, which counts as `off`.
-    pub fn from_env(env: &Env) -> (Self, Option<String>) {
-        let Some(raw) = env.get(MODE_VAR) else {
-            return (Self::Off, None);
-        };
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" => (Self::Off, None),
-            "dry" => (Self::Dry, None),
-            "claim" => (Self::Claim, None),
-            "runs" => (Self::Runs, None),
-            other => (
-                Self::Off,
-                Some(format!(
-                    "{MODE_VAR}={other:?} isn't off, dry, claim or runs, so the orchestrator stays off."
-                )),
-            ),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Dry => "dry",
-            Self::Claim => "claim",
-            Self::Runs => "runs",
-        }
-    }
-
-    /// Reads the mode and logs it once, with the warning or the note that `claim` isn't built.
-    pub fn read_and_log(env: &Env) -> Self {
-        let (mode, warning) = Self::from_env(env);
-        if let Some(w) = warning {
-            tracing::warn!("{w}");
-        }
-        match mode {
-            Self::Off => {
-                tracing::info!("orchestrator: off (set {MODE_VAR}=dry to read the backlog and log what it would do)")
-            }
-            Self::Dry => {
-                tracing::info!("orchestrator: dry (reads the backlog, logs tick events, never claims or starts work)")
-            }
-            Self::Claim => tracing::warn!(
-                "orchestrator: claim (claims work only once a session runner is given; until then it runs dry)"
-            ),
-            Self::Runs => tracing::info!(
-                "orchestrator: runs (takes work as short runs of the kinds it can run; with none it only drops old runs)"
-            ),
-        }
-        mode
-    }
-}
+use crate::telemetry::events::parse_iso_ms;
+use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
 
 /// What one pass of a project's loop did.
 #[derive(Debug, Clone, PartialEq)]
@@ -314,10 +242,10 @@ pub struct ProjectLoop {
     pub(super) triaging: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
-    /// The project's hub connection's bug-report link and the version a report names (`triage_bug.rs`).
+    /// This project's hub connection for reporting Retaskable's bugs, and the version it reports (`triage_bug.rs`).
     pub(super) bugs: Option<(Arc<crate::connector::bug_link::BugLink>, String)>,
-    /// Timeline lines for bug reports answered since the last pass: (item id, line).
-    pub(super) bug_notes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Where a sent bug's answer comes back to the loop, with the item it was for.
+    pub(super) bug_answers: super::triage_bug::Answers,
 }
 
 impl ProjectLoop {
@@ -368,7 +296,7 @@ impl ProjectLoop {
             triaging: Default::default(),
             triage_flag: false,
             bugs: None,
-            bug_notes: Default::default(),
+            bug_answers: Default::default(),
         }
     }
 
@@ -398,9 +326,9 @@ impl ProjectLoop {
         .with_guard(guard))
     }
 
-    /// Reports the triager's Retaskable bugs through `link`, naming `version`.
-    pub fn with_bug_link(mut self, link: Option<(Arc<crate::connector::bug_link::BugLink>, String)>) -> Self {
-        self.bugs = link;
+    /// Reports the triager's Retaskable bugs through `link`, as version `version`.
+    pub fn with_bugs(mut self, link: Option<Arc<crate::connector::bug_link::BugLink>>, version: &str) -> Self {
+        self.bugs = link.map(|l| (l, version.to_string()));
         self
     }
 
@@ -412,6 +340,104 @@ impl ProjectLoop {
 
     pub fn events(&self) -> &EventLog {
         &self.events
+    }
+
+    /// The pass's second half for a project whose items were read: records what its turns decided
+    /// (`actions`, from `round_robin::plan`) against the computer's `pool`, and writes the `tick` event.
+    pub(super) fn record(
+        &mut self,
+        items: Vec<Item>,
+        paused: bool,
+        actions: Vec<Action>,
+        pool: &LanePool,
+        live: Option<Option<String>>,
+    ) -> Step {
+        let mut states: BTreeMap<String, u32> = BTreeMap::new();
+        for item in &items {
+            if let Ok(Value::String(s)) = serde_json::to_value(item.status) {
+                *states.entry(s).or_default() += 1;
+            }
+        }
+        // The dry loop applies nothing, so the real runs, pool and log see only the `tick` event below.
+        // The lanes held are the computer's: this project's are the ones it shows.
+        let held: Vec<HeldLane> = pool
+            .held_lanes()
+            .filter_map(|lane| match pool.holder(lane)? {
+                Holder::Item { project, item } | Holder::Play { project, item } if *project == self.id => {
+                    Some(HeldLane {
+                        lane,
+                        title: items.iter().find(|i| &i.id == item).map(|i| i.title.clone()),
+                        item_id: item.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        let payload = tick_payload(paused, pool);
+        let would: Vec<String> = actions.iter().map(describe).collect();
+        let decision = match actions.first() {
+            None if paused => "paused: would do nothing".to_string(),
+            None => "would do nothing".to_string(),
+            Some(Action::AskForWork) if live.is_some() => "asked for work".to_string(),
+            Some(Action::AskForWork) => "would ask for work".to_string(),
+            Some(Action::StartImplementer { item_id, lane }) if live.is_some() => {
+                format!("started {item_id} on lane {lane}")
+            }
+            Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
+            Some(Action::NeedsHuman { .. }) => unreachable!("the plan lists no needs_human"),
+        };
+        self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
+        let mut payload = payload;
+        payload.states = Some(json!(states));
+        // `live` is the claim answer when this pass really applied its decisions (`claim` mode with a starter).
+        payload.claim = Some(json!(live.clone().flatten().unwrap_or_else(|| "not asked".into())));
+        if live.is_none() {
+            payload.extra.insert("dry".into(), json!(would));
+        }
+        self.events.add_in(&self.id, Event::Tick(payload));
+        if !would.is_empty() {
+            tracing::debug!(
+                "{}: tick {}: {}",
+                self.id,
+                if live.is_some() { "did" } else { "would" },
+                would.join(", ")
+            );
+        }
+        self.check_watchdog(paused, &actions, pool);
+        Step::Ticked { would }
+    }
+
+    /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
+    /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
+    /// from minutes before.
+    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool) {
+        let recent: Vec<watchdog::RecentEvent> = self
+            .events
+            .recent()
+            .iter()
+            .filter_map(|e| {
+                let at_ms = parse_iso_ms(&e.at)?;
+                let event = e.event()?;
+                Some(watchdog::RecentEvent { at_ms, event })
+            })
+            .collect();
+        let now_ms = now_ms();
+        let found = watchdog::check(&watchdog::Input {
+            project: &self.id,
+            paused,
+            runs: &self.runs,
+            leases: &self.leases,
+            records: &self.records,
+            running: &self.running,
+            pool,
+            actions,
+            recent: &recent,
+            now_ms,
+            lease_idle_minutes: self.project.tuning.lease_idle_minutes,
+            idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
+            no_progress_minutes: self.project.tuning.no_progress_minutes,
+        });
+        self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
     }
 
     /// Writes the held and the unreleased leases to the state file.
@@ -901,7 +927,7 @@ pub(super) fn signed_out(shared: &Shared<'_>) -> bool {
         .is_some_and(|until| std::time::Instant::now() < until)
 }
 
-pub(super) fn describe(action: &Action) -> String {
+fn describe(action: &Action) -> String {
     match action {
         Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
         Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
