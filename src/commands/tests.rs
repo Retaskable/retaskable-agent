@@ -587,3 +587,77 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     assert!(v.item_commands.take("one").is_empty());
     assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
 }
+
+fn ask_it(v: &AgentView, args: Value, dir: &Path) -> Value {
+    run(&cmd("ask", args), "one", &mut Seen::default(), v, &|_| {}, dir)
+}
+
+#[test]
+fn an_ask_is_queued_with_its_thread_and_where_it_was_asked() {
+    let v = claiming();
+    let answer = ask_it(
+        &v,
+        json!({ "askId": "a1", "text": " why is step 5 stuck? ", "replyTo": "a0", "about": "item-3" }),
+        &data_dir(),
+    );
+    assert_eq!(answer["type"], "ack");
+    let asks = v.item_commands.take_asks("one");
+    assert_eq!(asks.len(), 1);
+    let a = &asks[0];
+    assert_eq!((a.id.as_str(), a.text.as_str()), ("a1", "why is step 5 stuck?"));
+    assert_eq!(
+        (a.reply_to.as_deref(), a.about.as_deref()),
+        (Some("a0"), Some("item-3"))
+    );
+    assert!(a.images_block.is_empty());
+    assert!(v.item_commands.take_asks("one").is_empty());
+}
+
+#[test]
+fn an_ask_needs_its_id_and_text_and_claim_mode() {
+    let v = claiming();
+    for (args, word) in [
+        (json!({ "text": "hi" }), "askId"),
+        (json!({ "askId": "a" }), "text"),
+        (json!({ "askId": "a", "text": "  " }), "text"),
+        (json!({ "askId": "a", "text": "hi", "replyTo": 3 }), "replyTo"),
+        (json!({ "askId": "a", "text": "hi", "about": ["x"] }), "about"),
+    ] {
+        let answer = ask_it(&v, args, &data_dir());
+        assert_eq!(answer["type"], "nack");
+        assert!(answer["reason"].as_str().unwrap().contains(word), "{answer}");
+    }
+    assert!(v.item_commands.take_asks("one").is_empty());
+    let off = view();
+    let answer = ask_it(&off, json!({ "askId": "a", "text": "hi" }), &data_dir());
+    assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
+}
+
+#[test]
+fn an_asks_images_are_saved_and_listed_in_an_attached_images_block() {
+    let v = claiming();
+    let dir = tempfile::tempdir().unwrap();
+    let answer = ask_it(
+        &v,
+        json!({ "askId": "a", "text": "See this.", "images": [picture(10), picture(20)] }),
+        dir.path(),
+    );
+    assert_eq!(answer["type"], "ack");
+    let a = v.item_commands.take_asks("one").remove(0);
+    assert!(
+        a.images_block
+            .starts_with("Attached images (look at each with your Read tool")
+    );
+    assert_eq!(a.images_block.lines().count(), 3);
+    assert!(a.text.starts_with("See this.\n\nAttached images"));
+    for line in a.images_block.lines().skip(1) {
+        assert!(Path::new(line).is_file(), "{line}");
+    }
+    let too_many = ask_it(
+        &v,
+        json!({ "askId": "b", "text": "x", "images": [picture(1), picture(1), picture(1), picture(1), picture(1)] }),
+        dir.path(),
+    );
+    assert_eq!(too_many["type"], "nack");
+    assert!(v.item_commands.take_asks("one").is_empty());
+}

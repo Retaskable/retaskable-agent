@@ -10,7 +10,7 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
-//! `orchestrator::driver::lane_play`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::galleries;
 use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, DraftCommand, Exit, ItemCommand};
+use crate::view::{AgentView, Ask, DraftCommand, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -113,6 +113,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
+        "ask" => ask(cmd, project, view, data_dir),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }
@@ -197,6 +198,66 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         notes.push_str(&path.display().to_string());
     }
     queue_item(view, project, id, (!notes.is_empty()).then_some(notes), start_over);
+    ack(&cmd.id)
+}
+
+/// "Attached images…" block of an ask's saved pictures (`attachments.ts`'s trailer), empty with none.
+fn images_block(paths: &[std::path::PathBuf]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "Attached images (look at each with your Read tool before acting on this):\n{}",
+        list.join("\n")
+    )
+}
+
+/// `ask { askId, text, replyTo?, about?, images? }` (cloud.md section 6; agent/06.6-ask-claude.md): a message in the
+/// chat, saved with its pictures as Continue's are and queued for the orchestrator loop, which answers it with
+/// `ask_report`. Acked once queued; refused outside `claim` mode.
+fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    let text_arg = |k: &str| match cmd.args.get(k) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+        Some(_) => Err(format!("ask: {k} must be text.")),
+    };
+    let args = (|| {
+        Ok((
+            text_arg("askId")?,
+            text_arg("text")?,
+            text_arg("replyTo")?,
+            text_arg("about")?,
+        ))
+    })();
+    let (id, text, reply_to, about) = match args {
+        Ok((Some(id), Some(text), reply_to, about)) => (id, text, reply_to, about),
+        Ok((None, ..)) => return nack(&cmd.id, "ask needs the message's askId.".into()),
+        Ok(_) => return nack(&cmd.id, "ask needs the message's text.".into()),
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    if let Err(reason) = claim_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    let pictures = json!({ "pictures": cmd.args.get("images").cloned().unwrap_or(Value::Null) });
+    let saved = match save_pictures(&pictures, data_dir) {
+        Ok(p) => p,
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    let images_block = images_block(&saved);
+    let text = if images_block.is_empty() {
+        text
+    } else {
+        format!("{text}\n\n{images_block}")
+    };
+    view.item_commands.push_ask(Ask {
+        project: project.to_string(),
+        id,
+        text,
+        reply_to,
+        about,
+        images_block,
+    });
     ack(&cmd.id)
 }
 
@@ -441,15 +502,17 @@ fn nack(id: &str, reason: String) -> Value {
     json!({ "type": "nack", "id": id, "reason": reason })
 }
 
-/// A command's args for the log: pictures as `{ count, bytes }` only, never their data (tray/05.3 section 5.3.4).
+/// A command's args for the log: pictures (or an ask's images) as `{ count, bytes }` only, never their data (tray/05.3 section 5.3.4).
 fn audit_args(args: &Value) -> Value {
     let mut args = args.clone();
-    if let Some(Value::Array(list)) = args.get("pictures") {
-        let bytes: usize = (list.iter())
-            .filter_map(|p| p.get("data").and_then(Value::as_str))
-            .map(str::len)
-            .sum();
-        args["pictures"] = json!({ "count": list.len(), "bytes": bytes });
+    for key in ["pictures", "images"] {
+        if let Some(Value::Array(list)) = args.get(key) {
+            let bytes: usize = (list.iter())
+                .filter_map(|p| p.get("data").and_then(Value::as_str))
+                .map(str::len)
+                .sum();
+            args[key] = json!({ "count": list.len(), "bytes": bytes });
+        }
     }
     args
 }

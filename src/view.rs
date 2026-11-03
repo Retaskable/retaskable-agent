@@ -94,6 +94,19 @@ pub enum DraftCommand {
     Discard { project: String, draft: String },
 }
 
+/// A person's message in the chat (the `ask` command), waiting for the loop to answer it (agent/06.6-ask-claude.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    pub project: String,
+    pub id: String,
+    pub text: String,
+    pub reply_to: Option<String>,
+    /// The item or plan whose page it was asked on.
+    pub about: Option<String>,
+    /// The "Attached images…" block made from the message's pictures, empty with none.
+    pub images_block: String,
+}
+
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -102,6 +115,7 @@ pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
+    asks: Arc<std::sync::Mutex<Vec<Ask>>>,
 }
 
 impl PartialEq for ItemCommands {
@@ -126,6 +140,20 @@ impl ItemCommands {
 
     pub fn push_draft(&self, command: DraftCommand) {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    pub fn push_ask(&self, ask: Ask) {
+        self.asks.lock().unwrap_or_else(|e| e.into_inner()).push(ask);
+    }
+
+    /// Removes and returns the asks queued for `project`, oldest first.
+    pub fn take_asks(&self, project: &str) -> Vec<Ask> {
+        let mut queue = self.asks.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|a| a.project == project);
+        *queue = rest;
+        mine
     }
 
     /// Removes and returns the draft presses queued for `project`, oldest first.

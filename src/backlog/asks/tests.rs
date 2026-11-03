@@ -120,3 +120,14 @@ async fn a_store_error_or_5xx_is_an_error_never_an_empty_answer() {
     let (base, _) = store(200, json!({ "ok": true })).await;
     assert!(Client::new(base).asks_list(1, None).await.is_err(), "no value");
 }
+
+#[tokio::test]
+async fn project_paused_is_true_only_when_the_store_names_a_pause() {
+    let (base, seen) = store(200, json!({ "value": { "paused": { "by": "ada" } } })).await;
+    assert!(Client::new(base).project_paused(1, None).await.unwrap());
+    assert_eq!(seen.lock().unwrap()[0]["op"], "pause_get");
+    let (base, _) = store(200, json!({ "value": { "paused": null } })).await;
+    assert!(!Client::new(base).project_paused(1, None).await.unwrap());
+    let (base, _) = store(500, json!({ "error": "boom" })).await;
+    assert!(Client::new(base).project_paused(1, None).await.is_err());
+}

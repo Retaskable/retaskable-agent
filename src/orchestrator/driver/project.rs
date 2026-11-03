@@ -306,6 +306,8 @@ pub struct ProjectLoop {
     pub(super) draft: Option<super::drafts::RunningDraft>,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
+    /// Chat messages waiting to be answered and the sessions answering them (`asks.rs`).
+    pub(super) asking: super::asks::Asking,
 }
 
 impl ProjectLoop {
@@ -353,6 +355,7 @@ impl ProjectLoop {
             playing: BTreeMap::new(),
             draft: None,
             landing: Default::default(),
+            asking: Default::default(),
         }
     }
 

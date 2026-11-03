@@ -10,6 +10,9 @@ use crate::config::{Engine, ProjectBudget};
 use crate::engines::engine::{EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
 
+/// `prompts/assistant.md`.
+pub const TEMPLATE: &str = include_str!("../../prompts/assistant.md");
+
 /// What an assistant session runs with.
 pub struct Session<'a> {
     /// `prompts/assistant.md`.

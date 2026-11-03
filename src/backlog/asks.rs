@@ -138,6 +138,13 @@ impl Client {
         Ok(ask.id)
     }
 
+    /// `pause_get {}`: whether the project is paused for every computer (team-state-on-server.md section 3.1).
+    pub async fn project_paused(&self, repo_id: u64, token: Option<&str>) -> Result<bool, BacklogError> {
+        let (_, body) = self.send(repo_id, token, "pause_get", json!({})).await?;
+        let paused = body.value.as_ref().and_then(|v| v.get("paused"));
+        Ok(paused.is_some_and(|p| !p.is_null()))
+    }
+
     /// `facts_get { kind: "audiences" }`: the company's audiences.
     pub async fn audiences(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Audience>, BacklogError> {
         let list: Audiences = self

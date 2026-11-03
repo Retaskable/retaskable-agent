@@ -361,6 +361,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         } else {
             Vec::new()
         },
+        asks: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            (
+                orchestrator::ask_host::ClaudeAsks::new(
+                    dir.to_path_buf(),
+                    config::engine_choice(cfg, env),
+                    env.clone(),
+                    cfg.machine.models,
+                    cfg.machine.budget.daily_usd,
+                ) as Arc<dyn orchestrator::driver::AskHost>,
+                (*view).clone(),
+            )
+        }),
         drafts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::draft_host::ClaudeDrafts::new(
                 dir.to_path_buf(),
