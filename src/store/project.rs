@@ -44,6 +44,14 @@ pub struct RunRecord {
     pub branch: Option<String>,
     #[serde(default)]
     pub slice: u32,
+    /// How many times a person started this slice over (Start over): the branch is `…-s<slice>-r<attempt>` once
+    /// it is above 0. Counts the item's current slice only.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempt: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A project's own on-disk state.
