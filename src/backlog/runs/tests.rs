@@ -155,3 +155,58 @@ async fn an_unreachable_store_is_unreachable() {
         Err(RunDoneError::Other(BacklogError::Unreachable(_)))
     ));
 }
+
+#[tokio::test]
+async fn lock_take_sends_name_and_note_and_reads_a_token_or_a_holder() {
+    let (base, seen) = store(200, json!({ "value": { "held": true, "token": "L1" } })).await;
+    let c = Client::new(base);
+    assert_eq!(
+        c.lock_take(1, Some("tok"), "merge-main", Some("piece on box"))
+            .await
+            .unwrap(),
+        LockTake::Held("L1".into())
+    );
+    let sent = seen.lock().unwrap()[0].clone();
+    assert_eq!(sent["op"], "lock_take");
+    assert_eq!(sent["args"], json!({ "name": "merge-main", "note": "piece on box" }));
+
+    let (base, seen) = store(200, json!({ "value": { "held": false, "by": "other", "note": "n" } })).await;
+    assert_eq!(
+        Client::new(base).lock_take(1, None, "chore-tidy", None).await.unwrap(),
+        LockTake::HeldBy {
+            by: "other".into(),
+            note: Some("n".into())
+        }
+    );
+    assert!(seen.lock().unwrap()[0]["args"].get("note").is_none());
+}
+
+#[tokio::test]
+async fn lock_drop_sends_the_token() {
+    let (base, seen) = store(200, json!({ "value": null })).await;
+    Client::new(base).lock_drop(1, Some("tok"), "L1").await.unwrap();
+    let sent = seen.lock().unwrap()[0].clone();
+    assert_eq!(
+        (sent["op"].as_str(), &sent["args"]),
+        (Some("lock_drop"), &json!({ "token": "L1" }))
+    );
+}
+
+#[tokio::test]
+async fn a_refused_or_unreachable_store_is_an_error_for_both_lock_ops() {
+    let (base, _) = store(403, json!({ "error": "forbidden", "message": "no" })).await;
+    let c = Client::new(base);
+    assert!(c.lock_take(1, None, "x", None).await.is_err());
+    assert!(c.lock_drop(1, None, "L1").await.is_err());
+    let c = Client::new("http://127.0.0.1:1");
+    assert!(matches!(
+        c.lock_take(1, None, "x", None).await,
+        Err(BacklogError::Unreachable(_))
+    ));
+    assert!(matches!(
+        c.lock_drop(1, None, "L1").await,
+        Err(BacklogError::Unreachable(_))
+    ));
+    let (base, _) = store(200, json!({ "value": { "held": true } })).await;
+    assert!(Client::new(base).lock_take(1, None, "x", None).await.is_err());
+}
