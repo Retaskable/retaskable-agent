@@ -82,14 +82,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         piece: serde_json::from_value(piece).unwrap(),
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
         ends,
-        context: crate::orchestrator::driver::RunContext {
-            project: "p".into(),
-            config: Default::default(),
-            client: Arc::new(crate::backlog::Client::new("http://127.0.0.1:1")),
-            repo: 1,
-            token: "tok".into(),
-            locks: Default::default(),
-        },
+        context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees })
 }

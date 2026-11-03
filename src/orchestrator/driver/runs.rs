@@ -88,6 +88,21 @@ pub struct RunContext {
     pub locks: RunLocks,
 }
 
+#[cfg(test)]
+impl RunContext {
+    /// A context for project `p` whose store can't be reached, for starters' tests.
+    pub(crate) fn for_test() -> Self {
+        Self {
+            project: "p".into(),
+            config: Default::default(),
+            client: Arc::new(Client::new("http://127.0.0.1:1")),
+            repo: 1,
+            token: "tok".into(),
+            locks: Default::default(),
+        }
+    }
+}
+
 /// A run the store handed out, for the starter to do.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
