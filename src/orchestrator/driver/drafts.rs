@@ -52,6 +52,8 @@ pub trait DraftHost: Send + Sync {
     fn remove(&self, project: &ProjectConfig, id: &str);
     /// Squash-merges (or as the project's merge method says) the pull request with `gh pr merge`.
     fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()>;
+    /// Closes the pull request and deletes its branch, with `gh pr close --delete-branch`.
+    fn close(&self, project: &ProjectConfig, pr: u64) -> Result<()>;
     /// Rebases the draft's pushed branch onto the base branch in its worktree and force-pushes with lease. False
     /// when it conflicts.
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool>;

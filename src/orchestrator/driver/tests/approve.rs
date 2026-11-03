@@ -47,6 +47,10 @@ impl DraftHost for Host {
             Err(why) => anyhow::bail!(why),
         }
     }
+    fn close(&self, _: &ProjectConfig, pr: u64) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("close {pr}"));
+        Ok(())
+    }
     fn rebase(&self, _: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
         self.calls.lock().unwrap().push(format!("rebase {id} {branch}"));
         Ok(self.rebase.lock().unwrap().unwrap_or(true))
@@ -271,4 +275,30 @@ async fn a_merge_error_goes_back_to_waiting_with_its_reason() {
     .await;
     assert_eq!(sent[0]["detail"], "awaiting_approval");
     assert!(sent[0]["summary"].as_str().unwrap().contains("protected branch"));
+}
+
+#[tokio::test]
+async fn discard_takes_the_draft_closes_its_pr_and_reports_discarded() {
+    let (host, asked, sent, _root) = press(Setup {
+        press: || DraftCommand::Discard {
+            project: "p0".into(),
+            draft: "d1".into(),
+        },
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls(), ["close 9", "remove d1", "fetch"]);
+    let ops = ops(&asked);
+    let take = ops.iter().position(|o| o == "draft_take").unwrap();
+    let report = ops.iter().position(|o| o == "draft_report").unwrap();
+    assert!(take < report, "{ops:?}");
+    assert_eq!(
+        (
+            sent[0]["id"].as_str(),
+            sent[0]["token"].as_str(),
+            sent[0]["status"].as_str()
+        ),
+        (Some("d1"), Some("lease-d"), Some("discarded"))
+    );
+    assert!(upserts(&asked).is_empty());
 }

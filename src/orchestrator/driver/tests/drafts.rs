@@ -47,6 +47,9 @@ impl DraftHost for Host {
     fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
         Ok(())
     }
+    fn close(&self, _: &ProjectConfig, _: u64) -> Result<()> {
+        Ok(())
+    }
     fn rebase(&self, _: &ProjectConfig, _: &str, _: &str) -> Result<bool> {
         Ok(true)
     }

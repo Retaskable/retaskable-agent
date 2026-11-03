@@ -68,10 +68,6 @@ pub struct ItemRun {
     /// row: "at most twice before the item needs a human"). A person answering directly
     /// (`clarification_answered`) resets it, since that always comes from a person, not a reask.
     pub reasks: u32,
-    /// Whether the implementer session just before this one ran out of turns
-    /// (06.2-implementer.md "at most maxTurns turns"). Set by [`ran_out_of_turns`](Self::ran_out_of_turns);
-    /// cleared once a session finishes normally.
-    pub max_turns_hit: bool,
 }
 
 impl Default for ItemRun {
@@ -91,7 +87,6 @@ impl ItemRun {
             slice: 0,
             extra_slices: 0,
             reasks: 0,
-            max_turns_hit: false,
         }
     }
 
@@ -110,7 +105,6 @@ impl ItemRun {
 
     /// The implementer session exited.
     pub fn implementer_finished(&mut self, outcome: ImplementerOutcome, cfg: &ProjectConfig) {
-        self.max_turns_hit = false;
         self.state = match outcome {
             // "Only questions nobody has answered are put to the person": every one just asked
             // already has a decision on file, so the answers go back to the session instead,
@@ -291,15 +285,6 @@ impl ItemRun {
     /// escalation, or an error.
     pub fn escalate(&mut self) {
         self.state = ItemState::NeedsHuman;
-    }
-
-    /// The implementer session hit `error_max_turns` (06.2-implementer.md "at most maxTurns
-    /// turns"). Returns whether this is the second one in a row: the caller then escalates to
-    /// `needs_human` instead of starting a third fresh session in the same lane.
-    pub fn ran_out_of_turns(&mut self) -> bool {
-        let twice = self.max_turns_hit;
-        self.max_turns_hit = true;
-        twice
     }
 
     /// Whether the merge step may still bring the PR up to date with its base before landing

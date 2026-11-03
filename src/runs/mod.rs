@@ -3,8 +3,10 @@
 //! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
 //! state.json.
 mod build_end;
+mod locks;
 mod wind;
 pub use build_end::{Pushed, end_from_answer, needs_push};
+pub use locks::{RunLocks, lock_ceiling};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
@@ -66,6 +68,7 @@ pub struct Runs {
     project: String,
     live: Vec<LiveRun>,
     ends: Vec<PendingEnd>,
+    locks: RunLocks,
 }
 
 impl Runs {
@@ -74,12 +77,18 @@ impl Runs {
             project: project.into(),
             live: Vec::new(),
             ends: Vec::new(),
+            locks: RunLocks::default(),
         }
     }
 
-    /// What still has to be said to the store: live runs and ends not yet accepted.
+    /// What still has to be said to the store: live runs, ends not yet accepted, and locks still held.
     pub fn held(&self) -> usize {
-        self.live.len() + self.ends.len()
+        self.live.len() + self.ends.len() + self.locks.count()
+    }
+
+    /// The handle a run's worker takes and drops store locks through; the beat renews them.
+    pub fn locks(&self) -> RunLocks {
+        self.locks.clone()
     }
 
     pub fn live(&self) -> &[LiveRun] {
@@ -123,13 +132,16 @@ impl Runs {
         }
     }
 
-    /// Every live run's token, for `run_beat`.
+    /// Every live run's and held lock's token, for `run_beat`.
     pub fn beat_tokens(&self) -> Vec<String> {
-        self.live.iter().map(|r| r.token.clone()).collect()
+        let mut tokens: Vec<String> = self.live.iter().map(|r| r.token.clone()).collect();
+        tokens.extend(self.locks.tokens());
+        tokens
     }
 
-    /// Applies `run_beat`'s answer: a `stop` cuts that run's trees and ends it `interrupted`.
+    /// Applies `run_beat`'s answer: a `stop` cuts that run's trees and ends it `interrupted`, or marks that lock lost.
     pub fn apply_beat(&mut self, pool: &mut LanePool, verdicts: &HashMap<String, BeatVerdict>, now: Instant) {
+        self.locks.apply_beat(verdicts);
         let stopped: Vec<String> = self
             .live
             .iter()
@@ -141,9 +153,11 @@ impl Runs {
         }
     }
 
-    /// Ends every run within [`CEILING_MARGIN`] of its kind's ceiling, as `failed` naming the ceiling. Returns
+    /// Ends every run within [`CEILING_MARGIN`] of its kind's ceiling, as `failed` naming the ceiling, and marks the
+    /// locks within it lost. Returns
     /// their tokens.
     pub fn end_past_ceilings(&mut self, pool: &mut LanePool, now: Instant) -> Vec<String> {
+        self.locks.mark_past_ceilings(now);
         let over: Vec<(String, Duration)> = self
             .live
             .iter()

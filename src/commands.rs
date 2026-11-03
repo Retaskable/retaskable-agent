@@ -9,8 +9,8 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
-//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]) and **draft_files** (answered live from the draft's worktree), **draft_edit** and **draft_discard** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** `{ draftId }` (**Approve** and **Merge into main** on a spec draft, queued for the loop, `orchestrator::driver::land`). Play on a lane
-//! is a later piece. Every command checked, run or refused is written to
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
+//! `orchestrator::driver::lane_play`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -113,8 +113,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "retry" => item_command(cmd, project, view, data_dir, true),
         "play" | "stop" => play(cmd, project, view),
         "draft_files" => draft_files(cmd, project, view),
-        "draft_edit" | "draft_discard" => draft_change(cmd, project, view),
-        "draft_approve" | "merge_pr" => draft_press(cmd, project, view),
+        "draft_edit" => draft_change(cmd, project, view),
+        "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }
@@ -250,14 +250,15 @@ fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Val
     ack(&cmd.id)
 }
 
-/// `play { lane: 0 }` / `stop { lane: 0 }`: Play main ([`crate::play`]). Any other lane is a later piece.
+/// `play { lane }` / `stop { lane }`: lane 0 is Play main ([`crate::play`]). A lane from 1 is queued for the
+/// orchestrator loop, which owns the lanes and decides (`orchestrator::driver::lane_play`).
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
-    if lane != Some(0) {
-        return nack(
-            &cmd.id,
-            format!("Not a command this agent takes yet: {} on a lane", cmd.name),
-        );
+    match lane {
+        Some(0) => {}
+        Some(k) if k > 0 && k <= i64::from(view.lanes) => return play_in_lane(cmd, project, view, k as u32),
+        Some(k) if k > 0 => return nack(&cmd.id, format!("This computer has no lane {k}.")),
+        _ => return nack(&cmd.id, format!("{} needs a lane.", cmd.name)),
     }
     let Some(p) = view.projects.iter().find(|p| p.id == project) else {
         return nack(&cmd.id, "Finish setup first.".to_string());
@@ -271,6 +272,28 @@ fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
         Ok(()) => ack(&cmd.id),
         Err(reason) => nack(&cmd.id, reason),
     }
+}
+
+fn play_in_lane(cmd: &Command, project: &str, view: &AgentView, lane: u32) -> Value {
+    if !view.item_commands.claim() {
+        return nack(
+            &cmd.id,
+            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
+        );
+    }
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return nack(&cmd.id, "Finish setup first.".to_string());
+    };
+    let project = project.to_string();
+    if cmd.name == "play" {
+        if p.play_command.trim().is_empty() {
+            return nack(&cmd.id, "No play command set for this project.".to_string());
+        }
+        view.item_commands.push(ItemCommand::Play { project, lane });
+    } else {
+        view.item_commands.push(ItemCommand::Stop { project, lane });
+    }
+    ack(&cmd.id)
 }
 
 /// `draft_files { id }`: the draft's changed files and patches, listed live from its worktree
@@ -298,11 +321,10 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
 }
 
 /// `draft_edit { id, path, content }` writes the person's file into the draft's worktree, commits and pushes it to
-/// the draft's PR branch, and answers with the files listed again (`answer.files`). `draft_discard { id }` closes
-/// the PR with `gh`, deletes its branch and removes the worktree, then asks the project's loop to fetch again.
-/// `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
+/// the draft's PR branch, and answers with the files listed again (`answer.files`). Nothing on retaskable.com sends
+/// it yet. `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
 fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    use crate::drafts::actions::{Where, branch_of, discard, edit};
+    use crate::drafts::actions::{Where, branch_of, edit};
     let arg = |k: &str| cmd.args.get(k).and_then(Value::as_str);
     let id = arg("id").map(str::trim).unwrap_or("");
     if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
@@ -320,16 +342,6 @@ fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
         Ok(b) => b,
         Err(e) => return nack(&cmd.id, format!("{e:#}")),
     };
-    if cmd.name == "draft_discard" {
-        let gh = std::env::var_os("RETASKABLE_GH").map_or_else(|| "gh".into(), std::path::PathBuf::from);
-        return match discard(&w, &gh, id, &branch) {
-            Ok(()) => {
-                view.work.wake(project);
-                ack(&cmd.id)
-            }
-            Err(e) => nack(&cmd.id, format!("Couldn't discard draft {id}: {e:#}")),
-        };
-    }
     let (Some(file), Some(content)) = (arg("path"), arg("content")) else {
         return nack(&cmd.id, "draft_edit needs the file's path and content.".into());
     };
@@ -339,7 +351,8 @@ fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
     }
 }
 
-/// `draft_approve { draftId }` (**Approve and merge**) or `merge_pr { draftId }` (**Merge into main**): queued for the
+/// `draft_approve { draftId }` (**Approve and merge**), `merge_pr { draftId }` (**Merge into main**) or
+/// `draft_discard { draftId }` (**Discard**): queued for the
 /// loop, which takes the draft and lands it. A `merge_pr` for an item or the team branch isn't this agent's yet.
 fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let draft = cmd
@@ -352,7 +365,7 @@ fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
         return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
     }
     if draft.is_empty() {
-        return nack(&cmd.id, "Approve needs the draft's id.".into());
+        return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
     }
     if !view.item_commands.claim() {
         return nack(
@@ -361,10 +374,10 @@ fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
         );
     }
     let (project, draft) = (project.to_string(), draft.to_string());
-    view.item_commands.push_draft(if cmd.name == "merge_pr" {
-        DraftCommand::Merge { project, draft }
-    } else {
-        DraftCommand::Approve { project, draft }
+    view.item_commands.push_draft(match cmd.name.as_str() {
+        "merge_pr" => DraftCommand::Merge { project, draft },
+        "draft_discard" => DraftCommand::Discard { project, draft },
+        _ => DraftCommand::Approve { project, draft },
     });
     ack(&cmd.id)
 }
@@ -587,22 +600,14 @@ mod tests {
     }
 
     #[test]
-    fn play_and_stop_nack_a_lane_other_than_zero_and_a_blank_command() {
+    fn play_and_stop_nack_a_missing_lane_and_a_blank_command() {
         let v = view();
         let noop = |_: i32| {};
         for name in ["play", "stop"] {
-            let answer = run(
-                &cmd(name, json!({ "lane": 2 })),
-                "one",
-                &mut Seen::default(),
-                &v,
-                &noop,
-                &data_dir(),
-            );
-            assert_eq!(
-                answer["reason"],
-                format!("Not a command this agent takes yet: {name} on a lane")
-            );
+            for args in [json!({}), json!({ "lane": -1 })] {
+                let answer = run(&cmd(name, args), "one", &mut Seen::default(), &v, &noop, &data_dir());
+                assert_eq!(answer["reason"], format!("{name} needs a lane."));
+            }
         }
         let answer = run(
             &cmd("play", json!({ "lane": 0 })),
@@ -613,6 +618,45 @@ mod tests {
             &data_dir(),
         );
         assert_eq!(answer["reason"], "No play command set for this project.");
+    }
+
+    #[test]
+    fn play_and_stop_of_a_lane_are_queued_for_the_loop_and_refused_past_lanes() {
+        let mut v = view();
+        v.lanes = 2;
+        v.projects[0].play_command = "game".into();
+        let noop = |_: i32| {};
+        let go = |name, lane, v: &AgentView| {
+            run(
+                &cmd(name, json!({ "lane": lane })),
+                "one",
+                &mut Seen::default(),
+                v,
+                &noop,
+                &data_dir(),
+            )
+        };
+        assert_eq!(
+            go("play", 1, &v)["reason"],
+            "This computer isn't running work (the orchestrator isn't in claim mode)."
+        );
+        v.item_commands.set_claim(true);
+        assert_eq!(go("play", 3, &v)["reason"], "This computer has no lane 3.");
+        assert_eq!(go("play", 2, &v)["type"], "ack");
+        assert_eq!(go("stop", 1, &v)["type"], "ack");
+        assert_eq!(
+            v.item_commands.take_lane("one"),
+            vec![
+                ItemCommand::Play {
+                    project: "one".into(),
+                    lane: 2
+                },
+                ItemCommand::Stop {
+                    project: "one".into(),
+                    lane: 1
+                },
+            ]
+        );
     }
 
     #[test]
@@ -741,7 +785,7 @@ mod tests {
         let v = claiming();
         go(&v, json!({ "id": "a" }), &data_dir());
         let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
-            panic!()
+            panic!("not a continue")
         };
         assert_eq!(notes, None);
     }
@@ -818,7 +862,7 @@ mod tests {
         );
         assert_eq!(answer["type"], "ack");
         let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
-            panic!()
+            panic!("not a continue")
         };
         let notes = notes.unwrap();
         let files: Vec<_> = std::fs::read_dir(dir.path().join("attachments")).unwrap().collect();
@@ -889,10 +933,9 @@ mod tests {
         assert!(!log.contains("# New"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn draft_edit_commits_and_draft_discard_closes() {
-        use crate::test_support::{git, repo_with_origin, run, write_executable};
+    fn draft_edit_commits_and_pushes() {
+        use crate::test_support::{git, repo_with_origin, run};
         let tmp = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(tmp.path());
         let worktrees = tmp.path().join("worktrees");
@@ -900,8 +943,6 @@ mod tests {
         run(git(&repo)
             .args(["worktree", "add", "--quiet", "-b", "retaskable/spec-7-x"])
             .arg(&wt));
-        let gh = tmp.path().join("gh");
-        write_executable(&gh, "#!/bin/sh\nexit 0\n");
         let mut v = view();
         v.projects[0].repo_path = repo;
         v.projects[0].worktrees_dir = worktrees;
@@ -916,13 +957,6 @@ mod tests {
         assert_eq!(edit["answer"]["files"], json!([{ "path": "n.md", "content": "hi\n" }]));
         let missing = run_cmd(&cmd("draft_edit", json!({ "id": "7" })), &v, &noop);
         assert_eq!(missing["type"], "nack");
-        let unknown = run_cmd(&cmd("draft_discard", json!({ "id": "8" })), &v, &noop);
-        assert_eq!(unknown["type"], "nack");
-        // SAFETY: tests that set RETASKABLE_GH are the only ones that read it.
-        unsafe { std::env::set_var("RETASKABLE_GH", &gh) };
-        let gone = run_cmd(&cmd("draft_discard", json!({ "id": "7" })), &v, &noop);
-        assert_eq!(gone["type"], "ack", "{gone}");
-        assert!(!wt.exists());
     }
 
     #[test]
@@ -945,7 +979,9 @@ mod tests {
         assert_eq!(run_cmd(&cmd("draft_approve", args.clone()), &v, &noop)["type"], "nack");
         v.item_commands.set_claim(true);
         assert_eq!(run_cmd(&cmd("draft_approve", args.clone()), &v, &noop)["type"], "ack");
-        assert_eq!(run_cmd(&cmd("merge_pr", args), &v, &noop)["type"], "ack");
+        assert_eq!(run_cmd(&cmd("merge_pr", args.clone()), &v, &noop)["type"], "ack");
+        assert_eq!(run_cmd(&cmd("draft_discard", args), &v, &noop)["type"], "ack");
+        assert_eq!(run_cmd(&cmd("draft_discard", json!({})), &v, &noop)["type"], "nack");
         assert_eq!(run_cmd(&cmd("draft_approve", json!({})), &v, &noop)["type"], "nack");
         assert_eq!(
             run_cmd(&cmd("merge_pr", json!({ "itemId": "x" })), &v, &noop)["type"],
@@ -959,6 +995,10 @@ mod tests {
                     draft: "d1".into()
                 },
                 DraftCommand::Merge {
+                    project: "one".into(),
+                    draft: "d1".into()
+                },
+                DraftCommand::Discard {
                     project: "one".into(),
                     draft: "d1".into()
                 }

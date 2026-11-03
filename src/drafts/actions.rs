@@ -1,12 +1,12 @@
 //! What a person does to a draft waiting for approval, on this computer (docs/specs/agent/06.5-spec-drafts.md
-//! step 3): **Edit** a file by hand, and **Discard**. (Send back and the answers to questions come through the store's
+//! step 3): **Edit** a file by hand. (**Discard** is carried out by the loop with the other presses: `orchestrator::driver::land`.) (Send back and the answers to questions come through the store's
 //! claim, which resumes the drafter's session: `orchestrator::driver::drafts`.)
 use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
 use super::files::{DraftFile, draft_files};
-use crate::draft_worktree::{create, git, remove};
+use crate::draft_worktree::{create, git};
 
 /// Where a project's drafts live.
 pub struct Where<'a> {
@@ -55,27 +55,10 @@ pub fn edit(w: &Where<'_>, id: &str, branch: &str, rel: &str, content: &str) -> 
     draft_files(&dir, w.base_branch)
 }
 
-/// Closes the draft's PR with `gh` and deletes its branch, then removes the worktree.
-pub fn discard(w: &Where<'_>, gh: &Path, id: &str, branch: &str) -> Result<()> {
-    remove(w.repo_path, w.worktrees_dir, id)?;
-    let out = std::process::Command::new(gh)
-        .current_dir(w.repo_path)
-        .args(["pr", "close", branch, "--delete-branch"])
-        .output()
-        .context("starting gh pr close")?;
-    if !out.status.success() {
-        bail!("gh pr close failed: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    // gh drops the local branch only when it can; a branch it left is deleted here.
-    let _ = git(w.repo_path, &["branch", "-D", branch]);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::draft_worktree::path;
-    use crate::test_support::{git as tgit, repo_with_origin, run, write_executable};
+    use crate::test_support::repo_with_origin;
 
     fn setup(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
         let repo = repo_with_origin(root);
@@ -129,35 +112,5 @@ mod tests {
         for bad in ["", "../x.md", "/etc/x", "a/../../x"] {
             assert!(edit(&w, "7", "retaskable/spec-7-x", bad, "x").is_err(), "{bad}");
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn discard_closes_the_pr_deletes_the_branch_and_removes_the_worktree() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (repo, worktrees) = setup(tmp.path());
-        let log = tmp.path().join("gh.log");
-        let gh = tmp.path().join("gh");
-        write_executable(&gh, &format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()));
-        std::fs::remove_file(&log).ok();
-        let w = Where {
-            repo_path: &repo,
-            worktrees_dir: &worktrees,
-            base_branch: "main",
-        };
-        discard(&w, &gh, "7", "retaskable/spec-7-x").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&log).unwrap().trim(),
-            "pr close retaskable/spec-7-x --delete-branch"
-        );
-        assert!(!path(&worktrees, "7").exists());
-        run(tgit(&repo).args(["rev-parse", "--verify", "--quiet", "main"]));
-        assert!(
-            git(
-                &repo,
-                &["show-ref", "--verify", "--quiet", "refs/heads/retaskable/spec-7-x"]
-            )
-            .is_err()
-        );
     }
 }

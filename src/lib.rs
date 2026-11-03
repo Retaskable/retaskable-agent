@@ -8,6 +8,7 @@ pub mod backlog;
 pub mod base_hold;
 pub mod checks;
 pub mod ci_coverage;
+pub mod ci_watch;
 pub mod commands;
 pub mod config;
 pub mod connector;
