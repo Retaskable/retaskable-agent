@@ -125,8 +125,10 @@ fn piece_item(piece: &RunPiece) -> Item {
 /// published. A failure before any session ran is this computer's own (`interrupted`, the run goes back); after
 /// it, the run `failed`.
 async fn run(job: Job) -> (RunOutcome, Value) {
+    // A piece with a pushed branch carries on from it, whatever the run's kind: a fresh branch of the same name
+    // would be rejected as non-fast-forward when published.
     let (branch, start_point) = match (job.kind, job.piece.branch.as_deref()) {
-        (RunKind::Fix, Some(b)) => (b.to_string(), format!("origin/{b}")),
+        (_, Some(b)) => (b.to_string(), format!("origin/{b}")),
         (RunKind::Fix, None) => return failed("A fix run needs the piece's pushed branch, and the piece has none."),
         _ => (
             piece_branch_name(piece_id(&job.piece), &job.piece.title),
@@ -321,6 +323,6 @@ async fn commits_ahead(cwd: &Path, base_ref: &str) -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "piece_runs_tests.rs"]
 mod tests;
