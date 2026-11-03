@@ -3,7 +3,7 @@
 //! makes its docs-only worktree, runs the drafter, and reports how it ended with `draft_report`. The
 //! loop keeps only the running draft's id and session id, in memory: the store has the draft, and a
 //! claim that comes back with a session id resumes that session, so a restart carries on. What a person
-//! does with the draft afterwards (approve, edit, send back, discard) is not here.
+//! does with the draft afterwards is mostly not here: edit and discard are `drafts::actions` (commands), approve is later. A claim that carries send-back notes or answers resumes the session with them, and answers are acknowledged with `draft_answer_taken`.
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -207,6 +207,12 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         Ok(Err(e)) => return ctx.needs_person(&id, "failed", failed(format!("{e:#}"))).await,
         Err(e) => return ctx.needs_person(&id, "failed", failed(e.to_string())).await,
     };
+    // The session now has the person's answers: the store clears them, and keeps them off the next claim.
+    if draft.answer.is_some() {
+        ctx.client
+            .draft_answer_taken(ctx.repo, Some(&ctx.token), &id, &ctx.lease)
+            .await?;
+    }
     let job = DraftJob {
         project: ctx.project.clone(),
         follow_up: follow_up(&draft),

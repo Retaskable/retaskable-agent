@@ -2,6 +2,7 @@
 //! spec change a person approves. Retaskable.com's `agent/src/drafts.ts` is the ground truth. This
 //! piece is the drafter's answer ([`model`]: its result, schema and the breakdown check) and its
 //! prompt ([`prompt`]).
+pub mod actions;
 pub mod files;
 pub mod model;
 pub mod prompt;

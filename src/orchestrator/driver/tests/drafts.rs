@@ -252,3 +252,44 @@ async fn a_draft_takes_a_session_slot() {
         "the only slot is the draft's, so no item is claimed"
     );
 }
+
+#[tokio::test]
+async fn send_back_notes_resume_the_session_and_the_pr_is_reported_again() {
+    let draft = json!({"id": "d1", "request": "Add charts", "titles": ["Charts"], "sessionId": "sess-9",
+        "branch": "retaskable/spec-d1-x", "notes": "Shorter, please."});
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Shorter"});
+    let (mut rig, host, asked) = rig_with(draft, vec![answer]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    let jobs = host.jobs.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!((jobs[0].0.as_str(), jobs[0].1), ("sess-9", true));
+    assert!(jobs[0].2.contains("Shorter, please."), "{}", jobs[0].2);
+    assert_eq!(sent[1]["detail"], "awaiting_approval");
+    assert_eq!(sent[1]["prUrl"], "https://github.com/o/r/pull/9");
+    assert!(!ops(&asked).contains(&"draft_answer_taken".to_string()));
+}
+
+#[tokio::test]
+async fn answers_resume_the_session_and_are_marked_taken() {
+    let draft = json!({"id": "d1", "request": "Add charts", "titles": [], "sessionId": "sess-9",
+        "answer": {"answers": ["Admins", "Monthly"]}});
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Done"});
+    let (mut rig, host, asked) = rig_with(draft, vec![answer]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    let jobs = host.jobs.lock().unwrap().clone();
+    assert_eq!((jobs[0].0.as_str(), jobs[0].1), ("sess-9", true));
+    assert!(jobs[0].2.contains("Admins\nMonthly"), "{}", jobs[0].2);
+    assert_eq!(sent[1]["detail"], "awaiting_approval");
+    let taken: Vec<Value> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(op, _)| op == "draft_answer_taken")
+        .map(|(_, a)| a.clone())
+        .collect();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(
+        (taken[0]["id"].as_str(), taken[0]["token"].as_str()),
+        (Some("d1"), Some("lease-d"))
+    );
+}

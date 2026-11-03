@@ -9,7 +9,7 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
-//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]) and **draft_files** (answered live from the draft's worktree). Play on a lane
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]) and **draft_files** (answered live from the draft's worktree), **draft_edit** and **draft_discard** ([`crate::drafts::actions`]). Play on a lane
 //! is a later piece. Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
@@ -113,6 +113,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "retry" => item_command(cmd, project, view, data_dir, true),
         "play" | "stop" => play(cmd, project, view),
         "draft_files" => draft_files(cmd, project, view),
+        "draft_edit" | "draft_discard" => draft_change(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }
@@ -292,6 +293,48 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
     match crate::drafts::files::draft_files(&dir, &p.base_branch) {
         Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
         Err(e) => nack(&cmd.id, format!("Couldn't list draft {id}'s files: {e:#}")),
+    }
+}
+
+/// `draft_edit { id, path, content }` writes the person's file into the draft's worktree, commits and pushes it to
+/// the draft's PR branch, and answers with the files listed again (`answer.files`). `draft_discard { id }` closes
+/// the PR with `gh`, deletes its branch and removes the worktree, then asks the project's loop to fetch again.
+/// `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
+fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    use crate::drafts::actions::{Where, branch_of, discard, edit};
+    let arg = |k: &str| cmd.args.get(k).and_then(Value::as_str);
+    let id = arg("id").map(str::trim).unwrap_or("");
+    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
+        return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
+    }
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return nack(&cmd.id, "Finish setup first.".to_string());
+    };
+    let w = Where {
+        repo_path: &p.repo_path,
+        worktrees_dir: &p.worktrees_dir,
+        base_branch: &p.base_branch,
+    };
+    let branch = match branch_of(&w, id, arg("branch")) {
+        Ok(b) => b,
+        Err(e) => return nack(&cmd.id, format!("{e:#}")),
+    };
+    if cmd.name == "draft_discard" {
+        let gh = std::env::var_os("RETASKABLE_GH").map_or_else(|| "gh".into(), std::path::PathBuf::from);
+        return match discard(&w, &gh, id, &branch) {
+            Ok(()) => {
+                view.work.wake(project);
+                ack(&cmd.id)
+            }
+            Err(e) => nack(&cmd.id, format!("Couldn't discard draft {id}: {e:#}")),
+        };
+    }
+    let (Some(file), Some(content)) = (arg("path"), arg("content")) else {
+        return nack(&cmd.id, "draft_edit needs the file's path and content.".into());
+    };
+    match edit(&w, id, &branch, file, content) {
+        Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
+        Err(e) => nack(&cmd.id, format!("Couldn't edit draft {id}: {e:#}")),
     }
 }
 
@@ -813,6 +856,42 @@ mod tests {
         let log = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
         assert!(log.contains("\"name\":\"draft_files\"") && log.contains("\"outcome\":\"ack\""));
         assert!(!log.contains("# New"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draft_edit_commits_and_draft_discard_closes() {
+        use crate::test_support::{git, repo_with_origin, run, write_executable};
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(tmp.path());
+        let worktrees = tmp.path().join("worktrees");
+        let wt = crate::draft_worktree::path(&worktrees, "7");
+        run(git(&repo)
+            .args(["worktree", "add", "--quiet", "-b", "retaskable/spec-7-x"])
+            .arg(&wt));
+        let gh = tmp.path().join("gh");
+        write_executable(&gh, "#!/bin/sh\nexit 0\n");
+        let mut v = view();
+        v.projects[0].repo_path = repo;
+        v.projects[0].worktrees_dir = worktrees;
+        v.projects[0].base_branch = "main".into();
+        let noop = |_: i32| {};
+        let edit = run_cmd(
+            &cmd("draft_edit", json!({ "id": "7", "path": "n.md", "content": "hi\n" })),
+            &v,
+            &noop,
+        );
+        assert_eq!(edit["type"], "ack", "{edit}");
+        assert_eq!(edit["answer"]["files"], json!([{ "path": "n.md", "content": "hi\n" }]));
+        let missing = run_cmd(&cmd("draft_edit", json!({ "id": "7" })), &v, &noop);
+        assert_eq!(missing["type"], "nack");
+        let unknown = run_cmd(&cmd("draft_discard", json!({ "id": "8" })), &v, &noop);
+        assert_eq!(unknown["type"], "nack");
+        // SAFETY: tests that set RETASKABLE_GH are the only ones that read it.
+        unsafe { std::env::set_var("RETASKABLE_GH", &gh) };
+        let gone = run_cmd(&cmd("draft_discard", json!({ "id": "7" })), &v, &noop);
+        assert_eq!(gone["type"], "ack", "{gone}");
+        assert!(!wt.exists());
     }
 
     #[test]
