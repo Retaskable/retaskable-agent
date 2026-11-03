@@ -73,6 +73,8 @@ A run past its kind's ceiling is lost in the store even while it beats: `build` 
 
 ### 3.4 Locks
 
+The `merge` run's base update is plain git in `src/merge_update.rs`, with the git program a parameter: `behind` (fetch, skipped if one began in the last 15 seconds, then `git merge-base --is-ancestor origin/<base> <head>`: behind, up to date or can't tell), `update_from_base` (in `<worktreesDir>/merge-<piece>`, always removed, checks out the change's branch, merges `origin/<base>` and pushes without force; answers the new head, or the conflicting files with nothing pushed; any failure is an error and pushes nothing) and `conflict_instruction` (the "merge origin/<base> into your branch" text naming the files).
+
 The merge lock and chore locks are `lock_take { name, note? }` and `lock_drop { token }`, renewed in the same `run_beat` and lost 3 minutes after the last beat (or past 1 hour for the merge lock, 6 otherwise). `runs_drop` lets them go too. The agent holds them in memory per project (`RunLocks`, `src/runs/locks.rs`): a run's worker gets the handle in its `RunRequest`'s `RunContext` (project id and config, the store `Client`, repo id, link token), takes with `Client::lock_take` (answers a token, or who holds it) and records the token; the loop beats the tokens with the runs'. A `stop` for a lock's token, or being within the ceiling margin of its ceiling, marks it lost, and its holder checks `held(token)` before it acts. Held locks count in what a stop or restart waits for.
 
 ### 3.5 Looks

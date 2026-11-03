@@ -26,6 +26,7 @@ pub mod implementer;
 pub mod item_lifecycle;
 pub mod lane_pool;
 pub mod lanes;
+pub mod merge_update;
 pub mod link;
 pub mod local_model;
 pub mod network;
