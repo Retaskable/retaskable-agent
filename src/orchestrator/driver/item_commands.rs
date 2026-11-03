@@ -35,21 +35,11 @@ impl ProjectLoop {
         mut room: u32,
         shared: &mut Shared<'_>,
     ) {
-        self.release_finished_games(pool);
         for command in shared.links.item_commands.take(&self.id) {
             let (name, item, notes, start_over) = match command {
                 ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
                 ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
-                ItemCommand::Play { lane, .. } => {
-                    if !shared.stopping {
-                        self.play_lane(pool, lane, starter);
-                    }
-                    continue;
-                }
-                ItemCommand::Stop { lane, .. } => {
-                    self.stop_lane(pool, lane);
-                    continue;
-                }
+                ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
             };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self

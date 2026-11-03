@@ -21,8 +21,8 @@
 //! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused.
 mod drafts;
 mod item_commands;
-mod lane_play;
 mod land;
+mod lane_play;
 mod machine;
 mod playtest_round;
 mod project;

@@ -68,6 +68,10 @@ pub enum ItemCommand {
 }
 
 impl ItemCommand {
+    fn is_lane(&self) -> bool {
+        matches!(self, Self::Play { .. } | Self::Stop { .. })
+    }
+
     fn project(&self) -> &str {
         match self {
             Self::Continue { project, .. }
@@ -132,10 +136,19 @@ impl ItemCommands {
 
     /// Removes and returns `project`'s queued commands, oldest first.
     pub fn take(&self, project: &str) -> Vec<ItemCommand> {
+        self.take_where(project, |c| !c.is_lane())
+    }
+
+    /// Removes and returns `project`'s queued Play and Stop of a lane, oldest first.
+    pub fn take_lane(&self, project: &str) -> Vec<ItemCommand> {
+        self.take_where(project, ItemCommand::is_lane)
+    }
+
+    fn take_where(&self, project: &str, keep: impl Fn(&ItemCommand) -> bool) -> Vec<ItemCommand> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
-            .partition(|c| c.project() == project);
+            .partition(|c| c.project() == project && keep(c));
         *queue = rest;
         mine
     }

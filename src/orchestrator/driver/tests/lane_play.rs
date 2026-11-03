@@ -116,3 +116,21 @@ async fn play_is_refused_while_the_items_step_is_running() {
     rig.machine.poll().await;
     assert!(fake.games.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn stop_works_while_paused_and_a_play_queued_while_paused_starts_nothing() {
+    let (mut rig, fake) = idle(1);
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    assert!(rig.machine.pool.holder(1).is_some());
+
+    rig.pause("p0", true);
+    send(&rig, stop, 1);
+    rig.machine.poll().await;
+    assert!(rig.machine.pool.holder(1).is_none(), "the lane is freed while paused");
+
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    assert!(rig.machine.pool.holder(1).is_none());
+    assert_eq!(fake.games.lock().unwrap().len(), 1, "no second game");
+}

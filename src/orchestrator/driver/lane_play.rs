@@ -2,13 +2,33 @@
 //! item (the one that last used it here) with no session or step running in it, and nobody holding it now. While the
 //! game runs the lane is held as a [`Holder::Play`], so nothing else starts there; it goes back when the game closes
 //! or Stop ends it. A lane that's empty, busy building, or past `lanes` is refused (logged: the ack went out already).
-use super::{ProjectLoop, SessionStarter};
+use super::{Links, ProjectLoop, SessionStarter};
 use crate::lane_pool::{Holder, LanePool};
 use crate::lanes::lane_path;
 use crate::telemetry::{Event, event};
+use crate::view::ItemCommand;
 use std::path::Path;
 
 impl ProjectLoop {
+    /// Every poll, paused or not: gives back the lanes whose game closed, and carries out the queued Play and Stop.
+    /// A Play while `paused` (or stopping) is dropped, so nothing starts that nobody expects; a Stop always works.
+    pub(super) fn carry_out_lane_commands(
+        &mut self,
+        pool: &mut LanePool,
+        starter: &dyn SessionStarter,
+        links: &Links,
+        hold: bool,
+    ) {
+        self.release_finished_games(pool);
+        for command in links.item_commands.take_lane(&self.id) {
+            match command {
+                ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, starter),
+                ItemCommand::Stop { lane, .. } => self.stop_lane(pool, lane),
+                _ => tracing::info!("{}: dropped a play while paused or stopping", self.id),
+            }
+        }
+    }
+
     /// Plays lane `lane`: takes it as a Play and runs `playCommand` in it.
     pub(super) fn play_lane(&mut self, pool: &mut LanePool, lane: u32, starter: &dyn SessionStarter) {
         let refuse = |why: &str| tracing::info!("{}: refused a play of lane {lane}: {why}", self.id);

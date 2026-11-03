@@ -169,6 +169,8 @@ impl ProjectLoop {
         if let Some(lane) = pool.lane_of(&self.id, item_id)
             && pool.release(lane, &holder)
         {
+            // The lane's latest user is the one a Play names.
+            self.last_lane.retain(|_, k| *k != lane);
             self.last_lane.insert(item_id.to_string(), lane);
             self.events.add_in(
                 &self.id,
