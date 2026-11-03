@@ -107,6 +107,16 @@ impl Client {
         Ok(list.asks)
     }
 
+    /// `pause_get {}`: whether the project is paused on the store, for every computer on it.
+    pub async fn project_paused(&self, repo_id: u64, token: Option<&str>) -> Result<bool, BacklogError> {
+        #[derive(Deserialize)]
+        struct Pause {
+            paused: Option<Value>,
+        }
+        let pause: Pause = self.op(repo_id, token, "pause_get", json!({}), "pause").await?;
+        Ok(pause.paused.is_some_and(|p| !p.is_null()))
+    }
+
     /// `ask_report { id, ...fields }`: an ask's progress, waiting reason, final answer and action results.
     pub async fn ask_report(
         &self,

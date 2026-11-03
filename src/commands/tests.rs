@@ -587,3 +587,57 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     assert!(v.item_commands.take("one").is_empty());
     assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
 }
+
+fn ask_with(v: &AgentView, args: Value, dir: &Path) -> Value {
+    run(&cmd("ask", args), "one", &mut Seen::default(), v, &|_| {}, dir)
+}
+
+#[test]
+fn ask_queues_the_question_with_its_thread_and_card_and_acks() {
+    let v = claiming();
+    let args = json!({ "askId": " a1 ", "text": " why is step 5 stuck? ", "replyTo": "a0", "about": "item-3" });
+    assert_eq!(ask_with(&v, args, &data_dir()), json!({ "type": "ack", "id": "c1" }));
+    assert_eq!(
+        v.item_commands.take_asks("one"),
+        vec![AskCommand {
+            project: "one".into(),
+            ask_id: "a1".into(),
+            text: "why is step 5 stuck?".into(),
+            reply_to: Some("a0".into()),
+            about: Some("item-3".into()),
+            images: String::new(),
+        }]
+    );
+    assert!(v.item_commands.take_asks("one").is_empty());
+}
+
+#[test]
+fn ask_needs_an_id_a_message_and_claim_mode() {
+    let nack_of = |v: &AgentView, args: Value| ask_with(v, args, &data_dir())["reason"].as_str().unwrap().to_string();
+    let v = claiming();
+    assert_eq!(nack_of(&v, json!({ "text": "hi" })), "Ask needs the ask's id.");
+    assert_eq!(
+        nack_of(&v, json!({ "askId": "a", "text": "  " })),
+        "Ask needs a message."
+    );
+    assert!(nack_of(&view(), json!({ "askId": "a", "text": "hi" })).contains("claim mode"));
+    assert!(v.item_commands.take_asks("one").is_empty());
+}
+
+#[test]
+fn ask_saves_pictures_into_an_attached_images_block_and_checks_them() {
+    let v = claiming();
+    let dir = tempfile::tempdir().unwrap();
+    let args = json!({ "askId": "a", "text": "see", "images": [picture(10), picture(20)] });
+    assert_eq!(ask_with(&v, args, dir.path())["type"], "ack");
+    let images = v.item_commands.take_asks("one").remove(0).images;
+    assert!(images.starts_with("Attached images (look at each with your Read tool before acting on this):\n- "));
+    let files: Vec<_> = std::fs::read_dir(dir.path().join("attachments")).unwrap().collect();
+    assert_eq!(files.len(), 2);
+    for f in files {
+        assert!(images.contains(&f.unwrap().path().display().to_string()));
+    }
+    let bad = json!({ "askId": "b", "text": "see", "images": [json!({ "type": "text/plain", "data": "x" })] });
+    assert_eq!(ask_with(&v, bad, dir.path())["type"], "nack");
+    assert!(v.item_commands.take_asks("one").is_empty());
+}

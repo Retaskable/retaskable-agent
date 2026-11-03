@@ -10,7 +10,7 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
-//! `orchestrator::driver::lane_play`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop's ask step, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::galleries;
 use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, DraftCommand, Exit, ItemCommand};
+use crate::view::{AgentView, AskCommand, DraftCommand, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -109,6 +109,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
+        "ask" => ask(cmd, project, view, data_dir),
         "play" | "stop" => play(cmd, project, view),
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
@@ -124,9 +125,9 @@ const MAX_PICTURES_BYTES: usize = 4 << 20;
 
 /// Checks `args.pictures` (`[{ type, data }]`, base64) and saves them under `<data_dir>/attachments/` as
 /// `<uuid>.<ext>`. All are checked before any is written; one that fails fails them all. The paths, in order.
-fn save_pictures(args: &Value, data_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+fn save_pictures(args: &Value, key: &str, data_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     use base64::Engine;
-    let list = match args.get("pictures") {
+    let list = match args.get(key) {
         None | Some(Value::Null) => return Ok(vec![]),
         Some(Value::Array(list)) => list,
         Some(_) => return Err("pictures must be a list.".into()),
@@ -181,7 +182,7 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
     if let Err(reason) = claim_check(view) {
         return nack(&cmd.id, reason);
     }
-    let pictures = match save_pictures(&cmd.args, data_dir) {
+    let pictures = match save_pictures(&cmd.args, "pictures", data_dir) {
         Ok(p) => p,
         Err(reason) => return nack(&cmd.id, reason),
     };
@@ -197,6 +198,46 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         notes.push_str(&path.display().to_string());
     }
     queue_item(view, project, id, (!notes.is_empty()).then_some(notes), start_over);
+    ack(&cmd.id)
+}
+
+/// **Ask** (`ask { askId, text, replyTo?, about?, images? }`): a message in the app's chat. The pictures are saved
+/// as Continue's are and their paths made into an "Attached images…" block; the question is queued for the
+/// orchestrator loop's ask step (`orchestrator::driver`), which answers it through `ask_report`. Refused outside
+/// `claim` mode, like Continue.
+fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    let text_of = |k: &str| {
+        let v = cmd.args.get(k).and_then(Value::as_str).map(str::trim);
+        v.filter(|v| !v.is_empty()).map(str::to_string)
+    };
+    let Some(ask_id) = text_of("askId") else {
+        return nack(&cmd.id, "Ask needs the ask's id.".into());
+    };
+    let Some(text) = text_of("text") else {
+        return nack(&cmd.id, "Ask needs a message.".into());
+    };
+    if let Err(reason) = claim_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    let pictures = match save_pictures(&cmd.args, "images", data_dir) {
+        Ok(p) => p,
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    let mut images = String::new();
+    if !pictures.is_empty() {
+        images.push_str("Attached images (look at each with your Read tool before acting on this):");
+        for path in &pictures {
+            images.push_str(&format!("\n- {}", path.display()));
+        }
+    }
+    view.item_commands.push_ask(AskCommand {
+        project: project.to_string(),
+        ask_id,
+        text,
+        reply_to: text_of("replyTo"),
+        about: text_of("about"),
+        images,
+    });
     ack(&cmd.id)
 }
 
@@ -444,12 +485,14 @@ fn nack(id: &str, reason: String) -> Value {
 /// A command's args for the log: pictures as `{ count, bytes }` only, never their data (tray/05.3 section 5.3.4).
 fn audit_args(args: &Value) -> Value {
     let mut args = args.clone();
-    if let Some(Value::Array(list)) = args.get("pictures") {
-        let bytes: usize = (list.iter())
-            .filter_map(|p| p.get("data").and_then(Value::as_str))
-            .map(str::len)
-            .sum();
-        args["pictures"] = json!({ "count": list.len(), "bytes": bytes });
+    for key in ["pictures", "images"] {
+        if let Some(Value::Array(list)) = args.get(key) {
+            let bytes: usize = (list.iter())
+                .filter_map(|p| p.get("data").and_then(Value::as_str))
+                .map(str::len)
+                .sum();
+            args[key] = json!({ "count": list.len(), "bytes": bytes });
+        }
     }
     args
 }
