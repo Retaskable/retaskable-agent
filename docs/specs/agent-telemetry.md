@@ -114,6 +114,19 @@ When an anomaly starts the agent prints one line to its console, e.g. `[watchdog
 
 - `State.orchestrator.anomalies`: the open anomalies, oldest first (`Anomaly` in `shared/types.ts`). The agent only sends them; the Expo app words and places them (the Agents screen's "What looks wrong" list, a warning line on an item's page).
 
+What the `snapshot-reporting` item needs the computer to hold and send, all **[Proposal]**:
+
+- **The record.** `Telemetry` (`src/telemetry/debounce.rs`) today keeps only when a finding was first seen and whether it has started. To hand a snapshot its anomalies it also keeps, for each started one, the fields of its `start` event: `id`, `rule`, `item`, `text`, `details`, and `since` (the time of the first check that saw it, not of the `start` event, so a 10-minute threshold shows `since` 10 minutes before the event). One read, `open_anomalies()`, returns them oldest `since` first, ties by `id`.
+- **What is sent.** Each anomaly as `{ id, kind (the rule), item?, since (ISO), text, details }`, the shape section 4 names. `details` is the rule's own small object (counts, minutes, lane numbers, the item's state), never longer than 1 KB once written out; a larger one is cut to its first keys. `text` goes through the same redaction and 300-character cut as the log (section 3.2), since it also reaches the site.
+- **Many at once.** At most 20 open anomalies are sent, oldest first, with `anomaliesMore: n` beside them for the rest, so one broken project cannot make the snapshot grow without end. The log still gets every `start` and `end`.
+- **Several projects.** The computer sends all its projects' anomalies in one list; each carries its project id so the site can place it under its own project.
+- **When one ends.** It is in the next snapshot's list until the minute whose check no longer finds it; then it is gone from the list at once (no "resolved" row). Its `end` event, with `ms`, is the only record, and `retaskable why` and `agent-report` read it there.
+- **A restart.** Open anomalies are not saved. After a restart the list is empty, and a condition that still holds starts again after its full threshold, with a new `start` event and a new `since` (section 4's "clock starts again"). The log's `end` for the old one is never written, so a reader treats a `start` with no `end` before a `restart_back` as ended by the restart.
+- **Paused and offline.** A paused project keeps its open anomalies on the list until their rules stop finding them (`idle_lanes` and `no_progress` end at once, since they do not fire while paused). With the cloud link down the snapshot is not sent, and the next one that is sent carries the current list, not what was missed.
+- **Not sent.** Nothing from the event log's other kinds, and no anomaly that is still under its threshold.
+
+Tested, once built: `open_anomalies()` is empty below the threshold, lists a started anomaly with `since` from its first check, drops it the minute it ends, orders by `since`, and caps at 20 with the count of the rest (`src/telemetry/debounce/tests.rs`).
+
 ### 4.2 Cursor's tokens on the Usage card
 
 Cursor reports no limit or amount left, only each session's tokens, so the computer keeps a total of its own and reports it as a derived result (never a transcript) beside Claude Code's meters, in the snapshot's `usage.cursor` (`CursorUse` in `shared/types.ts`; `MachineStore.cursorUse`, `agent/src/store.ts`):
