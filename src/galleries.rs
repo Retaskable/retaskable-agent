@@ -42,6 +42,7 @@ use crate::lanes;
 use crate::paths;
 use crate::proc;
 use crate::sync::lock;
+use crate::text::capitalize;
 
 const SHOOT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const JPEG_QUALITY: u8 = 82;
@@ -503,14 +504,6 @@ fn strip_numeric_prefix(s: &str) -> &str {
         rest
     };
     after_letter.strip_prefix('-').unwrap_or(s)
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }
 
 /// The `.jpg` name a PNG is stored under: its extension (case-insensitively) swapped for `.jpg`, and

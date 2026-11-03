@@ -38,6 +38,33 @@ pub fn collapse_and_clip(s: &str, n: usize) -> String {
     clip(&s.split_whitespace().collect::<Vec<_>>().join(" "), n)
 }
 
+/// `s` with every run of whitespace (including newlines) replaced by a single space.
+pub fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+    }
+    out
+}
+
+/// `s` with its first character upper-cased.
+pub fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,6 +73,17 @@ mod tests {
     fn clip_passes_short_text_through_and_truncates_with_an_ellipsis_otherwise() {
         assert_eq!(clip("hello", 10), "hello");
         assert_eq!(clip("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn collapse_whitespace_squeezes_runs_to_one_space() {
+        assert_eq!(collapse_whitespace("a \n\t b  c"), "a b c");
+    }
+
+    #[test]
+    fn capitalize_upper_cases_only_the_first_char() {
+        assert_eq!(capitalize("élan vital"), "Élan vital");
+        assert_eq!(capitalize(""), "");
     }
 
     #[test]

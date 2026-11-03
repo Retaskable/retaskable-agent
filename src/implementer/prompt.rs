@@ -10,6 +10,7 @@ use crate::backlog::{Item, ItemStatus};
 use crate::config::{CheckConfig, CodeGates, ProjectType};
 use crate::decisions::{Decision, decisions_text};
 use crate::prompt::{project_words, render_prompt};
+use crate::text::capitalize;
 
 /// `checksText` (agent/src/steps.ts): the prompt's bulleted list of a project's checks, one per
 /// line, or a line saying there are none.
@@ -28,14 +29,6 @@ pub fn checks_text(checks: &[CheckConfig]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }
 
 /// `gateRule` (agent/src/codeGates.ts): the prompts' sentence saying what the code gates check
