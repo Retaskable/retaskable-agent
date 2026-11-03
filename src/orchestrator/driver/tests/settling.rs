@@ -431,6 +431,8 @@ async fn a_session_that_hit_its_engines_limit_marks_that_engine_limited_until_it
 #[tokio::test]
 async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_record() {
     let (mut rig, _fake, _asked) = ended(SessionResult::NeedsHuman("first problem".into()), &Default::default()).await;
+    // No triager here: its notes are the triage tests'.
+    rig.lp(0).project.triage = crate::config::OnOff::Off;
     rig.machine.pass().await;
     let lp = rig.lp(0);
     let r = lp.records["a"].clone();

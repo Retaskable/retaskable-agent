@@ -5,8 +5,10 @@
 //! `start_over` as Start over, `skip` as Skip, `human` as leaving it alone, `person_steps` as
 //! waiting on a person's own steps.
 //!
-//! Not wired to anything yet: [`crate::orchestrator`]'s tick only claims a lane for a `queued`
-//! item so far, nothing notices a `needs_human` item and runs this on it. [`crate::commands`]'s
+//! In `claim` mode the orchestrator loop runs it (`orchestrator::driver::triage_run`, behind the `triage-session`
+//! flag): a `needs_human` stop that `schedule::wants_triage` holds for gets one triager session, and every finding
+//! is carried out as `human` for now (its reason, and a `person_steps` answer's steps, are added to the item's).
+//! [`crate::commands`]'s
 //! **Continue** is carried out (queued, then done by the orchestrator loop in `claim` mode,
 //! `orchestrator::driver::item_commands`, with [`schedule::nothing_to_continue`] deciding an item has nothing to
 //! carry on from and is left for Start over); Start over and Skip are carried out too (the other buttons this decision would

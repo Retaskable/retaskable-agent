@@ -5,7 +5,6 @@ use super::ProjectLoop;
 use crate::item_lifecycle::ItemState;
 
 /// How many of an item's recent notes the triager is given.
-#[allow(dead_code)] // run by the triage session, a later piece
 const TRIAGE_NOTES: usize = 20;
 
 /// Why a step that moved an item to `needs_human` stopped it, by the state it ran in (the step's outcome is
@@ -40,7 +39,6 @@ impl ProjectLoop {
 
     /// What the triager is given for an item at `needs_human` (06.9 bullet 1), from its record, its backlog item
     /// and its recent notes. `None` without a record.
-    #[allow(dead_code)] // run by the triage session, a later piece
     pub(super) fn triage_context(&self, item_id: &str, data_dir: &Path) -> Option<crate::triage::TriageContext> {
         let record = self.records.get(item_id)?;
         Some(crate::triage::record::triage_context(

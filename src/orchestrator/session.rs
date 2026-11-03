@@ -42,16 +42,16 @@ const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
 
 /// Runs Claude implementer sessions for the claimed items of the projects it was built with.
 pub struct ClaudeStarter {
-    data_dir: PathBuf,
-    projects: Vec<ProjectConfig>,
-    choice: EngineChoiceConfig,
-    env: Env,
+    pub(super) data_dir: PathBuf,
+    pub(super) projects: Vec<ProjectConfig>,
+    pub(super) choice: EngineChoiceConfig,
+    pub(super) env: Env,
     max_turns: u32,
-    models: ModelsConfig,
+    pub(super) models: ModelsConfig,
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
-    running: Arc<AtomicU32>,
+    pub(super) running: Arc<AtomicU32>,
 }
 
 impl ClaudeStarter {
@@ -185,6 +185,10 @@ impl SessionStarter for ClaudeStarter {
             });
         });
         Ok(())
+    }
+
+    fn triage(&self, request: super::driver::TriageRequest) -> Result<(), String> {
+        self.start_triage(request)
     }
 
     fn active(&self) -> u32 {
