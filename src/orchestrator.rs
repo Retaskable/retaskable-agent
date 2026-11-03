@@ -25,6 +25,8 @@ pub mod piece_runs;
 pub mod plan_run;
 pub mod round_robin;
 pub mod session;
+#[cfg(all(test, unix))]
+mod starter_fixtures;
 pub mod steps;
 mod triage_session;
 pub mod trial_host;

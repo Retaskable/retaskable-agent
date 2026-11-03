@@ -2,26 +2,23 @@
 //! project's base checkout decides what's next for a piece or plan that keeps failing; the decision goes back as the
 //! run's `looked` result. One look at a time on this computer.
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
-use super::one_at_a_time::{Held, OneAtATime};
-use super::session::{exists, quiet_timeout};
+use super::driver::{RunRequest, RunStarter, piece_id};
+use super::one_at_a_time::{Cut, OneAtATime, base_or_repo, claude_project, spawn_run};
+use super::session::quiet_timeout;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_for, engine_of, run_session_tracked,
 };
 use crate::env::Env;
 use crate::looks::{LookBrief, Looker, decide};
-use crate::process_tree::ProcessTree;
+use crate::paths;
 use crate::runs::winding_down;
 use crate::tiers::{implementer_tier, mid_tier};
-use crate::{lanes, paths};
 
 const TEMPLATE: &str = include_str!("../../prompts/look.md");
 
@@ -72,19 +69,7 @@ impl RunStarter for LookRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let project = self
-            .projects
-            .iter()
-            .find(|p| p.id_or_derived() == request.project)
-            .ok_or_else(|| format!("no project {} is configured", request.project))?
-            .clone();
-        if !self.triager_on_claude(Some(&project)) {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.triager_on_claude(Some(p)))?;
         let held = self
             .slot
             .take()
@@ -96,20 +81,8 @@ impl RunStarter for LookRuns {
             bin,
             model,
         };
-        let (ends, token) = (request.ends.clone(), request.token.clone());
         let cut = Cut::default();
-        // The inner task is joined, so even a panic in it ends in exactly one end.
-        tokio::spawn(async move {
-            let _held: Held = held;
-            let end = match tokio::spawn(look(job, request.clone(), cut.clone())).await {
-                Ok(end) => end,
-                Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
-            };
-            // A run the loop already ended (a stop or the ceiling cut its tree) sends nothing.
-            if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
-                ends.send(RunEnd { token, outcome, result });
-            }
-        });
+        spawn_run(held, &request, cut.clone(), look(job, request.clone(), cut));
         Ok(())
     }
 }
@@ -121,26 +94,10 @@ struct Job {
     model: String,
 }
 
-/// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.
-#[derive(Clone, Default)]
-struct Cut(Arc<Mutex<Option<Arc<ProcessTree>>>>);
-
-impl Cut {
-    fn is_cut(&self) -> bool {
-        self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
-    }
-}
-
 /// How the run ended; `None` when the loop ended it.
 async fn look(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Value)> {
     let project = &job.project;
-    let worktrees = PathBuf::from(&project.worktrees_dir);
-    let base = lanes::base_checkout_path(&worktrees);
-    let cwd = if base.exists() {
-        base
-    } else {
-        PathBuf::from(&project.repo_path)
-    };
+    let cwd = base_or_repo(project);
     let brief = LookBrief::from_run(&Run {
         token: request.token.clone(),
         kind: request.kind,
@@ -167,14 +124,7 @@ async fn look(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
             .join(format!("look-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
     };
-    let (tx, rx) = tokio::sync::oneshot::channel::<Arc<ProcessTree>>();
-    let (processes, token, seen) = (request.processes.clone(), request.token.clone(), cut.clone());
-    tokio::spawn(async move {
-        if let Ok(tree) = rx.await {
-            *seen.0.lock().unwrap() = Some(tree.clone());
-            processes.add(&token, tree);
-        }
-    });
+    let tx = cut.tree_sender(&request);
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let decided = decide(&looker, &brief, |spec| async move {
         let engine = engine_of(Some(EngineId::Claude))?;

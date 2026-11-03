@@ -1,10 +1,8 @@
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedReceiver;
-
 use super::*;
-use crate::orchestrator::driver::{RunEndSender, RunProcesses};
-use crate::orchestrator::session::tests::{fake_name, project_in};
+use crate::lanes;
+use crate::orchestrator::starter_fixtures::{self as fixtures, Started, answer, end_of, fixture};
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -12,74 +10,33 @@ struct Rig {
     starter: LookRuns,
 }
 
-/// A project whose `claude` records its arguments and folder, then prints `out`; `extra` runs first.
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
-    let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let script = format!(
-        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{r}'\ncat > \"$R/in.txt\"\necho \"$@\" > \"$R/args.txt\"\npwd > \"$R/pwd.txt\"\n{extra}\ncat \"$R/out.jsonl\"\n",
-        r = root.display()
-    );
-    let bin = root.join(fake_name());
-    crate::test_support::write_executable(&bin, &script);
-    std::fs::write(root.join("out.jsonl"), out).unwrap();
-    let bin = bin.to_string_lossy().into_owned();
-    let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
-    let mut project = project_in(&root, &repo);
+    let f = fixture(out, extra);
+    let mut project = f.project;
     project.budget.reviewer_usd = 1.5;
-    let starter = LookRuns::new(root.join("data"), vec![project], choice, env, ModelsConfig::default());
+    let starter = LookRuns::new(
+        f.root.join("data"),
+        vec![project],
+        choice,
+        f.env,
+        ModelsConfig::default(),
+    );
     Rig {
-        _dir: dir,
-        root,
+        _dir: f._dir,
+        root: f.root,
         starter,
     }
 }
 
-fn answer(structured: &str) -> String {
-    format!(
-        r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{structured},"session_id":"s"}}"#
-    )
-}
-
 const GOOD: &str = r#"{"decision":"again","reason":"it was close","instructions":"Mind the tests."}"#;
 
-struct Started {
-    ends: UnboundedReceiver<RunEnd>,
-    trees: UnboundedReceiver<(String, Arc<ProcessTree>)>,
-    stop: crate::runs::RunStop,
-}
-
 fn request(piece: Value, other: Value) -> (RunRequest, Started) {
-    let (ends, rx) = RunEndSender::channel();
-    let (processes, trees) = RunProcesses::channel();
-    let stop = crate::runs::RunStop::default();
-    let request = RunRequest {
-        token: "tok".into(),
-        project: "p".into(),
-        processes,
-        stop: stop.clone(),
-        kind: RunKind::Look,
-        piece: serde_json::from_value(piece).unwrap(),
-        other: other.as_object().cloned().unwrap_or_default(),
-        lane: None,
-        ends,
-        context: crate::orchestrator::driver::RunContext::for_test(),
-    };
-    (request, Started { ends: rx, trees, stop })
+    fixtures::request(RunKind::Look, piece, other)
 }
 
 fn brief() -> Value {
     json!({ "id": "pc1", "title": "Show the thing", "what": "Show it.", "doneWhen": "It shows.",
         "attempts": [{ "kind": "build", "outcome": "failed", "why": "tests red" }] })
-}
-
-async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
-    tokio::time::timeout(Duration::from_secs(60), rx.recv())
-        .await
-        .expect("an end")
-        .expect("the channel stays open")
 }
 
 async fn until_free(r: &Rig) {
