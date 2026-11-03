@@ -1,5 +1,6 @@
 //! What a restart does with the items a computer still holds (`readopt` in `driver.rs`).
 use super::*;
+use crate::engines::EngineId;
 
 fn done(result: ImplementerOutcome) -> SessionResult {
     SessionResult::Implementer(result)
@@ -206,4 +207,37 @@ async fn a_resume_keeps_the_saved_size_and_a_fresh_start_clears_it() {
     assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, Some(100_000));
     let (mut rig, _fake, _) = after_restart_sized(None, "building", Some(150_001)).await;
     assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, None);
+}
+
+#[tokio::test]
+async fn a_restart_starts_a_session_fresh_when_its_lane_moved_to_another_engine() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let saved = rig.lp(0).store.runs()["a"].clone();
+    assert_eq!(saved.impl_session_engine, EngineId::Claude);
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": ["cursor", "cursor"] })).unwrap();
+    let fake_after = rig.go_live();
+    rig.machine.pass().await;
+    drop(fake);
+    let started = fake_after.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(!started[0].resume);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+    assert!(
+        started[0]
+            .follow_up
+            .as_deref()
+            .unwrap()
+            .starts_with("You're picking up")
+    );
+    let noted = (rig.lp(0).events().recent().iter()).any(|e| {
+        e.to_value()["note"] == "Moved to a lane on cursor, so this carries on in a fresh cursor session on the branch"
+    });
+    assert!(noted);
+    assert_eq!(rig.lp(0).store.runs()["a"].impl_session_engine, EngineId::Cursor);
 }

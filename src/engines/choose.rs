@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
+use super::EngineId;
 use crate::config::{Engine, EngineChoiceConfig, LaneEngine, RoleEngines};
 
 /// `Role` in `shared/types.ts`: the kind of work a session does.
@@ -64,6 +65,16 @@ pub fn lane_engine(cfg: &EngineChoiceConfig, lane: u32) -> Option<Engine> {
         LaneEngine::Cursor => Some(Engine::Cursor),
         LaneEngine::Codex => Some(Engine::Codex),
         LaneEngine::Default => None,
+    }
+}
+
+/// The program a session on `engine` runs: the local model is Claude Code.
+pub fn program_of(engine: Engine) -> EngineId {
+    match engine {
+        Engine::Claude | Engine::Local => EngineId::Claude,
+        Engine::Cursor => EngineId::Cursor,
+        Engine::Pi => EngineId::Pi,
+        Engine::Codex => EngineId::Codex,
     }
 }
 

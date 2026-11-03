@@ -16,14 +16,16 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
-use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, picking_up_prompt};
+use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::{
+    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, program_of, run_session,
+};
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
 use crate::implementer::{
@@ -104,6 +106,7 @@ impl SessionStarter for ClaudeStarter {
             outcomes,
             usage,
             session_id,
+            engine: session_engine,
             resume,
             follow_up,
             items,
@@ -127,6 +130,8 @@ impl SessionStarter for ClaudeStarter {
             models: self.models,
             max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
+            engine: session_engine,
+            lane_engine: lane_engine(&self.choice, lane).map(program_of),
             resume,
             follow_up,
             items,
@@ -244,6 +249,10 @@ struct Job {
     max_resume_context_tokens: u32,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
+    /// The engine the session runs on (`StartRequest::engine`).
+    engine: EngineId,
+    /// The engine the lane now has of its own, if any: a send-back resumes only if it matches `engine`.
+    lane_engine: Option<EngineId>,
     resume: bool,
     /// `None` prepares the lane fresh, as a newly claimed item does. `Some` is the picking-up prompt for a
     /// restart after the lane's prior session ran out of turns or had grown too large: the lane is reused
@@ -450,6 +459,9 @@ pub(super) struct GateRounds<'a> {
 pub(super) struct FreshRules {
     pub max_turns: u32,
     pub max_resume_context_tokens: u32,
+    /// The engine the session started on, and the lane's own engine now (if it has one).
+    pub engine: EngineId,
+    pub lane_engine: Option<EngineId>,
 }
 
 /// What [`gate_rounds`] asks its caller to run next.
@@ -483,6 +495,7 @@ where
     let mut notes = Vec::new();
     let mut rounds = 0;
     let mut restarted = false;
+    let mut current_engine = g.fresh.map(|f| f.engine);
     loop {
         if let Some(fresh) = g.fresh.filter(|_| ran_out_of_turns(&a)) {
             if restarted {
@@ -519,12 +532,20 @@ where
             return Ok(Gated::GaveUp(a, notes, why));
         }
         let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
-        let grown = g
-            .fresh
-            .and_then(|f| a.context_tokens.filter(|t| *t > u64::from(f.max_resume_context_tokens)));
-        a = match grown {
-            Some(tokens) => {
-                notes.push(FreshStart::Grown(tokens).history_line());
+        // A session resumes only on the engine it started on, and not past `maxResumeContextTokens`.
+        let reason = g.fresh.and_then(|f| {
+            fresh_for_engine(current_engine.unwrap_or(f.engine), f.lane_engine).or_else(|| {
+                a.context_tokens
+                    .filter(|t| *t > u64::from(f.max_resume_context_tokens))
+                    .map(FreshStart::Grown)
+            })
+        });
+        a = match reason {
+            Some(reason) => {
+                notes.push(reason.history_line());
+                if let Some(f) = g.fresh {
+                    current_engine = Some(f.lane_engine.unwrap_or(current_engine.unwrap_or(f.engine)));
+                }
                 next(Step::FixFresh(follow_up)).await?
             }
             None => next(Step::Fix(follow_up)).await?,
@@ -542,6 +563,8 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         fresh: Some(FreshRules {
             max_turns: job.max_turns,
             max_resume_context_tokens: job.max_resume_context_tokens,
+            engine: job.engine,
+            lane_engine: job.lane_engine,
         }),
     };
     // The session now answering, and whether it is a fresh one (so its id is reported).

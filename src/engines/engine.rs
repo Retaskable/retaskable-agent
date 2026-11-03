@@ -12,8 +12,10 @@ use serde_json::Value;
 
 /// `EngineId` in `shared/types.ts`: which AI tool a session runs on. Missing on a `SessionSpec`
 /// means `Claude`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EngineId {
+    #[default]
     Claude,
     Cursor,
     Pi,

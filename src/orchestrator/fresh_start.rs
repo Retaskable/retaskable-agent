@@ -3,6 +3,17 @@
 //! rules on resume" and "A session that's grown starts fresh").
 use crate::engines::EngineId;
 
+/// Whether a session that started on `started_on` can't resume now (engines/03-choosing-the-engine.md section
+/// 3.3): pi and Codex never resume (engines.md sections 13 and 14), and a lane that now has an engine of its
+/// own, which differs, starts fresh on it. `None` resumes.
+pub fn fresh_for_engine(started_on: EngineId, lane_engine: Option<EngineId>) -> Option<FreshStart> {
+    match (started_on, lane_engine) {
+        (EngineId::Pi | EngineId::Codex, _) => Some(FreshStart::CantResume(started_on)),
+        (from, Some(to)) if from != to => Some(FreshStart::LaneEngine { from, to }),
+        _ => None,
+    }
+}
+
 /// The follow-up a restarted session is given after its predecessor ran out of turns
 /// (06.2-implementer.md "at most maxTurns turns").
 pub const MAX_TURNS_FOLLOW_UP: &str = "An earlier session ran out of turns before it finished. Check \
@@ -86,6 +97,28 @@ mod tests {
             FreshStart::CantResume(Cursor).history_line(),
             "cursor can't resume a session, so this starts a fresh one on the branch"
         );
+    }
+
+    #[test]
+    fn a_session_resumes_only_on_the_engine_it_started_on() {
+        use EngineId::*;
+        assert_eq!(fresh_for_engine(Claude, None), None);
+        assert_eq!(fresh_for_engine(Claude, Some(Claude)), None);
+        assert_eq!(fresh_for_engine(Cursor, Some(Cursor)), None);
+        assert_eq!(
+            fresh_for_engine(Claude, Some(Cursor)),
+            Some(FreshStart::LaneEngine {
+                from: Claude,
+                to: Cursor
+            })
+        );
+        for engine in [Pi, Codex] {
+            assert_eq!(fresh_for_engine(engine, None), Some(FreshStart::CantResume(engine)));
+            assert_eq!(
+                fresh_for_engine(engine, Some(engine)),
+                Some(FreshStart::CantResume(engine))
+            );
+        }
     }
 
     #[test]
