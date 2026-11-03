@@ -114,8 +114,8 @@ pub struct RunRequest {
     pub kind: RunKind,
     /// The piece's brief as the store sent it.
     pub piece: RunPiece,
-    /// Any other brief field of the run (a look's `history` and `knownBugs`).
-    pub other: serde_json::Map<String, Value>,
+    /// Any other field of the run the store sent (a look's `history` and `knownBugs`).
+    pub other: serde_json::Map<String, serde_json::Value>,
     /// The folder of the lane the run holds; `None` for a kind that runs in none.
     pub lane: Option<PathBuf>,
     pub ends: RunEndSender,

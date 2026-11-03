@@ -4,22 +4,26 @@
 //! this computer.
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
-use super::driver::{RunRequest, RunStarter, piece_id};
-use super::one_at_a_time::{Cut, OneAtATime, Setup, base_or_repo, claude_project, spawn_run};
-use super::session::quiet_timeout;
+use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
+use super::session::{exists, quiet_timeout};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::config::{Engine, ProjectConfig};
+use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of,
     run_session_tracked,
 };
+use crate::env::Env;
+use crate::process_tree::ProcessTree;
 use crate::prompt::render_prompt;
 use crate::runs::winding_down;
-use crate::{paths, tiers};
+use crate::{lanes, paths, tiers};
 
 const TEMPLATE: &str = include_str!("../../prompts/planner.md");
 
@@ -205,31 +209,52 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
 
 /// Runs `plan` runs of the projects it was built with, one at a time on this computer.
 pub struct PlanRuns {
-    pub setup: Setup,
-    /// Shared with the look runner: one plan or look at a time.
-    pub slot: OneAtATime,
+    pub data_dir: PathBuf,
+    pub projects: Vec<ProjectConfig>,
+    pub choice: EngineChoiceConfig,
+    pub env: Env,
+    pub models: ModelsConfig,
+    running: Arc<AtomicBool>,
 }
 
 impl PlanRuns {
-    pub fn new(setup: Setup) -> Self {
+    pub fn new(
+        data_dir: PathBuf,
+        projects: Vec<ProjectConfig>,
+        choice: EngineChoiceConfig,
+        env: Env,
+        models: ModelsConfig,
+    ) -> Self {
         Self {
-            setup,
-            slot: OneAtATime::default(),
+            data_dir,
+            projects,
+            choice,
+            env,
+            models,
+            running: Arc::default(),
         }
     }
 
     fn planner_on_claude(&self, project: Option<&ProjectConfig>) -> bool {
         let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.setup.choice, engines, Role::Planner, None) == Engine::Claude
+        engine_for(&self.choice, engines, Role::Planner, None) == Engine::Claude
+    }
+}
+
+/// Clears the computer's plan flag when the run's task ends, however it ends (a panic included).
+struct Running(Arc<AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
 impl RunStarter for PlanRuns {
     fn kinds(&self) -> Vec<RunKind> {
         // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
-        let claude =
-            self.planner_on_claude(None) && self.setup.projects.iter().all(|p| self.planner_on_claude(Some(p)));
-        if claude && self.slot.is_free() {
+        let claude = self.planner_on_claude(None) && self.projects.iter().all(|p| self.planner_on_claude(Some(p)));
+        if claude && !self.running.load(Ordering::SeqCst) {
             vec![RunKind::Plan]
         } else {
             Vec::new()
@@ -237,21 +262,19 @@ impl RunStarter for PlanRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let (project, bin) = claude_project(&self.setup.projects, &request, &self.setup.env, |p| {
-            self.planner_on_claude(Some(p))
-        })?;
-        let held = self
-            .slot
-            .take()
-            .ok_or("a plan or look run is already running on this computer")?;
+        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.planner_on_claude(Some(p)))?;
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Err("a plan run is already running on this computer".into());
+        }
+        let guard = Running(self.running.clone());
         let job = Job {
-            data_dir: self.setup.data_dir.clone(),
+            data_dir: self.data_dir.clone(),
             project,
             bin,
             model: tiers::chore_tier().to_string(),
         };
         let cut = Cut::default();
-        spawn_run(held, &request, cut.clone(), plan(job, request.clone(), cut));
+        spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
     }
 }
@@ -261,6 +284,64 @@ struct Job {
     project: ProjectConfig,
     bin: PathBuf,
     model: String,
+}
+
+/// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.
+#[derive(Clone, Default)]
+pub(super) struct Cut(pub(super) Arc<Mutex<Option<Arc<ProcessTree>>>>);
+
+impl Cut {
+    pub(super) fn is_cut(&self) -> bool {
+        self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
+    }
+}
+
+/// The project of `request`, and the `claude` binary, for a starter whose role runs on Claude (`on_claude`); `Err`
+/// gives the run back.
+pub(super) fn claude_project(
+    projects: &[ProjectConfig],
+    request: &RunRequest,
+    env: &Env,
+    on_claude: impl Fn(&ProjectConfig) -> bool,
+) -> Result<(ProjectConfig, PathBuf), String> {
+    let project = projects
+        .iter()
+        .find(|p| p.id_or_derived() == request.project)
+        .ok_or_else(|| format!("no project {} is configured", request.project))?
+        .clone();
+    if !on_claude(&project) {
+        return Err("only Claude sessions run in the Rust agent yet".into());
+    }
+    let bin = resolve_claude_on_path(env).map_err(|e| format!("{e:#}"))?;
+    if !exists(&bin, env) {
+        return Err(format!("the claude binary wasn't found ({})", bin.display()));
+    }
+    Ok((project, bin))
+}
+
+/// Runs `work` as the run's task, holding `guard` until it ends. The inner task is joined, so even a panic in it
+/// ends in exactly one end. A run the loop already ended (a stop or the ceiling cut its tree) sends nothing, and
+/// neither does a `work` that answers `None`.
+pub(super) fn spawn_run<G: Send + 'static>(
+    guard: G,
+    request: RunRequest,
+    cut: Cut,
+    work: impl std::future::Future<Output = Option<(RunOutcome, Value)>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let _held = guard;
+        let end = match tokio::spawn(work).await {
+            Ok(end) => end,
+            Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
+        };
+        if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
+            request.ends.send(RunEnd {
+                token: request.token.clone(),
+                outcome,
+                result,
+            });
+        }
+    });
 }
 
 fn failed(why: impl Into<String>) -> Option<(RunOutcome, Value)> {
@@ -275,7 +356,13 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
         Err(e) => return Some((RunOutcome::Failed(e), json!({ "outside": true }))),
     };
     let project = &job.project;
-    let cwd = base_or_repo(project);
+    let worktrees = PathBuf::from(&project.worktrees_dir);
+    let base = lanes::base_checkout_path(&worktrees);
+    let cwd = if base.exists() {
+        base
+    } else {
+        PathBuf::from(&project.repo_path)
+    };
     let spec = EphemeralSessionConfig {
         cwd: &cwd,
         budget_usd: project.budget.planner_usd,
@@ -292,7 +379,14 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
             .join(format!("plan-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
     };
-    let tx = cut.tree_sender(&request);
+    let (tx, rx) = tokio::sync::oneshot::channel::<Arc<ProcessTree>>();
+    let (processes, token, seen) = (request.processes.clone(), request.token.clone(), cut.clone());
+    tokio::spawn(async move {
+        if let Ok(tree) = rx.await {
+            *seen.0.lock().unwrap() = Some(tree.clone());
+            processes.add(&token, tree);
+        }
+    });
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let ran = async {
         let engine = engine_of(Some(EngineId::Claude))?;

@@ -354,21 +354,25 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .collect(),
         bug_version: connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default()),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
-            let runs_setup = orchestrator::one_at_a_time::Setup {
-                data_dir: dir.to_path_buf(),
-                projects: cfg.projects.clone(),
-                choice: config::engine_choice(cfg, env),
-                env: env.clone(),
-                models: cfg.machine.models,
-            };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
                 orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
                     as Arc<dyn orchestrator::driver::RunStarter>,
-                Arc::new(orchestrator::plan_run::PlanRuns::new(runs_setup.clone()))
-                    as Arc<dyn orchestrator::driver::RunStarter>,
-                Arc::new(orchestrator::look_run::LookRuns::new(runs_setup.clone()))
-                    as Arc<dyn orchestrator::driver::RunStarter>,
+                Arc::new(orchestrator::plan_run::PlanRuns::new(
+                    dir.to_path_buf(),
+                    cfg.projects.clone(),
+                    config::engine_choice(cfg, env),
+                    env.clone(),
+                    cfg.machine.models,
+                )) as Arc<dyn orchestrator::driver::RunStarter>,
+                Arc::new(orchestrator::look_run::LookRuns::new(
+                    dir.to_path_buf(),
+                    cfg.projects.clone(),
+                    config::engine_choice(cfg, env),
+                    env.clone(),
+                    cfg.machine.models,
+                    orchestrator::look_run::Slot::default(),
+                )) as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),
