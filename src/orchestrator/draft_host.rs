@@ -157,6 +157,11 @@ impl DraftHost for ClaudeDrafts {
         land::rebase(crate::git_bin::program(), &dir, branch, &project.base_branch)
     }
 
+    fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()> {
+        let dir = self.prepare(project, id, branch)?;
+        land::push_rebased(crate::git_bin::program(), &dir, branch)
+    }
+
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
     }

@@ -344,7 +344,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
-        run_starters: Vec::new(),
+        run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
+            vec![Arc::new(orchestrator::piece_runs::PieceStarter {
+                data_dir: dir.to_path_buf(),
+                projects: cfg.projects.clone(),
+                choice: config::engine_choice(cfg, env),
+                env: env.clone(),
+                max_turns: cfg.machine.max_turns,
+                models: cfg.machine.models,
+            }) as Arc<dyn orchestrator::driver::RunStarter>]
+        } else {
+            Vec::new()
+        },
         drafts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::draft_host::ClaudeDrafts::new(
                 dir.to_path_buf(),

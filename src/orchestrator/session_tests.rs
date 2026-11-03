@@ -26,16 +26,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
     if claude {
         fake_claude(&bin, &out, &args, lines.is_some());
     }
-    let mut project = ProjectConfig {
-        id: Some("p".into()),
-        repo_path: repo.to_string_lossy().into_owned(),
-        worktrees_dir: root.join("worktrees").to_string_lossy().into_owned(),
-        base_branch: "main".into(),
-        github_repo: "o/p".into(),
-        max_check_rounds: 3,
-        ..Default::default()
-    };
-    project.budget.implementer_usd = 5.0;
+    let project = project_in(&root, &repo);
     let bin = bin.to_string_lossy().into_owned();
     let gh = root.join(if cfg!(windows) { "gh.cmd" } else { "gh.sh" });
     fake_gh(&gh, &root);
@@ -64,7 +55,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
 
 /// A `gh` that logs its arguments to `gh.log` in `root`, lists the JSON in `gh_list` for `pr list`, and for
 /// `pr create` saves its stdin as `gh_body` and prints a PR URL.
-fn fake_gh(bin: &Path, root: &Path) {
+pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
     std::fs::write(root.join("gh_list"), "[]").unwrap();
     std::fs::write(root.join("gh_state"), "OPEN").unwrap();
     let r = root.display();
@@ -124,7 +115,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     }
 }
 
-fn fake_name() -> &'static str {
+pub(in crate::orchestrator) fn fake_name() -> &'static str {
     if cfg!(windows) { "claude.cmd" } else { "claude.sh" }
 }
 
@@ -934,4 +925,19 @@ fn a_piece_branch_is_its_id_and_the_title_slug() {
         piece_branch_name("p7", "Build the implementer's prompt!"),
         "retaskable/p7-build-the-implementer-s-prompt"
     );
+}
+
+/// The rig project "p" over `repo`, with its lanes under `root`.
+pub(in crate::orchestrator) fn project_in(root: &Path, repo: &Path) -> ProjectConfig {
+    let mut project = ProjectConfig {
+        id: Some("p".into()),
+        repo_path: repo.to_string_lossy().into_owned(),
+        worktrees_dir: root.join("worktrees").to_string_lossy().into_owned(),
+        base_branch: "main".into(),
+        github_repo: "o/p".into(),
+        max_check_rounds: 3,
+        ..Default::default()
+    };
+    project.budget.implementer_usd = 5.0;
+    project
 }

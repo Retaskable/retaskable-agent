@@ -224,8 +224,13 @@ fn attempts_text(attempts: &[serde_json::Value]) -> String {
 /// The person's answers on a piece (`decisions`: `{question, answer}` as the store sends them in the piece's other
 /// fields), as the "Already decided by a person" section.
 fn piece_decisions(piece: &RunPiece) -> String {
+    decisions_text(&piece_decision_list(piece)).trim_start().to_string()
+}
+
+/// The person's answers on a piece, as [`Decision`]s.
+pub fn piece_decision_list(piece: &RunPiece) -> Vec<Decision> {
     let text = |d: &serde_json::Value, k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let decisions: Vec<Decision> = piece
+    piece
         .other
         .get("decisions")
         .and_then(|v| v.as_array())
@@ -236,8 +241,7 @@ fn piece_decisions(piece: &RunPiece) -> String {
             answer: text(d, "answer"),
             at: String::new(),
         })
-        .collect();
-    decisions_text(&decisions).trim_start().to_string()
+        .collect()
 }
 
 /// "Already done: <steps>" for the person steps a person has finished (`doneSteps` in the piece's other fields).
