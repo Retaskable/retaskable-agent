@@ -315,6 +315,8 @@ pub struct ProjectLoop {
     pub(super) triaging: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
+    /// The chat's asks, waiting and running (`asks.rs`).
+    pub(super) asks: super::asks::Asks,
 }
 
 impl ProjectLoop {
@@ -364,6 +366,7 @@ impl ProjectLoop {
             landing: Default::default(),
             triaging: Default::default(),
             triage_flag: false,
+            asks: Default::default(),
         }
     }
 

@@ -369,6 +369,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 cfg.machine.models,
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
+        asks: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::ask_host::ClaudeAsks::new(
+                dir.to_path_buf(),
+                config::engine_choice(cfg, env),
+                env.clone(),
+                cfg.machine.models,
+                cfg.machine.budget.daily_usd,
+                view.clone(),
+            ) as Arc<dyn orchestrator::driver::AskHost>
+        }),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),
