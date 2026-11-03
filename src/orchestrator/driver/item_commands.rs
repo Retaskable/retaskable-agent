@@ -69,7 +69,10 @@ impl ProjectLoop {
             }
         }
         for (item, notes) in std::mem::take(&mut self.starting_over) {
-            if !self.start_over(pool, &item, &notes, &mut room, starter, shared).await {
+            if !self
+                .start_over(&item, notes.as_deref(), (pool, starter), (&mut room, shared))
+                .await
+            {
                 self.starting_over.push((item, notes));
             }
         }
@@ -125,7 +128,9 @@ impl ProjectLoop {
         let session = record.and_then(|r| r.impl_session_id.as_deref());
         if !at_limit && nothing_to_continue(branch, pr_url, session) {
             tracing::info!("{}: {item_id} has nothing to continue from; starting it over", self.id);
-            return self.start_over(pool, item_id, notes, room, starter, shared).await;
+            return self
+                .start_over(item_id, notes.as_deref(), (pool, starter), (room, shared))
+                .await;
         }
         let checks_only = notes.is_none() && !at_limit;
         if !checks_only && *room == 0 {
@@ -171,12 +176,10 @@ impl ProjectLoop {
     /// Carries out one Start over. False when it must wait for a lane or a session slot.
     async fn start_over(
         &mut self,
-        pool: &mut LanePool,
         item_id: &str,
-        notes: &Option<String>,
-        room: &mut u32,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
+        notes: Option<&str>,
+        (pool, starter): (&mut LanePool, &dyn SessionStarter),
+        (room, shared): (&mut u32, &mut Shared<'_>),
     ) -> bool {
         if !self.runs.get(item_id).is_some_and(|r| r.state == ItemState::NeedsHuman) {
             tracing::info!("{}: dropped a start over for {item_id}: it isn't stopped here", self.id);
@@ -228,8 +231,15 @@ impl ProjectLoop {
         );
         self.remember(item_id, Some(lane), None, None);
         *room -= u32::from(
-            self.launch(pool, item_id, lane, Launch::StartOver(notes.clone()), starter, shared)
-                .await,
+            self.launch(
+                pool,
+                item_id,
+                lane,
+                Launch::StartOver(notes.map(str::to_string)),
+                starter,
+                shared,
+            )
+            .await,
         );
         true
     }
