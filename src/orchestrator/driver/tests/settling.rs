@@ -1,8 +1,8 @@
 //! How sessions and steps that ended settle their item's lane and lease (`driver/settle.rs`).
 use super::*;
+use crate::orchestrator::driver::machine::poll_period;
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
-use crate::orchestrator::driver::machine::poll_period;
 
 fn done(result: ImplementerOutcome) -> SessionResult {
     SessionResult::Implementer(result)
