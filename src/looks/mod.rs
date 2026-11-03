@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::backlog::runs::{Run, RunKind};
+use crate::backlog::runs::Run;
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
 use crate::prompt::{project_words, render_prompt};
@@ -22,7 +22,8 @@ const HISTORY_KEPT: usize = 10;
 /// - `piece.title`, `piece.what`, `piece.doneWhen`, `piece.branch`, `piece.change`;
 /// - `piece.attempts[]`: `kind`, `outcome`, `why`, `computer`, `engine`;
 /// - `piece.looks[]`: `decision`, `reason`, `instructions`;
-/// - for a `plan` run, `history[]` on the run: strings, or objects with a `note` (else `text`);
+/// - `history[]` on the look run, present only when the look is into an item's plan: strings, or objects with a
+///   `note` (else `text`). Its presence is what makes the brief's `kind` `plan` (otherwise `piece`);
 /// - `knownBugs[]` on the run: `id`, `title`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LookBrief(Value);
@@ -46,10 +47,8 @@ impl LookBrief {
                 .collect()
         };
         let mut brief = Map::new();
-        brief.insert(
-            "kind".into(),
-            json!(if run.kind == RunKind::Plan { "plan" } else { "piece" }),
-        );
+        let history = run.other.get("history").and_then(Value::as_array);
+        brief.insert("kind".into(), json!(if history.is_some() { "plan" } else { "piece" }));
         brief.insert("title".into(), json!(p.title));
         brief.insert("what".into(), json!(p.what));
         brief.insert("doneWhen".into(), json!(p.done_when));
@@ -70,13 +69,9 @@ impl LookBrief {
             "looks".into(),
             json!(list(p.other.get("looks"), &["decision", "reason", "instructions"])),
         );
-        if run.kind == RunKind::Plan {
-            let notes: Vec<String> = run
-                .other
-                .get("history")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
+        if let Some(history) = history {
+            let notes: Vec<String> = history
+                .iter()
                 .filter_map(|n| match n {
                     Value::String(s) => Some(s.clone()),
                     _ => n
@@ -376,10 +371,6 @@ mod tests {
             })
             .collect();
         let b = LookBrief::from_run(&run("look", json!({ "history": history }))).0;
-        assert!(b.get("history").is_none());
-        let mut r = run("plan", json!({ "history": history }));
-        r.kind = RunKind::Plan;
-        let b = LookBrief::from_run(&r).0;
         assert_eq!(b["kind"], "plan");
         let h = b["history"].as_array().unwrap();
         assert_eq!(h.len(), 10);
@@ -460,8 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_plan_may_split_with_instructions_alone() {
-        let mut plan = run("plan", json!({}));
-        plan.kind = RunKind::Plan;
+        let plan = run("look", json!({ "history": ["a note"] }));
         let answer = json!({ "decision": "split", "reason": "r", "instructions": "smaller" });
         let d = decided_for(plan.clone(), Some(answer.clone()), true).await;
         assert_eq!(d.result.unwrap().to_wire()["instructions"], "smaller");
