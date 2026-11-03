@@ -10,7 +10,7 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
-//! `orchestrator::driver::lane_play`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::galleries;
 use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, DraftCommand, Exit, ItemCommand};
+use crate::view::{AgentView, AskCommand, DraftCommand, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -110,6 +110,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
         "play" | "stop" => play(cmd, project, view),
+        "ask" => ask(cmd, project, view, data_dir),
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
@@ -124,9 +125,9 @@ const MAX_PICTURES_BYTES: usize = 4 << 20;
 
 /// Checks `args.pictures` (`[{ type, data }]`, base64) and saves them under `<data_dir>/attachments/` as
 /// `<uuid>.<ext>`. All are checked before any is written; one that fails fails them all. The paths, in order.
-fn save_pictures(args: &Value, data_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+fn save_pictures(args: &Value, key: &str, data_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     use base64::Engine;
-    let list = match args.get("pictures") {
+    let list = match args.get(key) {
         None | Some(Value::Null) => return Ok(vec![]),
         Some(Value::Array(list)) => list,
         Some(_) => return Err("pictures must be a list.".into()),
@@ -181,7 +182,7 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
     if let Err(reason) = claim_check(view) {
         return nack(&cmd.id, reason);
     }
-    let pictures = match save_pictures(&cmd.args, data_dir) {
+    let pictures = match save_pictures(&cmd.args, "pictures", data_dir) {
         Ok(p) => p,
         Err(reason) => return nack(&cmd.id, reason),
     };
@@ -197,6 +198,62 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         notes.push_str(&path.display().to_string());
     }
     queue_item(view, project, id, (!notes.is_empty()).then_some(notes), start_over);
+    ack(&cmd.id)
+}
+
+/// **ask** (`ask { askId, text, replyTo?, about?, images? }`, spec 06.6): a chat message for the assistant. The images
+/// are saved like a message's pictures and their paths go in an "Attached images…" block; the ask is queued for the
+/// orchestrator loop, which answers it with `ask_report`. Refused outside `claim` mode, the only mode that runs sessions.
+fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    if !view.item_commands.ask_on(project) {
+        return nack(&cmd.id, "Not a command this agent takes yet: ask".into());
+    }
+    let text_of = |key: &str| {
+        let v = cmd.args.get(key);
+        match v {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+            Some(_) => Err(format!("ask's {key} must be text.")),
+        }
+    };
+    let fields = (|| {
+        Ok((
+            text_of("askId")?,
+            text_of("text")?,
+            text_of("replyTo")?,
+            text_of("about")?,
+        ))
+    })();
+    let (ask_id, text, reply_to, about) = match fields {
+        Ok((Some(ask_id), Some(text), reply_to, about)) => (ask_id, text, reply_to, about),
+        Ok((None, ..)) => return nack(&cmd.id, "ask needs its askId.".into()),
+        Ok(_) => return nack(&cmd.id, "ask needs the message's text.".into()),
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    if let Err(reason) = claim_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    let images = match save_pictures(&cmd.args, "images", data_dir) {
+        Ok(p) => p,
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    let images_block = if images.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = images.iter().map(|p| format!("- {}", p.display())).collect();
+        format!(
+            "Attached images (look at each with your Read tool before acting on this):\n{}",
+            list.join("\n")
+        )
+    };
+    view.item_commands.push_ask(AskCommand {
+        project: project.to_string(),
+        ask_id,
+        text,
+        reply_to,
+        about,
+        images_block,
+    });
     ack(&cmd.id)
 }
 

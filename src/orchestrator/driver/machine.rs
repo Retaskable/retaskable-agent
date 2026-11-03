@@ -161,6 +161,8 @@ pub struct Machine {
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
+    /// Answers the chat's asks. With none, asks are left unanswered.
+    pub(super) asks: Option<Arc<dyn super::AskHost>>,
     /// The wait between merge tries after a draft is rebased.
     pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
@@ -193,6 +195,7 @@ impl Machine {
             links,
             starter: None,
             drafts: None,
+            asks: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
@@ -370,6 +373,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode answer the chat's asks.
+    pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
+        self.asks = Some(host);
+        self
+    }
+
     /// Lets `claim` mode claim and run spec drafts.
     pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
         self.drafts = Some(host);
@@ -525,6 +534,22 @@ impl Machine {
             }
         }
         let mut slots = (self.concurrency).saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
+        // Asks have a person waiting: they take their slots first, never wait for one, and count toward `concurrency`.
+        if let (Some(host), Some(_)) = (self.asks.clone(), starter.as_ref()) {
+            slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
+            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
+                if live {
+                    let shared = Shared {
+                        links: &self.links,
+                        claim_paused_until: &mut self.claim_paused_until,
+                        claude_signed_out_until: &mut self.claude_signed_out_until,
+                        engine_limits: &mut self.engine_limits,
+                        stopping,
+                    };
+                    lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
+                }
+            }
+        }
         // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
         if let (Some(host), Some(_)) = (self.drafts.clone(), starter.as_ref()) {
             slots = slots.saturating_sub(
@@ -671,6 +696,8 @@ pub struct SpawnArgs<'a> {
     pub starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts in `claim` mode. None claims no draft.
     pub drafts: Option<Arc<dyn super::DraftHost>>,
+    /// Answers the chat's asks in `claim` mode. None answers none.
+    pub asks: Option<Arc<dyn super::AskHost>>,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
@@ -717,6 +744,9 @@ pub fn spawn_all(args: SpawnArgs) {
         machine = machine.with_starter(starter);
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
+        }
+        if let Some(asks) = args.asks {
+            machine = machine.with_asks(asks);
         }
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");
