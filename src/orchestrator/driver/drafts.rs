@@ -50,6 +50,13 @@ pub trait DraftHost: Send + Sync {
     fn publish(&self, project: &ProjectConfig, dir: &Path, branch: &str, title: &str, body: &str) -> Result<Published>;
     /// Removes the worktree; the branch stays for the PR.
     fn remove(&self, project: &ProjectConfig, id: &str);
+    /// Squash-merges (or as the project's merge method says) the pull request with `gh pr merge`.
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()>;
+    /// Rebases the draft's pushed branch onto the base branch in its worktree and force-pushes with lease. False
+    /// when it conflicts.
+    fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool>;
+    /// Fetches the project's remote, so the merge is seen.
+    fn fetch(&self, project: &ProjectConfig) -> Result<()>;
 }
 
 /// The draft this project is drafting: only ids, never the draft itself.
@@ -106,12 +113,7 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let agent = ClaimNextAgent {
-            machine: shared.links.machine.clone(),
-            environment: shared.links.environment.clone(),
-            base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
-        };
+        let agent = claim_agent(shared.links, &self.project);
         let claim = match self.client.draft_claim_next(repo, Some(&token), &agent, &[]).await {
             Ok(Some(claim)) => claim,
             Ok(None) => return,
@@ -138,6 +140,16 @@ impl ProjectLoop {
             }
         });
         self.draft = Some(RunningDraft { id, session_id, task });
+    }
+}
+
+/// Who this computer is to the store, for taking or claiming a draft.
+pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> ClaimNextAgent {
+    ClaimNextAgent {
+        machine: links.machine.clone(),
+        environment: links.environment.clone(),
+        base_branch: project.base_branch.clone(),
+        tags: links.tags.clone(),
     }
 }
 

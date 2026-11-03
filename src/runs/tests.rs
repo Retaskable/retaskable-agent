@@ -146,3 +146,61 @@ fn a_lane_goes_back_on_every_outcome() {
         assert!(!runs.end(&mut pool, "a", outcome, json!({}), t0), "ended once");
     }
 }
+
+fn verdicts(pairs: &[(&str, BeatVerdict)]) -> HashMap<String, BeatVerdict> {
+    pairs.iter().map(|(t, v)| (t.to_string(), *v)).collect()
+}
+
+#[test]
+fn lock_tokens_beat_alongside_run_tokens() {
+    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
+    runs.start(&mut pool, "w", RunKind::Watch, "x", t0).unwrap();
+    runs.locks().add("L1", "chore-tidy", t0);
+    assert_eq!(runs.beat_tokens(), ["w", "L1"]);
+}
+
+#[test]
+fn a_stop_for_a_lock_marks_only_that_lock_lost() {
+    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
+    let locks = runs.locks();
+    locks.add("L1", "merge-main", t0);
+    locks.add("L2", "chore-tidy", t0);
+    runs.start(&mut pool, "w", RunKind::Watch, "x", t0).unwrap();
+    runs.apply_beat(
+        &mut pool,
+        &verdicts(&[("L1", BeatVerdict::Stop), ("L2", BeatVerdict::Ok)]),
+        t0,
+    );
+    assert!(!locks.held("L1") && locks.held("L2"));
+    assert_eq!(runs.live().len(), 1);
+    assert_eq!(runs.beat_tokens(), ["w", "L2"]);
+}
+
+#[test]
+fn a_lock_past_its_ceiling_margin_is_lost() {
+    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
+    let locks = runs.locks();
+    locks.add("M", "merge-main", t0);
+    locks.add("C", "chore-tidy", t0);
+    runs.end_past_ceilings(
+        &mut pool,
+        t0 + Duration::from_secs(3600) - CEILING_MARGIN - Duration::from_secs(1),
+    );
+    assert!(locks.held("M"));
+    runs.end_past_ceilings(&mut pool, t0 + Duration::from_secs(3600) - CEILING_MARGIN);
+    assert!(!locks.held("M") && locks.held("C"));
+    runs.end_past_ceilings(&mut pool, t0 + Duration::from_secs(6 * 3600) - CEILING_MARGIN);
+    assert!(!locks.held("C"));
+}
+
+#[test]
+fn held_locks_count_in_held_until_dropped() {
+    let (mut runs, t0) = (Runs::new("p"), Instant::now());
+    let locks = runs.locks();
+    assert_eq!(runs.held(), 0);
+    locks.add("L1", "chore-tidy", t0);
+    assert_eq!(runs.held(), 1);
+    locks.remove("L1");
+    assert_eq!(runs.held(), 0);
+    let _ = &mut runs;
+}

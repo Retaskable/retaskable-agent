@@ -55,7 +55,7 @@ The agent keeps no copy of a piece's state:
 | `merge` | the change | Takes the merge lock and the merge turn, merges, or merges the base in and pushes. | no | `merged` (commit), `updated`, `conflict` (what the implementer would be told) |
 | `look` | the base checkout as it is | A read-only session decides what's next for a piece or plan that keeps failing (section 3.5). One plan or look at a time per computer. | no | `looked` (decision), `failed` (why) |
 
-The implementer's brief for a piece is the piece: its title, `what`, `doneWhen`, earlier attempts' reasons, answers and any `next`. Rule 1 says to build that piece whole and nothing else; the store, not the result, says what's left of the item. A piece too big for one change ends `failed` with how to split it, until the implementer can return `split`.
+The implementer's brief for a piece is the piece: its title, `what`, `doneWhen`, earlier attempts' reasons, answers and any `next`. Rule 1 says to build that piece whole and nothing else; the store, not the result, says what's left of the item. A piece too big for one change ends `failed` with how to split it, until the implementer can return `split`. The prompt is `prompts/implementer-piece.md` filled from the piece (`build_piece_prompt`): its title, `what` and `doneWhen`; earlier attempts' kind, outcome and why; the instructions of the latest look in the piece's `looks` that gave any, under "What a look said"; for a `fix` run, `next.what` as what to fix, on the piece's pushed `branch`. The two [Proposal] paragraphs below add the person's answers (`decisions`, each `{ question, answer }`), which go under "Already decided by a person", and `doneSteps`, which go in as "Already done: <steps>"; the store's `Piece` has neither field yet, and the prompt reads them from the piece when it does.
 
 **[Proposal]** `needs`, on a piece the planner returns. It lists the other pieces of the same plan this one can't start before (by the title the plan gave them, since the store assigns ids once it saves the plan): the store holds a piece back the way an item's `dependsOn` holds an item back, and never hands it out in `run_take` before they're built. A piece with nothing it needs returns `needs: []`.
 
@@ -69,7 +69,7 @@ A run past its kind's ceiling is lost in the store even while it beats: `build` 
 
 ### 3.4 Locks
 
-The merge lock and chore locks are `lock_take { name, note? }` and `lock_drop { token }`, renewed in the same `run_beat` and lost 3 minutes after the last beat (or past 1 hour for the merge lock, 6 otherwise). `runs_drop` lets them go too.
+The merge lock and chore locks are `lock_take { name, note? }` and `lock_drop { token }`, renewed in the same `run_beat` and lost 3 minutes after the last beat (or past 1 hour for the merge lock, 6 otherwise). `runs_drop` lets them go too. The agent holds them in memory per project (`RunLocks`, `src/runs/locks.rs`): a run's worker gets the handle in its `RunRequest`'s `RunContext` (project id and config, the store `Client`, repo id, link token), takes with `Client::lock_take` (answers a token, or who holds it) and records the token; the loop beats the tokens with the runs'. A `stop` for a lock's token, or being within the ceiling margin of its ceiling, marks it lost, and its holder checks `held(token)` before it acts. Held locks count in what a stop or restart waits for.
 
 ### 3.5 Looks
 

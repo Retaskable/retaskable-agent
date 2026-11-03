@@ -52,6 +52,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         env,
         50,
         ModelsConfig::default(),
+        150_000,
     );
     Rig {
         _dir: dir,
@@ -553,7 +554,10 @@ fn running_out_of_turns_maps_to_max_turns_carrying_the_cap_and_the_context_size(
         usage: None,
         context_tokens: Some(7),
     };
-    assert_eq!(settled(out, 300), (SessionResult::MaxTurns(300), None, Some(7), vec![]));
+    assert_eq!(
+        settled(out, 300),
+        (SessionResult::MaxTurns(300), None, Some(7), vec![], None)
+    );
 }
 
 #[test]
@@ -673,6 +677,7 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         rig.starter.env.clone(),
         50,
         ModelsConfig::default(),
+        150_000,
     )
 }
 
@@ -736,6 +741,46 @@ fn the_branch_is_the_id_a_short_slug_and_the_slice() {
 fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
     assert_eq!(quiet_timeout(0), None);
     assert_eq!(quiet_timeout(20), Some(Duration::from_secs(20 * 60)));
+}
+
+#[cfg(unix)]
+const BIG_SESSION: &str = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":%N%,"cache_creation_input_tokens":0}}}
+{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"session_id":"s"}"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_send_back_to_a_grown_session_starts_a_fresh_one_with_the_findings() {
+    let rig = gated_rig(&[COMMIT_BIG, FIX]);
+    std::fs::write(rig.root.join("out.jsonl"), BIG_SESSION.replace("%N%", "200000")).unwrap();
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    let new = got.session_id.expect("the new session's id");
+    assert_ne!(new, "sess-1");
+    let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
+    let second = args.lines().nth(1).unwrap();
+    assert!(second.contains(&format!("--session-id {new}")), "{second}");
+    assert!(!second.contains("--resume"), "{second}");
+    let prompt = std::fs::read_to_string(rig.root.join("prompt2.txt")).unwrap();
+    assert!(prompt.starts_with("You're picking up"), "{prompt}");
+    assert!(prompt.contains("big.rs"), "{prompt}");
+    assert!(
+        got.notes
+            .iter()
+            .any(|n| n == "Its session had grown to 201000 tokens; starting a fresh one"),
+        "{:?}",
+        got.notes
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_send_back_to_a_session_under_the_limit_still_resumes_it() {
+    let rig = gated_rig(&[COMMIT_BIG, FIX]);
+    std::fs::write(rig.root.join("out.jsonl"), BIG_SESSION.replace("%N%", "1000")).unwrap();
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.session_id, None);
+    let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
+    assert!(args.lines().nth(1).unwrap().contains("--resume sess-1"), "{args}");
 }
 
 fn git_in(rig: &Rig, args: &[&str]) -> String {
@@ -819,4 +864,12 @@ async fn a_start_over_session_is_on_the_attempts_branch_with_the_notes_in_its_fi
     assert!(args.contains("Use the other API."), "{args}");
     assert_eq!(branch_name(&item(&[], None), 0), branch());
     assert!(branch().ends_with("-s2"));
+}
+
+#[test]
+fn a_piece_branch_is_its_id_and_the_title_slug() {
+    assert_eq!(
+        piece_branch_name("p7", "Build the implementer's prompt!"),
+        "retaskable/p7-build-the-implementer-s-prompt"
+    );
 }

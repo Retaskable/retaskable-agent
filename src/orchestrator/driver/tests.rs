@@ -499,6 +499,7 @@ impl SessionStarter for Fake {
                 context_tokens: *self.context_tokens.lock().unwrap(),
                 usage: None,
                 notes: vec![],
+                session_id: None,
             });
         }
         Ok(())
@@ -799,6 +800,7 @@ async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
         usage: Some(usage.clone()),
         context_tokens: None,
         notes: vec![],
+        session_id: None,
     });
     rig.machine.poll().await;
     assert_eq!(
@@ -939,6 +941,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
     assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
 }
 
+mod approve;
 mod commands;
 mod drafts;
 mod playtests;
