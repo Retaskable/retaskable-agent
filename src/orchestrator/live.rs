@@ -34,6 +34,8 @@ pub struct ProjectLive {
     pub decision: Option<String>,
     /// Set while the last attempt failed; cleared by the next tick.
     pub store_error: Option<StoreFailure>,
+    /// The id of the spec draft being written now, if any (it holds no lane).
+    pub drafting: Option<String>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -82,7 +84,13 @@ impl LiveHandle {
             held,
             decision: Some(decision),
             store_error: None,
+            drafting: entry.drafting.take(),
         };
+    }
+
+    /// Says which draft the project is writing now, or none.
+    pub fn set_drafting(&self, project: &str, draft: Option<String>) {
+        self.lock().projects.entry(project.to_string()).or_default().drafting = draft;
     }
 
     /// A pass that was skipped for a store error. The tick fields stay as the last good pass left them.

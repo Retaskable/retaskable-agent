@@ -15,3 +15,6 @@ export const commandHandling = (): boolean => flags.on("command-handling");
 
 /** The `item-waits-and-finishes` flag: act on a session's `waits_on` and `nothing_left` results. Off until there is an answer. */
 export const itemWaitsAndFinishes = (): boolean => flags.on("item-waits-and-finishes");
+
+/** The `spec-drafts` flag: claiming and writing up spec drafts. Off until there is an answer. */
+export const specDrafts = (): boolean => flags.on("spec-drafts");

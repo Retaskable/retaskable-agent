@@ -37,6 +37,18 @@ fn lane_pids(worktrees_dir: &Path) -> HashSet<u32> {
     pids
 }
 
+/// Every draft's docs-only worktree (`draft-<id>`, `draft_worktree::path`) under `worktrees_dir`.
+fn draft_worktrees(worktrees_dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(worktrees_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("draft-"))
+        .map(|e| e.path())
+        .collect()
+}
+
 /// Kills whatever's running in `dir` that is both one of the agent's own (`own`) and not one of a
 /// numbered lane's (`excluded_lane_pids`), waiting up to [`KILL_TIMEOUT`] for it to actually go.
 fn stop_and_wait(dir: &Path, own: &HashSet<u32>, excluded_lane_pids: &HashSet<u32>) {
@@ -77,7 +89,7 @@ fn stop_and_wait(dir: &Path, own: &HashSet<u32>, excluded_lane_pids: &HashSet<u3
 
 /// Stops every other session (reviews, scouts, triage, drafts, chat, release notes, ideas, checks
 /// and their installs, a shoot, a Play on phone build) still running in any project's main
-/// checkout or base checkout (`lanes::base_checkout_path`), as a restart or Quit cuts them. Only
+/// checkout, base checkout (`lanes::base_checkout_path`) or draft worktree, as a restart or Quit cuts them. Only
 /// the agent's own descendants are ever in scope (see the module docs above); a numbered lane's
 /// processes are excluded even from those.
 pub fn stop_other_sessions(projects: &[ProjectConfig]) {
@@ -97,6 +109,9 @@ pub fn stop_other_sessions(projects: &[ProjectConfig]) {
                 &own,
                 &excluded_lane_pids,
             );
+            for draft in draft_worktrees(Path::new(&project.worktrees_dir)) {
+                stop_and_wait(&draft, &own, &excluded_lane_pids);
+            }
         }
     }
 }
