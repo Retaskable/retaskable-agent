@@ -62,6 +62,7 @@ fn request(piece: Value) -> (RunRequest, Started) {
         stop: stop.clone(),
         kind: RunKind::Plan,
         piece: serde_json::from_value(piece).unwrap(),
+        other: Default::default(),
         lane: None,
         ends,
         context: crate::orchestrator::driver::RunContext::for_test(),

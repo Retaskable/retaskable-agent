@@ -17,6 +17,7 @@ pub mod driver;
 pub mod fresh_start;
 pub mod guard;
 pub mod live;
+pub mod look_run;
 pub mod merge_run;
 mod piece_review;
 pub mod piece_runs;
