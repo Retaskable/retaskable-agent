@@ -25,7 +25,6 @@ mod item_commands;
 mod land;
 mod lane_play;
 pub use lane_play::LanePlay;
-#[allow(dead_code)] // nothing schedules an ideas round yet
 mod ideas_round;
 mod machine;
 mod playtest_round;

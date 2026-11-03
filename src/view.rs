@@ -67,6 +67,8 @@ pub enum ItemCommand {
     Play { project: String, lane: u32 },
     /// **Stop** the game in lane `lane`.
     Stop { project: String, lane: u32 },
+    /// **Generate ideas** (`ideas_generate { fresh }`): one non-quiet ideas round; `fresh` drops the waiting ideas first.
+    Ideas { project: String, fresh: bool },
 }
 
 impl ItemCommand {
@@ -80,7 +82,8 @@ impl ItemCommand {
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
             | Self::Play { project, .. }
-            | Self::Stop { project, .. } => project,
+            | Self::Stop { project, .. }
+            | Self::Ideas { project, .. } => project,
         }
     }
 }
