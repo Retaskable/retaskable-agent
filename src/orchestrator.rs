@@ -18,6 +18,7 @@ pub mod fresh_start;
 pub mod guard;
 pub mod live;
 pub mod merge_run;
+pub mod plan_run;
 mod piece_review;
 pub mod piece_runs;
 pub mod round_robin;
