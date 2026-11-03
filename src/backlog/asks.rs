@@ -76,8 +76,9 @@ pub struct Audience {
     pub part: Option<String>,
 }
 
-/// A draft for the store's queue (`draft_queue`). `audience` and `revises` are sent as `null` when there is none.
-#[derive(Debug, Clone, Serialize)]
+/// A draft for the store's queue (`draft_queue`). `audience` and `revises` are sent as `null` when there is none; the
+/// optional fields are left out when unset (chat sets only `ask_id`, an accepted idea the rest).
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedDraft {
     pub request: String,
@@ -86,7 +87,19 @@ pub struct QueuedDraft {
     pub audience: Option<String>,
     pub revises: Option<String>,
     /// The ask it came from.
-    pub ask_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<String>,
+    /// Who asked for it, and whom it is assigned to (`requestedBy`, `assignee`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// Who pressed the button that started it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// What the drafter starts from beyond the request, e.g. `{ note }` (its first timeline line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intake: Option<Value>,
 }
 
 /// What `facts_get { kind: "project" }` says about the project's use today.

@@ -289,9 +289,11 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let bugs = cloud.bugs.get(project);
     if let Some(bugs) = bugs {
-        bugs.opened(out_tx);
+        bugs.opened(out_tx.clone());
     }
+    cloud.view.item_commands.set_out(project, Some(out_tx));
     let closed = session(ws, cloud, project, log, seen, out_rx).await;
+    cloud.view.item_commands.set_out(project, None);
     if let Some(bugs) = bugs {
         bugs.closed();
     }
@@ -327,11 +329,12 @@ async fn session(
     let mut trial_sent = view.trial_json(project, &cloud.dir);
     let mut gallery_status = galleries::subscribe_status_changes();
     gallery_status.mark_unchanged();
+    let mut pending = HashMap::new();
     let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
-                Some(Ok(Message::Text(text))) => receive(&text, cloud, project, seen, log),
+                Some(Ok(Message::Text(text))) => receive(&text, cloud, project, seen, &mut pending, log),
                 Some(Ok(Message::Close(frame))) => {
                     return frame.map_or((1005, String::new()), |f| (u16::from(f.code), f.reason.to_string()));
                 }
@@ -339,7 +342,10 @@ async fn session(
                 Some(Err(e)) => return (1006, cause(&e)),
                 None => return (1006, String::new()),
             },
-            Some(msg) = outbound.recv() => Some(msg),
+            Some(msg) = outbound.recv() => {
+                settle_pending(cloud, &mut pending, &msg, log);
+                Some(msg)
+            },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
@@ -373,7 +379,14 @@ async fn session(
 
 /// The answer to a message from the hub, if it needs one. A command is checked, run (commands.rs) and audited;
 /// `work_available` wakes the project's run loop; `watch` finds no session to send; everything else is nothing to act on yet.
-fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl Fn(String)) -> Option<Value> {
+fn receive(
+    text: &str,
+    cloud: &Cloud,
+    project: &str,
+    seen: &mut Seen,
+    pending: &mut HashMap<String, commands::Command>,
+    log: &impl Fn(String),
+) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
     match msg.get("type").and_then(Value::as_str) {
         Some("command") => {}
@@ -415,12 +428,30 @@ fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
     };
     let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir);
+    if answer.get("type").and_then(Value::as_str) == Some(commands::PENDING) {
+        // The loop settles it with the store and sends the ack or nack through `outbound`; it's audited then.
+        pending.insert(cmd.id.clone(), cmd);
+        return None;
+    }
     let outcome = if answer.get("type").and_then(Value::as_str) == Some("ack") {
         "done".to_string()
     } else {
         answer.get("reason").and_then(Value::as_str).unwrap_or("?").to_string()
     };
-    log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
-    commands::audit(&cloud.dir, &cmd, &answer, &cloud.url);
+    settled(cloud, &cmd, &answer, &outcome, log);
     Some(answer)
+}
+
+fn settled(cloud: &Cloud, cmd: &commands::Command, answer: &Value, outcome: &str, log: &impl Fn(String)) {
+    log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
+    commands::audit(&cloud.dir, cmd, answer, &cloud.url);
+}
+
+/// An `ack` or `nack` the loop sent for a command that was pending: logged and audited like one answered at once.
+fn settle_pending(cloud: &Cloud, pending: &mut HashMap<String, commands::Command>, msg: &Value, log: &impl Fn(String)) {
+    let id = msg.get("id").and_then(Value::as_str).unwrap_or_default();
+    if let Some(cmd) = pending.remove(id) {
+        let outcome = msg.get("reason").and_then(Value::as_str).unwrap_or("done");
+        settled(cloud, &cmd, msg, outcome, log);
+    }
 }

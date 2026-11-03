@@ -12,3 +12,4 @@ This section is what the computer still does for those screens: what it works ou
 - [9.1 What the computer works out for a project's settings](09.1-what-the-computer-works-out-for-a-projects-settings.md)
 - [9.2 What the computer reports](09.2-what-the-computer-reports.md)
 - [9.3 What the computer does when a command asks](09.3-what-the-computer-does-when-a-command-asks.md)
+- [9.3.1 Ideas, in this Rust agent](09.3.1-ideas.md)
