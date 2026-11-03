@@ -684,3 +684,49 @@ fn ask_is_refused_while_the_flag_is_off() {
     assert_eq!(answer["reason"], "Not a command this agent takes yet: ask");
     assert!(v.item_commands.take_asks("one").is_empty());
 }
+
+#[tokio::test]
+async fn idea_accept_is_refused_with_the_flag_off_and_needs_an_id() {
+    let v = view();
+    let answer = idea_accept(
+        &cmd("idea_accept", json!({ "idea": "i1" })),
+        "one",
+        &mut Seen::default(),
+        &v,
+    )
+    .await;
+    assert_eq!(answer["type"], "nack");
+    assert_eq!(answer["reason"], "Not a command this agent takes yet: idea_accept");
+    let store = crate::ideas::IdeaStore {
+        client: std::sync::Arc::new(crate::backlog::Client::new("http://127.0.0.1:1")),
+        repo: 1,
+        token: String::new(),
+    };
+    v.item_commands.set_ideas("one", Some(store));
+    let answer = idea_accept(&cmd("idea_accept", json!({})), "one", &mut Seen::default(), &v).await;
+    assert_eq!(answer["reason"], "idea_accept needs the idea's id.");
+    let answer = idea_accept(
+        &cmd("idea_accept", json!({ "idea": "i1" })),
+        "one",
+        &mut Seen::default(),
+        &v,
+    )
+    .await;
+    assert!(
+        answer["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Couldn't answer the idea in the shared backlog: ")
+    );
+    for name in ["idea_later", "idea_never"] {
+        let answer = run(
+            &cmd(name, json!({ "idea": "i1" })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &|_| {},
+            &data_dir(),
+        );
+        assert_eq!(answer["type"], "nack");
+    }
+}

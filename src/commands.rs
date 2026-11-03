@@ -104,7 +104,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             resume_computer(view, project);
             ack(&cmd.id)
         }
-        "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
+        "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
@@ -116,6 +116,28 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
+}
+
+/// **Build this** (`idea_accept { idea }`, agent/src/ideas.ts's `accept`), behind the `ideas-session` flag: the idea
+/// is queued as a spec draft and the store told, and the ack comes after that, so this awaits the store where
+/// [`run`] doesn't. Not now and Never (`idea_later`, `idea_never`) are the site's, refused in [`run`].
+pub async fn idea_accept(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView) -> Value {
+    if let Some(reason) = refusal(cmd, project, seen, now_ms()) {
+        return nack(&cmd.id, reason);
+    }
+    let Some(store) = view.item_commands.ideas(project) else {
+        return nack(&cmd.id, "Not a command this agent takes yet: idea_accept".into());
+    };
+    let idea = cmd
+        .args
+        .get("idea")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if idea.is_empty() {
+        return nack(&cmd.id, "idea_accept needs the idea's id.".into());
+    }
+    answer(cmd, crate::ideas::accept(&store, idea, &cmd.issued_by).await)
 }
 
 /// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4).

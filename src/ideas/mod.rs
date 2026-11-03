@@ -17,16 +17,20 @@
 //! store's rows, [`gather_live`] for the live titles (done items, newest PR merge first) and
 //! [`profiles_for`] for the store's audiences (starter set when it has none).
 //!
+//! [`accept`] carries out `idea_accept` (Build this, agent/src/ideas.ts's `accept`): it asks the store whether the
+//! idea still waits, queues it as a spec draft (`draft_queue`; a person's idea quoted with [`person_request`]) and
+//! records the answer with [`Ideas::answer`]. The command is `commands::idea_accept`, behind the `ideas-session`
+//! flag; the loop publishes the project's [`IdeaStore`] to it each pass. Not now and Never stay the site's.
+//!
 //! Still not wired to anything: there's no daily chore that calls [`run_round`] after a merge (needs
-//! the orchestrator loop's locks, so two computers don't run a round at once), no command that calls
-//! [`Ideas::answer`] for Accept/Not now/Never, and nothing calls the context builders yet but tests ([`build_prompt`]
-//! still takes `context` already built). Accept's draft-writing needs the spec-drafts item; person-added ideas
-//! (shared-ideas.md) need their own queue (a `StoreIdea` with `addedBy` set), not ported here.
+//! the orchestrator loop's locks, so two computers don't run a round at once), and nothing calls the context
+//! builders yet but tests ([`build_prompt`] still takes `context` already built).
 //!
 //! Split by responsibility, each piece with its own tests: `model` holds the plain data types and
 //! [`refilled`]'s fold, `profiles` is the user types and the prompt builder, `store` reads and writes
 //! the shared backlog's own copy of the queue, and `write` runs the session and picks the round.
 //! `test_support` is shared fixtures for this module's own tests.
+mod accept;
 mod context;
 mod model;
 mod profiles;
@@ -35,6 +39,7 @@ mod store;
 mod test_support;
 mod write;
 
+pub use accept::{IdeaStore, accept, person_request};
 pub use context::{LIVE_MAX, gather_live, live_titles, profiles_for, round_context};
 pub use model::{
     IDEA_EXPERIENCE_MAX, IDEA_FEATURE_MAX, IDEA_FOR_MAX, IDEA_NEW_FEATURE_MAX, IDEA_TITLE_MAX, IDEA_WHY_MAX,

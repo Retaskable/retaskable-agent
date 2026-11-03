@@ -96,6 +96,27 @@ pub(super) struct RunningAsk {
 }
 
 impl ProjectLoop {
+    /// Gives the connector the shared backlog `idea_accept` needs, behind the `ideas-session` flag: Off (or no linked
+    /// store) withdraws it, and the command is refused as one this agent doesn't take.
+    pub(super) async fn ideas_pass(&mut self, links: &super::machine::Links) {
+        let store = match (self.repo, self.flags.on("ideas-session").await) {
+            (Some(repo), true) => {
+                links
+                    .keychain
+                    .get(&links.backlog_url)
+                    .ok()
+                    .flatten()
+                    .map(|token| crate::ideas::IdeaStore {
+                        client: self.client.clone(),
+                        repo,
+                        token,
+                    })
+            }
+            _ => None,
+        };
+        links.item_commands.set_ideas(&self.id, store);
+    }
+
     /// How many asks are running here now; finished ones are forgotten.
     pub(super) fn asking(&mut self) -> u32 {
         self.asks.running.retain(|a| !a.task.is_finished());

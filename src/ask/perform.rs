@@ -83,7 +83,10 @@ async fn run(action: &Action, cx: &Perform<'_>) -> (&'static str, Result<Option<
                 themes: themes.clone(),
                 audience: audience.clone(),
                 revises: revises.clone().filter(|id| cx.items.iter().any(|i| &i.id == id)),
-                ask_id: cx.ask_id.to_string(),
+                ask_id: Some(cx.ask_id.to_string()),
+                requested_by: None,
+                started_by: None,
+                note: None,
             };
             let sent = cx.client.draft_queue(cx.repo_id, cx.token, &draft).await;
             ("draft_spec", sent.map(Some).map_err(|e| e.to_string()))

@@ -328,7 +328,7 @@ async fn session(
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
-                Some(Ok(Message::Text(text))) => receive(&text, cloud, project, seen, log),
+                Some(Ok(Message::Text(text))) => receive(&text, cloud, project, seen, log).await,
                 Some(Ok(Message::Close(frame))) => {
                     return frame.map_or((1005, String::new()), |f| (u16::from(f.code), f.reason.to_string()));
                 }
@@ -361,7 +361,7 @@ async fn session(
 
 /// The answer to a message from the hub, if it needs one. A command is checked, run (commands.rs) and audited;
 /// `work_available` wakes the project's run loop; `watch` finds no session to send; everything else is nothing to act on yet.
-fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl Fn(String)) -> Option<Value> {
+async fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl Fn(String)) -> Option<Value> {
     let msg: Value = serde_json::from_str(text).ok()?;
     match msg.get("type").and_then(Value::as_str) {
         Some("command") => {}
@@ -402,7 +402,11 @@ fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl
         issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
     };
-    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir);
+    let answer = if cmd.name == "idea_accept" {
+        commands::idea_accept(&cmd, project, seen, &cloud.view).await
+    } else {
+        commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir)
+    };
     let outcome = if answer.get("type").and_then(Value::as_str) == Some("ack") {
         "done".to_string()
     } else {

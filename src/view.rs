@@ -118,6 +118,7 @@ pub struct ItemCommands {
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     asks: Arc<std::sync::Mutex<Vec<AskCommand>>>,
     ask_on: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    ideas: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::ideas::IdeaStore>>>,
 }
 
 impl PartialEq for ItemCommands {
@@ -156,6 +157,24 @@ impl ItemCommands {
 
     pub fn ask_on(&self, project: &str) -> bool {
         self.ask_on.lock().unwrap_or_else(|e| e.into_inner()).contains(project)
+    }
+
+    /// Set by the loop each pass: the shared backlog `idea_accept` uses for `project`, or `None` while the
+    /// `ideas-session` flag is Off or the store isn't linked.
+    pub fn set_ideas(&self, project: &str, store: Option<crate::ideas::IdeaStore>) {
+        let mut map = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
+        match store {
+            Some(store) => map.insert(project.to_string(), store),
+            None => map.remove(project),
+        };
+    }
+
+    pub fn ideas(&self, project: &str) -> Option<crate::ideas::IdeaStore> {
+        self.ideas
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(project)
+            .cloned()
     }
 
     pub fn push_ask(&self, command: AskCommand) {

@@ -85,8 +85,18 @@ pub struct QueuedDraft {
     pub themes: Vec<String>,
     pub audience: Option<String>,
     pub revises: Option<String>,
-    /// The ask it came from.
-    pub ask_id: String,
+    /// The ask it came from; an idea's draft has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<String>,
+    /// Whose request it is, when not the one pressing (`requestedBy`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    /// Who pressed (`startedBy`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// What the timeline says about where it came from (`intake.note`).
+    #[serde(skip)]
+    pub note: Option<String>,
 }
 
 /// What `facts_get { kind: "project" }` says about the project's use today.
@@ -183,7 +193,11 @@ impl Client {
         token: Option<&str>,
         draft: &QueuedDraft,
     ) -> Result<String, BacklogError> {
-        let queued: Queued = self.op(repo_id, token, "draft_queue", json!(draft), "draft").await?;
+        let mut args = json!(draft);
+        if let Some(note) = &draft.note {
+            args["intake"] = json!({ "note": note });
+        }
+        let queued: Queued = self.op(repo_id, token, "draft_queue", args, "draft").await?;
         Ok(queued.id)
     }
 }
