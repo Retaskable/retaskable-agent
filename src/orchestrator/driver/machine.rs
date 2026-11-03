@@ -534,11 +534,6 @@ impl Machine {
             }
         }
         let mut slots = (self.concurrency).saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
-        for (lp, &live) in self.projects.iter_mut().zip(&live) {
-            if live {
-                lp.ideas_pass(&self.links).await;
-            }
-        }
         // Asks have a person waiting: they take their slots first, never wait for one, and count toward `concurrency`.
         if let (Some(host), Some(_)) = (self.asks.clone(), starter.as_ref()) {
             slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());

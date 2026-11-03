@@ -213,24 +213,6 @@ impl ItemCommands {
         }
     }
 
-    /// Set by the loop each pass: the shared backlog `idea_accept` uses for `project`, or `None` while the
-    /// `ideas-session` flag is Off or the store isn't linked.
-    pub fn set_ideas(&self, project: &str, store: Option<crate::ideas::IdeaStore>) {
-        let mut map = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
-        match store {
-            Some(store) => map.insert(project.to_string(), store),
-            None => map.remove(project),
-        };
-    }
-
-    pub fn ideas(&self, project: &str) -> Option<crate::ideas::IdeaStore> {
-        self.ideas
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(project)
-            .cloned()
-    }
-
     pub fn push_ask(&self, command: AskCommand) {
         self.asks.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }

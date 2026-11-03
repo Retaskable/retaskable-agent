@@ -196,11 +196,7 @@ impl Client {
         token: Option<&str>,
         draft: &QueuedDraft,
     ) -> Result<String, BacklogError> {
-        let mut args = json!(draft);
-        if let Some(note) = &draft.note {
-            args["intake"] = json!({ "note": note });
-        }
-        let queued: Queued = self.op(repo_id, token, "draft_queue", args, "draft").await?;
+        let queued: Queued = self.op(repo_id, token, "draft_queue", json!(draft), "draft").await?;
         Ok(queued.id)
     }
 }
