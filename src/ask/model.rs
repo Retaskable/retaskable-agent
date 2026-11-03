@@ -48,16 +48,16 @@ pub fn assistant_result_schema() -> Value {
             "actions": { "type": "array", "items": {
                 "type": "object",
                 "properties": {
-                    "name": { "enum": ["play", "stop", "pause", "resume", "retry", "skip", "draft_spec"] },
+                    "type": { "enum": ["play", "stop", "pause", "resume", "retry", "skip", "draft_spec"] },
                     "lane": { "type": "integer", "minimum": 0 },
-                    "id": { "type": "string" },
+                    "itemId": { "type": "string" },
                     "request": { "type": "string" },
                     "titles": { "type": "array", "items": { "type": "string" } },
                     "themes": { "type": "array", "items": { "type": "string" } },
                     "audience": { "type": ["string", "null"] },
                     "revises": { "type": ["string", "null"] }
                 },
-                "required": ["name"]
+                "required": ["type"]
             } }
         },
         "required": ["answer", "actions"]
@@ -74,14 +74,14 @@ fn id_or_null(v: &Value, key: &str) -> Option<String> {
 
 /// Checks one action; `Err` is the reason it was dropped.
 pub fn to_action(v: &Value) -> Result<Action, String> {
-    let name = v.get("name").and_then(Value::as_str).ok_or("an action has no name")?;
+    let name = v.get("type").and_then(Value::as_str).ok_or("an action has no type")?;
     let lane = || {
         v.get("lane")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(|| format!("{name}: lane must be a whole number, 0 or more"))
     };
-    let id = || id_or_null(v, "id").ok_or_else(|| format!("{name}: needs an item id"));
+    let id = || id_or_null(v, "itemId").ok_or_else(|| format!("{name}: needs an item id"));
     match name {
         "play" => Ok(Action::Play { lane: lane()? }),
         "stop" => Ok(Action::Stop { lane: lane()? }),
@@ -91,29 +91,28 @@ pub fn to_action(v: &Value) -> Result<Action, String> {
         "skip" => Ok(Action::Skip { id: id()? }),
         "draft_spec" => {
             let request = text(v, "request").ok_or("draft_spec: needs a request")?.to_string();
-            let titles: Vec<String> = strings(v.get("titles"))
-                .into_iter()
-                .filter_map(|t| t.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()))
-                .collect();
-            let themes: Option<Vec<String>> = strings(v.get("themes")).into_iter().collect();
-            let themes = themes.filter(|t| t.len() == titles.len()).unwrap_or_default();
+            let titles = kept_strings(v.get("titles"));
+            let themes = kept_strings(v.get("themes"));
+            let themes = if themes.len() == titles.len() { themes } else { vec![] };
             Ok(Action::DraftSpec {
                 request,
                 titles,
                 themes,
                 audience: id_or_null(v, "audience"),
-                revises: id_or_null(v, "revises"),
+                revises: id_or_null(v, "revises").map(|r| r.chars().take(100).collect()),
             })
         }
         other => Err(format!("unknown action \"{other}\"")),
     }
 }
 
-/// Each array element as a string, or `None` where it is not one.
-fn strings(v: Option<&Value>) -> Vec<Option<String>> {
+/// The non-empty strings of an array, trimmed, in order; anything else is dropped.
+fn kept_strings(v: Option<&Value>) -> Vec<String> {
     v.and_then(Value::as_array)
-        .map(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect())
-        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string))
+        .collect()
 }
 
 /// Reads the assistant's result; `None` when it has no answer.
@@ -146,38 +145,38 @@ mod tests {
 
     #[test]
     fn simple_actions() {
-        assert_eq!(ok(json!({ "name": "play", "lane": 0 })), Action::Play { lane: 0 });
-        assert_eq!(ok(json!({ "name": "stop", "lane": 2 })), Action::Stop { lane: 2 });
-        assert_eq!(ok(json!({ "name": "pause" })), Action::Pause);
-        assert_eq!(ok(json!({ "name": "resume" })), Action::Resume);
+        assert_eq!(ok(json!({ "type": "play", "lane": 0 })), Action::Play { lane: 0 });
+        assert_eq!(ok(json!({ "type": "stop", "lane": 2 })), Action::Stop { lane: 2 });
+        assert_eq!(ok(json!({ "type": "pause" })), Action::Pause);
+        assert_eq!(ok(json!({ "type": "resume" })), Action::Resume);
         assert_eq!(
-            ok(json!({ "name": "retry", "id": "a" })),
+            ok(json!({ "type": "retry", "itemId": "a" })),
             Action::Retry { id: "a".into() }
         );
         assert_eq!(
-            ok(json!({ "name": "skip", "id": "b" })),
+            ok(json!({ "type": "skip", "itemId": "b" })),
             Action::Skip { id: "b".into() }
         );
     }
 
     #[test]
     fn bad_lanes_and_ids_are_dropped() {
-        assert!(why(json!({ "name": "play", "lane": "1" })).contains("lane"));
-        assert!(why(json!({ "name": "stop", "lane": -1 })).contains("lane"));
-        assert!(why(json!({ "name": "play" })).contains("lane"));
-        assert!(why(json!({ "name": "retry", "id": " " })).contains("id"));
-        assert!(why(json!({ "name": "skip", "id": 3 })).contains("id"));
+        assert!(why(json!({ "type": "play", "lane": "1" })).contains("lane"));
+        assert!(why(json!({ "type": "stop", "lane": -1 })).contains("lane"));
+        assert!(why(json!({ "type": "play" })).contains("lane"));
+        assert!(why(json!({ "type": "retry", "itemId": " " })).contains("id"));
+        assert!(why(json!({ "type": "skip", "itemId": 3 })).contains("id"));
     }
 
     #[test]
     fn unknown_and_nameless_actions_are_dropped() {
-        assert!(why(json!({ "name": "deploy" })).contains("deploy"));
-        assert!(why(json!({ "lane": 1 })).contains("name"));
-        assert!(why(json!("play")).contains("name"));
+        assert!(why(json!({ "type": "deploy" })).contains("deploy"));
+        assert!(why(json!({ "lane": 1 })).contains("type"));
+        assert!(why(json!("play")).contains("type"));
     }
 
     fn draft(extra: Value) -> Action {
-        let mut v = json!({ "name": "draft_spec", "request": "Add dark mode" });
+        let mut v = json!({ "type": "draft_spec", "request": "Add dark mode" });
         v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         ok(v)
     }
@@ -190,8 +189,8 @@ mod tests {
 
     #[test]
     fn draft_spec_needs_a_request() {
-        assert!(why(json!({ "name": "draft_spec" })).contains("request"));
-        assert!(why(json!({ "name": "draft_spec", "request": "  " })).contains("request"));
+        assert!(why(json!({ "type": "draft_spec" })).contains("request"));
+        assert!(why(json!({ "type": "draft_spec", "request": "  " })).contains("request"));
     }
 
     #[test]
@@ -214,6 +213,11 @@ mod tests {
             parts(draft(json!({ "titles": ["a"], "themes": ["x", "y"] })))
                 .1
                 .is_empty()
+        );
+        // Themes are filtered like titles: blanks and non-strings dropped, then counted.
+        assert_eq!(
+            parts(draft(json!({ "titles": ["a", "b"], "themes": ["x", "", " y "] }))).1,
+            ["x", "y"]
         );
         assert!(
             parts(draft(json!({ "titles": ["a", "b"], "themes": ["x", 1] })))
@@ -245,13 +249,21 @@ mod tests {
     }
 
     #[test]
+    fn revises_is_cut_to_100_characters() {
+        let Action::DraftSpec { revises, .. } = draft(json!({ "revises": "x".repeat(150) })) else {
+            panic!()
+        };
+        assert_eq!(revises.unwrap().len(), 100);
+    }
+
+    #[test]
     fn a_result_parses_from_the_schemas_shape() {
         let raw = json!({
             "answer": "On it.",
             "actions": [
-                { "name": "pause" },
-                { "name": "dance" },
-                { "name": "draft_spec", "request": "r", "titles": ["T"], "themes": ["Th"], "audience": null, "revises": null }
+                { "type": "pause" },
+                { "type": "dance" },
+                { "type": "draft_spec", "request": "r", "titles": ["T"], "themes": ["Th"], "audience": null, "revises": null }
             ]
         });
         let required = assistant_result_schema()["required"].clone();
