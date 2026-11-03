@@ -16,6 +16,11 @@ pub fn clip(s: &str, n: usize) -> String {
     out
 }
 
+/// The first (up to) `max` characters of `s`, with no ellipsis (see [`clip`] for one).
+pub fn truncate(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
 /// The last (up to) `max_chars` characters of `s`, on a char boundary (`tail`).
 pub fn tail(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -41,6 +46,12 @@ mod tests {
     fn clip_passes_short_text_through_and_truncates_with_an_ellipsis_otherwise() {
         assert_eq!(clip("hello", 10), "hello");
         assert_eq!(clip("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn truncate_keeps_the_first_chars_without_an_ellipsis() {
+        assert_eq!(truncate("héllo", 3), "hél");
+        assert_eq!(truncate("hi", 5), "hi");
     }
 
     #[test]

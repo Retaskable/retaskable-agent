@@ -12,9 +12,9 @@ use tokio::sync::watch;
 use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::lane_pool::LaneSizes;
-use crate::link::truncate;
 use crate::paths;
 use crate::store::Store;
+use crate::text::truncate;
 use crate::trial_plan::TrialState;
 
 /// A callback that ends the process, to run restart (connector.ts's `exit`, `commands.ts`'s `restart`).

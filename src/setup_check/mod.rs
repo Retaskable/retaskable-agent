@@ -87,7 +87,7 @@ struct RunOutput {
 /// `firstLine` in `shared/text.ts` / `agent/src/engines/probe.ts`, cut to 200 chars.
 fn first_line(s: &str) -> String {
     let line = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-    line.chars().take(200).collect()
+    crate::text::truncate(line, 200)
 }
 
 /// `run` (`agent/src/proc.ts`): never through a shell, timed out and killed after `timeout`.

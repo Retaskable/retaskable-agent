@@ -28,7 +28,8 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 use self::bug_link::BugLink;
 use crate::commands::{self, Seen};
 use crate::galleries;
-use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
+use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name};
+use crate::text::truncate;
 use crate::view::{AgentView, Exit};
 
 /// The name a socket that signs in with a token offers beside it (shared/cloud.ts `SUBPROTOCOL`).
