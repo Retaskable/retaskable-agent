@@ -557,6 +557,9 @@ impl Machine {
             self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
+                    if !paused && !stopping {
+                        lp.release_silenced(self.concurrency.saturating_sub(starter.active()));
+                    }
                     lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
                         .await;
                     lp.take_finished(&mut self.pool, &self.links).await;

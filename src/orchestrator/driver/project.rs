@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -17,12 +16,11 @@ pub(super) use super::signed_out::signed_out;
 use super::{LanePlay, Shared};
 use crate::backlog::{ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
-use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
+use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::env::Env;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
-use crate::orchestrator::fresh_start::{FreshStart, fresh_for_engine};
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
@@ -258,6 +256,8 @@ pub struct ProjectLoop {
     pub(super) records: BTreeMap<String, RunRecord>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
+    /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
+    pub(super) silenced: BTreeMap<String, std::time::Instant>,
     /// The item the store handed out for each lease held, by id, for the session that starts on it.
     pub(super) items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`super::Machine::add`].
@@ -292,7 +292,7 @@ pub struct ProjectLoop {
     pub(super) run_loop: super::RunLoop,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
-    max_resume_context_tokens: u32,
+    pub(super) max_resume_context_tokens: u32,
     /// Continues waiting for a free lane (`item_commands.rs`).
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
@@ -347,6 +347,7 @@ impl ProjectLoop {
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
+            silenced: BTreeMap::new(),
             items: BTreeMap::new(),
             outcomes: super::OutcomeSender(mpsc::unbounded_channel().0),
             store,
@@ -601,6 +602,9 @@ impl ProjectLoop {
             }
             let session = session.map(|s| (s, record.impl_session_engine));
             self.remember(&id, lane, session, record.impl_context_tokens);
+            if let Some(saved) = self.records.get_mut(&id) {
+                saved.silence_kills = record.silence_kills;
+            }
         }
         self.save_leases();
     }
@@ -681,73 +685,6 @@ impl ProjectLoop {
             let context_tokens = self.records.get(item_id).and_then(|r| r.impl_context_tokens);
             self.remember(item_id, pool.lane_of(&self.id, item_id), None, context_tokens);
             self.save_leases();
-        }
-    }
-
-    /// The engine that can take over from `started_on` while it is at its usage limit: another one the
-    /// implementer role may use here (any lane's, or the default's) that isn't limited too.
-    fn takeover(&self, pool: &LanePool, shared: &Shared<'_>, started_on: EngineId) -> Option<EngineId> {
-        let choice = &shared.links.engine_choice;
-        let engines: Vec<EngineId> = (1..=pool.rules().lanes)
-            .map(Some)
-            .chain([None])
-            .map(|lane| {
-                program_of(engine_for(
-                    choice,
-                    self.project.engines.as_ref(),
-                    Role::Implementer,
-                    lane,
-                ))
-            })
-            .collect();
-        shared.engine_limits.takeover(started_on, &engines, Instant::now())
-    }
-
-    /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
-    /// known size is over `max_resume_context_tokens` starts fresh instead (06.2-implementer.md "A session
-    /// that's grown starts fresh"), keeping its lane as-is. Left for a
-    /// later pass, untouched, while Claude Code is signed out on this computer (section 7.3): resuming now
-    /// would only fail the same way.
-    pub(super) async fn resume_sessions(
-        &mut self,
-        pool: &mut LanePool,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) {
-        if signed_out(shared) {
-            return;
-        }
-        for id in std::mem::take(&mut self.to_resume) {
-            let record = self.records.get(&id).cloned();
-            if let Some(RunRecord {
-                lane: Some(lane),
-                impl_session_id: Some(session),
-                impl_session_engine,
-                impl_context_tokens,
-                ..
-            }) = record
-            {
-                let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
-                let takeover = self.takeover(pool, shared, impl_session_engine);
-                let kind = match impl_context_tokens {
-                    _ if let Some(reason) = fresh_for_engine(impl_session_engine, lane_now, takeover) => {
-                        tracing::info!("{}: {id}'s session can't resume ({reason:?}), starting fresh", self.id);
-                        self.fresh_launch(&id, lane, reason, "Carry on with the slice.")
-                    }
-                    Some(tokens) if tokens > u64::from(self.max_resume_context_tokens) => {
-                        tracing::info!(
-                            "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
-                            self.id
-                        );
-                        self.fresh_launch(&id, lane, FreshStart::Grown(tokens), "Carry on with the slice.")
-                    }
-                    _ => {
-                        tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
-                        Launch::Resume(session)
-                    }
-                };
-                self.launch(pool, &id, lane, kind, starter, shared).await;
-            }
         }
     }
 

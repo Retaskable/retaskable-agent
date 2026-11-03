@@ -533,3 +533,108 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
         assert_eq!(r.failed_in.as_deref(), Some(state_name(from)));
     }
 }
+
+/// A rig with `own-failure-handling` set as asked and "a" claimed on lane 1, its first session ended by a
+/// watchdog kill (not yet read).
+async fn silenced(flag: bool) -> (Rig, Arc<Fake>, Asked) {
+    let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
+        &["own-failure-handling"]
+    } else {
+        &[]
+    }));
+    let fake = rig.go_live();
+    fake.script
+        .lock()
+        .unwrap()
+        .push(SessionResult::Silenced("went quiet".into()));
+    rig.machine.pass().await;
+    (rig, fake, asked)
+}
+
+/// Makes the pending resume of "a" due now and runs a pass, with the next session ending as `next`.
+async fn resume_now(rig: &mut Rig, fake: &Fake, next: SessionResult) {
+    fake.script.lock().unwrap().push(next);
+    rig.lp(0).silenced.insert("a".into(), std::time::Instant::now());
+    rig.machine.pass().await;
+}
+
+#[tokio::test]
+async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() {
+    let (mut rig, _fake, asked) = silenced(true).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(
+        !ops(&asked)
+            .iter()
+            .any(|o| o == "release" || o == "park" || o == "report")
+    );
+    assert_eq!(rig.lp(0).store.runs()["a"].silence_kills, 1);
+    let events = rig.lp(0).events().recent();
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["subtype"], "killed_for_silence");
+}
+
+#[tokio::test]
+async fn a_watchdog_kill_is_resumed_by_id_only_after_the_delay() {
+    let (mut rig, fake, _) = silenced(true).await;
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1, "not resumed at once");
+    resume_now(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 2);
+    assert!(started[1].resume && started[1].session_id == started[0].session_id);
+    assert_eq!(started[1].lane, 1);
+}
+
+#[tokio::test]
+async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
+    let (mut rig, fake, _) = silenced(true).await;
+    rig.machine.pass().await;
+    for _ in 0..2 {
+        resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet".into())).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    }
+    resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet again".into())).await;
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 4, "three resumes");
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    let record = rig.lp(0).store.runs()["a"].clone();
+    assert_eq!(record.needs_human_reason.as_deref(), Some("went quiet again"));
+    assert_eq!(record.silence_kills, 0);
+}
+
+#[tokio::test]
+async fn an_answer_between_watchdog_kills_resets_the_count() {
+    let (mut rig, fake, _) = silenced(true).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).store.runs()["a"].silence_kills, 1);
+    resume_now(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).store.runs()["a"].silence_kills, 0);
+}
+
+#[tokio::test]
+async fn the_watchdog_kill_count_is_kept_across_a_reload() {
+    let (mut rig, _fake, _) = silenced(true).await;
+    rig.machine.pass().await;
+    let saved = rig.lp(0).store.runs()["a"].clone();
+    assert_eq!(saved.silence_kills, 1);
+    let json = serde_json::to_string(&saved).unwrap();
+    let back: crate::store::RunRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.silence_kills, 1);
+}
+
+#[tokio::test]
+async fn with_the_flag_off_a_watchdog_kill_gives_the_item_back_as_before() {
+    let (mut rig, _fake, asked) = silenced(false).await;
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
+    assert!(rig.machine.claim_paused_until.is_some());
+}
