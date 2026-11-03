@@ -88,7 +88,8 @@ async fn draft_queue_sends_null_audience_and_revises() {
         themes: vec!["Reports".into()],
         audience: None,
         revises: None,
-        ask_id: "a1".into(),
+        ask_id: Some("a1".into()),
+        ..Default::default()
     };
     assert_eq!(client.draft_queue(1, None, &draft).await.unwrap(), "d7");
     draft.audience = Some("dev".into());

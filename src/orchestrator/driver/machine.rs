@@ -550,6 +550,19 @@ impl Machine {
                 }
             }
         }
+        // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
+        for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            if live {
+                let shared = Shared {
+                    links: &self.links,
+                    claim_paused_until: &mut self.claim_paused_until,
+                    claude_signed_out_until: &mut self.claude_signed_out_until,
+                    engine_limits: &mut self.engine_limits,
+                    stopping,
+                };
+                lp.idea_pass(&shared).await;
+            }
+        }
         // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
         if let (Some(host), Some(_)) = (self.drafts.clone(), starter.as_ref()) {
             slots = slots.saturating_sub(

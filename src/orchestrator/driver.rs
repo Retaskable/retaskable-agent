@@ -21,6 +21,7 @@
 //! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit).
 mod asks;
 mod drafts;
+mod idea_accept;
 mod item_commands;
 mod land;
 mod lane_play;

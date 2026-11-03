@@ -4,7 +4,7 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
+//! So far this runs **idea_accept** (queued for the loop, answered later), **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
 //! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
@@ -104,7 +104,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             resume_computer(view, project);
             ack(&cmd.id)
         }
-        "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
+        "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
+        "idea_accept" => idea_accept(cmd, project, view),
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
@@ -255,6 +256,37 @@ fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value
         images_block,
     });
     ack(&cmd.id)
+}
+
+/// What [`run`] answers a command the loop settles once the store has answered: nothing is sent yet, and the loop sends
+/// the `ack` or `nack` later ([`crate::view::ItemCommands::answer`]).
+pub const PENDING: &str = "pending";
+
+/// `idea_accept { idea }` (**Build this** on an idea): behind the `ideas-session` flag, queued for the loop, which reads the
+/// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.
+fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if !view.item_commands.flag_on(project, "ideas-session") {
+        return nack(&cmd.id, "Not a command this agent takes yet: idea_accept".into());
+    }
+    let idea = cmd
+        .args
+        .get("idea")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if idea.is_empty() {
+        return nack(&cmd.id, "idea_accept needs the idea's id.".into());
+    }
+    if let Err(reason) = claim_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    view.item_commands.push_idea(crate::view::IdeaCommand {
+        project: project.to_string(),
+        command_id: cmd.id.clone(),
+        idea: idea.to_string(),
+        by: cmd.issued_by.clone(),
+    });
+    json!({ "type": PENDING, "id": cmd.id })
 }
 
 /// Item commands and lane play/stop only run where the orchestrator claims work.
