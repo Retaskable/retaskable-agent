@@ -611,6 +611,10 @@ impl ProjectLoop {
             self.remember(&id, lane, session, record.impl_context_tokens);
             if let Some(saved) = self.records.get_mut(&id) {
                 saved.silence_kills = record.silence_kills;
+                saved.not_started = record.not_started;
+                if record.not_started {
+                    self.fresh_launched.insert(id.clone());
+                }
             }
         }
         self.save_leases();
@@ -732,6 +736,9 @@ impl ProjectLoop {
             self.fresh_launched.insert(item_id.to_string());
         } else {
             self.fresh_launched.remove(item_id);
+        }
+        if let Some(record) = self.records.get_mut(item_id) {
+            record.not_started = false;
         }
         let session_id = resume.clone().unwrap_or_else(new_session_id);
         // A resumed session stays on its engine; a new one starts on the lane's.

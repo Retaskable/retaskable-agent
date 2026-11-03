@@ -78,6 +78,10 @@ pub struct RunRecord {
     /// session ends with an answer.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub silence_kills: u32,
+    /// The item's session couldn't start and is waiting to be started fresh again: its saved session id never
+    /// ran, so a restart must not resume it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_started: bool,
     /// Signatures of Retaskable bugs this item's triage already reported (`reported_bug`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reported_bugs: Vec<String>,

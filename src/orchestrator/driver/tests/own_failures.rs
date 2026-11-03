@@ -46,6 +46,10 @@ async fn a_session_that_wont_start_keeps_lane_lease_and_run_and_does_not_pause_c
             .any(|o| o == "release" || o == "park" || o == "report")
     );
     assert_eq!(rig.lp(0).store.own_failures()["a"], 1);
+    assert!(
+        rig.lp(0).store.runs()["a"].not_started,
+        "saved, so a restart starts it fresh instead of resuming an id that never ran"
+    );
     assert_eq!(fake.started.lock().unwrap().len(), 1, "not retried at once");
 }
 

@@ -413,12 +413,18 @@ impl ProjectLoop {
                 self.own_failures.insert(item.clone(), count + 1);
                 self.silenced
                     .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                if let Some(record) = self.records.get_mut(&item) {
+                    record.not_started = true;
+                }
                 SessionResult::NotStarted(why)
             } else {
                 SessionResult::NeedsHuman(why)
             };
         } else {
             self.fresh_launched.remove(&item);
+            if let Some(record) = self.records.get_mut(&item) {
+                record.not_started = false;
+            }
         }
         if flag_on && let SessionResult::Failed(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
