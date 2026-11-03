@@ -75,6 +75,14 @@ pub struct LaneItem {
     pub project: String,
 }
 
+/// A running session with no lane.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SessionRow {
+    pub id: String,
+    pub project: String,
+    pub title: &'static str,
+}
+
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Limit {
@@ -109,8 +117,8 @@ pub struct ComputerStatus {
     pub header: Header,
     pub alerts: Vec<Alert>,
     pub lanes: Vec<Lane>,
-    /// Always empty: this agent has no session pool to list.
-    pub sessions: Vec<()>,
+    /// Sessions that hold no lane: a project's spec draft, as a "Drafting specs" row.
+    pub sessions: Vec<SessionRow>,
     pub engines: Vec<EngineRow>,
     pub orchestrator: Orchestrator,
 }
@@ -300,7 +308,15 @@ pub fn build(
         },
         alerts,
         lanes,
-        sessions: Vec::new(),
+        sessions: (live.projects.iter())
+            .filter_map(|(project, p)| {
+                p.drafting.as_ref().map(|id| SessionRow {
+                    id: id.clone(),
+                    project: project.clone(),
+                    title: group_word("drafter"),
+                })
+            })
+            .collect(),
         engines,
         orchestrator: Orchestrator {
             mode: live.mode.name(),

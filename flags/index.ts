@@ -12,3 +12,6 @@ export const flags = createFlagClient({
 
 /** The `command-handling` flag: Continue and the other site commands. Off until there is an answer. */
 export const commandHandling = (): boolean => flags.on("command-handling");
+
+/** The `spec-drafts` flag: claiming and writing up spec drafts. Off until there is an answer. */
+export const specDrafts = (): boolean => flags.on("spec-drafts");

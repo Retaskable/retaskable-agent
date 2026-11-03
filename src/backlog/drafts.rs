@@ -81,9 +81,17 @@ pub struct DraftClaim {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftReport {
-    /// `queued`-like store statuses: `drafting`, `needs_person`, `merged`, `discarded`...
+    /// The store's statuses: `queued`, `drafting`, `needs_person`, `merged`, `discarded`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The holder's exact state beside the status: `awaiting_approval`, `needs_clarification`, `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The drafter's session, so a restart resumes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub titles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
