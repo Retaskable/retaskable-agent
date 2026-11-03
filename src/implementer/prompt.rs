@@ -172,15 +172,9 @@ fn branch_lines(branch: &str, base: &str, repo: &str) -> String {
 }
 
 /// The variables both forms share; each form adds its own `header`, `rule1` and the item words.
-fn shared_vars(
-    project_type: ProjectType,
-    branch: &str,
-    base_branch: &str,
-    github_repo: &str,
-    checks: &[CheckConfig],
-    gates: &CodeGates,
-) -> Vec<(&'static str, String)> {
-    let words = project_words(project_type);
+fn shared_vars(p: &Prompt<'_>) -> Vec<(&'static str, String)> {
+    let (branch, base_branch, github_repo) = (p.branch, p.base_branch, p.github_repo);
+    let words = project_words(p.project_type);
     vec![
         ("pr", "PR".to_string()),
         ("change", "pull request".to_string()),
@@ -188,8 +182,8 @@ fn shared_vars(
         ("branch", branch.to_string()),
         ("baseBranch", base_branch.to_string()),
         ("githubRepo", github_repo.to_string()),
-        ("checks", checks_text(checks)),
-        ("codeLimits", gate_rule(gates)),
+        ("checks", checks_text(p.checks)),
+        ("codeLimits", gate_rule(&p.code_gates)),
         ("projectNoun", words.noun.to_string()),
         ("projectUser", words.user.to_string()),
         ("projectExamples", words.examples.to_string()),
@@ -207,14 +201,7 @@ fn append_sections(mut out: String, extras: &[String]) -> String {
 
 /// Fills `prompts/implementer.md` for a fresh session on `p.item`.
 pub fn build_prompt(template: &str, p: &Prompt<'_>) -> Result<String> {
-    let mut vars = shared_vars(
-        p.project_type,
-        p.branch,
-        p.base_branch,
-        p.github_repo,
-        p.checks,
-        &p.code_gates,
-    );
+    let mut vars = shared_vars(p);
     vars.extend([
         ("header", item_header(p)),
         ("rule1", format!("{ITEM_RULE_1}\n{WHOLE_SLICE}")),
@@ -379,14 +366,7 @@ fn piece_header(pp: &PiecePrompt<'_>) -> String {
 /// brief (pieces.md section 3.2).
 pub fn build_piece_prompt(template: &str, pp: &PiecePrompt<'_>) -> Result<String> {
     let p = &pp.prompt;
-    let mut vars = shared_vars(
-        p.project_type,
-        p.branch,
-        p.base_branch,
-        p.github_repo,
-        p.checks,
-        &p.code_gates,
-    );
+    let mut vars = shared_vars(p);
     vars.extend([
         ("header", piece_header(pp)),
         ("rule1", format!("{PIECE_RULE_1}\n{WHOLE_SLICE}")),
