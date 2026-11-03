@@ -58,6 +58,12 @@ pub fn mid_tier(tier: &'static str) -> &'static str {
     if tier == OPUS { SONNET } else { tier }
 }
 
+/// `topTier` (section 7.1): the planner, the final reviewer and the triager's second look stay on Opus
+/// whatever the usage reading says.
+pub fn top_tier() -> &'static str {
+    OPUS
+}
+
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
 /// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
 /// kept for retries, reopened items and the bigger ones. Only a tier of `opus` is ever moved; a tier

@@ -2,8 +2,9 @@
 //! read-only Claude session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
 //! base checkout (or the repo itself before that checkout exists). Its end is a [`SessionResult::Triage`] on the outcome
 //! channel. Claude only, like the implementer.
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::driver::{
     LookFailure, SecondLookEnd, SecondLookRequest, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
@@ -14,10 +15,10 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_for, engine_of, run_session};
 use crate::implementer::new_session_id;
-use crate::tiers::{implementer_tier, mid_tier};
+use crate::tiers::{implementer_tier, mid_tier, top_tier};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
-use crate::triage::{TriageContext, Triager, decide};
+use crate::triage::{Triager, decide};
 use crate::{lanes, paths};
 
 const TEMPLATE: &str = include_str!("../../prompts/triage.md");
@@ -33,34 +34,17 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(&project.repo_path))
 }
 
-/// The read-only session both the triager and its second look run: the reviewer's budget, in `cwd`.
-fn read_only_session<'a>(project: &'a ProjectConfig, cwd: &'a Path, model: String) -> EphemeralSessionConfig<'a> {
-    EphemeralSessionConfig {
-        cwd,
-        budget_usd: project.budget.reviewer_usd,
-        model,
-        local: None,
-        engine: Some(EngineId::Claude),
-        cursor: None,
-        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
-        shell: true,
-    }
-}
-
 impl ClaudeStarter {
-    /// A new session id and its transcript sink; tells `context` where the item's transcripts are.
-    fn transcript(
-        &self,
-        project_id: &str,
-        item_id: &str,
-        lane: Option<u32>,
-        context: &mut TriageContext,
-    ) -> (String, TranscriptSink) {
-        let dir = paths::run_dir(&self.data_dir, project_id, item_id);
-        context.transcripts_dir = Some(dir.display().to_string());
+    /// A new session's id, where its transcript goes, and the running count it's now part of.
+    fn begin_session(&self, project: &str, item: &str, lane: Option<u32>) -> (String, TranscriptSink, Arc<AtomicU32>) {
         let session_id = new_session_id();
-        let path = dir.join(format!("{session_id}.jsonl"));
-        (session_id, TranscriptSink { path, lane })
+        let sink = TranscriptSink {
+            path: paths::run_dir(&self.data_dir, project, item).join(format!("{session_id}.jsonl")),
+            lane,
+        };
+        let running = self.running.clone();
+        running.fetch_add(1, Ordering::SeqCst);
+        (session_id, sink, running)
     }
 
     pub(super) fn start_triage(&self, request: TriageRequest) -> Result<(), String> {
@@ -85,15 +69,18 @@ impl ClaudeStarter {
             usage,
             outcomes,
         } = request;
+        context.transcripts_dir = Some(
+            paths::run_dir(&self.data_dir, &project_id, &item_id)
+                .display()
+                .to_string(),
+        );
         let model = mid_tier(implementer_tier(
             usage.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
         ))
         .to_string();
-        let (session_id, sink) = self.transcript(&project_id, &item_id, lane, &mut context);
-        let running = self.running.clone();
-        running.fetch_add(1, Ordering::SeqCst);
+        let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -102,7 +89,16 @@ impl ClaudeStarter {
                     template: TEMPLATE,
                     project_type: project.project_type,
                     github_repo: &project.github_repo,
-                    session: read_only_session(&project, &cwd, model),
+                    session: EphemeralSessionConfig {
+                        cwd: &cwd,
+                        budget_usd: project.budget.reviewer_usd,
+                        model,
+                        local: None,
+                        engine: Some(EngineId::Claude),
+                        cursor: None,
+                        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+                        shell: true,
+                    },
                     max_automatic_decisions: MAX_TRIAGES,
                 };
                 let engine = engine_of(Some(EngineId::Claude));
@@ -155,85 +151,80 @@ impl ClaudeStarter {
         });
         Ok(())
     }
+}
 
-    /// The top-tier second look at a triager's `human` answer (06.9 bullet 3): the same role, read-only place and
-    /// budget as the triager, on `implementer_tier` (opus unless the usage limit is low). Its end is a
-    /// [`SessionResult::SecondLook`] on the outcome channel.
+impl ClaudeStarter {
+    /// The second look at a `human` answer with a suggestion (06.9 bullet 3): the triager's role, place and budget on
+    /// the top tier, read-only. Its end is a [`SessionResult::SecondLook`]; a session that failed ends with no answer.
     pub(super) fn start_second_look(&self, request: SecondLookRequest) -> Result<(), String> {
         let project = self
             .projects
             .iter()
-            .find(|p| p.id_or_derived() == request.triage.project)
-            .ok_or_else(|| format!("no project {} is configured", request.triage.project))?
+            .find(|p| p.id_or_derived() == request.project)
+            .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
         let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
         if !exists(&bin, &self.env) {
             return Err(format!("the claude binary wasn't found ({})", bin.display()));
         }
         let SecondLookRequest {
-            triage:
-                TriageRequest {
-                    project: project_id,
-                    item_id,
-                    mut context,
-                    lane,
-                    usage,
-                    outcomes,
-                },
-            reason,
-            suggest,
-            instructions,
+            project: project_id,
+            item_id,
+            mut context,
+            lane,
+            outcomes,
+            triager_reason,
+            triager_suggest,
+            triager_instructions,
+            ..
         } = request;
-        let model = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &self.models).to_string();
-        let (session_id, sink) = self.transcript(&project_id, &item_id, lane, &mut context);
-        let running = self.running.clone();
-        running.fetch_add(1, Ordering::SeqCst);
+        context.transcripts_dir = Some(
+            paths::run_dir(&self.data_dir, &project_id, &item_id)
+                .display()
+                .to_string(),
+        );
+        let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
-            let end = match tokio::spawn(async move {
-                let look = SecondLook {
+            let agree = tokio::spawn(async move {
+                let second = SecondLook {
                     template: CHECK_TEMPLATE,
                     project_type: project.project_type,
                     github_repo: &project.github_repo,
-                    session: read_only_session(&project, &cwd, model),
+                    session: EphemeralSessionConfig {
+                        cwd: &cwd,
+                        budget_usd: project.budget.reviewer_usd,
+                        model: top_tier().to_string(),
+                        local: None,
+                        engine: Some(EngineId::Claude),
+                        cursor: None,
+                        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+                        shell: true,
+                    },
                     max_automatic_decisions: MAX_TRIAGES,
                 };
                 let ctx = SecondLookContext {
                     triage: &context,
-                    triager_reason: &reason,
-                    triager_suggest: suggest,
-                    triager_instructions: &instructions,
+                    triager_reason: &triager_reason,
+                    triager_suggest,
+                    triager_instructions: &triager_instructions,
                 };
                 let engine = engine_of(Some(EngineId::Claude));
-                let checked = check(&look, &ctx, |spec| async move {
+                let checked = check(&second, &ctx, |spec| async move {
                     run_session(engine?.as_ref(), &bin, &spec, &session_id, Some(&sink), quiet).await
                 })
                 .await;
-                match checked.result {
-                    Some(r) => SecondLookEnd::Checked {
-                        agree: r.agree,
-                        reason: r.reason,
-                        instructions: r.instructions,
-                    },
-                    None => SecondLookEnd::Failed {
-                        note: checked.note.unwrap_or_default(),
-                    },
-                }
+                checked.result.map(|r| (r.agree, r.reason, r.instructions))
             })
             .await
-            {
-                Ok(end) => end,
-                Err(e) => SecondLookEnd::Failed {
-                    note: format!("the session task crashed: {e}"),
-                },
-            };
+            .unwrap_or(None);
             running.fetch_sub(1, Ordering::SeqCst);
             outcomes.send(SessionOutcome {
                 project: project_id,
                 item_id,
                 lane: lane.unwrap_or(0),
-                result: SessionResult::SecondLook(end),
+                result: SessionResult::SecondLook(SecondLookEnd { agree }),
                 context_tokens: None,
                 usage: None,
                 notes: vec![],

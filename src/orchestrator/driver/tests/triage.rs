@@ -9,9 +9,9 @@ use crate::triage::{TriageButton, TriageDecision};
 pub(super) struct Triager {
     asked: Mutex<Vec<TriageRequest>>,
     ends: Mutex<Vec<TriageEnd>>,
-    /// The second looks asked for, and how each ends (one with no scripted end never reports).
-    checks: Mutex<Vec<SecondLookRequest>>,
-    check_ends: Mutex<Vec<SecondLookEnd>>,
+    /// The second looks asked for, and how each ends, in order (`None` is a failed one).
+    pub(super) looked: Mutex<Vec<SecondLookRequest>>,
+    pub(super) look_ends: Mutex<Vec<Option<(bool, String, String)>>>,
 }
 
 impl Triager {
@@ -36,15 +36,14 @@ impl Triager {
 
 impl Triager {
     pub(super) fn second_look(&self, request: SecondLookRequest) -> Result<(), String> {
-        self.checks.lock().unwrap().push(request.clone());
-        let mut ends = self.check_ends.lock().unwrap();
+        self.looked.lock().unwrap().push(request.clone());
+        let mut ends = self.look_ends.lock().unwrap();
         if !ends.is_empty() {
-            let r = request.triage;
-            r.outcomes.send(SessionOutcome {
-                project: r.project,
-                item_id: r.item_id,
-                lane: r.lane.unwrap_or(0),
-                result: SessionResult::SecondLook(ends.remove(0)),
+            request.outcomes.send(SessionOutcome {
+                project: request.project,
+                item_id: request.item_id,
+                lane: request.lane.unwrap_or(0),
+                result: SessionResult::SecondLook(SecondLookEnd { agree: ends.remove(0) }),
                 context_tokens: None,
                 usage: None,
                 notes: vec![],
@@ -465,94 +464,117 @@ async fn person_steps_with_a_pr_are_human_with_the_steps_under_the_reason() {
     );
 }
 
+/// The triager answers `human` and suggests `button`.
 fn suggesting(button: TriageButton) -> TriageEnd {
     TriageEnd::Found {
         decision: TriageDecision::Human,
-        reason: "the rest is for other items".into(),
+        reason: "the rest is other items' work".into(),
         steps: vec![],
-        instructions: "Skip it.".into(),
+        instructions: "".into(),
         suggest: Some(button),
     }
 }
 
-fn checked(agree: bool, instructions: &str) -> SecondLookEnd {
-    SecondLookEnd::Checked {
-        agree,
-        reason: "it is clear".into(),
-        instructions: instructions.into(),
-    }
-}
-
-/// "a" stopped, its triager answering `end`, then the second look `look` (if any), all settled.
-async fn looked(end: TriageEnd, look: Vec<SecondLookEnd>) -> (Rig, Arc<Fake>) {
-    let (mut rig, fake) = stopped(vec![end]).await;
-    *fake.triage.check_ends.lock().unwrap() = look;
-    for _ in 0..4 {
-        rig.machine.pass().await;
-    }
+/// "a" stopped, its triager answering `end` and its second look (when one runs) ending as `look`.
+async fn second_looked(end: TriageEnd, look: Option<(bool, String, String)>) -> (Rig, Arc<Fake>) {
+    let (mut rig, fake) = stopped(vec![]).await;
+    pushed(&mut rig);
+    *fake.triage.ends.lock().unwrap() = vec![];
+    *fake.triage.look_ends.lock().unwrap() = vec![look];
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 0,
+        result: SessionResult::Triage(end),
+        context_tokens: None,
+        usage: None,
+        notes: vec![],
+        session_id: None,
+    });
+    // One pass starts the second look; the next settles its end.
+    rig.machine.pass().await;
+    rig.machine.pass().await;
     (rig, fake)
 }
 
-#[tokio::test]
-async fn an_agreeing_second_look_carries_out_the_skip_and_logs_the_checked_line() {
-    let (mut rig, fake) = looked(suggesting(TriageButton::Skip), vec![checked(true, "")]).await;
-    assert_eq!(fake.triage.checks.lock().unwrap().len(), 1);
-    assert!(!rig.lp(0).runs.contains_key("a"));
-    assert!(
-        timeline(&mut rig)
-            .iter()
-            .any(|n| n == "Claude decided to skip, checked with a second look: it is clear")
-    );
+fn agreed(instructions: &str) -> Option<(bool, String, String)> {
+    Some((true, "it is clearly safe".into(), instructions.into()))
 }
 
 #[tokio::test]
-async fn an_agreeing_second_look_with_instructions_replaces_the_triagers() {
-    let (mut rig, fake) = stopped(vec![suggesting(TriageButton::Continue)]).await;
-    pushed(&mut rig);
-    *fake.triage.check_ends.lock().unwrap() = vec![checked(true, "Use the other API.")];
-    for _ in 0..3 {
-        rig.machine.pass().await;
+async fn human_with_a_skip_suggestion_and_an_agreeing_second_look_skips_it_and_logs_the_checked_line() {
+    let (mut rig, fake) = second_looked(suggesting(TriageButton::Skip), agreed("")).await;
+    {
+        let looked = fake.triage.looked.lock().unwrap();
+        assert_eq!(looked.len(), 1);
+        assert_eq!(looked[0].triager_suggest, TriageButton::Skip);
+        assert_eq!(looked[0].triager_reason, "the rest is other items' work");
     }
-    let started = fake.started.lock().unwrap();
-    assert_eq!(started.last().unwrap().follow_up.as_deref(), Some("Use the other API."));
+    rig.machine.pass().await;
+    assert!(!rig.lp(0).runs.contains_key("a"));
+    let line = "Claude decided to skip, checked with a second look: it is clearly safe";
+    assert!(timeline(&mut rig).iter().any(|l| l == line), "{:?}", timeline(&mut rig));
+}
+
+#[tokio::test]
+async fn an_agreeing_second_look_continues_with_its_own_instructions() {
+    let (mut rig, fake) = second_looked(suggesting(TriageButton::Continue), agreed("do this")).await;
+    assert_eq!(
+        fake.started.lock().unwrap().last().unwrap().follow_up.as_deref(),
+        Some("do this")
+    );
+    assert_eq!(rig.lp(0).records["a"].triages.map(|t| t.1), Some(1));
 }
 
 #[tokio::test]
 async fn a_disagreeing_second_look_leaves_it_for_a_person_with_both_reasons() {
-    let (mut rig, _fake) = looked(suggesting(TriageButton::Skip), vec![checked(false, "")]).await;
-    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    let no = Some((false, "it needs a design call".into(), String::new()));
+    let (mut rig, _fake) = second_looked(suggesting(TriageButton::Skip), no).await;
+    assert!(rig.lp(0).runs.contains_key("a"));
     let reason = rig.lp(0).records["a"].needs_human_reason.clone().unwrap();
-    assert!(reason.contains("the rest is for other items"), "{reason}");
+    assert!(reason.contains("the rest is other items' work"), "{reason}");
     assert!(
-        reason.contains("A second look kept it for you: it is clear"),
+        reason.contains("A second look kept it for you: it needs a design call"),
         "{reason}"
     );
-    assert!(rig.lp(0).records["a"].triages.is_none());
+    assert!(!rig.lp(0).claude_on_it("a"));
 }
 
 #[tokio::test]
 async fn a_failing_second_look_leaves_it_human() {
-    let failed = SecondLookEnd::Failed { note: "crashed".into() };
-    let (mut rig, _fake) = looked(suggesting(TriageButton::Skip), vec![failed]).await;
-    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
-    let r = rig.lp(0).records["a"].clone();
-    assert!(r.triaged && r.triages.is_none());
-    assert!(!r.needs_human_reason.unwrap().contains("second look"));
+    let (mut rig, _fake) = second_looked(suggesting(TriageButton::Skip), None).await;
+    assert!(rig.lp(0).runs.contains_key("a"));
+    let reason = rig.lp(0).records["a"].needs_human_reason.clone().unwrap();
+    assert!(
+        reason.contains("the rest is other items' work") && !reason.contains("second look"),
+        "{reason}"
+    );
+    assert!(!rig.lp(0).claude_on_it("a"));
 }
 
 #[tokio::test]
-async fn no_second_look_for_a_plain_human_or_a_direct_decision() {
-    let (_rig, fake) = looked(found("needs a call"), vec![]).await;
-    assert!(fake.triage.checks.lock().unwrap().is_empty());
-    let (_rig, fake) = looked(decision(TriageDecision::Skip, ""), vec![]).await;
-    assert!(fake.triage.checks.lock().unwrap().is_empty());
+async fn a_plain_human_or_a_direct_decision_gets_no_second_look() {
+    for end in [found("only you can say"), decision(TriageDecision::Skip, "")] {
+        let (_rig, fake) = second_looked(end, agreed("")).await;
+        assert!(fake.triage.looked.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
-async fn claude_stays_on_it_through_the_second_look() {
-    let (mut rig, _fake) = looked(suggesting(TriageButton::Skip), vec![]).await;
+async fn claude_is_on_the_item_throughout_the_second_look() {
+    let (mut rig, fake) = stopped(vec![]).await;
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 0,
+        result: SessionResult::Triage(suggesting(TriageButton::Skip)),
+        context_tokens: None,
+        usage: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.pass().await;
+    assert_eq!(fake.triage.looked.lock().unwrap().len(), 1);
     assert!(rig.lp(0).claude_on_it("a"));
-    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
-    let flags: Vec<_> = on_it_events(&mut rig);
-    assert!(flags.iter().all(|f| *f != Some(false)), "{flags:?}");
+    assert!(!on_it_events(&mut rig).contains(&Some(false)));
 }

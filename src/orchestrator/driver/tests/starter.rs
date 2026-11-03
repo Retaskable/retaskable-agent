@@ -1,4 +1,4 @@
-//! The fake starter's `SessionStarter` impl.
+//! The fake [`SessionStarter`] the driver tests run against.
 use super::*;
 
 impl SessionStarter for Fake {

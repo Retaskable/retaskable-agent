@@ -54,7 +54,7 @@ pub enum SessionResult {
     Limited { why: String, resets_in: Option<Duration> },
     /// A triager session ended (06.9); `outcome.lane` is the item's lane, 0 when it had none.
     Triage(super::TriageEnd),
-    /// A triager's second look ended (06.9 bullet 3); `outcome.lane` as for [`Triage`](Self::Triage).
+    /// A triager's second look ended (06.9 bullet 3).
     SecondLook(super::SecondLookEnd),
 }
 
@@ -314,7 +314,7 @@ impl ProjectLoop {
             return;
         }
         if let SessionResult::SecondLook(end) = &outcome.result {
-            self.second_look_ended(&outcome.item_id, outcome.lane, end.clone(), pool, shared)
+            self.second_look_ended(&outcome.item_id, end.clone(), pool, shared)
                 .await;
             return;
         }
