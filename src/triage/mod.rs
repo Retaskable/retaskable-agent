@@ -149,6 +149,19 @@ pub struct TriageResult {
     pub retaskable_bug: Option<RetaskableBug>,
 }
 
+/// The `retaskableBug` property of a result schema, shared with [`crate::looks`].
+pub fn retaskable_bug_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "title": { "type": "string" },
+            "details": { "type": "string" },
+            "sameAs": { "type": "string" }
+        },
+        "required": ["title", "details"]
+    })
+}
+
 /// For `SessionSpec.schema`.
 pub fn triage_result_schema() -> Value {
     json!({
@@ -159,15 +172,7 @@ pub fn triage_result_schema() -> Value {
             "reason": { "type": "string" },
             "instructions": { "type": "string" },
             "suggest": { "enum": ["continue", "start_over", "skip"] },
-            "retaskableBug": {
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "details": { "type": "string" },
-                    "sameAs": { "type": "string" }
-                },
-                "required": ["title", "details"]
-            }
+            "retaskableBug": retaskable_bug_schema()
         },
         "required": ["decision", "reason"]
     })

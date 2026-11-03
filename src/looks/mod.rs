@@ -12,7 +12,7 @@ use crate::backlog::runs::{Run, RunKind};
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
 use crate::prompt::{project_words, render_prompt};
-use crate::triage::RetaskableBug;
+use crate::triage::{RetaskableBug, retaskable_bug_schema};
 
 /// How many of an item's history notes a plan's brief carries.
 const HISTORY_KEPT: usize = 10;
@@ -217,15 +217,7 @@ pub fn look_result_schema() -> Value {
                 }
             },
             "engine": { "enum": ENGINES },
-            "retaskableBug": {
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "details": { "type": "string" },
-                    "sameAs": { "type": "string" }
-                },
-                "required": ["title", "details"]
-            }
+            "retaskableBug": retaskable_bug_schema()
         },
         "required": ["decision", "reason"]
     })
