@@ -30,6 +30,7 @@ mod project;
 mod report;
 mod runs;
 mod settle;
+mod store_errors;
 mod triage_facts;
 mod triage_run;
 

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use super::Shared;
 use super::report;
-use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
+use crate::backlog::{ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
 use crate::env::Env;
@@ -107,8 +107,7 @@ impl OrchestratorMode {
 /// What one pass of a project's loop did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    /// The backlog was read and a `tick` event written; `would` is what the tick decided to do, which
-    /// nothing did.
+    /// The backlog was read and a `tick` event written; `would` is what it decided to do, which nothing did.
     Ticked { would: Vec<String> },
     /// The pass was skipped after a `store_error` event.
     Skipped,
@@ -183,11 +182,9 @@ pub(super) enum Launch {
     Fresh,
     /// A session a restart of this computer cut off: resumes the saved session id in its existing lane.
     Resume(String),
-    /// A session that ran out of turns or had grown too large: a fresh session id, reusing the existing lane
-    /// as-is, with this text as the picking-up prompt.
+    /// A session that ran out of turns or grew too large: a fresh session id, the lane reused as-is, this text as the prompt.
     Continuing(String),
-    /// [`Continuing`](Self::Continuing) on this engine, not the lane's: the session's own engine is at its usage
-    /// limit and this one takes over.
+    /// [`Continuing`](Self::Continuing) on this engine, not the lane's: the lane's own engine is at its usage limit.
     ContinuingOn(String, EngineId),
     /// A person's Start over: a fresh session in a freshly prepared lane on the new attempt's branch, with these
     /// notes (if any) in its first prompt.
@@ -317,7 +314,6 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
-    /// The chat's asks waiting or being answered (`asks.rs`).
     pub(super) asking: super::asks::Asking,
 }
 
@@ -964,25 +960,6 @@ impl ProjectLoop {
             }),
         );
         Some((answer, more))
-    }
-
-    /// A pass that couldn't even ask the store (no repo id, no link): the page hears of it too.
-    pub(super) fn cant_start(&self, message: String) {
-        self.live.failed(&self.id, now_iso8601(), message);
-    }
-
-    pub(super) fn store_error(&mut self, op: &str, e: &BacklogError) {
-        tracing::warn!("{}: {op} failed: {e}", self.id);
-        self.live.failed(&self.id, now_iso8601(), e.to_string());
-        self.events.add_in(
-            &self.id,
-            Event::StoreError(event::StoreError {
-                op: Some(op.into()),
-                code: e.code().map(|c| json!(c)),
-                error: Some(e.to_string()),
-                ..Default::default()
-            }),
-        );
     }
 }
 
