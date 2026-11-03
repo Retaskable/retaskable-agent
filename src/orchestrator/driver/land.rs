@@ -131,7 +131,7 @@ impl Ctx {
         }
     }
 
-    /// Resumes the draft's drafter session to rebase the branch and resolve the conflicts, then pushes what it did.
+    /// Resumes the draft's drafter session to rebase the branch and resolve the conflicts, then force-pushes what it did.
     async fn hand_back(&self, taken: &TakenDraft, branch: &str, reason: &str) -> Result<(), String> {
         let draft = &taken.draft;
         let Some(session_id) = draft.session_id.clone() else {
@@ -161,12 +161,15 @@ impl Ctx {
         if result.status == DrafterStatus::Failed {
             return Err(result.summary);
         }
-        let title = draft.titles.first().cloned().unwrap_or_else(|| draft.id.clone());
-        let (host, project, b) = (self.host.clone(), self.project.clone(), branch.to_string());
-        tokio::task::spawn_blocking(move || host.publish(&project, &dir, &b, &title, &result.summary))
+        let (host, project, id, b) = (
+            self.host.clone(),
+            self.project.clone(),
+            draft.id.clone(),
+            branch.to_string(),
+        );
+        tokio::task::spawn_blocking(move || host.push(&project, &id, &b))
             .await
             .map_err(|e| e.to_string())?
-            .map(|_| ())
             .map_err(|e| format!("{e:#}"))
     }
 }

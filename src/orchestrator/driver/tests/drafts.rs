@@ -50,6 +50,9 @@ impl DraftHost for Host {
     fn rebase(&self, _: &ProjectConfig, _: &str, _: &str) -> Result<bool> {
         Ok(true)
     }
+    fn push(&self, _: &ProjectConfig, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
     }

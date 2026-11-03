@@ -37,12 +37,7 @@ impl DraftHost for Host {
         async { Ok(serde_json::from_value(json!({ "status": "pr_opened", "summary": "rebased" })).unwrap()) }.boxed()
     }
     fn publish(&self, _: &ProjectConfig, _: &Path, _: &str, _: &str, _: &str) -> Result<Published> {
-        self.calls.lock().unwrap().push("publish".into());
-        Ok(Published {
-            url: "https://github.com/o/r/pull/9".into(),
-            number: 9,
-            created: false,
-        })
+        anyhow::bail!("a hand-back must not publish: the PR exists")
     }
     fn remove(&self, _: &ProjectConfig, id: &str) {
         self.calls.lock().unwrap().push(format!("remove {id}"));
@@ -65,6 +60,10 @@ impl DraftHost for Host {
             return Ok(queued.remove(0));
         }
         Ok(self.rebase.lock().unwrap().unwrap_or(true))
+    }
+    fn push(&self, _: &ProjectConfig, id: &str, branch: &str) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("push {id} {branch}"));
+        Ok(())
     }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         self.calls.lock().unwrap().push("fetch".into());
@@ -305,7 +304,7 @@ async fn a_conflict_resumes_the_drafter_and_merges_with_no_new_approval() {
             "merge 9 delete=true",
             "rebase d1 retaskable/spec-d1-charts",
             "run sess-1",
-            "publish",
+            "push d1 retaskable/spec-d1-charts",
             "rebase d1 retaskable/spec-d1-charts",
             "merge 9 delete=true",
             "remove d1",

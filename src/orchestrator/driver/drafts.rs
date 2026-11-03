@@ -55,6 +55,8 @@ pub trait DraftHost: Send + Sync {
     /// Rebases the draft's pushed branch onto the base branch in its worktree and force-pushes with lease. False
     /// when it conflicts.
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool>;
+    /// Force-pushes with lease the branch the drafter rebased in the draft's worktree.
+    fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
 }
