@@ -18,3 +18,6 @@ export const itemWaitsAndFinishes = (): boolean => flags.on("item-waits-and-fini
 
 /** The `spec-drafts` flag: claiming and writing up spec drafts. Off until there is an answer. */
 export const specDrafts = (): boolean => flags.on("spec-drafts");
+
+/** The `ask-claude` flag: answering a person's chat question about the project. Off until there is an answer. */
+export const askClaude = (): boolean => flags.on("ask-claude");
