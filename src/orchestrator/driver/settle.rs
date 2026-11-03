@@ -11,7 +11,7 @@ use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
-use crate::orchestrator::fresh_start::{FreshStart, picking_up_prompt};
+use crate::orchestrator::fresh_start::{FreshStart, LIMIT_PAUSE, picking_up_prompt};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
 
@@ -47,6 +47,11 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
+    /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
+    /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
+    /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
+    /// section 3.5).
+    Limited { why: String, resets_in: Option<Duration> },
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -322,12 +327,18 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
+        if let SessionResult::Limited { resets_in, .. } = &outcome.result
+            && let Some(record) = self.records.get(&item)
+        {
+            let until = Instant::now() + resets_in.unwrap_or(LIMIT_PAUSE);
+            shared.engine_limits.hit(record.impl_session_engine, until);
+        }
         match outcome.result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
             SessionResult::Interrupted => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
-            SessionResult::NeedsHuman(why) => {
+            SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();
                 // Claude's sign-in running out is this computer's problem, not the item's (section 7.3):
                 // the item still needs a person (it may have left real work behind), but no other item
@@ -362,7 +373,11 @@ impl ProjectLoop {
             }),
         );
         let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
-        Launch::Continuing(picking_up_prompt(has_pr, &self.project.base_branch, follow_up))
+        let prompt = picking_up_prompt(has_pr, &self.project.base_branch, follow_up);
+        match reason {
+            FreshStart::EngineLimited { to, .. } => Launch::ContinuingOn(prompt, to),
+            _ => Launch::Continuing(prompt),
+        }
     }
 
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means
@@ -441,6 +456,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            engine_limits: &mut self.engine_limits,
                             stopping,
                         },
                     )

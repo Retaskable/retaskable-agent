@@ -21,6 +21,7 @@ use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
 use crate::link::TokenStore;
 use crate::orchestrator::Action;
+use crate::orchestrator::fresh_start::EngineLimits;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
@@ -90,6 +91,8 @@ pub struct Shared<'a> {
     pub links: &'a Links,
     pub claim_paused_until: &'a mut Option<Instant>,
     pub claude_signed_out_until: &'a mut Option<Instant>,
+    /// Which engines are at their usage limit on this computer ([`Machine::engine_limits`]).
+    pub engine_limits: &'a mut EngineLimits,
     /// [`process_tree::stopping`] as of this pass's start: a restart or Quit cutting every
     /// session, so no project claims or starts new work either
     /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
@@ -147,6 +150,9 @@ pub struct Machine {
     /// resumed Claude session starts on this computer until this time, the TS agent's `claudeSignedOut` gate
     /// (section 7.3). Nothing but time clears it yet, so each pass just retries after it passes.
     pub(super) claude_signed_out_until: Option<Instant>,
+    /// Which engines are at their usage limit and until when, from a session's `limit_hit`: a resume of a
+    /// session on one starts fresh on another engine that can take it (engines/03 section 3.5). In memory only.
+    pub(super) engine_limits: EngineLimits,
     pub(super) projects: Vec<ProjectLoop>,
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
@@ -181,6 +187,7 @@ impl Machine {
             }),
             claim_paused_until: None,
             claude_signed_out_until: None,
+            engine_limits: EngineLimits::default(),
             projects: Vec::new(),
             last_served: None,
             links,
@@ -333,6 +340,7 @@ impl Machine {
         let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused();
         let (mut claim_paused_until, mut signed_out_until) = (None, None);
+        let mut limits = EngineLimits::default();
         for (lp, paused) in self.projects.iter_mut().zip(paused) {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
@@ -341,6 +349,7 @@ impl Machine {
                 links: &self.links,
                 claim_paused_until: &mut claim_paused_until,
                 claude_signed_out_until: &mut signed_out_until,
+                engine_limits: &mut limits,
                 stopping: stopping || paused,
             };
             let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
@@ -473,6 +482,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            engine_limits: &mut self.engine_limits,
                             stopping,
                         },
                     )
@@ -489,6 +499,7 @@ impl Machine {
                                 links: &self.links,
                                 claim_paused_until: &mut self.claim_paused_until,
                                 claude_signed_out_until: &mut self.claude_signed_out_until,
+                                engine_limits: &mut self.engine_limits,
                                 stopping,
                             },
                         )
@@ -513,6 +524,7 @@ impl Machine {
                         links: &self.links,
                         claim_paused_until: &mut self.claim_paused_until,
                         claude_signed_out_until: &mut self.claude_signed_out_until,
+                        engine_limits: &mut self.engine_limits,
                         stopping,
                     };
                     lp.draft_pass(&mut slots, &host, &shared).await;
@@ -522,6 +534,7 @@ impl Machine {
                         links: &self.links,
                         claim_paused_until: &mut self.claim_paused_until,
                         claude_signed_out_until: &mut self.claude_signed_out_until,
+                        engine_limits: &mut self.engine_limits,
                         stopping,
                     };
                     lp.land_drafts(&host, &shared, self.merge_wait).await;
@@ -560,6 +573,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            engine_limits: &mut self.engine_limits,
                             stopping,
                         },
                     )
@@ -574,6 +588,7 @@ impl Machine {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
+                            engine_limits: &mut self.engine_limits,
                             stopping,
                         },
                     )

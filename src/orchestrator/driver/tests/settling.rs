@@ -396,3 +396,32 @@ async fn a_session_ending_saves_its_context_size_and_a_fresh_start_clears_it() {
     assert_eq!(rig.lp(0).records["a"].impl_context_tokens, Some(42_000));
     assert_eq!(rig.lp(0).store.runs()["a"].impl_context_tokens, Some(42_000));
 }
+
+#[tokio::test]
+async fn a_session_that_hit_its_engines_limit_marks_that_engine_limited_until_its_reset() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(SessionResult::Limited {
+        why: "hit the usage limit".into(),
+        resets_in: Some(Duration::from_secs(600)),
+    });
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let now = std::time::Instant::now();
+    assert!(
+        rig.machine
+            .engine_limits
+            .is_limited(crate::engines::EngineId::Claude, now)
+    );
+    assert!(
+        !rig.machine
+            .engine_limits
+            .is_limited(crate::engines::EngineId::Claude, now + Duration::from_secs(601))
+    );
+    assert!(
+        !rig.machine
+            .engine_limits
+            .is_limited(crate::engines::EngineId::Cursor, now)
+    );
+}
