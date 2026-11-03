@@ -31,3 +31,30 @@ pub fn hold_base(project: &str, holder: &'static str) -> Result<BaseHold, String
 pub fn base_holder(project: &str) -> Option<&'static str> {
     lock(&BASE_HELD).get(project).copied()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_base_refuses_a_second_holder_and_names_the_first() {
+        let first = hold_base("base-hold-t1", "a shoot").unwrap();
+        assert_eq!(base_holder("base-hold-t1"), Some("a shoot"));
+        let err = hold_base("base-hold-t1", "Play main").err().unwrap();
+        assert_eq!(err, "The base checkout is busy: a shoot is using it.");
+        drop(first);
+    }
+
+    #[test]
+    fn dropping_the_hold_frees_the_base() {
+        drop(hold_base("base-hold-t2", "Play main").unwrap());
+        assert_eq!(base_holder("base-hold-t2"), None);
+        assert!(hold_base("base-hold-t2", "a shoot").is_ok());
+    }
+
+    #[test]
+    fn projects_hold_their_bases_independently() {
+        let _a = hold_base("base-hold-t3a", "a shoot").unwrap();
+        assert!(hold_base("base-hold-t3b", "Play main").is_ok());
+    }
+}
