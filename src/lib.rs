@@ -30,6 +30,7 @@ pub mod jobs_due;
 pub mod lane_pool;
 pub mod lanes;
 pub mod link;
+pub mod looks;
 pub mod local_model;
 pub mod merge_update;
 pub mod network;
