@@ -2,12 +2,13 @@
 //! implementer's answer, or the session's error, plus what was published, to the `(RunOutcome, result)` that
 //! `run_done` carries. A `failed` result is `{}`: `run_done` adds the `why` from the outcome.
 use anyhow::Error;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
 use crate::backlog::runs::RunOutcome;
 use crate::decisions::{Decision, split_asked};
 use crate::implementer::publish::Published;
-use crate::implementer::{ImplementerResult, Interrupted, MaxTurns, Question, SilenceKilled};
+use crate::implementer::{ImplementerResult, Interrupted, LimitHit, MaxTurns, Question, SilenceKilled};
 
 /// A pushed branch and the change opened for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,14 +46,32 @@ pub fn questions_json(questions: &[Question]) -> Value {
         .collect()
 }
 
-/// The run's end from the implementer's answer. `decisions` are the answers already on the piece.
+/// A session that hit its engine's usage limit ends `limited` (pieces.md section 3.6), `until` being `now` plus
+/// the time the engine said until the limit lifts. `None` for any other error.
+pub fn limited_end(err: &Error, engine: &str, now: DateTime<Utc>) -> Option<(RunOutcome, Value)> {
+    let hit = err.downcast_ref::<LimitHit>()?;
+    let until = hit
+        .resets_in
+        .and_then(|d| chrono::Duration::from_std(d).ok())
+        .and_then(|d| now.checked_add_signed(d));
+    let engine = engine.to_string();
+    Some((RunOutcome::Limited { engine, until }, json!({})))
+}
+
+/// The run's end from the implementer's answer. `decisions` are the answers already on the piece; `engine` is the
+/// session's engine id, or `None` while `run-limits-and-causes` is Off, when a usage limit ends `failed`.
 pub fn end_from_answer(
     answer: Result<ImplementerResult, Error>,
     pushed: Option<&Pushed>,
     decisions: &[Decision],
+    engine: Option<&str>,
+    now: DateTime<Utc>,
 ) -> (RunOutcome, Value) {
     let r = match answer {
         Ok(r) => r,
+        Err(e) if engine.is_some_and(|engine| limited_end(&e, engine, now).is_some()) => {
+            return limited_end(&e, engine.unwrap_or_default(), now).expect("a LimitHit");
+        }
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return (RunOutcome::Interrupted, json!({})),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => {
             return failed(format!("went quiet and was killed: {e:#}"));

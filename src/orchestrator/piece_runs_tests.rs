@@ -51,6 +51,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         env,
         max_turns: 50,
         models: ModelsConfig::default(),
+        flags: Arc::new(crate::flags::Flags::fixed(&[])),
     });
     Rig {
         _dir: dir,

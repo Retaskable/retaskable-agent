@@ -40,6 +40,7 @@ pub struct PieceStarter {
     pub env: Env,
     pub max_turns: u32,
     pub models: ModelsConfig,
+    pub flags: std::sync::Arc<crate::flags::Flags>,
 }
 
 impl RunStarter for PieceStarter {
@@ -81,6 +82,7 @@ impl RunStarter for PieceStarter {
             kind: request.kind,
             piece: request.piece,
             processes: request.processes,
+            flags: self.flags.clone(),
         };
         let ends = request.ends;
         let token = request.token;
@@ -108,6 +110,7 @@ pub(super) struct Job {
     pub(super) kind: RunKind,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
+    pub(super) flags: std::sync::Arc<crate::flags::Flags>,
 }
 
 /// A sender for a session's process tree: it goes to the run as soon as the session starts, so a stop can cut it.
@@ -339,7 +342,10 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .ok()
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
-        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions);
+        // With `run-limits-and-causes` Off, a usage limit ends `failed` as before.
+        let limited_as = job.flags.on("run-limits-and-causes").await.then_some("claude");
+        let (outcome, mut result) =
+            end_from_answer(a.answer, pushed.as_ref(), &decisions, limited_as, chrono::Utc::now());
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
