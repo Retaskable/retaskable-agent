@@ -186,6 +186,19 @@ pub struct Machine {
     pub(super) stopping_override: Option<bool>,
 }
 
+/// A [`Shared`] borrowing the machine's fields (not its projects), so a loop over `self.projects` can build one.
+macro_rules! shared {
+    ($m:ident, $stopping:expr) => {
+        Shared {
+            links: &$m.links,
+            claim_paused_until: &mut $m.claim_paused_until,
+            claude_signed_out_until: &mut $m.claude_signed_out_until,
+            engine_limits: &mut $m.engine_limits,
+            stopping: $stopping,
+        }
+    };
+}
+
 impl Machine {
     pub fn new(lane_count: u32, concurrency: u32, links: Links) -> Self {
         let (sender, outcomes) = mpsc::unbounded_channel();
@@ -544,50 +557,18 @@ impl Machine {
             self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
-                    lp.resume_sessions(
-                        &mut self.pool,
-                        starter,
-                        &mut Shared {
-                            links: &self.links,
-                            claim_paused_until: &mut self.claim_paused_until,
-                            claude_signed_out_until: &mut self.claude_signed_out_until,
-                            engine_limits: &mut self.engine_limits,
-                            stopping,
-                        },
-                    )
-                    .await;
+                    lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
+                        .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
                     if !paused {
                         let room = self.concurrency.saturating_sub(starter.active());
-                        lp.carry_out_commands(
-                            &mut self.pool,
-                            starter,
-                            room,
-                            &mut Shared {
-                                links: &self.links,
-                                claim_paused_until: &mut self.claim_paused_until,
-                                claude_signed_out_until: &mut self.claude_signed_out_until,
-                                engine_limits: &mut self.engine_limits,
-                                stopping,
-                            },
-                        )
-                        .await;
+                        lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
+                            .await;
                         lp.advance(&self.pool, starter);
                         let mut room = self.concurrency.saturating_sub(starter.active());
-                        lp.triage_pass(
-                            &mut self.pool,
-                            starter,
-                            &mut room,
-                            &mut Shared {
-                                links: &self.links,
-                                claim_paused_until: &mut self.claim_paused_until,
-                                claude_signed_out_until: &mut self.claude_signed_out_until,
-                                engine_limits: &mut self.engine_limits,
-                                stopping,
-                            },
-                        )
-                        .await;
+                        lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
+                            .await;
                     }
                 }
             }
@@ -598,13 +579,7 @@ impl Machine {
             slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
-                    let shared = Shared {
-                        links: &self.links,
-                        claim_paused_until: &mut self.claim_paused_until,
-                        claude_signed_out_until: &mut self.claude_signed_out_until,
-                        engine_limits: &mut self.engine_limits,
-                        stopping,
-                    };
+                    let shared = shared!(self, stopping);
                     lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
                 }
             }
@@ -619,23 +594,11 @@ impl Machine {
             );
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live && !paused {
-                    let shared = Shared {
-                        links: &self.links,
-                        claim_paused_until: &mut self.claim_paused_until,
-                        claude_signed_out_until: &mut self.claude_signed_out_until,
-                        engine_limits: &mut self.engine_limits,
-                        stopping,
-                    };
+                    let shared = shared!(self, stopping);
                     lp.draft_pass(&mut slots, &host, &shared).await;
                 }
                 if live {
-                    let shared = Shared {
-                        links: &self.links,
-                        claim_paused_until: &mut self.claim_paused_until,
-                        claude_signed_out_until: &mut self.claude_signed_out_until,
-                        engine_limits: &mut self.engine_limits,
-                        stopping,
-                    };
+                    let shared = shared!(self, stopping);
                     lp.land_drafts(&host, &shared, self.merge_wait).await;
                     let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
                     lp.live.set_drafting(&lp.id, drafting);
@@ -647,13 +610,7 @@ impl Machine {
             slots = slots.saturating_sub(self.projects.iter().filter(|lp| lp.trialing()).count() as u32);
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
-                    let shared = Shared {
-                        links: &self.links,
-                        claim_paused_until: &mut self.claim_paused_until,
-                        claude_signed_out_until: &mut self.claude_signed_out_until,
-                        engine_limits: &mut self.engine_limits,
-                        stopping,
-                    };
+                    let shared = shared!(self, stopping);
                     lp.trial_pass(&mut self.pool, &mut slots, paused, &host, &checks, &shared)
                         .await;
                 }
@@ -681,34 +638,12 @@ impl Machine {
             let mut answer = None;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
                 slots = slots.saturating_sub(
-                    lp.apply_starts(
-                        &actions,
-                        &mut self.pool,
-                        starter,
-                        &mut Shared {
-                            links: &self.links,
-                            claim_paused_until: &mut self.claim_paused_until,
-                            claude_signed_out_until: &mut self.claude_signed_out_until,
-                            engine_limits: &mut self.engine_limits,
-                            stopping,
-                        },
-                    )
-                    .await,
+                    lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
+                        .await,
                 );
                 answer = Some(if actions.contains(&Action::AskForWork) {
-                    lp.claim(
-                        &mut self.pool,
-                        &mut slots,
-                        starter,
-                        &mut Shared {
-                            links: &self.links,
-                            claim_paused_until: &mut self.claim_paused_until,
-                            claude_signed_out_until: &mut self.claude_signed_out_until,
-                            engine_limits: &mut self.engine_limits,
-                            stopping,
-                        },
-                    )
-                    .await
+                    lp.claim(&mut self.pool, &mut slots, starter, &mut shared!(self, stopping))
+                        .await
                 } else {
                     None
                 });

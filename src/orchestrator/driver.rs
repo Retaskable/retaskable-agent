@@ -35,6 +35,7 @@ mod report;
 mod runs;
 mod settle;
 mod signed_out;
+mod store_errors;
 mod triage_bug;
 mod triage_facts;
 mod triage_run;
