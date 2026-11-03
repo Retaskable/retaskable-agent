@@ -47,12 +47,19 @@ pub enum Holder {
         project: String,
         piece: String,
     },
+    /// The project's trial plan session (first-run-check.md section 3.3).
+    Trial {
+        project: String,
+    },
 }
 
 impl Holder {
     pub fn project(&self) -> &str {
         match self {
-            Holder::Item { project, .. } | Holder::Play { project, .. } | Holder::Run { project, .. } => project,
+            Holder::Item { project, .. }
+            | Holder::Play { project, .. }
+            | Holder::Run { project, .. }
+            | Holder::Trial { project } => project,
         }
     }
 

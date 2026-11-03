@@ -166,6 +166,8 @@ pub struct Machine {
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
+    /// Runs the trial plan, with the latest setup checks. With none, no trial starts.
+    pub(super) trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks. With none, asks are left unanswered.
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
     /// The wait between merge tries after a draft is rebased.
@@ -200,6 +202,7 @@ impl Machine {
             links,
             starter: None,
             drafts: None,
+            trial: None,
             asks: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
@@ -430,6 +433,16 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode run each new project's trial plan, once its setup `checks` pass.
+    pub fn with_trial(
+        mut self,
+        host: Arc<dyn crate::orchestrator::trial_host::TrialHost>,
+        checks: SetupChecksHandle,
+    ) -> Self {
+        self.trial = Some((host, checks));
+        self
+    }
+
     pub fn add(&mut self, mut project: ProjectLoop) {
         project.outcomes = self.outcome_sender.clone();
         self.projects.push(project);
@@ -495,6 +508,7 @@ impl Machine {
             if let Some(items) = items
                 && self.live(&self.projects[i])
             {
+                self.projects[i].backlog_items = items.len();
                 self.projects[i].readopt(items, &mut self.pool);
             }
         }
@@ -628,6 +642,23 @@ impl Machine {
                 }
             }
         }
+        // The trial plan comes after asks and drafts and before items are planned; it counts toward `concurrency` too.
+        if let (Some((host, checks)), Some(_)) = (self.trial.clone(), starter.as_ref()) {
+            slots = slots.saturating_sub(self.projects.iter().filter(|lp| lp.trialing()).count() as u32);
+            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
+                if live {
+                    let shared = Shared {
+                        links: &self.links,
+                        claim_paused_until: &mut self.claim_paused_until,
+                        claude_signed_out_until: &mut self.claude_signed_out_until,
+                        engine_limits: &mut self.engine_limits,
+                        stopping,
+                    };
+                    lp.trial_pass(&mut self.pool, &mut slots, paused, &host, &checks, &shared)
+                        .await;
+                }
+            }
+        }
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))
             .map(|((lp, &ready), &paused)| {
                 ready.then(|| Candidate {
@@ -741,6 +772,8 @@ pub struct SpawnArgs<'a> {
     pub starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts in `claim` mode. None claims no draft.
     pub drafts: Option<Arc<dyn super::DraftHost>>,
+    /// Runs the trial plan in `claim` mode, with the setup checks it waits on. None runs none.
+    pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks in `claim` mode. None answers none.
     pub asks: Option<Arc<dyn super::AskHost>>,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
@@ -754,6 +787,9 @@ pub struct SpawnArgs<'a> {
     pub bugs: std::collections::HashMap<String, Arc<crate::connector::bug_link::BugLink>>,
     pub bug_version: String,
 }
+
+/// The latest setup checks (`runtime::spawn_setup_checks`).
+pub type SetupChecksHandle = Arc<std::sync::Mutex<Option<crate::setup_check::SetupChecks>>>;
 
 /// Starts the computer's one orchestrator task when the mode isn't `Off`. A project that can't loop (no
 /// GitHub repo, unreadable state) is logged and left out; the others go on.
@@ -793,6 +829,9 @@ pub fn spawn_all(args: SpawnArgs) {
         machine = machine.with_starter(starter);
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
+        }
+        if let Some((host, checks)) = args.trial {
+            machine = machine.with_trial(host, checks);
         }
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
