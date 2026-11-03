@@ -439,6 +439,9 @@ async fn a_claim_mode_tick_still_only_lists_with_or_without_the_guard_blocking()
 #[derive(Default)]
 struct Fake {
     started: Mutex<Vec<StartRequest>>,
+    /// What Start over let go of, and why it can't, if set.
+    abandoned: Mutex<Vec<Abandon>>,
+    abandon_fails: Mutex<Option<String>>,
     stepped: Mutex<Vec<StepRequest>>,
     panic_once: AtomicBool,
     refuse: Mutex<Option<String>>,
@@ -503,6 +506,12 @@ impl SessionStarter for Fake {
 
     fn active(&self) -> u32 {
         self.active.load(Ordering::SeqCst)
+    }
+
+    fn abandon(&self, old: Abandon) -> BoxFuture<'static, Result<(), String>> {
+        self.abandoned.lock().unwrap().push(old);
+        let fails = self.abandon_fails.lock().unwrap().clone();
+        async move { fails.map_or(Ok(()), Err) }.boxed()
     }
 
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
@@ -607,6 +616,8 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             follow_up: None,
             usage: None,
             items: rig.lp(0).items.values().cloned().collect(),
+            attempt: 0,
+            notes: None,
         }]
     );
     assert_eq!(
@@ -929,6 +940,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
 }
 
 mod commands;
+mod drafts;
 mod playtests;
 mod reporting;
 mod restart;
