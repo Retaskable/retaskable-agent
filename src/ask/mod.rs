@@ -2,3 +2,4 @@
 pub mod follow_up;
 pub mod model;
 pub mod prompt;
+pub mod session;
