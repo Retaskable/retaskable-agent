@@ -315,6 +315,10 @@ pub struct ProjectLoop {
     pub(super) triaging: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
+    /// This project's hub connection for reporting Retaskable's bugs, and the version it reports (`triage_bug.rs`).
+    pub(super) bugs: Option<(Arc<crate::connector::bug_link::BugLink>, String)>,
+    /// Where a sent bug's answer comes back to the loop, with the item it was for.
+    pub(super) bug_answers: super::triage_bug::Answers,
 }
 
 impl ProjectLoop {
@@ -364,6 +368,8 @@ impl ProjectLoop {
             landing: Default::default(),
             triaging: Default::default(),
             triage_flag: false,
+            bugs: None,
+            bug_answers: Default::default(),
         }
     }
 
@@ -391,6 +397,12 @@ impl ProjectLoop {
             max_resume_context_tokens,
         )
         .with_guard(guard))
+    }
+
+    /// Reports the triager's Retaskable bugs through `link`, as version `version`.
+    pub fn with_bugs(mut self, link: Option<Arc<crate::connector::bug_link::BugLink>>, version: &str) -> Self {
+        self.bugs = link.map(|l| (l, version.to_string()));
+        self
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).

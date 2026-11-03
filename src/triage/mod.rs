@@ -16,10 +16,10 @@
 //! the `claudeOnIt` predicate (06.9 bullets 16 and 20) as pure functions over the few item facts
 //! they need. A run's saved [`crate::store::RunRecord`] holds those facts for the current stop (its reason, the
 //! state it failed in, `triaged`, `triages`, failed looks and their retry time, reported bug signatures; a new stop
-//! replaces them), and [`record`] builds [`schedule::NeedsHumanFacts`] and a [`TriageContext`] from it. Also still missing: actually sending
-//! a decided [`bug_report::BugReportMessage`] over the cloud link (reading the hub's own consent
-//! and known bugs to decide one with [`bug_report::decide_bug_report`] is as far as this slice
-//! goes); no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the
+//! replaces them), and [`record`] builds [`schedule::NeedsHumanFacts`] and a [`TriageContext`] from it. A finding's `retaskableBug` is sent
+//! too (`orchestrator::driver::triage_bug`): decided with [`bug_report::decide_bug_report`] against the hub's consent
+//! and known bugs (which are also given to the triager), its signature kept in the item's record, and sent over the
+//! project's bug link without holding the loop. Also still missing: no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the
 //! prompt tells the session to run those itself). A caller puts this together the same way as
 //! [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`] from the
 //! item's own state, build a [`Triager`] with the project's words, the item's lane (or the base
@@ -125,7 +125,7 @@ impl TriageButton {
 /// `retaskableBug` (06.9 bullet 18): set only when what went wrong is Retaskable's own, never the
 /// project's. [`bug_report::decide_bug_report`] scrubs it and decides whether to send it before it
 /// ever leaves this computer.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RetaskableBug {
     pub title: String,
     pub details: String,
