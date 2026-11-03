@@ -26,8 +26,27 @@ use crate::telemetry::{Event, event};
 use crate::triage::schedule::nothing_to_continue;
 use crate::view::ItemCommand;
 
-/// A Continue waiting for a lane: the item and the notes (picture paths included) to send.
-pub(super) type PendingContinue = (String, Option<String>);
+/// A Continue or Start over waiting for a lane: the item, the notes (picture paths included) to send, and whether
+/// it is Claude's own decision (a person's command for the item replaces it).
+pub(super) struct PendingContinue {
+    item: String,
+    notes: Option<String>,
+    claude: bool,
+}
+
+impl PendingContinue {
+    pub(super) fn claude(item: &str, notes: Option<String>) -> Self {
+        Self {
+            item: item.to_string(),
+            notes,
+            claude: true,
+        }
+    }
+
+    fn by(&self) -> &'static str {
+        if self.claude { "Claude" } else { "a person" }
+    }
+}
 
 impl ProjectLoop {
     /// Takes in this project's queued commands, then carries on every Continue that can start. `room` is how
@@ -44,17 +63,20 @@ impl ProjectLoop {
                 ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
                 ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
                 ItemCommand::Skip { item, .. } => {
+                    self.drop_claudes(&item);
                     self.skip_stopped(pool, &item, shared).await;
                     continue;
                 }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
             };
+            // A person acting first drops Claude's decision waiting for a lane.
+            self.drop_claudes(&item);
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self
                 .continuing
                 .iter()
                 .chain(&self.starting_over)
-                .any(|(id, _)| *id == item);
+                .any(|p| p.item == item);
             if !stopped || waiting {
                 tracing::info!("{}: dropped a {name} for {item}: it isn't stopped here", self.id);
             } else {
@@ -63,28 +85,38 @@ impl ProjectLoop {
                 } else {
                     &mut self.continuing
                 };
-                queue.push((item, notes.filter(|n| !n.trim().is_empty())));
+                queue.push(PendingContinue {
+                    item,
+                    notes: notes.filter(|n| !n.trim().is_empty()),
+                    claude: false,
+                });
             }
         }
         if signed_out(shared) || shared.stopping {
             return;
         }
-        for (item, notes) in std::mem::take(&mut self.continuing) {
-            if !self
-                .continue_item(pool, &item, &notes, &mut room, starter, shared)
-                .await
-            {
-                self.continuing.push((item, notes));
+        for pending in std::mem::take(&mut self.continuing) {
+            if !self.continue_item(pool, &pending, &mut room, starter, shared).await {
+                self.continuing.push(pending);
             }
         }
-        for (item, notes) in std::mem::take(&mut self.starting_over) {
-            if !self
-                .start_over(&item, notes.as_deref(), (pool, starter), (&mut room, shared))
-                .await
-            {
-                self.starting_over.push((item, notes));
+        for pending in std::mem::take(&mut self.starting_over) {
+            if !self.start_over(&pending, (pool, starter), (&mut room, shared)).await {
+                self.starting_over.push(pending);
             }
         }
+    }
+
+    /// Drops Claude's own decision waiting for a lane for `item_id`.
+    fn drop_claudes(&mut self, item_id: &str) {
+        for queue in [&mut self.continuing, &mut self.starting_over] {
+            queue.retain(|p| !(p.claude && p.item == item_id));
+        }
+    }
+
+    /// Whether a decision of Claude's for `item_id` is waiting for a lane (`claudeOnIt` stays true meanwhile).
+    pub(super) fn claude_pending(&self, item_id: &str) -> bool {
+        (self.continuing.iter().chain(&self.starting_over)).any(|p| p.claude && p.item == item_id)
     }
 
     /// Skips a stopped item: the run is dropped (`item_state`, `needs_human` to `skipped`), the lane freed and the
@@ -150,12 +182,12 @@ impl ProjectLoop {
     async fn continue_item(
         &mut self,
         pool: &mut LanePool,
-        item_id: &str,
-        notes: &Option<String>,
+        pending: &PendingContinue,
         room: &mut u32,
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> bool {
+        let (item_id, notes) = (pending.item.as_str(), &pending.notes);
         let Some(run) = self.runs.get(item_id).filter(|r| r.state == ItemState::NeedsHuman) else {
             tracing::info!("{}: dropped a continue for {item_id}: it isn't stopped here", self.id);
             return true;
@@ -168,9 +200,7 @@ impl ProjectLoop {
         let session = record.and_then(|r| r.impl_session_id.as_deref());
         if !at_limit && nothing_to_continue(branch, pr_url, session) {
             tracing::info!("{}: {item_id} has nothing to continue from; starting it over", self.id);
-            return self
-                .start_over(item_id, notes.as_deref(), (pool, starter), (room, shared))
-                .await;
+            return self.start_over(pending, (pool, starter), (room, shared)).await;
         }
         let checks_only = notes.is_none() && !at_limit;
         if !checks_only && *room == 0 {
@@ -196,7 +226,7 @@ impl ProjectLoop {
                 from: Some("needs_human".into()),
                 to: Some(state_name(to).into()),
                 lane: Some(lane),
-                note: Some("a person chose Continue".into()),
+                note: Some(format!("{} chose Continue", pending.by())),
                 ..Default::default()
             }),
         );
@@ -216,11 +246,11 @@ impl ProjectLoop {
     /// Carries out one Start over. False when it must wait for a lane or a session slot.
     async fn start_over(
         &mut self,
-        item_id: &str,
-        notes: Option<&str>,
+        pending: &PendingContinue,
         (pool, starter): (&mut LanePool, &dyn SessionStarter),
         (room, shared): (&mut u32, &mut Shared<'_>),
     ) -> bool {
+        let (item_id, notes) = (pending.item.as_str(), pending.notes.as_deref());
         if !self.runs.get(item_id).is_some_and(|r| r.state == ItemState::NeedsHuman) {
             tracing::info!("{}: dropped a start over for {item_id}: it isn't stopped here", self.id);
             return true;
@@ -265,7 +295,7 @@ impl ProjectLoop {
                 from: Some("needs_human".into()),
                 to: Some("implementing".into()),
                 lane: Some(lane),
-                note: Some("a person chose Start over".into()),
+                note: Some(format!("{} chose Start over", pending.by())),
                 ..Default::default()
             }),
         );

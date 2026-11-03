@@ -105,6 +105,7 @@ impl ClaudeStarter {
                         decision: r.decision,
                         reason: r.reason,
                         steps: r.person_steps,
+                        instructions: r.instructions,
                     },
                     None => TriageEnd::Failed {
                         note: decided.note.unwrap_or_default(),

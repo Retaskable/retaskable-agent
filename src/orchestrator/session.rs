@@ -796,6 +796,16 @@ async fn run(job: Job) -> Result<Ran> {
     }
 }
 
+/// `waitForSteps`' reason: the steps only a person can do, numbered (also what a triager's `person_steps` leaves).
+pub(crate) fn wait_for_steps_reason(steps: &[String]) -> String {
+    let steps: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{}. {s}", i + 1))
+        .collect();
+    format!("Only steps a person can do are left:\n{}", steps.join("\n"))
+}
+
 /// What the loop does with a session's answer (`implement` in `steps.ts`). `failed` is `needsHuman("Implementer
 /// gave up")`, `person_steps` is `waitForSteps` (a needs_human with the steps), `waits_on` records the dependency
 /// and gives the item back (no `depends` op here yet, so it goes to a person), and `nothing_left` marks the item
@@ -815,13 +825,7 @@ fn classify(r: &ImplementerResult) -> SessionResult {
         "failed" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
         "nothing_left" => SessionResult::NeedsHuman(format!("Nothing left to build, so mark it done: {}", r.summary)),
         "person_steps" if !r.person_steps.is_empty() => {
-            let steps: Vec<String> = r
-                .person_steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| format!("{}. {s}", i + 1))
-                .collect();
-            SessionResult::NeedsHuman(format!("Only steps a person can do are left:\n{}", steps.join("\n")))
+            SessionResult::NeedsHuman(wait_for_steps_reason(&r.person_steps))
         }
         "person_steps" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
         "waits_on" => {

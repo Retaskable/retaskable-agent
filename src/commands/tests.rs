@@ -587,3 +587,85 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     assert!(v.item_commands.take("one").is_empty());
     assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
 }
+
+fn ask_with(v: &AgentView, args: Value, dir: &Path) -> Value {
+    run(&cmd("ask", args), "one", &mut Seen::default(), v, &|_| {}, dir)
+}
+
+#[test]
+fn ask_queues_the_message_for_the_loop_and_acks() {
+    let v = claiming();
+    let answer = ask_with(
+        &v,
+        json!({ "askId": "k1", "text": " why is step 5 stuck? ", "replyTo": "k0", "about": "item-a" }),
+        &data_dir(),
+    );
+    assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
+    assert_eq!(
+        v.item_commands.take_asks("one"),
+        vec![crate::view::AskCommand {
+            project: "one".into(),
+            ask_id: "k1".into(),
+            text: "why is step 5 stuck?".into(),
+            reply_to: Some("k0".into()),
+            about: Some("item-a".into()),
+            images_block: String::new(),
+        }]
+    );
+}
+
+#[test]
+fn ask_saves_its_images_and_lists_their_paths_in_an_attached_images_block() {
+    let v = claiming();
+    let dir = tempfile::tempdir().unwrap();
+    ask_with(
+        &v,
+        json!({ "askId": "k1", "text": "look", "images": [picture(10)] }),
+        dir.path(),
+    );
+    let ask = v.item_commands.take_asks("one").remove(0);
+    let saved = std::fs::read_dir(dir.path().join("attachments")).unwrap().count();
+    assert_eq!(saved, 1);
+    assert!(ask.images_block.starts_with("Attached images"));
+    assert!(ask.images_block.contains("attachments"));
+    assert!(ask.images_block.contains(".png"));
+}
+
+#[test]
+fn ask_checks_its_arguments() {
+    let v = claiming();
+    let nack_of = |args: Value| {
+        ask_with(&v, args, &data_dir())["reason"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    assert_eq!(nack_of(json!({ "text": "hi" })), "ask needs its askId.");
+    assert_eq!(nack_of(json!({ "askId": "  ", "text": "hi" })), "ask needs its askId.");
+    assert_eq!(nack_of(json!({ "askId": "k" })), "ask needs the message's text.");
+    assert_eq!(
+        nack_of(json!({ "askId": "k", "text": " " })),
+        "ask needs the message's text."
+    );
+    assert_eq!(
+        nack_of(json!({ "askId": "k", "text": "hi", "replyTo": 3 })),
+        "ask's replyTo must be text."
+    );
+    assert_eq!(
+        nack_of(json!({ "askId": "k", "text": "hi", "images": "x" })),
+        "pictures must be a list."
+    );
+    assert!(
+        nack_of(json!({ "askId": "k", "text": "hi", "images": [json!({"type": "text/html", "data": "x"})] }))
+            .contains("isn't a PNG")
+    );
+    assert!(v.item_commands.take_asks("one").is_empty());
+}
+
+#[test]
+fn ask_is_refused_outside_claim_mode() {
+    let v = view();
+    let answer = ask_with(&v, json!({ "askId": "k", "text": "hi" }), &data_dir());
+    assert_eq!(answer["type"], "nack");
+    assert!(v.item_commands.take_asks("one").is_empty());
+}

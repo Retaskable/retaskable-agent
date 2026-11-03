@@ -307,7 +307,8 @@ impl ProjectLoop {
     /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
     async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
         if let SessionResult::Triage(end) = &outcome.result {
-            self.triage_ended(&outcome.item_id, outcome.lane, end.clone(), shared);
+            self.triage_ended(pool, &outcome.item_id, outcome.lane, end.clone(), shared)
+                .await;
             return;
         }
         let item = outcome.item_id;
