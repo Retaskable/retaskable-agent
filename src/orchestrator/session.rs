@@ -443,6 +443,53 @@ pub(super) struct GateRounds<'a> {
     /// The claim's fresh-start rules (06.2-implementer.md "Fresh-start rules on resume"); `None` for a run that
     /// only ever resumes.
     pub fresh: Option<FreshRules>,
+    /// Stage 1 of review (06.3-review.md): the lane's checks, run once the gates pass; `None` for the claim.
+    pub checks: Option<&'a ChecksStage<'a>>,
+}
+
+/// The checks a piece run puts its change through, and where their result is kept for the run's end.
+pub(super) struct ChecksStage<'a> {
+    pub checks: &'a [crate::config::CheckConfig],
+    pub backlog_path: &'a str,
+    pub on_tree: std::sync::Arc<dyn Fn(std::sync::Arc<crate::process_tree::ProcessTree>) + Send + Sync>,
+    pub result: &'a std::sync::Mutex<Option<crate::checks::StageOneResult>>,
+}
+
+impl ChecksStage<'_> {
+    /// Runs the checks in `cwd`; a blocking failure is `(names of the failing checks, the message to send back)`.
+    async fn run(&self, cwd: &Path, base: &str) -> Result<Option<(String, String)>> {
+        let (dir, base) = (cwd.to_path_buf(), base.to_string());
+        let (checks, backlog, on_tree) = (
+            self.checks.to_vec(),
+            self.backlog_path.to_string(),
+            self.on_tree.clone(),
+        );
+        let stage = tokio::task::spawn_blocking(move || {
+            crate::checks::run_registered(&dir, &base, &checks, &backlog, &*on_tree)
+        })
+        .await
+        .context("running the checks")?
+        .context("running the checks")?;
+        let failures: Vec<_> = stage.blocking_failures().into_iter().cloned().collect();
+        *self.result.lock().unwrap() = Some(stage);
+        if failures.is_empty() {
+            return Ok(None);
+        }
+        let names = failures.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ");
+        let mut message = String::from("Before Retaskable pushes your branch, its checks failed:");
+        for c in &failures {
+            let how = if c.timed_out {
+                "timed out".to_string()
+            } else {
+                format!("exit code {}", c.exit_code)
+            };
+            message += &format!(
+                "\n\n`{}` ({how}), the end of its output:\n```\n{}\n```",
+                c.command, c.output_tail
+            );
+        }
+        Ok(Some((names, message)))
+    }
 }
 
 /// When a session is replaced instead of resumed.
@@ -502,23 +549,31 @@ where
             .await
             .context("running the code gates")?;
         let found = match found {
-            Ok(Some(found)) => found,
-            Ok(None) => break,
+            Ok(found) => found.map(|f| ("code gates", f.note, f.message)),
             Err(e) => {
                 notes.push(format!("Code gates couldn't run, so the push goes ahead: {e:#}"));
-                break;
+                None
             }
         };
-        notes.push(found.note.clone());
+        let found = match (found, g.checks) {
+            (Some(f), _) => f,
+            (None, None) => break,
+            (None, Some(stage)) => match stage.run(g.cwd, g.base_branch).await? {
+                Some((names, message)) => ("checks", names, message),
+                None => break,
+            },
+        };
+        let (what, note, message) = found;
+        notes.push(note.clone());
         rounds += 1;
         if rounds > g.max_check_rounds {
             let why = format!(
-                "The code gates still found problems after {} rounds: {}",
-                g.max_check_rounds, found.note
+                "The {what} still found problems after {} rounds: {note}",
+                g.max_check_rounds
             );
             return Ok(Gated::GaveUp(a, notes, why));
         }
-        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
+        let follow_up = format!("{message}\n\nFix them, commit, and return the result again.");
         let grown = g
             .fresh
             .and_then(|f| a.context_tokens.filter(|t| *t > u64::from(f.max_resume_context_tokens)));
@@ -543,6 +598,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
             max_turns: job.max_turns,
             max_resume_context_tokens: job.max_resume_context_tokens,
         }),
+        checks: None,
     };
     // The session now answering, and whether it is a fresh one (so its id is reported).
     let state = std::sync::Mutex::new((job.session_id.clone(), false));

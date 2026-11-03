@@ -79,6 +79,19 @@ pub fn run(lane_dir: &Path, base_branch: &str, checks: &[CheckConfig], backlog_p
     )
 }
 
+/// [`run`] with each command's process tree handed to `on_tree`, so a run's `stop` can cut it.
+pub fn run_registered(
+    lane_dir: &Path,
+    base_branch: &str,
+    checks: &[CheckConfig],
+    backlog_path: &str,
+    on_tree: &(dyn Fn(std::sync::Arc<crate::process_tree::ProcessTree>) + Sync),
+) -> Result<StageOneResult> {
+    run_with(lane_dir, base_branch, checks, backlog_path, |command, cwd, timeout| {
+        proc::run_command_in_tree(command, cwd, timeout, on_tree)
+    })
+}
+
 /// [`run`] with the command runner injected, so tests don't need a real `npm` or the configured
 /// checks' real commands.
 fn run_with(

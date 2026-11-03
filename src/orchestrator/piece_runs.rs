@@ -12,7 +12,9 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
-use super::session::{Attempt, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout};
+use super::session::{
+    Attempt, ChecksStage, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout,
+};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
@@ -255,12 +257,23 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let ids = Mutex::new(String::new());
     let first = session(job, cwd, branch, start, &where_to_start, &ids).await?;
     // A gate round resumes the session of this same run (section 2: a fix round inside a run may resume).
+    // Stage 1 of review runs in the lane after the gates; its commands' trees go to the run like the session's.
+    let stage_one = Mutex::new(None);
+    let (processes, token) = (job.processes.clone(), job.token.clone());
+    let on_tree = std::sync::Arc::new(move |tree| processes.add(&token, tree));
+    let stage = ChecksStage {
+        checks: &job.project.checks,
+        backlog_path: &job.project.backlog_path,
+        on_tree,
+        result: &stage_one,
+    };
     let rounds = GateRounds {
         cwd,
         base_branch: base,
         code_gates: job.project.code_gates,
         max_check_rounds: job.project.max_check_rounds,
         fresh: None,
+        checks: Some(&stage),
     };
     let ids = &ids;
     let resume = |step: Step| {
@@ -304,7 +317,13 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         _ => None,
     };
     let decisions = crate::implementer::piece_decision_list(&job.piece);
-    Ok(end_from_answer(a.answer, pushed.as_ref(), &decisions))
+    let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions);
+    // Review (a later piece) reads the checks' evidence from the run's result.
+    if let (RunOutcome::PrOpened, Some(stage)) = (&outcome, stage_one.into_inner().unwrap()) {
+        result["checks_summary"] = json!(crate::checks::checks_summary(&stage.checks));
+        result["diff_stat"] = json!(stage.diff_stat);
+    }
+    Ok((outcome, result))
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {

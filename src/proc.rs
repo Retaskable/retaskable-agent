@@ -58,6 +58,17 @@ pub fn npm_install_command(dir: &Path) -> &'static str {
 /// dev server — not just the shell itself; `lanes::kill_processes_in` then sweeps `cwd` for
 /// anything that still left the tree.
 pub fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) -> Result<(i32, String, bool)> {
+    run_command_in_tree(command, cwd, timeout, |_| {})
+}
+
+/// [`run_command_with_timeout`] that hands the command's [`ProcessTree`] to `on_tree` as soon as it starts, so
+/// whoever owns the work (a run) can cut it.
+pub fn run_command_in_tree(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    on_tree: impl FnOnce(std::sync::Arc<ProcessTree>),
+) -> Result<(i32, String, bool)> {
     let mut command_builder = shell_command(command);
     command_builder
         .current_dir(cwd)
@@ -69,7 +80,9 @@ pub fn run_command_with_timeout(command: &str, cwd: &Path, timeout: Duration) ->
     let mut child = command_builder
         .spawn()
         .with_context(|| format!("starting `{command}`"))?;
-    let tree = ProcessTree::join_sync(&child).context("putting the command in its own process tree")?;
+    let tree =
+        std::sync::Arc::new(ProcessTree::join_sync(&child).context("putting the command in its own process tree")?);
+    on_tree(tree.clone());
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
     let buf = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
