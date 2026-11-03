@@ -291,14 +291,45 @@ async fn skip_drops_a_stopped_item_releases_its_lease_and_skips_it_in_the_store(
 }
 
 #[tokio::test]
-async fn skip_keeps_a_release_the_store_refuses_and_does_not_skip_yet() {
+async fn skip_stays_owed_while_the_release_is_refused_then_goes_through() {
     let fail = Arc::new(AtomicBool::new(true));
-    let (base, asked) = claim_stub_with(json!([]), None, fail).await;
+    let (base, asked) = claim_stub_with(json!([]), None, fail.clone()).await;
     let (mut rig, _fake) = stopped_at(2, Some("s1"), &base);
     skip_a(&rig, "a");
     rig.machine.poll().await;
     assert!(!ops(&asked).contains(&"skip".to_string()));
     assert!(rig.lp(0).unreleased.contains_key("a"));
+    assert!(rig.lp(0).unskipped.contains("a"));
+    fail.store(false, Ordering::SeqCst);
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    let sent = ops(&asked);
+    let (release, skip) = (
+        sent.iter().position(|o| o == "release"),
+        sent.iter().position(|o| o == "skip"),
+    );
+    assert!(release.is_some() && release < skip, "{sent:?}");
+    assert!(rig.lp(0).unreleased.is_empty() && rig.lp(0).unskipped.is_empty());
+}
+
+#[tokio::test]
+async fn skip_stays_owed_when_only_the_skip_is_refused_then_goes_through() {
+    let fail_skip = Arc::new(AtomicBool::new(true));
+    let (base, asked) = claim_stub_failing(json!([]), None, Default::default(), fail_skip.clone()).await;
+    let (mut rig, _fake) = stopped_at(2, Some("s1"), &base);
+    skip_a(&rig, "a");
+    rig.machine.poll().await;
+    assert!(rig.lp(0).unreleased.is_empty());
+    assert!(rig.lp(0).unskipped.contains("a"));
+    fail_skip.store(false, Ordering::SeqCst);
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    let sent = ops(&asked);
+    assert!(
+        sent.contains(&"skip".to_string()) && !sent.contains(&"release".to_string()),
+        "{sent:?}"
+    );
+    assert!(rig.lp(0).unskipped.is_empty());
 }
 
 #[tokio::test]

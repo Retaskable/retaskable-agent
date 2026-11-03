@@ -88,9 +88,8 @@ impl ProjectLoop {
     }
 
     /// Skips a stopped item: the run is dropped (`item_state`, `needs_human` to `skipped`), the lane freed and the
-    /// lease released with a note; once the store has taken the release it's told to skip the item too. A release
-    /// the store refuses stays owed and is sent again (`flush_owed`) with no skip: the item stays claimed there,
-    /// never lost. An item that isn't stopped here has its command dropped and logged.
+    /// lease released with a note, and the skip is kept owed (`unskipped`) until the store has taken the release and
+    /// the `skip`; `flush_owed` sends both again on later passes. An item that isn't stopped here has its command dropped and logged.
     pub(super) async fn skip_stopped(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
         if !self.runs.get(item_id).is_some_and(|r| r.state == ItemState::NeedsHuman) {
             tracing::info!("{}: dropped a skip for {item_id}: it isn't stopped here", self.id);
@@ -114,20 +113,9 @@ impl ProjectLoop {
         };
         self.unreleased
             .insert(item_id.to_string(), (lease, "A person chose Skip.".into()));
+        self.unskipped.insert(item_id.to_string());
         self.save_leases();
         self.flush_owed(shared.links).await;
-        let (Some(repo), false) = (self.repo, self.unreleased.contains_key(item_id)) else {
-            return;
-        };
-        let Ok(Some(token)) = shared.links.keychain.get(&shared.links.backlog_url) else {
-            return;
-        };
-        // Refused as a conflict, it's skipped (or finished) already.
-        if let Err(e) = self.client.skip(repo, Some(&token), item_id).await
-            && e.code() != Some("conflict")
-        {
-            self.store_error("skip", &e);
-        }
     }
 
     fn want(&self, item_id: &str) -> Want {

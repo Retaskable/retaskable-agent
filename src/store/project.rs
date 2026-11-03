@@ -157,6 +157,20 @@ impl Store {
             .insert("unreleased".to_string(), serde_json::json!(unreleased));
     }
 
+    /// Items a person skipped here whose `skip` the store hasn't taken yet (sent after their `release`, again
+    /// on later passes until it answers). Empty when missing.
+    pub fn unskipped(&self) -> std::collections::BTreeSet<String> {
+        self.data
+            .get("unskipped")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.unskipped`. Doesn't save on its own; call `save` after.
+    pub fn set_unskipped(&mut self, unskipped: &std::collections::BTreeSet<String>) {
+        self.data.insert("unskipped".to_string(), serde_json::json!(unskipped));
+    }
+
     /// Leases let go while their item waits, which the store hasn't taken yet: item id to
     /// (lease token, what it waits for, the item's state). Sent again on later passes.
     pub fn unparked(&self) -> std::collections::BTreeMap<String, (String, String, String)> {
