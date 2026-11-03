@@ -426,7 +426,7 @@ async fn a_worker_takes_a_lock_through_its_context_and_the_next_beat_sends_its_t
 /// A machine whose only lane is busy, a project with a repo whose base branch has CI, and a `watch` starter on a
 /// fake `gh` that the store hands one `watch` run.
 #[cfg(unix)]
-async fn watch_rig(dir: &std::path::Path) -> (Rig, Shared_, Arc<dyn RunStarter>) {
+async fn watch_rig(dir: &std::path::Path, poll: Duration) -> (Rig, Shared_, Arc<dyn RunStarter>) {
     use crate::orchestrator::watch_run::{WatchRuns, tests as w};
     let (mut rig, script) = setup(1).await;
     assert!(rig.machine.pool.claim_run("other", "x").is_some(), "the lane is busy");
@@ -436,7 +436,7 @@ async fn watch_rig(dir: &std::path::Path) -> (Rig, Shared_, Arc<dyn RunStarter>)
     take["piece"]["change"] = json!({ "number": 7 });
     script.lock().unwrap().takes = VecDeque::from([take]);
     script.lock().unwrap().beat = json!({});
-    let starter: Arc<dyn RunStarter> = WatchRuns::with(w::fake_gh(dir), Duration::from_millis(5), None);
+    let starter: Arc<dyn RunStarter> = WatchRuns::with(w::fake_gh(dir), poll, None);
     (rig, script, starter)
 }
 
@@ -446,7 +446,7 @@ async fn a_watch_run_is_asked_for_with_every_lane_busy_and_sends_its_outcome() {
     use crate::orchestrator::watch_run::tests as w;
     let dir = tempfile::tempdir().unwrap();
     w::set(dir.path(), "checks", "t\tpass\t1s\thttps://x/t\t\n");
-    let (mut rig, script, starter) = watch_rig(dir.path()).await;
+    let (mut rig, script, starter) = watch_rig(dir.path(), Duration::from_millis(5)).await;
     let t0 = Instant::now();
     for _ in 0..200 {
         pass(&mut rig, &*starter, t0).await;
@@ -471,7 +471,7 @@ async fn a_beat_stop_cuts_the_watch_runs_gh_and_ends_it_interrupted() {
     let dir = tempfile::tempdir().unwrap();
     w::set(dir.path(), "hang", "");
     w::set(dir.path(), "checks", "");
-    let (mut rig, script, starter) = watch_rig(dir.path()).await;
+    let (mut rig, script, starter) = watch_rig(dir.path(), Duration::from_millis(5)).await;
     let t0 = Instant::now();
     pass(&mut rig, &*starter, t0).await;
     for _ in 0..200 {
@@ -491,4 +491,32 @@ async fn a_beat_stop_cuts_the_watch_runs_gh_and_ends_it_interrupted() {
         (json!("w1"), json!("interrupted"))
     );
     assert!(rig.machine.projects[0].run_loop.runs().live().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_beat_stop_between_polls_ends_the_run_and_starts_no_more_gh() {
+    use crate::orchestrator::watch_run::tests as w;
+    let dir = tempfile::tempdir().unwrap();
+    w::set(dir.path(), "checks", "t\tpending\t0\thttps://x/t\t\n");
+    let (mut rig, script, starter) = watch_rig(dir.path(), Duration::from_secs(1)).await;
+    let t0 = Instant::now();
+    pass(&mut rig, &*starter, t0).await;
+    for _ in 0..200 {
+        if !w::calls(dir.path()).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // The poll's gh has finished and the task sleeps.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = w::calls(dir.path()).len();
+    script.lock().unwrap().beat = json!({ "w1": "stop" });
+    pass(&mut rig, &*starter, t0 + Duration::from_secs(61)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    pass(&mut rig, &*starter, t0 + Duration::from_secs(62)).await;
+    assert_eq!(w::calls(dir.path()).len(), before, "no gh after the stop");
+    let done = script.lock().unwrap().args("run_done");
+    assert_eq!(done.len(), 1, "{done:?}");
+    assert_eq!(done[0]["outcome"], json!("interrupted"));
 }

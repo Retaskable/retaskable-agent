@@ -242,6 +242,7 @@ fn gh_out(gh: &Path, dir: &Path, args: &[&str], reg: Reg) -> Result<(String, Str
     let tree = Arc::new(ProcessTree::join_sync(&child)?);
     reg(tree.clone());
     let out = child.wait_with_output()?;
+    tree.finished();
     drop(tree);
     Ok((
         String::from_utf8_lossy(&out.stdout).into_owned(),

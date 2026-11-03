@@ -1,7 +1,7 @@
 //! The `watch` run (docs/specs/pieces.md section 3.2): it takes no lane, reads the piece's change's checks every
 //! 15 seconds until they settle, and ends `green`, `red` or `failed`. The reading and deciding are `ci_watch`'s.
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -16,25 +16,20 @@ use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
 /// How often the checks are read.
 pub const POLL_EVERY: Duration = Duration::from_secs(15);
 
-/// The `gh` trees a run started, held weakly (the loop owns them) just to see whether a stop cut one.
+/// The run's latest `gh` tree, kept so a stop that lands between polls is still seen after the loop has let the
+/// run go. Earlier trees are the loop's alone, so it can drop them once they finish.
 #[derive(Clone, Default)]
-struct Trees(Arc<Mutex<Vec<Weak<ProcessTree>>>>);
+struct Trees(Arc<Mutex<Option<Arc<ProcessTree>>>>);
 
 impl Trees {
     fn add(&self, request: &RunRequest, tree: Arc<ProcessTree>) {
-        let mut trees = self.0.lock().unwrap();
-        trees.retain(|t| t.strong_count() > 0);
-        trees.push(Arc::downgrade(&tree));
+        // The previous one is let go before the loop hears of this one, so the loop's prune sees it as finished.
+        *self.0.lock().unwrap() = Some(tree.clone());
         request.processes.add(&request.token, tree);
     }
 
     fn stopped(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .any(|t| t.was_cut())
+        self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
     }
 }
 
