@@ -1,11 +1,17 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
 
 use axum::{Json, Router, routing::post};
 use serde_json::{Value, json};
 
+use super::super::playtest_round::test_support::{self, Keys};
 use super::*;
-use crate::config::{ProjectType, SandboxMode};
+use crate::backlog::Client;
+use crate::config::{EngineChoiceConfig, ProjectConfig, ProjectType, SandboxMode};
 use crate::engines::engine::test_result;
+use crate::env::Env;
+use crate::runs::RunLocks;
 
 type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
@@ -29,22 +35,7 @@ async fn store(ideas: Value, lock_owner: Option<&str>, list_fails: bool) -> (Str
                         return Json(json!({ "error": { "code": "E_X", "message": "down" } }));
                     }
                     "ideas_list" | "ideas_round" => json!({ "round": null, "ideas": ideas }),
-                    "chore_lock" => {
-                        let mut held = owner.lock().unwrap();
-                        if args["take"].as_bool().unwrap_or(false) {
-                            if held.is_none() {
-                                *held = Some("my-pc".to_string());
-                            }
-                        } else {
-                            *held = None;
-                        }
-                        json!({ "held": held.is_some(), "by": held.clone() })
-                    }
-                    "lock_take" => match owner.lock().unwrap().as_ref() {
-                        Some(by) => json!({ "held": false, "by": by }),
-                        None => json!({ "held": true, "token": "L1" }),
-                    },
-                    _ => Value::Null,
+                    _ => test_support::lock_answer(&op, &args, &owner).unwrap_or(Value::Null),
                 };
                 Json(json!({ "value": value }))
             }
@@ -56,19 +47,6 @@ async fn store(ideas: Value, lock_owner: Option<&str>, list_fails: bool) -> (Str
     (format!("http://{addr}"), ops)
 }
 
-struct Keys;
-impl TokenStore for Keys {
-    fn get(&self, _url: &str) -> Result<Option<String>> {
-        Ok(Some("tok".to_string()))
-    }
-    fn set(&self, _url: &str, _token: &str) -> Result<()> {
-        Ok(())
-    }
-    fn delete(&self, _url: &str) -> Result<()> {
-        Ok(())
-    }
-}
-
 fn job(base: &str) -> Job {
     let mut project = ProjectConfig {
         project_type: ProjectType::Web,
@@ -78,16 +56,18 @@ fn job(base: &str) -> Job {
     };
     project.budget.scout_usd = 0.7;
     Job {
-        id: "p".into(),
-        client: Arc::new(Client::new(base)),
-        repo: Some(1),
-        project,
-        env: Env::new(|_| None),
-        engine_choice: EngineChoiceConfig::default(),
-        machine: "my-pc".into(),
-        backlog_url: base.into(),
-        keychain: Arc::new(Keys),
-        locks: None,
+        base: PlaytestJob {
+            id: "p".into(),
+            client: Arc::new(Client::new(base)),
+            repo: Some(1),
+            project,
+            env: Env::new(|_| None),
+            engine_choice: EngineChoiceConfig::default(),
+            machine: "my-pc".into(),
+            backlog_url: base.into(),
+            keychain: Arc::new(Keys),
+            locks: None,
+        },
         planner_dir: None,
         live: vec!["Dark mode".into()],
         audiences: vec![],
@@ -154,7 +134,7 @@ async fn runs_mode_takes_and_drops_by_token_without_chore_lock() {
     let (base, seen) = store(json!([]), None, false).await;
     let locks = RunLocks::default();
     let mut j = job(&base);
-    j.locks = Some(locks.clone());
+    j.base.locks = Some(locks.clone());
     let out = run_with(j, asked(), |_| async { answer_ok() }).await;
     assert!(matches!(out, Outcome::Ok { .. }), "{out:?}");
     assert_eq!(ops(&seen), vec!["lock_take", "ideas_list", "ideas_round", "lock_drop"]);

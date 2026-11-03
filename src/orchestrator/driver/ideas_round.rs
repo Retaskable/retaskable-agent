@@ -4,44 +4,30 @@
 //! it yet: [`run`] is what a daily job or a person's ask will call.
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::backlog::Client;
+use super::playtest_round::Job as PlaytestJob;
 use crate::backlog::asks::Audience;
 use crate::backlog::runs::LockTake;
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::Engine;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, SessionResult, SessionSpec, engine_for, engine_of, run_session,
 };
-use crate::env::Env;
 use crate::ideas::{
     IDEAS_LOCK, IDEAS_MAX_WAITS_DEFAULT, Ideas, QUEUE, Writer, profiles_for, queue_from_store, round_context, run_round,
 };
-use crate::link::TokenStore;
 use crate::orchestrator::session::{exists, quiet_timeout};
-use crate::runs::RunLocks;
 
 const TEMPLATE: &str = include_str!("../../../prompts/ideas.md");
 
-/// What one round needs, gathered like [`super::playtest_round::Job`]; `live` and `audiences` are what the
-/// caller read for the prompt (`gather_live`, the store's audiences).
+/// What one round needs: the same facts as the try-out grouping round ([`super::playtest_round::Job`]),
+/// plus what the caller read for the prompt (`live` from `gather_live`, the store's audiences).
 pub(super) struct Job {
-    pub id: String,
-    pub client: Arc<Client>,
-    pub repo: Option<u64>,
-    pub project: ProjectConfig,
-    pub env: Env,
-    pub engine_choice: EngineChoiceConfig,
-    pub machine: String,
-    pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
-    /// The project's held locks in `runs` mode (the lock is `lock_take`n into it); `None` in `claim` mode.
-    pub locks: Option<RunLocks>,
+    pub base: PlaytestJob,
     /// The planner's directory; the session reads there when it exists, else in the repo.
     pub planner_dir: Option<PathBuf>,
     pub live: Vec<String>,
@@ -49,6 +35,13 @@ pub(super) struct Job {
     /// `ideasQueue` and `ideasMaxWaits` from the project's config, when it sets them.
     pub queue: Option<usize>,
     pub max_waits: Option<u32>,
+}
+
+impl std::ops::Deref for Job {
+    type Target = PlaytestJob;
+    fn deref(&self) -> &PlaytestJob {
+        &self.base
+    }
 }
 
 /// Why this round runs.
