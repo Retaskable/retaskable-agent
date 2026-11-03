@@ -463,7 +463,7 @@ impl Machine {
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
         if let Some(starter) = starter.as_deref() {
-            self.settle_outcomes(starter).await;
+            self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     lp.resume_sessions(

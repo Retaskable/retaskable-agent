@@ -529,22 +529,6 @@ fn carrying_on_past_the_slice_limit_raises_it_and_resumes_implementing() {
 }
 
 #[test]
-fn ran_out_of_turns_is_false_the_first_time_and_true_the_second() {
-    let mut run = ItemRun::new();
-    assert!(!run.ran_out_of_turns());
-    assert!(run.max_turns_hit);
-    assert!(run.ran_out_of_turns());
-}
-
-#[test]
-fn a_normal_finish_clears_a_pending_max_turns_hit() {
-    let mut run = ItemRun::new();
-    run.ran_out_of_turns();
-    run.implementer_finished(ImplementerOutcome::Finished, &cfg());
-    assert!(!run.max_turns_hit);
-}
-
-#[test]
 fn any_state_can_escalate_to_needs_human() {
     let mut run = ItemRun::new();
     run.state = ItemState::AwaitingPlaytest;

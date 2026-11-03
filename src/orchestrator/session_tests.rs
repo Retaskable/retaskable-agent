@@ -547,19 +547,6 @@ fn a_watchdog_kill_is_an_own_failure_not_a_needs_human() {
 }
 
 #[test]
-fn running_out_of_turns_maps_to_max_turns_carrying_the_cap_and_the_context_size() {
-    let out = Attempt {
-        answer: Err(anyhow::Error::new(MaxTurns("ended with error_max_turns".into()))),
-        usage: None,
-        context_tokens: Some(7),
-    };
-    assert_eq!(
-        settled(out, 300),
-        (SessionResult::MaxTurns(300), None, Some(7), vec![], None)
-    );
-}
-
-#[test]
 fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     let cut = Err(anyhow::Error::new(Interrupted("ended with interrupted".into())));
     assert_eq!(session_result_for_answer(cut, None).0, SessionResult::Interrupted);
@@ -743,6 +730,52 @@ fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
 }
 
 #[cfg(unix)]
+const OUT_OF_TURNS: &str =
+    r#"printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":false,"session_id":"s"}'; exit 0"#;
+
+/// The fake's first run leaves an uncommitted file, then runs out of turns.
+#[cfg(unix)]
+const SPEND_TURNS: &str = "echo wip > wip.txt";
+
+#[cfg(unix)]
+fn session_of(rig: &Rig, n: usize) -> String {
+    let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
+    args.lines().nth(n).unwrap().to_string()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_attempt_that_runs_out_of_turns_is_followed_by_a_fresh_session_in_the_same_lane() {
+    let first = format!("{SPEND_TURNS}; {OUT_OF_TURNS}");
+    let rig = gated_rig(&[&first, "test -f wip.txt && echo present > \"$R/wip_seen\""]);
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    assert_eq!(runs_of(&rig), 2);
+    let args = session_of(&rig, 1);
+    assert!(args.contains("--session-id"), "{args}");
+    assert!(!args.contains("--resume"), "{args}");
+    let new_id = got.session_id.expect("the new session id comes back");
+    assert!(args.contains(&new_id), "{args}");
+    assert_ne!(new_id, "sess-1");
+    let prompt = std::fs::read_to_string(rig.root.join("prompt2.txt")).unwrap();
+    assert!(prompt.starts_with("You're picking up"), "{prompt}");
+    assert!(
+        prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
+        "{prompt}"
+    );
+    assert!(
+        rig.root.join("wip_seen").exists(),
+        "the uncommitted file is still there"
+    );
+    assert!(
+        got.notes
+            .contains(&"An earlier session ran out of turns; starting a fresh one".to_string()),
+        "{:?}",
+        got.notes
+    );
+}
+
+#[cfg(unix)]
 const BIG_SESSION: &str = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":%N%,"cache_creation_input_tokens":0}}}
 {"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"session_id":"s"}"#;
 
@@ -768,6 +801,36 @@ async fn a_send_back_to_a_grown_session_starts_a_fresh_one_with_the_findings() {
             .any(|n| n == "Its session had grown to 201000 tokens; starting a fresh one"),
         "{:?}",
         got.notes
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn two_attempts_in_a_row_that_run_out_of_turns_need_a_person() {
+    let rig = gated_rig(&[OUT_OF_TURNS, OUT_OF_TURNS]);
+    let got = gated_outcome(&rig).await;
+    assert_eq!(
+        got.result,
+        SessionResult::NeedsHuman("Implementer ran out of turns (50) twice in a row".into())
+    );
+    assert_eq!(runs_of(&rig), 2);
+    assert!(got.session_id.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_send_back_that_runs_out_of_turns_also_restarts_fresh() {
+    let rig = gated_rig(&[COMMIT_BIG, OUT_OF_TURNS, FIX]);
+    let got = gated_outcome(&rig).await;
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    assert_eq!(runs_of(&rig), 3);
+    assert!(session_of(&rig, 1).contains("--resume sess-1"));
+    let fresh = session_of(&rig, 2);
+    assert!(fresh.contains("--session-id"), "{fresh}");
+    let prompt = std::fs::read_to_string(rig.root.join("prompt3.txt")).unwrap();
+    assert!(
+        prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
+        "{prompt}"
     );
 }
 

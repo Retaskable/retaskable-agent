@@ -16,6 +16,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
+use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
@@ -25,13 +26,12 @@ use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
-use crate::implementer::new_session_id;
 use crate::implementer::{
-    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, run_implementer, session_spec,
+    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
+    run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
-use crate::orchestrator::fresh_start::{FreshStart, picking_up_prompt};
 use crate::telemetry::now_ms;
 use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
@@ -388,17 +388,19 @@ struct Attempt {
 
 /// What `run` returns: the result, the stream's usage reading, the session's last context size and the lines
 /// for the item's timeline (the code gates' notes).
+/// and the id of the fresh session the job carried on in, if it did.
 type Ran = (SessionResult, Option<Value>, Option<u64>, Vec<String>, Option<String>);
 
-fn settled(a: Attempt, max_turns: u32) -> Ran {
+fn ran_out_of_turns(a: &Attempt) -> bool {
+    matches!(&a.answer, Err(e) if e.downcast_ref::<MaxTurns>().is_some())
+}
+
+fn settled(a: Attempt) -> Ran {
     let Attempt {
         answer,
         usage,
         context_tokens,
     } = a;
-    if matches!(&answer, Err(e) if e.downcast_ref::<MaxTurns>().is_some()) {
-        return (SessionResult::MaxTurns(max_turns), usage, context_tokens, vec![], None);
-    }
     let (result, usage) = session_result_for_answer(answer, usage);
     (result, usage, context_tokens, vec![], None)
 }
@@ -442,7 +444,31 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
     let mut rounds = 0;
     let mut current = job.session_id.clone();
     let mut started_fresh = false;
+    let mut restarted = false;
     loop {
+        // Out of turns (06.2-implementer.md "Fresh-start rules on resume"): once per job, a fresh session
+        // carries on in the same lane, uncommitted work kept (no `lanes::prepare`), and its answer goes through
+        // the gates like any other. A second time in a row needs a person.
+        if ran_out_of_turns(&a) {
+            if restarted {
+                let why = format!("Implementer ran out of turns ({}) twice in a row", job.max_turns);
+                return Ok((
+                    SessionResult::NeedsHuman(why),
+                    a.usage,
+                    a.context_tokens,
+                    notes,
+                    Some(current),
+                ));
+            }
+            restarted = true;
+            started_fresh = true;
+            current = new_session_id();
+            notes.push(FreshStart::OutOfTurns.history_line());
+            let prompt = picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP);
+            let start = Start::Continuing { follow_up: &prompt };
+            a = attempt(job, cwd, start, &current, true, format!("{current}.jsonl"), "").await?;
+            continue;
+        }
         if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
             break;
         }
@@ -511,7 +537,7 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
         Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
         _ => None,
     };
-    let mut ran = settled(a, job.max_turns);
+    let mut ran = settled(a);
     if let Some((title, body, summary)) = titles {
         // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
         // failure here means a session ran and its work is committed, so a person is needed, not the queue.
