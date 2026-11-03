@@ -15,7 +15,8 @@ use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 
 use super::model::{ImplementerResult, implementer_result_schema};
-use super::prompt::{Prompt, build_prompt};
+use super::prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt};
+use crate::backlog::runs::{RunKind, RunPiece};
 
 /// What an implementer session runs with, besides how it starts ([`Start`]).
 pub struct Session<'a> {
@@ -51,6 +52,13 @@ pub enum Start<'a> {
     /// A brand new session: Retaskable names its id itself ([`new_session_id`]) so a later
     /// follow-up can resume it.
     Fresh,
+    /// A brand new session on a piece, with the piece as its brief (pieces.md section 3.2): `template` is
+    /// `prompts/implementer-piece.md`, `kind` is `Build` or `Fix`, and the session's `branch` is the piece's.
+    Piece {
+        template: &'a str,
+        kind: RunKind,
+        piece: &'a RunPiece,
+    },
     /// A fresh session that picks up where one just ran out of turns left off (06.2-implementer.md
     /// "at most maxTurns turns"): a new id ([`new_session_id`]), never `--resume` (a maxed-out
     /// session has nothing left to resume into), and `follow_up` as the whole prompt — never the
@@ -104,6 +112,23 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
                     where_to_start: s.where_to_start,
                     notes: s.notes,
                     items: s.items,
+                },
+            )?;
+            (SessionStart::Fresh(new_session_id()), prompt)
+        }
+        Start::Piece { template, kind, piece } => {
+            let prompt = build_piece_prompt(
+                template,
+                &PiecePrompt {
+                    kind,
+                    piece,
+                    project_type: s.project_type,
+                    branch: s.branch,
+                    base_branch: s.base_branch,
+                    github_repo: s.github_repo,
+                    checks: s.checks,
+                    code_gates: s.code_gates,
+                    where_to_start: s.where_to_start,
                 },
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
@@ -463,5 +488,25 @@ mod tests {
             SessionStart::Fresh(id) => assert_eq!(id.len(), 36),
             other => panic!("expected a fresh session, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_piece_start_builds_the_piece_prompt() {
+        let it = item(&[], None);
+        let piece: RunPiece =
+            serde_json::from_value(serde_json::json!({"title": "Do it", "what": "w", "doneWhen": "d"})).unwrap();
+        let template =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/prompts/implementer-piece.md")).unwrap();
+        let spec = session_spec(
+            &session(&it, &[], Path::new("repo")),
+            Start::Piece {
+                template: &template,
+                kind: RunKind::Build,
+                piece: &piece,
+            },
+        )
+        .unwrap();
+        assert!(spec.prompt.contains("**Do it**") && !spec.prompt.contains("{{"));
+        assert!(matches!(spec.start, SessionStart::Fresh(_)));
     }
 }

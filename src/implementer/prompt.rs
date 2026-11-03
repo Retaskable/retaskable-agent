@@ -5,8 +5,10 @@
 //! so `{{pr}}`/`{{change}}` are hardcoded to GitHub's words rather than built from a config.
 use anyhow::Result;
 
+use crate::backlog::runs::{RunKind, RunPiece};
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{CheckConfig, CodeGates, ProjectType};
+use crate::decisions::{Decision, decisions_text};
 use crate::prompt::{project_words, render_prompt};
 
 /// `checksText` (agent/src/steps.ts): the prompt's bulleted list of a project's checks, one per
@@ -203,6 +205,141 @@ pub fn build_prompt(template: &str, p: &Prompt<'_>) -> Result<String> {
     Ok(out)
 }
 
+/// A piece's attempts as the store keeps them, one line each: `- the <kind> <outcome>: <why>`.
+fn attempts_text(attempts: &[serde_json::Value]) -> String {
+    let word = |a: &serde_json::Value, k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let lines: Vec<String> = attempts
+        .iter()
+        .map(|a| format!("- the {} {}: {}", word(a, "kind"), word(a, "outcome"), word(a, "why")))
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## Earlier attempts\n\nThese runs on this piece did not finish it. Don't repeat what they got wrong:\n\n{}",
+        lines.join("\n")
+    )
+}
+
+/// The person's answers on a piece (`decisions`: `{question, answer}` as the store sends them in the piece's other
+/// fields), as the "Already decided by a person" section.
+fn piece_decisions(piece: &RunPiece) -> String {
+    let text = |d: &serde_json::Value, k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let decisions: Vec<Decision> = piece
+        .other
+        .get("decisions")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .map(|d| Decision {
+            question: text(d, "question"),
+            answer: text(d, "answer"),
+            at: String::new(),
+        })
+        .collect();
+    decisions_text(&decisions).trim_start().to_string()
+}
+
+/// "Already done: <steps>" for the person steps a person has finished (`doneSteps` in the piece's other fields).
+fn done_steps_text(piece: &RunPiece) -> String {
+    let steps: Vec<&str> = piece
+        .other
+        .get("doneSteps")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str())
+        .collect();
+    if steps.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Already done: {}. A person has done these; don't ask for them again.",
+        steps.join("; ")
+    )
+}
+
+/// What a piece's `build` or `fix` session is built from: the piece is the brief.
+pub struct PiecePrompt<'a> {
+    pub kind: RunKind,
+    pub piece: &'a RunPiece,
+    pub project_type: ProjectType,
+    pub branch: &'a str,
+    pub base_branch: &'a str,
+    pub github_repo: &'a str,
+    pub checks: &'a [CheckConfig],
+    pub code_gates: CodeGates,
+    /// [`super::start_files::render`]'s output; empty for none.
+    pub where_to_start: &'a str,
+}
+
+/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what a look told the
+/// runs (for a `build`) or what to fix (for a `fix`).
+pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
+    let words = project_words(p.project_type);
+    let piece = p.piece;
+    let next_what = piece
+        .other
+        .get("next")
+        .and_then(|n| n.get("what"))
+        .and_then(|w| w.as_str())
+        .map(str::trim)
+        .filter(|w| !w.is_empty());
+    let fixing = p.kind == RunKind::Fix;
+    let kind_line = if fixing {
+        "`fix`. The work is on the piece's pushed branch below, with its change already open: check it out, don't start again from the base."
+    } else {
+        "`build`. A fresh branch from the base."
+    };
+    let brief = match (next_what, fixing) {
+        (Some(w), true) => format!("## What to fix\n\n{w}"),
+        (None, true) => {
+            "## What to fix\n\nThe change needs fixing; read its failing checks and conflicts on the pushed branch."
+                .to_string()
+        }
+        (Some(w), false) => format!("## Instructions\n\n{w}"),
+        (None, false) => String::new(),
+    };
+    let mut sections = vec![
+        brief,
+        attempts_text(&piece.attempts),
+        piece_decisions(piece),
+        done_steps_text(piece),
+    ];
+    sections.retain(|s| !s.is_empty());
+    let briefs = if sections.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", sections.join("\n\n"))
+    };
+    let filled = render_prompt(
+        template,
+        &[
+            ("pr", "PR".to_string()),
+            ("change", "pull request".to_string()),
+            ("title", piece.title.clone()),
+            ("what", piece.what.clone()),
+            ("doneWhen", piece.done_when.clone()),
+            ("kindLine", kind_line.to_string()),
+            ("briefSection", briefs),
+            ("branch", p.branch.to_string()),
+            ("baseBranch", p.base_branch.to_string()),
+            ("githubRepo", p.github_repo.to_string()),
+            ("checks", checks_text(p.checks)),
+            ("codeLimits", gate_rule(&p.code_gates)),
+            ("projectNoun", words.noun.to_string()),
+            ("projectUser", words.user.to_string()),
+            ("projectExamples", words.examples.to_string()),
+            ("projectSteps", words.steps.to_string()),
+        ],
+    )?;
+    Ok(if p.where_to_start.is_empty() {
+        filled
+    } else {
+        format!("{filled}\n\n{}", p.where_to_start)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +474,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prompt, "(nothing listed) / (none)");
+    }
+
+    fn piece(extra: serde_json::Value) -> RunPiece {
+        let mut v = serde_json::json!({
+            "title": "Build the prompt",
+            "what": "Fill the template from a piece.",
+            "doneWhen": "A spec can be built.",
+            "attempts": [{"kind": "build", "outcome": "failed", "why": "too big"}],
+        });
+        v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn piece_prompt(kind: RunKind, p: &RunPiece) -> String {
+        let template = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("prompts")
+                .join("implementer-piece.md"),
+        )
+        .unwrap();
+        build_piece_prompt(
+            &template,
+            &PiecePrompt {
+                kind,
+                piece: p,
+                project_type: ProjectType::Cli,
+                branch: "retaskable/p-build-the-prompt",
+                base_branch: "main",
+                github_repo: "x/y",
+                checks: &checks(),
+                code_gates: CodeGates::default(),
+                where_to_start: "## Where to start\n\n- a",
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_build_prompt_carries_the_piece_and_what_a_person_and_a_look_added() {
+        let p = piece(serde_json::json!({
+            "next": {"kind": "build", "what": "Use the small template."},
+            "decisions": [{"question": "Which?", "answer": "This one."}],
+            "doneSteps": ["Add the secret", "Create the account"],
+        }));
+        let out = piece_prompt(RunKind::Build, &p);
+        assert!(!out.contains("{{"), "{out}");
+        for want in [
+            "Build the prompt",
+            "Fill the template from a piece.",
+            "Done when: A spec can be built.",
+            "- the build failed: too big",
+            "## Already decided by a person",
+            "A: This one.",
+            "Already done: Add the secret; Create the account",
+            "Use the small template.",
+            "Build this piece whole, and nothing else",
+            "return `failed` and say in `summary` how it should be split",
+            "retaskable/p-build-the-prompt",
+        ] {
+            assert!(out.contains(want), "missing {want:?}:\n{out}");
+        }
+        assert!(!out.contains("pushed branch"));
+        assert!(out.ends_with("- a"));
+    }
+
+    #[test]
+    fn a_fix_prompt_says_what_to_fix_on_the_pushed_branch() {
+        let p = piece(serde_json::json!({"next": {"kind": "fix", "what": "CI failed: clippy."}}));
+        let out = piece_prompt(RunKind::Fix, &p);
+        assert!(!out.contains("{{"));
+        assert!(out.contains("## What to fix\n\nCI failed: clippy."));
+        assert!(out.contains("pushed branch"));
+        let bare = piece_prompt(RunKind::Fix, &piece(serde_json::json!({"attempts": []})));
+        assert!(bare.contains("## What to fix") && !bare.contains("{{"));
     }
 }
