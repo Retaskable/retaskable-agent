@@ -73,10 +73,11 @@ pub async fn auto_link(
 }
 
 /// backlog/06.1-an-item.md: an item's status in the store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
     Held,
+    #[default]
     Todo,
     Claimed,
     Building,
@@ -93,7 +94,7 @@ pub enum ItemStatus {
 /// fields this agent needs to say what work there is and in what order. Other fields the store sends
 /// (`claimedBy`, `history`, `lease`, ...) are read by later pieces, not dropped by this one — `Item`
 /// just doesn't model them yet, and serde leaves unknown fields alone.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub id: String,
@@ -655,4 +656,4 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

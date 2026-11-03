@@ -5,7 +5,10 @@
 //! and it is refused while Shoot holds it. `stop` kills its process tree.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -17,8 +20,7 @@ use crate::view::ProjectView;
 /// How long `stop` waits for the process to close.
 pub const STOP_LIMIT: Duration = Duration::from_secs(15);
 
-static RUNNING: LazyLock<Mutex<HashMap<String, std::sync::Arc<ProcessTree>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static RUNNING: LazyLock<Mutex<HashMap<String, Arc<ProcessTree>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Whether Play main is running for `project`.
 pub fn running(project: &str) -> bool {
@@ -37,32 +39,72 @@ pub fn start(project: &str, p: &ProjectView) -> Result<(), String> {
     let hold = crate::base_hold::hold_base(project, "Play main")?;
     let dir = lanes::prepare_base_checkout(&p.repo_path, &p.worktrees_dir, &p.base_branch)
         .map_err(|e| format!("Couldn't prepare the base checkout: {e:#}"))?;
-    let mut command = shell(&p.play_command);
-    command
-        .current_dir(&dir)
-        .env("RETASKABLE_LANE", "play")
+    let (tree, done) = spawn(&dir, &p.play_command, "play")?;
+    lock(&RUNNING).insert(project.to_string(), tree);
+    let project = project.to_string();
+    std::thread::spawn(move || {
+        let _hold = hold;
+        while !done.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        lock(&RUNNING).remove(&project);
+    });
+    Ok(())
+}
+
+/// A game running in an item's lane (`play { lane: k }`): the orchestrator `Machine` keeps it and lets the lane go
+/// once [`LaneGame::finished`] or [`LaneGame::stop`].
+pub struct LaneGame {
+    tree: Arc<ProcessTree>,
+    done: Arc<AtomicBool>,
+}
+
+impl LaneGame {
+    /// Whether the process has ended.
+    pub fn finished(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+
+    /// Kills the process tree, on its own thread so the loop isn't held up; [`LaneGame::finished`] turns true
+    /// once it's gone.
+    pub fn stop(&self) {
+        let tree = self.tree.clone();
+        std::thread::spawn(move || {
+            tree.kill_and_wait(STOP_LIMIT);
+        });
+    }
+}
+
+/// Runs `command` visibly in `dir` with `RETASKABLE_LANE=<lane>`, unsandboxed.
+pub fn start_in_lane(dir: &Path, command: &str, lane: u32) -> Result<LaneGame, String> {
+    let (tree, done) = spawn(dir, command, &lane.to_string())?;
+    Ok(LaneGame { tree, done })
+}
+
+/// Starts `command` in `dir`; the flag is set when it ends.
+fn spawn(dir: &Path, command: &str, lane: &str) -> Result<(Arc<ProcessTree>, Arc<AtomicBool>), String> {
+    let mut cmd = shell(command);
+    cmd.current_dir(dir)
+        .env("RETASKABLE_LANE", lane)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    ProcessTree::prepare_sync(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Couldn't start `{}`: {e}", p.play_command))?;
+    ProcessTree::prepare_sync(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("Couldn't start `{command}`: {e}"))?;
     let tree = match ProcessTree::join_sync(&child) {
-        Ok(tree) => std::sync::Arc::new(tree),
+        Ok(tree) => Arc::new(tree),
         Err(e) => {
             let _ = child.kill();
             return Err(format!("Couldn't track the play process: {e:#}"));
         }
     };
-    lock(&RUNNING).insert(project.to_string(), tree);
-    let project = project.to_string();
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = done.clone();
     std::thread::spawn(move || {
-        let _hold = hold;
         let _ = child.wait();
-        lock(&RUNNING).remove(&project);
+        flag.store(true, Ordering::SeqCst);
     });
-    Ok(())
+    Ok((tree, done))
 }
 
 /// Stops Play main: kills its process tree and waits up to [`STOP_LIMIT`] for it to close.

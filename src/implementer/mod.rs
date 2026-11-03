@@ -27,6 +27,7 @@ pub mod code_gates;
 pub mod model;
 pub mod prompt;
 pub mod publish;
+pub mod run_end;
 pub mod session;
 pub mod start_files;
 #[cfg(test)]
@@ -34,7 +35,7 @@ mod test_support;
 
 pub use code_gates::GateResult;
 pub use model::{ImplementerResult, Playtest, Question, implementer_result_schema};
-pub use prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt, checks_text, gate_rule};
+pub use prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt, checks_text, gate_rule, piece_decision_list};
 pub use session::{
     Interrupted, MaxTurns, Session, SilenceKilled, Start, new_session_id, run_implementer, session_spec,
 };

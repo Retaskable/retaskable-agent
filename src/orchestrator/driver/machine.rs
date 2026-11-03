@@ -463,7 +463,7 @@ impl Machine {
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
         if let Some(starter) = starter.as_deref() {
-            self.settle_outcomes(starter).await;
+            self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     lp.resume_sessions(
@@ -478,6 +478,7 @@ impl Machine {
                     )
                     .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
                     if !paused {
                         let room = self.concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(

@@ -39,6 +39,7 @@ impl ProjectLoop {
             let (name, item, notes, start_over) = match command {
                 ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
                 ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
+                ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
             };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self

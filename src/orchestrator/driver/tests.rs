@@ -456,6 +456,22 @@ struct Fake {
     hold: AtomicBool,
     /// The next step panics.
     step_panics: AtomicBool,
+    /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
+    games: Mutex<Vec<Game>>,
+}
+
+/// The directory, the command, the lane, and whether it has closed.
+type Game = (std::path::PathBuf, String, u32, Arc<AtomicBool>);
+
+struct FakeGame(Arc<AtomicBool>);
+
+impl LanePlay for FakeGame {
+    fn finished(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+    fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Fake {
@@ -507,6 +523,15 @@ impl SessionStarter for Fake {
 
     fn active(&self) -> u32 {
         self.active.load(Ordering::SeqCst)
+    }
+
+    fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
+        let closed = Arc::new(AtomicBool::new(false));
+        self.games
+            .lock()
+            .unwrap()
+            .push((dir.to_path_buf(), command.into(), lane, closed.clone()));
+        Ok(Box::new(FakeGame(closed)))
     }
 
     fn abandon(&self, old: Abandon) -> BoxFuture<'static, Result<(), String>> {
@@ -944,6 +969,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
 mod approve;
 mod commands;
 mod drafts;
+mod lane_play;
 mod playtests;
 mod reporting;
 mod restart;

@@ -55,6 +55,8 @@ pub trait DraftHost: Send + Sync {
     /// Rebases the draft's pushed branch onto the base branch in its worktree and force-pushes with lease. False
     /// when it conflicts.
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool>;
+    /// Force-pushes with lease the branch the drafter rebased in the draft's worktree.
+    fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
 }
@@ -81,10 +83,15 @@ fn follow_up(d: &ClaimedDraft) -> String {
     } else if let Some(n) = d.notes.as_deref().filter(|n| !n.trim().is_empty()) {
         format!("The person sent the draft back with these notes:\n{n}")
     } else if let Some(r) = &d.rebase_reason {
-        format!("Rebase the branch onto the base branch and resolve the conflicts, keeping both sides: {r}")
+        rebase_request(r)
     } else {
         INTERRUPTED.to_string()
     }
+}
+
+/// The follow-up that hands a conflicted branch back to the drafter.
+pub(super) fn rebase_request(reason: &str) -> String {
+    format!("Rebase the branch onto the base branch and resolve the conflicts, keeping both sides: {reason}")
 }
 
 impl ProjectLoop {
