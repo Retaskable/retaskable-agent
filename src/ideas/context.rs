@@ -2,15 +2,14 @@
 //! `agent/src/ideas.ts` `context()` and `write()`'s `profiles`).
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::process::Command;
 
 use super::profiles::{Profile, starter_profiles};
 use super::store::{IdeaState, StoreIdeas};
 use crate::backlog::{Item, ItemStatus, asks::Audience};
-use crate::text::clip;
+use crate::release_notes::run_gh_pr_list;
 
 /// How many of the most recently live titles the prompt names.
 pub const LIVE_MAX: usize = 12;
@@ -55,23 +54,23 @@ pub async fn gather_live(
     base_branch: &str,
     items: &[Item],
 ) -> Result<Vec<String>> {
-    let output = Command::new(gh_bin)
-        .args(["pr", "list", "--repo", repo, "--state", "merged", "--base", base_branch])
-        .args(["--limit", "200", "--json", "url,mergedAt"])
-        .current_dir(cwd)
-        .output()
-        .await
-        .context("running gh pr list")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!("gh pr list failed: {}", clip(&stderr, 300));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let prs: Vec<MergedAt> = if stdout.trim().is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(&stdout).context("parsing gh pr list output")?
-    };
+    let args: Vec<String> = [
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "merged",
+        "--base",
+        base_branch,
+        "--limit",
+        "200",
+        "--json",
+        "url,mergedAt",
+    ]
+    .map(String::from)
+    .into();
+    let prs: Vec<MergedAt> = run_gh_pr_list(gh_bin, cwd, &args).await?;
     let mut done: Vec<(Option<&str>, &str)> = items
         .iter()
         .filter(|i| matches!(i.status, ItemStatus::OnMain | ItemStatus::InProduction))
