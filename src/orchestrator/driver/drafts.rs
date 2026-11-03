@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::project::{ProjectLoop, signed_out};
+use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
@@ -190,6 +191,15 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// Retaskable's own message about the draft, in the conversation that asked for it (a new one when no ask).
+    async fn post(&self, draft: &ClaimedDraft, text: &str) -> Result<(), BacklogError> {
+        let reply_to = draft.ask_id.as_deref();
+        let posted = self
+            .client
+            .ask_post(self.repo, Some(&self.token), text, &draft.id, reply_to);
+        posted.await.map(|_| ())
+    }
+
     async fn report(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
         self.client
             .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
@@ -309,7 +319,8 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                     ..Default::default()
                 },
             )
-            .await
+            .await?;
+            ctx.post(&draft, follow_up::DRAFT_QUESTIONS).await
         }
         (None, DrafterStatus::Failed) => ctx.failed(&id, failed(result.summary.clone())).await,
         (None, _) => {
@@ -439,5 +450,5 @@ async fn open_pr(
             draft: id.to_string(),
         });
     }
-    Ok(())
+    ctx.post(draft, follow_up::DRAFT_READY).await
 }

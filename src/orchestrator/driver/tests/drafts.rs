@@ -80,6 +80,7 @@ async fn store(draft: Value) -> (String, Asked) {
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
                         "requestedBy": "ada" } }),
+                    "ask_report" => json!({ "ask": { "id": "m1" } }),
                     "draft_claim_next" if !handed.swap(true, Ordering::SeqCst) => {
                         json!({ "draft": draft, "token": "lease-d" })
                     }
@@ -366,4 +367,64 @@ async fn a_failed_plan_tries_again_once_and_then_waits_for_a_person() {
     let sent = reports(&mut rig, &asked, 2).await;
     assert_eq!(sent[1]["status"], "needs_person");
     assert_eq!(sent[1]["detail"], "failed");
+}
+
+fn posts(asked: &Asked) -> Vec<Value> {
+    let seen = asked.lock().unwrap();
+    let posted = seen
+        .iter()
+        .filter(|(op, a)| op == "ask_report" && a["from"] == "retaskable");
+    posted.map(|(_, a)| a.clone()).collect()
+}
+
+async fn until_posted(rig: &mut Rig, asked: &Asked) {
+    for _ in 0..200 {
+        rig.machine.pass().await;
+        if !posts(asked).is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing was posted");
+}
+
+#[tokio::test]
+async fn a_ready_draft_from_an_ask_posts_into_that_conversation_once() {
+    let draft = json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"], "askId": "a1" });
+    let (mut rig, _host, asked) = rig_with(draft, vec![pr_opened(None)]).await;
+    until_posted(&mut rig, &asked).await;
+    for _ in 0..5 {
+        rig.machine.pass().await;
+    }
+    let sent = posts(&asked);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["draftId"], "d1");
+    assert_eq!(sent[0]["replyTo"], "a1");
+    assert!(
+        sent[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Do you want to approve it?")
+    );
+}
+
+#[tokio::test]
+async fn a_draft_with_questions_posts_the_questions_message() {
+    let answer = json!({"status": "needs_clarification", "summary": "Too vague",
+        "questions": [{"header": "Who", "question": "Who sees the charts?", "options": []}]});
+    let draft = json!({ "id": "d1", "titles": ["Charts"], "askId": "a1" });
+    let (mut rig, _host, asked) = rig_with(draft, vec![answer]).await;
+    until_posted(&mut rig, &asked).await;
+    let sent = posts(&asked);
+    assert_eq!(sent[0]["text"], crate::ask::follow_up::DRAFT_QUESTIONS);
+    assert_eq!(sent[0]["replyTo"], "a1");
+}
+
+#[tokio::test]
+async fn an_add_spec_draft_posts_into_a_new_conversation() {
+    let (mut rig, _host, asked) = rig_with(claimed(), vec![pr_opened(None)]).await;
+    until_posted(&mut rig, &asked).await;
+    let sent = posts(&asked);
+    assert_eq!(sent[0]["draftId"], "d1");
+    assert!(sent[0].get("replyTo").is_none());
 }
