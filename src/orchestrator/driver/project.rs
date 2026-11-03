@@ -631,6 +631,7 @@ impl ProjectLoop {
                 .unwrap_or_default(),
         };
         let attempt = self.attempt_of(item_id);
+        // The triage facts of the stop carry over; only the run's own fields are rewritten.
         let record = RunRecord {
             state: state_name(run.state).into(),
             lane,
@@ -640,6 +641,7 @@ impl ProjectLoop {
             slice: run.slice,
             impl_context_tokens: context_tokens,
             attempt,
+            ..self.records.get(item_id).cloned().unwrap_or_default()
         };
         self.records.insert(item_id.to_string(), record);
     }

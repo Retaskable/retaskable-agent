@@ -2,9 +2,8 @@
 //! it (docs/specs/agent/06.9-triage-claude-looks-at-needs-you-first.md bullets 16 and 20;
 //! `agent/src/triage.ts`'s `triageCount`, `triageAlreadyDone`, `wantsLook`/`wantsTriage`,
 //! `claudeOnIt` and `nothingToContinue`). Pure: these read the few facts about an item's stop a
-//! caller already has, named after the shared backlog's own fields for the day something
-//! assembles them from a real item record — there is no such record in this port yet (`mod.rs`'s
-//! own module doc), so nothing here gathers them.
+//! caller already has, named after the shared backlog's own fields. [`super::record`] assembles
+//! them from a run's saved record; nothing here gathers them.
 
 use std::sync::LazyLock;
 
@@ -43,8 +42,8 @@ pub fn triage_already_done(needs_human_reason: Option<&str>) -> bool {
 }
 
 /// The facts about a stopped item `wants_triage` and `claude_on_it` read, named after the shared
-/// backlog's own fields (`triaged`, `pendingTriage`, `running`, `triages`) for whenever something
-/// assembles these from a real item record. Not that record: this port has none yet.
+/// backlog's own fields (`triaged`, `pendingTriage`, `running`, `triages`); [`super::record::needs_human_facts`]
+/// builds them from a run's saved record.
 #[derive(Debug, Clone, Copy)]
 pub struct NeedsHumanFacts<'a> {
     pub is_needs_human: bool,

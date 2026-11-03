@@ -280,6 +280,18 @@ impl ProjectLoop {
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
+        if to == ItemState::NeedsHuman && from != to {
+            // A session's own reason is its note; a step's is fixed by the state it escalated from.
+            let reason = if from == ItemState::Implementing {
+                note.to_string()
+            } else {
+                super::triage_facts::step_stop_reason(from).to_string()
+            };
+            let slice = self.runs.get(item).map_or(0, |r| r.slice);
+            if let Some(record) = self.records.get_mut(item) {
+                record.new_stop(state_name(from), &reason, slice);
+            }
+        }
         self.refresh_record(pool, item);
     }
 
@@ -366,7 +378,12 @@ impl ProjectLoop {
             }
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
-                let note = format!("the session on lane {} ended", outcome.lane);
+                let note = if run.state == ItemState::NeedsHuman {
+                    "The session kept asking what a person had already answered, or the item reached its slice limit."
+                        .to_string()
+                } else {
+                    format!("the session on lane {} ended", outcome.lane)
+                };
                 self.moved(pool, &item, ItemState::Implementing, &note, shared.links)
                     .await;
             }

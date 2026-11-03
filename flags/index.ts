@@ -21,3 +21,6 @@ export const specDrafts = (): boolean => flags.on("spec-drafts");
 
 /** The `ask-claude` flag: answering a person's chat question about the project. Off until there is an answer. */
 export const askClaude = (): boolean => flags.on("ask-claude");
+
+/** The `triage-session` flag: a session looks at stuck work and suggests what to do next. Off until there is an answer. */
+export const triageSession = (): boolean => flags.on("triage-session");

@@ -24,7 +24,7 @@ const LEGACY_KEYS: [&str; 2] = ["items", "drafts"];
 
 /// One leased item's run, as the TS agent's item record keeps it (`state`, `lane`, `implSessionId`,
 /// `branch`, `slice`): enough to take the item back after a restart.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
     /// `implementing`, `checking`, `needs_human` or `queued` (`item_lifecycle::ItemState`, snake case).
@@ -53,6 +53,42 @@ pub struct RunRecord {
     /// it is above 0. Counts the item's current slice only.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempt: u32,
+    /// Why the item is at `needs_human` now (the current stop only: a new stop replaces it, and with it the
+    /// finding a triager left), for the triage session (06.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_human_reason: Option<String>,
+    /// The state the item failed in, as `item_lifecycle::ItemState` snake case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_in: Option<String>,
+    /// Claude already looked at this stop (06.9 bullet 16): a restart never looks again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub triaged: bool,
+    /// Automatic decisions made as `(slice, n)`; counted across start-overs, and a mark from an earlier slice
+    /// doesn't count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triages: Option<(u32, u32)>,
+    /// Looks at this stop that failed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub failed_looks: u32,
+    /// When a failed look may be tried again (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_look_at: Option<String>,
+    /// Signatures of Retaskable bugs this item's triage already reported (`reported_bug`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reported_bugs: Vec<String>,
+}
+
+impl RunRecord {
+    /// The run reached a new `needs_human` stop from `from` for `reason`: the stop's facts replace the old
+    /// ones, and the look marks start clean. `triages` is kept for the same slice and reset for a new one.
+    pub fn new_stop(&mut self, from: &str, reason: &str, slice: u32) {
+        self.needs_human_reason = Some(reason.to_string());
+        self.failed_in = Some(from.to_string());
+        self.triaged = false;
+        self.failed_looks = 0;
+        self.next_look_at = None;
+        self.triages = self.triages.filter(|(s, _)| *s == slice);
+    }
 }
 
 fn is_zero(n: &u32) -> bool {
