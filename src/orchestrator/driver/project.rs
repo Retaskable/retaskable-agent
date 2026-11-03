@@ -258,6 +258,11 @@ pub struct ProjectLoop {
     pub(super) to_resume: Vec<String>,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
+    /// Each item's own failures in a row (`state.ownFailures`): a session that wouldn't start, or a hand-back.
+    pub(super) own_failures: BTreeMap<String, u32>,
+    /// Items whose session was started as a `Launch::Fresh` and hasn't ended yet; one that couldn't start is
+    /// started fresh again rather than resumed by an id that never ran.
+    pub(super) fresh_launched: std::collections::BTreeSet<String>,
     /// The item the store handed out for each lease held, by id, for the session that starts on it.
     pub(super) items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`super::Machine::add`].
@@ -348,6 +353,8 @@ impl ProjectLoop {
             records: store.runs(),
             to_resume: Vec::new(),
             silenced: BTreeMap::new(),
+            own_failures: store.own_failures(),
+            fresh_launched: Default::default(),
             items: BTreeMap::new(),
             outcomes: super::OutcomeSender(mpsc::unbounded_channel().0),
             store,
@@ -705,6 +712,7 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        let kind_fresh = matches!(kind, Launch::Fresh);
         let mut notes = None;
         let mut on_engine = None;
         let (resume, follow_up) = match kind {
@@ -720,6 +728,11 @@ impl ProjectLoop {
                 (None, None)
             }
         };
+        if kind_fresh {
+            self.fresh_launched.insert(item_id.to_string());
+        } else {
+            self.fresh_launched.remove(item_id);
+        }
         let session_id = resume.clone().unwrap_or_else(new_session_id);
         // A resumed session stays on its engine; a new one starts on the lane's.
         let engine = match &resume {

@@ -249,6 +249,20 @@ impl Store {
         self.data.insert("runs".to_string(), serde_json::json!(runs));
     }
 
+    /// `state.ownFailures`: each item's own failures in a row (a session that wouldn't start, or a hand-back),
+    /// kept past the item's lease since a hand-back drops its run record.
+    pub fn own_failures(&self) -> std::collections::BTreeMap<String, u32> {
+        self.data
+            .get("ownFailures")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.ownFailures`. Doesn't save on its own; call `save` after.
+    pub fn set_own_failures(&mut self, failures: &std::collections::BTreeMap<String, u32>) {
+        self.data.insert("ownFailures".to_string(), serde_json::json!(failures));
+    }
+
     /// `state.trialPlan`; not started when missing or unreadable.
     pub fn trial(&self) -> TrialRecord {
         self.data

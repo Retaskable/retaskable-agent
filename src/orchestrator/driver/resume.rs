@@ -52,6 +52,15 @@ impl ProjectLoop {
                 ..
             }) = record
             {
+                if self.fresh_launched.contains(&id) {
+                    // Its session never started, so there is nothing to resume: start it again.
+                    tracing::info!(
+                        "{}: starting {id} again on lane {lane}, its session wouldn't start",
+                        self.id
+                    );
+                    self.launch(pool, &id, lane, Launch::Fresh, starter, shared).await;
+                    continue;
+                }
                 let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
                 let takeover = self.takeover(pool, shared, impl_session_engine);
                 let kind = match impl_context_tokens {
