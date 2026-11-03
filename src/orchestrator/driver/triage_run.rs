@@ -19,7 +19,7 @@ use crate::orchestrator::fresh_start::LIMIT_PAUSE;
 use crate::telemetry::{Event, event};
 use crate::triage::record::needs_human_facts;
 use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, triage_count, wants_triage};
-use crate::triage::{TriageContext, TriageDecision};
+use crate::triage::{RetaskableBug, TriageContext, TriageDecision};
 
 /// Failed looks at one stop before the item waits for a person with a note.
 const MAX_FAILED_LOOKS: u32 = 3;
@@ -59,6 +59,8 @@ pub enum TriageEnd {
         steps: Vec<String>,
         /// The next message (`continue`) or notes (`start_over`); empty when there are none.
         instructions: String,
+        /// The Retaskable bug the triager named, if any (06.9 bullet 18).
+        bug: Option<RetaskableBug>,
     },
     Failed {
         note: String,
@@ -114,6 +116,7 @@ impl ProjectLoop {
     ) {
         // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
         self.triage_flag = self.flags.on("triage-session").await;
+        self.bugs_answered();
         if !self.triage_flag
             || self.project.triage != OnOff::On
             || shared.stopping
@@ -149,9 +152,12 @@ impl ProjectLoop {
             if *room == 0 {
                 break;
             }
-            let Some(context) = self.triage_context(&id, std::path::Path::new("")) else {
+            let Some(mut context) = self.triage_context(&id, std::path::Path::new("")) else {
                 continue;
             };
+            if let Some(hub) = shared.links.bugs.get(&self.id) {
+                context.known_bugs = hub.known();
+            }
             let lane = pool.lane_of(&self.id, &id);
             self.triaging.insert(id.clone());
             self.look_note(&id, "Claude is looking into it".into());
@@ -209,7 +215,9 @@ impl ProjectLoop {
                 reason,
                 steps,
                 instructions,
+                bug,
             } => {
+                self.report_bug(item_id, bug.as_ref(), shared);
                 self.decided(item_id, decision, &reason, &steps, &instructions, pool, shared)
                     .await;
             }

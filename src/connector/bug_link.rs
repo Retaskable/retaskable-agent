@@ -3,7 +3,9 @@
 //! sending `bug_report` and waiting for the `bug_reported` with the same `ref`. Kept per connection: the hub says
 //! again after each hello, and everything here is off again once the connection closes.
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -200,6 +202,34 @@ impl BugLink {
                 BugOutcome::NotSent(format!("no answer in {} s", self.timeout.as_secs()))
             }
         }
+    }
+}
+
+/// What the orchestrator needs of a project's bug-report link: the hub's consent and known bugs, and sending. A trait so the
+/// driver's tests can stand in a fake link.
+pub trait BugHub: Send + Sync {
+    fn consent(&self) -> bool;
+    fn known(&self) -> Vec<KnownBug>;
+    fn send<'a>(
+        &'a self,
+        bug: &'a BugReportMessage,
+        version: &'a str,
+    ) -> Pin<Box<dyn Future<Output = BugOutcome> + Send + 'a>>;
+}
+
+impl BugHub for BugLink {
+    fn consent(&self) -> bool {
+        BugLink::consent(self)
+    }
+    fn known(&self) -> Vec<KnownBug> {
+        BugLink::known(self)
+    }
+    fn send<'a>(
+        &'a self,
+        bug: &'a BugReportMessage,
+        version: &'a str,
+    ) -> Pin<Box<dyn Future<Output = BugOutcome> + Send + 'a>> {
+        Box::pin(BugLink::send(self, bug, version))
     }
 }
 

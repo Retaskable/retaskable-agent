@@ -82,6 +82,8 @@ pub struct Links {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
+    /// Each project's bug-report link, and the build's version it reports (06.9 bullet 19).
+    pub bugs: super::triage_bug::BugHubs,
 }
 
 /// `links` and the computer-wide gates ([`Machine::claim_paused_until`], [`Machine::claude_signed_out_until`]),
@@ -675,6 +677,8 @@ pub struct SpawnArgs<'a> {
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
     pub max_resume_context_tokens: u32,
+    /// Each project's bug-report link (`triage_bug.rs`).
+    pub bugs: super::triage_bug::BugHubs,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -701,6 +705,7 @@ pub fn spawn_all(args: SpawnArgs) {
             tags: args.tags,
             env: args.env,
             engine_choice: args.engine_choice,
+            bugs: args.bugs,
         },
     );
     if args.live.snapshot().mode == OrchestratorMode::Runs {

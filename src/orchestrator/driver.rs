@@ -29,6 +29,7 @@ mod project;
 mod report;
 mod runs;
 mod settle;
+mod triage_bug;
 mod triage_facts;
 mod triage_run;
 
@@ -40,6 +41,7 @@ pub use project::{
 };
 pub use runs::{BEAT_EVERY, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
+pub use triage_bug::BugHubs;
 pub use triage_run::{LookFailure, TriageEnd, TriageRequest};
 
 #[cfg(test)]

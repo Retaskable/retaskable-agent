@@ -139,6 +139,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         tags: Vec::new(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
+        bugs: Default::default(),
     };
     let mut machine = Machine::new(lanes, 8, links);
     for (i, base) in bases.iter().enumerate() {

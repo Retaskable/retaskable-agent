@@ -2,10 +2,9 @@
 //! is the ground truth): when the triager names a bug in Retaskable itself rather than the
 //! project, this is what scrubs the project, its people and its computer out of it, and decides
 //! whether it's worth sending, before it ever leaves this one. [`decide_bug_report`] covers
-//! `reportBug` up to the message it would send; actually sending it over the cloud link (reading
-//! the hub's own `bug_reports { on, known }` and answering with `reportedBug`, writing the
-//! signature it sent so a later failure isn't retried) is the orchestrator's, once something runs
-//! the triager at all (see the module doc on [`crate::triage`]).
+//! `reportBug` up to the message it would send; the orchestrator sends it over the cloud link
+//! (`orchestrator::driver::triage_bug`), after writing its signature to the item's `reported_bugs` so a
+//! later failure isn't retried.
 use crate::env::Env;
 use std::path::Path;
 use std::sync::LazyLock;

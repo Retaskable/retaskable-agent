@@ -344,6 +344,19 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        // The agent's own cloud (the first) is the one a project's bugs are reported to.
+        bugs: orchestrator::driver::BugHubs {
+            hubs: cfg
+                .projects
+                .iter()
+                .filter_map(|p| {
+                    let id = p.id_or_derived();
+                    let hub: Arc<dyn connector::bug_link::BugHub> = connectors.first()?.bug_link(&id)?;
+                    Some((id, hub))
+                })
+                .collect(),
+            version: connector::bug_link::bug_version(build, version, Path::new(".")),
+        },
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,

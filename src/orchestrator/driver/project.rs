@@ -2,10 +2,8 @@
 //! starting work for that project alone. The lanes and the sessions across every project are the
 //! [`super::Machine`]'s.
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::sync::{Arc, atomic::AtomicBool};
+use std::{path::Path, time::Instant};
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -317,6 +315,7 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
+    pub(super) bug_answers: super::triage_bug::BugAnswers,
 }
 
 impl ProjectLoop {
@@ -367,6 +366,7 @@ impl ProjectLoop {
             triaging: Default::default(),
             claude_pending: Default::default(),
             triage_flag: false,
+            bug_answers: Default::default(),
         }
     }
 

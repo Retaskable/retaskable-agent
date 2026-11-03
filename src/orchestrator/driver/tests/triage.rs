@@ -48,6 +48,7 @@ fn found(reason: &str) -> TriageEnd {
         reason: reason.into(),
         steps: vec![],
         instructions: String::new(),
+        bug: None,
     }
 }
 
@@ -248,6 +249,7 @@ fn decision(decision: TriageDecision, instructions: &str) -> TriageEnd {
         reason: "because".into(),
         steps: vec![],
         instructions: instructions.into(),
+        bug: None,
     }
 }
 
@@ -410,6 +412,7 @@ fn steps_end() -> TriageEnd {
         reason: "only you can".into(),
         steps: vec!["Add the key".into(), "Press Done".into()],
         instructions: String::new(),
+        bug: None,
     }
 }
 
@@ -435,5 +438,144 @@ async fn person_steps_with_a_pr_are_human_with_the_steps_under_the_reason() {
     assert!(
         reason.starts_with("first problem") && reason.ends_with("1. Add the key\n2. Press Done"),
         "{reason}"
+    );
+}
+
+// Reporting the triager's Retaskable bug (06.9 bullet 19).
+
+use crate::connector::bug_link::{BugHub, BugOutcome, BugReported};
+use crate::triage::bug_report::BugReportMessage;
+use crate::triage::{KnownBug, RetaskableBug};
+
+/// A fake link: consent and known bugs as set, every bug sent kept, and each answered as `answer`.
+struct FakeHub {
+    on: bool,
+    answer: BugOutcome,
+    sent: Mutex<Vec<(BugReportMessage, String)>>,
+}
+
+impl BugHub for FakeHub {
+    fn consent(&self) -> bool {
+        self.on
+    }
+    fn known(&self) -> Vec<KnownBug> {
+        vec![KnownBug {
+            id: "retaskable-bug-1".into(),
+            title: "Known".into(),
+        }]
+    }
+    fn send<'a>(
+        &'a self,
+        bug: &'a BugReportMessage,
+        version: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = BugOutcome> + Send + 'a>> {
+        self.sent.lock().unwrap().push((bug.clone(), version.to_string()));
+        Box::pin(async { self.answer.clone() })
+    }
+}
+
+fn hub(on: bool, duplicate: bool) -> Arc<FakeHub> {
+    Arc::new(FakeHub {
+        on,
+        answer: BugOutcome::Answered(BugReported {
+            ok: true,
+            duplicate,
+            reason: None,
+            item_id: None,
+        }),
+        sent: Mutex::default(),
+    })
+}
+
+fn with_bug(mut end: TriageEnd) -> TriageEnd {
+    if let TriageEnd::Found { bug, .. } = &mut end {
+        *bug = Some(RetaskableBug {
+            title: "A prompt variable isn't filled".into(),
+            details: "It stayed {{name}} in a2 at /home/x.".into(),
+            same_as: Some("retaskable-bug-1".into()),
+        });
+    }
+    end
+}
+
+async fn reported(hub: &Arc<FakeHub>, ends: Vec<TriageEnd>) -> (Rig, Arc<Fake>) {
+    let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
+    rig.machine.links.bugs.hubs.insert("p0".into(), hub.clone());
+    rig.machine.links.bugs.version = "1.2.3 (abc)".into();
+    *fake.triage.ends.lock().unwrap() = ends;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+        rig.machine.pass().await;
+    }
+    (rig, fake)
+}
+
+#[tokio::test]
+async fn a_bug_with_consent_on_is_sent_once_and_its_line_added_even_across_a_second_look() {
+    let hub = hub(true, false);
+    let (mut rig, fake) = reported(&hub, vec![with_bug(found("one")), with_bug(found("two"))]).await;
+    {
+        let sent = hub.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1, "1.2.3 (abc)");
+        assert_eq!(sent[0].0.same_as.as_deref(), Some("retaskable-bug-1"));
+    }
+    assert_eq!(rig.lp(0).records["a"].reported_bugs.len(), 1);
+    let lines = timeline(&mut rig);
+    assert_eq!(
+        lines.iter().filter(|l| *l == "Reported to Retaskable as a fix").count(),
+        1
+    );
+    // The state file holds the signature, so a restarted agent has it too.
+    let saved = Store::load(&rig._dir.path().join("0")).unwrap();
+    assert_eq!(saved.runs()["a"].reported_bugs, rig.lp(0).records["a"].reported_bugs);
+    // A later stop for the same reason names the same bug: the record already holds it.
+    let slice = rig.lp(0).records["a"].slice;
+    rig.lp(0)
+        .records
+        .get_mut("a")
+        .unwrap()
+        .new_stop("reviewing", "first problem", slice);
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+        rig.machine.pass().await;
+    }
+    assert_eq!(looks(&fake), 2);
+    assert_eq!(hub.sent.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn consent_off_sends_nothing_adds_no_line_and_the_decision_is_carried_out_the_same() {
+    let hub = hub(false, false);
+    let (mut rig, _fake) = reported(&hub, vec![with_bug(found("it needs a design call"))]).await;
+    assert!(hub.sent.lock().unwrap().is_empty());
+    assert!(rig.lp(0).records["a"].reported_bugs.is_empty());
+    let lines = timeline(&mut rig);
+    assert!(lines.iter().all(|l| !l.contains("Retaskable")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("it needs a design call")), "{lines:?}");
+}
+
+#[tokio::test]
+async fn a_duplicate_answer_adds_the_duplicate_line() {
+    let hub = hub(true, true);
+    let (mut rig, _fake) = reported(&hub, vec![with_bug(found("one"))]).await;
+    let lines = timeline(&mut rig);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "Retaskable already has this bug on its board"),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_decision_with_a_bug_is_carried_out_like_one_without() {
+    let hub = hub(true, false);
+    let (mut rig, _fake) = reported(&hub, vec![with_bug(decision(TriageDecision::Skip, ""))]).await;
+    assert_eq!(hub.sent.lock().unwrap().len(), 1);
+    assert!(
+        timeline(&mut rig)
+            .iter()
+            .any(|l| l.starts_with("Claude decided to skip"))
     );
 }
