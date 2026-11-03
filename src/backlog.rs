@@ -291,6 +291,15 @@ pub struct LockAnswer {
     pub by: Option<String>,
 }
 
+/// The store's answer to `jobs_due` (`JobsDue`, shared/choreSchedule.ts): the project's day and which of
+/// the jobs asked about are due.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct JobsDue {
+    pub day: String,
+    #[serde(default)]
+    pub due: Vec<String>,
+}
+
 /// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
 /// stop and wait for the store (agent/02-principles.md).
 #[derive(Debug)]
@@ -607,6 +616,13 @@ impl Client {
             "lock answer",
         )
         .await
+    }
+
+    /// `jobs_due` (daily-lighthouse.md section 2): of the daily `jobs` named, which the store says are due
+    /// now, and the project's day. The store decides the day, the hour and whether a result is in.
+    pub async fn jobs_due(&self, repo_id: u64, token: Option<&str>, jobs: &[&str]) -> Result<JobsDue, BacklogError> {
+        self.op(repo_id, token, "jobs_due", json!({ "jobs": jobs }), "jobs due answer")
+            .await
     }
 
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,

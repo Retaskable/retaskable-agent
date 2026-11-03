@@ -26,6 +26,7 @@ pub mod git_bin;
 pub mod ideas;
 pub mod implementer;
 pub mod item_lifecycle;
+pub mod jobs_due;
 pub mod lane_pool;
 pub mod lanes;
 pub mod link;
