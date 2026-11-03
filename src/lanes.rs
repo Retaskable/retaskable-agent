@@ -462,12 +462,19 @@ fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
 fn strip_line_comments(manifest: &str) -> String {
     let mut out = String::with_capacity(manifest.len());
     for line in manifest.split('\n') {
-        let mut in_string = false;
+        // `None` outside a string, else the quote that opened it; a basic (`"`) string honours
+        // `\"`, a literal (`'`) string has no escapes.
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
         let mut end = line.len();
         for (idx, ch) in line.char_indices() {
-            match ch {
-                '"' => in_string = !in_string,
-                '#' if !in_string => {
+            match (quote, ch) {
+                (Some('"'), _) if escaped => escaped = false,
+                (Some('"'), '\\') => escaped = true,
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(ch),
+                (None, '#') => {
                     end = idx;
                     break;
                 }
@@ -836,6 +843,14 @@ mod tests {
     fn outside_paths_ignores_a_commented_out_dependency() {
         let cargo = "[dependencies]\n# void_engine = { path = \"../void-engine\" }\nserde = \"1\" # path = \"../x\"\n";
         assert_eq!(outside_paths(cargo), Vec::<String>::new());
+    }
+
+    #[test]
+    fn outside_paths_comment_stripping_follows_escaped_and_literal_strings() {
+        let escaped = "a = \"x\\\"y\" # path = \"../x\"\n";
+        assert_eq!(outside_paths(escaped), Vec::<String>::new());
+        let literal = "a = 'it\"s' # path = \"../y\"\n";
+        assert_eq!(outside_paths(literal), Vec::<String>::new());
     }
 
     #[test]
