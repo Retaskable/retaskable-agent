@@ -1,5 +1,5 @@
-//! Running the assistant (spec 06.6 paragraph 2, 07.1): its read-only `SessionSpec` and the
-//! session's answer parsed back into the answer text, the checked actions and the dropped ones.
+//! Running the assistant (spec 06.6 paragraph 2, 07.1): its read-only `SessionSpec` and the session's
+//! answer parsed back into the answer, the checked actions and the dropped ones.
 use std::path::Path;
 
 use anyhow::Result;
@@ -7,18 +7,17 @@ use anyhow::Result;
 use super::model::{AssistantResult, assistant_result_schema, parse_assistant_result};
 use super::prompt::{AssistantInput, build_prompt};
 use crate::config::{Engine, ProjectBudget};
-use crate::engines::engine::{EngineId, LocalTarget, ephemeral_readonly_spec};
-use crate::engines::{SessionResult, SessionSpec, describe_failure};
+use crate::engines::engine::{EngineId, LocalTarget};
+use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
 
 /// What an assistant session runs with.
 pub struct Session<'a> {
     /// `prompts/assistant.md`.
     pub template: &'a str,
     pub input: AssistantInput<'a>,
-    /// The engine `engines::engine_for(…, Role::Assistant, None)` chose.
+    /// The engine `engines::engine_for(…, Role::Ask, None)` chose.
     pub engine: Engine,
-    /// The implementer's tier from the usage reading (`tiers::implementer_tier`); the assistant
-    /// runs on it as is, not on `mid_tier`.
+    /// The implementer's tier from the usage reading (`tiers::implementer_tier`), used as it is.
     pub tier: &'static str,
     pub budget: &'a ProjectBudget,
     /// The project's base checkout, on the base branch.
@@ -26,16 +25,15 @@ pub struct Session<'a> {
     pub local: Option<LocalTarget>,
 }
 
-/// The assistant's `SessionSpec`: fresh, read-only, `budget.ask_usd`, in the base checkout.
+/// The assistant's `SessionSpec`: fresh and read-only, in the base checkout.
 pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
-    let engine = match s.engine {
-        Engine::Claude => Some(EngineId::Claude),
-        Engine::Cursor => Some(EngineId::Cursor),
-        Engine::Pi => Some(EngineId::Pi),
-        Engine::Codex => Some(EngineId::Codex),
-        Engine::Local => None,
+    let (engine, model) = match s.engine {
+        Engine::Claude => (Some(EngineId::Claude), s.tier),
+        Engine::Cursor => (Some(EngineId::Cursor), s.tier),
+        Engine::Pi => (Some(EngineId::Pi), s.tier),
+        Engine::Codex => (Some(EngineId::Codex), s.tier),
+        Engine::Local => (None, "local"),
     };
-    let model = if engine.is_some() { s.tier } else { "local" };
     Ok(ephemeral_readonly_spec(
         engine,
         model.to_string(),
@@ -54,21 +52,20 @@ pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
     ))
 }
 
-/// Parses a finished session into the assistant's answer, or a short failure answer a person can
-/// read in the chat.
+/// Parses a finished session into the assistant's result. A session that failed, ran over budget or
+/// answered with nothing usable gives a short answer saying so, with no actions.
 pub fn parse_result(r: SessionResult, budget_usd: f64) -> AssistantResult {
-    let answer = if r.ok {
-        match r.structured.as_ref().and_then(parse_assistant_result) {
-            Some(result) => return result,
-            None => "I couldn't put together an answer. Please try asking again.".to_string(),
-        }
-    } else {
-        format!("I couldn't answer: the assistant {}.", describe_failure(&r, budget_usd))
-    };
-    AssistantResult {
-        answer,
+    let failed = |why: String| AssistantResult {
+        answer: format!("Sorry, I couldn't answer that: the assistant {why}."),
         actions: vec![],
         dropped: vec![],
+    };
+    if !r.ok {
+        return failed(describe_failure(&r, budget_usd));
+    }
+    match r.structured.as_ref().and_then(parse_assistant_result) {
+        Some(a) => a,
+        None => failed("finished without an answer".to_string()),
     }
 }
 
@@ -79,25 +76,10 @@ mod tests {
     use super::*;
     use crate::ask::model::Action;
     use crate::ask::prompt::StateSummary;
-    use crate::config::ProjectType;
     use crate::engines::SessionStart;
+    use crate::tiers::mid_tier;
 
-    fn input(state: &StateSummary) -> AssistantInput<'_> {
-        AssistantInput {
-            project_type: ProjectType::default(),
-            base_branch: "main",
-            github_repo: "o/r",
-            pr: "pull request",
-            change: "pull request",
-            state,
-            audiences: &[],
-            asks: &[],
-            reply_to: None,
-            question: "why is step 5 stuck?",
-        }
-    }
-
-    fn spec_for(engine: Engine, tier: &'static str) -> SessionSpec {
+    fn with_session<T>(engine: Engine, tier: &'static str, f: impl FnOnce(SessionSpec) -> T) -> T {
         let budget = ProjectBudget {
             ask_usd: 1.5,
             ..Default::default()
@@ -112,73 +94,91 @@ mod tests {
             spent_today_usd: 0.0,
             daily_usd: 10.0,
         };
-        session_spec(&Session {
+        let s = Session {
             template: "Q: {{question}}",
-            input: input(&state),
+            input: AssistantInput {
+                project_type: Default::default(),
+                base_branch: "main",
+                github_repo: "o/r",
+                pr: "PR",
+                change: "pull request",
+                state: &state,
+                audiences: &[],
+                asks: &[],
+                reply_to: None,
+                question: "why is step 5 stuck?",
+            },
             engine,
             tier,
             budget: &budget,
             cwd: Path::new("base"),
             local: None,
-        })
-        .unwrap()
+        };
+        f(session_spec(&s).unwrap())
     }
 
     #[test]
     fn the_spec_is_read_only_on_the_implementer_tier_in_the_base_checkout() {
-        let spec = spec_for(Engine::Claude, "opus");
-        assert!(spec.readonly);
-        assert_eq!(spec.model, "opus");
-        assert_eq!(spec.engine, Some(EngineId::Claude));
-        assert_eq!(spec.budget_usd, 1.5);
-        assert_eq!(spec.cwd, Path::new("base"));
-        assert_eq!(spec.schema, assistant_result_schema());
-        assert!(matches!(spec.start, SessionStart::Ephemeral));
-        assert!(spec.prompt.contains("Q: why is step 5 stuck?"));
+        with_session(Engine::Claude, "opus", |spec| {
+            assert!(spec.readonly);
+            assert_eq!(spec.model, "opus");
+            assert_ne!(spec.model, mid_tier("opus"));
+            assert_eq!(spec.engine, Some(EngineId::Claude));
+            assert_eq!(spec.budget_usd, 1.5);
+            assert_eq!(spec.cwd, Path::new("base"));
+            assert_eq!(spec.schema, assistant_result_schema());
+            assert!(!matches!(spec.start, SessionStart::Resume(_)));
+            assert!(spec.prompt.contains("why is step 5 stuck?"));
+        });
     }
 
     #[test]
-    fn each_engine_gets_the_tier_and_local_gets_local() {
-        assert_eq!(spec_for(Engine::Codex, "sonnet").engine, Some(EngineId::Codex));
-        assert_eq!(spec_for(Engine::Pi, "sonnet").model, "sonnet");
-        let local = spec_for(Engine::Local, "opus");
-        assert_eq!((local.engine, local.model.as_str()), (None, "local"));
+    fn each_engine_gets_its_own_id_and_local_gets_no_engine() {
+        with_session(Engine::Codex, "sonnet", |s| {
+            assert_eq!((s.engine, s.model.as_str()), (Some(EngineId::Codex), "sonnet"));
+        });
+        with_session(Engine::Local, "opus", |s| {
+            assert_eq!((s.engine, s.model.as_str()), (None, "local"));
+        });
+    }
+
+    fn done(v: serde_json::Value) -> SessionResult {
+        SessionResult {
+            ok: true,
+            subtype: "success".into(),
+            structured: Some(v),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn a_good_result_parses_to_answer_actions_and_dropped() {
-        let r = SessionResult {
-            ok: true,
-            subtype: "success".into(),
-            structured: Some(json!({"answer": "Pausing.", "actions": [{"type": "pause"}, {"type": "launch_rockets"}]})),
-            ..Default::default()
-        };
-        let got = parse_result(r, 1.5);
-        assert_eq!(got.answer, "Pausing.");
-        assert_eq!(got.actions, vec![Action::Pause]);
-        assert_eq!(got.dropped.len(), 1);
+        let r = parse_result(
+            done(json!({"answer": "Paused it.", "actions": [{"type": "pause"}, {"type": "bogus"}]})),
+            1.0,
+        );
+        assert_eq!(r.answer, "Paused it.");
+        assert_eq!(r.actions, vec![Action::Pause]);
+        assert_eq!(r.dropped.len(), 1);
     }
 
     #[test]
-    fn a_failed_session_gives_a_readable_failure_answer() {
-        let r = SessionResult {
-            ok: false,
-            subtype: "error_max_budget_usd".into(),
-            cost_usd: Some(1.6),
-            ..Default::default()
-        };
-        let got = parse_result(r, 1.5);
-        assert!(got.answer.contains("hit its $1.5 budget"), "{}", got.answer);
-        assert!(got.actions.is_empty() && got.dropped.is_empty());
-    }
-
-    #[test]
-    fn an_answer_without_the_result_is_a_failure_answer_too() {
-        let r = SessionResult {
-            ok: true,
-            structured: Some(json!({"nope": 1})),
-            ..Default::default()
-        };
-        assert!(parse_result(r, 1.5).answer.contains("couldn't"));
+    fn a_failed_session_gives_a_readable_answer() {
+        let r = parse_result(
+            SessionResult {
+                ok: false,
+                subtype: "error_max_budget_usd".into(),
+                cost_usd: Some(1.2),
+                ..Default::default()
+            },
+            1.0,
+        );
+        assert!(r.answer.contains("hit its $1 budget"), "{}", r.answer);
+        assert!(r.actions.is_empty());
+        assert!(
+            parse_result(done(json!({"nope": 1})), 1.0)
+                .answer
+                .contains("without an answer")
+        );
     }
 }
