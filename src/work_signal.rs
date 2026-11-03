@@ -27,3 +27,47 @@ impl WorkSignals {
         self.signal(project).notify_one();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    async fn woke(n: &Notify) -> bool {
+        tokio::time::timeout(Duration::from_millis(50), n.notified())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn a_wake_sent_before_anyone_listens_is_kept() {
+        let signals = WorkSignals::default();
+        signals.wake("p");
+        assert!(woke(&signals.signal("p")).await);
+    }
+
+    #[tokio::test]
+    async fn a_wake_reaches_only_its_project() {
+        let signals = WorkSignals::default();
+        signals.wake("a");
+        assert!(!woke(&signals.signal("b")).await);
+        assert!(woke(&signals.signal("a")).await);
+    }
+
+    #[tokio::test]
+    async fn clones_share_signals_and_a_wake_is_consumed_once() {
+        let signals = WorkSignals::default();
+        let other = signals.clone();
+        other.wake("p");
+        assert!(Arc::ptr_eq(&signals.signal("p"), &other.signal("p")));
+        assert!(woke(&signals.signal("p")).await);
+        assert!(!woke(&signals.signal("p")).await);
+    }
+
+    #[test]
+    fn signals_always_compare_equal() {
+        let a = WorkSignals::default();
+        a.wake("p");
+        assert_eq!(a, WorkSignals::default());
+    }
+}
