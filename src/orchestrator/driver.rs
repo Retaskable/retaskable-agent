@@ -24,6 +24,7 @@ mod item_commands;
 mod land;
 mod lane_play;
 mod machine;
+mod mode;
 mod playtest_round;
 mod project;
 mod report;
