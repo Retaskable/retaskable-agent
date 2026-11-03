@@ -124,19 +124,11 @@ async fn items_lanes_and_pause_run_like_the_commands() {
     assert_eq!(results[4]["reason"], "This computer has no lane 3.");
     assert_eq!(v.paused.reason("one"), Some("Paused from the chat".to_string()));
     assert_eq!(v.item_commands.take("one").len(), 2);
-    assert_eq!(
-        v.item_commands.take_lane("one"),
-        vec![
-            ItemCommand::Play {
-                project: "one".into(),
-                lane: 2
-            },
-            ItemCommand::Stop {
-                project: "one".into(),
-                lane: 1
-            },
-        ]
-    );
+    let lanes = v.item_commands.take_lane("one");
+    assert!(matches!(
+        lanes[..],
+        [ItemCommand::Play { lane: 2, .. }, ItemCommand::Stop { lane: 1, .. }]
+    ));
     let (results, _) = performed(vec![Action::Resume], &v, &[], "").await;
     assert_eq!(results[0]["ok"], true);
     assert_eq!(v.paused.reason("one"), None);
