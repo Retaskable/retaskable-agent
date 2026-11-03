@@ -10,6 +10,7 @@ use futures_util::future::BoxFuture;
 use super::driver::{DraftHost, DraftJob};
 use super::session::{exists, quiet_timeout};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::drafts::land;
 use crate::drafts::session::{Session, Start, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
 use crate::engines::resolve::resolve_claude_on_path;
@@ -36,6 +37,14 @@ impl ClaudeDrafts {
             env,
             models,
         })
+    }
+}
+
+impl ClaudeDrafts {
+    fn gh(&self) -> PathBuf {
+        self.env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from)
     }
 }
 
@@ -117,13 +126,9 @@ impl DraftHost for ClaudeDrafts {
         title: &str,
         body: &str,
     ) -> Result<publish::Published> {
-        let gh = self
-            .env
-            .get("RETASKABLE_GH")
-            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
         publish::publish(
             crate::git_bin::program(),
-            &gh,
+            &self.gh(),
             dir,
             branch,
             &project.base_branch,
@@ -136,5 +141,19 @@ impl DraftHost for ClaudeDrafts {
         if let Err(e) = draft_worktree::remove(Path::new(&project.repo_path), Path::new(&project.worktrees_dir), id) {
             tracing::warn!("{id}: removing the draft's worktree: {e:#}");
         }
+    }
+
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()> {
+        let method = land::workflow(project).method_flag;
+        land::merge_pr(&self.gh(), Path::new(&project.repo_path), pr, method, delete_branch)
+    }
+
+    fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
+        let dir = self.prepare(project, id, branch)?;
+        land::rebase(crate::git_bin::program(), &dir, branch, &project.base_branch)
+    }
+
+    fn fetch(&self, project: &ProjectConfig) -> Result<()> {
+        crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
     }
 }
