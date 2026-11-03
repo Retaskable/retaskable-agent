@@ -3,7 +3,8 @@
 //! base checkout (or the repo itself before that checkout exists). Its end is a [`SessionResult::Triage`] on the outcome
 //! channel. Claude only, like the implementer.
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::driver::{
     LookFailure, SecondLookEnd, SecondLookRequest, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
@@ -34,6 +35,18 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
 }
 
 impl ClaudeStarter {
+    /// A new session's id, where its transcript goes, and the running count it's now part of.
+    fn begin_session(&self, project: &str, item: &str, lane: Option<u32>) -> (String, TranscriptSink, Arc<AtomicU32>) {
+        let session_id = new_session_id();
+        let sink = TranscriptSink {
+            path: paths::run_dir(&self.data_dir, project, item).join(format!("{session_id}.jsonl")),
+            lane,
+        };
+        let running = self.running.clone();
+        running.fetch_add(1, Ordering::SeqCst);
+        (session_id, sink, running)
+    }
+
     pub(super) fn start_triage(&self, request: TriageRequest) -> Result<(), String> {
         let project = self
             .projects
@@ -67,13 +80,7 @@ impl ClaudeStarter {
             &self.models,
         ))
         .to_string();
-        let session_id = new_session_id();
-        let sink = TranscriptSink {
-            path: paths::run_dir(&self.data_dir, &project_id, &item_id).join(format!("{session_id}.jsonl")),
-            lane,
-        };
-        let running = self.running.clone();
-        running.fetch_add(1, Ordering::SeqCst);
+        let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -176,13 +183,7 @@ impl ClaudeStarter {
                 .display()
                 .to_string(),
         );
-        let session_id = new_session_id();
-        let sink = TranscriptSink {
-            path: paths::run_dir(&self.data_dir, &project_id, &item_id).join(format!("{session_id}.jsonl")),
-            lane,
-        };
-        let running = self.running.clone();
-        running.fetch_add(1, Ordering::SeqCst);
+        let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
