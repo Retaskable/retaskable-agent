@@ -26,6 +26,7 @@ pub mod code_gates;
 pub mod model;
 pub mod prompt;
 pub mod publish;
+pub mod run_end;
 pub mod session;
 pub mod start_files;
 #[cfg(test)]
