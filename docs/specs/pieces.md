@@ -96,7 +96,7 @@ It returns `{ decision, reason, instructions?, pieces?, engine?, retaskableBug? 
 - `wait`: the cause isn't the work's (Retaskable's own bug, a service down, the computer's setup); the piece waits to retry, with `reason` as what it waits for.
 - `person`: it needs a person's decision or access; `reason` says what.
 
-The store carries the decision out. `engine` (`claude`, `cursor`, `pi` or `codex`), with `again`, `start_over` or `wait`, moves the piece to that engine when the failures were the engine's own. `retaskableBug` is reported as the triager's is. A look must not pick `again` or `start_over` for work another, unbuilt item owns, nor repeat a decision an earlier look made that then failed the same way.
+The store carries the decision out. `engine` (`claude`, `cursor`, `pi` or `codex`), with `again`, `start_over` or `wait`, moves the piece to that engine when the failures were the engine's own. `retaskableBug` is reported as the triager's is: scrubbed of the project's, the piece's and the computer's words, decided against the project's hub link (its consent and known bugs, with the look's `reason` as the needs-human reason), left out when an earlier look in the piece's `looks` gave the same signature, and sent from its own task so the run's end isn't held; the hub's answer, or why nothing was sent, is logged. The `looked` result keeps `retaskableBug` either way, and with no hub link nothing is sent. A look must not pick `again` or `start_over` for work another, unbuilt item owns, nor repeat a decision an earlier look made that then failed the same way.
 
 ### 3.6 Limits, outside causes and engines
 

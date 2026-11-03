@@ -316,6 +316,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             cfg.machine.port.unwrap_or(default_port),
         ],
     );
+    let bugs: std::collections::HashMap<_, _> = cfg
+        .projects
+        .iter()
+        .filter_map(|p| {
+            let link = connectors.iter().find_map(|c| c.bug_link(&p.id_or_derived()))?;
+            Some((p.id_or_derived(), link))
+        })
+        .collect();
+    let bug_version = connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default());
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = orchestrator::live::LiveHandle::new(mode);
@@ -345,15 +354,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
         checks: latest_checks.clone(),
-        bugs: cfg
-            .projects
-            .iter()
-            .filter_map(|p| {
-                let link = connectors.iter().find_map(|c| c.bug_link(&p.id_or_derived()))?;
-                Some((p.id_or_derived(), link))
-            })
-            .collect(),
-        bug_version: connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default()),
+        bugs: bugs.clone(),
+        bug_version: bug_version.clone(),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             // One plan or look at a time on this computer: both runners hold this slot.
             let plan_or_look = orchestrator::slot::Slot::default();
@@ -372,7 +374,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     roster.clone(),
                     plan_or_look.clone(),
                 )) as Arc<dyn orchestrator::driver::RunStarter>,
-                Arc::new(orchestrator::look_run::LookRuns::new(roster, plan_or_look))
+                Arc::new(orchestrator::look_run::LookRuns::new(roster, plan_or_look).with_bugs(bugs, bug_version))
                     as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),

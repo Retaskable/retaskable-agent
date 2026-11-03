@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::super::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
+use crate::connector::bug_link::BugLink;
 use crate::env::Env;
 use crate::orchestrator::driver::{RunEnd, RunEndSender, RunProcesses};
 
@@ -235,4 +236,90 @@ fn the_slot_is_held_until_its_guard_drops() {
     assert!(shared.busy() && shared.take().is_none());
     drop(guard);
     assert!(!shared.busy() && shared.take().is_some());
+}
+
+fn link(on: bool) -> (Arc<BugLink>, UnboundedReceiver<Value>) {
+    // The hub never answers a report.
+    let link = Arc::new(BugLink::new(Duration::from_secs(600)));
+    let (out, rx) = tokio::sync::mpsc::unbounded_channel();
+    link.opened(out);
+    link.consent_said(&json!({ "on": on, "known": [{ "id": "b1", "title": "Known bug" }] }));
+    (link, rx)
+}
+
+fn bug_answer(bug: &str) -> String {
+    answer(&format!(
+        r#"{{"decision":"wait","reason":"the hub is down","retaskableBug":{bug}}}"#
+    ))
+}
+
+const BUG: &str = r#"{"title":"Lane pc1 broke on retaskable/pc1-x","details":"branch retaskable/pc1-x, item pc1"}"#;
+
+fn piece_with(looks: Value) -> Value {
+    let mut p = brief();
+    p["branch"] = json!("retaskable/pc1-x");
+    p["looks"] = looks;
+    p
+}
+
+/// Runs a look whose session answers `out`, with `link` for project `p`; returns the end.
+async fn look_with(out: &str, link: Option<Arc<BugLink>>, piece: Value) -> RunEnd {
+    let r = rig(out, "", EngineChoiceConfig::default());
+    let links = link.into_iter().map(|l| ("p".to_string(), l)).collect();
+    let starter = LookRuns::new(r.starter.roster.clone(), Slot::default()).with_bugs(links, "v1".into());
+    let (req, mut s) = request(piece);
+    starter.start(req).unwrap();
+    end_of(&mut s.ends).await
+}
+
+async fn sent(rx: &mut UnboundedReceiver<Value>) -> Option<Value> {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    rx.try_recv().ok()
+}
+
+#[tokio::test]
+async fn a_bug_with_consent_is_sent_once_scrubbed_and_the_run_still_ends_looked() {
+    let (link, mut rx) = link(true);
+    // The hub never answers, yet the run ends at once with the bug in its result.
+    let end = look_with(&bug_answer(BUG), Some(link), piece_with(json!([]))).await;
+    assert_eq!(end.outcome, RunOutcome::Looked);
+    assert_eq!(
+        end.result["retaskableBug"]["title"],
+        "Lane pc1 broke on retaskable/pc1-x"
+    );
+    let msg = sent(&mut rx).await.expect("a report");
+    assert_eq!(msg["type"], "bug_report");
+    assert_eq!(msg["version"], "v1");
+    let text = msg.to_string();
+    assert!(!text.contains("pc1") && !text.contains("retaskable/pc1-x"), "{text}");
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn no_consent_a_known_same_as_an_earlier_look_or_no_link_sends_nothing() {
+    let (off, mut rx) = link(false);
+    let end = look_with(&bug_answer(BUG), Some(off), piece_with(json!([]))).await;
+    assert_eq!(end.outcome, RunOutcome::Looked);
+    assert!(sent(&mut rx).await.is_none());
+
+    let (on, mut rx) = link(true);
+    let same = r#"{"title":"Same again","details":"d","sameAs":"b1"}"#;
+    let end = look_with(&bug_answer(same), Some(on), piece_with(json!([]))).await;
+    assert_eq!(end.result["retaskableBug"]["sameAs"], "b1");
+    assert!(sent(&mut rx).await.is_none());
+
+    // An earlier look gave the same signature (the same reason).
+    let (on, mut rx) = link(true);
+    let earlier = json!([{ "decision": "wait", "reason": "the hub is down",
+        "retaskableBug": { "title": "Other words", "details": "x" } }]);
+    let end = look_with(&bug_answer(BUG), Some(on), piece_with(earlier)).await;
+    assert_eq!(end.outcome, RunOutcome::Looked);
+    assert!(sent(&mut rx).await.is_none());
+
+    let end = look_with(&bug_answer(BUG), None, piece_with(json!([]))).await;
+    assert_eq!(end.outcome, RunOutcome::Looked);
+    assert_eq!(
+        end.result["retaskableBug"]["details"],
+        "branch retaskable/pc1-x, item pc1"
+    );
 }

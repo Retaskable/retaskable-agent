@@ -3,6 +3,7 @@
 //! for a piece or plan that keeps failing. It takes no lane, and only one look (or plan) runs at a time on this
 //! computer, across all projects ([`Slot`]). Its process tree is registered with the run, so a beat's `stop` or
 //! the ceiling cuts it; the run ends exactly once through `request.ends`, unless the loop already ended it.
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,12 +14,16 @@ use super::plan_run::{Cut, Job, Roster, spawn_run};
 use super::session::quiet_timeout;
 pub use super::slot::Slot;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
+use crate::connector::bug_link::BugLink;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
 use crate::looks::{LookBrief, Looker, decide};
 use crate::process_tree::ProcessTree;
 use crate::tiers::{implementer_tier, mid_tier};
 use crate::{lanes, paths};
+
+mod bug;
+pub use bug::BugReports;
 
 const TEMPLATE: &str = include_str!("../../prompts/look.md");
 
@@ -27,11 +32,25 @@ pub struct LookRuns {
     pub roster: Roster,
     /// Shared with the plan runner: one plan or look at a time.
     pub slot: Slot,
+    /// Where a look's Retaskable bug is reported; with no link for the project, nothing is sent.
+    pub bugs: BugReports,
 }
 
 impl LookRuns {
     pub fn new(roster: Roster, slot: Slot) -> Self {
-        Self { roster, slot }
+        let bugs = BugReports {
+            links: Default::default(),
+            version: String::new(),
+            env: roster.env.clone(),
+        };
+        Self { roster, slot, bugs }
+    }
+
+    /// Reports a look's bug over each project's hub link in `links`.
+    pub fn with_bugs(mut self, links: HashMap<String, Arc<BugLink>>, version: String) -> Self {
+        self.bugs.links = links;
+        self.bugs.version = version;
+        self
     }
 }
 
@@ -49,13 +68,13 @@ impl RunStarter for LookRuns {
         .to_string();
         let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, model)?;
         let cut = Cut::default();
-        let work = look(job, request.clone(), cut.clone());
+        let work = look(job, request.clone(), cut.clone(), self.bugs.clone());
         spawn_run(guard, request, cut, async move { Some(work.await) });
         Ok(())
     }
 }
 
-async fn look(job: Job, request: RunRequest, cut: Cut) -> (RunOutcome, Value) {
+async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (RunOutcome, Value) {
     let project = &job.project;
     let base = lanes::base_checkout_path(&PathBuf::from(&project.worktrees_dir));
     let cwd = if base.exists() {
@@ -104,7 +123,11 @@ async fn look(job: Job, request: RunRequest, cut: Cut) -> (RunOutcome, Value) {
     })
     .await;
     match decided.result {
-        Some(r) => (RunOutcome::Looked, r.to_wire()),
+        Some(r) => {
+            // Sent from its own task: the end below doesn't wait for the hub.
+            bugs.report(&job.project, &request, &r);
+            (RunOutcome::Looked, r.to_wire())
+        }
         None => (
             RunOutcome::Failed(decided.note.unwrap_or_else(|| "the look gave no decision".into())),
             json!({}),
