@@ -353,6 +353,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 env.clone(),
                 cfg.machine.max_turns,
                 cfg.machine.models,
+                cfg.machine.max_resume_context_tokens,
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
