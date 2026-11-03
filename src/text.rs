@@ -8,7 +8,10 @@ pub fn clip(s: &str, n: usize) -> String {
     if chars.len() <= n {
         return s.to_string();
     }
-    let mut out: String = chars[..n.saturating_sub(1)].iter().collect();
+    if n == 0 {
+        return String::new();
+    }
+    let mut out: String = chars[..n - 1].iter().collect();
     out.push('…');
     out
 }
@@ -38,6 +41,13 @@ mod tests {
     fn clip_passes_short_text_through_and_truncates_with_an_ellipsis_otherwise() {
         assert_eq!(clip("hello", 10), "hello");
         assert_eq!(clip("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn clip_to_nothing_is_empty_not_an_ellipsis() {
+        assert_eq!(clip("hello", 0), "");
+        assert_eq!(clip("", 0), "");
+        assert_eq!(clip("hello", 1), "…");
     }
 
     #[test]
