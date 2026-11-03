@@ -18,12 +18,10 @@ use super::session::{
 };
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{
-    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_id_from_str, engine_of, run_session_tracked,
-};
+use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::runs::{Pushed, end_from_answer, needs_push};
@@ -43,6 +41,25 @@ pub struct PieceStarter {
     pub flags: std::sync::Arc<crate::flags::Flags>,
 }
 
+impl PieceStarter {
+    /// A run on an engine this agent can't run yet isn't refused (that would send it back `interrupted`, to bounce
+    /// between computers): it ends `failed`, an outside cause, so the store gives it a look that can move the
+    /// piece's engine. With `run-limits-and-causes` Off it is given back as before.
+    fn cannot_run(&self, request: RunRequest, engine: String) -> Result<(), String> {
+        let (ends, token, flags) = (request.ends, request.token, self.flags.clone());
+        tokio::spawn(async move {
+            let (outcome, result) = if flags.on("run-limits-and-causes").await {
+                let why = format!("this computer can't run {engine} sessions yet");
+                (RunOutcome::Failed(why), json!({ "outside": true }))
+            } else {
+                (RunOutcome::Interrupted, json!({}))
+            };
+            ends.send(RunEnd { token, outcome, result });
+        });
+        Ok(())
+    }
+}
+
 impl RunStarter for PieceStarter {
     fn kinds(&self) -> Vec<RunKind> {
         vec![RunKind::Build, RunKind::Fix]
@@ -56,13 +73,21 @@ impl RunStarter for PieceStarter {
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
         let lane = request.lane.clone().ok_or("the run has no lane")?;
-        let engine = match request.piece.other.get("engine").and_then(Value::as_str) {
-            Some(e) => engine_id_from_str(Some(e)) == EngineId::Claude,
-            None => engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None) == Engine::Claude,
+        // The piece's own engine wins; an unknown name is an engine this agent can't run, not Claude.
+        let chosen = match request.piece.other.get("engine").and_then(Value::as_str) {
+            Some(name) => parse_engine(name).ok_or(name.to_string()),
+            None => Ok(engine_for(
+                &self.choice,
+                project.engines.as_ref(),
+                Role::Implementer,
+                None,
+            )),
         };
-        if !engine {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
+        let engine = match chosen {
+            Ok(Engine::Claude) => EngineId::Claude,
+            Ok(other) => return self.cannot_run(request, other.to_string()),
+            Err(name) => return self.cannot_run(request, name),
+        };
         let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
         if !exists(&bin, &self.env) {
             return Err(format!("the claude binary wasn't found ({})", bin.display()));
@@ -80,6 +105,7 @@ impl RunStarter for PieceStarter {
             lane,
             token: request.token.clone(),
             kind: request.kind,
+            engine,
             piece: request.piece,
             processes: request.processes,
             flags: self.flags.clone(),
@@ -108,6 +134,7 @@ pub(super) struct Job {
     pub(super) lane: PathBuf,
     pub(super) token: String,
     pub(super) kind: RunKind,
+    pub(super) engine: EngineId,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
     pub(super) flags: std::sync::Arc<crate::flags::Flags>,
@@ -216,7 +243,7 @@ async fn session(
             model,
             budget_usd: project.budget.implementer_usd,
             max_turns: Some(job.max_turns),
-            engine: Some(EngineId::Claude),
+            engine: Some(job.engine),
             cursor: None,
             local: None,
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
@@ -233,7 +260,7 @@ async fn session(
             .join(format!("{id}-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
     };
-    let engine = engine_of(Some(EngineId::Claude))?;
+    let engine = engine_of(Some(job.engine))?;
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
@@ -343,9 +370,18 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .ok()
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
         // With `run-limits-and-causes` Off, a usage limit ends `failed` as before.
-        let limited_as = job.flags.on("run-limits-and-causes").await.then_some("claude");
-        let (outcome, mut result) =
-            end_from_answer(a.answer, pushed.as_ref(), &decisions, limited_as, chrono::Utc::now());
+        let limited_as = job
+            .flags
+            .on("run-limits-and-causes")
+            .await
+            .then(|| job.engine.to_string());
+        let (outcome, mut result) = end_from_answer(
+            a.answer,
+            pushed.as_ref(),
+            &decisions,
+            limited_as.as_deref(),
+            chrono::Utc::now(),
+        );
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
