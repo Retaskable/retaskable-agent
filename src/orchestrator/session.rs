@@ -24,7 +24,8 @@ use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
-    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, program_of, run_session,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, program_of,
+    run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
@@ -868,6 +869,10 @@ fn session_result_for_answer(
             let why = format!("The session ended without answering: {e:#}");
             (SessionResult::Limited { why, resets_in }, usage)
         }
+        Err(e) if e.downcast_ref::<CouldNotStart>().is_some() => (
+            SessionResult::NotStarted(format!("The session ended without answering: {e:#}")),
+            usage,
+        ),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
             SessionResult::Silenced(format!("went quiet and was killed: {e:#}")),
             usage,

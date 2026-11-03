@@ -78,6 +78,10 @@ pub struct RunRecord {
     /// session ends with an answer.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub silence_kills: u32,
+    /// The item's session couldn't start and is waiting to be started fresh again: its saved session id never
+    /// ran, so a restart must not resume it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_started: bool,
     /// Signatures of Retaskable bugs this item's triage already reported (`reported_bug`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reported_bugs: Vec<String>,
@@ -247,6 +251,20 @@ impl Store {
     /// Replaces `state.runs`. Doesn't save on its own; call `save` after.
     pub fn set_runs(&mut self, runs: &std::collections::BTreeMap<String, RunRecord>) {
         self.data.insert("runs".to_string(), serde_json::json!(runs));
+    }
+
+    /// `state.ownFailures`: each item's own failures in a row (a session that wouldn't start, or a hand-back),
+    /// kept past the item's lease since a hand-back drops its run record.
+    pub fn own_failures(&self) -> std::collections::BTreeMap<String, u32> {
+        self.data
+            .get("ownFailures")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.ownFailures`. Doesn't save on its own; call `save` after.
+    pub fn set_own_failures(&mut self, failures: &std::collections::BTreeMap<String, u32>) {
+        self.data.insert("ownFailures".to_string(), serde_json::json!(failures));
     }
 
     /// `state.trialPlan`; not started when missing or unreadable.

@@ -540,6 +540,17 @@ fn a_watchdog_kill_is_silenced_not_failed_or_needs_human() {
 }
 
 #[test]
+fn a_process_that_wont_start_is_not_started_not_needs_human() {
+    let refused = Err(anyhow::Error::new(crate::engines::CouldNotStart(
+        "starting claude: busy".into(),
+    )));
+    let SessionResult::NotStarted(why) = session_result_for_answer(refused, None).0 else {
+        panic!("a spawn failure can be retried");
+    };
+    assert!(why.contains("starting claude: busy"), "{why}");
+}
+
+#[test]
 fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     let cut = Err(anyhow::Error::new(Interrupted("ended with interrupted".into())));
     assert_eq!(session_result_for_answer(cut, None).0, SessionResult::Interrupted);

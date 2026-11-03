@@ -31,6 +31,10 @@ pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
 /// Watchdog kills in a row that are resumed; the next one goes to a person.
 const MAX_SILENCE_RESUMES: u32 = 3;
 
+/// Own failures in a row (a session that wouldn't start, or a hand-back) that are retried or handed back; the
+/// next one goes to a person.
+const MAX_OWN_FAILURES: u32 = 3;
+
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
 
@@ -53,6 +57,11 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
+    /// The session's process wouldn't start (the text says why), so nothing ran. Behind the
+    /// `own-failure-handling` flag the run keeps its lane and lease, claiming isn't paused, and the loop starts
+    /// the session again after [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure
+    /// goes to `needs_human`. With the flag Off it is a [`NeedsHuman`](Self::NeedsHuman).
+    NotStarted(String),
     /// The watchdog killed the session for printing nothing (the text says why). Behind the
     /// `own-failure-handling` flag the run stays `implementing` with its lane and lease, nothing is posted to
     /// the store, and the loop resumes the session by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row
@@ -395,6 +404,48 @@ impl ProjectLoop {
             shared.engine_limits.hit(record.impl_session_engine, until);
         }
         let mut result = outcome.result;
+        let flag_on = self.flags.on("own-failure-handling").await;
+        if let SessionResult::NotStarted(why) = result {
+            let count = self.own_failures.get(&item).copied().unwrap_or(0);
+            result = if !flag_on {
+                SessionResult::NeedsHuman(why)
+            } else if count < MAX_OWN_FAILURES {
+                self.own_failures.insert(item.clone(), count + 1);
+                self.silenced
+                    .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                if let Some(record) = self.records.get_mut(&item) {
+                    record.not_started = true;
+                }
+                SessionResult::NotStarted(why)
+            } else {
+                SessionResult::NeedsHuman(why)
+            };
+        } else {
+            self.fresh_launched.remove(&item);
+            if let Some(record) = self.records.get_mut(&item) {
+                record.not_started = false;
+            }
+        }
+        if flag_on && let SessionResult::Failed(why) = result {
+            let count = self.own_failures.get(&item).copied().unwrap_or(0);
+            result = if count < MAX_OWN_FAILURES {
+                self.own_failures.insert(item.clone(), count + 1);
+                SessionResult::Failed(why)
+            } else {
+                SessionResult::NeedsHuman(why)
+            };
+        }
+        // A session that started and answered (or needs a person) ends the run of own failures.
+        if matches!(
+            result,
+            SessionResult::Implementer(_) | SessionResult::NeedsHuman(_) | SessionResult::Limited { .. }
+        ) {
+            self.own_failures.remove(&item);
+        }
+        self.store.set_own_failures(&self.own_failures);
+        if let Err(e) = self.store.save() {
+            tracing::warn!("{}: saving the own-failure count failed: {e:#}", self.id);
+        }
         if let SessionResult::Silenced(why) = result {
             let record = self.records.get_mut(&item);
             result = match record {
@@ -420,7 +471,7 @@ impl ProjectLoop {
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Silenced(_) => self.save_leases(),
+            SessionResult::Silenced(_) | SessionResult::NotStarted(_) => self.save_leases(),
             SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
