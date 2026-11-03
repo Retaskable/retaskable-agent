@@ -75,6 +75,34 @@ impl ProjectLoop {
         }
     }
 
+    fn want(&self, item_id: &str) -> Want {
+        Want {
+            project: self.id.clone(),
+            item: item_id.to_string(),
+            chore: false,
+            last_lane: self.last_lane.get(item_id).copied(),
+            fix_queued: false,
+        }
+    }
+
+    fn lane_taken(&mut self, item_id: &str, lane: u32) {
+        self.events.add_in(
+            &self.id,
+            Event::LaneTaken(event::LaneTaken {
+                item: Some(item_id.to_string()),
+                lane: Some(lane),
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// Claims a lane for the item and records it.
+    fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
+        let lane = pool.claim(&self.want(item_id))?;
+        self.lane_taken(item_id, lane);
+        Some(lane)
+    }
+
     /// Carries out one Continue. False when it must wait for a lane or a session slot.
     async fn continue_item(
         &mut self,
@@ -103,22 +131,9 @@ impl ProjectLoop {
         if !checks_only && *room == 0 {
             return false;
         }
-        let want = Want {
-            project: self.id.clone(),
-            item: item_id.to_string(),
-            chore: false,
-            last_lane: self.last_lane.get(item_id).copied(),
-            fix_queued: false,
+        let Some(lane) = self.take_lane(pool, item_id) else {
+            return false;
         };
-        let Some(lane) = pool.claim(&want) else { return false };
-        self.events.add_in(
-            &self.id,
-            Event::LaneTaken(event::LaneTaken {
-                item: Some(item_id.to_string()),
-                lane: Some(lane),
-                ..Default::default()
-            }),
-        );
         let run = self.runs.get_mut(item_id).expect("checked above");
         if at_limit {
             run.resume_past_slice_limit(&self.project);
@@ -170,14 +185,9 @@ impl ProjectLoop {
         if *room == 0 {
             return false;
         }
-        let want = Want {
-            project: self.id.clone(),
-            item: item_id.to_string(),
-            chore: false,
-            last_lane: self.last_lane.get(item_id).copied(),
-            fix_queued: false,
+        let Some(lane) = pool.claim(&self.want(item_id)) else {
+            return false;
         };
-        let Some(lane) = pool.claim(&want) else { return false };
         let item = self.items.get(item_id);
         let old = Abandon {
             project: self.id.clone(),
@@ -197,14 +207,7 @@ impl ProjectLoop {
             pool.release(lane, &holder);
             return true;
         }
-        self.events.add_in(
-            &self.id,
-            Event::LaneTaken(event::LaneTaken {
-                item: Some(item_id.to_string()),
-                lane: Some(lane),
-                ..Default::default()
-            }),
-        );
+        self.lane_taken(item_id, lane);
         let attempt = self.attempt_of(item_id) + 1;
         let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
         if let Some(record) = self.records.get_mut(item_id) {
