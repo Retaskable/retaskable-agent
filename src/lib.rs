@@ -76,6 +76,7 @@ pub mod telemetry;
 mod test_support;
 pub mod text;
 pub mod tiers;
+pub mod trial_plan;
 pub mod triage;
 pub mod view;
 pub mod work_signal;
