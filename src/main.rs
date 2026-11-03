@@ -345,6 +345,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
         run_starters: Vec::new(),
+        drafts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::draft_host::ClaudeDrafts::new(
+                dir.to_path_buf(),
+                config::engine_choice(cfg, env),
+                env.clone(),
+                cfg.machine.models,
+            ) as Arc<dyn orchestrator::driver::DraftHost>
+        }),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),

@@ -66,15 +66,16 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
 /// `pr create` saves its stdin as `gh_body` and prints a PR URL.
 fn fake_gh(bin: &Path, root: &Path) {
     std::fs::write(root.join("gh_list"), "[]").unwrap();
+    std::fs::write(root.join("gh_state"), "OPEN").unwrap();
     let r = root.display();
     if cfg!(windows) {
         let script = format!(
-            "@echo off\r\necho %* >> \"{r}\\gh.log\"\r\nif \"%1 %2\"==\"pr list\" type \"{r}\\gh_list\"\r\nif \"%1 %2\"==\"pr create\" (findstr \"^\" > \"{r}\\gh_body\" & echo https://github.com/o/p/pull/7)\r\n"
+            "@echo off\r\necho %* >> \"{r}\\gh.log\"\r\nif \"%1 %2\"==\"pr view\" type \"{r}\\gh_state\"\r\nif \"%1 %2\"==\"pr list\" type \"{r}\\gh_list\"\r\nif \"%1 %2\"==\"pr create\" (findstr \"^\" > \"{r}\\gh_body\" & echo https://github.com/o/p/pull/7)\r\n"
         );
         std::fs::write(bin, script).unwrap();
     } else {
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr list\") cat '{r}/gh_list';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\nesac\n"
+            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr view\") cat '{r}/gh_state';;\n\"pr list\") cat '{r}/gh_list';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\nesac\n"
         );
         crate::test_support::write_executable(bin, &script);
     }
@@ -101,7 +102,7 @@ fn gh_log(rig: &Rig) -> String {
 }
 
 fn branch() -> String {
-    branch_name(&item(&[], Some("Wire it.")))
+    branch_name(&item(&[], Some("Wire it.")), 0)
 }
 
 fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
@@ -169,6 +170,8 @@ fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         usage: None,
         follow_up: None,
         items: vec![item(&[], None), queued_item()],
+        attempt: 0,
+        notes: None,
     };
     (request, rx)
 }
@@ -728,7 +731,7 @@ async fn a_missing_binary_refuses_to_start() {
 #[test]
 fn the_branch_is_the_id_a_short_slug_and_the_slice() {
     assert_eq!(
-        branch_name(&item(&[], None)),
+        branch_name(&item(&[], None), 0),
         "retaskable/implementer-session-have-a-session-write-the-code-s2"
     );
 }
@@ -777,4 +780,87 @@ async fn a_send_back_to_a_session_under_the_limit_still_resumes_it() {
     assert_eq!(got.session_id, None);
     let args = std::fs::read_to_string(rig.root.join("args_all")).unwrap();
     assert!(args.lines().nth(1).unwrap().contains("--resume sess-1"), "{args}");
+}
+
+fn git_in(rig: &Rig, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(rig.root.join("repo"))
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn old_work(rig: &Rig, pr_url: Option<&str>) -> Abandon {
+    git_in(rig, &["branch", "old"]);
+    git_in(rig, &["push", "origin", "old"]);
+    Abandon {
+        project: "p".into(),
+        branch: Some("old".into()),
+        pr_url: pr_url.map(Into::into),
+    }
+}
+
+#[tokio::test]
+async fn start_over_closes_the_old_pr_and_leaves_its_branch() {
+    let rig = rig(None, EngineChoiceConfig::default(), false);
+    rig.starter
+        .abandon(old_work(&rig, Some("https://github.com/o/p/pull/3")))
+        .await
+        .unwrap();
+    assert!(
+        gh_log(&rig).contains("pr close https://github.com/o/p/pull/3"),
+        "{}",
+        gh_log(&rig)
+    );
+    assert!(origin_branches(&rig).contains("old"));
+}
+
+#[tokio::test]
+async fn start_over_leaves_a_merged_slice_alone() {
+    let rig = rig(None, EngineChoiceConfig::default(), false);
+    std::fs::write(rig.root.join("gh_state"), "MERGED").unwrap();
+    rig.starter
+        .abandon(old_work(&rig, Some("https://github.com/o/p/pull/3")))
+        .await
+        .unwrap();
+    assert!(!gh_log(&rig).contains("pr close"), "{}", gh_log(&rig));
+    assert!(origin_branches(&rig).contains("old"));
+    assert!(git_in(&rig, &["branch", "--list", "old"]).contains("old"));
+}
+
+#[tokio::test]
+async fn start_over_without_a_pr_drops_the_old_branch_pushed_or_not() {
+    let rig = rig(None, EngineChoiceConfig::default(), false);
+    rig.starter.abandon(old_work(&rig, None)).await.unwrap();
+    assert!(!gh_log(&rig).contains("pr close"));
+    assert!(!origin_branches(&rig).contains("old"), "{}", origin_branches(&rig));
+    assert!(!git_in(&rig, &["branch", "--list", "old"]).contains("old"));
+    // Never pushed: only here.
+    git_in(&rig, &["branch", "local-only"]);
+    let old = Abandon {
+        branch: Some("local-only".into()),
+        ..old_work(&rig, None)
+    };
+    rig.starter.abandon(old).await.unwrap();
+    assert!(!git_in(&rig, &["branch", "--list", "local-only"]).contains("local-only"));
+}
+
+#[tokio::test]
+async fn a_start_over_session_is_on_the_attempts_branch_with_the_notes_in_its_first_prompt() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let (mut request, mut rx) = request();
+    request.attempt = 2;
+    request.notes = Some("Use the other API.".into());
+    rig.starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(
+        args.contains("retaskable/implementer-session-have-a-session-write-the-code-s2-r2"),
+        "{args}"
+    );
+    assert!(args.contains("## Notes from the last attempt"), "{args}");
+    assert!(args.contains("Use the other API."), "{args}");
+    assert_eq!(branch_name(&item(&[], None), 0), branch());
+    assert!(branch().ends_with("-s2"));
 }

@@ -3,14 +3,20 @@
 //!
 //! **Continue** on an item that is `needs_human` in `runs`: an item in any other state, or unknown here, has
 //! its command dropped and logged. With nothing on a branch to carry on from (`triage::schedule::nothing_to_continue`)
-//! the item is left for Start over. Otherwise it waits for a free lane, then `ItemRun::resume_from_needs_human`
+//! the item starts over, as **Start over** does. Otherwise it waits for a free lane, then `ItemRun::resume_from_needs_human`
 //! (or `resume_past_slice_limit` at the slice limit) clears its rounds and the implementer starts on the existing
 //! branch with the notes as its prompt (`Launch::Continuing`, the lane reused as it is). With no notes it goes
 //! back to `checking`, so its checks run again.
+//!
+//! **Start over** (`retry`) on a `needs_human` item (agent/09-web-ui.md section 9.3) waits for a free lane, then
+//! lets go of the old work ([`SessionStarter::abandon`]: `gh pr close`, or the branch dropped when there is no PR; a
+//! merged slice is never touched), bumps the item's attempt, clears its rounds (`resume_from_needs_human`) and starts
+//! a fresh implementer on the new branch (`…-s<slice>-r<attempt>`, prepared from `origin/<base>`), the notes in its
+//! first prompt. If the old work can't be let go of, the item stays as it is.
 use super::project::signed_out;
-use super::{Launch, ProjectLoop, SessionStarter, Shared};
+use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
 use crate::item_lifecycle::ItemState;
-use crate::lane_pool::{LanePool, Want};
+use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
 use crate::triage::schedule::nothing_to_continue;
@@ -30,12 +36,25 @@ impl ProjectLoop {
         shared: &mut Shared<'_>,
     ) {
         for command in shared.links.item_commands.take(&self.id) {
-            let ItemCommand::Continue { item, notes, .. } = command;
+            let (name, item, notes, start_over) = match command {
+                ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
+                ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
+            };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
-            if !stopped || self.continuing.iter().any(|(id, _)| *id == item) {
-                tracing::info!("{}: dropped a continue for {item}: it isn't stopped here", self.id);
+            let waiting = self
+                .continuing
+                .iter()
+                .chain(&self.starting_over)
+                .any(|(id, _)| *id == item);
+            if !stopped || waiting {
+                tracing::info!("{}: dropped a {name} for {item}: it isn't stopped here", self.id);
             } else {
-                self.continuing.push((item, notes.filter(|n| !n.trim().is_empty())));
+                let queue = if start_over {
+                    &mut self.starting_over
+                } else {
+                    &mut self.continuing
+                };
+                queue.push((item, notes.filter(|n| !n.trim().is_empty())));
             }
         }
         if signed_out(shared) || shared.stopping {
@@ -49,6 +68,42 @@ impl ProjectLoop {
                 self.continuing.push((item, notes));
             }
         }
+        for (item, notes) in std::mem::take(&mut self.starting_over) {
+            if !self
+                .start_over(&item, notes.as_deref(), (pool, starter), (&mut room, shared))
+                .await
+            {
+                self.starting_over.push((item, notes));
+            }
+        }
+    }
+
+    fn want(&self, item_id: &str) -> Want {
+        Want {
+            project: self.id.clone(),
+            item: item_id.to_string(),
+            chore: false,
+            last_lane: self.last_lane.get(item_id).copied(),
+            fix_queued: false,
+        }
+    }
+
+    fn lane_taken(&mut self, item_id: &str, lane: u32) {
+        self.events.add_in(
+            &self.id,
+            Event::LaneTaken(event::LaneTaken {
+                item: Some(item_id.to_string()),
+                lane: Some(lane),
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// Claims a lane for the item and records it.
+    fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
+        let lane = pool.claim(&self.want(item_id))?;
+        self.lane_taken(item_id, lane);
+        Some(lane)
     }
 
     /// Carries out one Continue. False when it must wait for a lane or a session slot.
@@ -72,32 +127,18 @@ impl ProjectLoop {
         let pr_url = self.items.get(item_id).and_then(|i| i.pr_url.as_deref());
         let session = record.and_then(|r| r.impl_session_id.as_deref());
         if !at_limit && nothing_to_continue(branch, pr_url, session) {
-            tracing::info!(
-                "{}: {item_id} has nothing to continue from; it waits for Start over",
-                self.id
-            );
-            return true;
+            tracing::info!("{}: {item_id} has nothing to continue from; starting it over", self.id);
+            return self
+                .start_over(item_id, notes.as_deref(), (pool, starter), (room, shared))
+                .await;
         }
         let checks_only = notes.is_none() && !at_limit;
         if !checks_only && *room == 0 {
             return false;
         }
-        let want = Want {
-            project: self.id.clone(),
-            item: item_id.to_string(),
-            chore: false,
-            last_lane: self.last_lane.get(item_id).copied(),
-            fix_queued: false,
+        let Some(lane) = self.take_lane(pool, item_id) else {
+            return false;
         };
-        let Some(lane) = pool.claim(&want) else { return false };
-        self.events.add_in(
-            &self.id,
-            Event::LaneTaken(event::LaneTaken {
-                item: Some(item_id.to_string()),
-                lane: Some(lane),
-                ..Default::default()
-            }),
-        );
         let run = self.runs.get_mut(item_id).expect("checked above");
         if at_limit {
             run.resume_past_slice_limit(&self.project);
@@ -129,6 +170,77 @@ impl ProjectLoop {
             self.remember(item_id, Some(lane), None, None);
             self.save_leases();
         }
+        true
+    }
+
+    /// Carries out one Start over. False when it must wait for a lane or a session slot.
+    async fn start_over(
+        &mut self,
+        item_id: &str,
+        notes: Option<&str>,
+        (pool, starter): (&mut LanePool, &dyn SessionStarter),
+        (room, shared): (&mut u32, &mut Shared<'_>),
+    ) -> bool {
+        if !self.runs.get(item_id).is_some_and(|r| r.state == ItemState::NeedsHuman) {
+            tracing::info!("{}: dropped a start over for {item_id}: it isn't stopped here", self.id);
+            return true;
+        }
+        if *room == 0 {
+            return false;
+        }
+        let Some(lane) = pool.claim(&self.want(item_id)) else {
+            return false;
+        };
+        let item = self.items.get(item_id);
+        let old = Abandon {
+            project: self.id.clone(),
+            branch: self
+                .records
+                .get(item_id)
+                .and_then(|r| r.branch.clone())
+                .or(item.and_then(|i| i.branch.clone())),
+            pr_url: item.and_then(|i| i.pr_url.clone()),
+        };
+        if let Err(why) = starter.abandon(old).await {
+            tracing::warn!("{}: didn't start {item_id} over: {why}", self.id);
+            let holder = Holder::Item {
+                project: self.id.clone(),
+                item: item_id.to_string(),
+            };
+            pool.release(lane, &holder);
+            return true;
+        }
+        self.lane_taken(item_id, lane);
+        let attempt = self.attempt_of(item_id) + 1;
+        let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
+        if let Some(record) = self.records.get_mut(item_id) {
+            (record.attempt, record.slice) = (attempt, slice);
+        }
+        let run = self.runs.get_mut(item_id).expect("checked above");
+        run.resume_from_needs_human();
+        self.events.add_in(
+            &self.id,
+            Event::ItemState(event::ItemState {
+                item: Some(item_id.to_string()),
+                from: Some("needs_human".into()),
+                to: Some("implementing".into()),
+                lane: Some(lane),
+                note: Some("a person chose Start over".into()),
+                ..Default::default()
+            }),
+        );
+        self.remember(item_id, Some(lane), None, None);
+        *room -= u32::from(
+            self.launch(
+                pool,
+                item_id,
+                lane,
+                Launch::StartOver(notes.map(str::to_string)),
+                starter,
+                shared,
+            )
+            .await,
+        );
         true
     }
 }
