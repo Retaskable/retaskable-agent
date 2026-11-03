@@ -5,12 +5,14 @@
 //! so tests can use a fake.
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
 use crate::ci_coverage::CiAnswer;
+use crate::process_tree::ProcessTree;
 
 /// Five `gh` errors in a row end the watch as `failed`.
 pub const MAX_GH_ERRORS: u32 = 5;
@@ -227,12 +229,20 @@ impl GhErrors {
 
 /// Runs `gh <args>`; stdout and whether it exited 0. `gh pr checks` exits non-zero for failing or pending
 /// checks while still printing them, so only a start failure or an empty stdout with an error is no answer.
-fn gh_out(gh: &Path, dir: &Path, args: &[&str]) -> Result<(String, String, bool)> {
-    let out = Command::new(gh)
+fn gh_out(gh: &Path, dir: &Path, args: &[&str], reg: Reg) -> Result<(String, String, bool)> {
+    let mut command = Command::new(gh);
+    command
         .current_dir(dir)
         .args(args)
         .stdin(Stdio::null())
-        .output()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    ProcessTree::prepare_sync(&mut command);
+    let child = command.spawn()?;
+    let tree = Arc::new(ProcessTree::join_sync(&child)?);
+    reg(tree.clone());
+    let out = child.wait_with_output()?;
+    drop(tree);
     Ok((
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -240,10 +250,13 @@ fn gh_out(gh: &Path, dir: &Path, args: &[&str]) -> Result<(String, String, bool)
     ))
 }
 
+/// Where each `gh` started is handed as a process tree, so a stop can cut it.
+pub type Reg<'a> = &'a dyn Fn(Arc<ProcessTree>);
+
 /// Reads a change's checks. `Err` is a `gh` error (no answer); a change with no checks is `Ok(vec![])`. The
 /// `--json` read is best effort, for `started`.
-pub fn read_checks(gh: &Path, dir: &Path, pr: &str) -> Result<Vec<Check>> {
-    let (out, err, ok) = gh_out(gh, dir, &["pr", "checks", pr])?;
+pub fn read_checks(gh: &Path, dir: &Path, pr: &str, reg: Reg) -> Result<Vec<Check>> {
+    let (out, err, ok) = gh_out(gh, dir, &["pr", "checks", pr], reg)?;
     let plain = parse_plain(&out);
     if plain.is_empty() && !ok && !err.contains("no checks reported") {
         bail!("gh pr checks failed: {}", err.trim());
@@ -251,7 +264,12 @@ pub fn read_checks(gh: &Path, dir: &Path, pr: &str) -> Result<Vec<Check>> {
     if !plain.iter().any(|c| c.state == CheckState::Pending) {
         return Ok(plain);
     }
-    let json = match gh_out(gh, dir, &["pr", "checks", pr, "--json", "name,bucket,link,startedAt"]) {
+    let json = match gh_out(
+        gh,
+        dir,
+        &["pr", "checks", pr, "--json", "name,bucket,link,startedAt"],
+        reg,
+    ) {
         Ok((out, _, _)) => parse_json(&out).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
@@ -274,9 +292,9 @@ fn run_id(link: &str) -> Option<&str> {
 
 /// The last `LOG_TAIL_LINES` lines of a check's `gh run view <id> --log-failed`; empty when the link has no run
 /// or `gh` can't say.
-pub fn red_entry(gh: &Path, dir: &Path, check: &Failing) -> RedEntry {
+pub fn red_entry(gh: &Path, dir: &Path, check: &Failing, reg: Reg) -> RedEntry {
     let log = run_id(&check.link)
-        .and_then(|id| gh_out(gh, dir, &["run", "view", id, "--log-failed"]).ok())
+        .and_then(|id| gh_out(gh, dir, &["run", "view", id, "--log-failed"], reg).ok())
         .map(|(out, _, _)| {
             let lines: Vec<&str> = out.lines().collect();
             lines[lines.len().saturating_sub(LOG_TAIL_LINES)..].join("\n")
@@ -426,7 +444,7 @@ mod tests {
             name: "t".into(),
             link: "https://github.com/o/r/actions/runs/42/job/9".into(),
         };
-        let e = red_entry(&gh, dir.path(), &f);
+        let e = red_entry(&gh, dir.path(), &f, &|_| {});
         let lines: Vec<&str> = e.log.lines().collect();
         assert_eq!(lines.len(), 120);
         assert_eq!((lines[0], lines[119]), ("line 181", "line 300"));
@@ -438,6 +456,7 @@ mod tests {
                 name: "x".into(),
                 link: "https://x/y".into(),
             },
+            &|_| {},
         );
         assert_eq!(none.log, "");
     }
@@ -451,19 +470,19 @@ mod tests {
             &gh,
             "#!/bin/sh\ncase \"$*\" in *--json*) echo '[{\"name\":\"a\",\"bucket\":\"pending\",\"startedAt\":\"0001-01-01T00:00:00Z\"}]';; *) printf 'a\\tpending\\t0\\thttps://x/a\\t\\nb\\tfail\\t1s\\thttps://x/b\\t\\n'; exit 8;; esac\n",
         );
-        let got = read_checks(&gh, dir.path(), "7").unwrap();
+        let got = read_checks(&gh, dir.path(), "7", &|_| {}).unwrap();
         assert_eq!(
             (got.len(), got[0].started, got[1].state),
             (2, Some(false), CheckState::Fail)
         );
         let bad = dir.path().join("bad.sh");
         crate::test_support::write_executable(&bad, "#!/bin/sh\necho 'HTTP 502' >&2\nexit 1\n");
-        assert!(read_checks(&bad, dir.path(), "7").is_err());
+        assert!(read_checks(&bad, dir.path(), "7", &|_| {}).is_err());
         let none = dir.path().join("none.sh");
         crate::test_support::write_executable(
             &none,
             "#!/bin/sh\necho \"no checks reported on the 'x' branch\" >&2\nexit 1\n",
         );
-        assert!(read_checks(&none, dir.path(), "7").unwrap().is_empty());
+        assert!(read_checks(&none, dir.path(), "7", &|_| {}).unwrap().is_empty());
     }
 }

@@ -17,7 +17,7 @@ use crate::backlog::runs::{Run, RunDoneError, RunKind, RunOutcome, RunPiece, Run
 use crate::config::ProjectConfig;
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
-use crate::runs::{NoLane, RunLocks, Runs, needs_lane};
+use crate::runs::{NoLane, RunHandle, RunLocks, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
 /// How often the live runs are beaten.
@@ -72,6 +72,8 @@ pub struct RunRequest {
     /// The folder of the lane the run holds; `None` for a kind that runs in none.
     pub lane: Option<PathBuf>,
     pub ends: RunEndSender,
+    /// Where the run registers each process it starts, and where it sees it was stopped.
+    pub handle: Arc<RunHandle>,
     pub context: RunContext,
 }
 
@@ -300,12 +302,9 @@ impl ProjectLoop {
             }
             return false;
         }
-        let lane = self
-            .run_loop
-            .runs
-            .live()
-            .iter()
-            .find(|r| r.token == run.token)
+        let live = self.run_loop.runs.live().iter().find(|r| r.token == run.token);
+        let handle = live.map(|r| r.handle.clone()).unwrap_or_default();
+        let lane = live
             .and_then(|r| r.lane)
             .map(|k| lane_path(Path::new(&self.project.worktrees_dir), k));
         let request = RunRequest {
@@ -314,6 +313,7 @@ impl ProjectLoop {
             piece: run.piece,
             lane,
             ends: self.run_loop.ends_tx.clone(),
+            handle,
             context: RunContext {
                 project: self.id.clone(),
                 config: self.project.clone(),

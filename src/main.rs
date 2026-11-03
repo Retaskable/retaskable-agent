@@ -344,7 +344,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
-        run_starters: Vec::new(),
+        run_starters: vec![orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>],
         drafts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::draft_host::ClaudeDrafts::new(
                 dir.to_path_buf(),
