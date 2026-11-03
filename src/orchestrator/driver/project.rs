@@ -215,6 +215,11 @@ pub trait SessionStarter: Send + Sync {
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
+    /// Starts a read-only triager session on a stopped item (06.9). Must not block; it reports its end through
+    /// `request.outcomes` as [`SessionResult::Triage`](super::SessionResult::Triage). An `Err` counts as a failed look.
+    fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
+        Err("this computer has no triager".into())
+    }
     /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`).
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
@@ -306,6 +311,10 @@ pub struct ProjectLoop {
     pub(super) draft: Option<super::drafts::RunningDraft>,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
+    /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
+    pub(super) triaging: std::collections::BTreeSet<String>,
+    /// The `triage-session` flag as of the last pass.
+    pub(super) triage_flag: bool,
 }
 
 impl ProjectLoop {
@@ -353,6 +362,8 @@ impl ProjectLoop {
             playing: BTreeMap::new(),
             draft: None,
             landing: Default::default(),
+            triaging: Default::default(),
+            triage_flag: false,
         }
     }
 

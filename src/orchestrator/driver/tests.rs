@@ -458,6 +458,7 @@ struct Fake {
     step_panics: AtomicBool,
     /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
     games: Mutex<Vec<Game>>,
+    triage: triage::Triager,
 }
 
 /// The directory, the command, the lane, and whether it has closed.
@@ -523,6 +524,10 @@ impl SessionStarter for Fake {
 
     fn active(&self) -> u32 {
         self.active.load(Ordering::SeqCst)
+    }
+
+    fn triage(&self, request: TriageRequest) -> Result<(), String> {
+        self.triage.start(request)
     }
 
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
@@ -989,3 +994,4 @@ mod reporting;
 mod restart;
 mod runs;
 mod settling;
+mod triage;

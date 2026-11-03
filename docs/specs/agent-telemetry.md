@@ -57,7 +57,7 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 
 | kind | when | fields |
 | --- | --- | --- |
-| `item_state` | any item's state changes. Recorded in one place, `Store.update`, which compares the state before and after | `item`, `from`, `to`, `note` (the timeline note that came with it), `lane` |
+| `item_state` | any item's state changes. Recorded in one place, `Store.update`, which compares the state before and after | `item`, `from`, `to`, `note` (the timeline note that came with it), `lane`, `claudeOnIt` (on an item at `needs_human`: whether Claude is looking into it or about to, 06.9) |
 | `lane_taken`, `lane_freed` | `laneItems` changes (compared on each save of the state, and each minute) | `lane`, `item`, `why` (the item's state, and its last note) |
 | `lease` | an item's lease in the shared backlog changes (also in `Store.update`) | `item`, `change`: `taken`, `parked`, `released` or `lost` |
 | `claim` | a `claim_next` to the store is answered | `answer`: the item id, `none`, or `failed` |

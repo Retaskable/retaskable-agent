@@ -28,7 +28,9 @@ payload!(ItemState {
     from: String,
     to: String,
     note: String,
-    lane: u32
+    lane: u32,
+    #[serde(rename = "claudeOnIt")]
+    claude_on_it: bool
 });
 payload!(LaneTaken {
     item: String,

@@ -52,6 +52,8 @@ pub enum SessionResult {
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
     /// section 3.5).
     Limited { why: String, resets_in: Option<Duration> },
+    /// A triager session ended (06.9); `outcome.lane` is the item's lane, 0 when it had none.
+    Triage(super::TriageEnd),
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -264,22 +266,6 @@ impl ProjectLoop {
         let Some(to) = self.runs.get(item).map(|r| r.state) else {
             return;
         };
-        if from != to {
-            self.events.add_in(
-                &self.id,
-                Event::ItemState(event::ItemState {
-                    item: Some(item.to_string()),
-                    from: Some(state_name(from).into()),
-                    to: Some(state_name(to).into()),
-                    ..Default::default()
-                }),
-            );
-        }
-        match to {
-            ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
-            to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
-            _ => {}
-        }
         if to == ItemState::NeedsHuman && from != to {
             // A session's own reason is its note; a step's is fixed by the state it escalated from.
             let reason = if from == ItemState::Implementing {
@@ -290,7 +276,28 @@ impl ProjectLoop {
             let slice = self.runs.get(item).map_or(0, |r| r.slice);
             if let Some(record) = self.records.get_mut(item) {
                 record.new_stop(state_name(from), &reason, slice);
+                record.state = "needs_human".into();
             }
+        }
+        if from != to {
+            self.events.add_in(
+                &self.id,
+                Event::ItemState(event::ItemState {
+                    item: Some(item.to_string()),
+                    from: Some(state_name(from).into()),
+                    to: Some(state_name(to).into()),
+                    claude_on_it: (to == ItemState::NeedsHuman
+                        && self.triage_flag
+                        && self.project.triage == crate::config::OnOff::On)
+                        .then(|| self.claude_on_it(item)),
+                    ..Default::default()
+                }),
+            );
+        }
+        match to {
+            ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
+            to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
+            _ => {}
         }
         self.refresh_record(pool, item);
     }
@@ -299,6 +306,10 @@ impl ProjectLoop {
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
     /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
     async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
+        if let SessionResult::Triage(end) = &outcome.result {
+            self.triage_ended(&outcome.item_id, outcome.lane, end.clone(), shared);
+            return;
+        }
         let item = outcome.item_id;
         let lane = outcome.lane;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
@@ -363,7 +374,7 @@ impl ProjectLoop {
         match outcome.result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Interrupted => {}
+            SessionResult::Interrupted | SessionResult::Triage(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();

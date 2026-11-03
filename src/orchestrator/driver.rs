@@ -30,6 +30,7 @@ mod report;
 mod runs;
 mod settle;
 mod triage_facts;
+mod triage_run;
 
 pub use drafts::{DraftHost, DraftJob};
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
@@ -39,6 +40,7 @@ pub use project::{
 };
 pub use runs::{BEAT_EVERY, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
+pub use triage_run::{LookFailure, TriageEnd, TriageRequest};
 
 #[cfg(test)]
 mod tests;
