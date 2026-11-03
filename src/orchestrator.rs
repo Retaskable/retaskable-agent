@@ -23,8 +23,8 @@ pub mod piece_runs;
 pub mod round_robin;
 pub mod session;
 pub mod steps;
-pub mod trial_host;
 mod triage_session;
+pub mod trial_host;
 pub mod watch_run;
 
 use std::collections::BTreeMap;
