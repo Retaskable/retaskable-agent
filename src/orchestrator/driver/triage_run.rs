@@ -1,8 +1,9 @@
 //! Looking at a stopped item (docs/specs/agent/06.9-triage-claude-looks-at-needs-you-first.md bullets 1, 16, 18 and
 //! 20): while a project's `triage` is on, each `needs_human` stop that `schedule::wants_triage` holds for gets one
 //! read-only triager session, started through the [`SessionStarter`] when a session slot is free, and its end comes
-//! back on the outcome channel like any session's. Every finding is carried out as `human`: its reason is added to the
-//! item's, with a `person_steps` answer's steps listed under it. A look that fails is tried again 10 minutes later,
+//! back on the outcome channel like any session's. A `human` finding's reason is added to the
+//! item's, with a `person_steps` answer's steps listed under it. A `continue`, `start_over` or `skip` decision is
+//! carried out through the button code (`item_commands.rs`), and a `person_steps` one with no PR waits for its steps. A look that fails is tried again 10 minutes later,
 //! then 20 (or once the usage limit lifts); on the third failure the reason says Claude couldn't look into it. A look
 //! that hit its budget isn't tried again. The record holds the marks, so a restart never looks at a stop twice.
 use std::time::{Duration, Instant};
@@ -17,7 +18,7 @@ use crate::lane_pool::LanePool;
 use crate::orchestrator::fresh_start::LIMIT_PAUSE;
 use crate::telemetry::{Event, event};
 use crate::triage::record::needs_human_facts;
-use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, wants_triage};
+use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, triage_count, wants_triage};
 use crate::triage::{TriageContext, TriageDecision};
 
 /// Failed looks at one stop before the item waits for a person with a note.
@@ -56,6 +57,8 @@ pub enum TriageEnd {
         decision: TriageDecision,
         reason: String,
         steps: Vec<String>,
+        /// The next message (`continue`) or notes (`start_over`); empty when there are none.
+        instructions: String,
     },
     Failed {
         note: String,
@@ -75,7 +78,11 @@ impl ProjectLoop {
     /// Whether Claude is looking into `item_id` or about to (`claudeOnIt`).
     pub(super) fn claude_on_it(&self, item_id: &str) -> bool {
         self.records.get(item_id).is_some_and(|r| {
-            let facts = needs_human_facts(r, false, self.triaging.contains(item_id));
+            let facts = needs_human_facts(
+                r,
+                self.claude_pending.contains(item_id),
+                self.triaging.contains(item_id),
+            );
             claude_on_it(&facts, self.triage_flag && self.project.triage == OnOff::On)
         })
     }
@@ -178,7 +185,14 @@ impl ProjectLoop {
     }
 
     /// A triager's end, back on the outcome channel. An item that a person already moved on from is left alone.
-    pub(super) fn triage_ended(&mut self, item_id: &str, lane: u32, end: TriageEnd, shared: &mut Shared<'_>) {
+    pub(super) async fn triage_ended(
+        &mut self,
+        item_id: &str,
+        lane: u32,
+        end: TriageEnd,
+        pool: &mut LanePool,
+        shared: &mut Shared<'_>,
+    ) {
         self.events.add_in(
             &self.id,
             Event::SessionEnd(event::SessionEnd {
@@ -190,14 +204,14 @@ impl ProjectLoop {
             }),
         );
         match end {
-            TriageEnd::Found { reason, steps, .. } => {
-                // Every decision is left to a person for now (`human`), so nothing is lost: the reason and any
-                // steps are listed under the item's.
-                let mut text = format!("Claude looked into it: {reason}");
-                for (n, step) in steps.iter().enumerate() {
-                    text.push_str(&format!("\n{}. {step}", n + 1));
-                }
-                self.look_found(item_id, &text);
+            TriageEnd::Found {
+                decision,
+                reason,
+                steps,
+                instructions,
+            } => {
+                self.decided(item_id, decision, &reason, &steps, &instructions, pool, shared)
+                    .await;
             }
             TriageEnd::Failed { note, why } => {
                 if let LookFailure::Limited { resets_in } = &why {
@@ -206,6 +220,73 @@ impl ProjectLoop {
                 }
                 self.look_ended(item_id, note, why);
             }
+        }
+    }
+
+    /// Carries out the triager's `decision` through the same code as the buttons (06.9 bullet 2). Continue and Start
+    /// over are queued for a lane, marked as Claude's; each automatic one counts in `triages` and is never asked
+    /// about again. Past the cap, or with a person's command already waiting, it's left for the person.
+    #[allow(clippy::too_many_arguments)]
+    async fn decided(
+        &mut self,
+        item_id: &str,
+        decision: TriageDecision,
+        reason: &str,
+        steps: &[String],
+        instructions: &str,
+        pool: &mut LanePool,
+        shared: &mut Shared<'_>,
+    ) {
+        let mut text = format!("Claude looked into it: {reason}");
+        for (n, step) in steps.iter().enumerate() {
+            text.push_str(&format!("\n{}. {step}", n + 1));
+        }
+        let Some(record) = self.records.get_mut(item_id).filter(|r| r.state == "needs_human") else {
+            self.triaging.remove(item_id);
+            return;
+        };
+        let count = triage_count(record.triages, record.slice);
+        let queued = (self.continuing.iter().chain(&self.starting_over)).any(|(id, _)| id == item_id);
+        let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
+        let verb = match decision {
+            TriageDecision::Continue => "continue",
+            TriageDecision::StartOver => "start over",
+            TriageDecision::Skip => "skip",
+            TriageDecision::PersonSteps if !steps.is_empty() && !has_pr => "wait for your steps",
+            _ => "",
+        };
+        if verb.is_empty() || queued || (verb != "wait for your steps" && count >= MAX_TRIAGES) {
+            self.look_found(item_id, &text);
+            return;
+        }
+        self.triaging.remove(item_id);
+        record.triaged = true;
+        if verb == "wait for your steps" {
+            let list: Vec<String> = steps
+                .iter()
+                .enumerate()
+                .map(|(n, s)| format!("{}. {s}", n + 1))
+                .collect();
+            record.needs_human_reason = Some(format!("Only steps a person can do are left:\n{}", list.join("\n")));
+        } else {
+            record.triages = Some((record.slice, count + 1));
+        }
+        let notes = Some(instructions.trim().to_string()).filter(|n| !n.is_empty());
+        match decision {
+            TriageDecision::Continue => {
+                self.claude_pending.insert(item_id.to_string());
+                self.continuing.push((item_id.to_string(), notes));
+            }
+            TriageDecision::StartOver => {
+                self.claude_pending.insert(item_id.to_string());
+                self.starting_over.push((item_id.to_string(), notes));
+            }
+            _ => {}
+        }
+        self.save_leases();
+        self.look_note(item_id, format!("Claude decided to {verb}: {reason}"));
+        if decision == TriageDecision::Skip {
+            self.skip_stopped(pool, item_id, true, shared).await;
         }
     }
 

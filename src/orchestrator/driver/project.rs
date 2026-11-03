@@ -313,6 +313,8 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
+    /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
+    pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
 }
@@ -363,6 +365,7 @@ impl ProjectLoop {
             draft: None,
             landing: Default::default(),
             triaging: Default::default(),
+            claude_pending: Default::default(),
             triage_flag: false,
         }
     }

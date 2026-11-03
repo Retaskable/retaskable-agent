@@ -47,6 +47,7 @@ fn found(reason: &str) -> TriageEnd {
         decision: TriageDecision::Human,
         reason: reason.into(),
         steps: vec![],
+        instructions: String::new(),
     }
 }
 
@@ -107,22 +108,6 @@ async fn a_stopped_item_gets_exactly_one_look_that_leaves_a_human_finding_on_its
             .item_notes("a", 10)
             .iter()
             .any(|n| n.contains("it needs a design call"))
-    );
-}
-
-#[tokio::test]
-async fn person_steps_are_left_as_a_human_finding_with_the_steps_listed_under_the_reason() {
-    let end = TriageEnd::Found {
-        decision: TriageDecision::PersonSteps,
-        reason: "only you can".into(),
-        steps: vec!["Add the key".into(), "Press Done".into()],
-    };
-    let (mut rig, _fake) = stopped(vec![end]).await;
-    rig.machine.pass().await;
-    let reason = rig.lp(0).records["a"].needs_human_reason.clone().unwrap();
-    assert!(
-        reason.ends_with("only you can\n1. Add the key\n2. Press Done"),
-        "{reason}"
     );
 }
 
@@ -255,4 +240,200 @@ async fn with_the_triage_session_flag_off_nothing_looks_and_no_event_carries_cla
     }
     assert_eq!(looks(&fake), 0);
     assert!(on_it_events(&mut rig).is_empty());
+}
+
+fn decision(decision: TriageDecision, instructions: &str) -> TriageEnd {
+    TriageEnd::Found {
+        decision,
+        reason: "because".into(),
+        steps: vec![],
+        instructions: instructions.into(),
+    }
+}
+
+/// "a" has a branch and a session to carry on from, and is on slice 1 of the store's view.
+fn pushed(rig: &mut Rig) {
+    let r = rig.lp(0).records.get_mut("a").unwrap();
+    r.branch = Some("a".into());
+    r.impl_session_id = Some("s1".into());
+}
+
+fn timeline(rig: &mut Rig) -> Vec<String> {
+    rig.lp(0).item_notes("a", 20)
+}
+
+#[tokio::test]
+async fn a_continue_decision_resumes_the_item_on_its_branch_with_the_instructions_and_counts() {
+    let (mut rig, fake) = stopped(vec![decision(TriageDecision::Continue, "Use the other API.")]).await;
+    pushed(&mut rig);
+    let before = fake.started.lock().unwrap().len();
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap();
+    assert_eq!(started.len(), before + 1);
+    assert_eq!(started.last().unwrap().follow_up.as_deref(), Some("Use the other API."));
+    drop(started);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    let r = &rig.lp(0).records["a"];
+    assert_eq!(r.triages, Some((r.slice, 1)));
+    assert!(
+        timeline(&mut rig)
+            .iter()
+            .any(|n| n == "Claude decided to continue: because")
+    );
+    assert!(rig.lp(0).claude_pending.is_empty());
+}
+
+#[tokio::test]
+async fn a_start_over_decision_starts_a_new_attempt_with_the_instructions_in_its_first_prompt() {
+    let (mut rig, fake) = stopped(vec![decision(TriageDecision::StartOver, "Try a smaller change.")]).await;
+    pushed(&mut rig);
+    let before = fake.started.lock().unwrap().len();
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap();
+    assert_eq!(started.len(), before + 1);
+    let last = started.last().unwrap();
+    assert_eq!(
+        (last.attempt, last.notes.as_deref()),
+        (1, Some("Try a smaller change."))
+    );
+    drop(started);
+    assert_eq!(rig.lp(0).records["a"].triages.map(|t| t.1), Some(1));
+}
+
+#[tokio::test]
+async fn a_skip_decision_skips_the_item_in_the_store() {
+    let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["triage-session"]));
+    let fake = rig.go_live();
+    fake.script
+        .lock()
+        .unwrap()
+        .push(SessionResult::NeedsHuman("first problem".into()));
+    rig.machine.pass().await;
+    *fake.triage.ends.lock().unwrap() = vec![decision(TriageDecision::Skip, "")];
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(!rig.lp(0).runs.contains_key("a"));
+    assert!(ops(&asked).contains(&"skip".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn a_decision_past_the_cap_is_left_for_a_person() {
+    let (mut rig, fake) = stopped(vec![]).await;
+    pushed(&mut rig);
+    let slice = rig.lp(0).records["a"].slice;
+    rig.lp(0).records.get_mut("a").unwrap().triages = Some((slice, 2));
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 0,
+        result: SessionResult::Triage(decision(TriageDecision::Continue, "again")),
+        context_tokens: None,
+        usage: None,
+        notes: vec![],
+        session_id: None,
+    });
+    let before = fake.started.lock().unwrap().len();
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), before);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert!(
+        rig.lp(0).records["a"]
+            .needs_human_reason
+            .clone()
+            .unwrap()
+            .contains("Claude looked into it")
+    );
+}
+
+#[tokio::test]
+async fn a_decision_waiting_for_a_lane_starts_when_one_frees_with_no_second_look() {
+    let (mut rig, fake) = stopped(vec![decision(TriageDecision::Continue, "Go on.")]).await;
+    pushed(&mut rig);
+    let holders: Vec<_> = (1..=2)
+        .map(|n| Holder::Item {
+            project: "p9".into(),
+            item: format!("o{n}"),
+        })
+        .collect();
+    for (n, h) in holders.iter().enumerate() {
+        rig.machine.pool.take(n as u32 + 1, h.clone());
+    }
+    let before = fake.started.lock().unwrap().len();
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), before);
+    assert!(rig.lp(0).claude_on_it("a"), "claudeOnIt stays true while it waits");
+    rig.machine.pass().await;
+    assert_eq!(looks(&fake), 1);
+    rig.machine.pool.release(1, &holders[0]);
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), before + 1);
+    assert_eq!(looks(&fake), 1, "Claude isn't asked again");
+    assert!(!rig.lp(0).claude_on_it("a"));
+}
+
+#[tokio::test]
+async fn a_persons_command_drops_claudes_waiting_decision() {
+    let (mut rig, fake) = stopped(vec![decision(TriageDecision::Continue, "Claude's way.")]).await;
+    pushed(&mut rig);
+    let holders: Vec<_> = (1..=2)
+        .map(|n| Holder::Item {
+            project: "p9".into(),
+            item: format!("o{n}"),
+        })
+        .collect();
+    for (n, h) in holders.iter().enumerate() {
+        rig.machine.pool.take(n as u32 + 1, h.clone());
+    }
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).continuing.len(), 1);
+    rig.machine
+        .links
+        .item_commands
+        .push(crate::view::ItemCommand::Continue {
+            project: "p0".into(),
+            item: "a".into(),
+            notes: Some("Person's way.".into()),
+        });
+    rig.machine.pool.release(1, &holders[0]);
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap();
+    assert_eq!(started.last().unwrap().follow_up.as_deref(), Some("Person's way."));
+    drop(started);
+    assert!(rig.lp(0).continuing.is_empty() && rig.lp(0).claude_pending.is_empty());
+}
+
+fn steps_end() -> TriageEnd {
+    TriageEnd::Found {
+        decision: TriageDecision::PersonSteps,
+        reason: "only you can".into(),
+        steps: vec!["Add the key".into(), "Press Done".into()],
+        instructions: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn person_steps_with_no_pr_wait_for_the_steps() {
+    let (mut rig, _fake) = stopped(vec![steps_end()]).await;
+    rig.machine.pass().await;
+    let r = rig.lp(0).records["a"].clone();
+    assert_eq!(
+        r.needs_human_reason.unwrap(),
+        "Only steps a person can do are left:\n1. Add the key\n2. Press Done"
+    );
+    assert!(r.triaged && r.triages.is_none());
+    assert!(!rig.lp(0).claude_on_it("a"));
+}
+
+#[tokio::test]
+async fn person_steps_with_a_pr_are_human_with_the_steps_under_the_reason() {
+    let (mut rig, _fake) = stopped(vec![steps_end()]).await;
+    rig.lp(0).items.get_mut("a").unwrap().pr_url = Some("https://github.com/o/p/pull/3".into());
+    rig.machine.pass().await;
+    let reason = rig.lp(0).records["a"].needs_human_reason.clone().unwrap();
+    assert!(
+        reason.starts_with("first problem") && reason.ends_with("1. Add the key\n2. Press Done"),
+        "{reason}"
+    );
 }
