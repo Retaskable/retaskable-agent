@@ -234,8 +234,15 @@ mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
+                // Read the whole request first: closing with it unread would reset the connection.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 256];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
                 let _ = write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}");
             }
         });
