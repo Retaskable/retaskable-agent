@@ -1,14 +1,18 @@
 //! One round of ideas under the project's `ideas` lock (docs/specs/agent/09-web-ui.md section 9.3, "Ideas";
 //! `write()` in Retaskable.com's agent/src/ideas.ts): reads the store's ideas, runs the read-only `writer`
-//! session through [`crate::ideas::run_round`] and sends the new queue with `ideas_round`. The daily job starts
-//! it, and [`run`] is what the daily job ([`super::ideas_daily`]) or a person's ask calls.
+//! session through [`crate::ideas::run_round`] and sends the new queue with `ideas_round`. The daily job
+//! ([`super::ideas_daily`]) and a person's `ideas_generate` ([`ProjectLoop::ideas_command`]) start it.
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use anyhow::Result;
 
 use super::playtest_round::Job as PlaytestJob;
+use super::{Links, OrchestratorMode, ProjectLoop};
+use crate::backlog::Item;
 use crate::backlog::asks::Audience;
 use crate::backlog::runs::LockTake;
 use crate::config::Engine;
@@ -18,7 +22,8 @@ use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, SessionResult, SessionSpec, engine_for, engine_of, run_session,
 };
 use crate::ideas::{
-    IDEAS_LOCK, IDEAS_MAX_WAITS_DEFAULT, Ideas, QUEUE, Writer, profiles_for, queue_from_store, round_context, run_round,
+    IDEAS_LOCK, IDEAS_MAX_WAITS_DEFAULT, Ideas, QUEUE, Writer, gather_live, live_titles, profiles_for,
+    queue_from_store, round_context, run_round,
 };
 use crate::orchestrator::session::{exists, quiet_timeout};
 
@@ -263,6 +268,78 @@ where
         model: done.model,
         cost_usd: done.cost_usd,
     }
+}
+
+impl ProjectLoop {
+    /// A person's `ideas_generate { fresh }`: starts one non-quiet round as its own task, unless the `ideas-session`
+    /// flag is Off or this project's round is already running (logged either way). The outcome is logged by the round.
+    pub(super) async fn ideas_command(&mut self, fresh: bool, links: &Links) {
+        if !self.flags.on("ideas-session").await {
+            tracing::info!("{}: dropped an ideas_generate: the ideas-session flag is off", self.id);
+            return;
+        }
+        if self.ideas_round_running.swap(true, Ordering::SeqCst) {
+            tracing::info!("{}: Claude is already thinking of ideas.", self.id);
+            return;
+        }
+        let base = PlaytestJob {
+            id: self.id.clone(),
+            client: self.client.clone(),
+            repo: self.repo,
+            project: self.project.clone(),
+            env: links.env.clone(),
+            engine_choice: links.engine_choice.clone(),
+            machine: links.machine.clone(),
+            backlog_url: links.backlog_url.clone(),
+            keychain: links.keychain.clone(),
+            locks: (self.mode == OrchestratorMode::Runs).then(|| self.run_loop.runs().locks()),
+        };
+        let items: Vec<_> = self.items.values().cloned().collect();
+        let running = self.ideas_round_running.clone();
+        tokio::spawn(async move {
+            command_round(base, &items, fresh).await;
+            running.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
+/// Reads what the prompt shows (what went live, the store's audiences) and runs the round; a read that fails
+/// leaves that part out, and the round's outcome is logged by [`run_with`].
+async fn command_round(base: PlaytestJob, items: &[Item], fresh: bool) {
+    let (Some(repo), Ok(Some(token))) = (base.repo, base.keychain.get(&base.backlog_url)) else {
+        tracing::info!("{}: ideas round skipped: not linked to the shared backlog", base.id);
+        return;
+    };
+    let audiences = base.client.audiences(repo, Some(&token)).await.unwrap_or_default();
+    let gh = base
+        .env
+        .get("RETASKABLE_GH")
+        .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+    let cwd = PathBuf::from(&base.project.repo_path);
+    let live = match gather_live(&gh, &cwd, &base.project.github_repo, &base.project.base_branch, items).await {
+        Ok(live) => live,
+        Err(e) => {
+            tracing::warn!("{}: reading what went live failed: {e:#}", base.id);
+            live_titles(items, &HashMap::new())
+        }
+    };
+    let job = Job {
+        base,
+        planner_dir: None,
+        live,
+        audiences,
+        queue: None,
+        max_waits: None,
+    };
+    run(
+        job,
+        Ask {
+            fresh,
+            quiet: false,
+            after: None,
+        },
+    )
+    .await;
 }
 
 #[cfg(test)]

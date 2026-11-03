@@ -684,3 +684,41 @@ fn ask_is_refused_while_the_flag_is_off() {
     assert_eq!(answer["reason"], "Not a command this agent takes yet: ask");
     assert!(v.item_commands.take_asks("one").is_empty());
 }
+
+#[test]
+fn ideas_generate_queues_a_round_and_nacks_when_paused_or_not_set_up() {
+    let v = view();
+    let noop = |_: i32| {};
+    let go = |args: Value, project: &str, v: &AgentView| {
+        run(
+            &cmd("ideas_generate", args),
+            project,
+            &mut Seen::default(),
+            v,
+            &noop,
+            &data_dir(),
+        )
+    };
+    assert_eq!(go(json!({}), "one", &v)["type"], "ack");
+    assert_eq!(go(json!({ "fresh": true }), "one", &v)["type"], "ack");
+    assert_eq!(
+        v.item_commands.take("one"),
+        vec![
+            ItemCommand::Ideas {
+                project: "one".into(),
+                fresh: false
+            },
+            ItemCommand::Ideas {
+                project: "one".into(),
+                fresh: true
+            },
+        ]
+    );
+    assert_eq!(go(json!({}), "", &v)["reason"], "Finish setup first.");
+    v.paused.set("one", Some("test".into()));
+    assert_eq!(
+        go(json!({}), "one", &v)["reason"],
+        "The project is paused: resume it first."
+    );
+    assert!(v.item_commands.take("one").is_empty());
+}
