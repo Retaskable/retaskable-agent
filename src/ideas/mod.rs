@@ -1,4 +1,4 @@
-//! Ideas (docs/specs/agent/09.1-ideas.md; Retaskable.com's `agent/src/ideas.ts`
+//! Ideas (docs/specs/agent/09.3.1-ideas.md; Retaskable.com's `agent/src/ideas.ts`
 //! and `shared/storeIdeas.ts` are the ground truth). After a slice merges, a read-only `writer`
 //! session suggests a few new features or UI improvements, from what went live, the questions asked,
 //! and the owner's past answers. [`refilled`] folds its answer into the queue that waits for a person
