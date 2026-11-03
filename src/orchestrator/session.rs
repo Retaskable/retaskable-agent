@@ -253,28 +253,7 @@ pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
 const INTERRUPTED: &str = "You were interrupted. Continue from where you left off, then return the result.";
 
-/// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
-/// slice over.
-pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
-    let retry = if attempt > 0 {
-        format!("-r{attempt}")
-    } else {
-        String::new()
-    };
-    format!(
-        "retaskable/{}-{}-s{}{retry}",
-        item.id,
-        title_slug(&item.title),
-        item.slice
-    )
-}
-
-/// A piece's branch: `retaskable/<item id>-p<piece n>-<slug of the title>`.
-#[allow(dead_code)] // The run loop names a piece's branch with it.
-pub(super) fn piece_branch_name(item_id: &str, n: u32, title: &str) -> String {
-    format!("retaskable/{item_id}-p{n}-{}", title_slug(title))
-}
-
+/// A title as a branch-name slug: lowercase words joined by `-`, at most 40 characters.
 fn title_slug(title: &str) -> String {
     let slug: String = title
         .to_lowercase()
@@ -286,6 +265,25 @@ fn title_slug(title: &str) -> String {
         .take(40)
         .collect();
     slug.trim_end_matches('-').to_string()
+}
+
+/// A piece's branch: `retaskable/<piece id>-<slug of the title>` (pieces.md: one branch per piece, kept for its
+/// `fix` runs).
+#[allow(dead_code)] // the piece runs call it
+pub(super) fn piece_branch_name(piece_id: &str, title: &str) -> String {
+    format!("retaskable/{piece_id}-{}", title_slug(title))
+}
+
+/// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
+/// slice over.
+pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
+    let slug = title_slug(&item.title);
+    let retry = if attempt > 0 {
+        format!("-r{attempt}")
+    } else {
+        String::new()
+    };
+    format!("retaskable/{}-{}-s{}{retry}", item.id, slug, item.slice)
 }
 
 /// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at

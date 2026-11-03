@@ -34,7 +34,7 @@ mod test_support;
 
 pub use code_gates::GateResult;
 pub use model::{ImplementerResult, Playtest, Question, implementer_result_schema};
-pub use prompt::{Prompt, build_prompt, checks_text, gate_rule};
+pub use prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt, checks_text, gate_rule};
 pub use session::{
     Interrupted, MaxTurns, Session, SilenceKilled, Start, new_session_id, run_implementer, session_spec,
 };
