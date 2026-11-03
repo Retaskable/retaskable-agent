@@ -499,6 +499,7 @@ impl SessionStarter for Fake {
                 context_tokens: *self.context_tokens.lock().unwrap(),
                 usage: None,
                 notes: vec![],
+                session_id: None,
             });
         }
         Ok(())
@@ -798,6 +799,7 @@ async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
         usage: Some(usage.clone()),
         context_tokens: None,
         notes: vec![],
+        session_id: None,
     });
     rig.machine.poll().await;
     assert_eq!(
