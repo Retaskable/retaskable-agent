@@ -3,7 +3,7 @@
 //! makes its docs-only worktree, runs the drafter, and reports how it ended with `draft_report`. The
 //! loop keeps only the running draft's id and session id, in memory: the store has the draft, and a
 //! claim that comes back with a session id resumes that session, so a restart carries on. What a person
-//! does with the draft afterwards is mostly not here: edit and discard are `drafts::actions` (commands), approve is later. A claim that carries send-back notes or answers resumes the session with them, and answers are acknowledged with `draft_answer_taken`.
+//! does with the draft afterwards is mostly not here: Edit is the `draft_edit` command (`drafts::actions`); Approve, Merge into main and Discard are carried out by `driver::land`. A claim that carries send-back notes or answers resumes the session with them, and answers are acknowledged with `draft_answer_taken`.
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
