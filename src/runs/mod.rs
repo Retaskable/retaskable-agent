@@ -4,9 +4,11 @@
 //! state.json.
 mod build_end;
 mod locks;
+mod outside;
 mod wind;
 pub use build_end::{Pushed, change_json, end_from_answer, limited_end, needs_push, questions_json};
 pub use locks::{RunLocks, lock_ceiling};
+pub use outside::is_outside;
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;

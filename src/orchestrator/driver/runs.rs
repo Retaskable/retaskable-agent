@@ -201,7 +201,17 @@ impl ProjectLoop {
             }
         }
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
-        for end in due {
+        let outside_flag = self.flags.on("run-limits-and-causes").await;
+        for mut end in due {
+            if outside_flag
+                && let RunOutcome::Failed(why) = &end.outcome
+                && crate::runs::is_outside(why)
+            {
+                if !end.result.is_object() {
+                    end.result = json!({});
+                }
+                end.result["outside"] = json!(true);
+            }
             let answer = self
                 .client
                 .run_done(repo, token, &end.token, &end.outcome, end.result)
