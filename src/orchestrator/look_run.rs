@@ -5,13 +5,13 @@
 //! the ceiling cuts it; the run ends exactly once through `request.ends`, unless the loop already ended it.
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
 use super::driver::{RunRequest, RunStarter, piece_id};
 use super::plan_run::{Cut, claude_project, spawn_run};
 use super::session::quiet_timeout;
+pub use super::slot::Slot;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -25,30 +25,6 @@ use crate::tiers::{implementer_tier, mid_tier};
 use crate::{lanes, paths};
 
 const TEMPLATE: &str = include_str!("../../prompts/look.md");
-
-/// The computer's one plan-or-look at a time: whoever holds the slot is the one running.
-#[derive(Clone, Default)]
-pub struct Slot(Arc<AtomicBool>);
-
-/// Holds the [`Slot`] until it's dropped, however the run's task ends (a panic included).
-pub struct SlotGuard(Arc<AtomicBool>);
-
-impl Slot {
-    pub fn busy(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-
-    /// The slot, if nobody else has it.
-    pub fn take(&self) -> Option<SlotGuard> {
-        (!self.0.swap(true, Ordering::SeqCst)).then(|| SlotGuard(self.0.clone()))
-    }
-}
-
-impl Drop for SlotGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
 
 /// Runs `look` runs of the projects it was built with, one at a time on this computer.
 pub struct LookRuns {

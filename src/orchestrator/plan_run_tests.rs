@@ -5,6 +5,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::*;
 use crate::orchestrator::driver::{RunEndSender, RunProcesses};
 use crate::orchestrator::fake_session_tests::{Fake, assert_ran_read_only_in, cut_registered_tree, fake_claude};
+use crate::orchestrator::look_run::LookRuns;
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -21,7 +22,14 @@ fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
         mut project,
     } = fake_claude(out, extra);
     project.budget.planner_usd = 1.5;
-    let starter = PlanRuns::new(root.join("data"), vec![project], choice, env, ModelsConfig::default());
+    let starter = PlanRuns::new(
+        root.join("data"),
+        vec![project],
+        choice,
+        env,
+        ModelsConfig::default(),
+        Slot::default(),
+    );
     Rig {
         _dir: dir,
         root,
@@ -162,4 +170,31 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
     let mut other = EngineChoiceConfig::default();
     other.roles.planner = Some(Engine::Codex);
     assert!(rig(&answer(GOOD), "", other).starter.kinds().is_empty());
+}
+
+#[tokio::test]
+async fn a_plan_and_a_look_share_one_slot() {
+    let r = rig(&answer(GOOD), "sleep 60", EngineChoiceConfig::default());
+    let look = LookRuns::new(
+        r.starter.data_dir.clone(),
+        r.starter.projects.clone(),
+        EngineChoiceConfig::default(),
+        r.starter.env.clone(),
+        ModelsConfig::default(),
+        r.starter.slot.clone(),
+    );
+    // A look holds the slot: no plan is asked for or started.
+    let held = r.starter.slot.take().unwrap();
+    assert!(r.starter.kinds().is_empty() && look.kinds().is_empty());
+    let (req, _s) = request(brief());
+    assert!(r.starter.start(req).unwrap_err().contains("already running"));
+    drop(held);
+    // A plan holds it: no look is asked for or started.
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    assert!(look.kinds().is_empty());
+    let (mut req, _s2) = request(brief());
+    req.kind = RunKind::Look;
+    assert!(look.start(req).unwrap_err().contains("already running"));
+    cut_registered_tree(&mut s.trees).await;
 }

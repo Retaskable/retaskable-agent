@@ -354,6 +354,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .collect(),
         bug_version: connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default()),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
+            // One plan or look at a time on this computer: both runners hold this slot.
+            let plan_or_look = orchestrator::slot::Slot::default();
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
                 orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
@@ -364,6 +366,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     config::engine_choice(cfg, env),
                     env.clone(),
                     cfg.machine.models,
+                    plan_or_look.clone(),
                 )) as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::look_run::LookRuns::new(
                     dir.to_path_buf(),
@@ -371,7 +374,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     config::engine_choice(cfg, env),
                     env.clone(),
                     cfg.machine.models,
-                    orchestrator::look_run::Slot::default(),
+                    plan_or_look,
                 )) as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),

@@ -4,13 +4,14 @@
 //! this computer.
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
 use super::session::{exists, quiet_timeout};
+use super::slot::Slot;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -214,7 +215,8 @@ pub struct PlanRuns {
     pub choice: EngineChoiceConfig,
     pub env: Env,
     pub models: ModelsConfig,
-    running: Arc<AtomicBool>,
+    /// Shared with the look runner: one plan or look at a time.
+    slot: Slot,
 }
 
 impl PlanRuns {
@@ -224,6 +226,7 @@ impl PlanRuns {
         choice: EngineChoiceConfig,
         env: Env,
         models: ModelsConfig,
+        slot: Slot,
     ) -> Self {
         Self {
             data_dir,
@@ -231,7 +234,7 @@ impl PlanRuns {
             choice,
             env,
             models,
-            running: Arc::default(),
+            slot,
         }
     }
 
@@ -241,20 +244,11 @@ impl PlanRuns {
     }
 }
 
-/// Clears the computer's plan flag when the run's task ends, however it ends (a panic included).
-struct Running(Arc<AtomicBool>);
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
-    }
-}
-
 impl RunStarter for PlanRuns {
     fn kinds(&self) -> Vec<RunKind> {
         // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
         let claude = self.planner_on_claude(None) && self.projects.iter().all(|p| self.planner_on_claude(Some(p)));
-        if claude && !self.running.load(Ordering::SeqCst) {
+        if claude && !self.slot.busy() {
             vec![RunKind::Plan]
         } else {
             Vec::new()
@@ -263,10 +257,10 @@ impl RunStarter for PlanRuns {
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
         let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.planner_on_claude(Some(p)))?;
-        if self.running.swap(true, Ordering::SeqCst) {
-            return Err("a plan run is already running on this computer".into());
-        }
-        let guard = Running(self.running.clone());
+        let guard = self
+            .slot
+            .take()
+            .ok_or("a plan or look run is already running on this computer")?;
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
