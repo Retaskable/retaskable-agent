@@ -26,7 +26,7 @@ pub(crate) use machine::{
 };
 pub use project::{
     CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, Playtests, ProjectBudget, ProjectConfig,
-    ProjectType, SandboxMode,
+    ProjectType, ReviewConfig, SandboxMode,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
