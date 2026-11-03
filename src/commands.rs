@@ -9,8 +9,8 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
-//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]) and **draft_files** (answered live from the draft's worktree). Start over is not built yet; Play on a lane
-//! is a later piece. Every command checked, run or refused is written to
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
+//! `orchestrator::driver::lane_play`) and **draft_files** (answered live from the draft's worktree). Start over is not built yet. Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -240,14 +240,15 @@ fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Val
     ack(&cmd.id)
 }
 
-/// `play { lane: 0 }` / `stop { lane: 0 }`: Play main ([`crate::play`]). Any other lane is a later piece.
+/// `play { lane }` / `stop { lane }`: lane 0 is Play main ([`crate::play`]). A lane from 1 is queued for the
+/// orchestrator loop, which owns the lanes and decides (`orchestrator::driver::lane_play`).
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
-    if lane != Some(0) {
-        return nack(
-            &cmd.id,
-            format!("Not a command this agent takes yet: {} on a lane", cmd.name),
-        );
+    match lane {
+        Some(0) => {}
+        Some(k) if k > 0 && k <= i64::from(view.lanes) => return play_in_lane(cmd, project, view, k as u32),
+        Some(k) if k > 0 => return nack(&cmd.id, format!("This computer has no lane {k}.")),
+        _ => return nack(&cmd.id, format!("{} needs a lane.", cmd.name)),
     }
     let Some(p) = view.projects.iter().find(|p| p.id == project) else {
         return nack(&cmd.id, "Finish setup first.".to_string());
@@ -261,6 +262,28 @@ fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
         Ok(()) => ack(&cmd.id),
         Err(reason) => nack(&cmd.id, reason),
     }
+}
+
+fn play_in_lane(cmd: &Command, project: &str, view: &AgentView, lane: u32) -> Value {
+    if !view.item_commands.claim() {
+        return nack(
+            &cmd.id,
+            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
+        );
+    }
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return nack(&cmd.id, "Finish setup first.".to_string());
+    };
+    let project = project.to_string();
+    if cmd.name == "play" {
+        if p.play_command.trim().is_empty() {
+            return nack(&cmd.id, "No play command set for this project.".to_string());
+        }
+        view.item_commands.push(ItemCommand::Play { project, lane });
+    } else {
+        view.item_commands.push(ItemCommand::Stop { project, lane });
+    }
+    ack(&cmd.id)
 }
 
 /// `draft_files { id }`: the draft's changed files and patches, listed live from its worktree
@@ -505,22 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn play_and_stop_nack_a_lane_other_than_zero_and_a_blank_command() {
+    fn play_and_stop_nack_a_missing_lane_and_a_blank_command() {
         let v = view();
         let noop = |_: i32| {};
         for name in ["play", "stop"] {
-            let answer = run(
-                &cmd(name, json!({ "lane": 2 })),
-                "one",
-                &mut Seen::default(),
-                &v,
-                &noop,
-                &data_dir(),
-            );
-            assert_eq!(
-                answer["reason"],
-                format!("Not a command this agent takes yet: {name} on a lane")
-            );
+            for args in [json!({}), json!({ "lane": -1 })] {
+                let answer = run(&cmd(name, args), "one", &mut Seen::default(), &v, &noop, &data_dir());
+                assert_eq!(answer["reason"], format!("{name} needs a lane."));
+            }
         }
         let answer = run(
             &cmd("play", json!({ "lane": 0 })),
@@ -531,6 +546,45 @@ mod tests {
             &data_dir(),
         );
         assert_eq!(answer["reason"], "No play command set for this project.");
+    }
+
+    #[test]
+    fn play_and_stop_of_a_lane_are_queued_for_the_loop_and_refused_past_lanes() {
+        let mut v = view();
+        v.lanes = 2;
+        v.projects[0].play_command = "game".into();
+        let noop = |_: i32| {};
+        let go = |name, lane, v: &AgentView| {
+            run(
+                &cmd(name, json!({ "lane": lane })),
+                "one",
+                &mut Seen::default(),
+                v,
+                &noop,
+                &data_dir(),
+            )
+        };
+        assert_eq!(
+            go("play", 1, &v)["reason"],
+            "This computer isn't running work (the orchestrator isn't in claim mode)."
+        );
+        v.item_commands.set_claim(true);
+        assert_eq!(go("play", 3, &v)["reason"], "This computer has no lane 3.");
+        assert_eq!(go("play", 2, &v)["type"], "ack");
+        assert_eq!(go("stop", 1, &v)["type"], "ack");
+        assert_eq!(
+            v.item_commands.take("one"),
+            vec![
+                ItemCommand::Play {
+                    project: "one".into(),
+                    lane: 2
+                },
+                ItemCommand::Stop {
+                    project: "one".into(),
+                    lane: 1
+                },
+            ]
+        );
     }
 
     #[test]
@@ -658,7 +712,9 @@ mod tests {
     fn continue_without_notes_queues_none() {
         let v = claiming();
         go(&v, json!({ "id": "a" }), &data_dir());
-        let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0);
+        let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
+            panic!("not a continue")
+        };
         assert_eq!(notes, None);
     }
 
@@ -688,7 +744,9 @@ mod tests {
             dir.path(),
         );
         assert_eq!(answer["type"], "ack");
-        let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0);
+        let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
+            panic!("not a continue")
+        };
         let notes = notes.unwrap();
         let files: Vec<_> = std::fs::read_dir(dir.path().join("attachments")).unwrap().collect();
         assert_eq!(files.len(), 2);

@@ -29,8 +29,21 @@ impl ProjectLoop {
         mut room: u32,
         shared: &mut Shared<'_>,
     ) {
+        self.release_finished_games(pool);
         for command in shared.links.item_commands.take(&self.id) {
-            let ItemCommand::Continue { item, notes, .. } = command;
+            let (item, notes) = match command {
+                ItemCommand::Continue { item, notes, .. } => (item, notes),
+                ItemCommand::Play { lane, .. } => {
+                    if !shared.stopping {
+                        self.play_lane(pool, lane, starter);
+                    }
+                    continue;
+                }
+                ItemCommand::Stop { lane, .. } => {
+                    self.stop_lane(pool, lane);
+                    continue;
+                }
+            };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             if !stopped || self.continuing.iter().any(|(id, _)| *id == item) {
                 tracing::info!("{}: dropped a continue for {item}: it isn't stopped here", self.id);

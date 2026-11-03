@@ -55,12 +55,16 @@ pub enum ItemCommand {
         item: String,
         notes: Option<String>,
     },
+    /// **Play** in lane `lane` (> 0), decided by the loop, which owns the lanes.
+    Play { project: String, lane: u32 },
+    /// **Stop** the game in lane `lane`.
+    Stop { project: String, lane: u32 },
 }
 
 impl ItemCommand {
     fn project(&self) -> &str {
         match self {
-            Self::Continue { project, .. } => project,
+            Self::Continue { project, .. } | Self::Play { project, .. } | Self::Stop { project, .. } => project,
         }
     }
 }

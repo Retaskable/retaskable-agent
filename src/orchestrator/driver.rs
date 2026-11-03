@@ -19,6 +19,7 @@
 //! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
 //! the site's item commands (Continue) that the connector queued.
 mod item_commands;
+mod lane_play;
 mod machine;
 mod playtest_round;
 mod project;
@@ -28,7 +29,7 @@ mod settle;
 
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
 use project::Launch;
-pub use project::{MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode};
+pub use project::{LanePlay, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode};
 pub use runs::{BEAT_EVERY, RunEnd, RunEndSender, RunLoop, RunRequest, RunStarter};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 
