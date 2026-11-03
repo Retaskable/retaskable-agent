@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::project::{ProjectLoop, signed_out};
+use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
@@ -135,6 +136,7 @@ impl ProjectLoop {
         let session_id = claim.draft.session_id.clone().unwrap_or_else(new_session_id);
         let ctx = Ctx {
             client: self.client.clone(),
+            flags: self.flags.clone(),
             repo,
             token,
             lease: claim.token,
@@ -178,6 +180,7 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
 
 struct Ctx {
     client: std::sync::Arc<Client>,
+    flags: std::sync::Arc<crate::flags::Flags>,
     repo: u64,
     token: String,
     lease: String,
@@ -194,6 +197,21 @@ impl Ctx {
         self.client
             .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
             .await
+    }
+
+    /// Retaskable's own message in the chat about `draft`: into the ask that wanted it, or a new conversation. The draft's
+    /// state is already reported, so a message the store doesn't take is only logged.
+    /// Only with the `ask-claude` flag On: Off is today's behaviour, no message.
+    async fn say(&self, draft: &ClaimedDraft, text: &str) {
+        if !self.flags.on("ask-claude").await {
+            return;
+        }
+        let posted = (self.client)
+            .ask_post(self.repo, Some(&self.token), text, &draft.id, draft.ask_id.as_deref())
+            .await;
+        if let Err(e) = posted {
+            tracing::warn!("a draft's chat message didn't reach the store: {e}");
+        }
     }
 
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
@@ -309,7 +327,9 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                     ..Default::default()
                 },
             )
-            .await
+            .await?;
+            ctx.say(&draft, follow_up::HAS_QUESTIONS).await;
+            Ok(())
         }
         (None, DrafterStatus::Failed) => ctx.failed(&id, failed(result.summary.clone())).await,
         (None, _) => {
@@ -432,7 +452,11 @@ async fn open_pr(
     let by = draft.other.get("requestedBy").and_then(Value::as_str);
     let kind_release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
     let trial = draft.intake.as_ref().is_some_and(|i| i.trial);
-    if approves_itself(ctx.project.plans, by, r.risk.as_deref(), kind_release, trial) {
+    let itself = approves_itself(ctx.project.plans, by, r.risk.as_deref(), kind_release, trial);
+    if !itself {
+        ctx.say(draft, follow_up::WRITTEN).await;
+    }
+    if itself {
         let Approve { commands, project } = &ctx.approve;
         commands.push_draft(DraftCommand::Approve {
             project: project.clone(),

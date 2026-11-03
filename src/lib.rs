@@ -19,6 +19,7 @@ pub mod drafts;
 pub mod engines;
 pub mod env;
 pub mod env_path;
+pub mod flags;
 pub mod fs_util;
 pub mod galleries;
 pub mod git_bin;
