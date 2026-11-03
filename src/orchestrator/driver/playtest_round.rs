@@ -8,7 +8,9 @@
 //! here does any of those.
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
+use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
 use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -18,6 +20,7 @@ use crate::env::Env;
 use crate::link::TokenStore;
 use crate::orchestrator::session::{exists, quiet_timeout};
 use crate::playtest_groups::{LastGrouped, Planner, PlaytestEntry, TRYOUT_GROUPS_LOCK, plan, should_group, signature};
+use crate::runs::RunLocks;
 use crate::telemetry::now_ms;
 
 const TEMPLATE: &str = include_str!("../../../prompts/playtest-groups.md");
@@ -34,6 +37,9 @@ pub(super) struct Job {
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
+    /// The project's held locks in `runs` mode: the grouping lock is `lock_take`n into it and beats with the runs.
+    /// `None` in `claim` mode, which uses `chore_lock`.
+    pub locks: Option<RunLocks>,
 }
 
 /// Runs one round for `job`'s project: nothing if there's no repo id yet, no backlog link, the
@@ -95,16 +101,39 @@ pub(super) async fn run(job: Job) {
         );
         return;
     }
-    let answer = match job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, true).await {
-        Ok(answer) => answer,
-        Err(e) => {
-            tracing::warn!("{}: playtest grouping round skipped: taking the lock: {e}", job.id);
-            return;
+    let lock_token = match &job.locks {
+        None => {
+            let answer = match job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, true).await {
+                Ok(answer) => answer,
+                Err(e) => {
+                    tracing::warn!("{}: playtest grouping round skipped: taking the lock: {e}", job.id);
+                    return;
+                }
+            };
+            if answer.by.as_deref() != Some(job.machine.as_str()) {
+                return;
+            }
+            None
+        }
+        Some(locks) => {
+            let note = format!("playtest grouping on {}", job.machine);
+            match job
+                .client
+                .lock_take(repo, Some(&token), TRYOUT_GROUPS_LOCK, Some(&note))
+                .await
+            {
+                Ok(LockTake::Held(lock)) => {
+                    locks.add(&lock, TRYOUT_GROUPS_LOCK, Instant::now());
+                    Some(lock)
+                }
+                Ok(LockTake::HeldBy { .. }) => return,
+                Err(e) => {
+                    tracing::warn!("{}: playtest grouping round skipped: taking the lock: {e}", job.id);
+                    return;
+                }
+            }
         }
     };
-    if answer.by.as_deref() != Some(job.machine.as_str()) {
-        return;
-    }
     let entries: Vec<PlaytestEntry> = waiting
         .iter()
         .map(|t| PlaytestEntry {
@@ -136,7 +165,14 @@ pub(super) async fn run(job: Job) {
         run_session(engine.as_ref(), &bin, &spec, "playtest-groups", None, quiet).await
     })
     .await;
-    match planned.groups {
+    let still_held = match (&job.locks, &lock_token) {
+        (Some(locks), Some(lock)) => locks.held(lock),
+        _ => true,
+    };
+    if !still_held {
+        tracing::info!("{}: playtest grouping round lost its lock, sending nothing", job.id);
+    }
+    match planned.groups.filter(|_| still_held) {
         Some(groups) => {
             let wire: Vec<TryoutGroup> = groups
                 .into_iter()
@@ -156,8 +192,19 @@ pub(super) async fn run(job: Job) {
             }
         }
     }
-    if let Err(e) = job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, false).await {
-        tracing::warn!("{}: dropping the playtest grouping lock failed: {e}", job.id);
+    match (&job.locks, &lock_token) {
+        (Some(locks), Some(lock)) => {
+            // A lost lock needs nothing said to the store.
+            if still_held && let Err(e) = job.client.lock_drop(repo, Some(&token), lock).await {
+                tracing::warn!("{}: dropping the playtest grouping lock failed: {e}", job.id);
+            }
+            locks.remove(lock);
+        }
+        _ => {
+            if let Err(e) = job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, false).await {
+                tracing::warn!("{}: dropping the playtest grouping lock failed: {e}", job.id);
+            }
+        }
     }
 }
 
@@ -165,6 +212,7 @@ pub(super) async fn run(job: Job) {
 mod tests {
     use std::path::Path;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use anyhow::Result;
     use axum::{Json, Router, routing::post};
@@ -205,6 +253,13 @@ mod tests {
                                 *held_by = None;
                             }
                             json!({ "held": held_by.is_some(), "by": held_by.clone() })
+                        }
+                        "lock_take" => {
+                            let held_by = lock_state.lock().unwrap();
+                            match held_by.as_ref() {
+                                Some(by) => json!({ "held": false, "by": by }),
+                                None => json!({ "held": true, "token": "L1" }),
+                            }
                         }
                         _ => Value::Null,
                     };
@@ -279,6 +334,7 @@ mod tests {
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
+            locks: None,
         }
     }
 
@@ -355,5 +411,85 @@ mod tests {
         let recorded = seen.lock().unwrap();
         let groups_args = recorded.iter().find(|(op, _)| op == "tryout_groups").unwrap().1.clone();
         assert_eq!(groups_args["signature"], "k1|k2|k3|k4");
+    }
+
+    fn runs_job(base: &str, bin: &Path, cwd: &Path) -> (Job, RunLocks) {
+        let locks = RunLocks::default();
+        let mut job = job(base, bin, cwd);
+        job.locks = Some(locks.clone());
+        (job, locks)
+    }
+
+    #[tokio::test]
+    async fn a_runs_round_takes_and_drops_the_lock_by_token_and_never_asks_chore_lock() {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false)
+        ]);
+        let (base, seen) = store(waiting, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (job, locks) = runs_job(&base, &bin, dir.path());
+        run(job).await;
+        assert_eq!(
+            ops(&seen),
+            vec!["tryouts_list", "lock_take", "tryout_groups", "lock_drop"]
+        );
+        let recorded = seen.lock().unwrap();
+        assert_eq!(recorded[1].1["name"], TRYOUT_GROUPS_LOCK);
+        assert_eq!(recorded[3].1["token"], "L1");
+        assert!(locks.tokens().is_empty(), "forgotten once dropped");
+    }
+
+    #[tokio::test]
+    async fn a_runs_round_whose_lock_another_computer_holds_is_skipped() {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false)
+        ]);
+        let (base, seen) = store(waiting, Some("other-pc")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (job, locks) = runs_job(&base, &bin, dir.path());
+        run(job).await;
+        assert_eq!(ops(&seen), vec!["tryouts_list", "lock_take"]);
+        assert!(locks.tokens().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runs_round_that_lost_its_lock_sends_no_grouping_and_drops_nothing() {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false)
+        ]);
+        let (base, seen) = store(waiting, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.jsonl");
+        std::fs::write(&out, GROUPED).unwrap();
+        let bin = dir.path().join("slow.sh");
+        crate::test_support::write_executable(
+            &bin,
+            &format!("#!/bin/sh\nsleep 1\ncat \"{}\"\nexit 0\n", out.display()),
+        );
+        let (job, locks) = runs_job(&base, &bin, dir.path());
+        let round = tokio::spawn(run(job));
+        while locks.tokens().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        locks.apply_beat(&std::collections::HashMap::from([(
+            "L1".to_string(),
+            crate::backlog::runs::BeatVerdict::Stop,
+        )]));
+        round.await.unwrap();
+        assert_eq!(ops(&seen), vec!["tryouts_list", "lock_take"]);
     }
 }
