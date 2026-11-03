@@ -13,15 +13,18 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::drafts::{DraftHost, claim_agent};
+use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::project::signed_out;
 use super::{ProjectLoop, Shared};
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
 use crate::config::ProjectConfig;
+use crate::drafts::DrafterStatus;
 use crate::drafts::land::{deletes_head, pr_number, workflow};
 use crate::view::DraftCommand;
 
+/// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
+const HAND_BACKS: u32 = 2;
 /// Tries at the merge once the branch is rebased, and the wait between them.
 const MERGE_TRIES: u32 = 5;
 pub(super) const MERGE_WAIT: Duration = Duration::from_secs(2);
@@ -127,6 +130,45 @@ impl Ctx {
             Err(e) => Err(e.to_string()),
         }
     }
+
+    /// Resumes the draft's drafter session to rebase the branch and resolve the conflicts, then pushes what it did.
+    async fn hand_back(&self, taken: &TakenDraft, branch: &str, reason: &str) -> Result<(), String> {
+        let draft = &taken.draft;
+        let Some(session_id) = draft.session_id.clone() else {
+            return Err("the draft has no session to resume".into());
+        };
+        let (host, project, id, b) = (
+            self.host.clone(),
+            self.project.clone(),
+            draft.id.clone(),
+            branch.to_string(),
+        );
+        let dir = tokio::task::spawn_blocking(move || host.prepare(&project, &id, &b))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?;
+        let job = DraftJob {
+            project: self.project.clone(),
+            draft: draft.clone(),
+            dir: dir.clone(),
+            branch: branch.to_string(),
+            session_id,
+            resume: true,
+            follow_up: rebase_request(reason),
+            usage: None,
+        };
+        let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
+        if result.status == DrafterStatus::Failed {
+            return Err(result.summary);
+        }
+        let title = draft.titles.first().cloned().unwrap_or_else(|| draft.id.clone());
+        let (host, project, b) = (self.host.clone(), self.project.clone(), branch.to_string());
+        tokio::task::spawn_blocking(move || host.publish(&project, &dir, &b, &title, &result.summary))
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    }
 }
 
 fn text<'a>(draft: &'a TakenDraft, key: &str) -> Option<&'a str> {
@@ -175,10 +217,24 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
             ctx.back(&id, &first).await;
             return None;
         };
-        let why = match ctx.rebase(&id, branch).await {
-            Ok(true) => ctx.merge(pr, delete, MERGE_TRIES).await.err(),
-            Ok(false) => Some(format!("it conflicts with {base}. Send it back with notes.")),
-            Err(e) => Some(e),
+        let mut hand_backs = 0;
+        let why = loop {
+            match ctx.rebase(&id, branch).await {
+                Ok(true) => break ctx.merge(pr, delete, MERGE_TRIES).await.err(),
+                Ok(false) if hand_backs < HAND_BACKS => {
+                    hand_backs += 1;
+                    let reason = format!("it conflicts with {base}");
+                    if let Err(e) = ctx.hand_back(&taken, branch, &reason).await {
+                        break Some(format!("{reason}, and the drafter couldn't rebase it: {e}"));
+                    }
+                }
+                Ok(false) => {
+                    break Some(format!(
+                        "it conflicts with {base}, even after going back to the drafter {HAND_BACKS} times. Send it back with notes."
+                    ));
+                }
+                Err(e) => break Some(e),
+            }
         };
         if let Some(why) = why {
             ctx.back(&id, &why).await;

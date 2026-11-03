@@ -81,10 +81,15 @@ fn follow_up(d: &ClaimedDraft) -> String {
     } else if let Some(n) = d.notes.as_deref().filter(|n| !n.trim().is_empty()) {
         format!("The person sent the draft back with these notes:\n{n}")
     } else if let Some(r) = &d.rebase_reason {
-        format!("Rebase the branch onto the base branch and resolve the conflicts, keeping both sides: {r}")
+        rebase_request(r)
     } else {
         INTERRUPTED.to_string()
     }
+}
+
+/// The follow-up that hands a conflicted branch back to the drafter.
+pub(super) fn rebase_request(reason: &str) -> String {
+    format!("Rebase the branch onto the base branch and resolve the conflicts, keeping both sides: {reason}")
 }
 
 impl ProjectLoop {
