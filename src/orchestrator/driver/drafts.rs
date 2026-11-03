@@ -69,9 +69,6 @@ pub trait DraftHost: Send + Sync {
 /// The draft this project is drafting: only ids, never the draft itself.
 pub(super) struct RunningDraft {
     pub id: String,
-    /// The session that is drafting; a restart gets it back from the store's claim.
-    #[allow(dead_code)]
-    pub session_id: String,
     task: JoinHandle<()>,
 }
 
@@ -158,7 +155,7 @@ impl ProjectLoop {
                 tracing::warn!("a draft's report didn't reach the store: {e}");
             }
         });
-        self.draft = Some(RunningDraft { id, session_id, task });
+        self.draft = Some(RunningDraft { id, task });
     }
 }
 
