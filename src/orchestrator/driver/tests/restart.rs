@@ -174,12 +174,17 @@ async fn a_run_is_removed_when_its_lease_is_given_back() {
 
 #[tokio::test]
 async fn a_restart_starts_a_session_over_the_size_limit_fresh_in_its_lane() {
-    let (_rig, fake, saved) = after_restart_sized(None, "building", Some(150_001)).await;
+    let (mut rig, fake, saved) = after_restart_sized(None, "building", Some(150_001)).await;
     let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert!(!started[0].resume);
     assert_ne!(Some(&started[0].session_id), saved.impl_session_id.as_ref());
-    assert_eq!(started[0].follow_up, Some(settle::grown_follow_up(150_001)));
+    let prompt = started[0].follow_up.as_deref().unwrap();
+    assert!(prompt.starts_with("You're picking up"), "{prompt}");
+    assert!(prompt.ends_with("Carry on with the slice."));
+    let noted = (rig.lp(0).events().recent().iter())
+        .any(|e| e.to_value()["note"] == "Its session had grown to 150001 tokens; starting a fresh one");
+    assert!(noted);
     assert_eq!(Some(started[0].lane), saved.lane);
 }
 

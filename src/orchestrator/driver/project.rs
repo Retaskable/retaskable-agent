@@ -19,6 +19,7 @@ use crate::env::Env;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
+use crate::orchestrator::fresh_start::FreshStart;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
@@ -590,7 +591,7 @@ impl ProjectLoop {
                             "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
                             self.id
                         );
-                        Launch::Continuing(super::settle::grown_follow_up(tokens))
+                        self.fresh_launch(&id, lane, FreshStart::Grown(tokens), "Carry on with the slice.")
                     }
                     _ => {
                         tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);

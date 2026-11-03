@@ -364,13 +364,14 @@ async fn a_session_that_runs_out_of_turns_restarts_once_in_the_same_lane() {
     assert!(!ops(&asked).contains(&"release".to_string()));
     let started = fake.started.lock().unwrap();
     assert_eq!(started.len(), 2, "the claim's start and the restart");
-    assert_eq!(
-        started[1].follow_up.as_deref(),
-        Some(
-            "An earlier session ran out of turns before it finished. Check `git status` and \
-             `git diff --stat` for its uncommitted work, then carry on with the slice."
-        )
-    );
+    let prompt = started[1].follow_up.as_deref().unwrap();
+    assert!(prompt.starts_with("You're picking up"), "{prompt}");
+    assert!(prompt.contains("git diff --stat origin/"));
+    assert!(prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP));
+    let notes: Vec<_> = (rig.lp(0).events().recent().iter())
+        .filter_map(|e| e.to_value()["note"].as_str().map(String::from))
+        .collect();
+    assert!(notes.contains(&"An earlier session ran out of turns; starting a fresh one".to_string()));
 }
 
 #[tokio::test]
