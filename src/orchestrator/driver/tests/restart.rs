@@ -241,3 +241,57 @@ async fn a_restart_starts_a_session_fresh_when_its_lane_moved_to_another_engine(
     assert!(noted);
     assert_eq!(rig.lp(0).store.runs()["a"].impl_session_engine, EngineId::Cursor);
 }
+
+#[tokio::test]
+async fn a_restart_starts_a_session_fresh_on_another_engine_when_its_engine_is_at_its_limit() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    // Lane 1 stays on Claude; lane 2 runs Cursor, so Cursor is an engine the implementer may use here.
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": ["claude", "cursor"] })).unwrap();
+    let limited_until = std::time::Instant::now() + Duration::from_secs(600);
+    rig.machine.engine_limits.hit(EngineId::Claude, limited_until);
+    let fake_after = rig.go_live();
+    rig.machine.pass().await;
+    drop(fake);
+    let started = fake_after.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(!started[0].resume);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+    assert!(
+        started[0]
+            .follow_up
+            .as_deref()
+            .unwrap()
+            .starts_with("You're picking up")
+    );
+    let noted = (rig.lp(0).events().recent().iter()).any(|e| {
+        e.to_value()["note"]
+            == "claude is at its usage limit, so this carries on in a fresh cursor session on the branch"
+    });
+    assert!(noted);
+    assert_eq!(rig.lp(0).store.runs()["a"].impl_session_engine, EngineId::Cursor);
+}
+
+#[tokio::test]
+async fn a_restart_resumes_when_its_engine_is_limited_but_nothing_else_can_take_it() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    let limited_until = std::time::Instant::now() + Duration::from_secs(600);
+    rig.machine.engine_limits.hit(EngineId::Claude, limited_until);
+    let fake_after = rig.go_live();
+    rig.machine.pass().await;
+    drop(fake);
+    let started = fake_after.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(started[0].resume);
+}

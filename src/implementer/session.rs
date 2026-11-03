@@ -207,6 +207,33 @@ impl std::fmt::Display for MaxTurns {
 
 impl std::error::Error for MaxTurns {}
 
+/// Marks a failed run's error as the engine's usage limit (engines/03-choosing-the-engine.md section 3):
+/// `resets_in` is how long until the usage reading says the limit lifts, when it said.
+#[derive(Debug)]
+pub struct LimitHit {
+    pub why: String,
+    pub resets_in: Option<std::time::Duration>,
+}
+
+impl std::fmt::Display for LimitHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl std::error::Error for LimitHit {}
+
+/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead.
+fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
+    let usage = usage.filter(|u| u["status"] == "rejected")?;
+    let at = usage["resetsAt"].as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    at.checked_sub(now).map(std::time::Duration::from_secs)
+}
+
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer, alongside the latest usage reading the session's stream reported — set
 /// whenever the stream sent one, whether the session went on to succeed or fail, since that
@@ -231,7 +258,12 @@ where
     let usage = r.usage.clone();
     if !r.ok {
         let why = describe_failure(&r, budget_usd);
-        let err = if r.subtype == "killed_for_silence" {
+        let err = if r.limit_hit {
+            anyhow::Error::new(LimitHit {
+                why,
+                resets_in: resets_in(usage.as_ref()),
+            })
+        } else if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))
         } else if r.subtype == "error_max_turns" {
             anyhow::Error::new(MaxTurns(why))
@@ -470,6 +502,20 @@ mod tests {
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
         let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "error_max_turns", None)) }).await;
         assert!(err.unwrap_err().downcast_ref::<MaxTurns>().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_implementer_reports_a_usage_limit_distinctly() {
+        let it = item(&[], None);
+        let cwd = Path::new("repo");
+        let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
+        let (err, _) = run_implementer(spec, |_| async {
+            let mut r = result(false, "error", None);
+            r.limit_hit = true;
+            Ok(r)
+        })
+        .await;
+        assert!(err.unwrap_err().downcast_ref::<LimitHit>().is_some());
     }
 
     #[test]

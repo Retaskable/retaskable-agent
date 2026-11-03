@@ -164,6 +164,7 @@ fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         items: vec![item(&[], None), queued_item()],
         attempt: 0,
         notes: None,
+        takeover: None,
     };
     (request, rx)
 }

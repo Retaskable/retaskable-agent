@@ -109,6 +109,7 @@ async fn pass(rig: &mut Rig, starter: &FakeRuns, now: Instant) {
         links: &m.links,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
+        engine_limits: &mut Default::default(),
         stopping: false,
     };
     m.projects[0].run_pass(&mut m.pool, starter, &shared, now).await;
@@ -279,6 +280,7 @@ async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
         links: &m.links,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
+        engine_limits: &mut Default::default(),
         stopping: false,
     };
     let started = m.projects[0]
@@ -357,6 +359,7 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
         links: &m.links,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
+        engine_limits: &mut Default::default(),
         stopping: true,
     };
     m.projects[0]

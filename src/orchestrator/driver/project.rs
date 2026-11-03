@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -162,6 +163,10 @@ pub struct StartRequest {
     pub attempt: u32,
     /// A Start over's notes, for the fresh session's first prompt as notes from the last attempt.
     pub notes: Option<String>,
+    /// The engine that takes over from `engine` if it is at its usage limit when the code gates send findings
+    /// back (engines/03 section 3.5): the session starts fresh on it. `None` when `engine` isn't limited or
+    /// nothing else can take it.
+    pub takeover: Option<EngineId>,
 }
 
 /// What [`SessionStarter::abandon`] lets go of.
@@ -181,6 +186,9 @@ pub(super) enum Launch {
     /// A session that ran out of turns or had grown too large: a fresh session id, reusing the existing lane
     /// as-is, with this text as the picking-up prompt.
     Continuing(String),
+    /// [`Continuing`](Self::Continuing) on this engine, not the lane's: the session's own engine is at its usage
+    /// limit and this one takes over.
+    ContinuingOn(String, EngineId),
     /// A person's Start over: a fresh session in a freshly prepared lane on the new attempt's branch, with these
     /// notes (if any) in its first prompt.
     StartOver(Option<String>),
@@ -638,6 +646,25 @@ impl ProjectLoop {
         }
     }
 
+    /// The engine that can take over from `started_on` while it is at its usage limit: another one the
+    /// implementer role may use here (any lane's, or the default's) that isn't limited too.
+    fn takeover(&self, pool: &LanePool, shared: &Shared<'_>, started_on: EngineId) -> Option<EngineId> {
+        let choice = &shared.links.engine_choice;
+        let engines: Vec<EngineId> = (1..=pool.rules().lanes)
+            .map(Some)
+            .chain([None])
+            .map(|lane| {
+                program_of(engine_for(
+                    choice,
+                    self.project.engines.as_ref(),
+                    Role::Implementer,
+                    lane,
+                ))
+            })
+            .collect();
+        shared.engine_limits.takeover(started_on, &engines, Instant::now())
+    }
+
     /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
     /// known size is over `max_resume_context_tokens` starts fresh instead (06.2-implementer.md "A session
     /// that's grown starts fresh"), keeping its lane as-is. Left for a
@@ -663,8 +690,9 @@ impl ProjectLoop {
             }) = record
             {
                 let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
+                let takeover = self.takeover(pool, shared, impl_session_engine);
                 let kind = match impl_context_tokens {
-                    _ if let Some(reason) = fresh_for_engine(impl_session_engine, lane_now) => {
+                    _ if let Some(reason) = fresh_for_engine(impl_session_engine, lane_now, takeover) => {
                         tracing::info!("{}: {id}'s session can't resume ({reason:?}), starting fresh", self.id);
                         self.fresh_launch(&id, lane, reason, "Carry on with the slice.")
                     }
@@ -703,10 +731,15 @@ impl ProjectLoop {
             return false;
         };
         let mut notes = None;
+        let mut on_engine = None;
         let (resume, follow_up) = match kind {
             Launch::Fresh => (None, None),
             Launch::Resume(session_id) => (Some(session_id), None),
             Launch::Continuing(follow_up) => (None, Some(follow_up)),
+            Launch::ContinuingOn(follow_up, to) => {
+                on_engine = Some(to);
+                (None, Some(follow_up))
+            }
             Launch::StartOver(text) => {
                 notes = text;
                 (None, None)
@@ -720,6 +753,7 @@ impl ProjectLoop {
                 .get(item_id)
                 .map(|r| r.impl_session_engine)
                 .unwrap_or_default(),
+            None if let Some(to) = on_engine => to,
             None => program_of(engine_for(
                 &shared.links.engine_choice,
                 self.project.engines.as_ref(),
@@ -734,6 +768,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
+        let takeover = self.takeover(pool, shared, engine);
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
@@ -749,6 +784,7 @@ impl ProjectLoop {
             items: self.items.values().cloned().collect(),
             attempt: self.attempt_of(item_id),
             notes,
+            takeover,
         };
         match starter.start(request) {
             Ok(()) => {

@@ -29,7 +29,7 @@ use crate::engines::{
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
 use crate::implementer::{
-    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
+    ImplementerResult, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
     run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
@@ -112,6 +112,7 @@ impl SessionStarter for ClaudeStarter {
             items,
             attempt,
             notes,
+            takeover,
             ..
         } = request;
         let job = Job {
@@ -132,6 +133,7 @@ impl SessionStarter for ClaudeStarter {
             session_id,
             engine: session_engine,
             lane_engine: lane_engine(&self.choice, lane).map(program_of),
+            takeover,
             resume,
             follow_up,
             items,
@@ -253,6 +255,7 @@ struct Job {
     engine: EngineId,
     /// The engine the lane now has of its own, if any: a send-back resumes only if it matches `engine`.
     lane_engine: Option<EngineId>,
+    takeover: Option<EngineId>,
     resume: bool,
     /// `None` prepares the lane fresh, as a newly claimed item does. `Some` is the picking-up prompt for a
     /// restart after the lane's prior session ran out of turns or had grown too large: the lane is reused
@@ -462,6 +465,8 @@ pub(super) struct FreshRules {
     /// The engine the session started on, and the lane's own engine now (if it has one).
     pub engine: EngineId,
     pub lane_engine: Option<EngineId>,
+    /// The engine that takes over while the one the session started on is at its usage limit.
+    pub takeover: Option<EngineId>,
 }
 
 /// What [`gate_rounds`] asks its caller to run next.
@@ -534,7 +539,9 @@ where
         let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
         // A session resumes only on the engine it started on, and not past `maxResumeContextTokens`.
         let reason = g.fresh.and_then(|f| {
-            fresh_for_engine(current_engine.unwrap_or(f.engine), f.lane_engine).or_else(|| {
+            // The takeover was picked for the engine the session started on, so it only counts until a fresh start moves it.
+            let takeover = f.takeover.filter(|_| current_engine.is_none_or(|e| e == f.engine));
+            fresh_for_engine(current_engine.unwrap_or(f.engine), f.lane_engine, takeover).or_else(|| {
                 a.context_tokens
                     .filter(|t| *t > u64::from(f.max_resume_context_tokens))
                     .map(FreshStart::Grown)
@@ -544,7 +551,8 @@ where
             Some(reason) => {
                 notes.push(reason.history_line());
                 if let Some(f) = g.fresh {
-                    current_engine = Some(f.lane_engine.unwrap_or(current_engine.unwrap_or(f.engine)));
+                    let takeover = reason_takeover(&reason);
+                    current_engine = Some(takeover.or(f.lane_engine).unwrap_or(current_engine.unwrap_or(f.engine)));
                 }
                 next(Step::FixFresh(follow_up)).await?
             }
@@ -552,6 +560,14 @@ where
         };
     }
     Ok(Gated::Settled(a, notes))
+}
+
+/// The engine a fresh start for `reason` moves to for being at its usage limit.
+fn reason_takeover(reason: &FreshStart) -> Option<EngineId> {
+    match reason {
+        FreshStart::EngineLimited { to, .. } => Some(*to),
+        _ => None,
+    }
 }
 
 async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
@@ -565,6 +581,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
             max_resume_context_tokens: job.max_resume_context_tokens,
             engine: job.engine,
             lane_engine: job.lane_engine,
+            takeover: job.takeover,
         }),
     };
     // The session now answering, and whether it is a fresh one (so its id is reported).
@@ -781,6 +798,11 @@ fn session_result_for_answer(
 ) -> (SessionResult, Option<Value>) {
     match answer {
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => (SessionResult::Interrupted, usage),
+        Err(e) if e.downcast_ref::<LimitHit>().is_some() => {
+            let resets_in = e.downcast_ref::<LimitHit>().and_then(|hit| hit.resets_in);
+            let why = format!("The session ended without answering: {e:#}");
+            (SessionResult::Limited { why, resets_in }, usage)
+        }
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
             SessionResult::Failed(format!("went quiet and was killed: {e:#}")),
             usage,
