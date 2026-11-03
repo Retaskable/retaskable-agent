@@ -3,8 +3,8 @@
 //! before the orchestrator loop that will call it exists: a `pub` item here is this crate's own
 //! API, not dead code just because `main` doesn't reach it yet.
 pub mod api;
-pub mod ask;
 pub mod app_menu;
+pub mod ask;
 pub mod backlog;
 pub mod base_hold;
 pub mod checks;
@@ -19,6 +19,7 @@ pub mod drafts;
 pub mod engines;
 pub mod env;
 pub mod env_path;
+pub mod flags;
 pub mod fs_util;
 pub mod galleries;
 pub mod git_bin;

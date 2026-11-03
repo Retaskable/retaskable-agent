@@ -103,6 +103,7 @@ async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) 
     let (base, asked) = store(draft).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude"]));
     let host = Arc::new(Host {
         answers: Mutex::new(answers),
         ..Default::default()
@@ -435,4 +436,17 @@ async fn a_draft_with_questions_says_so_in_the_chat() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0]["replyTo"], "a1");
     assert_eq!(sent[0]["text"], crate::ask::follow_up::HAS_QUESTIONS);
+}
+
+#[tokio::test]
+async fn nothing_is_posted_while_the_ask_claude_flag_is_off() {
+    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
+    let (mut rig, _host, asked) = rig_with(draft, vec![written()]).await;
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
+    reports(&mut rig, &asked, 2).await;
+    for _ in 0..20 {
+        rig.machine.pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(posts(&asked).is_empty());
 }
