@@ -65,8 +65,8 @@ pub struct ClaimedDraft {
     pub branch: Option<String>,
     #[serde(default)]
     pub pr_url: Option<String>,
-    /// The chat ask that asked for this draft; none for **Add spec** and feedback.
-    #[serde(default, alias = "ask")]
+    /// The chat ask the draft was asked for in (none for Add spec and feedback drafts).
+    #[serde(default)]
     pub ask_id: Option<String>,
     /// Any other field of the draft.
     #[serde(flatten)]

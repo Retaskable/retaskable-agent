@@ -1,7 +1,8 @@
-//! Retaskable's own messages in the chat (spec 06.6, "Retaskable's own messages"): written in code, never by a model.
+//! Retaskable's own messages in the chat (docs/specs/agent/06.6-ask-claude.md, "Retaskable's own messages"). They are
+//! written here, in code, never by a model.
 
-/// A draft that is written and waits for a person's yes.
-pub const DRAFT_READY: &str = "The spec is written. Do you want to approve it?";
+/// A draft a person asked for is written and waits for their yes.
+pub const WRITTEN: &str = "The spec is written. Do you want to approve it?";
 
-/// A draft whose drafter has questions for the person.
-pub const DRAFT_QUESTIONS: &str = "I have questions before I can write the spec. Can you answer them?";
+/// The drafter needs answers before it can write the spec.
+pub const HAS_QUESTIONS: &str = "The drafter has questions before it can write this up. Can you answer them?";

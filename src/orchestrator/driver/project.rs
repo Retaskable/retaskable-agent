@@ -274,6 +274,8 @@ pub struct ProjectLoop {
     pub(super) guard: Option<PortGuard>,
     pub(super) events: EventLog,
     pub(super) client: Arc<Client>,
+    /// The Retaskable release flags (`ask-claude` gates the draft step's chat messages).
+    pub(super) flags: Arc<crate::flags::Flags>,
     pub(super) live: LiveHandle,
     /// GitHub's numeric id of `project.github_repo`, asked of `gh` until it answers and then kept.
     pub(super) repo: Option<u64>,
@@ -337,6 +339,7 @@ impl ProjectLoop {
             guard: None,
             events,
             client: Arc::new(client),
+            flags: Arc::new(crate::flags::Flags::from_env()),
             live,
             repo: None,
             running: Running::default(),
