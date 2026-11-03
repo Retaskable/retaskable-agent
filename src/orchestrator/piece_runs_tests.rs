@@ -1,10 +1,11 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
 use crate::orchestrator::driver::RunEndSender;
-use crate::orchestrator::session::tests::{fake_gh, fake_name};
+use crate::orchestrator::session::tests::{fake_gh, fake_name, project_in};
 
 const COMMIT: &str = "echo 'fn a() {}' > small.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm small";
 
@@ -33,30 +34,21 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
     std::fs::write(root.join("out.jsonl"), answer).unwrap();
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
-    let mut project = ProjectConfig {
-        id: Some("p".into()),
-        repo_path: repo.to_string_lossy().into_owned(),
-        worktrees_dir: root.join("worktrees").to_string_lossy().into_owned(),
-        base_branch: "main".into(),
-        github_repo: "o/p".into(),
-        max_check_rounds: 3,
-        ..Default::default()
-    };
-    project.budget.implementer_usd = 5.0;
+    let project = project_in(&root, &repo);
     let (bin, gh) = (bin.to_string_lossy().into_owned(), gh.to_string_lossy().into_owned());
     let env = Env::new(move |k| match k {
         "RETASKABLE_CLAUDE" => Some(bin.clone()),
         "RETASKABLE_GH" => Some(gh.clone()),
         _ => None,
     });
-    let starter = PieceStarter::new(
-        root.join("data"),
-        vec![project],
-        EngineChoiceConfig::default(),
+    let starter = Arc::new(PieceStarter {
+        data_dir: root.join("data"),
+        projects: vec![project],
+        choice: EngineChoiceConfig::default(),
         env,
-        50,
-        ModelsConfig::default(),
-    );
+        max_turns: 50,
+        models: ModelsConfig::default(),
+    });
     Rig {
         _dir: dir,
         root,

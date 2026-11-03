@@ -6,7 +6,7 @@
 //! A beat's `stop` and the ceiling cut the session's process tree ([`RunProcesses`]); the loop releases the
 //! lane whatever the outcome.
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -31,32 +31,12 @@ const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
 
 /// Runs `build` and `fix` runs of the projects it was built with.
 pub struct PieceStarter {
-    data_dir: PathBuf,
-    projects: Vec<ProjectConfig>,
-    choice: EngineChoiceConfig,
-    env: Env,
-    max_turns: u32,
-    models: ModelsConfig,
-}
-
-impl PieceStarter {
-    pub fn new(
-        data_dir: PathBuf,
-        projects: Vec<ProjectConfig>,
-        choice: EngineChoiceConfig,
-        env: Env,
-        max_turns: u32,
-        models: ModelsConfig,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            data_dir,
-            projects,
-            choice,
-            env,
-            max_turns,
-            models,
-        })
-    }
+    pub data_dir: PathBuf,
+    pub projects: Vec<ProjectConfig>,
+    pub choice: EngineChoiceConfig,
+    pub env: Env,
+    pub max_turns: u32,
+    pub models: ModelsConfig,
 }
 
 impl RunStarter for PieceStarter {
@@ -137,17 +117,7 @@ fn piece_item(piece: &RunPiece) -> Item {
         id: piece_id(piece).to_string(),
         title: piece.title.clone(),
         status: ItemStatus::Building,
-        rank: 0,
-        do_next: false,
-        depends_on: Vec::new(),
-        spec_refs: Vec::new(),
-        slice: 0,
-        remaining: None,
-        pr_url: None,
-        branch: None,
-        kind: None,
-        milestone: None,
-        reopened: None,
+        ..Item::default()
     }
 }
 
