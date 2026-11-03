@@ -4,6 +4,7 @@
 //! description, diff range, re-review note and checks text. Factored out so each one's own
 //! context struct holds or embeds one [`ReviewContext`] instead of repeating these fields and the
 //! `render_prompt` vars built from them.
+#[derive(Clone, Copy)]
 pub struct ReviewContext<'a> {
     pub item_id: &'a str,
     pub title: &'a str,
@@ -16,6 +17,13 @@ pub struct ReviewContext<'a> {
     /// The re-review note (`scope` in `review.ts`), or "" for a first review.
     pub scope: &'a str,
     pub checks: &'a str,
+}
+
+/// A piece's brief as a review session reads it in place of an item's slice description: the
+/// piece's `what` and `doneWhen`, then what the implementer says it did. Pass the result as
+/// [`ReviewContext::slice_description`] (and the piece's title as `title`).
+pub fn piece_slice_description(what: &str, done_when: &str, slice_description: &str) -> String {
+    format!("The piece: {what}\nDone when: {done_when}\n\nThe implementer's description:\n{slice_description}")
 }
 
 impl ReviewContext<'_> {
@@ -50,6 +58,15 @@ mod tests {
             scope: "",
             checks: "✓ test",
         }
+    }
+
+    #[test]
+    fn piece_slice_description_puts_the_brief_before_the_implementers_words() {
+        let d = piece_slice_description("Do X", "X works", "Did X");
+        assert_eq!(
+            d,
+            "The piece: Do X\nDone when: X works\n\nThe implementer's description:\nDid X"
+        );
     }
 
     #[test]
