@@ -23,6 +23,7 @@ pub mod piece_runs;
 pub mod round_robin;
 pub mod session;
 pub mod steps;
+pub mod trial_host;
 mod triage_session;
 pub mod watch_run;
 
