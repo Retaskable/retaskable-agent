@@ -151,15 +151,16 @@ pub struct LookResult {
 
 impl LookResult {
     /// Why the answer can't be used, if it can't.
-    fn problem(&self) -> Option<&'static str> {
+    fn problem(&self, plan: bool) -> Option<&'static str> {
         let has = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.trim().is_empty());
         if self.engine.as_deref().is_some_and(|e| !ENGINES.contains(&e)) {
             return Some("named an engine that doesn't exist");
         }
         match self.decision {
-            LookDecision::Split if self.pieces.is_empty() && !has(&self.instructions) => {
-                Some("chose to split but gave no pieces")
+            LookDecision::Split if plan && !has(&self.instructions) => {
+                Some("chose to split the plan but gave no instructions")
             }
+            LookDecision::Split if !plan && self.pieces.is_empty() => Some("chose to split but gave no pieces"),
             LookDecision::Again if !has(&self.instructions) => Some("chose to try again but gave no instructions"),
             _ => None,
         }
@@ -286,7 +287,7 @@ where
         return noted(cost_usd, describe_failure(&r, l.session.budget_usd));
     }
     match r.structured.and_then(|v| serde_json::from_value::<LookResult>(v).ok()) {
-        Some(result) => match result.problem() {
+        Some(result) => match result.problem(brief.0["kind"] == "plan") {
             Some(p) => noted(cost_usd, format!("didn't answer with a usable decision ({p})")),
             None => Decided {
                 result: Some(result),
@@ -424,7 +425,11 @@ mod tests {
     }
 
     async fn decided(answer: Option<Value>, ok: bool) -> Decided {
-        let brief = LookBrief::from_run(&run("look", json!({})));
+        decided_for(run("look", json!({})), answer, ok).await
+    }
+
+    async fn decided_for(run: Run, answer: Option<Value>, ok: bool) -> Decided {
+        let brief = LookBrief::from_run(&run);
         decide(&looker(), &brief, |_| async move {
             Ok(result(
                 ok,
@@ -455,12 +460,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_plan_may_split_with_instructions_alone() {
-        let d = decided(
-            Some(json!({ "decision": "split", "reason": "r", "instructions": "smaller" })),
-            true,
-        )
-        .await;
+        let mut plan = run("plan", json!({}));
+        plan.kind = RunKind::Plan;
+        let answer = json!({ "decision": "split", "reason": "r", "instructions": "smaller" });
+        let d = decided_for(plan.clone(), Some(answer.clone()), true).await;
         assert_eq!(d.result.unwrap().to_wire()["instructions"], "smaller");
+        let none = json!({ "decision": "split", "reason": "r", "pieces": [] });
+        assert!(decided_for(plan, Some(none), true).await.result.is_none());
+        // A piece's split needs pieces: instructions alone are unusable.
+        let d = decided(Some(answer), true).await;
+        assert!(d.result.is_none() && d.note.is_some());
     }
 
     #[tokio::test]
