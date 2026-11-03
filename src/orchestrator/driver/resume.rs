@@ -4,7 +4,6 @@ use std::time::Instant;
 use super::project::{Launch, ProjectLoop, signed_out};
 use super::{SessionStarter, Shared};
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
-use crate::item_lifecycle::ItemState;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::fresh_start::{FreshStart, fresh_for_engine};
 use crate::store::RunRecord;
@@ -42,17 +41,6 @@ impl ProjectLoop {
     ) {
         if signed_out(shared) {
             return;
-        }
-        let now = Instant::now();
-        let due: Vec<String> = (self.silenced_until.iter())
-            .filter(|(_, at)| **at <= now)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in due {
-            self.silenced_until.remove(&id);
-            if self.runs.get(&id).is_some_and(|r| r.state == ItemState::Implementing) && !self.running.busy(&id) {
-                self.to_resume.push(id);
-            }
         }
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();

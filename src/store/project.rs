@@ -61,10 +61,6 @@ pub struct RunRecord {
     /// The state the item failed in, as `item_lifecycle::ItemState` snake case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_in: Option<String>,
-    /// Watchdog kills in a row on this item's session; cleared when a session ends with an answer
-    /// (07-orchestrator-loop.md's Watchdog bullet).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub silenced: u32,
     /// Claude already looked at this stop (06.9 bullet 16): a restart never looks again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub triaged: bool,
@@ -78,6 +74,10 @@ pub struct RunRecord {
     /// When a failed look may be tried again (RFC 3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_look_at: Option<String>,
+    /// Watchdog kills of this item's session in a row, kept so a restart doesn't reset it; cleared when a
+    /// session ends with an answer.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub silence_kills: u32,
     /// Signatures of Retaskable bugs this item's triage already reported (`reported_bug`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reported_bugs: Vec<String>,

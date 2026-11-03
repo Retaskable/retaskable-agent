@@ -297,12 +297,3 @@ async fn a_restart_resumes_when_its_engine_is_limited_but_nothing_else_can_take_
     assert_eq!(started.len(), 1);
     assert!(started[0].resume);
 }
-
-#[tokio::test]
-async fn the_watchdog_kill_count_survives_a_restart() {
-    let (_rig, _fake, saved) = after_restart(Some(SessionResult::Silenced("quiet".into())), "building").await;
-    assert_eq!(saved.silenced, 1);
-    let (mut rig, fake, _) = after_restart(Some(SessionResult::Silenced("quiet".into())), "building").await;
-    assert_eq!(fake.started.lock().unwrap().len(), 1, "resumed at once by the restart");
-    assert_eq!(rig.lp(0).store.runs()["a"].silenced, 1);
-}

@@ -849,9 +849,8 @@ fn classify(r: &ImplementerResult) -> SessionResult {
 }
 
 /// What `run_implementer`'s answer means for the item (`run`'s return): the watchdog's own kill
-/// ([`SilenceKilled`]) is this computer's problem, so the item keeps its lane and lease and the same
-/// session is resumed about a minute later, up to 3 times in a row ([`SessionResult::Silenced`],
-/// 07-orchestrator-loop.md's watchdog). A
+/// ([`SilenceKilled`]) is an interruption, not a failure: it keeps its lane and lease and is resumed
+/// by id a minute later, up to 3 times in a row before a person (07-orchestrator-loop.md's watchdog). A
 /// cut session ([`Interrupted`], 07.4-stopping-and-restarting.md) keeps its lease and run record as
 /// they are, with nothing posted to the store, so it's resumed by id on the next restart. Any other
 /// error means a session ran and didn't come back clean, so it needs a person instead (it may have

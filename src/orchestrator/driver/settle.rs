@@ -18,18 +18,18 @@ use crate::telemetry::{Event, event};
 /// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses claiming of new
 /// work for every project on this computer (section 7.3): a problem with this computer, not the item, so
 /// hammering the store for more work would likely just fail the same way.
-/// How long after a watchdog kill the session is resumed.
-pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
-
-/// Watchdog kills in a row that are resumed; the next goes to a person.
-const MAX_SILENCE_RESUMES: u32 = 3;
-
 pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
 
 /// How long a session that found Claude Code signed out (section 7.3's `claudeSignedOut`) blocks new or
 /// resumed Claude session starts on this computer: long enough that a person has time to sign back in
 /// before the next retry, short enough that work resumes soon after they do.
 pub(super) const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(60);
+
+/// How long after a watchdog kill the same session is resumed.
+pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
+
+/// Watchdog kills in a row that are resumed; the next one goes to a person.
+const MAX_SILENCE_RESUMES: u32 = 3;
 
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
@@ -53,10 +53,10 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
-    /// The watchdog killed the session for printing nothing for too long: an interruption, not a failure. The
-    /// run stays `implementing` with its lane and lease (nothing posted, no claim pause) and the loop resumes
-    /// the same session by id about a minute later, up to 3 times in a row before the run goes to
-    /// `needs_human` with this text.
+    /// The watchdog killed the session for printing nothing (the text says why). Behind the
+    /// `own-failure-handling` flag the run stays `implementing` with its lane and lease, nothing is posted to
+    /// the store, and the loop resumes the session by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row
+    /// goes to `needs_human`. With the flag Off it is a [`Failed`](Self::Failed).
     Silenced(String),
     /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
     /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
@@ -394,37 +394,34 @@ impl ProjectLoop {
             let until = Instant::now() + resets_in.unwrap_or(LIMIT_PAUSE);
             shared.engine_limits.hit(record.impl_session_engine, until);
         }
-        // Watchdog kills in a row: an answer clears the count, a kill adds to it, and the 4th goes to a person.
-        let result = match outcome.result {
-            SessionResult::Silenced(why) => {
-                let kills = self.records.get_mut(&item).map_or(MAX_SILENCE_RESUMES + 1, |r| {
-                    r.silenced += 1;
-                    r.silenced
-                });
-                if kills > MAX_SILENCE_RESUMES {
-                    if let Some(record) = self.records.get_mut(&item) {
-                        record.silenced = 0;
-                    }
-                    SessionResult::NeedsHuman(why)
-                } else {
-                    self.silenced_until
+        let mut result = outcome.result;
+        if let SessionResult::Silenced(why) = result {
+            let record = self.records.get_mut(&item);
+            result = match record {
+                // Off: today's behaviour, the item goes back to the queue.
+                _ if !self.flags.on("own-failure-handling").await => SessionResult::Failed(why),
+                Some(record) if record.silence_kills < MAX_SILENCE_RESUMES => {
+                    record.silence_kills += 1;
+                    self.silenced
                         .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
                     SessionResult::Silenced(why)
                 }
-            }
-            answer @ (SessionResult::Implementer(_) | SessionResult::NeedsHuman(_)) => {
-                if let Some(record) = self.records.get_mut(&item) {
-                    record.silenced = 0;
+                record => {
+                    if let Some(record) = record {
+                        record.silence_kills = 0;
+                    }
+                    SessionResult::NeedsHuman(why)
                 }
-                answer
-            }
-            other => other,
-        };
+            };
+        } else if let Some(record) = self.records.get_mut(&item) {
+            // Any answer ends the run of kills.
+            record.silence_kills = 0;
+        }
         match result {
-            // A cut or watchdog-killed session (07.4): the run stays implementing, with its lane and lease untouched, and
+            // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Silenced(_) => self.save_leases(),
+            SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();
@@ -447,6 +444,26 @@ impl ProjectLoop {
                 };
                 self.moved(pool, &item, ItemState::Implementing, &note, shared.links)
                     .await;
+            }
+        }
+    }
+
+    /// Moves the items whose watchdog-kill delay has passed to `to_resume`, up to `room` of them (the
+    /// session slots left); [`resume_sessions`](Self::resume_sessions) then resumes each by its saved id.
+    pub(super) fn release_silenced(&mut self, mut room: u32) {
+        let now = Instant::now();
+        let due: Vec<String> = (self.silenced.iter())
+            .filter(|(_, at)| **at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            if room == 0 {
+                break;
+            }
+            room -= 1;
+            self.silenced.remove(&id);
+            if self.runs.get(&id).is_some_and(|r| r.state == ItemState::Implementing) {
+                self.to_resume.push(id);
             }
         }
     }
