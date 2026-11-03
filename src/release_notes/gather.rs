@@ -111,6 +111,29 @@ impl From<RawMergedPr> for MergedPr {
     }
 }
 
+/// Runs `gh pr list` with `args` and parses its JSON array (empty output is an empty list).
+pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
+    gh_bin: &Path,
+    cwd: &Path,
+    args: &[String],
+) -> Result<Vec<T>> {
+    let output = Command::new(gh_bin)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .context("running gh pr list")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("gh pr list failed: {}", clip(&stderr, 300));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&stdout).context("parsing gh pr list output")
+}
+
 /// Runs `gh pr list` for the PRs merged into `base_branch` between `from` and `to`, up to `limit`.
 pub async fn gather_merged_prs(
     gh_bin: &Path,
@@ -122,22 +145,7 @@ pub async fn gather_merged_prs(
     limit: u32,
 ) -> Result<Vec<MergedPr>> {
     let args = merged_pr_args(repo, base_branch, from, to, limit);
-    let output = Command::new(gh_bin)
-        .args(&args)
-        .current_dir(cwd)
-        .output()
-        .await
-        .context("running gh pr list")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!("gh pr list failed: {}", clip(&stderr, 300));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let raw: Vec<RawMergedPr> = if stdout.trim().is_empty() {
-        Vec::new()
-    } else {
-        serde_json::from_str(&stdout).context("parsing gh pr list output")?
-    };
+    let raw: Vec<RawMergedPr> = run_gh_list(gh_bin, cwd, &args).await?;
     Ok(raw.into_iter().map(MergedPr::from).collect())
 }
 
