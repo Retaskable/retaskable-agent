@@ -208,3 +208,159 @@ fn stop(child: &mut std::process::Child, own_group: bool) {
 fn stop(child: &mut std::process::Child, _own_group: bool) {
     let _ = child.kill();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn build() -> Build {
+        Build {
+            os: "linux".into(),
+            environment: Environment::Staging,
+            version: "1.2.3".into(),
+            commit: "abc".into(),
+        }
+    }
+
+    /// Serves a canned HTTP response to every connection on a free port.
+    fn serve_once(body: &'static str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                // Read the whole request first: closing with it unread would reset the connection.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 256];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}");
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn arg_returns_the_token_after_the_flag() {
+        let a = args(&["--out", "dir", "--x"]);
+        assert_eq!(arg(&a, "--out").as_deref(), Some("dir"));
+        assert_eq!(arg(&a, "--missing"), None);
+        // A flag in last position has no value.
+        assert_eq!(arg(&a, "--x"), None);
+    }
+
+    #[test]
+    fn environment_arg_defaults_to_staging_and_rejects_unknown() {
+        assert_eq!(environment_arg(&[]).unwrap(), Environment::Staging);
+        assert_eq!(
+            environment_arg(&args(&["--environment", "staging"])).unwrap(),
+            Environment::Staging
+        );
+        assert_eq!(
+            environment_arg(&args(&["--environment", "production"])).unwrap(),
+            Environment::Production
+        );
+        let err = environment_arg(&args(&["--environment", "prod"])).unwrap_err();
+        assert!(err.contains("staging or production, not prod"), "{err}");
+    }
+
+    #[test]
+    fn scratch_dir_exists_then_is_removed_on_drop() {
+        let scratch = ScratchDir::new("rc-test").unwrap();
+        let path = scratch.path().to_path_buf();
+        std::fs::write(path.join("f"), "x").unwrap();
+        assert!(path.is_dir());
+        drop(scratch);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn scratch_dirs_are_distinct() {
+        let a = ScratchDir::new("rc-test").unwrap();
+        let b = ScratchDir::new("rc-test").unwrap();
+        assert_ne!(a.path(), b.path());
+    }
+
+    #[test]
+    fn free_port_is_bindable() {
+        let port = free_port().unwrap();
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn http_get_returns_only_the_body() {
+        let port = serve_once("hello");
+        assert_eq!(http_get(port, "/x").unwrap(), "hello");
+    }
+
+    #[test]
+    fn http_get_errors_when_nothing_listens() {
+        let port = free_port().unwrap();
+        assert!(http_get(port, "/").unwrap_err().starts_with("connecting"));
+    }
+
+    #[test]
+    fn wait_for_health_accepts_the_matching_version() {
+        let port = serve_once(r#"{"version":"1.2.3"}"#);
+        wait_for_health(port, "1.2.3").unwrap();
+    }
+
+    #[test]
+    fn silent_terminal_passes_on_empty_output_and_fails_otherwise() {
+        let exe = Path::new("agent");
+        let out = |stdout: &str, stderr: &str| Output {
+            status: std::process::ExitStatus::default(),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        assert!(check_silent_terminal(exe, &out("", "")).is_ok());
+        let err = check_silent_terminal(exe, &out("hi", "")).unwrap_err();
+        assert!(err.contains("stdout: hi"), "{err}");
+        let err = check_silent_terminal(exe, &out("", "oops")).unwrap_err();
+        assert!(err.contains("stderr: oops"), "{err}");
+    }
+
+    #[test]
+    fn not_linked_log_needs_a_links_line_saying_not_linked() {
+        let scratch = ScratchDir::new("rc-test").unwrap();
+        let b = build();
+        let p = scratch.path().to_path_buf();
+        let env = Env::new(move |k: &str| {
+            matches!(
+                k,
+                "HOME" | "USERPROFILE" | "LOCALAPPDATA" | "XDG_DATA_HOME" | "XDG_STATE_HOME"
+            )
+            .then(|| p.to_string_lossy().to_string())
+        });
+        let dir = release::logs_dir(&b, &env);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("retaskable.log");
+
+        // No log file at all.
+        assert!(
+            check_not_linked_log(&b, scratch.path())
+                .unwrap_err()
+                .contains("reading")
+        );
+
+        // A Links: line that doesn't say "not linked", and a "not linked" line without Links:.
+        std::fs::write(&log, "Links: linked\nsomething not linked\n").unwrap();
+        assert!(
+            check_not_linked_log(&b, scratch.path())
+                .unwrap_err()
+                .contains("no Links: line")
+        );
+
+        std::fs::write(&log, "boot\nLinks: not linked\n").unwrap();
+        check_not_linked_log(&b, scratch.path()).unwrap();
+    }
+}
