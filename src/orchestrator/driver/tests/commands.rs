@@ -346,3 +346,23 @@ async fn skip_drops_an_item_that_is_unknown_or_not_stopped() {
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
     assert!(!ops(&asked).contains(&"skip".to_string()));
 }
+
+#[tokio::test]
+async fn a_persons_continue_with_nothing_to_continue_from_says_so_and_a_plain_start_over_does_not() {
+    let (mut rig, _fake) = stopped(2, None);
+    continue_a(&rig, "a", Some("Try it differently."));
+    rig.machine.poll().await;
+    let notes = rig.lp(0).item_notes("a", 20);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n == "Started over: there was nothing to continue from"),
+        "{notes:?}"
+    );
+
+    let (mut rig, _fake) = stopped(2, Some("s1"));
+    start_over_a(&rig, "a", None);
+    rig.machine.poll().await;
+    let notes = rig.lp(0).item_notes("a", 20);
+    assert!(notes.iter().any(|n| n == "a person chose Start over"), "{notes:?}");
+}

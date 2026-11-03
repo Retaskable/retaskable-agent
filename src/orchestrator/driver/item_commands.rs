@@ -92,7 +92,7 @@ impl ProjectLoop {
         }
         for (item, notes) in std::mem::take(&mut self.starting_over) {
             if !self
-                .start_over(&item, notes.as_deref(), (pool, starter), (&mut room, shared))
+                .start_over(&item, (notes.as_deref(), false), (pool, starter), (&mut room, shared))
                 .await
             {
                 self.starting_over.push((item, notes));
@@ -217,7 +217,7 @@ impl ProjectLoop {
         if !at_limit && nothing_to_continue(branch, pr_url, session) {
             tracing::info!("{}: {item_id} has nothing to continue from; starting it over", self.id);
             return self
-                .start_over(item_id, notes.as_deref(), (pool, starter), (room, shared))
+                .start_over(item_id, (notes.as_deref(), true), (pool, starter), (room, shared))
                 .await;
         }
         let checks_only = notes.is_none() && !at_limit;
@@ -262,11 +262,12 @@ impl ProjectLoop {
         true
     }
 
-    /// Carries out one Start over. False when it must wait for a lane or a session slot.
+    /// Carries out one Start over (`redirected`: it's a Continue with nothing to continue from, and the note says so).
+    /// False when it must wait for a lane or a session slot.
     async fn start_over(
         &mut self,
         item_id: &str,
-        notes: Option<&str>,
+        (notes, redirected): (Option<&str>, bool),
         (pool, starter): (&mut LanePool, &dyn SessionStarter),
         (room, shared): (&mut u32, &mut Shared<'_>),
     ) -> bool {
@@ -315,7 +316,13 @@ impl ProjectLoop {
                 from: Some("needs_human".into()),
                 to: Some("implementing".into()),
                 lane: Some(lane),
-                note: Some(format!("{who} chose Start over")),
+                note: Some(if !redirected {
+                    format!("{who} chose Start over")
+                } else if who == "Claude" {
+                    "Started over by Claude: there was nothing to continue from".into()
+                } else {
+                    "Started over: there was nothing to continue from".into()
+                }),
                 ..Default::default()
             }),
         );
