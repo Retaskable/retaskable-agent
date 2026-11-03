@@ -149,7 +149,7 @@ pub struct Breakdown {
 fn words(v: Option<&Value>, max: usize) -> String {
     let s = v.and_then(Value::as_str).unwrap_or("");
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    s.chars().take(max).collect()
+    crate::text::truncate(&s, max)
 }
 
 /// The drafter's breakdown, checked: a `build` entry whose id isn't one of `item_ids`, a second entry

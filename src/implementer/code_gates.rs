@@ -205,7 +205,7 @@ pub struct BigFile {
 }
 
 fn truncate80(s: &str) -> String {
-    crate::link::truncate(s.trim(), 80)
+    crate::text::truncate(s.trim(), 80)
 }
 
 /// Of `anchors` (each `(line, text, pos)`, `pos` along something `total` long), the ones nearest

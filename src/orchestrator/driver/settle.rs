@@ -156,7 +156,7 @@ impl ProjectLoop {
             }),
         );
         if let Some(token) = self.leases.remove(item_id) {
-            let note: String = why.chars().take(MAX_NOTE_CHARS).collect();
+            let note = crate::text::truncate(why, MAX_NOTE_CHARS);
             self.unreleased.insert(item_id.to_string(), (token, note));
             self.save_leases();
             self.events.add_in(

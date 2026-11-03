@@ -166,15 +166,10 @@ pub fn machine_info(env: &Env, version: &str) -> Value {
         other => other,
     };
     json!({
-        "machine": truncate(&machine_name(env), 100),
+        "machine": crate::text::truncate(&machine_name(env), 100),
         "os": os,
         "agentVersion": version,
     })
-}
-
-/// At most `max` characters.
-pub(crate) fn truncate(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
 }
 
 /// The code to show while a link waits for approval.

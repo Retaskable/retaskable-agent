@@ -71,7 +71,7 @@ fn claude_request(row: &StoreIdea) -> String {
 }
 
 fn cut(s: &str) -> String {
-    s.chars().take(TITLE_MAX).collect()
+    crate::text::truncate(s, TITLE_MAX)
 }
 
 /// The draft for `row`, which `by` (whoever pressed Build this) accepted.

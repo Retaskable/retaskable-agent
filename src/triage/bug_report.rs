@@ -12,7 +12,8 @@ use std::sync::LazyLock;
 use regex::{Match, Regex, RegexBuilder};
 
 use crate::config::ProjectConfig;
-use crate::link::{machine_name, truncate};
+use crate::link::machine_name;
+use crate::text::truncate;
 
 use super::{KnownBug, RetaskableBug};
 
