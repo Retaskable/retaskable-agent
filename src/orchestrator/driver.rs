@@ -26,6 +26,7 @@ mod lane_play;
 mod machine;
 mod playtest_round;
 mod project;
+mod project_tick;
 mod report;
 mod runs;
 mod settle;
