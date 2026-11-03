@@ -64,7 +64,7 @@ This spec is split: each section below is its own file in [agent/](agent/). Read
 
 ## 9. What the app and site ask of the computer
 
-- [agent/09-web-ui.md](agent/09-web-ui.md): 9.1 What the computer works out for a project's settings · 9.2 What the computer reports · 9.3 What the computer does when a command asks
+- [agent/09-web-ui.md](agent/09-web-ui.md): [9.1 What the computer works out for a project's settings](agent/09.1-what-the-computer-works-out-for-a-projects-settings.md) · [9.2 What the computer reports](agent/09.2-what-the-computer-reports.md) · [9.3 What the computer does when a command asks](agent/09.3-what-the-computer-does-when-a-command-asks.md)
 
 ## 10. Config — `.retaskable/config.json`
 

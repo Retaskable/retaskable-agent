@@ -26,6 +26,7 @@ mod saved;
 mod test_support;
 mod write;
 
+pub(crate) use gather::run_gh_list;
 pub use gather::{
     DEFAULT_MAX_PRS, GatherArgs, commit_log_args, fill_draft_files, gather, gather_commits, gather_merged_prs,
     merged_pr_args, read_base_files,
