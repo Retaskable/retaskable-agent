@@ -24,6 +24,7 @@ pub mod round_robin;
 pub mod session;
 pub mod steps;
 mod triage_session;
+pub mod trial_host;
 pub mod watch_run;
 
 use std::collections::BTreeMap;

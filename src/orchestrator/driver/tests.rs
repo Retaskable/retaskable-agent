@@ -937,6 +937,7 @@ mod asks;
 mod commands;
 mod drafts;
 mod ideas;
+mod ideas_daily;
 mod lane_play;
 mod playtests;
 mod reporting;
