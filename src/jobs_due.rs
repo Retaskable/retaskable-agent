@@ -164,6 +164,8 @@ mod tests {
         let buf = Buf::default();
         let sub = tracing_subscriber::fmt().with_writer(buf.clone()).finish();
         let _g = tracing::subscriber::set_default(sub);
+        // Other tests may have cached this callsite as disabled while no subscriber was set.
+        tracing::callsite::rebuild_interest_cache();
         let a = asker("http://127.0.0.1:1".to_string(), Arc::default());
         a.ask().await;
         let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
