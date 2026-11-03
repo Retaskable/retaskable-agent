@@ -529,8 +529,8 @@ fn a_watchdog_kill_is_an_own_failure_not_a_needs_human() {
         "ended with killed_for_silence: no output".into(),
     )));
     assert!(
-        matches!(session_result_for_answer(killed, None).0, SessionResult::Failed(_)),
-        "a session the watchdog killed should requeue, not need a person"
+        matches!(session_result_for_answer(killed, None).0, SessionResult::Silenced(_)),
+        "a session the watchdog killed should be resumed, not need a person"
     );
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
     assert!(matches!(
@@ -549,7 +549,7 @@ fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     )));
     assert!(matches!(
         session_result_for_answer(killed, None).0,
-        SessionResult::Failed(_)
+        SessionResult::Silenced(_)
     ));
 
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));

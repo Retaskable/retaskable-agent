@@ -533,3 +533,80 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
         assert_eq!(r.failed_in.as_deref(), Some(state_name(from)));
     }
 }
+
+fn silenced() -> SessionResult {
+    SessionResult::Silenced("went quiet and was killed".into())
+}
+
+/// Makes the one-minute wait before a watchdog resume already over.
+fn resume_now(rig: &mut Rig) {
+    for at in rig.lp(0).silenced_until.values_mut() {
+        *at = std::time::Instant::now() - Duration::from_secs(1);
+    }
+}
+
+#[tokio::test]
+async fn a_watchdog_kill_keeps_lane_lease_and_run_and_pauses_nothing() {
+    let (mut rig, _fake, asked) = ended(silenced(), &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(
+        !ops(&asked)
+            .iter()
+            .any(|o| o == "release" || o == "park" || o == "report")
+    );
+    assert_eq!(rig.lp(0).store.runs()["a"].silenced, 1);
+    let events = rig.lp(0).events().recent();
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["subtype"], "killed_for_silence");
+}
+
+#[tokio::test]
+async fn a_watchdog_killed_session_is_resumed_by_id_after_the_delay() {
+    let (mut rig, fake, _asked) = ended(silenced(), &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1, "not resumed before the delay");
+    resume_now(&mut rig);
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 2);
+    assert_eq!(
+        (started[1].resume, &started[1].session_id, started[1].lane),
+        (true, &started[0].session_id, 1)
+    );
+}
+
+#[tokio::test]
+async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
+    let (mut rig, fake, asked) = ended(silenced(), &Default::default()).await;
+    for _ in 0..3 {
+        fake.script.lock().unwrap().push(silenced());
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+        resume_now(&mut rig);
+        rig.machine.pass().await;
+    }
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 4);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(!ops(&asked).contains(&"release".to_string()));
+    assert_eq!(rig.lp(0).store.runs()["a"].silenced, 0);
+}
+
+#[tokio::test]
+async fn an_answer_between_watchdog_kills_resets_the_count() {
+    let (mut rig, fake, _asked) = ended(silenced(), &Default::default()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).store.runs()["a"].silenced, 1);
+    fake.script.lock().unwrap().push(done(ImplementerOutcome::Finished));
+    resume_now(&mut rig);
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).store.runs()["a"].silenced, 0);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Checking);
+}

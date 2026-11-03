@@ -258,6 +258,8 @@ pub struct ProjectLoop {
     pub(super) records: BTreeMap<String, RunRecord>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
+    /// Items whose session the watchdog killed, with when it is resumed (a restart resumes them at once).
+    pub(super) silenced_until: BTreeMap<String, Instant>,
     /// The item the store handed out for each lease held, by id, for the session that starts on it.
     pub(super) items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`super::Machine::add`].
@@ -347,6 +349,7 @@ impl ProjectLoop {
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
+            silenced_until: BTreeMap::new(),
             items: BTreeMap::new(),
             outcomes: super::OutcomeSender(mpsc::unbounded_channel().0),
             store,
@@ -601,6 +604,9 @@ impl ProjectLoop {
             }
             let session = session.map(|s| (s, record.impl_session_engine));
             self.remember(&id, lane, session, record.impl_context_tokens);
+            if let Some(saved) = self.records.get_mut(&id) {
+                saved.silenced = record.silenced;
+            }
         }
         self.save_leases();
     }
@@ -716,6 +722,17 @@ impl ProjectLoop {
     ) {
         if signed_out(shared) {
             return;
+        }
+        let now = Instant::now();
+        let due: Vec<String> = (self.silenced_until.iter())
+            .filter(|(_, at)| **at <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            self.silenced_until.remove(&id);
+            if self.runs.get(&id).is_some_and(|r| r.state == ItemState::Implementing) && !self.running.busy(&id) {
+                self.to_resume.push(id);
+            }
         }
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();

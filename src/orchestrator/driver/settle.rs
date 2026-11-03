@@ -18,6 +18,12 @@ use crate::telemetry::{Event, event};
 /// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses claiming of new
 /// work for every project on this computer (section 7.3): a problem with this computer, not the item, so
 /// hammering the store for more work would likely just fail the same way.
+/// How long after a watchdog kill the session is resumed.
+pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
+
+/// Watchdog kills in a row that are resumed; the next goes to a person.
+const MAX_SILENCE_RESUMES: u32 = 3;
+
 pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
 
 /// How long a session that found Claude Code signed out (section 7.3's `claudeSignedOut`) blocks new or
@@ -47,6 +53,11 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
+    /// The watchdog killed the session for printing nothing for too long: an interruption, not a failure. The
+    /// run stays `implementing` with its lane and lease (nothing posted, no claim pause) and the loop resumes
+    /// the same session by id about a minute later, up to 3 times in a row before the run goes to
+    /// `needs_human` with this text.
+    Silenced(String),
     /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
     /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
@@ -369,7 +380,11 @@ impl ProjectLoop {
                 role: Some("implementer".into()),
                 engine: Some("claude".into()),
                 ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
-                subtype: matches!(outcome.result, SessionResult::Interrupted).then(|| "interrupted".into()),
+                subtype: match outcome.result {
+                    SessionResult::Interrupted => Some("interrupted".into()),
+                    SessionResult::Silenced(_) => Some("killed_for_silence".into()),
+                    _ => None,
+                },
                 ..Default::default()
             }),
         );
@@ -379,10 +394,37 @@ impl ProjectLoop {
             let until = Instant::now() + resets_in.unwrap_or(LIMIT_PAUSE);
             shared.engine_limits.hit(record.impl_session_engine, until);
         }
-        match outcome.result {
-            // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
+        // Watchdog kills in a row: an answer clears the count, a kill adds to it, and the 4th goes to a person.
+        let result = match outcome.result {
+            SessionResult::Silenced(why) => {
+                let kills = self.records.get_mut(&item).map_or(MAX_SILENCE_RESUMES + 1, |r| {
+                    r.silenced += 1;
+                    r.silenced
+                });
+                if kills > MAX_SILENCE_RESUMES {
+                    if let Some(record) = self.records.get_mut(&item) {
+                        record.silenced = 0;
+                    }
+                    SessionResult::NeedsHuman(why)
+                } else {
+                    self.silenced_until
+                        .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                    SessionResult::Silenced(why)
+                }
+            }
+            answer @ (SessionResult::Implementer(_) | SessionResult::NeedsHuman(_)) => {
+                if let Some(record) = self.records.get_mut(&item) {
+                    record.silenced = 0;
+                }
+                answer
+            }
+            other => other,
+        };
+        match result {
+            // A cut or watchdog-killed session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
             SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
+            SessionResult::Silenced(_) => self.save_leases(),
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();

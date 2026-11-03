@@ -61,6 +61,10 @@ pub struct RunRecord {
     /// The state the item failed in, as `item_lifecycle::ItemState` snake case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_in: Option<String>,
+    /// Watchdog kills in a row on this item's session; cleared when a session ends with an answer
+    /// (07-orchestrator-loop.md's Watchdog bullet).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub silenced: u32,
     /// Claude already looked at this stop (06.9 bullet 16): a restart never looks again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub triaged: bool,
