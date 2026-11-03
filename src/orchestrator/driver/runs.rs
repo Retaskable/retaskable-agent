@@ -199,7 +199,15 @@ impl ProjectLoop {
             }
         }
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
-        for end in due {
+        for mut end in due {
+            if let RunOutcome::Failed(why) = &end.outcome
+                && crate::runs::is_outside(why)
+            {
+                if !end.result.is_object() {
+                    end.result = json!({});
+                }
+                end.result["outside"] = json!(true);
+            }
             let answer = self
                 .client
                 .run_done(repo, token, &end.token, &end.outcome, end.result)
