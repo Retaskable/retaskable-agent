@@ -18,7 +18,7 @@
 //! [`profiles_for`] for the store's audiences (starter set when it has none).
 //!
 //! `orchestrator::driver::ideas_round` runs one round under the [`IDEAS_LOCK`] lock (so two computers don't
-//! think at once), reading the store and sending `ideas_round`. Still not wired to anything: nothing schedules it (no daily chore, no command that asks for one), no command that calls
+//! think at once), reading the store and sending `ideas_round`. The daily chore is wired (`orchestrator::driver::ideas_daily`: the store says when a day's round is due, the `ideas-session` flag gates it); still no command that asks for a round, no command that calls
 //! [`Ideas::answer`] for Accept/Not now/Never, and nothing calls the context builders yet but tests ([`build_prompt`]
 //! still takes `context` already built). Accept's draft-writing needs the spec-drafts item; person-added ideas
 //! (shared-ideas.md) need their own queue (a `StoreIdea` with `addedBy` set), not ported here.

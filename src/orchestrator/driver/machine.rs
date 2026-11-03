@@ -11,7 +11,8 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, playtest_round,
+    OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, ideas_daily,
+    playtest_round,
 };
 use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
@@ -285,6 +286,60 @@ impl Machine {
         }
     }
 
+    /// What a background round (playtest grouping, ideas) needs of project `lp`.
+    fn round_job(&self, lp: &ProjectLoop) -> playtest_round::Job {
+        playtest_round::Job {
+            id: lp.id.clone(),
+            client: lp.client.clone(),
+            repo: lp.repo,
+            project: lp.project.clone(),
+            env: self.links.env.clone(),
+            engine_choice: self.links.engine_choice.clone(),
+            machine: self.links.machine.clone(),
+            backlog_url: self.links.backlog_url.clone(),
+            keychain: self.links.keychain.clone(),
+            locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
+        }
+    }
+
+    /// Starts the daily round of ideas for every live (or `runs`-mode) project that ticked this minute, isn't
+    /// paused and has the `ideas-session` flag On, unless one is still running (`ideas_daily::run` asks the store
+    /// whether it's due). Each is its own task, so the pass never waits.
+    pub async fn ideas_rounds(&mut self, steps: &[Step]) {
+        let paused = self.paused();
+        let jobs: Vec<_> = (self.projects.iter().enumerate())
+            .filter(|(i, lp)| {
+                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
+                    && !paused[*i]
+                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
+            })
+            .map(|(_, lp)| lp)
+            .filter(|lp| {
+                let busy = lp.ideas_round_running.swap(true, Ordering::SeqCst);
+                if busy {
+                    tracing::debug!("{}: an ideas round is still running, skipping this minute", lp.id);
+                }
+                !busy
+            })
+            .map(|lp| {
+                (
+                    lp.ideas_round_running.clone(),
+                    ideas_daily::Daily {
+                        base: self.round_job(lp),
+                        flags: lp.flags.clone(),
+                        state: lp.ideas_daily.clone(),
+                    },
+                )
+            })
+            .collect();
+        for (running, daily) in jobs {
+            tokio::spawn(async move {
+                ideas_daily::run(daily).await;
+                running.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+
     /// Runs one playtest-grouping round for every live project that isn't already running one
     /// (`playtest_round::run`), each as its own task so a slow or stuck planner session costs that
     /// project's round only. `steps` is what this minute's [`Machine::pass`] did: a project whose
@@ -311,21 +366,7 @@ impl Machine {
                     );
                     return None;
                 }
-                Some((
-                    lp.playtest_round_running.clone(),
-                    playtest_round::Job {
-                        id: lp.id.clone(),
-                        client: lp.client.clone(),
-                        repo: lp.repo,
-                        project: lp.project.clone(),
-                        env: self.links.env.clone(),
-                        engine_choice: self.links.engine_choice.clone(),
-                        machine: self.links.machine.clone(),
-                        backlog_url: self.links.backlog_url.clone(),
-                        keychain: self.links.keychain.clone(),
-                        locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
-                    },
-                ))
+                Some((lp.playtest_round_running.clone(), self.round_job(lp)))
             })
             .collect();
         for (running, job) in jobs {
@@ -802,6 +843,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             machine.fetch().await;
             let steps = machine.pass().await;
             machine.playtest_rounds(&steps).await;
+            machine.ideas_rounds(&steps).await;
         } else {
             machine.poll().await;
         }
