@@ -97,14 +97,11 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             ack(&cmd.id)
         }
         "pause" if computer => {
-            view.paused.set(
-                project,
-                Some(format!("Paused from retaskable.com by {}", cmd.issued_by)),
-            );
+            pause_computer(view, project, &format!("retaskable.com by {}", cmd.issued_by));
             ack(&cmd.id)
         }
         "resume" if computer => {
-            view.paused.set(project, None);
+            resume_computer(view, project);
             ack(&cmd.id)
         }
         "pause" | "resume" => nack(&cmd.id, SITE_ANSWERS.to_string()),
@@ -181,11 +178,8 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         let what = if start_over { "Start over" } else { "Continue" };
         return nack(&cmd.id, format!("{what} needs the item's id."));
     }
-    if !view.item_commands.claim() {
-        return nack(
-            &cmd.id,
-            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
-        );
+    if let Err(reason) = claim_check(view) {
+        return nack(&cmd.id, reason);
     }
     let pictures = match save_pictures(&cmd.args, data_dir) {
         Ok(p) => p,
@@ -202,37 +196,69 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         notes.push_str(if notes.is_empty() { "Picture: " } else { "\nPicture: " });
         notes.push_str(&path.display().to_string());
     }
-    let (project, item, notes) = (
-        project.to_string(),
-        id.to_string(),
-        (!notes.is_empty()).then_some(notes),
-    );
+    queue_item(view, project, id, (!notes.is_empty()).then_some(notes), start_over);
+    ack(&cmd.id)
+}
+
+/// Item commands and lane play/stop only run where the orchestrator claims work.
+fn claim_check(view: &AgentView) -> Result<(), String> {
+    if view.item_commands.claim() {
+        Ok(())
+    } else {
+        Err("This computer isn't running work (the orchestrator isn't in claim mode).".into())
+    }
+}
+
+fn queue_item(view: &AgentView, project: &str, id: &str, notes: Option<String>, start_over: bool) {
+    let (project, item) = (project.to_string(), id.to_string());
     view.item_commands.push(if start_over {
         ItemCommand::StartOver { project, item, notes }
     } else {
         ItemCommand::Continue { project, item, notes }
     });
-    ack(&cmd.id)
+}
+
+/// **Pause** of this computer's project (`{ computer: true }`); `from` says who, in the reason shown.
+pub(crate) fn pause_computer(view: &AgentView, project: &str, from: &str) {
+    view.paused.set(project, Some(format!("Paused from {from}")));
+}
+
+/// **Resume** of this computer's project.
+pub(crate) fn resume_computer(view: &AgentView, project: &str) {
+    view.paused.set(project, None);
+}
+
+/// **Start over** with no notes or pictures: what the command and the assistant's `retry` both run. `Err` is the
+/// nack reason.
+pub(crate) fn retry_item(view: &AgentView, project: &str, id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("Start over needs the item's id.".into());
+    }
+    claim_check(view)?;
+    queue_item(view, project, id, None, true);
+    Ok(())
+}
+
+/// **Skip**: what the command and the assistant's `skip` both run. `Err` is the nack reason.
+pub(crate) fn skip_item(view: &AgentView, project: &str, id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("Skip needs the item's id.".into());
+    }
+    claim_check(view)?;
+    view.item_commands.push(ItemCommand::Skip {
+        project: project.to_string(),
+        item: id.to_string(),
+    });
+    Ok(())
 }
 
 /// **Skip** (`skip { id }`): queued for the orchestrator loop, which lets the item go and skips it in the store
 /// (`orchestrator::driver::item_commands`). Refused outside `claim` mode, like Continue.
 fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
-    if id.is_empty() {
-        return nack(&cmd.id, "Skip needs the item's id.".into());
-    }
-    if !view.item_commands.claim() {
-        return nack(
-            &cmd.id,
-            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
-        );
-    }
-    view.item_commands.push(ItemCommand::Skip {
-        project: project.to_string(),
-        item: id.to_string(),
-    });
-    ack(&cmd.id)
+    let id = cmd.args.get("id").and_then(Value::as_str).unwrap_or("");
+    answer(cmd, skip_item(view, project, id))
 }
 
 /// Finds `cmd`'s gallery by its `gallery` slug (`GalleryConfig::slug`) among `project`'s own, runs
@@ -271,50 +297,54 @@ fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Val
     ack(&cmd.id)
 }
 
-/// `play { lane }` / `stop { lane }`: lane 0 is Play main ([`crate::play`]). A lane from 1 is queued for the
-/// orchestrator loop, which owns the lanes and decides (`orchestrator::driver::lane_play`).
+/// `play { lane }` / `stop { lane }`.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
+    answer(cmd, play_lane(view, project, cmd.name == "play", lane))
+}
+
+/// `play` (or `stop`) of a lane: lane 0 is Play main ([`crate::play`], which waits up to `play::STOP_LIMIT` to stop).
+/// A lane from 1 is queued for the orchestrator loop, which owns the lanes and decides
+/// (`orchestrator::driver::lane_play`). `Err` is the nack reason.
+pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Option<i64>) -> Result<(), String> {
+    let name = if play { "play" } else { "stop" };
     match lane {
         Some(0) => {}
-        Some(k) if k > 0 && k <= i64::from(view.lanes) => return play_in_lane(cmd, project, view, k as u32),
-        Some(k) if k > 0 => return nack(&cmd.id, format!("This computer has no lane {k}.")),
-        _ => return nack(&cmd.id, format!("{} needs a lane.", cmd.name)),
+        Some(k) if k > 0 && k <= i64::from(view.lanes) => {
+            claim_check(view)?;
+            let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+                return Err("Finish setup first.".to_string());
+            };
+            let (project, lane) = (project.to_string(), k as u32);
+            if play {
+                if p.play_command.trim().is_empty() {
+                    return Err("No play command set for this project.".to_string());
+                }
+                view.item_commands.push(ItemCommand::Play { project, lane });
+            } else {
+                view.item_commands.push(ItemCommand::Stop { project, lane });
+            }
+            return Ok(());
+        }
+        Some(k) if k > 0 => return Err(format!("This computer has no lane {k}.")),
+        _ => return Err(format!("{name} needs a lane.")),
     }
     let Some(p) = view.projects.iter().find(|p| p.id == project) else {
-        return nack(&cmd.id, "Finish setup first.".to_string());
+        return Err("Finish setup first.".to_string());
     };
-    let done = if cmd.name == "play" {
+    if play {
         crate::play::start(project, p)
     } else {
         crate::play::stop(project)
-    };
+    }
+}
+
+/// `ack`, or `nack` with the reason.
+fn answer(cmd: &Command, done: Result<(), String>) -> Value {
     match done {
         Ok(()) => ack(&cmd.id),
         Err(reason) => nack(&cmd.id, reason),
     }
-}
-
-fn play_in_lane(cmd: &Command, project: &str, view: &AgentView, lane: u32) -> Value {
-    if !view.item_commands.claim() {
-        return nack(
-            &cmd.id,
-            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
-        );
-    }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
-        return nack(&cmd.id, "Finish setup first.".to_string());
-    };
-    let project = project.to_string();
-    if cmd.name == "play" {
-        if p.play_command.trim().is_empty() {
-            return nack(&cmd.id, "No play command set for this project.".to_string());
-        }
-        view.item_commands.push(ItemCommand::Play { project, lane });
-    } else {
-        view.item_commands.push(ItemCommand::Stop { project, lane });
-    }
-    ack(&cmd.id)
 }
 
 /// `draft_files { id }`: the draft's changed files and patches, listed live from its worktree

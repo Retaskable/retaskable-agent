@@ -43,10 +43,12 @@ pub fn start(project: &str, p: &ProjectView) -> Result<(), String> {
     lock(&RUNNING).insert(project.to_string(), tree);
     let project = project.to_string();
     std::thread::spawn(move || {
-        let _hold = hold;
         while !done.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(20));
         }
+        // The base checkout is let go before the project stops counting as running, so `stop` returning means a
+        // `start` can follow at once.
+        drop(hold);
         lock(&RUNNING).remove(&project);
     });
     Ok(())
@@ -113,7 +115,11 @@ pub fn stop(project: &str) -> Result<(), String> {
     let Some(tree) = tree else {
         return Err("Play main isn't running.".to_string());
     };
+    let began = std::time::Instant::now();
     if tree.kill_and_wait(STOP_LIMIT) {
+        while running(project) && began.elapsed() < STOP_LIMIT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         Ok(())
     } else {
         Err("Play main didn't close within 15 seconds.".to_string())
