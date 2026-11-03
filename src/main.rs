@@ -344,6 +344,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        bugs: cfg
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let link = connectors.iter().find_map(|c| c.bug_link(&p.id_or_derived()))?;
+                Some((p.id_or_derived(), link))
+            })
+            .collect(),
+        bug_version: connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default()),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
