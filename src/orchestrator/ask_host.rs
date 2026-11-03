@@ -1,24 +1,29 @@
-//! The real [`AskHost`]: the assistant session through `claude -p` (Claude only, like the drafter's host), read-only,
-//! in the project's base checkout. The session's process tree registers with `process_tree`, so a restart or Quit
-//! cuts it.
-use std::path::{Path, PathBuf};
+//! The real [`AskHost`]: reads the store for the assistant's prompt (`asks_list`, `facts_get`, the items and the
+//! drafts) and the agent's run state, runs the assistant session through `claude -p` in the project's base checkout
+//! (Claude only, like the drafter's host), carries out its actions with `ask::perform` and hands back the answer
+//! and each action's result for the loop to send with `ask_report`. The session's process tree registers with
+//! `process_tree`, so a restart or Quit cuts it.
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use futures_util::future::BoxFuture;
 
-use super::driver::{AskHost, AskJob};
+use super::driver::{AskHost, AskJob, AskReply, AskStore};
 use super::session::{exists, quiet_timeout};
-use crate::ask::model::AssistantResult;
-use crate::ask::prompt::AssistantInput;
+use crate::ask::perform::{Perform, perform};
+use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, StateItem, StateSummary};
 use crate::ask::session::{Session, parse_result, session_spec};
+use crate::backlog::asks::Ask;
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig};
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
-use crate::implementer::{Interrupted, new_session_id};
+use crate::implementer::Interrupted;
+use crate::implementer::session::new_session_id;
 use crate::paths;
 use crate::tiers::implementer_tier;
+use crate::view::AgentView;
 
 const TEMPLATE: &str = include_str!("../../prompts/assistant.md");
 
@@ -27,38 +32,153 @@ pub struct ClaudeAsks {
     choice: EngineChoiceConfig,
     env: Env,
     models: ModelsConfig,
+    /// The machine's `budget.dailyUsd`; 0 is no cap.
+    daily_usd: f64,
+    view: Arc<AgentView>,
 }
 
 impl ClaudeAsks {
-    pub fn new(data_dir: PathBuf, choice: EngineChoiceConfig, env: Env, models: ModelsConfig) -> Arc<Self> {
+    pub fn new(
+        data_dir: PathBuf,
+        choice: EngineChoiceConfig,
+        env: Env,
+        models: ModelsConfig,
+        daily_usd: f64,
+        view: Arc<AgentView>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
             choice,
             env,
             models,
+            daily_usd,
+            view,
         })
     }
 }
 
+fn exchange(a: &Ask) -> Exchange {
+    Exchange {
+        id: a.id.clone(),
+        text: a.text.clone(),
+        answer: a.answer.clone(),
+        reply_to: a.reply_to.clone(),
+        from_retaskable: a.from.as_deref() == Some("retaskable"),
+    }
+}
+
+fn status_word(status: crate::backlog::ItemStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+}
+
 impl AskHost for ClaudeAsks {
-    fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AssistantResult>> {
-        let (data_dir, choice, env, models) = (
+    fn blocked(&self, store: &AskStore) -> BoxFuture<'static, Result<bool>> {
+        let (client, repo, token, daily) = (store.client.clone(), store.repo, store.token.clone(), self.daily_usd);
+        Box::pin(async move {
+            let facts = client.project_facts(repo, Some(&token)).await?;
+            Ok(facts.paused || (daily > 0.0 && facts.spent_today_usd >= daily))
+        })
+    }
+
+    fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
+        let (data_dir, choice, env, models, daily_usd, view) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
             self.models,
+            self.daily_usd,
+            self.view.clone(),
         );
         Box::pin(async move {
-            let project = &job.project;
+            let AskJob {
+                project,
+                ask,
+                store,
+                usage,
+                lanes,
+                runs,
+            } = job;
+            let (client, repo, token) = (&store.client, store.repo, Some(store.token.as_str()));
+            // Every read is the store's: one that fails leaves the ask waiting, nothing is answered without it.
+            let asks = client.asks_list(repo, token).await?;
+            let audiences = client.audiences(repo, token).await?;
+            let items = client.list(repo, token).await?;
+            let drafts = client.drafts(repo, token).await?;
+            let facts = client.project_facts(repo, token).await?;
+
+            let history: Vec<Exchange> = asks.iter().filter(|a| a.id != ask.ask_id).map(exchange).collect();
+            let audiences: Vec<AudienceLine> = (audiences.into_iter())
+                .map(|a| AudienceLine {
+                    id: a.id,
+                    name: a.name,
+                    who: a.short,
+                })
+                .collect();
+            let state = StateSummary {
+                about: ask.about.clone(),
+                items: (items.iter())
+                    .map(|i| {
+                        let run = runs.get(&i.id);
+                        StateItem {
+                            id: i.id.clone(),
+                            title: i.title.clone(),
+                            state: run.map_or_else(|| status_word(i.status), |r| r.state.clone()),
+                            backlog_status: status_word(i.status),
+                            lane: run.and_then(|r| r.lane),
+                            change_url: i.pr_url.clone(),
+                            needs_person: run.and_then(|r| r.needs_human_reason.clone()),
+                        }
+                    })
+                    .collect(),
+                lanes,
+                drafts: (drafts.iter())
+                    .map(|d| StateDraft {
+                        id: d.id.clone(),
+                        title: d.titles.first().cloned().unwrap_or_default(),
+                        state: if d.pr_url.is_some() {
+                            "awaiting approval"
+                        } else {
+                            "being written"
+                        }
+                        .into(),
+                    })
+                    .collect(),
+                status: "running".into(),
+                paused_reason: None,
+                spent_today_usd: facts.spent_today_usd,
+                daily_usd,
+            };
+            let question = if ask.images_block.is_empty() {
+                ask.text.clone()
+            } else {
+                format!("{}\n\n{}", ask.text, ask.images_block)
+            };
+            let reply = |answer: String| AskReply {
+                answer,
+                actions: vec![],
+            };
             if engine_for(&choice, project.engines.as_ref(), Role::Assistant, None) != Engine::Claude {
-                return Err(anyhow!("only Claude sessions run in the Rust agent yet"));
+                return Ok(reply(
+                    "Sorry, I couldn't answer that: only Claude sessions run in the Rust agent yet.".into(),
+                ));
             }
-            let bin = resolve_claude_on_path(&env)?;
+            let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
+            let bin = match resolve_claude_on_path(&env) {
+                Ok(bin) => bin,
+                Err(e) => return Ok(sorry(e)),
+            };
             if !exists(&bin, &env) {
-                return Err(anyhow!("the claude binary wasn't found ({})", bin.display()));
+                return Ok(reply(format!(
+                    "Sorry, I couldn't answer that: the claude binary wasn't found ({}).",
+                    bin.display()
+                )));
             }
-            let tier = implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
-            let spec = session_spec(&Session {
+            let repo_path = PathBuf::from(&project.repo_path);
+            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
+            let spec = match session_spec(&Session {
                 template: TEMPLATE,
                 input: AssistantInput {
                     project_type: project.project_type,
@@ -66,36 +186,60 @@ impl AskHost for ClaudeAsks {
                     github_repo: &project.github_repo,
                     pr: "PR",
                     change: "pull request",
-                    state: &job.state,
-                    audiences: &job.audiences,
-                    asks: &job.asks,
-                    reply_to: job.reply_to.as_deref(),
-                    question: &job.question,
+                    state: &state,
+                    audiences: &audiences,
+                    asks: &history,
+                    reply_to: ask.reply_to.as_deref(),
+                    question: &question,
                 },
                 engine: Engine::Claude,
                 tier,
                 budget: &project.budget,
-                cwd: Path::new(&project.repo_path),
+                cwd: &repo_path,
                 local: None,
-            })?;
+            }) {
+                Ok(spec) => spec,
+                Err(e) => return Ok(sorry(e)),
+            };
+            let project_id = project.id_or_derived();
             let sink = TranscriptSink {
-                path: paths::run_dir(&data_dir, &project.id_or_derived(), &job.ask_id).join("assistant.jsonl"),
+                path: paths::run_dir(&data_dir, &project_id, &ask.ask_id).join("assistant.jsonl"),
                 lane: None,
             };
-            let engine = engine_of(spec.engine)?;
+            let engine = match engine_of(spec.engine) {
+                Ok(engine) => engine,
+                Err(e) => return Ok(sorry(e)),
+            };
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
-            let r = run_session(engine.as_ref(), &bin, &spec, &new_session_id(), Some(&sink), quiet).await?;
+            let r = match run_session(engine.as_ref(), &bin, &spec, &new_session_id(), Some(&sink), quiet).await {
+                Ok(r) => r,
+                Err(e) => return Ok(sorry(e)),
+            };
             if r.subtype == "interrupted" {
                 return Err(anyhow::Error::new(Interrupted(
                     "the assistant was cut by a restart".into(),
                 )));
             }
-            Ok(parse_result(r, project.budget.ask_usd))
+            let result = parse_result(r, project.budget.ask_usd);
+            let results = perform(
+                &result.actions,
+                &result.dropped,
+                &Perform {
+                    view: &view,
+                    project: &project_id,
+                    client,
+                    repo_id: repo,
+                    token,
+                    ask_id: &ask.ask_id,
+                    images_block: &ask.images_block,
+                    items: &items,
+                },
+            )
+            .await;
+            Ok(AskReply {
+                answer: result.answer,
+                actions: results,
+            })
         })
-    }
-
-    /// 0 until this agent keeps a day's spend, so the daily budget never holds an ask here yet.
-    fn spent_today_usd(&self) -> f64 {
-        0.0
     }
 }

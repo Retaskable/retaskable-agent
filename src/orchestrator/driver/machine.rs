@@ -161,8 +161,8 @@ pub struct Machine {
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
-    /// Runs the chat's asks. With none, an ask is never answered.
-    pub(super) asks: Option<super::AskRig>,
+    /// Answers the chat's asks. With none, asks are left unanswered.
+    pub(super) asks: Option<Arc<dyn super::AskHost>>,
     /// The wait between merge tries after a draft is rebased.
     pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
@@ -373,15 +373,15 @@ impl Machine {
         self
     }
 
-    /// Lets `claim` mode claim and run spec drafts.
-    pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
-        self.drafts = Some(host);
+    /// Lets `claim` mode answer the chat's asks.
+    pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
+        self.asks = Some(host);
         self
     }
 
-    /// Lets `claim` mode answer the chat's asks.
-    pub fn with_asks(mut self, rig: super::AskRig) -> Self {
-        self.asks = Some(rig);
+    /// Lets `claim` mode claim and run spec drafts.
+    pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
+        self.drafts = Some(host);
         self
     }
 
@@ -534,8 +534,9 @@ impl Machine {
             }
         }
         let mut slots = (self.concurrency).saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
-        // Asks have a human waiting: they start whatever the slots hold, and count toward them while they run.
-        if let (Some(rig), Some(_)) = (self.asks.clone(), starter.as_ref()) {
+        // Asks have a person waiting: they take their slots first, never wait for one, and count toward `concurrency`.
+        if let (Some(host), Some(_)) = (self.asks.clone(), starter.as_ref()) {
+            slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     let shared = Shared {
@@ -545,7 +546,7 @@ impl Machine {
                         engine_limits: &mut self.engine_limits,
                         stopping,
                     };
-                    lp.ask_pass(&mut slots, &rig, &self.pool, paused, &shared).await;
+                    lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
                 }
             }
         }
@@ -696,7 +697,7 @@ pub struct SpawnArgs<'a> {
     /// Runs spec drafts in `claim` mode. None claims no draft.
     pub drafts: Option<Arc<dyn super::DraftHost>>,
     /// Answers the chat's asks in `claim` mode. None answers none.
-    pub asks: Option<super::AskRig>,
+    pub asks: Option<Arc<dyn super::AskHost>>,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.

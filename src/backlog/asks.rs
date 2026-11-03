@@ -83,6 +83,18 @@ pub struct QueuedDraft {
     pub ask_id: String,
 }
 
+/// What `facts_get { kind: "project" }` says about the project's use today.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFacts {
+    /// The project's own pause (for every computer on it), set from the store.
+    #[serde(default)]
+    pub paused: bool,
+    /// What the project's sessions cost today, in USD, across computers.
+    #[serde(default)]
+    pub spent_today_usd: f64,
+}
+
 #[derive(Deserialize)]
 struct Asks {
     #[serde(default)]
@@ -105,16 +117,6 @@ impl Client {
     pub async fn asks_list(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Ask>, BacklogError> {
         let list: Asks = self.op(repo_id, token, "asks_list", json!({}), "asks").await?;
         Ok(list.asks)
-    }
-
-    /// `pause_get {}`: whether the project is paused on the store, for every computer on it.
-    pub async fn project_paused(&self, repo_id: u64, token: Option<&str>) -> Result<bool, BacklogError> {
-        #[derive(Deserialize)]
-        struct Pause {
-            paused: Option<Value>,
-        }
-        let pause: Pause = self.op(repo_id, token, "pause_get", json!({}), "pause").await?;
-        Ok(pause.paused.is_some_and(|p| !p.is_null()))
     }
 
     /// `ask_report { id, ...fields }`: an ask's progress, waiting reason, final answer and action results.
@@ -146,6 +148,18 @@ impl Client {
         }
         let ask: Queued = self.op(repo_id, token, "ask_report", args, "ask").await?;
         Ok(ask.id)
+    }
+
+    /// `facts_get { kind: "project" }`: the project's pause and today's spend, which gate new asks.
+    pub async fn project_facts(&self, repo_id: u64, token: Option<&str>) -> Result<ProjectFacts, BacklogError> {
+        self.op(
+            repo_id,
+            token,
+            "facts_get",
+            json!({ "kind": "project" }),
+            "project facts",
+        )
+        .await
     }
 
     /// `facts_get { kind: "audiences" }`: the company's audiences.
