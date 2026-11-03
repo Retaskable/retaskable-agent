@@ -315,6 +315,10 @@ pub struct ProjectLoop {
     pub(super) triaging: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
+    /// The project's hub connection's bug-report link and the version a report names (`triage_bug.rs`).
+    pub(super) bugs: Option<(Arc<crate::connector::bug_link::BugLink>, String)>,
+    /// Timeline lines for bug reports answered since the last pass: (item id, line).
+    pub(super) bug_notes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl ProjectLoop {
@@ -364,6 +368,8 @@ impl ProjectLoop {
             landing: Default::default(),
             triaging: Default::default(),
             triage_flag: false,
+            bugs: None,
+            bug_notes: Default::default(),
         }
     }
 
@@ -391,6 +397,12 @@ impl ProjectLoop {
             max_resume_context_tokens,
         )
         .with_guard(guard))
+    }
+
+    /// Reports the triager's Retaskable bugs through `link`, naming `version`.
+    pub fn with_bug_link(mut self, link: Option<(Arc<crate::connector::bug_link::BugLink>, String)>) -> Self {
+        self.bugs = link;
+        self
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).

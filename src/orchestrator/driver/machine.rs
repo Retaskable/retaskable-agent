@@ -679,6 +679,8 @@ pub struct SpawnArgs<'a> {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
+    /// Each project's hub bug-report link and the version a report names, by project id.
+    pub bug_links: std::collections::HashMap<String, (Arc<crate::connector::bug_link::BugLink>, String)>,
 }
 
 /// Starts the computer's one orchestrator task when the mode isn't `Off`. A project that can't loop (no
@@ -736,7 +738,7 @@ pub fn spawn_all(args: SpawnArgs) {
             args.guard.cloned(),
             args.max_resume_context_tokens,
         ) {
-            Ok(lp) => machine.add(lp),
+            Ok(lp) => machine.add(lp.with_bug_link(args.bug_links.get(&id).cloned())),
             Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
         }
     }

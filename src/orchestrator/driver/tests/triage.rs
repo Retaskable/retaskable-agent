@@ -1,7 +1,8 @@
 //! A stopped item gets one look from a triager (`driver/triage_run.rs`, 06.9 bullets 16 and 20).
 use super::*;
 use crate::config::OnOff;
-use crate::triage::TriageDecision;
+use crate::connector::bug_link::BugLink;
+use crate::triage::{RetaskableBug, TriageDecision};
 
 /// The triager sessions the fake starter was asked to start, and how each ends, in order (one with no scripted end
 /// never reports).
@@ -47,6 +48,7 @@ fn found(reason: &str) -> TriageEnd {
         decision: TriageDecision::Human,
         reason: reason.into(),
         steps: vec![],
+        bug: None,
     }
 }
 
@@ -116,6 +118,7 @@ async fn person_steps_are_left_as_a_human_finding_with_the_steps_listed_under_th
         decision: TriageDecision::PersonSteps,
         reason: "only you can".into(),
         steps: vec!["Add the key".into(), "Press Done".into()],
+        bug: None,
     };
     let (mut rig, _fake) = stopped(vec![end]).await;
     rig.machine.pass().await;
@@ -255,4 +258,133 @@ async fn with_the_triage_session_flag_off_nothing_looks_and_no_event_carries_cla
     }
     assert_eq!(looks(&fake), 0);
     assert!(on_it_events(&mut rig).is_empty());
+}
+
+/// A link to a fake hub: consent `on`, every `bug_report` it is sent answered as `answer` says; the sent ones listed.
+fn fake_hub(on: bool, answer: Value) -> (Arc<BugLink>, Arc<Mutex<Vec<Value>>>) {
+    let link = Arc::new(BugLink::new(std::time::Duration::from_secs(5)));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    link.opened(tx);
+    link.consent_said(&json!({ "on": on, "known": [{ "id": "b1", "title": "Known" }] }));
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let (l, s) = (link.clone(), sent.clone());
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let mut reply = answer.clone();
+            reply["ref"] = msg["ref"].clone();
+            s.lock().unwrap().push(msg);
+            l.answered(&reply);
+        }
+    });
+    (link, sent)
+}
+
+fn found_with_bug(decision: TriageDecision) -> TriageEnd {
+    TriageEnd::Found {
+        decision,
+        reason: "r".into(),
+        steps: vec![],
+        bug: Some(RetaskableBug {
+            title: "A prompt left {{name}} unfilled".into(),
+            details: "details".into(),
+            same_as: None,
+        }),
+    }
+}
+
+fn send_end(rig: &mut Rig, end: TriageEnd) {
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 0,
+        result: SessionResult::Triage(end),
+        context_tokens: None,
+        usage: None,
+        notes: vec![],
+        session_id: None,
+    });
+}
+
+/// Passes until `sent` holds `n` reports and the timeline has had `lines` of them answered.
+async fn settle_bug(rig: &mut Rig, lines: usize) -> Vec<String> {
+    for _ in 0..50 {
+        rig.machine.pass().await;
+        let notes: Vec<String> = (rig.lp(0).item_notes("a", 20).into_iter())
+            .filter(|n| n.contains("Retaskable"))
+            .collect();
+        if notes.len() >= lines {
+            return notes;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Vec::new()
+}
+
+#[tokio::test]
+async fn a_bug_with_consent_is_sent_once_with_its_timeline_line_and_never_again_even_after_a_restart() {
+    let (mut rig, _fake) = stopped(vec![]).await;
+    let (link, sent) = fake_hub(true, json!({ "type": "bug_reported", "ok": true }));
+    rig.lp(0).bugs = Some((link, "1.0 (abc)".into()));
+    send_end(&mut rig, found_with_bug(TriageDecision::Continue));
+    let notes = settle_bug(&mut rig, 1).await;
+    assert_eq!(notes, vec!["Reported to Retaskable as a fix"]);
+    let msg = sent.lock().unwrap()[0].clone();
+    assert_eq!(msg["type"], "bug_report");
+    assert_eq!(msg["version"], "1.0 (abc)");
+    let signature = rig.lp(0).records["a"].reported_bugs.clone();
+    assert_eq!(signature, vec![msg["signature"].as_str().unwrap().to_string()]);
+    // A restart keeps the record; a look at the same stop that names the same bug sends nothing.
+    rig.lp(0).records.get_mut("a").unwrap().needs_human_reason = Some("first problem".into());
+    send_end(&mut rig, found_with_bug(TriageDecision::Human));
+    for _ in 0..5 {
+        rig.machine.pass().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    assert_eq!(rig.lp(0).records["a"].reported_bugs, signature);
+}
+
+#[tokio::test]
+async fn with_consent_off_nothing_is_sent_and_no_timeline_line_is_added() {
+    let (mut rig, _fake) = stopped(vec![]).await;
+    let (link, sent) = fake_hub(false, json!({ "ok": true }));
+    rig.lp(0).bugs = Some((link, "1.0".into()));
+    send_end(&mut rig, found_with_bug(TriageDecision::Human));
+    for _ in 0..5 {
+        rig.machine.pass().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(sent.lock().unwrap().is_empty());
+    assert!(rig.lp(0).records["a"].reported_bugs.is_empty());
+    assert!(rig.lp(0).item_notes("a", 20).iter().all(|n| !n.contains("Reported to")));
+}
+
+#[tokio::test]
+async fn a_duplicate_answer_adds_the_duplicate_line() {
+    let (mut rig, _fake) = stopped(vec![]).await;
+    let (link, _sent) = fake_hub(true, json!({ "ok": true, "duplicate": true, "itemId": "b1" }));
+    rig.lp(0).bugs = Some((link, "1.0".into()));
+    send_end(&mut rig, found_with_bug(TriageDecision::Human));
+    let notes = settle_bug(&mut rig, 1).await;
+    assert_eq!(notes, vec!["Retaskable already has this bug on its board"]);
+}
+
+#[tokio::test]
+async fn the_decision_is_carried_out_the_same_with_or_without_the_bug() {
+    let reason_of = |bug: bool| async move {
+        let (mut rig, _fake) = stopped(vec![]).await;
+        let (link, _sent) = fake_hub(true, json!({ "ok": true }));
+        rig.lp(0).bugs = Some((link, "1.0".into()));
+        let mut end = found_with_bug(TriageDecision::Human);
+        if let TriageEnd::Found { bug: b, .. } = &mut end
+            && !bug
+        {
+            *b = None;
+        }
+        send_end(&mut rig, end);
+        rig.machine.pass().await;
+        let r = rig.lp(0).records["a"].clone();
+        (r.needs_human_reason, r.triaged)
+    };
+    assert_eq!(reason_of(true).await, reason_of(false).await);
 }
