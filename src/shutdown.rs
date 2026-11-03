@@ -1,8 +1,9 @@
-//! What a restart or Quit does to every session besides a detached implementer's
+//! What a restart or Quit does to every session in a project's base and main checkouts
 //! (docs/specs/agent/07.4-stopping-and-restarting.md, item `restart-cuts-sessions`): kills the
-//! whole process tree running in each project's base checkout and main checkout, waiting for it
-//! to actually go before the agent exits. A numbered lane is implementer territory and is left
-//! alone here — a restart neither waits for those nor stops them.
+//! whole process tree running in each, waiting for it to actually go before the agent exits. A
+//! numbered lane is a run's territory and is skipped by this scan: a run's own trees are waited
+//! for (up to a limit) and then cut by `runs::wind`, as docs/specs/pieces.md section 3.1 says,
+//! so nothing is left running across a restart.
 //!
 //! The main checkout is also the person's own working copy, so a scan there can't just match any
 //! process whose command line happens to contain its path: that would as happily catch the
