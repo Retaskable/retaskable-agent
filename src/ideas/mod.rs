@@ -17,16 +17,17 @@
 //!
 //! Still not wired to anything: there's no daily chore that calls [`run_round`] after a merge (needs
 //! the orchestrator loop's locks, so two computers don't run a round at once), no command that calls
-//! [`Ideas::answer`] for Accept/Not now/Never, and the prompt's `context` (what went live, what was
-//! asked, past answers) still has to be built from real store data by the caller: this agent doesn't
-//! yet track merged items' dates or asked questions, so [`build_prompt`] keeps taking `context`
-//! already built. Accept's draft-writing needs the spec-drafts item; person-added ideas
+//! [`Ideas::answer`] for Accept/Not now/Never, and nothing yet calls `context`'s [`round_context`], [`gather_live`] or
+//! [`profiles_for`], which build the prompt's `context` (what went live, and the queue's titles by
+//! state) and the user types (the store's audiences, else [`starter_profiles`]) from the store;
+//! [`build_prompt`] takes them already built. Accept's draft-writing needs the spec-drafts item; person-added ideas
 //! (shared-ideas.md) need their own queue (a `StoreIdea` with `addedBy` set), not ported here.
 //!
-//! Split by responsibility, each piece with its own tests: `model` holds the plain data types and
+//! Split by responsibility, each piece with its own tests: `context` builds the prompt's context and user types, `model` holds the plain data types and
 //! [`refilled`]'s fold, `profiles` is the user types and the prompt builder, `store` reads and writes
 //! the shared backlog's own copy of the queue, and `write` runs the session and picks the round.
 //! `test_support` is shared fixtures for this module's own tests.
+mod context;
 mod model;
 mod profiles;
 mod store;
@@ -34,6 +35,7 @@ mod store;
 mod test_support;
 mod write;
 
+pub use context::{LIVE_MAX, gather_live, profiles_for, round_context};
 pub use model::{
     IDEA_EXPERIENCE_MAX, IDEA_FEATURE_MAX, IDEA_FOR_MAX, IDEA_NEW_FEATURE_MAX, IDEA_TITLE_MAX, IDEA_WHY_MAX,
     IDEA_WHY_NOW_MAX, IDEAS_MAX_WAITS_DEFAULT, Idea, IdeaSuggestion, IdeasResult, QUEUE, Queue, ideas_result_schema,
