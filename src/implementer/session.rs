@@ -495,8 +495,12 @@ mod tests {
         let it = item(&[], None);
         let piece: RunPiece =
             serde_json::from_value(serde_json::json!({"title": "Do it", "what": "w", "doneWhen": "d"})).unwrap();
-        let template =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/prompts/implementer-piece.md")).unwrap();
+        let template = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("prompts")
+                .join("implementer-piece.md"),
+        )
+        .unwrap();
         let spec = session_spec(
             &session(&it, &[], Path::new("repo")),
             Start::Piece {

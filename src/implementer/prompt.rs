@@ -259,6 +259,22 @@ fn done_steps_text(piece: &RunPiece) -> String {
     )
 }
 
+/// What the latest look that gave `instructions` told the runs (`looks[]` in the piece's other fields).
+fn look_text(piece: &RunPiece) -> String {
+    piece
+        .other
+        .get("looks")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter_map(|l| l.get("instructions").and_then(|i| i.as_str()))
+        .map(str::trim)
+        .find(|i| !i.is_empty())
+        .map(|i| format!("## What a look said\n\nA look at this piece's earlier runs told the next runs:\n\n{i}"))
+        .unwrap_or_default()
+}
+
 /// What a piece's `build` or `fix` session is built from: the piece is the brief.
 pub struct PiecePrompt<'a> {
     pub kind: RunKind,
@@ -273,8 +289,8 @@ pub struct PiecePrompt<'a> {
     pub where_to_start: &'a str,
 }
 
-/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what a look told the
-/// runs (for a `build`) or what to fix (for a `fix`).
+/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what to fix (for a
+/// `fix`); a look's `instructions` come from `looks[]`.
 pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
     let words = project_words(p.project_type);
     let piece = p.piece;
@@ -302,6 +318,7 @@ pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String>
     };
     let mut sections = vec![
         brief,
+        look_text(piece),
         attempts_text(&piece.attempts),
         piece_decisions(piece),
         done_steps_text(piece),
@@ -514,7 +531,10 @@ mod tests {
     #[test]
     fn a_build_prompt_carries_the_piece_and_what_a_person_and_a_look_added() {
         let p = piece(serde_json::json!({
-            "next": {"kind": "build", "what": "Use the small template."},
+            "looks": [
+                {"decision": "start_over", "reason": "r", "instructions": "Old."},
+                {"decision": "again", "reason": "r", "instructions": "Use the small template."},
+            ],
             "decisions": [{"question": "Which?", "answer": "This one."}],
             "doneSteps": ["Add the secret", "Create the account"],
         }));
@@ -528,6 +548,7 @@ mod tests {
             "## Already decided by a person",
             "A: This one.",
             "Already done: Add the secret; Create the account",
+            "## What a look said",
             "Use the small template.",
             "Build this piece whole, and nothing else",
             "return `failed` and say in `summary` how it should be split",
@@ -535,15 +556,21 @@ mod tests {
         ] {
             assert!(out.contains(want), "missing {want:?}:\n{out}");
         }
-        assert!(!out.contains("pushed branch"));
+        assert!(!out.contains("pushed branch") && !out.contains("Old."));
         assert!(out.ends_with("- a"));
     }
 
     #[test]
     fn a_fix_prompt_says_what_to_fix_on_the_pushed_branch() {
-        let p = piece(serde_json::json!({"next": {"kind": "fix", "what": "CI failed: clippy."}}));
+        let p = piece(serde_json::json!({
+            "next": {"kind": "fix", "what": "CI failed: clippy."},
+            "looks": [{"decision": "again", "reason": "r", "instructions": "Keep the fix small."}],
+        }));
         let out = piece_prompt(RunKind::Fix, &p);
         assert!(!out.contains("{{"));
+        assert!(out.contains(
+            "## What a look said\n\nA look at this piece's earlier runs told the next runs:\n\nKeep the fix small."
+        ));
         assert!(out.contains("## What to fix\n\nCI failed: clippy."));
         assert!(out.contains("pushed branch"));
         let bare = piece_prompt(RunKind::Fix, &piece(serde_json::json!({"attempts": []})));
