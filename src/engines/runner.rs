@@ -97,20 +97,6 @@ struct SpawnSpec<'a> {
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 }
 
-/// The session's process couldn't be spawned (for example while Claude Code is updating): the error
-/// `spawn_and_read` fails with, so the orchestrator loop can tell this computer's own failure to start from a
-/// session that ran (`orchestrator::session`'s `downcast_ref`).
-#[derive(Debug)]
-pub struct CouldntStart(pub String);
-
-impl std::fmt::Display for CouldntStart {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for CouldntStart {}
-
 /// What a silent session's own `SessionResult` says, once the watchdog has killed it
 /// (07-orchestrator-loop.md's "a session that prints nothing ... is killed"). Reusing the
 /// existing `SessionResult::Failed` path (via `classify`), this is handed back to the project's
@@ -156,6 +142,19 @@ fn interrupted(known_session_id: &str) -> SessionResult {
 /// output from stdout line by line until the process exits — not knowing or caring which engine
 /// wrote any of it. Each raw line is teed to `sink` first, when there is one, so a crash partway
 /// still leaves everything read so far on disk.
+/// The session's process wouldn't start (the OS refused to spawn it, for example while Claude Code is
+/// updating), so nothing ran: the caller can start it again (07-orchestrator-loop.md).
+#[derive(Debug)]
+pub struct CouldNotStart(pub String);
+
+impl std::fmt::Display for CouldNotStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CouldNotStart {}
+
 async fn spawn_and_read(
     spec: SpawnSpec<'_>,
     mut reader: Box<dyn super::engine::EngineReader>,
@@ -172,7 +171,7 @@ async fn spawn_and_read(
     ProcessTree::prepare(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|e| anyhow::Error::new(CouldntStart(format!("starting {}: {e}", spec.bin.display()))))?;
+        .map_err(|e| anyhow::Error::new(CouldNotStart(format!("starting {}: {e}", spec.bin.display()))))?;
     let tree = ProcessTree::join(&child).context("putting the session in its own process tree")?;
     if let Some(tx) = spec.tree_tx {
         let _ = tx.send(tree.clone());
@@ -369,6 +368,20 @@ mod tests {
     async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
         let (bin, args) = print_file_command(out);
         run_spawn(&bin, &args, dir, None, None, Box::new(SessionReader::new(false))).await
+    }
+
+    #[tokio::test]
+    async fn spawn_and_read_marks_a_process_that_wont_start() {
+        let dir = std::env::temp_dir();
+        let missing = dir.join("retaskable-no-such-claude");
+        let err = spawn_and_read(
+            spec(&missing, &[], &dir, None, None, None),
+            Box::new(SessionReader::new(false)),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<CouldNotStart>().is_some(), "{err:#}");
     }
 
     #[tokio::test]

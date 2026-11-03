@@ -940,6 +940,7 @@ mod idea_accept;
 mod ideas;
 mod ideas_daily;
 mod lane_play;
+mod own_failures;
 mod playtests;
 mod reporting;
 mod restart;

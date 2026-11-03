@@ -2,7 +2,6 @@
 //! settled on the next wake), a step's end through the project's `Running` set, and what either means for the
 //! item's lane and lease (freed, parked, or given back to the store, with the releases and parks the store
 //! hasn't taken yet sent again later: the TS agent's `unreleased`).
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -14,7 +13,6 @@ use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::fresh_start::{FreshStart, LIMIT_PAUSE, picking_up_prompt};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
-use crate::store::RunRecord;
 use crate::telemetry::{Event, event};
 
 /// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses claiming of new
@@ -33,12 +31,9 @@ pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
 /// Watchdog kills in a row that are resumed; the next one goes to a person.
 const MAX_SILENCE_RESUMES: u32 = 3;
 
-/// Starts of a session that couldn't spawn that are tried again (a minute apart, [`SILENCE_RESUME_DELAY`]);
-/// the next failure goes to a person.
-const MAX_START_RETRIES: u32 = 3;
-
-/// Own failures before any work in a row that are handed back; the next one goes to a person.
-const MAX_HAND_BACKS: u32 = 3;
+/// Own failures in a row (a session that wouldn't start, or a hand-back) that are retried or handed back; the
+/// next one goes to a person.
+const MAX_OWN_FAILURES: u32 = 3;
 
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
@@ -62,16 +57,16 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
+    /// The session's process wouldn't start (the text says why), so nothing ran. Behind the
+    /// `own-failure-handling` flag the run keeps its lane and lease, claiming isn't paused, and the loop starts
+    /// the session again after [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure
+    /// goes to `needs_human`. With the flag Off it is a [`NeedsHuman`](Self::NeedsHuman).
+    NotStarted(String),
     /// The watchdog killed the session for printing nothing (the text says why). Behind the
     /// `own-failure-handling` flag the run stays `implementing` with its lane and lease, nothing is posted to
     /// the store, and the loop resumes the session by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row
     /// goes to `needs_human`. With the flag Off it is a [`Failed`](Self::Failed).
     Silenced(String),
-    /// The session's process couldn't be started at all (for example while Claude Code is updating). Behind the
-    /// `own-failure-handling` flag it is treated like [`Silenced`](Self::Silenced): lane and lease kept, nothing
-    /// posted, another start after [`SILENCE_RESUME_DELAY`], and the 4th failure in a row goes to
-    /// `needs_human`. With the flag Off it is a [`NeedsHuman`](Self::NeedsHuman).
-    CouldntStart(String),
     /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
     /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
@@ -397,7 +392,6 @@ impl ProjectLoop {
                 subtype: match outcome.result {
                     SessionResult::Interrupted => Some("interrupted".into()),
                     SessionResult::Silenced(_) => Some("killed_for_silence".into()),
-                    SessionResult::CouldntStart(_) => Some("couldnt_start".into()),
                     _ => None,
                 },
                 ..Default::default()
@@ -410,45 +404,68 @@ impl ProjectLoop {
             shared.engine_limits.hit(record.impl_session_engine, until);
         }
         let mut result = outcome.result;
-        let flag = self.flags.on("own-failure-handling").await;
-        // Off: today's behaviour.
-        result = match result {
-            SessionResult::Silenced(why) if !flag => SessionResult::Failed(why),
-            SessionResult::CouldntStart(why) if !flag => SessionResult::NeedsHuman(why),
-            other => other,
-        };
-        result = match result {
-            SessionResult::Silenced(why) => retry_or_escalate(&mut self.records, &mut self.silenced, &item, true, why),
-            SessionResult::CouldntStart(why) => {
-                retry_or_escalate(&mut self.records, &mut self.silenced, &item, false, why)
-            }
-            // The 4th own failure before work in a row for the item goes to a person, not a 4th hand back.
-            SessionResult::Failed(why) if flag => {
-                let count = self.own_failures.entry(item.clone()).or_default();
-                if *count < MAX_HAND_BACKS {
-                    *count += 1;
-                    SessionResult::Failed(why)
-                } else {
-                    self.own_failures.remove(&item);
-                    SessionResult::NeedsHuman(why)
-                }
-            }
-            other => other,
-        };
-        if !matches!(result, SessionResult::Failed(_)) {
+        let flag_on = self.flags.on("own-failure-handling").await;
+        if let SessionResult::NotStarted(why) = result {
+            let count = self.own_failures.get(&item).copied().unwrap_or(0);
+            result = if !flag_on {
+                SessionResult::NeedsHuman(why)
+            } else if count < MAX_OWN_FAILURES {
+                self.own_failures.insert(item.clone(), count + 1);
+                self.silenced
+                    .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                SessionResult::NotStarted(why)
+            } else {
+                SessionResult::NeedsHuman(why)
+            };
+        } else {
+            self.fresh_launched.remove(&item);
+        }
+        if flag_on && let SessionResult::Failed(why) = result {
+            let count = self.own_failures.get(&item).copied().unwrap_or(0);
+            result = if count < MAX_OWN_FAILURES {
+                self.own_failures.insert(item.clone(), count + 1);
+                SessionResult::Failed(why)
+            } else {
+                SessionResult::NeedsHuman(why)
+            };
+        }
+        // A session that started and answered (or needs a person) ends the run of own failures.
+        if matches!(
+            result,
+            SessionResult::Implementer(_) | SessionResult::NeedsHuman(_) | SessionResult::Limited { .. }
+        ) {
             self.own_failures.remove(&item);
         }
-        if !matches!(result, SessionResult::Silenced(_) | SessionResult::CouldntStart(_)) {
-            // Any answer (or a person-bound end) ends the runs of kills and failed starts.
-            if let Some(record) = self.records.get_mut(&item) {
-                record.silence_kills = 0;
-                record.start_failures = 0;
-            }
+        self.store.set_own_failures(&self.own_failures);
+        if let Err(e) = self.store.save() {
+            tracing::warn!("{}: saving the own-failure count failed: {e:#}", self.id);
+        }
+        if let SessionResult::Silenced(why) = result {
+            let record = self.records.get_mut(&item);
+            result = match record {
+                // Off: today's behaviour, the item goes back to the queue.
+                _ if !self.flags.on("own-failure-handling").await => SessionResult::Failed(why),
+                Some(record) if record.silence_kills < MAX_SILENCE_RESUMES => {
+                    record.silence_kills += 1;
+                    self.silenced
+                        .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                    SessionResult::Silenced(why)
+                }
+                record => {
+                    if let Some(record) = record {
+                        record.silence_kills = 0;
+                    }
+                    SessionResult::NeedsHuman(why)
+                }
+            };
+        } else if let Some(record) = self.records.get_mut(&item) {
+            // Any answer ends the run of kills.
+            record.silence_kills = 0;
         }
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Silenced(_) | SessionResult::CouldntStart(_) => self.save_leases(),
+            SessionResult::Silenced(_) | SessionResult::NotStarted(_) => self.save_leases(),
             SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
@@ -565,38 +582,6 @@ impl ProjectLoop {
             self.events.add_in(&self.id, Event::StepStart(start));
             self.running.spawn(item_id, step);
         }
-    }
-}
-
-/// A watchdog kill (`silence`) or a session that couldn't start: kept for another go a minute later while
-/// the item's count in a row is under its cap, else the person-bound end with the same reason.
-fn retry_or_escalate(
-    records: &mut BTreeMap<String, RunRecord>,
-    silenced: &mut BTreeMap<String, Instant>,
-    item: &str,
-    silence: bool,
-    why: String,
-) -> SessionResult {
-    let (cap, again) = if silence {
-        (MAX_SILENCE_RESUMES, SessionResult::Silenced(why.clone()))
-    } else {
-        (MAX_START_RETRIES, SessionResult::CouldntStart(why.clone()))
-    };
-    let Some(record) = records.get_mut(item) else {
-        return SessionResult::NeedsHuman(why);
-    };
-    let count = if silence {
-        &mut record.silence_kills
-    } else {
-        &mut record.start_failures
-    };
-    if *count < cap {
-        *count += 1;
-        silenced.insert(item.to_string(), Instant::now() + SILENCE_RESUME_DELAY);
-        again
-    } else {
-        *count = 0;
-        SessionResult::NeedsHuman(why)
     }
 }
 

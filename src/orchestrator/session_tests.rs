@@ -171,8 +171,8 @@ fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
 
 /// Starts one session and waits for its outcome, checking that no second one follows.
 async fn outcome_of(rig: &Rig) -> SessionResult {
-    let (first, mut rx) = request();
-    rig.starter.start(first).unwrap();
+    let (request, mut rx) = request();
+    rig.starter.start(request).unwrap();
     let got = tokio::time::timeout(Duration::from_secs(120), rx.recv())
         .await
         .expect("an outcome")
@@ -540,6 +540,17 @@ fn a_watchdog_kill_is_silenced_not_failed_or_needs_human() {
 }
 
 #[test]
+fn a_process_that_wont_start_is_not_started_not_needs_human() {
+    let refused = Err(anyhow::Error::new(crate::engines::CouldNotStart(
+        "starting claude: busy".into(),
+    )));
+    let SessionResult::NotStarted(why) = session_result_for_answer(refused, None).0 else {
+        panic!("a spawn failure can be retried");
+    };
+    assert!(why.contains("starting claude: busy"), "{why}");
+}
+
+#[test]
 fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     let cut = Err(anyhow::Error::new(Interrupted("ended with interrupted".into())));
     assert_eq!(session_result_for_answer(cut, None).0, SessionResult::Interrupted);
@@ -668,34 +679,6 @@ async fn a_lane_that_cannot_be_prepared_fails() {
     starter.start(request).unwrap();
     let got = rx.recv().await.unwrap();
     assert!(matches!(got.result, SessionResult::Failed(_)), "{got:?}");
-}
-
-#[tokio::test]
-async fn a_claude_that_cannot_be_spawned_couldnt_start_and_a_lane_that_cannot_be_prepared_still_fails() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    // Present but not runnable: the binary check passes and spawning it fails.
-    let bin = rig.root.join(fake_name());
-    std::fs::remove_file(&bin).unwrap();
-    std::fs::write(&bin, "not a program").unwrap();
-    let (first, mut rx) = request();
-    rig.starter.start(first).unwrap();
-    let got = rx.recv().await.unwrap();
-    assert!(
-        matches!(&got.result, SessionResult::CouldntStart(why) if why.contains("starting")),
-        "{got:?}"
-    );
-    // A resume that can't spawn is the same: nothing ran.
-    let (mut resumed, mut rx) = request();
-    resumed.resume = true;
-    rig.starter.start(resumed).unwrap();
-    assert!(matches!(
-        rx.recv().await.unwrap().result,
-        SessionResult::CouldntStart(_)
-    ));
-    let starter = starter_with_unpreparable_lane(&rig);
-    let (third, mut rx) = request();
-    starter.start(third).unwrap();
-    assert!(matches!(rx.recv().await.unwrap().result, SessionResult::Failed(_)));
 }
 
 #[tokio::test]
