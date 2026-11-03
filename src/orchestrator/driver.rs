@@ -18,7 +18,8 @@
 //! started in the background after each full pass for the live, unpaused projects whose read succeeded and
 //! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
 //! the site's item commands (Continue) that the connector queued; [`drafts`] is a project's spec draft, one at a time,
-//! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused.
+//! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit).
+mod asks;
 mod drafts;
 mod item_commands;
 mod land;
@@ -32,6 +33,7 @@ mod settle;
 mod triage_facts;
 mod triage_run;
 
+pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
 use project::Launch;
