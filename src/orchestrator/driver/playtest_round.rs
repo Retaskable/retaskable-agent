@@ -208,16 +208,64 @@ pub(super) async fn run(job: Job) {
     }
 }
 
+/// Fakes the ideas round's tests share with this round's.
+#[cfg(test)]
+pub(super) mod test_support {
+    use std::sync::Mutex;
+
+    use anyhow::Result;
+    use serde_json::{Value, json};
+
+    use crate::link::TokenStore;
+
+    /// A keychain that always holds a token.
+    pub struct Keys;
+    impl TokenStore for Keys {
+        fn get(&self, _url: &str) -> Result<Option<String>> {
+            Ok(Some("tok".to_string()))
+        }
+        fn set(&self, _url: &str, _token: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _url: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The fake store's answer to `chore_lock` / `lock_take` the way the real one gives it
+    /// (backlog/tests.rs): `owner` is whoever currently holds the lock (`None` means free).
+    pub fn lock_answer(op: &str, args: &Value, owner: &Mutex<Option<String>>) -> Option<Value> {
+        let mut held_by = owner.lock().unwrap();
+        match op {
+            "chore_lock" => {
+                if args["take"].as_bool().unwrap_or(false) {
+                    if held_by.is_none() {
+                        *held_by = Some("my-pc".to_string());
+                    }
+                } else {
+                    *held_by = None;
+                }
+                Some(json!({ "held": held_by.is_some(), "by": held_by.clone() }))
+            }
+            "lock_take" => Some(match held_by.as_ref() {
+                Some(by) => json!({ "held": false, "by": by }),
+                None => json!({ "held": true, "token": "L1" }),
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use anyhow::Result;
     use axum::{Json, Router, routing::post};
     use serde_json::{Value, json};
 
+    use super::test_support::Keys;
     use super::*;
     use crate::config::{ProjectType, SandboxMode};
 
@@ -243,25 +291,7 @@ mod tests {
                     seen.lock().unwrap().push((op.clone(), args.clone()));
                     let value = match op.as_str() {
                         "tryouts_list" => json!({ "waiting": waiting, "groups": null }),
-                        "chore_lock" => {
-                            let mut held_by = lock_state.lock().unwrap();
-                            if args["take"].as_bool().unwrap_or(false) {
-                                if held_by.is_none() {
-                                    *held_by = Some("my-pc".to_string());
-                                }
-                            } else {
-                                *held_by = None;
-                            }
-                            json!({ "held": held_by.is_some(), "by": held_by.clone() })
-                        }
-                        "lock_take" => {
-                            let held_by = lock_state.lock().unwrap();
-                            match held_by.as_ref() {
-                                Some(by) => json!({ "held": false, "by": by }),
-                                None => json!({ "held": true, "token": "L1" }),
-                            }
-                        }
-                        _ => Value::Null,
+                        _ => test_support::lock_answer(&op, &args, &lock_state).unwrap_or(Value::Null),
                     };
                     Json(json!({ "value": value }))
                 }
@@ -271,19 +301,6 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{addr}"), ops)
-    }
-
-    struct Keys;
-    impl TokenStore for Keys {
-        fn get(&self, _url: &str) -> Result<Option<String>> {
-            Ok(Some("tok".to_string()))
-        }
-        fn set(&self, _url: &str, _token: &str) -> Result<()> {
-            Ok(())
-        }
-        fn delete(&self, _url: &str) -> Result<()> {
-            Ok(())
-        }
     }
 
     fn tryout(key: &str, on_branch: bool) -> Value {

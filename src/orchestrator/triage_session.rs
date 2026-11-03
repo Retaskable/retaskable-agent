@@ -117,6 +117,7 @@ impl ClaudeStarter {
                         reason: r.reason,
                         steps: r.person_steps,
                         instructions: r.instructions,
+                        bug: r.retaskable_bug,
                         suggest: r.suggest,
                     },
                     None => TriageEnd::Failed {

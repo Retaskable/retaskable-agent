@@ -20,7 +20,7 @@ use crate::telemetry::{Event, event};
 use crate::triage::record::needs_human_facts;
 use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, triage_count, wants_triage};
 use crate::triage::second_look::{SecondLookResult, resolve};
-use crate::triage::{TriageButton, TriageContext, TriageDecision, TriageResult};
+use crate::triage::{RetaskableBug, TriageButton, TriageContext, TriageDecision, TriageResult};
 
 /// Failed looks at one stop before the item waits for a person with a note.
 const MAX_FAILED_LOOKS: u32 = 3;
@@ -89,6 +89,8 @@ pub enum TriageEnd {
         steps: Vec<String>,
         /// The next message (`continue`) or notes (`start_over`); empty when there are none.
         instructions: String,
+        /// A bug in Retaskable itself the triager named, whatever it decided (06.9 bullet 19).
+        bug: Option<RetaskableBug>,
         /// The button a `human` answer offers first.
         suggest: Option<TriageButton>,
     },
@@ -144,6 +146,7 @@ impl ProjectLoop {
         room: &mut u32,
         shared: &mut Shared<'_>,
     ) {
+        self.bug_answers();
         for (id, lane, held) in std::mem::take(&mut self.second_due) {
             let (reason, steps, instructions) = (held.reason.clone(), held.steps.clone(), held.instructions.clone());
             if !self.start_second_look(&id, lane, held, starter) {
@@ -197,9 +200,12 @@ impl ProjectLoop {
             if *room == 0 {
                 break;
             }
-            let Some(context) = self.triage_context(&id, std::path::Path::new("")) else {
+            let Some(mut context) = self.triage_context(&id, std::path::Path::new("")) else {
                 continue;
             };
+            if let Some(link) = shared.links.bugs.get(&self.id) {
+                context.known_bugs = link.known();
+            }
             let lane = pool.lane_of(&self.id, &id);
             self.triaging.insert(id.clone());
             self.look_note(&id, "Claude is looking into it".into());
@@ -257,8 +263,10 @@ impl ProjectLoop {
                 reason,
                 steps,
                 instructions,
+                bug,
                 suggest,
             } => {
+                self.report_bug(item_id, bug, shared);
                 if let (TriageDecision::Human, Some(suggest)) = (decision, suggest)
                     && self.records.get(item_id).is_some_and(|r| r.state == "needs_human")
                 {

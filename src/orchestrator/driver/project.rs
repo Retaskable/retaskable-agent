@@ -281,6 +281,9 @@ pub struct ProjectLoop {
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
+    /// Set while this project's ideas round is running, so a second one doesn't start on top of it.
+    #[allow(dead_code)] // nothing starts an ideas round yet
+    pub(super) ideas_round_running: Arc<AtomicBool>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
@@ -303,6 +306,8 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
+    /// Retaskable bugs sent to the hub that haven't been answered (triage_bug.rs).
+    pub(super) bug_sends: Vec<super::triage_bug::BugSend>,
     /// Triager answers waiting on their second look, by item (`claudeOnIt` stays on meanwhile), in memory only.
     pub(super) second_looking: BTreeMap<String, super::triage_run::Held>,
     /// Triager answers whose second look hasn't started yet: item, its lane (0 for none) and the answer.
@@ -352,6 +357,7 @@ impl ProjectLoop {
             running: Running::default(),
             seen: report::Seen::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
+            ideas_round_running: Arc::new(AtomicBool::new(false)),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
@@ -361,6 +367,7 @@ impl ProjectLoop {
             draft: None,
             landing: Default::default(),
             triaging: Default::default(),
+            bug_sends: Vec::new(),
             second_looking: Default::default(),
             second_due: Vec::new(),
             claude_pending: Default::default(),

@@ -20,15 +20,19 @@
 //! [`accept`] carries out Build this (`idea_accept`, [`crate::commands`]): it queues the idea as a spec draft in the shared
 //! backlog and answers it `accept` there. Not now and Never are the site's own (`idea_answer`).
 //!
-//! Still not wired to anything: there's no daily chore that calls [`run_round`] after a merge (needs
-//! the orchestrator loop's locks, so two computers don't run a round at once), and nothing calls the context builders
-//! yet but tests ([`build_prompt`] still takes `context` already built).
+//! `orchestrator::driver::ideas_round` runs one round under the [`IDEAS_LOCK`] lock (so two computers don't
+//! think at once), reading the store and sending `ideas_round`. Still not wired to anything: nothing schedules it
+//! (no daily chore), and nothing calls the context builders yet but tests ([`build_prompt`] still takes `context`
+//! already built).
 //!
 //! Split by responsibility, each piece with its own tests: `model` holds the plain data types and
 //! [`refilled`]'s fold, `profiles` is the user types and the prompt builder, `store` reads and writes
 //! the shared backlog's own copy of the queue, `write` runs the session and picks the round, and `accept` writes an idea up as a draft.
 //! `test_support` is shared fixtures for this module's own tests.
 mod accept;
+/// The store's `chore_lock` name for a round (`IDEAS_LOCK`, shared/storeIdeas.ts).
+pub const IDEAS_LOCK: &str = "ideas";
+
 mod context;
 mod model;
 mod profiles;
