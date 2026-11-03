@@ -64,6 +64,26 @@ pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch
     run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ())
 }
 
+/// Force-pushes (with lease) the branch checked out in `dir`, after a rebase rewrote it.
+pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
+    let mut cmd = Command::new(git);
+    cmd.current_dir(dir).args([
+        "push",
+        "--force-with-lease",
+        "origin",
+        &format!("HEAD:refs/heads/{branch}"),
+    ]);
+    run(cmd, None, "git push").map(|_| ())
+}
+
+/// `gh pr close <pr> --delete-branch`, run in the project's checkout.
+pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir)
+        .args(["pr", "close", &pr.to_string(), "--delete-branch"]);
+    run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
+}
+
 /// Rebases the draft's branch (checked out in `dir`) onto `origin/<base>`, and force-pushes it with lease.
 /// False, with nothing changed, when the rebase conflicts.
 pub fn rebase(git: &Path, dir: &Path, branch: &str, base: &str) -> Result<bool> {
@@ -128,6 +148,22 @@ mod tests {
         let mut other = project(Some(g));
         other.base_branch = "develop".into();
         assert_eq!(workflow(&other).person_merges_into, None);
+    }
+
+    #[test]
+    fn a_rebased_branch_is_force_pushed_with_lease() {
+        use crate::test_support::{git, repo_with_origin, run};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        run(git(&repo).args(["checkout", "--quiet", "-b", "b"]));
+        std::fs::write(repo.join("a.txt"), "1").unwrap();
+        run(git(&repo).args(["add", "-A"]));
+        run(git(&repo).args(["commit", "--quiet", "-m", "one"]));
+        run(git(&repo).args(["push", "--quiet", "origin", "b"]));
+        run(git(&repo).args(["fetch", "--quiet", "origin"]));
+        // Rewrite the pushed commit: a plain push would be rejected.
+        run(git(&repo).args(["commit", "--quiet", "--amend", "-m", "rewritten"]));
+        push_rebased(Path::new("git"), &repo, "b").unwrap();
     }
 
     #[test]

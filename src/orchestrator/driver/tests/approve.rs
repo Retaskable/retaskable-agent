@@ -15,6 +15,10 @@ struct Host {
     calls: Mutex<Vec<String>>,
     merges: Mutex<Vec<Result<(), &'static str>>>,
     rebase: Mutex<Option<bool>>,
+    /// Answers for the next rebases, before `rebase` is asked.
+    rebases: Mutex<Vec<bool>>,
+    /// The follow-up of each drafter run.
+    runs: Mutex<Vec<String>>,
 }
 
 impl Host {
@@ -27,11 +31,13 @@ impl DraftHost for Host {
     fn prepare(&self, _: &ProjectConfig, id: &str, _: &str) -> Result<PathBuf> {
         Ok(PathBuf::from(format!("draft-{id}")))
     }
-    fn run(&self, _: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
-        async { anyhow::bail!("no drafter here") }.boxed()
+    fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
+        self.calls.lock().unwrap().push(format!("run {}", job.session_id));
+        self.runs.lock().unwrap().push(job.follow_up);
+        async { Ok(serde_json::from_value(json!({ "status": "pr_opened", "summary": "rebased" })).unwrap()) }.boxed()
     }
     fn publish(&self, _: &ProjectConfig, _: &Path, _: &str, _: &str, _: &str) -> Result<Published> {
-        anyhow::bail!("nothing to publish")
+        anyhow::bail!("a hand-back must not publish: the PR exists")
     }
     fn remove(&self, _: &ProjectConfig, id: &str) {
         self.calls.lock().unwrap().push(format!("remove {id}"));
@@ -47,9 +53,21 @@ impl DraftHost for Host {
             Err(why) => anyhow::bail!(why),
         }
     }
+    fn close(&self, _: &ProjectConfig, pr: u64) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("close {pr}"));
+        Ok(())
+    }
     fn rebase(&self, _: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
         self.calls.lock().unwrap().push(format!("rebase {id} {branch}"));
+        let mut queued = self.rebases.lock().unwrap();
+        if !queued.is_empty() {
+            return Ok(queued.remove(0));
+        }
         Ok(self.rebase.lock().unwrap().unwrap_or(true))
+    }
+    fn push(&self, _: &ProjectConfig, id: &str, branch: &str) -> Result<()> {
+        self.calls.lock().unwrap().push(format!("push {id} {branch}"));
+        Ok(())
     }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         self.calls.lock().unwrap().push("fetch".into());
@@ -72,7 +90,7 @@ async fn store() -> (String, Asked) {
                     "draft_take" => json!({ "token": "lease-d", "draft": {
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval", "titles": ["Charts"],
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
-                        "itemIds": ["charts-1"], "requestedBy": "ada" } }),
+                        "itemIds": ["charts-1"], "requestedBy": "ada", "sessionId": "sess-1" } }),
                     "upsert_from_specs" => json!({ "added": ["charts-1"] }),
                     "specs_commit" => Value::Null,
                     "list" => json!([]),
@@ -94,6 +112,7 @@ struct Setup {
     press: fn() -> DraftCommand,
     merges: Vec<Result<(), &'static str>>,
     rebase: Option<bool>,
+    rebases: Vec<bool>,
 }
 
 impl Default for Setup {
@@ -107,6 +126,7 @@ impl Default for Setup {
             },
             merges: Vec::new(),
             rebase: None,
+            rebases: Vec::new(),
         }
     }
 }
@@ -133,6 +153,7 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     let host = Arc::new(Host {
         merges: Mutex::new(setup.merges),
         rebase: Mutex::new(setup.rebase),
+        rebases: Mutex::new(setup.rebases),
         ..Default::default()
     });
     rig.machine.drafts = Some(host.clone());
@@ -271,4 +292,77 @@ async fn a_merge_error_goes_back_to_waiting_with_its_reason() {
     .await;
     assert_eq!(sent[0]["detail"], "awaiting_approval");
     assert!(sent[0]["summary"].as_str().unwrap().contains("protected branch"));
+}
+
+#[tokio::test]
+async fn discard_takes_the_draft_closes_its_pr_and_reports_discarded() {
+    let (host, asked, sent, _root) = press(Setup {
+        press: || DraftCommand::Discard {
+            project: "p0".into(),
+            draft: "d1".into(),
+        },
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls(), ["close 9", "remove d1", "fetch"]);
+    let ops = ops(&asked);
+    let take = ops.iter().position(|o| o == "draft_take").unwrap();
+    let report = ops.iter().position(|o| o == "draft_report").unwrap();
+    assert!(take < report, "{ops:?}");
+    assert_eq!(
+        (
+            sent[0]["id"].as_str(),
+            sent[0]["token"].as_str(),
+            sent[0]["status"].as_str()
+        ),
+        (Some("d1"), Some("lease-d"), Some("discarded"))
+    );
+    assert!(upserts(&asked).is_empty());
+}
+
+#[tokio::test]
+async fn a_conflict_resumes_the_drafter_and_merges_with_no_new_approval() {
+    let (host, asked, sent, _root) = press(Setup {
+        merges: vec![Err("head branch is behind")],
+        rebases: vec![false, true],
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(
+        host.calls(),
+        [
+            "merge 9 delete=true",
+            "rebase d1 retaskable/spec-d1-charts",
+            "run sess-1",
+            "push d1 retaskable/spec-d1-charts",
+            "rebase d1 retaskable/spec-d1-charts",
+            "merge 9 delete=true",
+            "remove d1",
+            "fetch"
+        ]
+    );
+    let runs = host.runs.lock().unwrap().clone();
+    assert!(runs[0].starts_with("Rebase the branch onto the base branch") && runs[0].contains("conflicts with main"));
+    assert_eq!(sent.len(), 1, "no report of waiting for approval: {sent:?}");
+    assert_eq!(sent[0]["status"], "merged");
+    assert_eq!(upserts(&asked).len(), 1);
+}
+
+#[tokio::test]
+async fn a_third_conflict_after_two_hand_backs_waits_for_approval_with_the_reason() {
+    let (host, _asked, sent, _root) = press(Setup {
+        merges: vec![Err("head branch is behind")],
+        rebases: vec![false, false, false],
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls().iter().filter(|c| c.starts_with("run ")).count(), 2);
+    assert!(!host.calls().iter().any(|c| c.starts_with("remove")));
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        (sent[0]["status"].as_str(), sent[0]["detail"].as_str()),
+        (Some("needs_person"), Some("awaiting_approval"))
+    );
+    let why = sent[0]["summary"].as_str().unwrap();
+    assert!(why.contains("conflicts with main") && why.contains("2 times"), "{why}");
 }

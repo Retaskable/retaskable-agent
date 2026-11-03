@@ -1,7 +1,7 @@
 //! The `watch` run (docs/specs/pieces.md section 3.2): it takes no lane, reads the piece's change's checks every
 //! 15 seconds until they settle, and ends `green`, `red` or `failed`. The reading and deciding are `ci_watch`'s.
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -10,10 +10,29 @@ use super::driver::{RunEnd, RunRequest, RunStarter};
 use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_coverage::{ci_coverage, read_workflows};
 use crate::ci_watch::{AfterError, Decision, GhErrors, decide, read_checks, red_entry};
+use crate::process_tree::ProcessTree;
 use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
 
 /// How often the checks are read.
 pub const POLL_EVERY: Duration = Duration::from_secs(15);
+
+/// The `gh` process trees a run started, handed to the loop and kept here to see whether a stop cut one.
+#[derive(Clone, Default)]
+struct Trees(Arc<Mutex<Vec<Arc<ProcessTree>>>>);
+
+impl Trees {
+    fn add(&self, request: &RunRequest, tree: Arc<ProcessTree>) {
+        let mut trees = self.0.lock().unwrap();
+        // A tree its starter let go of has finished.
+        trees.retain(|t| Arc::strong_count(t) > 1);
+        trees.push(tree.clone());
+        request.processes.add(&request.token, tree);
+    }
+
+    fn stopped(&self) -> bool {
+        self.0.lock().unwrap().iter().any(|t| t.was_cut())
+    }
+}
 
 pub struct WatchRuns {
     gh: PathBuf,
@@ -80,11 +99,12 @@ async fn watch(
             .await
             .unwrap_or_default()
     };
+    let trees = Trees::default();
     let start = Instant::now();
     let limit = ceiling(RunKind::Watch).saturating_sub(CEILING_MARGIN);
     let mut errors = GhErrors::default();
     loop {
-        if request.handle.stopped() {
+        if trees.stopped() {
             return None;
         }
         if winding_down() {
@@ -94,10 +114,10 @@ async fn watch(
             return failed("The watch reached its time limit before CI settled.");
         }
         let read = {
-            let (gh, repo, pr, handle) = (gh.clone(), repo.clone(), pr.clone(), request.handle.clone());
-            tokio::task::spawn_blocking(move || read_checks(&gh, &repo, &pr, &|t| handle.add(t))).await
+            let (gh, repo, pr, handle) = (gh.clone(), repo.clone(), pr.clone(), (request.clone(), trees.clone()));
+            tokio::task::spawn_blocking(move || read_checks(&gh, &repo, &pr, &|t| handle.1.add(&handle.0, t))).await
         };
-        if request.handle.stopped() {
+        if trees.stopped() {
             return None;
         }
         let checks = match read {
@@ -123,16 +143,16 @@ async fn watch(
             Decision::Green { note } => return Some((RunOutcome::Green, json!({ "note": note }))),
             Decision::Failed { why } => return failed(&why),
             Decision::Red { failing } => {
-                let (gh, repo, handle) = (gh.clone(), repo.clone(), request.handle.clone());
+                let (gh, repo, handle) = (gh.clone(), repo.clone(), (request.clone(), trees.clone()));
                 let entries = tokio::task::spawn_blocking(move || {
                     failing
                         .iter()
-                        .map(|f| red_entry(&gh, &repo, f, &|t| handle.add(t)))
+                        .map(|f| red_entry(&gh, &repo, f, &|t| handle.1.add(&handle.0, t)))
                         .collect::<Vec<_>>()
                 })
                 .await
                 .unwrap_or_default();
-                if request.handle.stopped() {
+                if trees.stopped() {
                     return None;
                 }
                 let checks: Vec<Value> = entries

@@ -82,12 +82,13 @@ impl ItemCommand {
     }
 }
 
-/// A press on a draft waiting for a person (**Approve** or **Merge into main**), carried out whether or not the
+/// A press on a draft waiting for a person (**Approve**, **Merge into main** or **Discard**), carried out whether or not the
 /// project is paused (agent/06.5-spec-drafts.md step 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftCommand {
     Approve { project: String, draft: String },
     Merge { project: String, draft: String },
+    Discard { project: String, draft: String },
 }
 
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
@@ -128,7 +129,9 @@ impl ItemCommands {
     pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
         let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
         let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
-            DraftCommand::Approve { project: p, .. } | DraftCommand::Merge { project: p, .. } => p == project,
+            DraftCommand::Approve { project: p, .. }
+            | DraftCommand::Merge { project: p, .. }
+            | DraftCommand::Discard { project: p, .. } => p == project,
         });
         *queue = rest;
         mine

@@ -148,9 +148,18 @@ impl DraftHost for ClaudeDrafts {
         land::merge_pr(&self.gh(), Path::new(&project.repo_path), pr, method, delete_branch)
     }
 
+    fn close(&self, project: &ProjectConfig, pr: u64) -> Result<()> {
+        land::close_pr(&self.gh(), Path::new(&project.repo_path), pr)
+    }
+
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
         let dir = self.prepare(project, id, branch)?;
         land::rebase(crate::git_bin::program(), &dir, branch, &project.base_branch)
+    }
+
+    fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()> {
+        let dir = self.prepare(project, id, branch)?;
+        land::push_rebased(crate::git_bin::program(), &dir, branch)
     }
 
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {

@@ -184,6 +184,16 @@ async fn read(a: &mut Accepted) -> Value {
     }
 }
 
+/// The next message that isn't a heartbeat, which can land between any two.
+async fn read_not_alive(a: &mut Accepted) -> Value {
+    loop {
+        let v = read(a).await;
+        if v["type"] != "alive" {
+            return v;
+        }
+    }
+}
+
 async fn close(a: &mut Accepted, code: u16) {
     let frame = CloseFrame {
         code: CloseCode::from(code),
@@ -456,7 +466,7 @@ async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     a.ws.send(Message::text(command("c1", "pause", json!({})).to_string()))
         .await
         .unwrap();
-    let nack = read(&mut a).await;
+    let nack = read_not_alive(&mut a).await;
     assert_eq!(
         nack["reason"],
         "retaskable.com answers this one itself; it doesn't take a computer."
@@ -467,8 +477,8 @@ async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     ))
     .await
     .unwrap();
-    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c2" }));
-    let snapshot = read(&mut a).await;
+    assert_eq!(read_not_alive(&mut a).await, json!({ "type": "ack", "id": "c2" }));
+    let snapshot = read_not_alive(&mut a).await;
     assert_eq!(snapshot["type"], "snapshot");
     assert_eq!(
         snapshot["state"]["orchestrator"]["pausedReason"],
@@ -480,8 +490,8 @@ async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     ))
     .await
     .unwrap();
-    assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c3" }));
-    let snapshot = read(&mut a).await;
+    assert_eq!(read_not_alive(&mut a).await, json!({ "type": "ack", "id": "c3" }));
+    let snapshot = read_not_alive(&mut a).await;
     assert_eq!(snapshot["state"]["orchestrator"]["pausedReason"], NO_WORK_YET);
     c.stop(Duration::from_secs(1)).await;
 }

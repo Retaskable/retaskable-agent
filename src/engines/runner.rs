@@ -250,6 +250,19 @@ pub async fn run_session(
     sink: Option<&TranscriptSink>,
     quiet: Option<Duration>,
 ) -> Result<SessionResult> {
+    run_session_tracked(engine, bin, spec, known_session_id, sink, quiet, None).await
+}
+
+/// [`run_session`], handing the session's process tree to `tree_tx` once it has started, so a run can cut it.
+pub async fn run_session_tracked(
+    engine: &dyn Engine,
+    bin: &Path,
+    spec: &SessionSpec,
+    known_session_id: &str,
+    sink: Option<&TranscriptSink>,
+    quiet: Option<Duration>,
+    tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
+) -> Result<SessionResult> {
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;
     spawn_and_read(
@@ -262,7 +275,7 @@ pub async fn run_session(
             known_session_id,
             end_after_result: engine.ends_on_result().then_some(END_AFTER_RESULT),
             quiet,
-            tree_tx: None,
+            tree_tx,
         },
         engine.reader(spec),
         file,

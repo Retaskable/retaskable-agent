@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use super::*;
 use crate::backlog::Client;
 use crate::config::ProjectConfig;
-use crate::orchestrator::driver::{RunContext, RunEndSender};
-use crate::runs::{RunHandle, RunLocks};
+use crate::orchestrator::driver::{RunContext, RunEndSender, RunProcesses};
+use crate::runs::RunLocks;
 use crate::test_support::write_executable;
 
 /// A git repo whose `origin/main` has a workflow that runs on pull requests, so CI counts as covering the base.
@@ -75,13 +75,17 @@ fn request(repo: &Path, change: Value, max_minutes: u32) -> (RunRequest, tokio::
     };
     config.tuning.ci_max_minutes = max_minutes;
     let piece = serde_json::from_value(json!({ "title": "t", "change": change })).unwrap();
+    // Kept open (leaked) so a registered tree isn't cut as the loop's gone.
+    let (processes, processes_rx) = RunProcesses::channel();
+    std::mem::forget(processes_rx);
     let request = RunRequest {
         token: "W1".into(),
         kind: RunKind::Watch,
         piece,
         lane: None,
         ends,
-        handle: std::sync::Arc::new(RunHandle::default()),
+        project: "p".into(),
+        processes,
         context: RunContext {
             project: "p".into(),
             config,

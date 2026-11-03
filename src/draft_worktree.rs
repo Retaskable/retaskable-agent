@@ -39,7 +39,7 @@ pub fn path(worktrees_dir: &Path, id: &str) -> PathBuf {
 
 /// Git inside the project's checkout, with the agent's own calls skipping `maintenance run --auto`
 /// (04-architecture.md section 4.1.1).
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut cmd: Command = crate::git_bin::command(dir);
     let output = cmd
         .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])

@@ -636,6 +636,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             token: "lease-1".into(),
             item: rig.lp(0).items["a"].clone(),
             session_id,
+            engine: crate::engines::EngineId::Claude,
             resume: false,
             outcomes: rig.machine.outcome_sender(),
             follow_up: None,

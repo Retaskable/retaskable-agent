@@ -13,15 +13,18 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::drafts::{DraftHost, claim_agent};
+use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::project::signed_out;
 use super::{ProjectLoop, Shared};
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
 use crate::config::ProjectConfig;
+use crate::drafts::DrafterStatus;
 use crate::drafts::land::{deletes_head, pr_number, workflow};
 use crate::view::DraftCommand;
 
+/// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
+const HAND_BACKS: u32 = 2;
 /// Tries at the merge once the branch is rebased, and the wait between them.
 const MERGE_TRIES: u32 = 5;
 pub(super) const MERGE_WAIT: Duration = Duration::from_secs(2);
@@ -127,10 +130,84 @@ impl Ctx {
             Err(e) => Err(e.to_string()),
         }
     }
+
+    /// Resumes the draft's drafter session to rebase the branch and resolve the conflicts, then force-pushes what it did.
+    async fn hand_back(&self, taken: &TakenDraft, branch: &str, reason: &str) -> Result<(), String> {
+        let draft = &taken.draft;
+        let Some(session_id) = draft.session_id.clone() else {
+            return Err("the draft has no session to resume".into());
+        };
+        let (host, project, id, b) = (
+            self.host.clone(),
+            self.project.clone(),
+            draft.id.clone(),
+            branch.to_string(),
+        );
+        let dir = tokio::task::spawn_blocking(move || host.prepare(&project, &id, &b))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))?;
+        let job = DraftJob {
+            project: self.project.clone(),
+            draft: draft.clone(),
+            dir: dir.clone(),
+            branch: branch.to_string(),
+            session_id,
+            resume: true,
+            follow_up: rebase_request(reason),
+            usage: None,
+        };
+        let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
+        if result.status == DrafterStatus::Failed {
+            return Err(result.summary);
+        }
+        let (host, project, id, b) = (
+            self.host.clone(),
+            self.project.clone(),
+            draft.id.clone(),
+            branch.to_string(),
+        );
+        tokio::task::spawn_blocking(move || host.push(&project, &id, &b))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))
+    }
 }
 
 fn text<'a>(draft: &'a TakenDraft, key: &str) -> Option<&'a str> {
     draft.draft.other.get(key).and_then(Value::as_str)
+}
+
+/// **Discard**: the pull request is closed with its branch (a failure is ignored, as it may be closed already), the
+/// worktree goes, the project's remote is fetched, and the store is told the draft is `discarded`. A draft that
+/// isn't waiting for a person is let go instead.
+async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
+    if text(&taken, "status") != Some("needs_person") {
+        tracing::info!("dropped a Discard on {id}: it isn't waiting for a person");
+        ctx.release(&id).await;
+        return None;
+    }
+    let pr = taken.draft.pr_url.as_deref().and_then(pr_number);
+    let (host, project, draft_id) = (ctx.host.clone(), ctx.project.clone(), id.clone());
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(pr) = pr
+            && let Err(e) = host.close(&project, pr)
+        {
+            tracing::warn!("{draft_id}: closing the pull request: {e:#}");
+        }
+        host.remove(&project, &draft_id);
+        if let Err(e) = host.fetch(&project) {
+            tracing::warn!("{draft_id}: fetching after the discard: {e:#}");
+        }
+    })
+    .await;
+    let report = DraftReport {
+        status: Some("discarded".into()),
+        detail: Some("discarded".into()),
+        ..Default::default()
+    };
+    ctx.report(&id, report).await;
+    None
 }
 
 /// One press, from taking the draft to reporting it. `Some` when the pull request merged.
@@ -175,10 +252,24 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
             ctx.back(&id, &first).await;
             return None;
         };
-        let why = match ctx.rebase(&id, branch).await {
-            Ok(true) => ctx.merge(pr, delete, MERGE_TRIES).await.err(),
-            Ok(false) => Some(format!("it conflicts with {base}. Send it back with notes.")),
-            Err(e) => Some(e),
+        let mut hand_backs = 0;
+        let why = loop {
+            match ctx.rebase(&id, branch).await {
+                Ok(true) => break ctx.merge(pr, delete, MERGE_TRIES).await.err(),
+                Ok(false) if hand_backs < HAND_BACKS => {
+                    hand_backs += 1;
+                    let reason = format!("it conflicts with {base}");
+                    if let Err(e) = ctx.hand_back(&taken, branch, &reason).await {
+                        break Some(format!("{reason}, and the drafter couldn't rebase it: {e}"));
+                    }
+                }
+                Ok(false) => {
+                    break Some(format!(
+                        "it conflicts with {base}, even after going back to the drafter {HAND_BACKS} times. Send it back with notes."
+                    ));
+                }
+                Err(e) => break Some(e),
+            }
         };
         if let Some(why) = why {
             ctx.back(&id, &why).await;
@@ -247,7 +338,9 @@ impl ProjectLoop {
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
         for press in presses {
-            let (DraftCommand::Approve { draft, .. } | DraftCommand::Merge { draft, .. }) = &press;
+            let (DraftCommand::Approve { draft, .. }
+            | DraftCommand::Merge { draft, .. }
+            | DraftCommand::Discard { draft, .. }) = &press;
             let id = draft.clone();
             let merge_press = matches!(press, DraftCommand::Merge { .. });
             let agent = claim_agent(shared.links, &self.project);
@@ -267,7 +360,12 @@ impl ProjectLoop {
                 host: host.clone(),
                 wait,
             };
-            self.landing.tasks.push(tokio::spawn(land(ctx, id, merge_press, taken)));
+            let task = if matches!(press, DraftCommand::Discard { .. }) {
+                tokio::spawn(discard(ctx, id, taken))
+            } else {
+                tokio::spawn(land(ctx, id, merge_press, taken))
+            };
+            self.landing.tasks.push(task);
         }
     }
 }

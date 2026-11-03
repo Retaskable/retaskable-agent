@@ -16,6 +16,7 @@ pub mod driver;
 pub mod fresh_start;
 pub mod guard;
 pub mod live;
+pub mod piece_runs;
 pub mod round_robin;
 pub mod session;
 pub mod steps;

@@ -15,11 +15,12 @@ use super::Shared;
 use super::report;
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
+use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
 use crate::env::Env;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
-use crate::orchestrator::fresh_start::FreshStart;
+use crate::orchestrator::fresh_start::{FreshStart, fresh_for_engine};
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
@@ -140,6 +141,8 @@ pub struct StartRequest {
     /// The session's id, saved in the state file before it starts: the one `--session-id` names for a new
     /// session, or the saved one `--resume` continues.
     pub session_id: String,
+    /// The engine the session runs on: the one it started on when `resume`, else the lane's.
+    pub engine: EngineId,
     /// Whether to resume `session_id` (a restart cut it off) rather than start it.
     pub resume: bool,
     /// Where the session reports how it ended; the loop reads it on its next wake.
@@ -552,6 +555,7 @@ impl ProjectLoop {
             if state == ItemState::Implementing {
                 self.to_resume.push(id.clone());
             }
+            let session = session.map(|s| (s, record.impl_session_engine));
             self.remember(&id, lane, session, record.impl_context_tokens);
         }
         self.save_leases();
@@ -593,7 +597,7 @@ impl ProjectLoop {
         &mut self,
         item_id: &str,
         lane: Option<u32>,
-        session: Option<String>,
+        session: Option<(String, EngineId)>,
         context_tokens: Option<u64>,
     ) {
         let (Some(run), Some(item)) = (self.runs.get(item_id), self.items.get(item_id)) else {
@@ -602,12 +606,20 @@ impl ProjectLoop {
         if !self.leases.contains_key(item_id) {
             return;
         }
-        let session = session.or_else(|| self.records.get(item_id).and_then(|r| r.impl_session_id.clone()));
+        let (session, engine) = match session {
+            Some((id, engine)) => (Some(id), engine),
+            None => self
+                .records
+                .get(item_id)
+                .map(|r| (r.impl_session_id.clone(), r.impl_session_engine))
+                .unwrap_or_default(),
+        };
         let attempt = self.attempt_of(item_id);
         let record = RunRecord {
             state: state_name(run.state).into(),
             lane,
             impl_session_id: session,
+            impl_session_engine: engine,
             branch: Some(branch_name(item, attempt)),
             slice: run.slice,
             impl_context_tokens: context_tokens,
@@ -645,11 +657,17 @@ impl ProjectLoop {
             if let Some(RunRecord {
                 lane: Some(lane),
                 impl_session_id: Some(session),
+                impl_session_engine,
                 impl_context_tokens,
                 ..
             }) = record
             {
+                let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
                 let kind = match impl_context_tokens {
+                    _ if let Some(reason) = fresh_for_engine(impl_session_engine, lane_now) => {
+                        tracing::info!("{}: {id}'s session can't resume ({reason:?}), starting fresh", self.id);
+                        self.fresh_launch(&id, lane, reason, "Carry on with the slice.")
+                    }
                     Some(tokens) if tokens > u64::from(self.max_resume_context_tokens) => {
                         tracing::info!(
                             "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
@@ -695,12 +713,26 @@ impl ProjectLoop {
             }
         };
         let session_id = resume.clone().unwrap_or_else(new_session_id);
+        // A resumed session stays on its engine; a new one starts on the lane's.
+        let engine = match &resume {
+            Some(_) => self
+                .records
+                .get(item_id)
+                .map(|r| r.impl_session_engine)
+                .unwrap_or_default(),
+            None => program_of(engine_for(
+                &shared.links.engine_choice,
+                self.project.engines.as_ref(),
+                Role::Implementer,
+                Some(lane),
+            )),
+        };
         // A resumed session keeps its last known size; a fresh or picking-up one starts with none of its own yet.
         let context_tokens = resume
             .is_some()
             .then(|| self.records.get(item_id).and_then(|r| r.impl_context_tokens))
             .flatten();
-        self.remember(item_id, Some(lane), Some(session_id.clone()), context_tokens);
+        self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
         let request = StartRequest {
             project: self.id.clone(),
@@ -709,6 +741,7 @@ impl ProjectLoop {
             token: self.leases.get(item_id).cloned().unwrap_or_default(),
             item,
             session_id,
+            engine,
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
             usage: self.store.usage(),
