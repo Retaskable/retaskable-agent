@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(go("play", 2, &v)["type"], "ack");
         assert_eq!(go("stop", 1, &v)["type"], "ack");
         assert_eq!(
-            v.item_commands.take("one"),
+            v.item_commands.take_lane("one"),
             vec![
                 ItemCommand::Play {
                     project: "one".into(),
