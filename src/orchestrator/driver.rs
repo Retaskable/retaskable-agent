@@ -31,6 +31,7 @@ mod machine;
 mod playtest_round;
 mod project;
 mod report;
+mod resume;
 mod runs;
 mod settle;
 mod signed_out;
