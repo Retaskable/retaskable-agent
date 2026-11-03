@@ -245,6 +245,96 @@ async fn cutting_the_registered_tree_ends_the_run_interrupted() {
     assert_eq!(end.outcome, RunOutcome::Interrupted);
 }
 
+fn check(name: &str, command: &str, blocking: bool) -> crate::config::CheckConfig {
+    crate::config::CheckConfig {
+        name: name.into(),
+        command: command.into(),
+        blocking,
+        timeout_sec: 60,
+    }
+}
+
+/// `rig` with the project's checks and rounds set.
+fn rig_checked(steps: &[&str], checks: Vec<crate::config::CheckConfig>, rounds: u32) -> Rig {
+    let mut r = rig(steps, &answer("pr_opened", ""));
+    let starter = Arc::get_mut(&mut r.starter).unwrap();
+    starter.projects[0].checks = checks;
+    starter.projects[0].max_check_rounds = rounds;
+    r
+}
+
+async fn end_with(r: &Rig) -> RunEnd {
+    let (req, mut s) = request(r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    end_of(&mut s.ends).await
+}
+
+const FIXED: &str = "touch fixed.txt; git add -A; git -c user.name=t -c user.email=t@t commit -qm fixed";
+
+#[tokio::test]
+async fn passing_checks_let_the_run_end_pr_opened_with_their_evidence() {
+    let r = rig_checked(&[COMMIT], vec![check("ok", "true", true)], 3);
+    let end = end_with(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    assert_eq!(end.result["checks_summary"], "✓ ok");
+    assert!(end.result["diff_stat"].as_str().unwrap().contains("small.rs"));
+}
+
+#[tokio::test]
+async fn a_blocking_failure_goes_back_to_the_session_and_a_second_round_passes() {
+    let c = check("needs-fix", "echo still-broken; test -f fixed.txt", true);
+    let r = rig_checked(&[COMMIT, FIXED], vec![c], 3);
+    let end = end_with(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    let prompt = std::fs::read_to_string(r.root.join("prompt2.txt")).unwrap();
+    assert!(
+        prompt.contains("still-broken") && prompt.contains("test -f fixed.txt"),
+        "{prompt}"
+    );
+    assert_eq!(end.result["checks_summary"], "✓ needs-fix");
+}
+
+#[tokio::test]
+async fn a_non_blocking_failure_does_not_block() {
+    let r = rig_checked(&[COMMIT], vec![check("lint", "false", false)], 3);
+    let end = end_with(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    assert_eq!(end.result["checks_summary"], "✗ lint (non-blocking)");
+    assert!(!r.root.join("prompt2.txt").exists());
+}
+
+#[tokio::test]
+async fn failing_past_max_check_rounds_fails_naming_the_checks() {
+    let checks = vec![
+        check("unit", "false", true),
+        check("types", "false", true),
+        check("lint", "false", false),
+    ];
+    let r = rig_checked(&[COMMIT, "true"], checks, 1);
+    let end = end_with(&r).await;
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("unit, types") && !why.contains("lint"), "{why}");
+    assert!(!origin_has(&r, BRANCH));
+}
+
+#[tokio::test]
+async fn a_failed_install_counts_as_a_failed_blocking_check() {
+    let step = r#"echo '{ not json' > package.json; git add -A; git -c user.name=t -c user.email=t@t commit -qm pkg"#;
+    let r = rig_checked(&[step, "true"], vec![check("ok", "true", true)], 1);
+    let end = end_with(&r).await;
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("npm"), "{why}");
+    assert!(
+        std::fs::read_to_string(r.root.join("prompt2.txt"))
+            .unwrap()
+            .contains("npm")
+    );
+}
+
 #[test]
 fn it_asks_for_build_and_fix() {
     let r = rig(&[], "");
