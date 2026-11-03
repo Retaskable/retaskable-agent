@@ -16,9 +16,20 @@ use crate::review_context::ReviewContext;
 use crate::reviewer::{self, Reviewer, ReviewerContext, ReviewerResult};
 use crate::scouts::{self, ScoutInfo, Scouts};
 
-/// What the final reviewer is told when no scout ran.
-const NO_SCOUTS: &str =
-    "(No scouts ran: the diff is small. Read the diff yourself, with `git diff` over the range above.)";
+/// What the final reviewer is told when no scout ran: to read the whole change itself, for every
+/// concern the scouts would have covered (`review.ts`).
+fn no_scouts_note(diff: &scouts::DiffInfo, range: &str) -> String {
+    let files = diff
+        .files
+        .iter()
+        .map(|f| format!("`{}`", f.file))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "(No scouts ran: read the whole change yourself ({} lines), line by line: `git diff {range} -- <file>` for {files}. Look for logic bugs and broken edge cases, missing tests for behaviour that could break unnoticed, differences from the specs, and committed secrets or risky commands.)",
+        diff.total_lines
+    )
+}
 
 /// Everything one review needs besides the lane and the runner. `common` carries the piece's brief
 /// (build it with [`crate::review_context::piece_slice_description`]) and the stage 1 `checks`.
@@ -55,7 +66,7 @@ where
         input.review.min_scout_diff_lines,
     );
     let scout_text = if jobs.is_empty() {
-        NO_SCOUTS.to_string()
+        no_scouts_note(&diff, input.common.range)
     } else {
         scouts::run_scouts(&jobs, &input.scouts, &input.common, input.scout_info, &run)
             .await
@@ -192,7 +203,19 @@ mod tests {
         let (r, seen) = go(2, false).await;
         let r = r.unwrap();
         assert_eq!(seen.len(), 1);
-        assert!(seen[0].prompt.contains("Read the diff yourself"));
+        let p = &seen[0].prompt;
+        assert!(
+            p.contains("No scouts ran: read the whole change yourself (2 lines), line by line"),
+            "{p}"
+        );
+        assert!(p.contains("`git diff origin/main...HEAD -- <file>` for `a.rs`"), "{p}");
+        assert!(
+            p.contains("logic bugs")
+                && p.contains("missing tests")
+                && p.contains("differences from the specs")
+                && p.contains("committed secrets"),
+            "{p}"
+        );
         assert!(seen[0].prompt.contains("Piece: build it"));
         assert_eq!(r.result.verdict, "approve");
         assert!(r.comment.contains("**Verdict:** approve") && r.comment.contains("Looks right."));
