@@ -1,6 +1,7 @@
 //! The trial plan's state (first-run-check.md section 3.3, "In this Rust agent"): one fixed change,
 //! started once per project, kept in the project's `state.json` under `trialPlan`. This holds the
-//! record, the fixed instruction and the plain-code decisions; nothing runs it yet.
+//! record, the fixed instruction and the plain-code decisions; `orchestrator::driver::trial` runs them and
+//! `orchestrator::trial_host` is the session.
 use crate::config::ProjectConfig;
 use crate::setup_check::{SetupChecks, setup_checks_pass};
 

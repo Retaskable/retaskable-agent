@@ -155,6 +155,8 @@ fn describe_event(event: &Event) -> String {
             },
             text(&e.text)
         ),
+        Event::TrialOpened(e) => format!("trial plan opened {}", text(&e.pr_url)),
+        Event::TrialDropped(e) => format!("trial plan dropped: {}", text(&e.reason)),
         // No line of their own: every field, sorted by name.
         Event::Tick(_)
         | Event::HostCallUndefined(_)

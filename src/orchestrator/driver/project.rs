@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use super::report;
 pub(super) use super::signed_out::signed_out;
 use super::{LanePlay, Shared};
-use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
+use crate::backlog::{ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
 use crate::env::Env;
@@ -319,6 +319,10 @@ pub struct ProjectLoop {
     pub(super) triage_flag: bool,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
+    /// The trial plan's session running now, if any (`trial.rs`), in memory only.
+    pub(super) trial: Option<super::trial::RunningTrial>,
+    /// How many items the backlog held when this project was last read.
+    pub(super) backlog_items: usize,
 }
 
 impl ProjectLoop {
@@ -375,6 +379,8 @@ impl ProjectLoop {
             claude_pending: Default::default(),
             triage_flag: false,
             asks: Default::default(),
+            trial: None,
+            backlog_items: 0,
         }
     }
 
@@ -969,25 +975,6 @@ impl ProjectLoop {
             }),
         );
         Some((answer, more))
-    }
-
-    /// A pass that couldn't even ask the store (no repo id, no link): the page hears of it too.
-    pub(super) fn cant_start(&self, message: String) {
-        self.live.failed(&self.id, now_iso8601(), message);
-    }
-
-    pub(super) fn store_error(&mut self, op: &str, e: &BacklogError) {
-        tracing::warn!("{}: {op} failed: {e}", self.id);
-        self.live.failed(&self.id, now_iso8601(), e.to_string());
-        self.events.add_in(
-            &self.id,
-            Event::StoreError(event::StoreError {
-                op: Some(op.into()),
-                code: e.code().map(|c| json!(c)),
-                error: Some(e.to_string()),
-                ..Default::default()
-            }),
-        );
     }
 }
 
