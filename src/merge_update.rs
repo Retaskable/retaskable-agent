@@ -9,6 +9,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::lanes::{fetch_is_stale, fetch_latest_with};
+use crate::process_tree::output_std;
 
 /// How to start git in a directory.
 pub type Git<'a> = &'a dyn Fn(&Path) -> Command;
@@ -37,11 +38,12 @@ pub fn behind(git: Git, repo: &Path, base: &str, head: &str) -> Behind {
     if fetch_latest_with(git, repo).is_err() {
         return Behind::CantTell;
     }
-    let status = git(repo)
-        .args(["merge-base", "--is-ancestor"])
-        .arg(format!("origin/{base}"))
-        .arg(head)
-        .output();
+    let status = output_std(
+        git(repo)
+            .args(["merge-base", "--is-ancestor"])
+            .arg(format!("origin/{base}"))
+            .arg(head),
+    );
     // Exit 0: contained. 1: not an ancestor. Anything else (an unknown ref is 128): can't tell.
     match status.map(|o| o.status.code()) {
         Ok(Some(0)) => Behind::UpToDate,
@@ -55,11 +57,12 @@ pub fn worktree_path(worktrees_dir: &Path, piece: &str) -> PathBuf {
 }
 
 fn run(git: Git, dir: &Path, args: &[&str]) -> Result<String> {
-    let output = git(dir)
-        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
-        .args(args)
-        .output()
-        .context("running git")?;
+    let output = output_std(
+        git(dir)
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+            .args(args),
+    )
+    .context("running git")?;
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
