@@ -82,6 +82,7 @@ pub(crate) fn lane_free_request(
         token: token.into(),
         kind,
         piece,
+        other: Default::default(),
         lane: None,
         ends,
         project: "p".into(),

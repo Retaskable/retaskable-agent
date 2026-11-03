@@ -80,6 +80,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         stop: Default::default(),
         kind,
         piece: serde_json::from_value(piece).unwrap(),
+        other: Default::default(),
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
         ends,
         context: crate::orchestrator::driver::RunContext::for_test(),

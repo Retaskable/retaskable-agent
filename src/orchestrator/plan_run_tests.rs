@@ -3,8 +3,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
+use crate::config::{Engine, EngineChoiceConfig};
 use crate::orchestrator::driver::{RunEndSender, RunProcesses};
-use crate::orchestrator::session::tests::{fake_name, project_in};
+use crate::orchestrator::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
+use crate::orchestrator::look_run::LookRuns;
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -12,28 +14,12 @@ struct Rig {
     starter: PlanRuns,
 }
 
-/// A project whose `claude` records its arguments and folder, then prints `out`; `extra` runs first.
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
-    let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let script = format!(
-        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{r}'\ncat > \"$R/in.txt\"\necho \"$@\" > \"$R/args.txt\"\npwd > \"$R/pwd.txt\"\n{extra}\ncat \"$R/out.jsonl\"\n",
-        r = root.display()
-    );
-    let bin = root.join(fake_name());
-    crate::test_support::write_executable(&bin, &script);
-    std::fs::write(root.join("out.jsonl"), out).unwrap();
-    let bin = bin.to_string_lossy().into_owned();
-    let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
-    let mut project = project_in(&root, &repo);
-    project.budget.planner_usd = 1.5;
-    let starter = PlanRuns::new(root.join("data"), vec![project], choice, env, ModelsConfig::default());
+    let (dir, root, roster) = roster(out, extra, choice, |p| p.budget.planner_usd = 1.5);
     Rig {
         _dir: dir,
         root,
-        starter,
+        starter: PlanRuns::new(roster, Slot::default()),
     }
 }
 
@@ -62,6 +48,7 @@ fn request(piece: Value) -> (RunRequest, Started) {
         stop: stop.clone(),
         kind: RunKind::Plan,
         piece: serde_json::from_value(piece).unwrap(),
+        other: Default::default(),
         lane: None,
         ends,
         context: crate::orchestrator::driver::RunContext::for_test(),
@@ -83,7 +70,7 @@ async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
 #[tokio::test]
 async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
-    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.projects[0].worktrees_dir));
+    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
     let (req, mut s) = request(brief());
     assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
@@ -91,20 +78,7 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::Planned, "{:?}", end.result);
     assert_eq!(end.result["pieces"][1]["needs"], json!(["A"]));
-    let pwd = std::fs::read_to_string(r.root.join("pwd.txt")).unwrap();
-    assert_eq!(
-        std::fs::canonicalize(pwd.trim()).unwrap(),
-        std::fs::canonicalize(&base).unwrap()
-    );
-    let args = std::fs::read_to_string(r.root.join("args.txt")).unwrap();
-    assert!(
-        args.contains("--max-budget-usd 1.5") && args.contains("sonnet"),
-        "{args}"
-    );
-    assert!(
-        !args.contains("--dangerously") && args.contains("--disallowedTools") && args.contains("Edit Write"),
-        "{args}"
-    );
+    assert_ran_read_only_in(&r.root, &base);
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(prompt.contains("Add the widget"), "{prompt}");
     // The flag clears once the run has ended.
@@ -168,13 +142,7 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
     let (second, _s2) = request(brief());
     assert!(r.starter.start(second).unwrap_err().contains("already running"));
     // Cutting the registered tree ends the run with nothing from the task.
-    let (token, tree) = tokio::time::timeout(Duration::from_secs(30), s.trees.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(token, "tok");
-    tree.cut();
-    tree.kill_and_wait(Duration::from_secs(5));
+    cut_registered_tree(&mut s.trees).await;
     tokio::time::timeout(Duration::from_secs(30), async {
         while r.starter.kinds().is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -188,4 +156,24 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
     let mut other = EngineChoiceConfig::default();
     other.roles.planner = Some(Engine::Codex);
     assert!(rig(&answer(GOOD), "", other).starter.kinds().is_empty());
+}
+
+#[tokio::test]
+async fn a_plan_and_a_look_share_one_slot() {
+    let r = rig(&answer(GOOD), "sleep 60", EngineChoiceConfig::default());
+    let look = LookRuns::new(r.starter.roster.clone(), r.starter.slot.clone());
+    // A look holds the slot: no plan is asked for or started.
+    let held = r.starter.slot.take().unwrap();
+    assert!(r.starter.kinds().is_empty() && look.kinds().is_empty());
+    let (req, _s) = request(brief());
+    assert!(r.starter.start(req).unwrap_err().contains("already running"));
+    drop(held);
+    // A plan holds it: no look is asked for or started.
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    assert!(look.kinds().is_empty());
+    let (mut req, _s2) = request(brief());
+    req.kind = RunKind::Look;
+    assert!(look.start(req).unwrap_err().contains("already running"));
+    cut_registered_tree(&mut s.trees).await;
 }

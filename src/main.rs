@@ -354,17 +354,25 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .collect(),
         bug_version: connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default()),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
+            // One plan or look at a time on this computer: both runners hold this slot.
+            let plan_or_look = orchestrator::slot::Slot::default();
+            let roster = orchestrator::plan_run::Roster {
+                data_dir: dir.to_path_buf(),
+                projects: cfg.projects.clone(),
+                choice: config::engine_choice(cfg, env),
+                env: env.clone(),
+                models: cfg.machine.models,
+            };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
                 orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
                     as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::plan_run::PlanRuns::new(
-                    dir.to_path_buf(),
-                    cfg.projects.clone(),
-                    config::engine_choice(cfg, env),
-                    env.clone(),
-                    cfg.machine.models,
+                    roster.clone(),
+                    plan_or_look.clone(),
                 )) as Arc<dyn orchestrator::driver::RunStarter>,
+                Arc::new(orchestrator::look_run::LookRuns::new(roster, plan_or_look))
+                    as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),

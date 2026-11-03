@@ -1,6 +1,6 @@
 //! A `look` run's pure part (docs/specs/pieces.md sections 3.2 and 3.5): the brief a read-only session is
 //! given, the prompt (`prompts/look.md`), the session and the decision it answers with. Modelled on
-//! [`crate::triage`]; nothing runs it yet.
+//! [`crate::triage`]; `orchestrator::look_run` runs it.
 
 use std::future::Future;
 

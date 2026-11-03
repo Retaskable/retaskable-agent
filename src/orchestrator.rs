@@ -14,15 +14,19 @@
 pub mod ask_host;
 pub mod draft_host;
 pub mod driver;
+#[cfg(all(test, unix))]
+mod fake_session_tests;
 pub mod fresh_start;
 pub mod guard;
 pub mod live;
+pub mod look_run;
 pub mod merge_run;
 mod piece_review;
 pub mod piece_runs;
 pub mod plan_run;
 pub mod round_robin;
 pub mod session;
+pub mod slot;
 pub mod steps;
 mod triage_session;
 pub mod trial_host;

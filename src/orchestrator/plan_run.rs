@@ -4,13 +4,14 @@
 //! this computer.
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
 use super::session::{exists, quiet_timeout};
+use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -207,117 +208,143 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     Ok(Value::Object(result))
 }
 
-/// Runs `plan` runs of the projects it was built with, one at a time on this computer.
-pub struct PlanRuns {
+/// What the plan and look runners are built with.
+#[derive(Clone)]
+pub struct Roster {
     pub data_dir: PathBuf,
     pub projects: Vec<ProjectConfig>,
     pub choice: EngineChoiceConfig,
     pub env: Env,
     pub models: ModelsConfig,
-    running: Arc<AtomicBool>,
+}
+
+/// What a plan or look session runs with.
+pub(super) struct Job {
+    pub data_dir: PathBuf,
+    pub project: ProjectConfig,
+    pub bin: PathBuf,
+    pub model: String,
+}
+
+impl Roster {
+    fn on_claude(&self, role: Role, project: Option<&ProjectConfig>) -> bool {
+        let engines = project.and_then(|p| p.engines.as_ref());
+        engine_for(&self.choice, engines, role, None) == Engine::Claude
+    }
+
+    /// `kind`, unless the role runs on another engine (only Claude sessions run in the Rust agent yet; the role's
+    /// engine is the machine's choice unless a project overrides it) or `slot` is held.
+    pub(super) fn kinds(&self, role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
+        let claude = self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p)));
+        if claude && !slot.busy() { vec![kind] } else { Vec::new() }
+    }
+
+    /// Takes `slot` and sets up the session of `request` for `role` on `model`; `Err` gives the run back.
+    pub(super) fn begin(
+        &self,
+        role: Role,
+        request: &RunRequest,
+        slot: &Slot,
+        model: String,
+    ) -> Result<(Job, SlotGuard), String> {
+        let (project, bin) = claude_project(&self.projects, request, &self.env, |p| self.on_claude(role, Some(p)))?;
+        let guard = slot
+            .take()
+            .ok_or("a plan or look run is already running on this computer")?;
+        let job = Job {
+            data_dir: self.data_dir.clone(),
+            project,
+            bin,
+            model,
+        };
+        Ok((job, guard))
+    }
+}
+
+/// Runs `plan` runs of the projects it was built with, one at a time on this computer.
+pub struct PlanRuns {
+    pub roster: Roster,
+    /// Shared with the look runner: one plan or look at a time.
+    pub slot: Slot,
 }
 
 impl PlanRuns {
-    pub fn new(
-        data_dir: PathBuf,
-        projects: Vec<ProjectConfig>,
-        choice: EngineChoiceConfig,
-        env: Env,
-        models: ModelsConfig,
-    ) -> Self {
-        Self {
-            data_dir,
-            projects,
-            choice,
-            env,
-            models,
-            running: Arc::default(),
-        }
-    }
-
-    fn planner_on_claude(&self, project: Option<&ProjectConfig>) -> bool {
-        let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.choice, engines, Role::Planner, None) == Engine::Claude
-    }
-}
-
-/// Clears the computer's plan flag when the run's task ends, however it ends (a panic included).
-struct Running(Arc<AtomicBool>);
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+    pub fn new(roster: Roster, slot: Slot) -> Self {
+        Self { roster, slot }
     }
 }
 
 impl RunStarter for PlanRuns {
     fn kinds(&self) -> Vec<RunKind> {
-        // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
-        let claude = self.planner_on_claude(None) && self.projects.iter().all(|p| self.planner_on_claude(Some(p)));
-        if claude && !self.running.load(Ordering::SeqCst) {
-            vec![RunKind::Plan]
-        } else {
-            Vec::new()
-        }
+        self.roster.kinds(Role::Planner, RunKind::Plan, &self.slot)
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let project = self
-            .projects
-            .iter()
-            .find(|p| p.id_or_derived() == request.project)
-            .ok_or_else(|| format!("no project {} is configured", request.project))?
-            .clone();
-        if !self.planner_on_claude(Some(&project)) {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
-        if self.running.swap(true, Ordering::SeqCst) {
-            return Err("a plan run is already running on this computer".into());
-        }
-        let guard = Running(self.running.clone());
-        let job = Job {
-            data_dir: self.data_dir.clone(),
-            project,
-            bin,
-            model: tiers::chore_tier().to_string(),
-        };
-        let (ends, token) = (request.ends.clone(), request.token.clone());
+        let (job, guard) = self
+            .roster
+            .begin(Role::Planner, &request, &self.slot, tiers::chore_tier().to_string())?;
         let cut = Cut::default();
-        // The inner task is joined, so even a panic in it ends in exactly one end.
-        tokio::spawn(async move {
-            let _running = guard;
-            let end = match tokio::spawn(plan(job, request.clone(), cut.clone())).await {
-                Ok(end) => end,
-                Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
-            };
-            // A run the loop already ended (a stop or the ceiling cut its tree) sends nothing.
-            if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
-                ends.send(RunEnd { token, outcome, result });
-            }
-        });
+        spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
     }
 }
 
-struct Job {
-    data_dir: PathBuf,
-    project: ProjectConfig,
-    bin: PathBuf,
-    model: String,
-}
-
 /// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.
 #[derive(Clone, Default)]
-struct Cut(Arc<Mutex<Option<Arc<ProcessTree>>>>);
+pub(super) struct Cut(pub(super) Arc<Mutex<Option<Arc<ProcessTree>>>>);
 
 impl Cut {
-    fn is_cut(&self) -> bool {
+    pub(super) fn is_cut(&self) -> bool {
         self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
     }
+}
+
+/// The project of `request`, and the `claude` binary, for a starter whose role runs on Claude (`on_claude`); `Err`
+/// gives the run back.
+pub(super) fn claude_project(
+    projects: &[ProjectConfig],
+    request: &RunRequest,
+    env: &Env,
+    on_claude: impl Fn(&ProjectConfig) -> bool,
+) -> Result<(ProjectConfig, PathBuf), String> {
+    let project = projects
+        .iter()
+        .find(|p| p.id_or_derived() == request.project)
+        .ok_or_else(|| format!("no project {} is configured", request.project))?
+        .clone();
+    if !on_claude(&project) {
+        return Err("only Claude sessions run in the Rust agent yet".into());
+    }
+    let bin = resolve_claude_on_path(env).map_err(|e| format!("{e:#}"))?;
+    if !exists(&bin, env) {
+        return Err(format!("the claude binary wasn't found ({})", bin.display()));
+    }
+    Ok((project, bin))
+}
+
+/// Runs `work` as the run's task, holding `guard` until it ends. The inner task is joined, so even a panic in it
+/// ends in exactly one end. A run the loop already ended (a stop or the ceiling cut its tree) sends nothing, and
+/// neither does a `work` that answers `None`.
+pub(super) fn spawn_run<G: Send + 'static>(
+    guard: G,
+    request: RunRequest,
+    cut: Cut,
+    work: impl std::future::Future<Output = Option<(RunOutcome, Value)>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let _held = guard;
+        let end = match tokio::spawn(work).await {
+            Ok(end) => end,
+            Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
+        };
+        if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
+            request.ends.send(RunEnd {
+                token: request.token.clone(),
+                outcome,
+                result,
+            });
+        }
+    });
 }
 
 fn failed(why: impl Into<String>) -> Option<(RunOutcome, Value)> {
