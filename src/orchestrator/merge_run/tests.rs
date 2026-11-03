@@ -283,3 +283,49 @@ async fn a_lock_lost_before_landing_ends_interrupted_without_merging() {
     rig.assert_lock_dropped();
     assert_eq!(rig.request.context.locks.count(), 0);
 }
+
+fn start_runner(rig: &Rig) {
+    let runner = MergeRuns::with(
+        fake_gh(rig.dir.path()),
+        tgit,
+        "here".into(),
+        Duration::from_millis(10),
+        None,
+    );
+    runner.start(rig.request.clone()).unwrap();
+}
+
+#[tokio::test]
+async fn a_stop_while_waiting_for_the_lock_takes_nothing_and_merges_nothing() {
+    let mut rig = rig(true).await;
+    start_runner(&rig);
+    while ops(&rig.log, "lock_take").len() < 2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The loop ended the run (no process of it was running), and then the other computer let the lock go.
+    rig.request.stop.set();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let asked = ops(&rig.log, "lock_take").len();
+    rig.log.lock().unwrap().1 = false;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(ops(&rig.log, "lock_take").len() <= asked + 1);
+    assert_eq!(rig.request.context.locks.count(), 0, "no lock was taken");
+    assert!(calls(rig.dir.path()).is_empty(), "no gh ran");
+    assert!(rig.ends.try_recv().is_err(), "the loop already ended the run");
+}
+
+#[tokio::test]
+async fn a_stop_between_processes_drops_the_lock_and_merges_nothing() {
+    let mut rig = rig(false).await;
+    set(rig.dir.path(), "slow", "");
+    start_runner(&rig);
+    while rig.request.context.locks.count() == 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    rig.request.stop.set();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!calls(rig.dir.path()).iter().any(|c| c.starts_with("pr merge")));
+    rig.assert_lock_dropped();
+    assert_eq!(rig.request.context.locks.count(), 0);
+    assert!(rig.ends.try_recv().is_err());
+}

@@ -74,8 +74,6 @@ pub fn cut_all() {
     }
 }
 
-/// Resets the process-wide flag and registry `cut_all` uses, so a test that exercises it
-/// doesn't leave `stopping()` true, or stale entries behind, for whatever runs after it.
 type Hook = Box<dyn Fn(Arc<ProcessTree>)>;
 
 thread_local! {
@@ -117,6 +115,8 @@ pub fn output_std(command: &mut std::process::Command) -> std::io::Result<std::p
     out
 }
 
+/// Resets the process-wide flag and registry `cut_all` uses, so a test that exercises it
+/// doesn't leave `stopping()` true, or stale entries behind, for whatever runs after it.
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     STOPPING.store(false, Ordering::SeqCst);

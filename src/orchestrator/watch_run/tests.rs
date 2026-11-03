@@ -86,6 +86,7 @@ pub(crate) fn lane_free_request(
         ends,
         project: "p".into(),
         processes,
+        stop: Default::default(),
         context: RunContext {
             project: "p".into(),
             config,

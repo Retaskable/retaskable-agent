@@ -167,6 +167,9 @@ impl Job {
         let ctx = &self.request.context;
         let start = Instant::now();
         loop {
+            if self.stopped() {
+                return Err(None);
+            }
             let held = ctx
                 .client
                 .lock_take(ctx.repo, Some(ctx.token.as_str()), name, Some(note))
@@ -191,6 +194,11 @@ impl Job {
         }
     }
 
+    /// The loop has ended the run: a beat's `stop` or the ceiling, seen whether or not a process was running.
+    fn stopped(&self) -> bool {
+        self.request.stop.stopped() || self.trees.stopped()
+    }
+
     fn lost(&self) -> Outcome {
         Some((RunOutcome::Interrupted, json!({})))
     }
@@ -199,10 +207,16 @@ impl Job {
         let config = &self.request.context.config;
         let base = config.base_branch.clone();
         let head = format!("origin/{branch}");
+        if self.stopped() {
+            return None;
+        }
         let seen = {
             let base = base.clone();
             self.git(move |git, repo| behind(git, repo, &base, &head)).await
         };
+        if self.stopped() {
+            return None;
+        }
         if seen == Behind::Behind {
             return self.update(lock, branch, piece).await;
         }
@@ -214,7 +228,7 @@ impl Job {
                 Ok(v) => v,
                 Err(why) => return failed(why),
             };
-            if self.trees.stopped() {
+            if self.stopped() {
                 return None;
             }
             match view.next() {
@@ -222,7 +236,12 @@ impl Job {
                 Next::Closed => return failed("The change was closed without merging."),
                 Next::Update => return self.update(lock, branch, piece).await,
                 Next::Land => return self.merge(lock, pr, branch, piece).await,
-                Next::Unknown => tokio::time::sleep(self.ask_every).await,
+                Next::Unknown => {
+                    tokio::time::sleep(self.ask_every).await;
+                    if self.stopped() {
+                        return None;
+                    }
+                }
             }
         }
         failed("GitHub couldn't say whether the change can merge.")
@@ -230,6 +249,9 @@ impl Job {
 
     /// Merges the base into the change's branch and pushes it.
     async fn update(&self, lock: &str, branch: &str, piece: &str) -> Outcome {
+        if self.stopped() {
+            return None;
+        }
         if !self.request.context.locks.held(lock) {
             return self.lost();
         }
@@ -241,7 +263,7 @@ impl Job {
             self.git(move |git, repo| update_from_base(git, repo, &dir, &piece, &branch, &base))
                 .await
         };
-        if self.trees.stopped() {
+        if self.stopped() {
             return None;
         }
         match done {
@@ -255,6 +277,9 @@ impl Job {
     }
 
     async fn merge(&self, lock: &str, pr: &str, branch: &str, piece: &str) -> Outcome {
+        if self.stopped() {
+            return None;
+        }
         if !self.request.context.locks.held(lock) {
             return self.lost();
         }
@@ -263,7 +288,7 @@ impl Job {
             Ok(out) => out,
             Err(why) => return failed(why),
         };
-        if self.trees.stopped() {
+        if self.stopped() {
             return None;
         }
         if ok {
@@ -288,7 +313,7 @@ impl Job {
             merge_commit: Option<Merge>,
         }
         let read = self.gh_json::<Read>(&["pr", "view", pr, "--json", "mergeCommit"]).await;
-        if self.trees.stopped() {
+        if self.stopped() {
             return None;
         }
         let commit = read.ok().and_then(|r| r.merge_commit?.oid);
