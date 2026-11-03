@@ -25,7 +25,7 @@ struct Listed {
     url: String,
 }
 
-pub(super) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<String> {
+pub(crate) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<String> {
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

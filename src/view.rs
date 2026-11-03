@@ -71,6 +71,14 @@ impl ItemCommand {
     }
 }
 
+/// A press on a draft waiting for a person (**Approve** or **Merge into main**), carried out whether or not the
+/// project is paused (agent/06.5-spec-drafts.md step 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftCommand {
+    Approve { project: String, draft: String },
+    Merge { project: String, draft: String },
+}
+
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -78,6 +86,7 @@ impl ItemCommand {
 pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
+    drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
 }
 
 impl PartialEq for ItemCommands {
@@ -98,6 +107,20 @@ impl ItemCommands {
 
     pub fn push(&self, command: ItemCommand) {
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    pub fn push_draft(&self, command: DraftCommand) {
+        self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the draft presses queued for `project`, oldest first.
+    pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
+        let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
+            DraftCommand::Approve { project: p, .. } | DraftCommand::Merge { project: p, .. } => p == project,
+        });
+        *queue = rest;
+        mine
     }
 
     /// Removes and returns `project`'s queued commands, oldest first.
