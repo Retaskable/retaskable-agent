@@ -1,5 +1,6 @@
 //! The minute pass starting each project's try-out grouping round in the background.
 use super::*;
+use crate::backlog::runs::RunKind;
 use crate::config::Playtests;
 use std::path::Path;
 
@@ -168,4 +169,132 @@ async fn a_round_in_flight_isnt_started_again_and_never_blocks_the_pass() {
 
 fn all_ops(seen: &Seen) -> Vec<String> {
     seen.lock().unwrap().clone()
+}
+
+/// A store for a `runs`-mode round: the grouping lock is `lock_take`n as token `L1`, `run_beat` answers `beat`, and
+/// every op asked is recorded with its args.
+async fn runs_store(beat: Value) -> (String, Arc<Mutex<Vec<(String, Value)>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            let beat = beat.clone();
+            async move {
+                let op = body["op"].as_str().unwrap_or("").to_string();
+                seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                let value = match op.as_str() {
+                    "list" => json!([]),
+                    "tryouts_list" => {
+                        let waiting: Vec<Value> = (1..=4)
+                            .map(|n| json!({"key": format!("k{n}"), "itemId": "1", "title": "T", "what": "W", "steps": ["S"]}))
+                            .collect();
+                        json!({"waiting": waiting, "groups": null})
+                    }
+                    "lock_take" => json!({"held": true, "token": "L1"}),
+                    "run_beat" => beat,
+                    _ => Value::Null,
+                };
+                Json(json!({ "value": value })).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), asked)
+}
+
+struct NoRuns;
+impl RunStarter for NoRuns {
+    fn kinds(&self) -> Vec<RunKind> {
+        Vec::new()
+    }
+    fn start(&self, _request: RunRequest) -> Result<(), String> {
+        Err("none".into())
+    }
+}
+
+fn runs_ops(asked: &Arc<Mutex<Vec<(String, Value)>>>) -> Vec<String> {
+    let mut ops: Vec<String> = asked.lock().unwrap().iter().map(|(o, _)| o.clone()).collect();
+    ops.retain(|o| o.starts_with("tryout") || o.starts_with("lock_") || o == "chore_lock" || o == "run_beat");
+    ops
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("never saw {what}");
+}
+
+/// A `runs`-mode project whose planner session takes a second, so the lock is held while the loop beats.
+#[cfg(unix)]
+async fn runs_round(beat: Value) -> (Rig, Arc<Mutex<Vec<(String, Value)>>>) {
+    let (base, asked) = runs_store(beat).await;
+    let mut rig = live_rig(&base);
+    rig.lp(0).mode = OrchestratorMode::Runs;
+    let dir = rig._dir.path();
+    let bin = dir.join("slow.sh");
+    crate::test_support::write_executable(
+        &bin,
+        &format!(
+            "#!/bin/sh\nsleep 1\ncat \"{}\"\nexit 0\n",
+            dir.join("out.jsonl").display()
+        ),
+    );
+    let bin = bin.to_string_lossy().into_owned();
+    rig.machine.links.env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
+    minute(&mut rig).await;
+    until("lock_take", || runs_ops(&asked).contains(&"lock_take".to_string())).await;
+    (rig, asked)
+}
+
+/// One run-loop pass a minute from now, which beats whatever tokens are held.
+#[cfg(unix)]
+async fn beat(rig: &mut Rig) {
+    let m = &mut rig.machine;
+    let shared = Shared {
+        links: &m.links,
+        claim_paused_until: &mut None,
+        claude_signed_out_until: &mut None,
+        engine_limits: &mut Default::default(),
+        stopping: false,
+    };
+    let now = std::time::Instant::now() + Duration::from_secs(61);
+    m.projects[0].run_pass(&mut m.pool, &NoRuns, &shared, now).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_runs_round_takes_and_drops_the_lock_by_token_and_the_beat_carries_it() {
+    let (mut rig, asked) = runs_round(json!({})).await;
+    beat(&mut rig).await;
+    let running = rig.lp(0).playtest_round_running.clone();
+    until("the round's end", || !running.load(Ordering::SeqCst)).await;
+    assert_eq!(
+        runs_ops(&asked),
+        vec!["tryouts_list", "lock_take", "run_beat", "tryout_groups", "lock_drop"]
+    );
+    let recorded = asked.lock().unwrap();
+    let beats: Vec<_> = recorded.iter().filter(|(o, _)| o == "run_beat").collect();
+    assert_eq!(beats[0].1["tokens"], json!(["L1"]));
+    let take = recorded.iter().find(|(o, _)| o == "lock_take").unwrap();
+    assert_eq!(take.1["name"], crate::playtest_groups::TRYOUT_GROUPS_LOCK);
+    let drop = recorded.iter().find(|(o, _)| o == "lock_drop").unwrap();
+    assert_eq!(drop.1["token"], "L1");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lock_lost_to_a_beat_stop_sends_no_grouping() {
+    let (mut rig, asked) = runs_round(json!({ "L1": "stop" })).await;
+    beat(&mut rig).await;
+    let running = rig.lp(0).playtest_round_running.clone();
+    until("the round's end", || !running.load(Ordering::SeqCst)).await;
+    assert_eq!(runs_ops(&asked), vec!["tryouts_list", "lock_take", "run_beat"]);
 }

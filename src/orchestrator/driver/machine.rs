@@ -290,7 +290,7 @@ impl Machine {
             .iter()
             .enumerate()
             .filter(|(i, lp)| {
-                self.live(lp)
+                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
                     && !paused[*i]
                     && matches!(steps.get(*i), Some(Step::Ticked { .. }))
                     && lp.project.playtests != Playtests::Off
@@ -316,6 +316,7 @@ impl Machine {
                         machine: self.links.machine.clone(),
                         backlog_url: self.links.backlog_url.clone(),
                         keychain: self.links.keychain.clone(),
+                        locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
                     },
                 ))
             })

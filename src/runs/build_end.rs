@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::backlog::runs::RunOutcome;
 use crate::decisions::{Decision, split_asked};
 use crate::implementer::publish::Published;
-use crate::implementer::{ImplementerResult, Interrupted, MaxTurns, SilenceKilled};
+use crate::implementer::{ImplementerResult, Interrupted, MaxTurns, Question, SilenceKilled};
 
 /// A pushed branch and the change opened for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +26,23 @@ fn failed(why: impl Into<String>) -> (RunOutcome, Value) {
     (RunOutcome::Failed(why.into()), json!({}))
 }
 
-fn change_json(p: &Pushed) -> Value {
+/// The `branch` and `change` a result carries.
+pub fn change_json(p: &Pushed) -> Value {
     json!({ "branch": p.branch, "change": { "number": p.change.number, "url": p.change.url } })
+}
+
+/// A result's `questions` array: each `{ header?, question, options }`.
+pub fn questions_json(questions: &[Question]) -> Value {
+    questions
+        .iter()
+        .map(|q| {
+            let mut o = json!({ "question": q.question, "options": q.options });
+            if !q.header.is_empty() {
+                o["header"] = json!(q.header);
+            }
+            o
+        })
+        .collect()
 }
 
 /// The run's end from the implementer's answer. `decisions` are the answers already on the piece.
@@ -63,19 +78,8 @@ pub fn end_from_answer(
                         .join("; ")
                 ));
             }
-            let questions: Vec<Value> = r
-                .questions
-                .iter()
-                .map(|q| {
-                    let mut o = json!({ "question": q.question, "options": q.options });
-                    if !q.header.is_empty() {
-                        o["header"] = json!(q.header);
-                    }
-                    o
-                })
-                .collect();
             let mut result = pushed.map(change_json).unwrap_or_else(|| json!({}));
-            result["questions"] = json!(questions);
+            result["questions"] = questions_json(&r.questions);
             (RunOutcome::Questions, result)
         }
         "person_steps" if r.person_steps.is_empty() => failed(format!("Implementer gave up: {}", r.summary)),

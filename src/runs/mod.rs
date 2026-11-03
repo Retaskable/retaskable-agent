@@ -5,7 +5,7 @@
 mod build_end;
 mod locks;
 mod wind;
-pub use build_end::{Pushed, end_from_answer, needs_push};
+pub use build_end::{Pushed, change_json, end_from_answer, needs_push, questions_json};
 pub use locks::{RunLocks, lock_ceiling};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
