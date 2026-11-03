@@ -66,7 +66,7 @@ pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
         std::fs::write(bin, script).unwrap();
     } else {
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr view\") cat '{r}/gh_state';;\n\"pr list\") cat '{r}/gh_list';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\nesac\n"
+            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr view\") cat '{r}/gh_state';;\n\"pr list\") cat '{r}/gh_list';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\n\"pr comment\") cat >> '{r}/gh_comment'; echo '---' >> '{r}/gh_comment';;\nesac\n"
         );
         crate::test_support::write_executable(bin, &script);
     }

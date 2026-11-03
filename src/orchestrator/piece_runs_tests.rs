@@ -22,7 +22,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
     let mut script = format!(
-        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{}'\nn=$(cat \"$R/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$R/count\"\necho \"$@\" >> \"$R/args_all\"\ncat > \"$R/prompt$n.txt\"\ncase $n in\n",
+        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{}'\necho \"$@\" >> \"$R/args_all\"\ncat > \"$R/cur.txt\"\ncase \"$*\" in *needs_human*) r=$(cat \"$R/rcount\" 2>/dev/null || echo 0); r=$((r+1)); echo $r > \"$R/rcount\"; cp \"$R/cur.txt\" \"$R/review_prompt$r.txt\"; [ -f \"$R/review_sleep\" ] && sleep 60; if [ -f \"$R/review$r.jsonl\" ]; then cat \"$R/review$r.jsonl\"; else cat \"$R/approve.jsonl\"; fi; exit 0;; esac\nn=$(cat \"$R/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$R/count\"; cp \"$R/cur.txt\" \"$R/prompt$n.txt\"\ncase $n in\n",
         root.display()
     );
     for (i, step) in steps.iter().enumerate() {
@@ -32,6 +32,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
     let bin = root.join(fake_name());
     crate::test_support::write_executable(&bin, &script);
     std::fs::write(root.join("out.jsonl"), answer).unwrap();
+    std::fs::write(root.join("approve.jsonl"), verdict("approve", "")).unwrap();
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
     let project = project_in(&root, &repo);
@@ -54,6 +55,13 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         root,
         starter,
     }
+}
+
+/// The reviewer session's answer.
+fn verdict(verdict: &str, extra: &str) -> String {
+    format!(
+        r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"verdict":"{verdict}","summary":"The summary"{extra}}},"session_id":"s"}}"#
+    )
 }
 
 fn answer(status: &str, extra: &str) -> String {
@@ -339,4 +347,104 @@ async fn a_failed_install_counts_as_a_failed_blocking_check() {
 fn it_asks_for_build_and_fix() {
     let r = rig(&[], "");
     assert_eq!(r.starter.kinds(), vec![RunKind::Build, RunKind::Fix]);
+}
+
+fn read(r: &Rig, name: &str) -> String {
+    std::fs::read_to_string(r.root.join(name)).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn an_approving_review_posts_its_comment_and_ends_pr_opened() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let end = end_with(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    let comment = read(&r, "gh_comment");
+    assert!(
+        comment.contains("**Verdict:** approve") && comment.contains("The summary"),
+        "{comment}"
+    );
+    assert!(read(&r, "gh.log").contains("pr comment 7"));
+    assert!(read(&r, "review_prompt1.txt").contains("Show the thing"));
+}
+
+#[tokio::test]
+async fn requested_changes_resume_the_implementer_and_a_re_review_approves() {
+    let mut r = rig(&[COMMIT, FIXED], &answer("pr_opened", ""));
+    Arc::get_mut(&mut r.starter).unwrap().projects[0].max_review_rounds = 3;
+    let extra = r#","comments":[{"file":"small.rs","line":1,"body":"Add the fixed file"}]"#;
+    std::fs::write(r.root.join("review1.jsonl"), verdict("request_changes", extra)).unwrap();
+    let end = end_with(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened, "{:?}", end.result);
+    let prompt = read(&r, "prompt2.txt");
+    assert!(prompt.contains("Add the fixed file"), "{prompt}");
+    assert!(read(&r, "args_all").lines().nth(2).unwrap().contains("--resume"));
+    assert_eq!(read(&r, "rcount").trim(), "2");
+    let again = read(&r, "review_prompt2.txt");
+    assert!(
+        again.contains("re-review") && again.contains("Add the fixed file"),
+        "{again}"
+    );
+    assert!(read(&r, "gh_comment").matches("**Verdict:**").count() == 2);
+    let tree = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(r.root.join("origin.git"))
+        .args(["ls-tree", "--name-only", BRANCH])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&tree.stdout).contains("fixed.txt"));
+}
+
+#[tokio::test]
+async fn asking_for_changes_past_the_round_limit_fails_with_the_requests() {
+    let mut r = rig(&[COMMIT, FIXED], &answer("pr_opened", ""));
+    Arc::get_mut(&mut r.starter).unwrap().projects[0].max_review_rounds = 1;
+    let extra = r#","comments":[{"body":"Still wrong"}]"#;
+    for n in 1..=2 {
+        std::fs::write(
+            r.root.join(format!("review{n}.jsonl")),
+            verdict("request_changes", extra),
+        )
+        .unwrap();
+    }
+    let end = end_with(&r).await;
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("Still wrong") && why.contains("1 rounds"), "{why}");
+}
+
+#[tokio::test]
+async fn a_review_needing_a_person_asks_if_it_gave_questions_else_fails() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let q = r#","questions":[{"question":"Which way?","options":["a","b"]}]"#;
+    std::fs::write(r.root.join("review1.jsonl"), verdict("needs_human", q)).unwrap();
+    let end = end_with(&r).await;
+    assert_eq!(end.outcome, RunOutcome::Questions);
+    assert_eq!(end.result["questions"][0]["question"], "Which way?");
+    assert_eq!(end.result["change"]["number"], 7);
+
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    std::fs::write(r.root.join("review1.jsonl"), verdict("needs_human", "")).unwrap();
+    let end = end_with(&r).await;
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("The summary"), "{why}");
+}
+
+#[tokio::test]
+async fn a_stop_during_review_kills_its_session_and_ends_interrupted() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    std::fs::write(r.root.join("review_sleep"), "").unwrap();
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    async fn wait(s: &mut Started) -> Arc<crate::process_tree::ProcessTree> {
+        let got = tokio::time::timeout(Duration::from_secs(60), s.trees.recv()).await;
+        got.expect("a tree").unwrap().1
+    }
+    let _implementer = wait(&mut s).await;
+    let reviewer = wait(&mut s).await;
+    reviewer.cut();
+    reviewer.kill_and_wait(crate::process_tree::KILL_LIMIT);
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
 }

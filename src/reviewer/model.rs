@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::implementer::Playtest;
+use crate::implementer::{Playtest, Question};
 
 /// One problem the reviewer is noting on the PR (`comments`): the confirmed findings, or anything
 /// else worth knowing on an `approve`. `file`/`line` are optional — a comment can be general.
@@ -41,6 +41,9 @@ pub struct ReviewerResult {
     pub dismissed_findings: Vec<DismissedFinding>,
     #[serde(default)]
     pub playtest: Option<Playtest>,
+    /// For `needs_human`: what a person has to decide, when the reviewer can put it as questions.
+    #[serde(default)]
+    pub questions: Vec<Question>,
 }
 
 /// `REVIEWER_RESULT_SCHEMA` (06.3-review.md), for the reviewer session's `schema`.
@@ -74,6 +77,18 @@ pub fn reviewer_result_schema() -> Value {
                         "reason": { "type": "string" }
                     },
                     "required": ["scout", "file", "line", "reason"]
+                }
+            },
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "header": { "type": "string" },
+                        "question": { "type": "string" },
+                        "options": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["question", "options"]
                 }
             },
             "playtest": {

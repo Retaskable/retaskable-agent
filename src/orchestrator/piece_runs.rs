@@ -11,6 +11,8 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+mod review;
+
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
 use super::session::{
     Attempt, ChecksStage, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout,
@@ -24,7 +26,7 @@ use crate::engines::{
     EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_id_from_str, engine_of, run_session_tracked,
 };
 use crate::env::Env;
-use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
+use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
@@ -58,7 +60,8 @@ impl RunStarter for PieceStarter {
             Some(e) => engine_id_from_str(Some(e)) == EngineId::Claude,
             None => engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None) == Engine::Claude,
         };
-        if !engine {
+        let review = engine_for(&self.choice, project.engines.as_ref(), Role::Reviewer, None) == Engine::Claude;
+        if !engine || !review {
             return Err("only Claude sessions run in the Rust agent yet".into());
         }
         let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
@@ -170,6 +173,18 @@ async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf
     .context("preparing the lane")
 }
 
+/// Hands a session's process tree to the run as soon as the session starts, so a stop can cut it.
+fn track(job: &Job) -> tokio::sync::oneshot::Sender<std::sync::Arc<crate::process_tree::ProcessTree>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (processes, token) = (job.processes.clone(), job.token.clone());
+    tokio::spawn(async move {
+        if let Ok(tree) = rx.await {
+            processes.add(&token, tree);
+        }
+    });
+    tx
+}
+
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
 async fn session(
     job: &Job,
@@ -222,15 +237,16 @@ async fn session(
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
     let (answer, usage) = run_implementer(spec, |spec| async move {
-        // The tree goes to the run as soon as the session starts, so a stop can cut it.
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let (processes, token) = (job.processes.clone(), job.token.clone());
-        tokio::spawn(async move {
-            if let Ok(tree) = rx.await {
-                processes.add(&token, tree);
-            }
-        });
-        let r = run_session_tracked(engine.as_ref(), &job.bin, &spec, &id, Some(&sink), quiet, Some(tx)).await?;
+        let r = run_session_tracked(
+            engine.as_ref(),
+            &job.bin,
+            &spec,
+            &id,
+            Some(&sink),
+            quiet,
+            Some(track(job)),
+        )
+        .await?;
         *ctx = r.context_tokens;
         Ok(r)
     })
@@ -290,40 +306,74 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             session(job, cwd, branch, start, "", ids).await
         }
     };
-    let a = match gate_rounds(&rounds, first, resume).await? {
-        Gated::Settled(a, _) => a,
-        Gated::GaveUp(_, _, why) => return Ok(failed(why)),
-    };
-    let pushed = match &a.answer {
-        Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
-            let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
-            let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
-            let (gh, dir, branch, base) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string(), base.clone());
-            let published = tokio::task::spawn_blocking(move || {
-                publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
-                    .map(|change| Pushed { branch, change })
-            })
-            .await
-            .context("publishing the change")?;
-            match published {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    return Ok(failed(format!(
-                        "The work is committed but couldn't be published: {e:#}"
-                    )));
+    let mut reviews = review::Reviews::default();
+    let mut attempt = first;
+    loop {
+        let a = match gate_rounds(&rounds, attempt, &resume).await? {
+            Gated::Settled(a, _) => a,
+            Gated::GaveUp(_, _, why) => return Ok(failed(why)),
+        };
+        let pushed = match &a.answer {
+            Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
+                let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
+                let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
+                let (gh, dir, branch, base) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string(), base.clone());
+                let published = tokio::task::spawn_blocking(move || {
+                    publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
+                        .map(|change| Pushed { branch, change })
+                })
+                .await
+                .context("publishing the change")?;
+                match published {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        return Ok(failed(format!(
+                            "The work is committed but couldn't be published: {e:#}"
+                        )));
+                    }
                 }
             }
+            _ => None,
+        };
+        let summary = a.answer.as_ref().map(|r| r.summary.clone()).unwrap_or_default();
+        let decisions = crate::implementer::piece_decision_list(&job.piece);
+        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions);
+        let (RunOutcome::PrOpened, Some(pushed)) = (&outcome, &pushed) else {
+            return Ok((outcome, result));
+        };
+        let checks = match stage_one.lock().unwrap().as_ref() {
+            Some(stage) => {
+                let checks = crate::checks::checks_summary(&stage.checks);
+                result["checks_summary"] = json!(checks);
+                result["diff_stat"] = json!(stage.diff_stat);
+                checks
+            }
+            None => String::new(),
+        };
+        let reviewed = match review::review(job, cwd, pushed, &summary, &checks, &reviews).await {
+            Ok(r) => r,
+            Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok((RunOutcome::Interrupted, json!({}))),
+            Err(e) => return Ok(failed(format!("The change is pushed but its review failed: {e:#}"))),
+        };
+        match review::judge(&reviewed, pushed) {
+            review::Verdict::Approved => return Ok((outcome, result)),
+            review::Verdict::End(outcome, result) => return Ok((outcome, result)),
+            review::Verdict::Changes(requests) => {
+                reviews.rounds += 1;
+                if reviews.rounds > job.project.max_review_rounds {
+                    return Ok(failed(format!(
+                        "The review still asked for changes after {} rounds: {requests}",
+                        job.project.max_review_rounds
+                    )));
+                }
+                let follow_up = format!(
+                    "The review asked for changes:\n{requests}\n\nMake them, commit, and return the result again."
+                );
+                reviews.last = Some((review::head(cwd).await?, requests));
+                attempt = resume(Step::Fix(follow_up)).await?;
+            }
         }
-        _ => None,
-    };
-    let decisions = crate::implementer::piece_decision_list(&job.piece);
-    let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions);
-    // Review (a later piece) reads the checks' evidence from the run's result.
-    if let (RunOutcome::PrOpened, Some(stage)) = (&outcome, stage_one.into_inner().unwrap()) {
-        result["checks_summary"] = json!(crate::checks::checks_summary(&stage.checks));
-        result["diff_stat"] = json!(stage.diff_stat);
     }
-    Ok((outcome, result))
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {

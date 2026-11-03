@@ -43,6 +43,7 @@ Confirm or throw out each scout finding by reading only its cited lines and the 
 - `summary`: what you decided and why.
 - `comments`: the problems to fix (or, for `approve`, worth knowing), each with `file`, `line` and `body` where it applies.
 - `dismissedFindings`: each scout finding you threw out, with `scout`, `file`, `line` and `reason`.
+- `questions`: for `needs_human`, when a person's answer would settle it: each with `header`, `question` and `options`.
 - `playtest`: for `approve`, when the slice changes something a user can see or feel. Keep the implementer's suggestion, sharpen its steps, drop it, or add one it missed — your answer is final.
 
 Return the result through the structured output tool.
