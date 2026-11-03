@@ -11,9 +11,8 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-mod review;
-
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
+use super::piece_review::{ReviewState, Reviewed, review as review_change};
 use super::session::{
     Attempt, ChecksStage, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout,
 };
@@ -26,7 +25,7 @@ use crate::engines::{
     EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_id_from_str, engine_of, run_session_tracked,
 };
 use crate::env::Env;
-use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec, start_files};
+use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
@@ -60,8 +59,7 @@ impl RunStarter for PieceStarter {
             Some(e) => engine_id_from_str(Some(e)) == EngineId::Claude,
             None => engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None) == Engine::Claude,
         };
-        let review = engine_for(&self.choice, project.engines.as_ref(), Role::Reviewer, None) == Engine::Claude;
-        if !engine || !review {
+        if !engine {
             return Err("only Claude sessions run in the Rust agent yet".into());
         }
         let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
@@ -98,18 +96,30 @@ impl RunStarter for PieceStarter {
     }
 }
 
-struct Job {
-    data_dir: PathBuf,
-    project: ProjectConfig,
-    bin: PathBuf,
-    gh: PathBuf,
-    max_turns: u32,
-    models: ModelsConfig,
-    lane: PathBuf,
-    token: String,
-    kind: RunKind,
-    piece: RunPiece,
-    processes: RunProcesses,
+pub(super) struct Job {
+    pub(super) data_dir: PathBuf,
+    pub(super) project: ProjectConfig,
+    pub(super) bin: PathBuf,
+    pub(super) gh: PathBuf,
+    pub(super) max_turns: u32,
+    pub(super) models: ModelsConfig,
+    pub(super) lane: PathBuf,
+    pub(super) token: String,
+    pub(super) kind: RunKind,
+    pub(super) piece: RunPiece,
+    pub(super) processes: RunProcesses,
+}
+
+/// A sender for a session's process tree: it goes to the run as soon as the session starts, so a stop can cut it.
+pub(super) fn tree_sender(job: &Job) -> tokio::sync::oneshot::Sender<std::sync::Arc<crate::process_tree::ProcessTree>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (processes, token) = (job.processes.clone(), job.token.clone());
+    tokio::spawn(async move {
+        if let Ok(tree) = rx.await {
+            processes.add(&token, tree);
+        }
+    });
+    tx
 }
 
 fn failed(why: impl Into<String>) -> (RunOutcome, Value) {
@@ -117,7 +127,7 @@ fn failed(why: impl Into<String>) -> (RunOutcome, Value) {
 }
 
 /// The piece as the item the session helpers want (its id, for "Where to start" and the tier).
-fn piece_item(piece: &RunPiece) -> Item {
+pub(super) fn piece_item(piece: &RunPiece) -> Item {
     Item {
         id: piece_id(piece).to_string(),
         title: piece.title.clone(),
@@ -171,18 +181,6 @@ async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf
     .await
     .context("preparing the lane")?
     .context("preparing the lane")
-}
-
-/// Hands a session's process tree to the run as soon as the session starts, so a stop can cut it.
-fn track(job: &Job) -> tokio::sync::oneshot::Sender<std::sync::Arc<crate::process_tree::ProcessTree>> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let (processes, token) = (job.processes.clone(), job.token.clone());
-    tokio::spawn(async move {
-        if let Ok(tree) = rx.await {
-            processes.add(&token, tree);
-        }
-    });
-    tx
 }
 
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
@@ -244,7 +242,7 @@ async fn session(
             &id,
             Some(&sink),
             quiet,
-            Some(track(job)),
+            Some(tree_sender(job)),
         )
         .await?;
         *ctx = r.context_tokens;
@@ -306,10 +304,11 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             session(job, cwd, branch, start, "", ids).await
         }
     };
-    let mut reviews = review::Reviews::default();
-    let mut attempt = first;
+    let decisions = crate::implementer::piece_decision_list(&job.piece);
+    let mut review = ReviewState::default();
+    let mut gated = gate_rounds(&rounds, first, &resume).await?;
     loop {
-        let a = match gate_rounds(&rounds, attempt, &resume).await? {
+        let a = match gated {
             Gated::Settled(a, _) => a,
             Gated::GaveUp(_, _, why) => return Ok(failed(why)),
         };
@@ -335,42 +334,40 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             }
             _ => None,
         };
-        let summary = a.answer.as_ref().map(|r| r.summary.clone()).unwrap_or_default();
-        let decisions = crate::implementer::piece_decision_list(&job.piece);
+        let described = a
+            .answer
+            .as_ref()
+            .ok()
+            .map(|r| (r.slice_description.clone(), r.playtest.clone()));
         let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions);
-        let (RunOutcome::PrOpened, Some(pushed)) = (&outcome, &pushed) else {
+        let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
-        let checks = match stage_one.lock().unwrap().as_ref() {
-            Some(stage) => {
-                let checks = crate::checks::checks_summary(&stage.checks);
-                result["checks_summary"] = json!(checks);
-                result["diff_stat"] = json!(stage.diff_stat);
-                checks
-            }
-            None => String::new(),
-        };
-        let reviewed = match review::review(job, cwd, pushed, &summary, &checks, &reviews).await {
-            Ok(r) => r,
-            Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok((RunOutcome::Interrupted, json!({}))),
-            Err(e) => return Ok(failed(format!("The change is pushed but its review failed: {e:#}"))),
-        };
-        match review::judge(&reviewed, pushed) {
-            review::Verdict::Approved => return Ok((outcome, result)),
-            review::Verdict::End(outcome, result) => return Ok((outcome, result)),
-            review::Verdict::Changes(requests) => {
-                reviews.rounds += 1;
-                if reviews.rounds > job.project.max_review_rounds {
-                    return Ok(failed(format!(
-                        "The review still asked for changes after {} rounds: {requests}",
-                        job.project.max_review_rounds
-                    )));
+        // The checks' evidence goes to review and to the run's result.
+        let stage = stage_one.lock().unwrap().take();
+        let checks = stage
+            .as_ref()
+            .map(|s| crate::checks::checks_summary(&s.checks))
+            .unwrap_or_default();
+        match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
+            Reviewed::Approved => {
+                if let Some(stage) = stage {
+                    result["checks_summary"] = json!(checks);
+                    result["diff_stat"] = json!(stage.diff_stat);
                 }
-                let follow_up = format!(
-                    "The review asked for changes:\n{requests}\n\nMake them, commit, and return the result again."
-                );
-                reviews.last = Some((review::head(cwd).await?, requests));
-                attempt = resume(Step::Fix(follow_up)).await?;
+                return Ok((outcome, result));
+            }
+            Reviewed::Ends(outcome, result) => return Ok((outcome, result)),
+            Reviewed::Changes(follow_up) => {
+                // A fix round inside the run: the same session, then the gates and checks again.
+                let id = ids.lock().unwrap().clone();
+                let start = Start::Resume {
+                    session_id: id,
+                    follow_up: &follow_up,
+                    decisions: &[],
+                };
+                let next = session(job, cwd, branch, start, "", ids).await?;
+                gated = gate_rounds(&rounds, next, &resume).await?;
             }
         }
     }

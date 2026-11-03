@@ -19,7 +19,7 @@ mod plan;
 mod prompt;
 mod run;
 
-pub use diff::{DiffInfo, FileLines, diff_info, diff_info_range};
+pub use diff::{DiffInfo, FileLines, diff_info};
 pub use info::{ScoutInfo, parse_scout_info, scout_info};
 pub use model::{Finding, ScoutResult, scout_result_schema};
 pub use plan::{ScoutJob, ScoutKind, pack_files, plan_scouts};

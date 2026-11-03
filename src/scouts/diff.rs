@@ -27,12 +27,7 @@ pub struct DiffInfo {
 /// Gathers `lane_dir`'s diff against `origin/<base_branch>...HEAD`: the stat text and, per file,
 /// how many lines it changed.
 pub fn diff_info(lane_dir: &Path, base_branch: &str, backlog_path: &str) -> Result<DiffInfo> {
-    diff_info_range(lane_dir, &format!("origin/{base_branch}...HEAD"), backlog_path)
-}
-
-/// [`diff_info`] over any single-argument `git diff` range (a re-review's `<sha>..HEAD`).
-pub fn diff_info_range(lane_dir: &Path, range: &str, backlog_path: &str) -> Result<DiffInfo> {
-    let range = range.to_string();
+    let range = format!("origin/{base_branch}...HEAD");
     let stat = lanes::git_output_in_worktree(lane_dir, &["diff", "--stat", &range]).context("git diff --stat")?;
     let numstat = lanes::git_output_in_worktree(lane_dir, &["diff", "--numstat", "--no-renames", &range])
         .context("git diff --numstat")?;

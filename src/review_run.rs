@@ -1,7 +1,8 @@
 //! Stages 2 and 3 of review run on a lane (docs/specs/agent/06.3-review.md): plan the scouts from
 //! the lane's diff, run them in parallel as read-only sessions, then run the final reviewer
 //! read-only with their findings, and return its answer with the PR comment. The brief is a piece
-//! in place of an item (see [`crate::review_context::piece_slice_description`]). The engine runner is injected, as `run_implementer` takes one.
+//! in place of an item (see [`crate::review_context::piece_slice_description`]). Not wired into
+//! runs yet; the engine runner is injected, as `run_implementer` takes one.
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -58,7 +59,7 @@ where
     F: Fn(SessionSpec) -> Fut,
     Fut: Future<Output = Result<SessionResult>>,
 {
-    let diff = scouts::diff_info_range(lane_dir, input.common.range, "")?;
+    let diff = scouts::diff_info(lane_dir, input.base_branch, "")?;
     let jobs = scouts::plan_scouts(
         &diff,
         input.review.max_scout_diff_lines,
