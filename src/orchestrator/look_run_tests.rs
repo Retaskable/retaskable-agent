@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::super::fake_session_tests::{Fake, assert_ran_read_only_in, cut_registered_tree, fake_claude};
+use super::super::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
 use super::*;
+use crate::config::{Engine, EngineChoiceConfig};
+use crate::env::Env;
 use crate::orchestrator::driver::{RunEnd, RunEndSender, RunProcesses};
 
 struct Rig {
@@ -14,27 +16,12 @@ struct Rig {
     starter: LookRuns,
 }
 
-/// A project whose `claude` records its arguments, prompt and folder, then prints `out`; `extra` runs first.
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let Fake {
-        dir,
-        root,
-        env,
-        mut project,
-    } = fake_claude(out, extra);
-    project.budget.reviewer_usd = 1.5;
-    let starter = LookRuns::new(
-        root.join("data"),
-        vec![project],
-        choice,
-        env,
-        ModelsConfig::default(),
-        Slot::default(),
-    );
+    let (dir, root, roster) = roster(out, extra, choice, |p| p.budget.reviewer_usd = 1.5);
     Rig {
         _dir: dir,
         root,
-        starter,
+        starter: LookRuns::new(roster, Slot::default()),
     }
 }
 
@@ -103,7 +90,7 @@ async fn until_free(r: &Rig) {
 #[tokio::test]
 async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
     let r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
-    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.projects[0].worktrees_dir));
+    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
     let (req, mut s) = request(brief());
     assert_eq!(r.starter.kinds(), vec![RunKind::Look]);
@@ -204,7 +191,7 @@ async fn another_engine_or_a_missing_binary_gives_the_run_back() {
 
     let mut r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
     let gone = r.root.join("nothing-here").to_string_lossy().into_owned();
-    r.starter.env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| gone.clone()));
+    r.starter.roster.env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| gone.clone()));
     let (req, _s) = request(brief());
     assert!(r.starter.start(req).unwrap_err().contains("wasn't found"));
     // A run given back leaves the slot free.

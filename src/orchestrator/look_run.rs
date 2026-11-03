@@ -9,16 +9,12 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::driver::{RunRequest, RunStarter, piece_id};
-use super::plan_run::{Cut, claude_project, spawn_run};
+use super::plan_run::{Cut, Job, Roster, spawn_run};
 use super::session::quiet_timeout;
 pub use super::slot::Slot;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::{
-    EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_for, engine_of, run_session_tracked,
-};
-use crate::env::Env;
+use crate::engines::{EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
 use crate::looks::{LookBrief, Looker, decide};
 use crate::process_tree::ProcessTree;
 use crate::tiers::{implementer_tier, mid_tier};
@@ -28,63 +24,30 @@ const TEMPLATE: &str = include_str!("../../prompts/look.md");
 
 /// Runs `look` runs of the projects it was built with, one at a time on this computer.
 pub struct LookRuns {
-    pub data_dir: PathBuf,
-    pub projects: Vec<ProjectConfig>,
-    pub choice: EngineChoiceConfig,
-    pub env: Env,
-    pub models: ModelsConfig,
-    slot: Slot,
+    pub roster: Roster,
+    /// Shared with the plan runner: one plan or look at a time.
+    pub slot: Slot,
 }
 
 impl LookRuns {
-    pub fn new(
-        data_dir: PathBuf,
-        projects: Vec<ProjectConfig>,
-        choice: EngineChoiceConfig,
-        env: Env,
-        models: ModelsConfig,
-        slot: Slot,
-    ) -> Self {
-        Self {
-            data_dir,
-            projects,
-            choice,
-            env,
-            models,
-            slot,
-        }
-    }
-
-    fn triager_on_claude(&self, project: Option<&ProjectConfig>) -> bool {
-        let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.choice, engines, Role::Triager, None) == Engine::Claude
+    pub fn new(roster: Roster, slot: Slot) -> Self {
+        Self { roster, slot }
     }
 }
 
 impl RunStarter for LookRuns {
     fn kinds(&self) -> Vec<RunKind> {
-        // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
-        let claude = self.triager_on_claude(None) && self.projects.iter().all(|p| self.triager_on_claude(Some(p)));
-        if claude && !self.slot.busy() {
-            vec![RunKind::Look]
-        } else {
-            Vec::new()
-        }
+        self.roster.kinds(Role::Triager, RunKind::Look, &self.slot)
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.triager_on_claude(Some(p)))?;
-        let guard = self
-            .slot
-            .take()
-            .ok_or("a plan or look run is already running on this computer")?;
-        let model = mid_tier(implementer_tier(None, crate::telemetry::now_ms() / 1000, &self.models)).to_string();
-        let job = Job {
-            data_dir: self.data_dir.clone(),
-            project,
-            bin,
-            model,
-        };
+        let model = mid_tier(implementer_tier(
+            None,
+            crate::telemetry::now_ms() / 1000,
+            &self.roster.models,
+        ))
+        .to_string();
+        let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, model)?;
         let cut = Cut::default();
         let work = look(job, request.clone(), cut.clone());
         spawn_run(guard, request, cut, async move { Some(work.await) });
@@ -92,14 +55,6 @@ impl RunStarter for LookRuns {
     }
 }
 
-struct Job {
-    data_dir: PathBuf,
-    project: ProjectConfig,
-    bin: PathBuf,
-    model: String,
-}
-
-/// How the run ended: the decision, or why there isn't one.
 async fn look(job: Job, request: RunRequest, cut: Cut) -> (RunOutcome, Value) {
     let project = &job.project;
     let base = lanes::base_checkout_path(&PathBuf::from(&project.worktrees_dir));

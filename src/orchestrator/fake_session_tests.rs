@@ -70,3 +70,27 @@ pub(super) async fn cut_registered_tree(trees: &mut UnboundedReceiver<(String, A
     tree.cut();
     tree.kill_and_wait(Duration::from_secs(5));
 }
+
+/// A fake `claude` project as a plan/look roster, `tweak`ing its config first.
+pub(super) fn roster(
+    out: &str,
+    extra: &str,
+    choice: crate::config::EngineChoiceConfig,
+    tweak: impl FnOnce(&mut ProjectConfig),
+) -> (tempfile::TempDir, PathBuf, crate::orchestrator::plan_run::Roster) {
+    let Fake {
+        dir,
+        root,
+        env,
+        mut project,
+    } = fake_claude(out, extra);
+    tweak(&mut project);
+    let roster = crate::orchestrator::plan_run::Roster {
+        data_dir: root.join("data"),
+        projects: vec![project],
+        choice,
+        env,
+        models: Default::default(),
+    };
+    (dir, root, roster)
+}

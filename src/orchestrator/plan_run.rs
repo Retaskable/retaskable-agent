@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
 use super::session::{exists, quiet_timeout};
-use super::slot::Slot;
+use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -208,76 +208,85 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     Ok(Value::Object(result))
 }
 
-/// Runs `plan` runs of the projects it was built with, one at a time on this computer.
-pub struct PlanRuns {
+/// What the plan and look runners are built with.
+#[derive(Clone)]
+pub struct Roster {
     pub data_dir: PathBuf,
     pub projects: Vec<ProjectConfig>,
     pub choice: EngineChoiceConfig,
     pub env: Env,
     pub models: ModelsConfig,
-    /// Shared with the look runner: one plan or look at a time.
-    slot: Slot,
 }
 
-impl PlanRuns {
-    pub fn new(
-        data_dir: PathBuf,
-        projects: Vec<ProjectConfig>,
-        choice: EngineChoiceConfig,
-        env: Env,
-        models: ModelsConfig,
-        slot: Slot,
-    ) -> Self {
-        Self {
-            data_dir,
-            projects,
-            choice,
-            env,
-            models,
-            slot,
-        }
-    }
+/// What a plan or look session runs with.
+pub(super) struct Job {
+    pub data_dir: PathBuf,
+    pub project: ProjectConfig,
+    pub bin: PathBuf,
+    pub model: String,
+}
 
-    fn planner_on_claude(&self, project: Option<&ProjectConfig>) -> bool {
+impl Roster {
+    fn on_claude(&self, role: Role, project: Option<&ProjectConfig>) -> bool {
         let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.choice, engines, Role::Planner, None) == Engine::Claude
-    }
-}
-
-impl RunStarter for PlanRuns {
-    fn kinds(&self) -> Vec<RunKind> {
-        // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
-        let claude = self.planner_on_claude(None) && self.projects.iter().all(|p| self.planner_on_claude(Some(p)));
-        if claude && !self.slot.busy() {
-            vec![RunKind::Plan]
-        } else {
-            Vec::new()
-        }
+        engine_for(&self.choice, engines, role, None) == Engine::Claude
     }
 
-    fn start(&self, request: RunRequest) -> Result<(), String> {
-        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.planner_on_claude(Some(p)))?;
-        let guard = self
-            .slot
+    /// `kind`, unless the role runs on another engine (only Claude sessions run in the Rust agent yet; the role's
+    /// engine is the machine's choice unless a project overrides it) or `slot` is held.
+    pub(super) fn kinds(&self, role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
+        let claude = self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p)));
+        if claude && !slot.busy() { vec![kind] } else { Vec::new() }
+    }
+
+    /// Takes `slot` and sets up the session of `request` for `role` on `model`; `Err` gives the run back.
+    pub(super) fn begin(
+        &self,
+        role: Role,
+        request: &RunRequest,
+        slot: &Slot,
+        model: String,
+    ) -> Result<(Job, SlotGuard), String> {
+        let (project, bin) = claude_project(&self.projects, request, &self.env, |p| self.on_claude(role, Some(p)))?;
+        let guard = slot
             .take()
             .ok_or("a plan or look run is already running on this computer")?;
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
             bin,
-            model: tiers::chore_tier().to_string(),
+            model,
         };
+        Ok((job, guard))
+    }
+}
+
+/// Runs `plan` runs of the projects it was built with, one at a time on this computer.
+pub struct PlanRuns {
+    pub roster: Roster,
+    /// Shared with the look runner: one plan or look at a time.
+    pub slot: Slot,
+}
+
+impl PlanRuns {
+    pub fn new(roster: Roster, slot: Slot) -> Self {
+        Self { roster, slot }
+    }
+}
+
+impl RunStarter for PlanRuns {
+    fn kinds(&self) -> Vec<RunKind> {
+        self.roster.kinds(Role::Planner, RunKind::Plan, &self.slot)
+    }
+
+    fn start(&self, request: RunRequest) -> Result<(), String> {
+        let (job, guard) = self
+            .roster
+            .begin(Role::Planner, &request, &self.slot, tiers::chore_tier().to_string())?;
         let cut = Cut::default();
         spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
     }
-}
-
-struct Job {
-    data_dir: PathBuf,
-    project: ProjectConfig,
-    bin: PathBuf,
-    model: String,
 }
 
 /// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.

@@ -3,8 +3,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
+use crate::config::{Engine, EngineChoiceConfig};
 use crate::orchestrator::driver::{RunEndSender, RunProcesses};
-use crate::orchestrator::fake_session_tests::{Fake, assert_ran_read_only_in, cut_registered_tree, fake_claude};
+use crate::orchestrator::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
 use crate::orchestrator::look_run::LookRuns;
 
 struct Rig {
@@ -13,27 +14,12 @@ struct Rig {
     starter: PlanRuns,
 }
 
-/// A project whose `claude` records its arguments and folder, then prints `out`; `extra` runs first.
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let Fake {
-        dir,
-        root,
-        env,
-        mut project,
-    } = fake_claude(out, extra);
-    project.budget.planner_usd = 1.5;
-    let starter = PlanRuns::new(
-        root.join("data"),
-        vec![project],
-        choice,
-        env,
-        ModelsConfig::default(),
-        Slot::default(),
-    );
+    let (dir, root, roster) = roster(out, extra, choice, |p| p.budget.planner_usd = 1.5);
     Rig {
         _dir: dir,
         root,
-        starter,
+        starter: PlanRuns::new(roster, Slot::default()),
     }
 }
 
@@ -84,7 +70,7 @@ async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
 #[tokio::test]
 async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
-    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.projects[0].worktrees_dir));
+    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
     let (req, mut s) = request(brief());
     assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
@@ -175,14 +161,7 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
 #[tokio::test]
 async fn a_plan_and_a_look_share_one_slot() {
     let r = rig(&answer(GOOD), "sleep 60", EngineChoiceConfig::default());
-    let look = LookRuns::new(
-        r.starter.data_dir.clone(),
-        r.starter.projects.clone(),
-        EngineChoiceConfig::default(),
-        r.starter.env.clone(),
-        ModelsConfig::default(),
-        r.starter.slot.clone(),
-    );
+    let look = LookRuns::new(r.starter.roster.clone(), r.starter.slot.clone());
     // A look holds the slot: no plan is asked for or started.
     let held = r.starter.slot.take().unwrap();
     assert!(r.starter.kinds().is_empty() && look.kinds().is_empty());
