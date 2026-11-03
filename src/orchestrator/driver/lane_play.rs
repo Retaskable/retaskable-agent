@@ -9,6 +9,23 @@ use crate::telemetry::{Event, event};
 use crate::view::ItemCommand;
 use std::path::Path;
 
+/// A game running in an item's lane.
+pub trait LanePlay: Send {
+    /// Whether the game has closed.
+    fn finished(&self) -> bool;
+    /// Ends the game; it is [`finished`](Self::finished) once it is gone.
+    fn stop(&self);
+}
+
+impl LanePlay for crate::play::LaneGame {
+    fn finished(&self) -> bool {
+        self.finished()
+    }
+    fn stop(&self) {
+        self.stop()
+    }
+}
+
 impl ProjectLoop {
     /// Every poll, paused or not: gives back the lanes whose game closed, and carries out the queued Play and Stop.
     /// A Play while `paused` (or stopping) is dropped, so nothing starts that nobody expects; a Stop always works.

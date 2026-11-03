@@ -530,6 +530,10 @@ impl SessionStarter for Fake {
         self.triage.start(request)
     }
 
+    fn second_look(&self, request: SecondLookRequest) -> Result<(), String> {
+        self.triage.second_look(request)
+    }
+
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         let closed = Arc::new(AtomicBool::new(false));
         self.games

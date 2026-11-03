@@ -12,8 +12,8 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::Shared;
 use super::report;
+use super::{LanePlay, Shared};
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
@@ -220,26 +220,15 @@ pub trait SessionStarter: Send + Sync {
     fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
         Err("this computer has no triager".into())
     }
+    /// Starts the top-tier read-only second look at a triager's `human` answer with a suggestion (06.9 bullet 3). Must
+    /// not block; it reports its end as [`SessionResult::SecondLook`](super::SessionResult::SecondLook). An `Err`
+    /// leaves the answer as `human`.
+    fn second_look(&self, _request: super::SecondLookRequest) -> Result<(), String> {
+        Err("this computer has no second look".into())
+    }
     /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`).
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
-    }
-}
-
-/// A game running in an item's lane.
-pub trait LanePlay: Send {
-    /// Whether the game has closed.
-    fn finished(&self) -> bool;
-    /// Ends the game; it is [`finished`](Self::finished) once it is gone.
-    fn stop(&self);
-}
-
-impl LanePlay for crate::play::LaneGame {
-    fn finished(&self) -> bool {
-        self.finished()
-    }
-    fn stop(&self) {
-        self.stop()
     }
 }
 
@@ -313,6 +302,10 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
+    /// Triager answers waiting on their second look, by item (`claudeOnIt` stays on meanwhile), in memory only.
+    pub(super) second_looking: BTreeMap<String, super::triage_run::Held>,
+    /// Triager answers whose second look hasn't started yet: item, its lane (0 for none) and the answer.
+    pub(super) second_due: Vec<(String, u32, super::triage_run::Held)>,
     /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
@@ -365,6 +358,8 @@ impl ProjectLoop {
             draft: None,
             landing: Default::default(),
             triaging: Default::default(),
+            second_looking: Default::default(),
+            second_due: Vec::new(),
             claude_pending: Default::default(),
             triage_flag: false,
         }
