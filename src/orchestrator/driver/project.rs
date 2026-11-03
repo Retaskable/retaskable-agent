@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use super::report;
 use super::{LanePlay, Shared};
+pub(super) use super::signed_out::signed_out;
 use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
@@ -310,6 +311,8 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
+    /// The chat's asks, waiting and running (`asks.rs`).
+    pub(super) asks: super::asks::Asks,
 }
 
 impl ProjectLoop {
@@ -362,6 +365,7 @@ impl ProjectLoop {
             second_due: Vec::new(),
             claude_pending: Default::default(),
             triage_flag: false,
+            asks: Default::default(),
         }
     }
 
@@ -976,14 +980,6 @@ impl ProjectLoop {
             }),
         );
     }
-}
-
-/// Whether Claude Code was found signed out on this computer recently enough that no new or resumed
-/// session should start yet ([`Machine::claude_signed_out_until`](super::Machine), section 7.3).
-pub(super) fn signed_out(shared: &Shared<'_>) -> bool {
-    shared
-        .claude_signed_out_until
-        .is_some_and(|until| std::time::Instant::now() < until)
 }
 
 fn describe(action: &Action) -> String {
