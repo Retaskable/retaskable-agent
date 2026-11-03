@@ -2,7 +2,7 @@
 //! started once per project, kept in the project's `state.json` under `trialPlan`. This holds the
 //! record, the fixed instruction and the plain-code decisions; nothing runs it yet.
 use crate::config::ProjectConfig;
-use crate::setup_check::{setup_checks_pass, SetupChecks};
+use crate::setup_check::{SetupChecks, setup_checks_pass};
 
 /// The instruction a trial session gets in place of an item's `remaining` text.
 pub const TRIAL_TEXT: &str = "Add a line to the README saying this project uses Retaskable. \
