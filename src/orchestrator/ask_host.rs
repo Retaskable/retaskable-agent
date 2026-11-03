@@ -100,7 +100,6 @@ impl AskHost for ClaudeAsks {
                 usage,
                 lanes,
                 runs,
-                events,
             } = job;
             let (client, repo, token) = (&store.client, store.repo, Some(store.token.as_str()));
             // Every read is the store's: one that fails leaves the ask waiting, nothing is answered without it.
@@ -212,10 +211,7 @@ impl AskHost for ClaudeAsks {
                 Err(e) => return Ok(sorry(e)),
             };
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
-            let follower = follow(sink.path.clone(), engine_of(spec.engine)?, events);
-            let r = run_session(engine.as_ref(), &bin, &spec, &new_session_id(), Some(&sink), quiet).await;
-            follower.abort();
-            let r = match r {
+            let r = match run_session(engine.as_ref(), &bin, &spec, &new_session_id(), Some(&sink), quiet).await {
                 Ok(r) => r,
                 Err(e) => return Ok(sorry(e)),
             };
@@ -246,33 +242,4 @@ impl AskHost for ClaudeAsks {
             })
         })
     }
-}
-
-/// Tails the session's transcript, sending each line's summarized events (`Engine::summarize`) as they are written,
-/// for the loop to report as progress. Stops when aborted.
-fn follow(
-    path: PathBuf,
-    engine: Box<dyn crate::engines::Engine>,
-    events: tokio::sync::mpsc::UnboundedSender<crate::engines::SessionEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut read = 0usize;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let Ok(bytes) = std::fs::read(&path) else { continue };
-            let text = String::from_utf8_lossy(&bytes);
-            let Some(end) = text.rfind('\n') else { continue };
-            if end < read {
-                continue;
-            }
-            for line in text[read..end].lines() {
-                if let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) {
-                    for event in engine.summarize(&ev, crate::telemetry::now_ms()) {
-                        let _ = events.send(event);
-                    }
-                }
-            }
-            read = end + 1;
-        }
-    })
 }

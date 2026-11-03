@@ -26,9 +26,10 @@ mod saved;
 mod test_support;
 mod write;
 
+pub(crate) use gather::run_gh_list;
 pub use gather::{
     DEFAULT_MAX_PRS, GatherArgs, commit_log_args, fill_draft_files, gather, gather_commits, gather_merged_prs,
-    merged_pr_args, read_base_files, run_gh_pr_list,
+    merged_pr_args, read_base_files,
 };
 pub use group::{DEFAULT_FULL_ENTRIES, GroupInput, counts, facts, for_users, group, pr_owner, spec_links, spec_title};
 pub use model::{

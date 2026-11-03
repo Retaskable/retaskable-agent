@@ -111,8 +111,8 @@ impl From<RawMergedPr> for MergedPr {
     }
 }
 
-/// Runs `gh pr list` with `args` and parses its JSON array (empty output is no PRs).
-pub async fn run_gh_pr_list<T: serde::de::DeserializeOwned>(
+/// Runs `gh pr list` with `args` and parses its JSON array (empty output is an empty list).
+pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
     gh_bin: &Path,
     cwd: &Path,
     args: &[String],
@@ -145,7 +145,7 @@ pub async fn gather_merged_prs(
     limit: u32,
 ) -> Result<Vec<MergedPr>> {
     let args = merged_pr_args(repo, base_branch, from, to, limit);
-    let raw: Vec<RawMergedPr> = run_gh_pr_list(gh_bin, cwd, &args).await?;
+    let raw: Vec<RawMergedPr> = run_gh_list(gh_bin, cwd, &args).await?;
     Ok(raw.into_iter().map(MergedPr::from).collect())
 }
 

@@ -19,16 +19,13 @@ use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
 use crate::backlog::asks::AskReport;
 use crate::config::ProjectConfig;
-use crate::engines::{EventKind, Role, SessionEvent, engine_for, program_of};
+use crate::engines::{Role, engine_for, program_of};
 use crate::lane_pool::{Holder, LanePool};
 use crate::store::RunRecord;
 use crate::view::AskCommand;
 
 /// What an ask's `ask_report` says while it waits.
 pub const WAITING: &str = "Paused: I'll answer when someone resumes";
-
-/// How often a running ask reports how long it has been thinking and what it is reading.
-const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The store as the ask reads and writes it.
 #[derive(Clone)]
@@ -49,8 +46,6 @@ pub struct AskJob {
     pub lanes: Vec<StateLane>,
     /// The runs this computer holds, by item id.
     pub runs: BTreeMap<String, RunRecord>,
-    /// Where the host sends the session's summarized events as they happen; the loop reports them as progress.
-    pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
 }
 
 /// The answer and what each action it asked for came to (`perform`'s results).
@@ -71,23 +66,11 @@ pub trait AskHost: Send + Sync {
 }
 
 /// A project's asks: those waiting for a session, which of them the store was told so, and those running.
+#[derive(Default)]
 pub(super) struct Asks {
     waiting: Vec<AskCommand>,
     reported: BTreeSet<String>,
     running: Vec<RunningAsk>,
-    /// How often a running ask's progress is reported.
-    pub(super) progress_every: std::time::Duration,
-}
-
-impl Default for Asks {
-    fn default() -> Self {
-        Self {
-            waiting: Vec::new(),
-            reported: BTreeSet::new(),
-            running: Vec::new(),
-            progress_every: PROGRESS_EVERY,
-        }
-    }
 }
 
 /// An ask whose session is running.
@@ -167,8 +150,6 @@ impl ProjectLoop {
         for ask in waiting {
             self.asks.reported.remove(&ask.ask_id);
             *slots = slots.saturating_sub(1);
-            let (events, rx) = tokio::sync::mpsc::unbounded_channel();
-            let every = self.asks.progress_every;
             let job = AskJob {
                 project: self.project.clone(),
                 ask,
@@ -176,12 +157,11 @@ impl ProjectLoop {
                 usage: self.store.usage(),
                 lanes: self.ask_lanes(pool),
                 runs: self.records.clone(),
-                events,
             };
             let (host, queue) = (host.clone(), shared.links.item_commands.clone());
             tracing::info!("{}: answering ask {}", self.id, job.ask.ask_id);
             self.asks.running.push(RunningAsk {
-                task: tokio::spawn(answer(host, job, rx, every, queue)),
+                task: tokio::spawn(answer(host, job, queue)),
             });
         }
     }
@@ -204,39 +184,9 @@ impl ProjectLoop {
 
 /// One ask from start to report. A store that fails before the session puts the ask back in the queue; once the
 /// session has run and its actions are done the reply is kept and only the report is retried, never the session.
-async fn answer(
-    host: Arc<dyn AskHost>,
-    job: AskJob,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
-    every: std::time::Duration,
-    queue: crate::view::ItemCommands,
-) {
+async fn answer(host: Arc<dyn AskHost>, job: AskJob, queue: crate::view::ItemCommands) {
     let (store, ask) = (job.store.clone(), job.ask.clone());
-    let started = std::time::Instant::now();
-    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-    let mut reading: Option<String> = None;
-    let run = host.run(job);
-    tokio::pin!(run);
-    // Progress goes out on the tick, not per event, and each send finishes before the next step, so the answer
-    // always follows the last progress report.
-    let result = loop {
-        tokio::select! {
-            r = &mut run => break r,
-            Some(ev) = events.recv() => {
-                if let Some(now) = reading_now(&ev) {
-                    reading = Some(now);
-                }
-            }
-            _ = tick.tick() => {
-                let report = AskReport {
-                    progress: Some(progress_line(started.elapsed().as_secs(), reading.as_deref())),
-                    ..Default::default()
-                };
-                send(&store, &ask.ask_id, &report).await;
-            }
-        }
-    };
-    let reply = match result {
+    let reply = match host.run(job).await {
         Ok(reply) => reply,
         Err(e) => {
             tracing::warn!("ask {}: the store failed, it stays waiting: {e:#}", ask.ask_id);
@@ -274,29 +224,5 @@ async fn send(store: &AskStore, id: &str, report: &AskReport) -> bool {
             tracing::warn!("ask {id}: the report didn't reach the store: {e}");
             false
         }
-    }
-}
-
-/// What a tool event says the session is reading or looking at, for the progress line.
-fn reading_now(ev: &SessionEvent) -> Option<String> {
-    if ev.kind != EventKind::Tool {
-        return None;
-    }
-    let (tool, arg) = ev.text.split_once(": ")?;
-    let arg = arg.trim();
-    if arg.is_empty() {
-        return None;
-    }
-    Some(match tool {
-        "Read" | "NotebookRead" => format!("reading {arg}"),
-        "Grep" | "Glob" => format!("searching for {arg}"),
-        _ => format!("{tool}: {arg}"),
-    })
-}
-
-fn progress_line(secs: u64, reading: Option<&str>) -> String {
-    match reading {
-        Some(r) => format!("Thinking for {secs}s, {r}"),
-        None => format!("Thinking for {secs}s"),
     }
 }

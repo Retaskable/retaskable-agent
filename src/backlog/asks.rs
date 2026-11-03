@@ -68,6 +68,12 @@ pub struct Audience {
     pub name: String,
     #[serde(default)]
     pub short: Option<String>,
+    /// Who they are, in a sentence (the ideas prompt's user types).
+    #[serde(default)]
+    pub who: Option<String>,
+    /// The part of the product they use.
+    #[serde(default)]
+    pub part: Option<String>,
 }
 
 /// A draft for the store's queue (`draft_queue`). `audience` and `revises` are sent as `null` when there is none.

@@ -8,8 +8,7 @@ This section is what the computer still does for those screens: what it works ou
 
 **Images.** Every command that sends text to Claude (Ask Claude, Add spec, Send back, question answers, playtest problems, Continue and Start over notes, gallery feedback) can carry images. The agent saves them under `.retaskable/attachments/` and adds their paths after the text (section 8).
 
-Sections:
 
-- 9.1 [What the computer works out for a project's settings](09.1-settings-it-works-out.md)
-- 9.2 [What the computer reports](09.2-what-it-reports.md)
-- 9.3 [What the computer does when a command asks](09.3-commands.md)
+- [9.1 What the computer works out for a project's settings](09.1-what-the-computer-works-out-for-a-projects-settings.md)
+- [9.2 What the computer reports](09.2-what-the-computer-reports.md)
+- [9.3 What the computer does when a command asks](09.3-what-the-computer-does-when-a-command-asks.md)

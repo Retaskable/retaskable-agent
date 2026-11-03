@@ -1,5 +1,6 @@
-//! The ideas prompt's `context` and user types, built from the store (Retaskable.com's
-//! `agent/src/ideas.ts` `context()` and `write()`'s `profiles`).
+//! The ideas round's `context` and user types, built from the store (`context()` and `write()`'s
+//! `profiles`, agent/src/ideas.ts).
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -8,16 +9,16 @@ use serde_json::{Value, json};
 
 use super::profiles::{Profile, starter_profiles};
 use super::store::{IdeaState, StoreIdeas};
-use crate::backlog::{Item, ItemStatus, asks::Audience};
-use crate::release_notes::run_gh_pr_list;
+use crate::backlog::asks::Audience;
+use crate::backlog::{Item, ItemStatus};
+use crate::release_notes::run_gh_list;
 
-/// How many of the most recently live titles the prompt names.
+/// How many of the most recently live titles the prompt shows.
 pub const LIVE_MAX: usize = 12;
 
-/// `{ live, accepted, later, never, waiting, people }` (`context()`, agent/src/ideas.ts): `live` is
-/// the titles of what went live (newest first, at most [`LIVE_MAX`]); the rest are the store rows'
-/// titles by state, with Claude's waiting ideas under `waiting` and a person's (`addedBy` set) under
-/// `people`.
+/// `{ live, accepted, later, never, waiting, people }`: `live` is what went live (newest first, at
+/// most [`LIVE_MAX`]), the next three are the titles of the store's rows in that state, `waiting` is
+/// Claude's waiting ideas and `people` is people's own (`addedBy` set).
 pub fn round_context(live: &[String], ideas: &StoreIdeas) -> Value {
     let titles = |state: IdeaState, by_person: bool| -> Vec<&str> {
         ideas
@@ -44,9 +45,21 @@ struct MergedAt {
     merged_at: String,
 }
 
-/// Titles of the done items (`on_main`, `in_production`), newest merge first by their PR's merge
-/// time from `gh pr list --state merged --base <base_branch>`; an item whose PR isn't in that list
-/// goes last. At most [`LIVE_MAX`].
+/// The titles of the done `items` (on main or in production), newest merge first by their PR's merge
+/// time in `merged` (url -> `mergedAt`); an item whose PR isn't in it goes last. At most [`LIVE_MAX`].
+pub fn live_titles(items: &[Item], merged: &HashMap<String, String>) -> Vec<String> {
+    let mut done: Vec<(Option<&String>, &str)> = items
+        .iter()
+        .filter(|i| matches!(i.status, ItemStatus::OnMain | ItemStatus::InProduction))
+        .map(|i| (i.pr_url.as_ref().and_then(|u| merged.get(u)), i.title.as_str()))
+        .collect();
+    // Some sorts above None; reversed so the newest is first. The sort is stable.
+    done.sort_by(|a, b| b.0.cmp(&a.0));
+    done.into_iter().take(LIVE_MAX).map(|(_, t)| t.to_string()).collect()
+}
+
+/// Reads `live` for a project: `gh pr list --state merged --base <base_branch> --json url,mergedAt`,
+/// then [`live_titles`] over the store's `items`.
 pub async fn gather_live(
     gh_bin: &Path,
     cwd: &Path,
@@ -54,42 +67,18 @@ pub async fn gather_live(
     base_branch: &str,
     items: &[Item],
 ) -> Result<Vec<String>> {
-    let args: Vec<String> = [
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "merged",
-        "--base",
-        base_branch,
-        "--limit",
-        "200",
-        "--json",
-        "url,mergedAt",
-    ]
-    .map(String::from)
-    .into();
-    let prs: Vec<MergedAt> = run_gh_pr_list(gh_bin, cwd, &args).await?;
-    let mut done: Vec<(Option<&str>, &str)> = items
-        .iter()
-        .filter(|i| matches!(i.status, ItemStatus::OnMain | ItemStatus::InProduction))
-        .map(|i| {
-            let at = i
-                .pr_url
-                .as_deref()
-                .and_then(|u| prs.iter().find(|p| p.url == u))
-                .map(|p| p.merged_at.as_str());
-            (at, i.title.as_str())
-        })
+    let args: Vec<String> = ["pr", "list", "--repo", repo, "--base", base_branch, "--state", "merged"]
+        .into_iter()
+        .chain(["--limit", "200", "--json", "url,mergedAt"])
+        .map(String::from)
         .collect();
-    // Newest first; `None` sorts before `Some`, so the reversed order puts unmatched items last.
-    done.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(done.into_iter().take(LIVE_MAX).map(|(_, t)| t.to_string()).collect())
+    let raw: Vec<MergedAt> = run_gh_list(gh_bin, cwd, &args).await?;
+    let merged = raw.into_iter().map(|m| (m.url, m.merged_at)).collect();
+    Ok(live_titles(items, &merged))
 }
 
-/// The user types for the prompt: the store's audiences (`short` as the one-line `who`), or the
-/// starter set when the store has none (`audiencesOf`, shared/audiences.ts).
+/// The user types for the prompt: the store's audiences (`who` falls back to their short line), or the starter
+/// set when the store has none (`audiencesOf`, shared/audiences.ts).
 pub fn profiles_for(audiences: &[Audience]) -> Vec<Profile> {
     if audiences.is_empty() {
         return starter_profiles();
@@ -99,8 +88,8 @@ pub fn profiles_for(audiences: &[Audience]) -> Vec<Profile> {
         .map(|a| Profile {
             id: a.id.clone(),
             name: a.name.clone(),
-            who: a.short.clone().unwrap_or_default(),
-            part: String::new(),
+            who: a.who.clone().or_else(|| a.short.clone()).unwrap_or_default(),
+            part: a.part.clone().unwrap_or_default(),
         })
         .collect()
 }
@@ -110,58 +99,72 @@ mod tests {
     use super::*;
     use crate::ideas::store::StoreIdea;
 
-    fn row(title: &str, state: IdeaState, person: bool) -> StoreIdea {
-        StoreIdea {
-            id: title.to_string(),
-            title: title.to_string(),
-            state,
-            idea: None,
-            at: 0,
-            answer: None,
-            added_by: person.then(|| json!({ "login": "sam" })),
-        }
-    }
-
-    #[test]
-    fn round_context_sorts_titles_by_state_and_author() {
-        let ideas = StoreIdeas {
-            round: None,
-            ideas: vec![
-                row("A", IdeaState::Accepted, false),
-                row("L", IdeaState::Later, false),
-                row("N", IdeaState::Never, false),
-                row("W", IdeaState::Waiting, false),
-                row("P", IdeaState::Waiting, true),
-            ],
-        };
-        let live: Vec<String> = (0..15).map(|n| format!("t{n}")).collect();
-        let c = round_context(&live, &ideas);
-        assert_eq!(c["accepted"], json!(["A"]));
-        assert_eq!(c["later"], json!(["L"]));
-        assert_eq!(c["never"], json!(["N"]));
-        assert_eq!(c["waiting"], json!(["W"]));
-        assert_eq!(c["people"], json!(["P"]));
-        assert_eq!(c["live"].as_array().unwrap().len(), 12);
-        assert_eq!(c["live"][0], "t0");
+    fn row(title: &str, state: IdeaState, by: Option<&str>) -> StoreIdea {
+        serde_json::from_value(json!({
+            "id": title, "title": title, "state": match state {
+                IdeaState::Waiting => "waiting", IdeaState::Accepted => "accepted",
+                IdeaState::Later => "later", IdeaState::Never => "never" },
+            "at": 1, "addedBy": by,
+        }))
+        .unwrap()
     }
 
     fn item(title: &str, status: ItemStatus, pr: Option<&str>) -> Item {
         Item {
-            id: title.to_string(),
-            title: title.to_string(),
+            id: title.into(),
+            title: title.into(),
             status,
-            pr_url: pr.map(ToString::to_string),
+            pr_url: pr.map(String::from),
             ..Item::default()
         }
     }
 
+    #[test]
+    fn round_context_sorts_titles_by_state_and_who_added_them() {
+        let ideas = StoreIdeas {
+            round: None,
+            ideas: vec![
+                row("a", IdeaState::Accepted, None),
+                row("l", IdeaState::Later, None),
+                row("n", IdeaState::Never, None),
+                row("w", IdeaState::Waiting, None),
+                row("p", IdeaState::Waiting, Some("sam")),
+            ],
+        };
+        let live: Vec<String> = (0..15).map(|i| format!("t{i}")).collect();
+        let c = round_context(&live, &ideas);
+        assert_eq!(c["accepted"], json!(["a"]));
+        assert_eq!(c["later"], json!(["l"]));
+        assert_eq!(c["never"], json!(["n"]));
+        assert_eq!(c["waiting"], json!(["w"]));
+        assert_eq!(c["people"], json!(["p"]));
+        assert_eq!(c["live"].as_array().unwrap().len(), 12);
+        assert_eq!(c["live"][0], "t0");
+    }
+
+    #[test]
+    fn live_titles_order_by_merge_time_with_unmatched_last_and_skip_unfinished() {
+        let items = vec![
+            item("old", ItemStatus::OnMain, Some("u1")),
+            item("none", ItemStatus::InProduction, Some("missing")),
+            item("busy", ItemStatus::Building, Some("u3")),
+            item("new", ItemStatus::InProduction, Some("u2")),
+        ];
+        let merged = HashMap::from([
+            ("u1".to_string(), "2026-01-01T00:00:00Z".to_string()),
+            ("u2".to_string(), "2026-02-01T00:00:00Z".to_string()),
+            ("u3".to_string(), "2026-03-01T00:00:00Z".to_string()),
+        ]);
+        assert_eq!(live_titles(&items, &merged), ["new", "old", "none"]);
+    }
+
     #[tokio::test]
-    async fn gather_live_orders_done_items_by_merge_time_with_unmatched_last() {
+    async fn gather_live_reads_gh_and_orders_items() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("prs.json");
         std::fs::write(
             &out,
-            r#"[{"url":"u1","mergedAt":"2026-09-01T00:00:00Z"},{"url":"u2","mergedAt":"2026-10-01T00:00:00Z"}]"#,
+            r#"[{"url":"u1","mergedAt":"2026-01-01T00:00:00Z"},{"url":"u2","mergedAt":"2026-02-01T00:00:00Z"}]"#,
         )
         .unwrap();
         let gh = dir
@@ -173,26 +176,26 @@ mod tests {
             crate::test_support::write_executable(&gh, &format!("#!/bin/sh\ncat \"{}\"\n", out.display()));
         }
         let items = vec![
-            item("Old", ItemStatus::OnMain, Some("u1")),
-            item("Loose", ItemStatus::InProduction, Some("nope")),
-            item("Busy", ItemStatus::Building, Some("u2")),
-            item("New", ItemStatus::InProduction, Some("u2")),
+            item("first", ItemStatus::OnMain, Some("u1")),
+            item("second", ItemStatus::OnMain, Some("u2")),
         ];
         let live = gather_live(&gh, dir.path(), "x/y", "main", &items).await.unwrap();
-        assert_eq!(live, ["New", "Old", "Loose"]);
+        assert_eq!(live, ["second", "first"]);
     }
 
     #[test]
-    fn profiles_for_maps_audiences_and_falls_back_to_starters() {
+    fn profiles_map_store_audiences_and_fall_back_to_the_starter_set() {
         let a = Audience {
-            id: "dev".into(),
-            name: "Developer".into(),
-            short: Some("Writes code.".into()),
+            id: "buyer".into(),
+            name: "Buyer".into(),
+            short: Some("short".into()),
+            who: Some("Buys things.".into()),
+            part: Some("shop".into()),
         };
         let p = profiles_for(&[a]);
         assert_eq!(
-            (p[0].id.as_str(), p[0].name.as_str(), p[0].who.as_str()),
-            ("dev", "Developer", "Writes code.")
+            (p[0].id.as_str(), p[0].who.as_str(), p[0].part.as_str()),
+            ("buyer", "Buys things.", "shop")
         );
         assert_eq!(profiles_for(&[]).len(), 8);
     }
