@@ -693,3 +693,29 @@ async fn claude_is_on_the_item_throughout_the_second_look() {
     assert!(rig.lp(0).claude_on_it("a"));
     assert!(!on_it_events(&mut rig).contains(&Some(false)));
 }
+
+#[tokio::test]
+async fn a_continue_decision_with_nothing_to_continue_from_starts_over_and_says_why() {
+    let (mut rig, fake) = stopped(vec![decision(TriageDecision::Continue, "Try again.")]).await;
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["triage-session", "own-failure-handling"]));
+    let r = rig.lp(0).records.get_mut("a").unwrap();
+    (r.branch, r.impl_session_id) = (None, None);
+    rig.machine.pass().await;
+    assert_eq!(
+        fake.started.lock().unwrap().last().unwrap().notes.as_deref(),
+        Some("Try again.")
+    );
+    assert!(has_note(
+        &mut rig,
+        "Started over by Claude: there was nothing to continue from"
+    ));
+}
+
+#[tokio::test]
+async fn with_own_failure_handling_off_the_redirect_keeps_the_plain_start_over_note() {
+    let (mut rig, _fake) = stopped(vec![decision(TriageDecision::Continue, "Try again.")]).await;
+    let r = rig.lp(0).records.get_mut("a").unwrap();
+    (r.branch, r.impl_session_id) = (None, None);
+    rig.machine.pass().await;
+    assert!(has_note(&mut rig, "Claude chose Start over"));
+}
