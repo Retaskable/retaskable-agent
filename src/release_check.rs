@@ -346,15 +346,19 @@ mod tests {
         let log = dir.join("retaskable.log");
 
         // No log file at all.
-        assert!(check_not_linked_log(&b, scratch.path())
-            .unwrap_err()
-            .contains("reading"));
+        assert!(
+            check_not_linked_log(&b, scratch.path())
+                .unwrap_err()
+                .contains("reading")
+        );
 
         // A Links: line that doesn't say "not linked", and a "not linked" line without Links:.
         std::fs::write(&log, "Links: linked\nsomething not linked\n").unwrap();
-        assert!(check_not_linked_log(&b, scratch.path())
-            .unwrap_err()
-            .contains("no Links: line"));
+        assert!(
+            check_not_linked_log(&b, scratch.path())
+                .unwrap_err()
+                .contains("no Links: line")
+        );
 
         std::fs::write(&log, "boot\nLinks: not linked\n").unwrap();
         check_not_linked_log(&b, scratch.path()).unwrap();
