@@ -20,6 +20,7 @@ pub mod live;
 pub mod merge_run;
 mod piece_review;
 pub mod piece_runs;
+pub mod plan_run;
 pub mod round_robin;
 pub mod session;
 pub mod steps;
