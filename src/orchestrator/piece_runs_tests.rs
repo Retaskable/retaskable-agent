@@ -69,7 +69,7 @@ struct Started {
 
 fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
     let (ends, rx) = RunEndSender::channel();
-    let (processes, trees) = RunProcesses::channel();
+    let (processes, trees) = crate::orchestrator::driver::RunProcesses::channel();
     let request = RunRequest {
         token: "tok".into(),
         project: "p".into(),
@@ -78,6 +78,14 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         piece: serde_json::from_value(piece).unwrap(),
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
         ends,
+        context: crate::orchestrator::driver::RunContext {
+            project: "p".into(),
+            config: Default::default(),
+            client: Arc::new(crate::backlog::Client::new("http://127.0.0.1:1")),
+            repo: 1,
+            token: "tok".into(),
+            locks: Default::default(),
+        },
     };
     (request, Started { ends: rx, trees })
 }

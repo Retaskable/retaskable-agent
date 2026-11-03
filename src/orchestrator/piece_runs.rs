@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
-use super::session::{Attempt, GateRounds, Gated, exists, gate_rounds, piece_branch_name, quiet_timeout};
+use super::session::{Attempt, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
@@ -258,9 +258,13 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         base_branch: base,
         code_gates: job.project.code_gates,
         max_check_rounds: job.project.max_check_rounds,
+        fresh: None,
     };
     let ids = &ids;
-    let resume = |follow_up: String| {
+    let resume = |step: Step| {
+        let (Step::Fix(follow_up) | Step::FixFresh(follow_up)) = step else {
+            unreachable!("a piece run has no fresh-start rules")
+        };
         let id = ids.lock().unwrap().clone();
         async move {
             let start = Start::Resume {

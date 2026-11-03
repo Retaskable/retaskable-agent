@@ -4,7 +4,7 @@
 //! the store as `upsert_from_specs` (backlog.md section 6.4), and the items whose merge commits reached the
 //! default branch or production are sent as `landed` (section 6.5). Plain code: no model reads anything. A
 //! failure is only logged; the next fetch tries again.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,7 +91,7 @@ impl ProjectLoop {
             repo_path: PathBuf::from(&self.project.repo_path),
             main,
         };
-        match upsert(&ctx, &mut self.seen).await {
+        match upsert(&ctx, &mut self.seen, &mut self.landing).await {
             Ok(done) => tracing::debug!("{}: Items headers: {done}", self.id),
             Err(e) => tracing::warn!("{}: sending the Items headers failed: {e:#}", self.id),
         }
@@ -106,7 +106,7 @@ impl ProjectLoop {
 /// `upsert_from_specs`, naming as `previous` the commit the store took headers from last. Not when the store's
 /// commit isn't an ancestor of this one (another agent fetched later), nor when the headers hold a cycle; any other
 /// problem leaves out only its own item. What it did, for the log.
-async fn upsert(ctx: &Ctx, seen: &mut Seen) -> Result<String> {
+async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) -> Result<String> {
     let at = ctx.origin(&ctx.main);
     let Some(commit) = git(
         &ctx.repo_path,
@@ -172,7 +172,8 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen) -> Result<String> {
         let id = item.id.clone();
         (item.depends_on).retain(|d| *d != id && (named.contains(d) || known.contains(d)));
     }
-    // No spec drafts are approved on this agent yet (spec-drafts), so none start `todo` and none has an asker.
+    // The items of drafts merged here start `todo`, with whoever asked for each.
+    let (approved, asked_by) = (landing.approved(), landing.asked_by());
     let added = (ctx.client)
         .upsert_from_specs(
             ctx.repo,
@@ -181,12 +182,13 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen) -> Result<String> {
                 commit: &commit,
                 previous: previous.as_deref(),
                 items: &items,
-                approved: &[],
-                asked_by: &BTreeMap::new(),
+                approved: &approved,
+                asked_by: &asked_by,
             },
         )
         .await?;
     seen.sent_tree = Some(tree);
+    landing.sent();
     tracing::info!("sent the Items headers at {}: {} new", short(&commit), added.len());
     Ok("sent".into())
 }

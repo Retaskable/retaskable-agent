@@ -155,6 +155,8 @@ pub struct Machine {
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
+    /// The wait between merge tries after a draft is rebased.
+    pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
     pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
@@ -184,6 +186,7 @@ impl Machine {
             links,
             starter: None,
             drafts: None,
+            merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
             outcomes,
@@ -460,7 +463,7 @@ impl Machine {
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
         if let Some(starter) = starter.as_deref() {
-            self.settle_outcomes(starter).await;
+            self.settle_outcomes().await;
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     lp.resume_sessions(
@@ -475,6 +478,7 @@ impl Machine {
                     )
                     .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
                     if !paused {
                         let room = self.concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(
@@ -514,6 +518,13 @@ impl Machine {
                     lp.draft_pass(&mut slots, &host, &shared).await;
                 }
                 if live {
+                    let shared = Shared {
+                        links: &self.links,
+                        claim_paused_until: &mut self.claim_paused_until,
+                        claude_signed_out_until: &mut self.claude_signed_out_until,
+                        stopping,
+                    };
+                    lp.land_drafts(&host, &shared, self.merge_wait).await;
                     let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
                     lp.live.set_drafting(&lp.id, drafting);
                 }

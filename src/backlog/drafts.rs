@@ -77,6 +77,13 @@ pub struct DraftClaim {
     pub token: String,
 }
 
+/// A draft taken for a person's press (`draft_take`): the store's draft and the lease that goes with it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TakenDraft {
+    pub draft: ClaimedDraft,
+    pub token: String,
+}
+
 /// What `draft_report` changes: only the fields given are sent.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +201,30 @@ impl Client {
         args["id"] = json!(id);
         args["token"] = json!(lease);
         self.send(repo_id, token, "draft_report", args).await.map(|_| ())
+    }
+
+    /// `draft_take { id, agent }`: takes a draft nobody holds (or this computer's own) to land or close it.
+    pub async fn draft_take(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        agent: &ClaimNextAgent,
+    ) -> Result<TakenDraft, BacklogError> {
+        let args = json!({ "id": id, "agent": agent });
+        self.op(repo_id, token, "draft_take", args, "taken draft").await
+    }
+
+    /// `draft_release { id, token }`: lets go of a draft taken but not acted on.
+    pub async fn draft_release(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        lease: &str,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "id": id, "token": lease });
+        self.send(repo_id, token, "draft_release", args).await.map(|_| ())
     }
 
     /// `draft_answer_taken { id, token }`: the holder took the person's answer, so the store clears it.

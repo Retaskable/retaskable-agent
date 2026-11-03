@@ -16,6 +16,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
+use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
@@ -26,7 +27,8 @@ use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, e
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
 use crate::implementer::{
-    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, run_implementer, session_spec,
+    ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
+    run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
@@ -44,6 +46,8 @@ pub struct ClaudeStarter {
     env: Env,
     max_turns: u32,
     models: ModelsConfig,
+    /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
+    max_resume_context_tokens: u32,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     running: Arc<AtomicU32>,
 }
@@ -56,6 +60,7 @@ impl ClaudeStarter {
         env: Env,
         max_turns: u32,
         models: ModelsConfig,
+        max_resume_context_tokens: u32,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -64,6 +69,7 @@ impl ClaudeStarter {
             env,
             max_turns,
             models,
+            max_resume_context_tokens,
             running: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -119,6 +125,7 @@ impl SessionStarter for ClaudeStarter {
             item,
             usage,
             models: self.models,
+            max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             resume,
             follow_up,
@@ -133,26 +140,29 @@ impl SessionStarter for ClaudeStarter {
             // A fresh start's failure here is before any session ran (an own failure, section 7.3): it goes
             // back to the queue. A resumed session already ran once, so the same failure here may have left
             // real work behind, and needs a person instead.
-            let (result, usage, context_tokens, notes) = match tokio::spawn(run(job)).await {
+            let (result, usage, context_tokens, notes, new_session) = match tokio::spawn(run(job)).await {
                 Ok(Ok(ran)) => ran,
                 Ok(Err(e)) if resume => (
                     SessionResult::NeedsHuman(format!("the session couldn't resume: {e:#}")),
                     None,
                     None,
                     vec![],
+                    None,
                 ),
-                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None, None, vec![]),
+                Ok(Err(e)) => (SessionResult::Failed(format!("{e:#}")), None, None, vec![], None),
                 Err(e) if resume => (
                     SessionResult::NeedsHuman(format!("the session's task crashed while resuming: {e}")),
                     None,
                     None,
                     vec![],
+                    None,
                 ),
                 Err(e) => (
                     SessionResult::Failed(format!("the session task crashed: {e}")),
                     None,
                     None,
                     vec![],
+                    None,
                 ),
             };
             running.fetch_sub(1, Ordering::SeqCst);
@@ -164,6 +174,7 @@ impl SessionStarter for ClaudeStarter {
                 context_tokens,
                 usage,
                 notes,
+                session_id: new_session,
             });
         });
         Ok(())
@@ -230,6 +241,7 @@ struct Job {
     /// The latest `state.usage` reading, for picking the implementer's model tier.
     usage: Option<Value>,
     models: ModelsConfig,
+    max_resume_context_tokens: u32,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
     resume: bool,
@@ -293,6 +305,7 @@ async fn attempt(
     job: &Job,
     cwd: &Path,
     start: Start<'_>,
+    session_id: &str,
     fresh: bool,
     name: String,
     where_to_start: &str,
@@ -307,7 +320,6 @@ async fn attempt(
         item,
         usage,
         models,
-        session_id,
         items,
         notes,
         attempt: attempt_no,
@@ -343,7 +355,7 @@ async fn attempt(
         start,
     )?;
     if fresh {
-        spec.start = SessionStart::Fresh(session_id.clone());
+        spec.start = SessionStart::Fresh(session_id.to_string());
     }
     let sink = TranscriptSink {
         path: paths::run_dir(data_dir, project_id, &item.id).join(name),
@@ -375,19 +387,21 @@ pub(super) struct Attempt {
 
 /// What `run` returns: the result, the stream's usage reading, the session's last context size and the lines
 /// for the item's timeline (the code gates' notes).
-type Ran = (SessionResult, Option<Value>, Option<u64>, Vec<String>);
+/// and the id of the fresh session the job carried on in, if it did.
+type Ran = (SessionResult, Option<Value>, Option<u64>, Vec<String>, Option<String>);
 
-fn settled(a: Attempt, max_turns: u32) -> Ran {
+fn ran_out_of_turns(a: &Attempt) -> bool {
+    matches!(&a.answer, Err(e) if e.downcast_ref::<MaxTurns>().is_some())
+}
+
+fn settled(a: Attempt) -> Ran {
     let Attempt {
         answer,
         usage,
         context_tokens,
     } = a;
-    if matches!(&answer, Err(e) if e.downcast_ref::<MaxTurns>().is_some()) {
-        return (SessionResult::MaxTurns(max_turns), usage, context_tokens, vec![]);
-    }
     let (result, usage) = session_result_for_answer(answer, usage);
-    (result, usage, context_tokens, vec![])
+    (result, usage, context_tokens, vec![], None)
 }
 
 /// The folder a session runs in: an `existing` lane kept as it is, after stopping anything the old session left
@@ -426,29 +440,60 @@ pub(super) struct GateRounds<'a> {
     pub base_branch: &'a str,
     pub code_gates: crate::config::CodeGates,
     pub max_check_rounds: u32,
+    /// The claim's fresh-start rules (06.2-implementer.md "Fresh-start rules on resume"); `None` for a run that
+    /// only ever resumes.
+    pub fresh: Option<FreshRules>,
+}
+
+/// When a session is replaced instead of resumed.
+#[derive(Clone, Copy)]
+pub(super) struct FreshRules {
+    pub max_turns: u32,
+    pub max_resume_context_tokens: u32,
+}
+
+/// What [`gate_rounds`] asks its caller to run next.
+pub(super) enum Step {
+    /// The session ran out of turns: a fresh one carries on in the same lane, uncommitted work kept.
+    OutOfTurns,
+    /// Send the findings back: resume the session.
+    Fix(String),
+    /// Send the findings to a fresh session, the old one having grown too large to resume.
+    FixFresh(String),
 }
 
 /// How [`gate_rounds`] ended.
 pub(super) enum Gated {
     /// The answer to settle, with the gates' notes.
     Settled(Attempt, Vec<String>),
-    /// Findings remained after the last round: a person is needed, for this reason.
+    /// A person is needed, for this reason.
     GaveUp(Attempt, Vec<String>, String),
 }
 
 /// Code gates before the push (06.2-implementer.md): while the session answers `pr_opened`, the gates check the
-/// lane's change against `origin/<baseBranch>`. A finding resumes the same session with it (`resume` runs the
-/// follow-up and returns that session's next answer), and gates its next answer too; every such round counts
-/// against `maxCheckRounds`, and past it a person is needed. Gates that can't run (a git error) are noted and the
-/// answer stands. Shared by the claim and the piece runs.
-pub(super) async fn gate_rounds<F, Fut>(g: &GateRounds<'_>, mut a: Attempt, mut resume: F) -> Result<Gated>
+/// lane's change against `origin/<baseBranch>`. A finding goes back through `next` and its answer is gated too;
+/// every such round counts against `maxCheckRounds`, and past it a person is needed. Gates that can't run (a git
+/// error) are noted and the answer stands. With fresh-start rules, running out of turns restarts once. Shared by
+/// the claim and the piece runs.
+pub(super) async fn gate_rounds<F, Fut>(g: &GateRounds<'_>, mut a: Attempt, mut next: F) -> Result<Gated>
 where
-    F: FnMut(String) -> Fut,
+    F: FnMut(Step) -> Fut,
     Fut: std::future::Future<Output = Result<Attempt>>,
 {
     let mut notes = Vec::new();
     let mut rounds = 0;
+    let mut restarted = false;
     loop {
+        if let Some(fresh) = g.fresh.filter(|_| ran_out_of_turns(&a)) {
+            if restarted {
+                let why = format!("Implementer ran out of turns ({}) twice in a row", fresh.max_turns);
+                return Ok(Gated::GaveUp(a, notes, why));
+            }
+            restarted = true;
+            notes.push(FreshStart::OutOfTurns.history_line());
+            a = next(Step::OutOfTurns).await?;
+            continue;
+        }
         if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
             break;
         }
@@ -473,11 +518,17 @@ where
             );
             return Ok(Gated::GaveUp(a, notes, why));
         }
-        a = resume(format!(
-            "{}\n\nFix them, commit, and return the result again.",
-            found.message
-        ))
-        .await?;
+        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
+        let grown = g
+            .fresh
+            .and_then(|f| a.context_tokens.filter(|t| *t > u64::from(f.max_resume_context_tokens)));
+        a = match grown {
+            Some(tokens) => {
+                notes.push(FreshStart::Grown(tokens).history_line());
+                next(Step::FixFresh(follow_up)).await?
+            }
+            None => next(Step::Fix(follow_up)).await?,
+        };
     }
     Ok(Gated::Settled(a, notes))
 }
@@ -488,25 +539,61 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         base_branch: &job.project.base_branch,
         code_gates: job.project.code_gates,
         max_check_rounds: job.project.max_check_rounds,
+        fresh: Some(FreshRules {
+            max_turns: job.max_turns,
+            max_resume_context_tokens: job.max_resume_context_tokens,
+        }),
     };
-    let resume = |follow_up: String| async move {
-        let start = Start::Resume {
-            session_id: job.session_id.clone(),
-            follow_up: &follow_up,
-            decisions: &[],
+    // The session now answering, and whether it is a fresh one (so its id is reported).
+    let state = std::sync::Mutex::new((job.session_id.clone(), false));
+    let next = |step: Step| {
+        let current = state.lock().unwrap().0.clone();
+        let (follow_up, fresh_prompt) = match &step {
+            Step::OutOfTurns => (
+                picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP),
+                true,
+            ),
+            Step::FixFresh(f) => (picking_up_prompt(false, &job.project.base_branch, f), true),
+            Step::Fix(f) => (f.clone(), false),
         };
-        let name = format!("{}-resumed-{}.jsonl", job.session_id, now_ms());
-        attempt(job, cwd, start, false, name, "").await
+        let id = if fresh_prompt { new_session_id() } else { current };
+        if fresh_prompt {
+            *state.lock().unwrap() = (id.clone(), true);
+        }
+        async move {
+            if fresh_prompt {
+                let start = Start::Continuing { follow_up: &follow_up };
+                attempt(job, cwd, start, &id, true, format!("{id}.jsonl"), "").await
+            } else {
+                let start = Start::Resume {
+                    session_id: id.clone(),
+                    follow_up: &follow_up,
+                    decisions: &[],
+                };
+                let name = format!("{id}-resumed-{}.jsonl", now_ms());
+                attempt(job, cwd, start, &id, false, name, "").await
+            }
+        }
     };
-    let (a, mut notes) = match gate_rounds(&rounds, a, resume).await? {
+    let gated = gate_rounds(&rounds, a, next).await?;
+    let (current, started_fresh) = state.into_inner().unwrap();
+    let (a, mut notes) = match gated {
         Gated::Settled(a, notes) => (a, notes),
-        Gated::GaveUp(a, notes, why) => return Ok((SessionResult::NeedsHuman(why), a.usage, a.context_tokens, notes)),
+        Gated::GaveUp(a, notes, why) => {
+            return Ok((
+                SessionResult::NeedsHuman(why),
+                a.usage,
+                a.context_tokens,
+                notes,
+                started_fresh.then_some(current),
+            ));
+        }
     };
     let titles = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
         _ => None,
     };
-    let mut ran = settled(a, job.max_turns);
+    let mut ran = settled(a);
     if let Some((title, body, summary)) = titles {
         // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
         // failure here means a session ran and its work is committed, so a person is needed, not the queue.
@@ -542,6 +629,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         }
     }
     ran.3 = notes;
+    ran.4 = started_fresh.then_some(current);
     Ok(ran)
 }
 
@@ -559,7 +647,7 @@ async fn run(job: Job) -> Result<Ran> {
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
         };
-        let a = attempt(&job, &cwd, start, true, name, "").await?;
+        let a = attempt(&job, &cwd, start, &job.session_id, true, name, "").await?;
         return gated(&job, &cwd, a).await;
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
@@ -596,7 +684,7 @@ async fn run(job: Job) -> Result<Ran> {
             let base_ref = format!("origin/{}", job.project.base_branch);
             start_files::render(&start_files::build(crate::git_bin::program(), &cwd, &base_ref, &job.item).await)
         };
-        let a = attempt(&job, &cwd, start, !resumed, name, &where_to_start).await?;
+        let a = attempt(&job, &cwd, start, &job.session_id, !resumed, name, &where_to_start).await?;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
         // same id starts a fresh one, as `implement` in `steps.ts` does on "No conversation found".
         if resumed && matches!(&a.answer, Err(e) if format!("{e:#}").contains("No conversation found")) {

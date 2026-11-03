@@ -345,6 +345,7 @@ struct OpResponse {
 }
 
 /// A client for one backlog store (one `BacklogStore` in the TypeScript agent, trimmed to `list`).
+#[derive(Debug)]
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
@@ -655,4 +656,4 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

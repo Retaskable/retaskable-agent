@@ -136,6 +136,13 @@ pub struct TuningConfig {
     /// `watchdog.no_progress`'s threshold.
     #[serde(default = "default_no_progress_minutes")]
     pub no_progress_minutes: u32,
+    /// How long a watch waits for any check to show up before reading "no CI" as a pass
+    /// (`ciGraceMinutes`, 05-item-lifecycle.md's `awaiting_ci` row).
+    #[serde(default = "default_ci_grace_minutes")]
+    pub ci_grace_minutes: u32,
+    /// The most a watch waits for pending checks (`ciMaxMinutes`).
+    #[serde(default = "default_ci_max_minutes")]
+    pub ci_max_minutes: u32,
 }
 
 impl Default for TuningConfig {
@@ -145,12 +152,22 @@ impl Default for TuningConfig {
             lease_idle_minutes: default_lease_idle_minutes(),
             idle_lanes_minutes: default_idle_lanes_minutes(),
             no_progress_minutes: default_no_progress_minutes(),
+            ci_grace_minutes: default_ci_grace_minutes(),
+            ci_max_minutes: default_ci_max_minutes(),
         }
     }
 }
 
 fn default_session_quiet_minutes() -> u32 {
     20
+}
+
+fn default_ci_grace_minutes() -> u32 {
+    10
+}
+
+fn default_ci_max_minutes() -> u32 {
+    120
 }
 
 fn default_lease_idle_minutes() -> u32 {
@@ -389,6 +406,16 @@ fn kebab_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_tuning_defaults_to_ten_and_one_hundred_twenty_minutes_and_can_be_set() {
+        let t = TuningConfig::default();
+        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+        let t: TuningConfig = serde_json::from_str(r#"{"ciGraceMinutes":3,"ciMaxMinutes":30}"#).unwrap();
+        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
+        let t: TuningConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+    }
 
     #[test]
     fn a_relative_repo_path_resolves_against_the_current_directory_first() {

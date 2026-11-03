@@ -61,14 +61,33 @@ pub enum ItemCommand {
         item: String,
         notes: Option<String>,
     },
+    /// **Play** in lane `lane` (> 0), decided by the loop, which owns the lanes.
+    Play { project: String, lane: u32 },
+    /// **Stop** the game in lane `lane`.
+    Stop { project: String, lane: u32 },
 }
 
 impl ItemCommand {
+    fn is_lane(&self) -> bool {
+        matches!(self, Self::Play { .. } | Self::Stop { .. })
+    }
+
     fn project(&self) -> &str {
         match self {
-            Self::Continue { project, .. } | Self::StartOver { project, .. } => project,
+            Self::Continue { project, .. }
+            | Self::StartOver { project, .. }
+            | Self::Play { project, .. }
+            | Self::Stop { project, .. } => project,
         }
     }
+}
+
+/// A press on a draft waiting for a person (**Approve** or **Merge into main**), carried out whether or not the
+/// project is paused (agent/06.5-spec-drafts.md step 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftCommand {
+    Approve { project: String, draft: String },
+    Merge { project: String, draft: String },
 }
 
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
@@ -78,6 +97,7 @@ impl ItemCommand {
 pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
+    drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
 }
 
 impl PartialEq for ItemCommands {
@@ -100,12 +120,35 @@ impl ItemCommands {
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }
 
+    pub fn push_draft(&self, command: DraftCommand) {
+        self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the draft presses queued for `project`, oldest first.
+    pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
+        let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
+            DraftCommand::Approve { project: p, .. } | DraftCommand::Merge { project: p, .. } => p == project,
+        });
+        *queue = rest;
+        mine
+    }
+
     /// Removes and returns `project`'s queued commands, oldest first.
     pub fn take(&self, project: &str) -> Vec<ItemCommand> {
+        self.take_where(project, |c| !c.is_lane())
+    }
+
+    /// Removes and returns `project`'s queued Play and Stop of a lane, oldest first.
+    pub fn take_lane(&self, project: &str) -> Vec<ItemCommand> {
+        self.take_where(project, ItemCommand::is_lane)
+    }
+
+    fn take_where(&self, project: &str, keep: impl Fn(&ItemCommand) -> bool) -> Vec<ItemCommand> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
-            .partition(|c| c.project() == project);
+            .partition(|c| c.project() == project && keep(c));
         *queue = rest;
         mine
     }
