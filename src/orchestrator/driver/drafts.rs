@@ -17,12 +17,14 @@ use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::draft_worktree::{branch_name, slug};
+use crate::drafts::approval::approves_itself;
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
+use crate::view::DraftCommand;
 
 /// What a drafter session needs.
 pub struct DraftJob {
@@ -139,8 +141,14 @@ impl ProjectLoop {
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
+            approve: Approve {
+                commands: shared.links.item_commands.clone(),
+                project: self.id.clone(),
+            },
+            retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
         };
         let id = claim.draft.id.clone();
+
         let sid = session_id.clone();
         tracing::info!("{}: drafting {id} (session {session_id})", self.id);
         let task = tokio::spawn(async move {
@@ -150,6 +158,12 @@ impl ProjectLoop {
         });
         self.draft = Some(RunningDraft { id, session_id, task });
     }
+}
+
+/// Where a plan that approves itself queues its Approve, as if a person had pressed it.
+struct Approve {
+    commands: crate::view::ItemCommands,
+    project: String,
 }
 
 /// Who this computer is to the store, for taking or claiming a draft.
@@ -170,6 +184,9 @@ struct Ctx {
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
+    /// The draft already went back to the queue once by itself.
+    retried: bool,
+    approve: Approve,
 }
 
 impl Ctx {
@@ -177,6 +194,25 @@ impl Ctx {
         self.client
             .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
             .await
+    }
+
+    /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
+    /// failed on its retry waits for a person as `failed`.
+    async fn failed(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
+        if self.retried {
+            return self.needs_person(id, "failed", report).await;
+        }
+        let summary = report.summary.as_deref().unwrap_or("it failed");
+        self.report(
+            id,
+            DraftReport {
+                status: Some("queued".into()),
+                summary: Some(format!("Trying again by itself: {summary}")),
+                retried: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// An end that needs a person: waiting on them (`needs_person`) with the holder's exact state.
@@ -225,8 +261,8 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     };
     let dir = match prepared {
         Ok(Ok(dir)) => dir,
-        Ok(Err(e)) => return ctx.needs_person(&id, "failed", failed(format!("{e:#}"))).await,
-        Err(e) => return ctx.needs_person(&id, "failed", failed(e.to_string())).await,
+        Ok(Err(e)) => return ctx.failed(&id, failed(format!("{e:#}"))).await,
+        Err(e) => return ctx.failed(&id, failed(e.to_string())).await,
     };
     // The session now has the person's answers: the store clears them, and keeps them off the next claim.
     if draft.answer.is_some() {
@@ -248,7 +284,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         Ok(result) => result,
         // Cut by a restart or Quit: left as it is, to be claimed and resumed by its session id.
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok(()),
-        Err(e) => return ctx.needs_person(&id, "failed", failed(format!("{e:#}"))).await,
+        Err(e) => return ctx.failed(&id, failed(format!("{e:#}"))).await,
     };
     let sorted = sort_fixes(&result);
     let ask = |qs: &[Question]| -> Vec<String> {
@@ -275,7 +311,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             )
             .await
         }
-        (None, DrafterStatus::Failed) => ctx.needs_person(&id, "failed", failed(result.summary.clone())).await,
+        (None, DrafterStatus::Failed) => ctx.failed(&id, failed(result.summary.clone())).await,
         (None, _) => {
             let outcome = sorted.outcome;
             for fix in &sorted.fix_items {
@@ -304,14 +340,21 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                     )
                     .await;
             }
-            open_pr(&ctx, &id, &dir, &branch, &result).await
+            open_pr(&ctx, &id, &draft, &dir, &branch, &result).await
         }
     }
 }
 
 /// Pushes the branch, opens the PR and reports the draft as waiting for approval. A revision that
 /// names no items keeps the earlier ones (`itemIds` left out).
-async fn open_pr(ctx: &Ctx, id: &str, dir: &Path, branch: &str, r: &DrafterResult) -> Result<(), BacklogError> {
+async fn open_pr(
+    ctx: &Ctx,
+    id: &str,
+    draft: &ClaimedDraft,
+    dir: &Path,
+    branch: &str,
+    r: &DrafterResult,
+) -> Result<(), BacklogError> {
     let title = r
         .change_title
         .clone()
@@ -337,9 +380,8 @@ async fn open_pr(ctx: &Ctx, id: &str, dir: &Path, branch: &str, r: &DrafterResul
         Ok(Err(e)) => {
             let why = format!("The spec is committed but couldn't be published: {e:#}");
             return ctx
-                .needs_person(
+                .failed(
                     id,
-                    "failed",
                     DraftReport {
                         summary: Some(why),
                         ..Default::default()
@@ -349,9 +391,8 @@ async fn open_pr(ctx: &Ctx, id: &str, dir: &Path, branch: &str, r: &DrafterResul
         }
         Err(e) => {
             return ctx
-                .needs_person(
+                .failed(
                     id,
-                    "failed",
                     DraftReport {
                         summary: Some(e.to_string()),
                         ..Default::default()
@@ -385,5 +426,18 @@ async fn open_pr(ctx: &Ctx, id: &str, dir: &Path, branch: &str, r: &DrafterResul
             ..Default::default()
         },
     )
-    .await
+    .await?;
+    // A plan someone asked for goes ahead on that yes: the same Approve a person's press queues, which the land step
+    // carries out on its next pass (paused or not) by the project's workflow.
+    let by = draft.other.get("requestedBy").and_then(Value::as_str);
+    let kind_release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
+    let trial = draft.intake.as_ref().is_some_and(|i| i.trial);
+    if approves_itself(ctx.project.plans, by, r.risk.as_deref(), kind_release, trial) {
+        let Approve { commands, project } = &ctx.approve;
+        commands.push_draft(DraftCommand::Approve {
+            project: project.clone(),
+            draft: id.to_string(),
+        });
+    }
+    Ok(())
 }

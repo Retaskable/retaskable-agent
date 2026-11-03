@@ -53,6 +53,9 @@ pub struct DrafterResult {
     #[serde(default, rename = "itemIds")]
     pub item_ids: Option<Vec<String>>,
     pub summary: String,
+    /// Why a person should read the plan first; empty or left out when nothing in it is risky.
+    #[serde(default)]
+    pub risk: Option<String>,
     #[serde(default)]
     pub questions: Vec<Question>,
     #[serde(default)]
@@ -112,6 +115,7 @@ pub fn drafter_result_schema() -> Value {
                 "required": ["id", "title", "remaining", "specRefs"]
             } },
             "summary": { "type": "string" },
+            "risk": { "type": "string" },
             "questions": { "type": "array", "items": {
                 "type": "object",
                 "properties": { "header": { "type": "string" }, "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } },
