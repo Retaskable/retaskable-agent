@@ -22,6 +22,7 @@
 mod drafts;
 mod item_commands;
 mod land;
+mod lane_play;
 mod machine;
 mod playtest_round;
 mod project;
@@ -33,7 +34,7 @@ pub use drafts::{DraftHost, DraftJob};
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
 use project::Launch;
 pub use project::{
-    Abandon, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
+    Abandon, LanePlay, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
 };
 pub use runs::{BEAT_EVERY, RunEnd, RunEndSender, RunLoop, RunRequest, RunStarter};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};

@@ -478,6 +478,7 @@ impl Machine {
                     )
                     .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
                     if !paused {
                         let room = self.concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(

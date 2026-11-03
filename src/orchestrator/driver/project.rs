@@ -204,6 +204,27 @@ pub trait SessionStarter: Send + Sync {
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
+    /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`).
+    fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
+        crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
+    }
+}
+
+/// A game running in an item's lane.
+pub trait LanePlay: Send {
+    /// Whether the game has closed.
+    fn finished(&self) -> bool;
+    /// Ends the game; it is [`finished`](Self::finished) once it is gone.
+    fn stop(&self);
+}
+
+impl LanePlay for crate::play::LaneGame {
+    fn finished(&self) -> bool {
+        self.finished()
+    }
+    fn stop(&self) {
+        self.stop()
+    }
 }
 
 /// One project's orchestrator state, kept for as long as the agent runs. The lanes are not here: they
@@ -263,6 +284,8 @@ pub struct ProjectLoop {
     pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
     pub(super) last_lane: BTreeMap<String, u32>,
+    /// The games running in lanes (`play { lane }`), by lane, with the item each lane was held for.
+    pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
@@ -309,6 +332,7 @@ impl ProjectLoop {
             continuing: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
+            playing: BTreeMap::new(),
             draft: None,
             landing: Default::default(),
         }
