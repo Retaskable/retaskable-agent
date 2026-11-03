@@ -119,6 +119,20 @@ impl ProjectLoop {
         })
     }
 
+    /// The triager's or second look's session ended, `ok` or not.
+    fn session_ended(&mut self, item_id: &str, lane: u32, ok: bool) {
+        self.events.add_in(
+            &self.id,
+            Event::SessionEnd(event::SessionEnd {
+                item: Some(item_id.to_string()),
+                lane: Some(lane),
+                role: Some("triager".into()),
+                ok: Some(ok),
+                ..Default::default()
+            }),
+        );
+    }
+
     /// An `item_state` note about the item's look, with `claudeOnIt` as it stands now.
     pub(super) fn look_note(&mut self, item_id: &str, note: String) {
         let on_it = self.claude_on_it(item_id);
@@ -226,16 +240,7 @@ impl ProjectLoop {
         pool: &mut LanePool,
         shared: &mut Shared<'_>,
     ) {
-        self.events.add_in(
-            &self.id,
-            Event::SessionEnd(event::SessionEnd {
-                item: Some(item_id.to_string()),
-                lane: Some(lane),
-                role: Some("triager".into()),
-                ok: Some(matches!(end, TriageEnd::Found { .. })),
-                ..Default::default()
-            }),
-        );
+        self.session_ended(item_id, lane, matches!(end, TriageEnd::Found { .. }));
         match end {
             TriageEnd::Found {
                 decision,
@@ -431,16 +436,7 @@ impl ProjectLoop {
         pool: &mut LanePool,
         shared: &mut Shared<'_>,
     ) {
-        self.events.add_in(
-            &self.id,
-            Event::SessionEnd(event::SessionEnd {
-                item: Some(item_id.to_string()),
-                lane: Some(lane),
-                role: Some("triager".into()),
-                ok: Some(matches!(end, SecondLookEnd::Checked { .. })),
-                ..Default::default()
-            }),
-        );
+        self.session_ended(item_id, lane, matches!(end, SecondLookEnd::Checked { .. }));
         let look = match end {
             SecondLookEnd::Checked {
                 agree,

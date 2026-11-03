@@ -2,7 +2,7 @@
 //! read-only Claude session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
 //! base checkout (or the repo itself before that checkout exists). Its end is a [`SessionResult::Triage`] on the outcome
 //! channel. Claude only, like the implementer.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use super::driver::{
@@ -17,7 +17,7 @@ use crate::implementer::new_session_id;
 use crate::tiers::{implementer_tier, mid_tier};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
-use crate::triage::{Triager, decide};
+use crate::triage::{TriageContext, Triager, decide};
 use crate::{lanes, paths};
 
 const TEMPLATE: &str = include_str!("../../prompts/triage.md");
@@ -33,7 +33,36 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(&project.repo_path))
 }
 
+/// The read-only session both the triager and its second look run: the reviewer's budget, in `cwd`.
+fn read_only_session<'a>(project: &'a ProjectConfig, cwd: &'a Path, model: String) -> EphemeralSessionConfig<'a> {
+    EphemeralSessionConfig {
+        cwd,
+        budget_usd: project.budget.reviewer_usd,
+        model,
+        local: None,
+        engine: Some(EngineId::Claude),
+        cursor: None,
+        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+        shell: true,
+    }
+}
+
 impl ClaudeStarter {
+    /// A new session id and its transcript sink; tells `context` where the item's transcripts are.
+    fn transcript(
+        &self,
+        project_id: &str,
+        item_id: &str,
+        lane: Option<u32>,
+        context: &mut TriageContext,
+    ) -> (String, TranscriptSink) {
+        let dir = paths::run_dir(&self.data_dir, project_id, item_id);
+        context.transcripts_dir = Some(dir.display().to_string());
+        let session_id = new_session_id();
+        let path = dir.join(format!("{session_id}.jsonl"));
+        (session_id, TranscriptSink { path, lane })
+    }
+
     pub(super) fn start_triage(&self, request: TriageRequest) -> Result<(), String> {
         let project = self
             .projects
@@ -56,22 +85,13 @@ impl ClaudeStarter {
             usage,
             outcomes,
         } = request;
-        context.transcripts_dir = Some(
-            paths::run_dir(&self.data_dir, &project_id, &item_id)
-                .display()
-                .to_string(),
-        );
         let model = mid_tier(implementer_tier(
             usage.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
         ))
         .to_string();
-        let session_id = new_session_id();
-        let sink = TranscriptSink {
-            path: paths::run_dir(&self.data_dir, &project_id, &item_id).join(format!("{session_id}.jsonl")),
-            lane,
-        };
+        let (session_id, sink) = self.transcript(&project_id, &item_id, lane, &mut context);
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
@@ -82,16 +102,7 @@ impl ClaudeStarter {
                     template: TEMPLATE,
                     project_type: project.project_type,
                     github_repo: &project.github_repo,
-                    session: EphemeralSessionConfig {
-                        cwd: &cwd,
-                        budget_usd: project.budget.reviewer_usd,
-                        model,
-                        local: None,
-                        engine: Some(EngineId::Claude),
-                        cursor: None,
-                        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
-                        shell: true,
-                    },
+                    session: read_only_session(&project, &cwd, model),
                     max_automatic_decisions: MAX_TRIAGES,
                 };
                 let engine = engine_of(Some(EngineId::Claude));
@@ -173,17 +184,8 @@ impl ClaudeStarter {
             suggest,
             instructions,
         } = request;
-        context.transcripts_dir = Some(
-            paths::run_dir(&self.data_dir, &project_id, &item_id)
-                .display()
-                .to_string(),
-        );
         let model = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &self.models).to_string();
-        let session_id = new_session_id();
-        let sink = TranscriptSink {
-            path: paths::run_dir(&self.data_dir, &project_id, &item_id).join(format!("{session_id}.jsonl")),
-            lane,
-        };
+        let (session_id, sink) = self.transcript(&project_id, &item_id, lane, &mut context);
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
@@ -194,16 +196,7 @@ impl ClaudeStarter {
                     template: CHECK_TEMPLATE,
                     project_type: project.project_type,
                     github_repo: &project.github_repo,
-                    session: EphemeralSessionConfig {
-                        cwd: &cwd,
-                        budget_usd: project.budget.reviewer_usd,
-                        model,
-                        local: None,
-                        engine: Some(EngineId::Claude),
-                        cursor: None,
-                        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
-                        shell: true,
-                    },
+                    session: read_only_session(&project, &cwd, model),
                     max_automatic_decisions: MAX_TRIAGES,
                 };
                 let ctx = SecondLookContext {
