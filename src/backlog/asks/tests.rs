@@ -89,9 +89,7 @@ async fn draft_queue_sends_null_audience_and_revises() {
         audience: None,
         revises: None,
         ask_id: Some("a1".into()),
-        requested_by: None,
-        started_by: None,
-        note: None,
+        ..Default::default()
     };
     assert_eq!(client.draft_queue(1, None, &draft).await.unwrap(), "d7");
     draft.audience = Some("dev".into());

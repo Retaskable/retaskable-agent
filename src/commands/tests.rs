@@ -685,39 +685,41 @@ fn ask_is_refused_while_the_flag_is_off() {
     assert!(v.item_commands.take_asks("one").is_empty());
 }
 
-#[tokio::test]
-async fn idea_accept_is_refused_with_the_flag_off_and_needs_an_id() {
-    let v = view();
-    let answer = idea_accept(
-        &cmd("idea_accept", json!({ "idea": "i1" })),
+fn idea_accept(v: &AgentView, args: Value) -> Value {
+    run(
+        &cmd("idea_accept", args),
         "one",
         &mut Seen::default(),
-        &v,
+        v,
+        &|_| {},
+        &data_dir(),
     )
-    .await;
-    assert_eq!(answer["type"], "nack");
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: idea_accept");
-    let store = crate::ideas::IdeaStore {
-        client: std::sync::Arc::new(crate::backlog::Client::new("http://127.0.0.1:1")),
-        repo: 1,
-        token: String::new(),
-    };
-    v.item_commands.set_ideas("one", Some(store));
-    let answer = idea_accept(&cmd("idea_accept", json!({})), "one", &mut Seen::default(), &v).await;
-    assert_eq!(answer["reason"], "idea_accept needs the idea's id.");
-    let answer = idea_accept(
-        &cmd("idea_accept", json!({ "idea": "i1" })),
-        "one",
-        &mut Seen::default(),
-        &v,
-    )
-    .await;
-    assert!(
-        answer["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("Couldn't answer the idea in the shared backlog: ")
+}
+
+#[test]
+fn idea_accept_is_queued_for_the_loop_behind_the_flag_and_answered_later() {
+    let v = claiming();
+    let off = idea_accept(&v, json!({ "idea": "i1" }));
+    assert_eq!(off["type"], "nack");
+    assert!(off["reason"].as_str().unwrap().contains("idea_accept"));
+    v.item_commands.set_flag("one", "ideas-session", true);
+    assert_eq!(
+        idea_accept(&v, json!({ "idea": "i1" }))["type"],
+        crate::commands::PENDING
     );
+    let queued = v.item_commands.take_ideas("one");
+    assert_eq!(queued.len(), 1);
+    assert_eq!((queued[0].idea.as_str(), queued[0].by.as_str()), ("i1", "jc"));
+    assert_eq!(idea_accept(&v, json!({ "idea": " " }))["type"], "nack");
+    assert_eq!(idea_accept(&v, json!({}))["type"], "nack");
+    assert!(v.item_commands.take_ideas("one").is_empty());
+}
+
+#[test]
+fn idea_accept_needs_claim_mode_and_not_now_and_never_are_the_sites() {
+    let v = view();
+    v.item_commands.set_flag("one", "ideas-session", true);
+    assert_eq!(idea_accept(&v, json!({ "idea": "i1" }))["type"], "nack");
     for name in ["idea_later", "idea_never"] {
         let answer = run(
             &cmd(name, json!({ "idea": "i1" })),
@@ -728,5 +730,19 @@ async fn idea_accept_is_refused_with_the_flag_off_and_needs_an_id() {
             &data_dir(),
         );
         assert_eq!(answer["type"], "nack");
+        assert!(answer["reason"].as_str().unwrap().contains("answers this one itself"));
     }
+}
+
+#[test]
+fn a_settled_answer_goes_up_the_projects_open_connection() {
+    let v = claiming();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    v.item_commands.answer("one", json!({ "type": "ack", "id": "lost" }));
+    v.item_commands.set_out("one", Some(tx));
+    v.item_commands.answer("one", json!({ "type": "ack", "id": "c1" }));
+    assert_eq!(rx.try_recv().unwrap()["id"], "c1");
+    v.item_commands.set_out("one", None);
+    v.item_commands.answer("one", json!({ "type": "ack", "id": "c2" }));
+    assert!(rx.try_recv().is_err());
 }

@@ -108,6 +108,17 @@ pub struct AskCommand {
     pub images_block: String,
 }
 
+/// An `idea_accept` waiting for the loop, which writes the idea up as a draft and answers command `command_id` once the
+/// store has (`ideas::accept`).
+#[derive(Debug, Clone)]
+pub struct IdeaCommand {
+    pub project: String,
+    pub command_id: String,
+    pub idea: String,
+    /// Who pressed Build this.
+    pub by: String,
+}
+
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -117,8 +128,11 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     asks: Arc<std::sync::Mutex<Vec<AskCommand>>>,
-    ask_on: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
-    ideas: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::ideas::IdeaStore>>>,
+    /// The `(project, flag)` pairs On, set by the loop each pass.
+    flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
+    ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
+    /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
+    out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
 }
 
 impl PartialEq for ItemCommands {
@@ -147,16 +161,56 @@ impl ItemCommands {
 
     /// Set by the loop each pass: whether the `ask-claude` flag is On for `project`.
     pub fn set_ask_on(&self, project: &str, on: bool) {
-        let mut set = self.ask_on.lock().unwrap_or_else(|e| e.into_inner());
-        if on {
-            set.insert(project.to_string());
-        } else {
-            set.remove(project);
-        }
+        self.set_flag(project, "ask-claude", on);
     }
 
     pub fn ask_on(&self, project: &str) -> bool {
-        self.ask_on.lock().unwrap_or_else(|e| e.into_inner()).contains(project)
+        self.flag_on(project, "ask-claude")
+    }
+
+    /// Records whether `flag` is On for `project`; commands behind a flag are refused while it is Off.
+    pub fn set_flag(&self, project: &str, flag: &'static str, on: bool) {
+        let mut set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            set.insert((project.to_string(), flag));
+        } else {
+            set.remove(&(project.to_string(), flag));
+        }
+    }
+
+    pub fn flag_on(&self, project: &str, flag: &'static str) -> bool {
+        let set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
+        set.contains(&(project.to_string(), flag))
+    }
+
+    pub fn push_idea(&self, command: IdeaCommand) {
+        self.ideas.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the `idea_accept`s queued for `project`, oldest first.
+    pub fn take_ideas(&self, project: &str) -> Vec<IdeaCommand> {
+        let mut queue = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project == project);
+        *queue = rest;
+        mine
+    }
+
+    /// A connection to the hub for `project` opened (`None`: it closed): [`answer`](Self::answer) goes up it.
+    pub fn set_out(&self, project: &str, out: Option<tokio::sync::mpsc::UnboundedSender<Value>>) {
+        let mut map = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        match out {
+            Some(out) => map.insert(project.to_string(), out),
+            None => map.remove(project),
+        };
+    }
+
+    /// Sends a command's `ack` or `nack` that was settled later, by the loop. Dropped when the connection is gone.
+    pub fn answer(&self, project: &str, answer: Value) {
+        if let Some(out) = self.out.lock().unwrap_or_else(|e| e.into_inner()).get(project) {
+            let _ = out.send(answer);
+        }
     }
 
     /// Set by the loop each pass: the shared backlog `idea_accept` uses for `project`, or `None` while the
