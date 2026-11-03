@@ -72,12 +72,12 @@ impl BugLink {
     }
 
     /// A connection opened: messages put on `out` go up it.
-    pub(super) fn opened(&self, out: mpsc::UnboundedSender<Value>) {
+    pub(crate) fn opened(&self, out: mpsc::UnboundedSender<Value>) {
         self.state().out = Some(out);
     }
 
     /// The connection closed: off again until the next hello's `bug_reports`, and anything waiting gives up.
-    pub(super) fn closed(&self) {
+    pub(crate) fn closed(&self) {
         let mut state = self.state();
         *state = State {
             sent: state.sent,
@@ -86,7 +86,7 @@ impl BugLink {
     }
 
     /// The hub's `bug_reports { on, known }`.
-    pub(super) fn consent_said(&self, msg: &Value) {
+    pub(crate) fn consent_said(&self, msg: &Value) {
         let on = msg.get("on").and_then(Value::as_bool).unwrap_or(false);
         let known = msg
             .get("known")
@@ -111,7 +111,7 @@ impl BugLink {
     }
 
     /// The hub's `bug_reported`, to whoever sent the bug with its `ref`.
-    pub(super) fn answered(&self, msg: &Value) {
+    pub(crate) fn answered(&self, msg: &Value) {
         let Some(r) = msg.get("ref").and_then(Value::as_str) else {
             return;
         };

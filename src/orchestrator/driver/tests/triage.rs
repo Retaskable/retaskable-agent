@@ -48,6 +48,7 @@ fn found(reason: &str) -> TriageEnd {
         reason: reason.into(),
         steps: vec![],
         instructions: String::new(),
+        bug: None,
     }
 }
 
@@ -248,6 +249,7 @@ fn decision(decision: TriageDecision, instructions: &str) -> TriageEnd {
         reason: "because".into(),
         steps: vec![],
         instructions: instructions.into(),
+        bug: None,
     }
 }
 
@@ -410,6 +412,7 @@ fn steps_end() -> TriageEnd {
         reason: "only you can".into(),
         steps: vec!["Add the key".into(), "Press Done".into()],
         instructions: String::new(),
+        bug: None,
     }
 }
 
@@ -436,4 +439,114 @@ async fn person_steps_with_a_pr_are_human_with_the_steps_under_the_reason() {
         reason.starts_with("first problem") && reason.ends_with("1. Add the key\n2. Press Done"),
         "{reason}"
     );
+}
+
+// Reporting the triager's Retaskable bugs (06.9 bullet 19), with a fake hub behind a real `BugLink`.
+
+fn bug_end(decision: TriageDecision) -> TriageEnd {
+    TriageEnd::Found {
+        decision,
+        reason: "because".into(),
+        steps: vec![],
+        instructions: String::new(),
+        bug: Some(crate::triage::RetaskableBug {
+            title: "Lane prep drops the sync".into(),
+            details: "The sync step is skipped.".into(),
+            same_as: None,
+        }),
+    }
+}
+
+/// The project's hub link, consent `on`, answering each `bug_report` with `answer`; the reports it got.
+fn hub(rig: &mut Rig, on: bool, answer: Value) -> Arc<Mutex<Vec<Value>>> {
+    use crate::connector::bug_link::BugLink;
+    let link = Arc::new(BugLink::new(Duration::from_secs(5)));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    link.opened(tx);
+    link.consent_said(&json!({ "type": "bug_reports", "on": on, "known": [] }));
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let (seen, answering) = (got.clone(), link.clone());
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let mut reply = answer.clone();
+            reply["ref"] = msg["ref"].clone();
+            seen.lock().unwrap().push(msg);
+            answering.answered(&reply);
+        }
+    });
+    rig.machine.links.bugs.insert("p0".into(), link);
+    got
+}
+
+async fn settle_bug(rig: &mut Rig) {
+    rig.machine.pass().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    rig.machine.pass().await;
+}
+
+fn has_note(rig: &mut Rig, text: &str) -> bool {
+    timeline(rig).iter().any(|n| n == text)
+}
+
+#[tokio::test]
+async fn a_bug_with_consent_on_is_sent_once_and_its_timeline_line_added() {
+    let (mut rig, _fake) = stopped(vec![bug_end(TriageDecision::Human), bug_end(TriageDecision::Human)]).await;
+    let got = hub(&mut rig, true, json!({ "type": "bug_reported", "ok": true }));
+    settle_bug(&mut rig).await;
+    assert_eq!(got.lock().unwrap().len(), 1);
+    assert_eq!(got.lock().unwrap()[0]["title"], "Lane prep drops the sync");
+    assert!(has_note(&mut rig, "Reported to Retaskable as a fix"));
+    let sig = rig.lp(0).store.runs()["a"].reported_bugs.clone();
+    assert_eq!(sig.len(), 1);
+    // A second look finds the same bug: never sent again for the item.
+    let r = rig.lp(0).records.get_mut("a").unwrap();
+    r.triaged = false;
+    rig.lp(0).triaging.clear();
+    past(&mut rig);
+    settle_bug(&mut rig).await;
+    assert_eq!(got.lock().unwrap().len(), 1);
+    assert_eq!(rig.lp(0).records["a"].reported_bugs, sig);
+}
+
+#[tokio::test]
+async fn consent_off_sends_nothing_and_adds_no_line() {
+    let (mut rig, _fake) = stopped(vec![bug_end(TriageDecision::Human)]).await;
+    let got = hub(&mut rig, false, json!({ "type": "bug_reported", "ok": true }));
+    settle_bug(&mut rig).await;
+    assert!(got.lock().unwrap().is_empty());
+    assert!(rig.lp(0).records["a"].reported_bugs.is_empty());
+    assert!(!has_note(&mut rig, "Reported to Retaskable as a fix"));
+}
+
+#[tokio::test]
+async fn a_duplicate_answer_adds_the_duplicate_line() {
+    let (mut rig, _fake) = stopped(vec![bug_end(TriageDecision::Human)]).await;
+    let answer = json!({ "type": "bug_reported", "ok": true, "duplicate": true, "itemId": "b1" });
+    let got = hub(&mut rig, true, answer);
+    settle_bug(&mut rig).await;
+    assert_eq!(got.lock().unwrap().len(), 1);
+    assert!(has_note(&mut rig, "Retaskable already has this bug on its board"));
+}
+
+#[tokio::test]
+async fn a_refused_report_is_marked_but_adds_no_line() {
+    let (mut rig, _fake) = stopped(vec![bug_end(TriageDecision::Human)]).await;
+    let got = hub(
+        &mut rig,
+        true,
+        json!({ "type": "bug_reported", "ok": false, "reason": "no" }),
+    );
+    settle_bug(&mut rig).await;
+    assert_eq!(got.lock().unwrap().len(), 1);
+    assert_eq!(rig.lp(0).records["a"].reported_bugs.len(), 1);
+    assert!(!has_note(&mut rig, "Reported to Retaskable as a fix"));
+}
+
+#[tokio::test]
+async fn the_decision_is_carried_out_the_same_with_the_bug() {
+    let (mut rig, _fake) = stopped(vec![bug_end(TriageDecision::Skip)]).await;
+    let got = hub(&mut rig, true, json!({ "type": "bug_reported", "ok": true }));
+    settle_bug(&mut rig).await;
+    assert_eq!(got.lock().unwrap().len(), 1);
+    assert!(has_note(&mut rig, "Claude decided to skip: because"));
 }
