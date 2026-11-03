@@ -81,6 +81,19 @@ pub fn ensure(repo_path: &Path, worktrees_dir: &Path, lane_count: u32) -> Result
 /// when one of this repo began less than 15 seconds ago. Returns the lane's directory.
 pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, base_branch: &str) -> Result<PathBuf> {
     let dir = lane_path(worktrees_dir, lane);
+    prepare_at(repo_path, worktrees_dir, &dir, branch, &format!("origin/{base_branch}"))
+}
+
+/// [`prepare`] for the lane at `dir`, resetting onto `start_point` (a ref such as `origin/<piece branch>`) instead
+/// of the base.
+pub fn prepare_at(
+    repo_path: &Path,
+    worktrees_dir: &Path,
+    dir: &Path,
+    branch: &str,
+    start_point: &str,
+) -> Result<PathBuf> {
+    let dir = dir.to_path_buf();
     ensure_worktree(repo_path, worktrees_dir, &dir)?;
     kill_processes_in(&dir)?;
     {
@@ -88,8 +101,7 @@ pub fn prepare(repo_path: &Path, worktrees_dir: &Path, lane: u32, branch: &str, 
         fetch(repo_path, true)?;
         run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
         run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
-        let start_point = format!("origin/{base_branch}");
-        run(git_in_worktree(&dir).args(["checkout", "-B", branch, &start_point]))?;
+        run(git_in_worktree(&dir).args(["checkout", "-B", branch, start_point]))?;
     }
     // Every junction lives in worktrees_dir, outside the lane, so clean -fd never touches them;
     // this is run again because the new base branch may add dependencies the old one didn't have.

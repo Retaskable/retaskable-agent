@@ -36,7 +36,7 @@ use project::Launch;
 pub use project::{
     Abandon, LanePlay, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
 };
-pub use runs::{BEAT_EVERY, RunEnd, RunEndSender, RunLoop, RunRequest, RunStarter};
+pub use runs::{BEAT_EVERY, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 
 #[cfg(test)]

@@ -281,7 +281,6 @@ fn title_slug(title: &str) -> String {
 
 /// A piece's branch: `retaskable/<piece id>-<slug of the title>` (pieces.md: one branch per piece, kept for its
 /// `fix` runs).
-#[allow(dead_code)] // the piece runs call it
 pub(super) fn piece_branch_name(piece_id: &str, title: &str) -> String {
     format!("retaskable/{piece_id}-{}", title_slug(title))
 }
@@ -380,10 +379,10 @@ async fn attempt(
 }
 
 /// How an [`attempt`] ended.
-struct Attempt {
-    answer: Result<ImplementerResult>,
-    usage: Option<Value>,
-    context_tokens: Option<u64>,
+pub(super) struct Attempt {
+    pub(super) answer: Result<ImplementerResult>,
+    pub(super) usage: Option<Value>,
+    pub(super) context_tokens: Option<u64>,
 }
 
 /// What `run` returns: the result, the stream's usage reading, the session's last context size and the lines
@@ -435,48 +434,70 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// What the code gates' rounds need to know of a run.
+pub(super) struct GateRounds<'a> {
+    pub cwd: &'a Path,
+    pub base_branch: &'a str,
+    pub code_gates: crate::config::CodeGates,
+    pub max_check_rounds: u32,
+    /// The claim's fresh-start rules (06.2-implementer.md "Fresh-start rules on resume"); `None` for a run that
+    /// only ever resumes.
+    pub fresh: Option<FreshRules>,
+}
+
+/// When a session is replaced instead of resumed.
+#[derive(Clone, Copy)]
+pub(super) struct FreshRules {
+    pub max_turns: u32,
+    pub max_resume_context_tokens: u32,
+}
+
+/// What [`gate_rounds`] asks its caller to run next.
+pub(super) enum Step {
+    /// The session ran out of turns: a fresh one carries on in the same lane, uncommitted work kept.
+    OutOfTurns,
+    /// Send the findings back: resume the session.
+    Fix(String),
+    /// Send the findings to a fresh session, the old one having grown too large to resume.
+    FixFresh(String),
+}
+
+/// How [`gate_rounds`] ended.
+pub(super) enum Gated {
+    /// The answer to settle, with the gates' notes.
+    Settled(Attempt, Vec<String>),
+    /// A person is needed, for this reason.
+    GaveUp(Attempt, Vec<String>, String),
+}
+
 /// Code gates before the push (06.2-implementer.md): while the session answers `pr_opened`, the gates check the
-/// lane's change against `origin/<baseBranch>`. A finding resumes the same session with it, in a new transcript,
-/// and gates its next answer too; every such round counts against `maxCheckRounds`, and past it a person is
-/// needed. Gates that can't run (a git error) are noted and the answer stands. Any other answer is `settled`.
-async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
+/// lane's change against `origin/<baseBranch>`. A finding goes back through `next` and its answer is gated too;
+/// every such round counts against `maxCheckRounds`, and past it a person is needed. Gates that can't run (a git
+/// error) are noted and the answer stands. With fresh-start rules, running out of turns restarts once. Shared by
+/// the claim and the piece runs.
+pub(super) async fn gate_rounds<F, Fut>(g: &GateRounds<'_>, mut a: Attempt, mut next: F) -> Result<Gated>
+where
+    F: FnMut(Step) -> Fut,
+    Fut: std::future::Future<Output = Result<Attempt>>,
+{
     let mut notes = Vec::new();
     let mut rounds = 0;
-    let mut current = job.session_id.clone();
-    let mut started_fresh = false;
     let mut restarted = false;
     loop {
-        // Out of turns (06.2-implementer.md "Fresh-start rules on resume"): once per job, a fresh session
-        // carries on in the same lane, uncommitted work kept (no `lanes::prepare`), and its answer goes through
-        // the gates like any other. A second time in a row needs a person.
-        if ran_out_of_turns(&a) {
+        if let Some(fresh) = g.fresh.filter(|_| ran_out_of_turns(&a)) {
             if restarted {
-                let why = format!("Implementer ran out of turns ({}) twice in a row", job.max_turns);
-                return Ok((
-                    SessionResult::NeedsHuman(why),
-                    a.usage,
-                    a.context_tokens,
-                    notes,
-                    Some(current),
-                ));
+                let why = format!("Implementer ran out of turns ({}) twice in a row", fresh.max_turns);
+                return Ok(Gated::GaveUp(a, notes, why));
             }
             restarted = true;
-            started_fresh = true;
-            current = new_session_id();
             notes.push(FreshStart::OutOfTurns.history_line());
-            let prompt = picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP);
-            let start = Start::Continuing { follow_up: &prompt };
-            a = attempt(job, cwd, start, &current, true, format!("{current}.jsonl"), "").await?;
+            a = next(Step::OutOfTurns).await?;
             continue;
         }
         if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
             break;
         }
-        let (dir, base, gates) = (
-            cwd.to_path_buf(),
-            job.project.base_branch.clone(),
-            job.project.code_gates,
-        );
+        let (dir, base, gates) = (g.cwd.to_path_buf(), g.base_branch.to_string(), g.code_gates);
         let found = tokio::task::spawn_blocking(move || code_gates::run(&dir, &base, &gates))
             .await
             .context("running the code gates")?;
@@ -490,49 +511,84 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
         };
         notes.push(found.note.clone());
         rounds += 1;
-        if rounds > job.project.max_check_rounds {
-            let (usage, context_tokens) = (a.usage, a.context_tokens);
+        if rounds > g.max_check_rounds {
             let why = format!(
                 "The code gates still found problems after {} rounds: {}",
-                job.project.max_check_rounds, found.note
+                g.max_check_rounds, found.note
             );
+            return Ok(Gated::GaveUp(a, notes, why));
+        }
+        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
+        let grown = g
+            .fresh
+            .and_then(|f| a.context_tokens.filter(|t| *t > u64::from(f.max_resume_context_tokens)));
+        a = match grown {
+            Some(tokens) => {
+                notes.push(FreshStart::Grown(tokens).history_line());
+                next(Step::FixFresh(follow_up)).await?
+            }
+            None => next(Step::Fix(follow_up)).await?,
+        };
+    }
+    Ok(Gated::Settled(a, notes))
+}
+
+async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
+    let rounds = GateRounds {
+        cwd,
+        base_branch: &job.project.base_branch,
+        code_gates: job.project.code_gates,
+        max_check_rounds: job.project.max_check_rounds,
+        fresh: Some(FreshRules {
+            max_turns: job.max_turns,
+            max_resume_context_tokens: job.max_resume_context_tokens,
+        }),
+    };
+    // The session now answering, and whether it is a fresh one (so its id is reported).
+    let state = std::sync::Mutex::new((job.session_id.clone(), false));
+    let next = |step: Step| {
+        let current = state.lock().unwrap().0.clone();
+        let (follow_up, fresh_prompt) = match &step {
+            Step::OutOfTurns => (
+                picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP),
+                true,
+            ),
+            Step::FixFresh(f) => (picking_up_prompt(false, &job.project.base_branch, f), true),
+            Step::Fix(f) => (f.clone(), false),
+        };
+        let id = if fresh_prompt { new_session_id() } else { current };
+        if fresh_prompt {
+            *state.lock().unwrap() = (id.clone(), true);
+        }
+        async move {
+            if fresh_prompt {
+                let start = Start::Continuing { follow_up: &follow_up };
+                attempt(job, cwd, start, &id, true, format!("{id}.jsonl"), "").await
+            } else {
+                let start = Start::Resume {
+                    session_id: id.clone(),
+                    follow_up: &follow_up,
+                    decisions: &[],
+                };
+                let name = format!("{id}-resumed-{}.jsonl", now_ms());
+                attempt(job, cwd, start, &id, false, name, "").await
+            }
+        }
+    };
+    let gated = gate_rounds(&rounds, a, next).await?;
+    let (current, started_fresh) = state.into_inner().unwrap();
+    let (a, mut notes) = match gated {
+        Gated::Settled(a, notes) => (a, notes),
+        Gated::GaveUp(a, notes, why) => {
             return Ok((
                 SessionResult::NeedsHuman(why),
-                usage,
-                context_tokens,
+                a.usage,
+                a.context_tokens,
                 notes,
                 started_fresh.then_some(current),
             ));
         }
-        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
-        // A session past `maxResumeContextTokens` isn't resumed: a fresh one picks the branch up in the same lane,
-        // and its size starts from none (06.2-implementer.md "Fresh-start rules on resume").
-        a = match a
-            .context_tokens
-            .filter(|t| *t > u64::from(job.max_resume_context_tokens))
-        {
-            Some(tokens) => {
-                notes.push(FreshStart::Grown(tokens).history_line());
-                let id = new_session_id();
-                let prompt = picking_up_prompt(false, &job.project.base_branch, &follow_up);
-                let start = Start::Continuing { follow_up: &prompt };
-                let name = format!("{id}.jsonl");
-                let next = attempt(job, cwd, start, &id, true, name, "").await?;
-                current = id;
-                started_fresh = true;
-                next
-            }
-            None => {
-                let start = Start::Resume {
-                    session_id: current.clone(),
-                    follow_up: &follow_up,
-                    decisions: &[],
-                };
-                let name = format!("{current}-resumed-{}.jsonl", now_ms());
-                attempt(job, cwd, start, &current, false, name, "").await?
-            }
-        };
-    }
+    };
     let titles = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
         _ => None,
@@ -716,4 +772,4 @@ fn session_result_for_answer(
 
 #[cfg(test)]
 #[path = "session_tests.rs"]
-mod tests;
+pub(super) mod tests;
