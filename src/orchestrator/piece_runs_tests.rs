@@ -21,8 +21,10 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
+    // A reviewer session (its prompt says so) is counted apart and answers from `review<m>.jsonl` (else the
+    // approving `review_default.jsonl`); `review<m>.sleep` makes it hang.
     let mut script = format!(
-        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{}'\nn=$(cat \"$R/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$R/count\"\necho \"$@\" >> \"$R/args_all\"\ncat > \"$R/prompt$n.txt\"\ncase $n in\n",
+        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{}'\ncat > \"$R/in.txt\"\nif grep -q 'You are the final reviewer' \"$R/in.txt\"; then\nm=$(cat \"$R/count_r\" 2>/dev/null || echo 0); m=$((m+1)); echo $m > \"$R/count_r\"\ncp \"$R/in.txt\" \"$R/reviewer$m.txt\"\n[ -f \"$R/review$m.sleep\" ] && sleep 60\nf=\"$R/review$m.jsonl\"; [ -f \"$f\" ] || f=\"$R/review_default.jsonl\"\ncat \"$f\"; exit 0\nfi\nn=$(cat \"$R/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$R/count\"\necho \"$@\" >> \"$R/args_all\"\ncp \"$R/in.txt\" \"$R/prompt$n.txt\"\ncase $n in\n",
         root.display()
     );
     for (i, step) in steps.iter().enumerate() {
@@ -32,6 +34,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
     let bin = root.join(fake_name());
     crate::test_support::write_executable(&bin, &script);
     std::fs::write(root.join("out.jsonl"), answer).unwrap();
+    std::fs::write(root.join("review_default.jsonl"), reviewed("approve", "Fine.")).unwrap();
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
     let project = project_in(&root, &repo);
@@ -339,4 +342,118 @@ async fn a_failed_install_counts_as_a_failed_blocking_check() {
 fn it_asks_for_build_and_fix() {
     let r = rig(&[], "");
     assert_eq!(r.starter.kinds(), vec![RunKind::Build, RunKind::Fix]);
+}
+
+fn reviewed(verdict: &str, summary: &str) -> String {
+    format!(
+        r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"verdict":"{verdict}","summary":"{summary}","comments":[{{"body":"rename the thing"}}]}},"session_id":"r"}}"#
+    )
+}
+
+const COMMIT_B: &str = "echo 'fn b() {}' > b.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm b";
+
+fn script_review(r: &Rig, m: u32, verdict: &str) {
+    std::fs::write(
+        r.root.join(format!("review{m}.jsonl")),
+        reviewed(verdict, "Needs work."),
+    )
+    .unwrap();
+}
+
+fn comment(r: &Rig) -> String {
+    std::fs::read_to_string(r.root.join("gh_comment")).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn an_approving_review_posts_its_comment_and_ends_pr_opened() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    assert!(comment(&r).contains("**Verdict:** approve"), "{}", comment(&r));
+    assert!(
+        std::fs::read_to_string(r.root.join("gh.log"))
+            .unwrap()
+            .contains("pr comment 7")
+    );
+    let prompt = std::fs::read_to_string(r.root.join("reviewer1.txt")).unwrap();
+    assert!(prompt.contains("The piece: Show it."), "{prompt}");
+}
+
+#[tokio::test]
+async fn a_request_for_changes_resumes_the_implementer_then_re_reviews() {
+    let r = rig(&[COMMIT, COMMIT_B], &answer("pr_opened", ""));
+    script_review(&r, 1, "request_changes");
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    let fix = std::fs::read_to_string(r.root.join("prompt2.txt")).unwrap();
+    assert!(fix.contains("rename the thing"), "{fix}");
+    assert!(
+        std::fs::read_to_string(r.root.join("args_all"))
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("--resume")
+    );
+    let again = std::fs::read_to_string(r.root.join("reviewer2.txt")).unwrap();
+    assert!(again.contains("re-review"), "{again}");
+    assert_eq!(comment(&r).matches("**Verdict:**").count(), 2);
+    let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap();
+    assert_eq!(log.matches("pr comment").count(), 2);
+}
+
+#[tokio::test]
+async fn too_many_review_rounds_end_failed_with_the_requests() {
+    let mut r = rig(&[COMMIT, COMMIT_B], &answer("pr_opened", ""));
+    Arc::get_mut(&mut r.starter).unwrap().projects[0].max_review_rounds = 1;
+    script_review(&r, 1, "request_changes");
+    script_review(&r, 2, "request_changes");
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(
+        why.contains("after 1 rounds") && why.contains("rename the thing"),
+        "{why}"
+    );
+}
+
+#[tokio::test]
+async fn a_verdict_needing_a_person_ends_failed_with_why() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    script_review(&r, 1, "needs_human");
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let RunOutcome::Failed(why) = end_of(&mut s.ends).await.outcome else {
+        panic!("not failed")
+    };
+    assert!(why.contains("needs a person") && why.contains("Needs work."), "{why}");
+}
+
+#[tokio::test]
+async fn cutting_a_review_session_ends_the_run_interrupted() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    std::fs::write(r.root.join("review1.sleep"), "").unwrap();
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let mut last = None;
+    for _ in 0..2 {
+        last = Some(
+            tokio::time::timeout(Duration::from_secs(60), s.trees.recv())
+                .await
+                .expect("a session's tree")
+                .unwrap(),
+        );
+    }
+    let (_, tree) = last.unwrap();
+    tree.cut();
+    tree.kill_and_wait(crate::process_tree::KILL_LIMIT);
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
+    assert!(comment(&r).is_empty());
 }
