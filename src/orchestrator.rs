@@ -14,6 +14,8 @@
 pub mod ask_host;
 pub mod draft_host;
 pub mod driver;
+#[cfg(all(test, unix))]
+mod fake_session_tests;
 pub mod fresh_start;
 pub mod guard;
 pub mod live;

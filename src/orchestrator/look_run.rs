@@ -4,17 +4,17 @@
 //! computer, across all projects ([`Slot`]). Its process tree is registered with the run, so a beat's `stop` or
 //! the ceiling cuts it; the run ends exactly once through `request.ends`, unless the loop already ended it.
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
-use super::session::{exists, quiet_timeout};
+use super::driver::{RunRequest, RunStarter, piece_id};
+use super::plan_run::{Cut, claude_project, spawn_run};
+use super::session::quiet_timeout;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_for, engine_of, run_session_tracked,
 };
@@ -97,19 +97,7 @@ impl RunStarter for LookRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let project = self
-            .projects
-            .iter()
-            .find(|p| p.id_or_derived() == request.project)
-            .ok_or_else(|| format!("no project {} is configured", request.project))?
-            .clone();
-        if !self.triager_on_claude(Some(&project)) {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.triager_on_claude(Some(p)))?;
         let guard = self
             .slot
             .take()
@@ -121,21 +109,9 @@ impl RunStarter for LookRuns {
             bin,
             model,
         };
-        let (ends, token) = (request.ends.clone(), request.token.clone());
-        let stop = request.stop.clone();
         let cut = Cut::default();
-        // The inner task is joined, so even a panic in it ends in exactly one end.
-        tokio::spawn(async move {
-            let _slot = guard;
-            let (outcome, result) = match tokio::spawn(look(job, request, cut.clone())).await {
-                Ok(end) => end,
-                Err(e) => (RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({})),
-            };
-            // A run the loop already ended (a stop or the ceiling) sends nothing more.
-            if !stop.stopped() && !cut.is_cut() {
-                ends.send(RunEnd { token, outcome, result });
-            }
-        });
+        let work = look(job, request.clone(), cut.clone());
+        spawn_run(guard, request, cut, async move { Some(work.await) });
         Ok(())
     }
 }
@@ -145,16 +121,6 @@ struct Job {
     project: ProjectConfig,
     bin: PathBuf,
     model: String,
-}
-
-/// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.
-#[derive(Clone, Default)]
-struct Cut(Arc<Mutex<Option<Arc<ProcessTree>>>>);
-
-impl Cut {
-    fn is_cut(&self) -> bool {
-        self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
-    }
 }
 
 /// How the run ended: the decision, or why there isn't one.

@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use super::super::fake_session_tests::{Fake, assert_ran_read_only_in, cut_registered_tree, fake_claude};
 use super::*;
-use crate::orchestrator::driver::{RunEndSender, RunProcesses};
-use crate::orchestrator::session::tests::{fake_name, project_in};
+use crate::orchestrator::driver::{RunEnd, RunEndSender, RunProcesses};
 
 struct Rig {
     _dir: tempfile::TempDir,
@@ -16,20 +16,12 @@ struct Rig {
 
 /// A project whose `claude` records its arguments, prompt and folder, then prints `out`; `extra` runs first.
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
-    let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let script = format!(
-        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{r}'\ncat > \"$R/in.txt\"\necho \"$@\" > \"$R/args.txt\"\npwd > \"$R/pwd.txt\"\n{extra}\ncat \"$R/out.jsonl\"\n",
-        r = root.display()
-    );
-    let bin = root.join(fake_name());
-    crate::test_support::write_executable(&bin, &script);
-    std::fs::write(root.join("out.jsonl"), out).unwrap();
-    let bin = bin.to_string_lossy().into_owned();
-    let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
-    let mut project = project_in(&root, &repo);
+    let Fake {
+        dir,
+        root,
+        env,
+        mut project,
+    } = fake_claude(out, extra);
     project.budget.reviewer_usd = 1.5;
     let starter = LookRuns::new(
         root.join("data"),
@@ -129,20 +121,7 @@ async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
         })
     );
     // It runs in the base checkout, read-only, on the middle tier with the reviewer's budget.
-    let pwd = std::fs::read_to_string(r.root.join("pwd.txt")).unwrap();
-    assert_eq!(
-        std::fs::canonicalize(pwd.trim()).unwrap(),
-        std::fs::canonicalize(&base).unwrap()
-    );
-    let args = std::fs::read_to_string(r.root.join("args.txt")).unwrap();
-    assert!(
-        args.contains("--max-budget-usd 1.5") && args.contains("sonnet"),
-        "{args}"
-    );
-    assert!(
-        !args.contains("--dangerously") && args.contains("--disallowedTools") && args.contains("Edit Write"),
-        "{args}"
-    );
+    assert_ran_read_only_in(&r.root, &base);
     // The prompt carries the piece and its attempts.
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(
@@ -244,13 +223,7 @@ async fn one_look_at_a_time_and_its_tree_is_registered() {
     let (second, _s2) = request(brief());
     assert!(r.starter.start(second).unwrap_err().contains("already running"));
     // Cutting the registered tree ends the run with nothing from the task, and frees the slot.
-    let (token, tree) = tokio::time::timeout(Duration::from_secs(30), s.trees.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(token, "tok");
-    tree.cut();
-    tree.kill_and_wait(Duration::from_secs(5));
+    cut_registered_tree(&mut s.trees).await;
     until_free(&r).await;
     assert_eq!(r.starter.kinds(), vec![RunKind::Look]);
     assert!(s.ends.try_recv().is_err());

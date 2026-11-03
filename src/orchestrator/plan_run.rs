@@ -262,19 +262,7 @@ impl RunStarter for PlanRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let project = self
-            .projects
-            .iter()
-            .find(|p| p.id_or_derived() == request.project)
-            .ok_or_else(|| format!("no project {} is configured", request.project))?
-            .clone();
-        if !self.planner_on_claude(Some(&project)) {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.planner_on_claude(Some(p)))?;
         if self.running.swap(true, Ordering::SeqCst) {
             return Err("a plan run is already running on this computer".into());
         }
@@ -285,20 +273,8 @@ impl RunStarter for PlanRuns {
             bin,
             model: tiers::chore_tier().to_string(),
         };
-        let (ends, token) = (request.ends.clone(), request.token.clone());
         let cut = Cut::default();
-        // The inner task is joined, so even a panic in it ends in exactly one end.
-        tokio::spawn(async move {
-            let _running = guard;
-            let end = match tokio::spawn(plan(job, request.clone(), cut.clone())).await {
-                Ok(end) => end,
-                Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
-            };
-            // A run the loop already ended (a stop or the ceiling cut its tree) sends nothing.
-            if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
-                ends.send(RunEnd { token, outcome, result });
-            }
-        });
+        spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
     }
 }
@@ -312,12 +288,60 @@ struct Job {
 
 /// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.
 #[derive(Clone, Default)]
-struct Cut(Arc<Mutex<Option<Arc<ProcessTree>>>>);
+pub(super) struct Cut(pub(super) Arc<Mutex<Option<Arc<ProcessTree>>>>);
 
 impl Cut {
-    fn is_cut(&self) -> bool {
+    pub(super) fn is_cut(&self) -> bool {
         self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
     }
+}
+
+/// The project of `request`, and the `claude` binary, for a starter whose role runs on Claude (`on_claude`); `Err`
+/// gives the run back.
+pub(super) fn claude_project(
+    projects: &[ProjectConfig],
+    request: &RunRequest,
+    env: &Env,
+    on_claude: impl Fn(&ProjectConfig) -> bool,
+) -> Result<(ProjectConfig, PathBuf), String> {
+    let project = projects
+        .iter()
+        .find(|p| p.id_or_derived() == request.project)
+        .ok_or_else(|| format!("no project {} is configured", request.project))?
+        .clone();
+    if !on_claude(&project) {
+        return Err("only Claude sessions run in the Rust agent yet".into());
+    }
+    let bin = resolve_claude_on_path(env).map_err(|e| format!("{e:#}"))?;
+    if !exists(&bin, env) {
+        return Err(format!("the claude binary wasn't found ({})", bin.display()));
+    }
+    Ok((project, bin))
+}
+
+/// Runs `work` as the run's task, holding `guard` until it ends. The inner task is joined, so even a panic in it
+/// ends in exactly one end. A run the loop already ended (a stop or the ceiling cut its tree) sends nothing, and
+/// neither does a `work` that answers `None`.
+pub(super) fn spawn_run<G: Send + 'static>(
+    guard: G,
+    request: RunRequest,
+    cut: Cut,
+    work: impl std::future::Future<Output = Option<(RunOutcome, Value)>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        let _held = guard;
+        let end = match tokio::spawn(work).await {
+            Ok(end) => end,
+            Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
+        };
+        if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
+            request.ends.send(RunEnd {
+                token: request.token.clone(),
+                outcome,
+                result,
+            });
+        }
+    });
 }
 
 fn failed(why: impl Into<String>) -> Option<(RunOutcome, Value)> {
