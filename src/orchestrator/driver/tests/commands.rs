@@ -134,6 +134,50 @@ async fn continue_with_nothing_to_carry_on_from_starts_the_slice_over_notes_and_
     assert!(rig.lp(0).continuing.is_empty());
 }
 
+fn notes_of(rig: &mut Rig) -> Vec<String> {
+    (rig.lp(0).events().recent().iter())
+        .filter_map(|e| e.to_value()["note"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_persons_continue_with_nothing_to_carry_on_from_says_so_in_its_note() {
+    let (mut rig, _fake) = stopped(2, None);
+    continue_a(&rig, "a", None);
+    rig.machine.poll().await;
+    let notes = notes_of(&mut rig);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n == "Started over: there was nothing to continue from"),
+        "{notes:?}"
+    );
+}
+
+#[tokio::test]
+async fn claudes_continue_with_nothing_to_carry_on_from_says_so_in_its_note() {
+    let (mut rig, _fake) = stopped(2, None);
+    rig.lp(0).continuing.push(("a".into(), Some("Try again.".into())));
+    rig.lp(0).claude_pending.insert("a".into());
+    rig.machine.poll().await;
+    let notes = notes_of(&mut rig);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n == "Started over by Claude: there was nothing to continue from"),
+        "{notes:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_plain_start_over_still_says_who_chose_it() {
+    let (mut rig, _fake) = stopped(2, None);
+    start_over_a(&rig, "a", None);
+    rig.machine.poll().await;
+    let notes = notes_of(&mut rig);
+    assert!(notes.iter().any(|n| n == "a person chose Start over"), "{notes:?}");
+}
+
 #[tokio::test]
 async fn start_over_closes_the_old_pr_bumps_the_attempt_and_starts_a_fresh_session_with_the_notes() {
     let (mut rig, fake) = stopped(2, Some("s1"));
