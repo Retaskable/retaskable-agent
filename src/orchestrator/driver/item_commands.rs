@@ -14,7 +14,10 @@
 //! a fresh implementer on the new branch (`…-s<slice>-r<attempt>`, prepared from `origin/<base>`), the notes in its
 //! first prompt. If the old work can't be let go of, the item stays as it is.
 //!
-//! **Skip** (`skip`, and a triage `skip` decision) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
+//! Claude's own decisions (`triage_run.rs`) are queued here too, marked in `claude_pending`: a person's Continue, Start
+//! over or Skip for the item drops Claude's, and one waiting for a lane stays `claudeOnIt`.
+//!
+//! **Skip** (`skip`, and a triage `skip` decision, `claude`) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
 //! run, frees its lane, gives the lease back with a note (`report`, `release`) and then skips the item in the store
 //! (`skip`), so no computer claims it again. Its branch and pull request are kept.
 use super::project::signed_out;
@@ -40,11 +43,17 @@ impl ProjectLoop {
         shared: &mut Shared<'_>,
     ) {
         for command in shared.links.item_commands.take(&self.id) {
+            if let ItemCommand::Continue { item, .. }
+            | ItemCommand::StartOver { item, .. }
+            | ItemCommand::Skip { item, .. } = &command
+            {
+                self.drop_claudes(item);
+            }
             let (name, item, notes, start_over) = match command {
                 ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
                 ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
                 ItemCommand::Skip { item, .. } => {
-                    self.skip_stopped(pool, &item, shared).await;
+                    self.skip_stopped(pool, &item, false, shared).await;
                     continue;
                 }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
@@ -85,26 +94,61 @@ impl ProjectLoop {
                 self.starting_over.push((item, notes));
             }
         }
+        let waiting: Vec<&String> = self
+            .continuing
+            .iter()
+            .chain(&self.starting_over)
+            .map(|(id, _)| id)
+            .collect();
+        self.claude_pending.retain(|id| waiting.contains(&id));
     }
 
-    /// Skips a stopped item: the run is dropped (`item_state`, `needs_human` to `skipped`), the lane freed and the
+    /// A person acted on `item_id`, so Claude's decision waiting for a lane is dropped (06.9 bullet 17).
+    fn drop_claudes(&mut self, item_id: &str) {
+        if self.claude_pending.remove(item_id) {
+            self.continuing.retain(|(id, _)| id != item_id);
+            self.starting_over.retain(|(id, _)| id != item_id);
+        }
+    }
+
+    /// "Claude" or "a person": who chose what is being carried out for `item_id`.
+    fn chooser(&self, item_id: &str) -> &'static str {
+        if self.claude_pending.contains(item_id) {
+            "Claude"
+        } else {
+            "a person"
+        }
+    }
+
+    /// Skips a stopped item (`claude`: the triager's decision, else a person's button): the run is dropped (`item_state`, `needs_human` to `skipped`), the lane freed and the
     /// lease released with a note, and the skip is kept owed (`unskipped`) until the store has taken the release and
     /// the `skip`; `flush_owed` sends both again on later passes. An item that isn't stopped here has its command dropped and logged.
-    pub(super) async fn skip_stopped(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
+    pub(super) async fn skip_stopped(
+        &mut self,
+        pool: &mut LanePool,
+        item_id: &str,
+        claude: bool,
+        shared: &mut Shared<'_>,
+    ) {
+        let (who, lower) = if claude {
+            ("Claude", "Claude")
+        } else {
+            ("A person", "a person")
+        };
         if !self.runs.get(item_id).is_some_and(|r| r.state == ItemState::NeedsHuman) {
             tracing::info!("{}: dropped a skip for {item_id}: it isn't stopped here", self.id);
             return;
         }
         self.runs.remove(item_id);
         self.items.remove(item_id);
-        self.free_lane(pool, item_id, "skipped", "a person chose Skip");
+        self.free_lane(pool, item_id, "skipped", &format!("{lower} chose Skip"));
         self.events.add_in(
             &self.id,
             Event::ItemState(event::ItemState {
                 item: Some(item_id.to_string()),
                 from: Some("needs_human".into()),
                 to: Some("skipped".into()),
-                note: Some("a person chose Skip".into()),
+                note: Some(format!("{lower} chose Skip")),
                 ..Default::default()
             }),
         );
@@ -112,7 +156,7 @@ impl ProjectLoop {
             return;
         };
         self.unreleased
-            .insert(item_id.to_string(), (lease, "A person chose Skip.".into()));
+            .insert(item_id.to_string(), (lease, format!("{who} chose Skip.")));
         self.unskipped.insert(item_id.to_string());
         self.save_leases();
         self.flush_owed(shared.links).await;
@@ -189,6 +233,7 @@ impl ProjectLoop {
             }
         }
         let to = run.state;
+        let who = self.chooser(item_id);
         self.events.add_in(
             &self.id,
             Event::ItemState(event::ItemState {
@@ -196,7 +241,7 @@ impl ProjectLoop {
                 from: Some("needs_human".into()),
                 to: Some(state_name(to).into()),
                 lane: Some(lane),
-                note: Some("a person chose Continue".into()),
+                note: Some(format!("{who} chose Continue")),
                 ..Default::default()
             }),
         );
@@ -251,6 +296,7 @@ impl ProjectLoop {
             return true;
         }
         self.lane_taken(item_id, lane);
+        let who = self.chooser(item_id);
         let attempt = self.attempt_of(item_id) + 1;
         let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
         if let Some(record) = self.records.get_mut(item_id) {
@@ -265,7 +311,7 @@ impl ProjectLoop {
                 from: Some("needs_human".into()),
                 to: Some("implementing".into()),
                 lane: Some(lane),
-                note: Some("a person chose Start over".into()),
+                note: Some(format!("{who} chose Start over")),
                 ..Default::default()
             }),
         );
