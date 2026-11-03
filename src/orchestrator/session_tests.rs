@@ -819,3 +819,11 @@ async fn a_start_over_session_is_on_the_attempts_branch_with_the_notes_in_its_fi
     assert_eq!(branch_name(&item(&[], None), 0), branch());
     assert!(branch().ends_with("-s2"));
 }
+
+#[test]
+fn a_pieces_branch_is_named_from_its_item_number_and_title() {
+    assert_eq!(
+        piece_branch_name("piece-build-runs", 1, "Build the implementer's prompt from a piece"),
+        "retaskable/piece-build-runs-p1-build-the-implementer-s-prompt-from-a-pi"
+    );
+}

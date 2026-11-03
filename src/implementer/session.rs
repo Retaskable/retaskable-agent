@@ -9,13 +9,14 @@ use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 use crate::backlog::Item;
+use crate::backlog::runs::{RunKind, RunPiece};
 use crate::config::{CheckConfig, CodeGates, ProjectType};
 use crate::decisions::{Decision, decisions_text};
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 
 use super::model::{ImplementerResult, implementer_result_schema};
-use super::prompt::{Prompt, build_prompt};
+use super::prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt};
 
 /// What an implementer session runs with, besides how it starts ([`Start`]).
 pub struct Session<'a> {
@@ -51,6 +52,9 @@ pub enum Start<'a> {
     /// A brand new session: Retaskable names its id itself ([`new_session_id`]) so a later
     /// follow-up can resume it.
     Fresh,
+    /// A brand new session on a piece's `build` or `fix` run: the piece is the brief (pieces.md
+    /// section 3.2), `item` supplying the item's id and spec links.
+    Piece { kind: RunKind, piece: &'a RunPiece },
     /// A fresh session that picks up where one just ran out of turns left off (06.2-implementer.md
     /// "at most maxTurns turns"): a new id ([`new_session_id`]), never `--resume` (a maxed-out
     /// session has nothing left to resume into), and `follow_up` as the whole prompt — never the
@@ -90,22 +94,23 @@ pub fn new_session_id() -> String {
 /// already running (the follow-up text alone).
 pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     let (session_start, prompt) = match start {
-        Start::Fresh => {
-            let prompt = build_prompt(
-                s.template,
-                &Prompt {
-                    item: s.item,
-                    project_type: s.project_type,
-                    branch: s.branch,
-                    base_branch: s.base_branch,
-                    github_repo: s.github_repo,
-                    checks: s.checks,
-                    code_gates: s.code_gates,
-                    where_to_start: s.where_to_start,
-                    notes: s.notes,
-                    items: s.items,
-                },
-            )?;
+        Start::Fresh | Start::Piece { .. } => {
+            let prompt = Prompt {
+                item: s.item,
+                project_type: s.project_type,
+                branch: s.branch,
+                base_branch: s.base_branch,
+                github_repo: s.github_repo,
+                checks: s.checks,
+                code_gates: s.code_gates,
+                where_to_start: s.where_to_start,
+                notes: s.notes,
+                items: s.items,
+            };
+            let prompt = match start {
+                Start::Piece { kind, piece } => build_piece_prompt(s.template, &PiecePrompt { prompt, kind, piece })?,
+                _ => build_prompt(s.template, &prompt)?,
+            };
             (SessionStart::Fresh(new_session_id()), prompt)
         }
         Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),

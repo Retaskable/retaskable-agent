@@ -256,16 +256,6 @@ const INTERRUPTED: &str = "You were interrupted. Continue from where you left of
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
 /// slice over.
 pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
-    let slug: String = item
-        .title
-        .to_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .take(40)
-        .collect();
     let retry = if attempt > 0 {
         format!("-r{attempt}")
     } else {
@@ -274,9 +264,28 @@ pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
     format!(
         "retaskable/{}-{}-s{}{retry}",
         item.id,
-        slug.trim_end_matches('-'),
+        title_slug(&item.title),
         item.slice
     )
+}
+
+/// A piece's branch: `retaskable/<item id>-p<piece n>-<slug of the title>`.
+#[allow(dead_code)] // The run loop names a piece's branch with it.
+pub(super) fn piece_branch_name(item_id: &str, n: u32, title: &str) -> String {
+    format!("retaskable/{item_id}-p{n}-{}", title_slug(title))
+}
+
+fn title_slug(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .take(40)
+        .collect();
+    slug.trim_end_matches('-').to_string()
 }
 
 /// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at
