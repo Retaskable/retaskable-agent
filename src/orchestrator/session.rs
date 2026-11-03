@@ -269,7 +269,6 @@ fn title_slug(title: &str) -> String {
 
 /// A piece's branch: `retaskable/<piece id>-<slug of the title>` (pieces.md: one branch per piece, kept for its
 /// `fix` runs).
-#[allow(dead_code)] // the piece runs call it
 pub(super) fn piece_branch_name(piece_id: &str, title: &str) -> String {
     format!("retaskable/{piece_id}-{}", title_slug(title))
 }
@@ -368,10 +367,10 @@ async fn attempt(
 }
 
 /// How an [`attempt`] ended.
-struct Attempt {
-    answer: Result<ImplementerResult>,
-    usage: Option<Value>,
-    context_tokens: Option<u64>,
+pub(super) struct Attempt {
+    pub(super) answer: Result<ImplementerResult>,
+    pub(super) usage: Option<Value>,
+    pub(super) context_tokens: Option<u64>,
 }
 
 /// What `run` returns: the result, the stream's usage reading, the session's last context size and the lines
@@ -421,22 +420,39 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// What the code gates' rounds need to know of a run.
+pub(super) struct GateRounds<'a> {
+    pub cwd: &'a Path,
+    pub base_branch: &'a str,
+    pub code_gates: crate::config::CodeGates,
+    pub max_check_rounds: u32,
+}
+
+/// How [`gate_rounds`] ended.
+pub(super) enum Gated {
+    /// The answer to settle, with the gates' notes.
+    Settled(Attempt, Vec<String>),
+    /// Findings remained after the last round: a person is needed, for this reason.
+    GaveUp(Attempt, Vec<String>, String),
+}
+
 /// Code gates before the push (06.2-implementer.md): while the session answers `pr_opened`, the gates check the
-/// lane's change against `origin/<baseBranch>`. A finding resumes the same session with it, in a new transcript,
-/// and gates its next answer too; every such round counts against `maxCheckRounds`, and past it a person is
-/// needed. Gates that can't run (a git error) are noted and the answer stands. Any other answer is `settled`.
-async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
+/// lane's change against `origin/<baseBranch>`. A finding resumes the same session with it (`resume` runs the
+/// follow-up and returns that session's next answer), and gates its next answer too; every such round counts
+/// against `maxCheckRounds`, and past it a person is needed. Gates that can't run (a git error) are noted and the
+/// answer stands. Shared by the claim and the piece runs.
+pub(super) async fn gate_rounds<F, Fut>(g: &GateRounds<'_>, mut a: Attempt, mut resume: F) -> Result<Gated>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Attempt>>,
+{
     let mut notes = Vec::new();
     let mut rounds = 0;
     loop {
         if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
             break;
         }
-        let (dir, base, gates) = (
-            cwd.to_path_buf(),
-            job.project.base_branch.clone(),
-            job.project.code_gates,
-        );
+        let (dir, base, gates) = (g.cwd.to_path_buf(), g.base_branch.to_string(), g.code_gates);
         let found = tokio::task::spawn_blocking(move || code_gates::run(&dir, &base, &gates))
             .await
             .context("running the code gates")?;
@@ -450,23 +466,42 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
         };
         notes.push(found.note.clone());
         rounds += 1;
-        if rounds > job.project.max_check_rounds {
-            let (usage, context_tokens) = (a.usage, a.context_tokens);
+        if rounds > g.max_check_rounds {
             let why = format!(
                 "The code gates still found problems after {} rounds: {}",
-                job.project.max_check_rounds, found.note
+                g.max_check_rounds, found.note
             );
-            return Ok((SessionResult::NeedsHuman(why), usage, context_tokens, notes));
+            return Ok(Gated::GaveUp(a, notes, why));
         }
-        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
+        a = resume(format!(
+            "{}\n\nFix them, commit, and return the result again.",
+            found.message
+        ))
+        .await?;
+    }
+    Ok(Gated::Settled(a, notes))
+}
+
+async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
+    let rounds = GateRounds {
+        cwd,
+        base_branch: &job.project.base_branch,
+        code_gates: job.project.code_gates,
+        max_check_rounds: job.project.max_check_rounds,
+    };
+    let resume = |follow_up: String| async move {
         let start = Start::Resume {
             session_id: job.session_id.clone(),
             follow_up: &follow_up,
             decisions: &[],
         };
         let name = format!("{}-resumed-{}.jsonl", job.session_id, now_ms());
-        a = attempt(job, cwd, start, false, name, "").await?;
-    }
+        attempt(job, cwd, start, false, name, "").await
+    };
+    let (a, mut notes) = match gate_rounds(&rounds, a, resume).await? {
+        Gated::Settled(a, notes) => (a, notes),
+        Gated::GaveUp(a, notes, why) => return Ok((SessionResult::NeedsHuman(why), a.usage, a.context_tokens, notes)),
+    };
     let titles = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
         _ => None,
@@ -649,4 +684,4 @@ fn session_result_for_answer(
 
 #[cfg(test)]
 #[path = "session_tests.rs"]
-mod tests;
+pub(super) mod tests;

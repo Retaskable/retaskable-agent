@@ -367,3 +367,30 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
     drop(s);
     assert_no_item_keys(&rig);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stop_cuts_the_process_tree_the_run_registered() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    pass(&mut rig, &starter, t0).await;
+
+    let mut command = tokio::process::Command::new("sleep");
+    command.arg("60");
+    crate::process_tree::ProcessTree::prepare(&mut command);
+    let mut child = command.spawn().unwrap();
+    let tree = crate::process_tree::ProcessTree::join(&child).unwrap();
+    starter.started.lock().unwrap()[0].processes.add("a", tree.clone());
+
+    script.lock().unwrap().beat = json!({ "a": "stop" });
+    pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
+    assert!(tree.was_cut());
+    tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("the process was killed")
+        .unwrap();
+    assert_eq!(script.lock().unwrap().args("run_done")[0]["outcome"], "interrupted");
+    assert_eq!(rig.machine.pool.held_lanes().count(), 0);
+}

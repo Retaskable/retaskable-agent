@@ -3,6 +3,7 @@
 //! path in `project.rs` is separate. What runs and how they are kept live is `crate::runs`; the work of a run
 //! is the [`RunStarter`]'s.
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
@@ -14,6 +15,7 @@ use super::project::ProjectLoop;
 use crate::backlog::runs::{Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunWant};
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
+use crate::process_tree::{KILL_LIMIT, ProcessTree};
 use crate::runs::{NoLane, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
@@ -46,10 +48,37 @@ impl RunEndSender {
     }
 }
 
+/// Where a run's work registers each session's process tree, so a beat's `stop` or the ceiling can cut it.
+#[derive(Debug, Clone)]
+pub struct RunProcesses(mpsc::UnboundedSender<(String, Arc<ProcessTree>)>);
+
+impl RunProcesses {
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<(String, Arc<ProcessTree>)>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self(sender), receiver)
+    }
+
+    /// Adds `tree` to the run `token`. Taken up on the loop's next pass; if the run has ended by then, the tree
+    /// is cut at once.
+    pub fn add(&self, token: &str, tree: Arc<ProcessTree>) {
+        if let Err(e) = self.0.send((token.to_string(), tree)) {
+            e.0.1.cut();
+            e.0.1.kill_and_wait(KILL_LIMIT);
+        }
+    }
+}
+
+/// The id of a piece as the store sent it, or its title when it sent none.
+pub fn piece_id(piece: &RunPiece) -> &str {
+    piece.other.get("id").and_then(Value::as_str).unwrap_or(&piece.title)
+}
+
 /// A run the store handed out, for the starter to do.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub token: String,
+    pub project: String,
+    pub processes: RunProcesses,
     pub kind: RunKind,
     /// The piece's brief as the store sent it.
     pub piece: RunPiece,
@@ -76,11 +105,14 @@ pub struct RunLoop {
     last_beat: Option<Instant>,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
+    processes_tx: RunProcesses,
+    processes_rx: mpsc::UnboundedReceiver<(String, Arc<ProcessTree>)>,
 }
 
 impl RunLoop {
     pub fn new(project: &str) -> Self {
         let (ends_tx, ends_rx) = RunEndSender::channel();
+        let (processes_tx, processes_rx) = RunProcesses::channel();
         Self {
             runs: Runs::new(project),
             dropped: false,
@@ -88,6 +120,8 @@ impl RunLoop {
             last_beat: None,
             ends_tx,
             ends_rx,
+            processes_tx,
+            processes_rx,
         }
     }
 
@@ -106,6 +140,12 @@ impl ProjectLoop {
         let token = Some(token.as_str());
         if shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
             self.run_loop.waiting = false;
+        }
+        while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
+            if !self.run_loop.runs.add_process(&run, tree.clone()) {
+                tree.cut();
+                tree.kill_and_wait(KILL_LIMIT);
+            }
         }
         while let Ok(end) = self.run_loop.ends_rx.try_recv() {
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
@@ -266,13 +306,8 @@ impl ProjectLoop {
         run: Run,
         now: Instant,
     ) -> bool {
-        let piece_id = run
-            .piece
-            .other
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or(&run.piece.title);
-        if let Err(NoLane) = self.run_loop.runs.start(pool, &run.token, run.kind, piece_id, now) {
+        let piece_id = piece_id(&run.piece).to_string();
+        if let Err(NoLane) = self.run_loop.runs.start(pool, &run.token, run.kind, &piece_id, now) {
             // Not queued: the run never held anything here, so its end is sent now, once.
             let ended = self
                 .client
@@ -293,6 +328,8 @@ impl ProjectLoop {
             .map(|k| lane_path(Path::new(&self.project.worktrees_dir), k));
         let request = RunRequest {
             token: run.token.clone(),
+            project: self.id.clone(),
+            processes: self.run_loop.processes_tx.clone(),
             kind: run.kind,
             piece: run.piece,
             lane,

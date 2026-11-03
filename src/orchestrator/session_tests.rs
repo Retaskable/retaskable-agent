@@ -63,7 +63,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
 
 /// A `gh` that logs its arguments to `gh.log` in `root`, lists the JSON in `gh_list` for `pr list`, and for
 /// `pr create` saves its stdin as `gh_body` and prints a PR URL.
-fn fake_gh(bin: &Path, root: &Path) {
+pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
     std::fs::write(root.join("gh_list"), "[]").unwrap();
     std::fs::write(root.join("gh_state"), "OPEN").unwrap();
     let r = root.display();
@@ -123,7 +123,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     }
 }
 
-fn fake_name() -> &'static str {
+pub(in crate::orchestrator) fn fake_name() -> &'static str {
     if cfg!(windows) { "claude.cmd" } else { "claude.sh" }
 }
 
