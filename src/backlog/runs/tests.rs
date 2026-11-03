@@ -210,3 +210,26 @@ async fn a_refused_or_unreachable_store_is_an_error_for_both_lock_ops() {
     let (base, _) = store(200, json!({ "value": { "held": true } })).await;
     assert!(Client::new(base).lock_take(1, None, "x", None).await.is_err());
 }
+
+#[tokio::test]
+async fn run_done_limited_sends_engine_and_until_when_known() {
+    use chrono::TimeZone;
+    let (base, seen) = store(200, json!({ "value": null })).await;
+    let c = Client::new(base);
+    let until = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).unwrap();
+    let limited = |until| RunOutcome::Limited {
+        engine: "claude".into(),
+        until,
+    };
+    c.run_done(1, None, "t", &limited(Some(until)), json!({}))
+        .await
+        .unwrap();
+    c.run_done(1, None, "t", &limited(None), json!({})).await.unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0]["args"]["outcome"], "limited");
+    assert_eq!(
+        seen[0]["args"]["result"],
+        json!({ "engine": "claude", "until": "2026-01-01T01:00:00.000Z" })
+    );
+    assert_eq!(seen[1]["args"]["result"], json!({ "engine": "claude" }));
+}

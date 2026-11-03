@@ -103,6 +103,12 @@ pub enum RunOutcome {
     Updated,
     Conflict,
     Looked,
+    /// The session hit its engine's usage limit; `until` is when it lifts, if the engine said. Sent as
+    /// `result.engine` and `result.until` (left out when unknown).
+    Limited {
+        engine: String,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    },
 }
 
 impl RunOutcome {
@@ -121,6 +127,7 @@ impl RunOutcome {
             Self::Updated => "updated",
             Self::Conflict => "conflict",
             Self::Looked => "looked",
+            Self::Limited { .. } => "limited",
         }
     }
 }
@@ -201,12 +208,21 @@ impl Client {
         result: Value,
     ) -> Result<(), RunDoneError> {
         let mut result = result;
-        if let RunOutcome::Failed(why) = outcome {
-            match &mut result {
-                Value::Object(o) => {
-                    o.insert("why".into(), json!(why));
+        let extra = match outcome {
+            RunOutcome::Failed(why) => Some(json!({ "why": why })),
+            RunOutcome::Limited { engine, until } => {
+                let mut o = json!({ "engine": engine });
+                if let Some(until) = until {
+                    o["until"] = json!(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
                 }
-                _ => result = json!({ "why": why }),
+                Some(o)
+            }
+            _ => None,
+        };
+        if let Some(Value::Object(extra)) = extra {
+            match &mut result {
+                Value::Object(o) => o.extend(extra),
+                _ => result = Value::Object(extra),
             }
         }
         let args = json!({ "token": run_token, "outcome": outcome.wire(), "result": result });

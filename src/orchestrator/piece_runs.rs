@@ -339,7 +339,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .ok()
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
-        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions);
+        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, "claude", chrono::Utc::now());
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };

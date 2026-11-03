@@ -1,6 +1,8 @@
 use super::*;
 use crate::implementer::Question;
 use anyhow::anyhow;
+use chrono::{TimeZone, Utc};
+use std::time::Duration;
 
 fn answer(status: &str) -> ImplementerResult {
     serde_json::from_value(json!({ "status": status, "summary": "why" })).unwrap()
@@ -34,7 +36,7 @@ fn decided(text: &str) -> Decision {
 }
 
 fn end(r: ImplementerResult, p: Option<&Pushed>, d: &[Decision]) -> (RunOutcome, Value) {
-    end_from_answer(Ok(r), p, d)
+    end_from_answer(Ok(r), p, d, "claude", Utc::now())
 }
 
 #[test]
@@ -128,7 +130,7 @@ fn nothing_left_failed_waits_on_and_unknown() {
 
 #[test]
 fn session_errors() {
-    let e = |err: Error| end_from_answer(Err(err), None, &[]);
+    let e = |err: Error| end_from_answer(Err(err), None, &[], "claude", Utc::now());
     assert_eq!(
         e(Interrupted("cut".into()).into()),
         (RunOutcome::Interrupted, json!({}))
@@ -154,4 +156,36 @@ fn pushes_for_pr_opened_and_for_questions_with_commits() {
     assert!(!needs_push("needs_clarification", 0));
     assert!(!needs_push("person_steps", 3));
     assert!(!needs_push("failed", 3));
+}
+
+#[test]
+fn a_usage_limit_ends_limited_with_when_it_lifts() {
+    let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let hit = |resets_in| {
+        Error::new(LimitHit {
+            why: "limit".into(),
+            resets_in,
+        })
+    };
+    let (o, r) = end_from_answer(Err(hit(Some(Duration::from_secs(3600)))), None, &[], "claude", now);
+    let until = Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).unwrap();
+    assert_eq!(
+        (o, r),
+        (
+            RunOutcome::Limited {
+                engine: "claude".into(),
+                until: Some(until)
+            },
+            json!({})
+        )
+    );
+    let (o, _) = end_from_answer(Err(hit(None)), None, &[], "claude", now);
+    assert_eq!(
+        o,
+        RunOutcome::Limited {
+            engine: "claude".into(),
+            until: None
+        }
+    );
+    assert!(limited_end(&anyhow!("boom"), "claude", now).is_none());
 }
