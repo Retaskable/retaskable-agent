@@ -220,6 +220,12 @@ pub trait SessionStarter: Send + Sync {
     fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
         Err("this computer has no triager".into())
     }
+    /// Starts the top-tier second look at a triager's `human` answer with a suggested button (06.9 bullet 3). Must not
+    /// block; it reports its end through `request.triage.outcomes` as
+    /// [`SessionResult::SecondLook`](super::SessionResult::SecondLook). An `Err` counts as a failed second look.
+    fn second_look(&self, _request: super::SecondLookRequest) -> Result<(), String> {
+        Err("this computer has no second look".into())
+    }
     /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`).
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
@@ -313,6 +319,8 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
+    /// Triager answers waiting for, or running, their second look; the item stays in `triaging` meanwhile.
+    pub(super) checks: BTreeMap<String, super::triage_run::PendingCheck>,
     /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
@@ -365,6 +373,7 @@ impl ProjectLoop {
             draft: None,
             landing: Default::default(),
             triaging: Default::default(),
+            checks: Default::default(),
             claude_pending: Default::default(),
             triage_flag: false,
         }

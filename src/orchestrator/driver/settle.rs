@@ -54,6 +54,8 @@ pub enum SessionResult {
     Limited { why: String, resets_in: Option<Duration> },
     /// A triager session ended (06.9); `outcome.lane` is the item's lane, 0 when it had none.
     Triage(super::TriageEnd),
+    /// A triager's second look ended (06.9 bullet 3); `outcome.lane` as for [`Triage`](Self::Triage).
+    SecondLook(super::SecondLookEnd),
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -311,6 +313,11 @@ impl ProjectLoop {
                 .await;
             return;
         }
+        if let SessionResult::SecondLook(end) = &outcome.result {
+            self.second_look_ended(&outcome.item_id, outcome.lane, end.clone(), pool, shared)
+                .await;
+            return;
+        }
         let item = outcome.item_id;
         let lane = outcome.lane;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
@@ -375,7 +382,7 @@ impl ProjectLoop {
         match outcome.result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Interrupted | SessionResult::Triage(_) => {}
+            SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use super::{OutcomeSender, ProjectLoop, SessionStarter, Shared};
+use super::{OutcomeSender, ProjectLoop, SessionOutcome, SessionResult, SessionStarter, Shared};
 use crate::config::OnOff;
 use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::lane_pool::LanePool;
@@ -19,7 +19,8 @@ use crate::orchestrator::fresh_start::LIMIT_PAUSE;
 use crate::telemetry::{Event, event};
 use crate::triage::record::needs_human_facts;
 use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, triage_count, wants_triage};
-use crate::triage::{TriageContext, TriageDecision};
+use crate::triage::second_look::{SecondLookResult, needs_second_look, resolve};
+use crate::triage::{TriageButton, TriageContext, TriageDecision, TriageResult};
 
 /// Failed looks at one stop before the item waits for a person with a note.
 const MAX_FAILED_LOOKS: u32 = 3;
@@ -59,11 +60,42 @@ pub enum TriageEnd {
         steps: Vec<String>,
         /// The next message (`continue`) or notes (`start_over`); empty when there are none.
         instructions: String,
+        /// The button a `human` answer offers first; one of the three gets a second look.
+        suggest: Option<TriageButton>,
     },
     Failed {
         note: String,
         why: LookFailure,
     },
+}
+
+/// What a second-look session needs: the triager's context plus its answer (06.9 bullet 3).
+#[derive(Debug, Clone)]
+pub struct SecondLookRequest {
+    pub triage: TriageRequest,
+    pub reason: String,
+    pub suggest: TriageButton,
+    pub instructions: String,
+}
+
+/// How a second-look session ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecondLookEnd {
+    Checked {
+        agree: bool,
+        reason: String,
+        instructions: String,
+    },
+    Failed {
+        note: String,
+    },
+}
+
+/// A triager's `human` answer waiting for, or running, its second look.
+#[derive(Debug, Clone)]
+pub(super) struct PendingCheck {
+    result: TriageResult,
+    started: bool,
 }
 
 /// The item's reason with `text` added under it.
@@ -130,6 +162,7 @@ impl ProjectLoop {
         if shared.engine_limits.is_limited(engine, Instant::now()) {
             return;
         }
+        self.start_checks(pool, starter, room);
         let now = Utc::now();
         let wanted: Vec<String> = (self.records.iter())
             .filter(|(id, r)| {
@@ -209,9 +242,35 @@ impl ProjectLoop {
                 reason,
                 steps,
                 instructions,
+                suggest,
             } => {
-                self.decided(item_id, decision, &reason, &steps, &instructions, pool, shared)
-                    .await;
+                let result = TriageResult {
+                    decision,
+                    person_steps: steps,
+                    reason,
+                    instructions,
+                    suggest,
+                    retaskable_bug: None,
+                };
+                let open = (self.records.get(item_id)).is_some_and(|r| r.state == "needs_human");
+                if open && needs_second_look(&result) {
+                    // Claude stays on it (`triaging`) until the second look is carried out or fails.
+                    self.checks
+                        .insert(item_id.to_string(), PendingCheck { result, started: false });
+                    return;
+                }
+                let steps = result.person_steps;
+                self.decided(
+                    item_id,
+                    decision,
+                    &result.reason,
+                    &steps,
+                    &result.instructions,
+                    None,
+                    pool,
+                    shared,
+                )
+                .await;
             }
             TriageEnd::Failed { note, why } => {
                 if let LookFailure::Limited { resets_in } = &why {
@@ -234,6 +293,7 @@ impl ProjectLoop {
         reason: &str,
         steps: &[String],
         instructions: &str,
+        line: Option<&str>,
         pool: &mut LanePool,
         shared: &mut Shared<'_>,
     ) {
@@ -284,10 +344,143 @@ impl ProjectLoop {
             _ => {}
         }
         self.save_leases();
-        self.look_note(item_id, format!("Claude decided to {verb}: {reason}"));
+        self.look_note(
+            item_id,
+            line.map_or_else(|| format!("Claude decided to {verb}: {reason}"), str::to_string),
+        );
         if decision == TriageDecision::Skip {
             self.skip_stopped(pool, item_id, true, shared).await;
         }
+    }
+
+    /// Starts the second look on each `human` answer that waits for one, while `room` session slots are free. A look
+    /// that can't start is a failed one: the item stays `human`.
+    fn start_checks(&mut self, pool: &LanePool, starter: &dyn SessionStarter, room: &mut u32) {
+        let waiting: Vec<String> = (self.checks.iter())
+            .filter(|(_, c)| !c.started)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in waiting {
+            if *room == 0 {
+                break;
+            }
+            let (Some(context), Some(check)) =
+                (self.triage_context(&id, std::path::Path::new("")), self.checks.get(&id))
+            else {
+                self.checks.remove(&id);
+                self.triaging.remove(&id);
+                continue;
+            };
+            let Some(suggest) = check.result.suggest else { continue };
+            let lane = pool.lane_of(&self.id, &id);
+            self.events.add_in(
+                &self.id,
+                Event::SessionStart(event::SessionStart {
+                    item: Some(id.clone()),
+                    lane,
+                    role: Some("triager".into()),
+                    ..Default::default()
+                }),
+            );
+            let request = SecondLookRequest {
+                triage: TriageRequest {
+                    project: self.id.clone(),
+                    item_id: id.clone(),
+                    context,
+                    lane,
+                    usage: self.store.usage(),
+                    outcomes: self.outcomes.clone(),
+                },
+                reason: check.result.reason.clone(),
+                suggest,
+                instructions: check.result.instructions.clone(),
+            };
+            match starter.second_look(request) {
+                Ok(()) => {
+                    *room -= 1;
+                    if let Some(c) = self.checks.get_mut(&id) {
+                        c.started = true;
+                    }
+                }
+                Err(why) => {
+                    tracing::warn!("{}: the second look for {id} didn't start: {why}", self.id);
+                    // Settled like any end, on the next wake: the item stays `human`.
+                    self.outcomes.send(SessionOutcome {
+                        project: self.id.clone(),
+                        item_id: id.clone(),
+                        lane: lane.unwrap_or(0),
+                        result: SessionResult::SecondLook(SecondLookEnd::Failed {
+                            note: format!("couldn't check it ({why})"),
+                        }),
+                        context_tokens: None,
+                        usage: None,
+                        notes: vec![],
+                        session_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    /// A second look's end, back on the outcome channel.
+    pub(super) async fn second_look_ended(
+        &mut self,
+        item_id: &str,
+        lane: u32,
+        end: SecondLookEnd,
+        pool: &mut LanePool,
+        shared: &mut Shared<'_>,
+    ) {
+        self.events.add_in(
+            &self.id,
+            Event::SessionEnd(event::SessionEnd {
+                item: Some(item_id.to_string()),
+                lane: Some(lane),
+                role: Some("triager".into()),
+                ok: Some(matches!(end, SecondLookEnd::Checked { .. })),
+                ..Default::default()
+            }),
+        );
+        let look = match end {
+            SecondLookEnd::Checked {
+                agree,
+                reason,
+                instructions,
+            } => Some(SecondLookResult {
+                agree,
+                reason,
+                instructions,
+            }),
+            SecondLookEnd::Failed { .. } => None,
+        };
+        self.checked(item_id, look, pool, shared).await;
+    }
+
+    /// Folds the second look's answer (none when it failed) into the triager's and carries the result out.
+    async fn checked(
+        &mut self,
+        item_id: &str,
+        look: Option<SecondLookResult>,
+        pool: &mut LanePool,
+        shared: &mut Shared<'_>,
+    ) {
+        let Some(check) = self.checks.remove(item_id) else {
+            return;
+        };
+        let resolved = resolve(&check.result, look.as_ref());
+        let line = (resolved.decision != TriageDecision::Human && look.is_some()).then_some(resolved.reason.as_str());
+        let steps = check.result.person_steps;
+        self.decided(
+            item_id,
+            resolved.decision,
+            &resolved.reason,
+            &steps,
+            &resolved.instructions,
+            line,
+            pool,
+            shared,
+        )
+        .await;
     }
 
     /// The look found `text` (already shaped like "Claude looked into it: …").

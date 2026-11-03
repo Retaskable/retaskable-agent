@@ -40,7 +40,7 @@ pub use project::{
 };
 pub use runs::{BEAT_EVERY, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
-pub use triage_run::{LookFailure, TriageEnd, TriageRequest};
+pub use triage_run::{LookFailure, SecondLookEnd, SecondLookRequest, TriageEnd, TriageRequest};
 
 #[cfg(test)]
 mod tests;
