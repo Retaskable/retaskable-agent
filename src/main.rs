@@ -365,6 +365,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     env.clone(),
                     cfg.machine.models,
                 )) as Arc<dyn orchestrator::driver::RunStarter>,
+                Arc::new(orchestrator::look_run::LookRuns::new(
+                    dir.to_path_buf(),
+                    cfg.projects.clone(),
+                    config::engine_choice(cfg, env),
+                    env.clone(),
+                    cfg.machine.models,
+                )) as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),

@@ -83,7 +83,7 @@ The merge lock and chore locks are `lock_take { name, note? }` and `lock_drop { 
 
 ### 3.5 Looks
 
-The store gives a piece a `look` run after 3 failed runs of the same kind in a row (or at once, for an `outside` failure), and an item whose plan failed 3 times the same way. The agent asks for `look` in `run_take`'s `kinds` once it can run one; until then such a piece waits for a person.
+The store gives a piece a `look` run after 3 failed runs of the same kind in a row (or at once, for an `outside` failure), and an item whose plan failed 3 times the same way. The agent asks for `look` in `run_take`'s `kinds` while it can run one: Claude is the triager's engine for every project, and no look is running here (one at a time per computer, shared with `plan`). A look runs in the base checkout with no lane.
 
 The session runs on the middle tier with the reviewer's budget and the `triager` role's engine, read-only, like the triager ([agent/06.9-triage-claude-looks-at-needs-you-first.md](agent/06.9-triage-claude-looks-at-needs-you-first.md)). Its prompt, `prompts/look.md`, is built from `prompts/triage.md`. Its brief is what `run_take` returns: the piece's title, `what` and `doneWhen`; every attempt's kind, outcome, why, computer and engine; its branch and change, if any; earlier looks' decisions and reasons; for a plan, the item's last 10 history notes; and the known Retaskable bugs. It may read the code, `git` history and the change on the code host. It never sees another computer's transcripts.
 
