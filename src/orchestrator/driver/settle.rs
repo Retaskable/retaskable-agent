@@ -280,6 +280,16 @@ impl ProjectLoop {
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
+        if to == ItemState::NeedsHuman && from != to {
+            // A step's own reason is the note its last `item_state` event carried.
+            let reason = (note == "the step ended")
+                .then(|| self.item_notes(item, 1).into_iter().next())
+                .flatten();
+            let slice = self.runs.get(item).map_or(0, |r| r.slice);
+            if let Some(record) = self.records.get_mut(item) {
+                record.new_stop(state_name(from), reason.as_deref().unwrap_or(note), slice);
+            }
+        }
         self.refresh_record(pool, item);
     }
 

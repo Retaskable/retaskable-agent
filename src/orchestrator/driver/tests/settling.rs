@@ -425,3 +425,60 @@ async fn a_session_that_hit_its_engines_limit_marks_that_engine_limited_until_it
             .is_limited(crate::engines::EngineId::Cursor, now)
     );
 }
+
+#[tokio::test]
+async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_record() {
+    let (mut rig, _fake, _asked) = ended(SessionResult::NeedsHuman("first problem".into()), &Default::default()).await;
+    rig.machine.pass().await;
+    let lp = rig.lp(0);
+    let r = lp.records["a"].clone();
+    assert_eq!(r.state, "needs_human");
+    assert_eq!(r.needs_human_reason.as_deref(), Some("first problem"));
+    assert_eq!(r.failed_in.as_deref(), Some("implementing"));
+    assert!(!r.triaged && r.failed_looks == 0 && r.next_look_at.is_none());
+    // The marks survive a rewrite of the run's own fields, and the context reads the record.
+    lp.records.get_mut("a").unwrap().triages = Some((r.slice, 1));
+    lp.records.get_mut("a").unwrap().triaged = true;
+    lp.remember("a", None, None, None);
+    assert!(lp.records["a"].triaged);
+    let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
+    assert_eq!(
+        (ctx.reason.as_str(), ctx.failed_in.as_str()),
+        ("first problem", "implementing")
+    );
+    assert_eq!(ctx.automatic_decisions, 1);
+    assert!(ctx.timeline.iter().any(|n| n == "first problem") || ctx.timeline.is_empty());
+}
+
+#[tokio::test]
+async fn a_run_that_needs_a_person_saves_its_stop_and_a_second_stop_clears_the_first_ones_marks() {
+    let why = "Implementer gave up: the build is broken";
+    let (base, _asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(SessionResult::NeedsHuman(why.into()));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let record = rig.lp(0).records["a"].clone();
+    assert_eq!(record.state, "needs_human");
+    assert_eq!(record.needs_human_reason.as_deref(), Some(why));
+    assert_eq!(record.failed_in.as_deref(), Some("implementing"));
+    assert!(!record.triaged && record.failed_looks == 0 && record.next_look_at.is_none());
+    let back: crate::store::RunRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+    assert_eq!(back, record);
+    assert_eq!(rig.lp(0).store.runs()["a"], record, "saved in the state file");
+
+    // Claude looked at this stop and decided once; a later stop on the same slice clears the look marks
+    // but keeps the count, and a new slice resets it.
+    let slice = record.slice;
+    let r = rig.lp(0).records.get_mut("a").unwrap();
+    (r.triaged, r.failed_looks, r.triages) = (true, 2, Some((slice, 1)));
+    r.new_stop("merging", "Merge failed", slice);
+    assert!(!r.triaged && r.failed_looks == 0);
+    assert_eq!(
+        (r.needs_human_reason.as_deref(), r.triages),
+        (Some("Merge failed"), Some((slice, 1)))
+    );
+    r.new_stop("merging", "Merge failed again", slice + 1);
+    assert_eq!(r.triages, None);
+}

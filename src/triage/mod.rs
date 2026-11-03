@@ -12,8 +12,9 @@
 //! carry on from and is left for Start over); Start over and Skip are carried out too (the other buttons this decision would
 //! be carried out through; Skip is `ProjectLoop::skip_stopped`). [`schedule`] has the cap on automatic decisions and
 //! the `claudeOnIt` predicate (06.9 bullets 16 and 20) as pure functions over the few item facts
-//! they need, named after the shared backlog's own fields — there is still no item-record data
-//! model in this port for a caller to read those facts from. Also still missing: actually sending
+//! they need. A run's saved [`crate::store::RunRecord`] holds those facts for the current stop (its reason, the
+//! state it failed in, `triaged`, `triages`, failed looks and their retry time, reported bug signatures; a new stop
+//! replaces them), and [`record`] builds [`schedule::NeedsHumanFacts`] and a [`TriageContext`] from it. Also still missing: actually sending
 //! a decided [`bug_report::BugReportMessage`] over the cloud link (reading the hub's own consent
 //! and known bugs to decide one with [`bug_report::decide_bug_report`] is as far as this slice
 //! goes); no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the
@@ -27,6 +28,7 @@
 //! failure) back onto the triager's own answer with [`second_look::resolve`] before the caller
 //! carries anything out.
 pub mod bug_report;
+pub mod record;
 pub mod schedule;
 pub mod second_look;
 

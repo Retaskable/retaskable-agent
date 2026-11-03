@@ -29,6 +29,7 @@ fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>)
             branch: Some("a".into()),
             slice: 0,
             attempt: 0,
+            ..Default::default()
         },
     );
     (rig, fake)
