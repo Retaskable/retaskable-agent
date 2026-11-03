@@ -22,13 +22,16 @@ use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::{
+    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, program_of, run_session,
+};
 use crate::env::Env;
 use crate::implementer::{
     ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, run_implementer, session_spec,
 };
-use crate::implementer::{publish, start_files};
+use crate::implementer::{new_session_id, publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
+use crate::orchestrator::fresh_start::{fresh_for_engine, picking_up_prompt};
 use crate::telemetry::now_ms;
 use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
@@ -97,6 +100,7 @@ impl SessionStarter for ClaudeStarter {
             outcomes,
             usage,
             session_id,
+            engine: session_engine,
             resume,
             follow_up,
             items,
@@ -117,6 +121,8 @@ impl SessionStarter for ClaudeStarter {
             usage,
             models: self.models,
             session_id,
+            engine: session_engine,
+            lane_engine: lane_engine(&self.choice, lane).map(program_of),
             resume,
             follow_up,
             items,
@@ -185,6 +191,7 @@ pub(super) fn exists(bin: &Path, env: &Env) -> bool {
     })
 }
 
+#[derive(Clone)]
 struct Job {
     data_dir: PathBuf,
     project: ProjectConfig,
@@ -200,6 +207,10 @@ struct Job {
     models: ModelsConfig,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
+    /// The engine the session runs on (`StartRequest::engine`).
+    engine: EngineId,
+    /// The engine the lane now has of its own, if any: a send-back resumes only if it matches `engine`.
+    lane_engine: Option<EngineId>,
     resume: bool,
     /// `None` prepares the lane fresh, as a newly claimed item does. `Some` is the picking-up prompt for a
     /// restart after the lane's prior session ran out of turns or had grown too large: the lane is reused
@@ -366,6 +377,7 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
 /// and gates its next answer too; every such round counts against `maxCheckRounds`, and past it a person is
 /// needed. Gates that can't run (a git error) are noted and the answer stands. Any other answer is `settled`.
 async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
+    let mut job = std::borrow::Cow::Borrowed(job);
     let mut notes = Vec::new();
     let mut rounds = 0;
     loop {
@@ -399,13 +411,29 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
             return Ok((SessionResult::NeedsHuman(why), usage, context_tokens, notes));
         }
         let follow_up = format!("{}\n\nFix them, commit, and return the result again.", found.message);
+        // A session resumes only on the engine it started on; otherwise a fresh one picks up the branch.
+        if let Some(reason) = fresh_for_engine(job.engine, job.lane_engine) {
+            notes.push(reason.history_line());
+            let fresh = Job {
+                session_id: new_session_id(),
+                engine: job.lane_engine.unwrap_or(job.engine),
+                ..Job::clone(&job)
+            };
+            let has_pr = fresh.item.pr_url.is_some();
+            let prompt = picking_up_prompt(has_pr, &fresh.project.base_branch, &follow_up);
+            let start = Start::Continuing { follow_up: &prompt };
+            let name = format!("{}.jsonl", fresh.session_id);
+            a = attempt(&fresh, cwd, start, true, name, "").await?;
+            job = std::borrow::Cow::Owned(fresh);
+            continue;
+        }
         let start = Start::Resume {
             session_id: job.session_id.clone(),
             follow_up: &follow_up,
             decisions: &[],
         };
         let name = format!("{}-resumed-{}.jsonl", job.session_id, now_ms());
-        a = attempt(job, cwd, start, false, name, "").await?;
+        a = attempt(&job, cwd, start, false, name, "").await?;
     }
     let titles = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),

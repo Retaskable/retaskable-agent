@@ -20,6 +20,7 @@ fn stopped(lanes: u32, session: Option<&str>) -> (Rig, Arc<Fake>) {
             state: "needs_human".into(),
             lane: None,
             impl_session_id: session.map(Into::into),
+            impl_session_engine: Default::default(),
             impl_context_tokens: None,
             branch: Some("a".into()),
             slice: 0,

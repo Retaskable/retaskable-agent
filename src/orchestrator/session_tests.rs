@@ -163,6 +163,7 @@ fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         token: "t".into(),
         item: item(&[], Some("Wire it.")),
         session_id: "sess-1".into(),
+        engine: EngineId::Claude,
         resume: false,
         outcomes,
         usage: None,

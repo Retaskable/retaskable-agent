@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use super::SmokeState;
+use crate::engines::EngineId;
 use crate::fs_util::write_json_atomic;
 
 const STATE_FILE: &str = "state.json";
@@ -34,6 +35,10 @@ pub struct RunRecord {
     /// The implementer session's id, to resume it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_session_id: Option<String>,
+    /// The engine that session started on (`implSessionEngine`), kept with its id: a session resumes only on
+    /// the engine it started on. A record saved before this reads as Claude.
+    #[serde(default)]
+    pub impl_session_engine: EngineId,
     /// That session's size as of its last turn (06.2-implementer.md "A session that's grown starts
     /// fresh"; the TS agent's `implContextTokens`), kept so a resume across a restart can still tell
     /// a grown session from a small one. `None` until a session reports one, and cleared whenever
@@ -205,6 +210,16 @@ mod tests {
 
     fn read(dir: &Path) -> String {
         std::fs::read_to_string(dir.join(STATE_FILE)).unwrap()
+    }
+
+    #[test]
+    fn a_run_keeps_its_session_engine_and_an_old_one_reads_as_claude() {
+        let record = |json: &str| serde_json::from_str::<RunRecord>(json).unwrap();
+        let cursor = record(r#"{"state":"implementing","implSessionId":"s","implSessionEngine":"cursor"}"#);
+        assert_eq!(cursor.impl_session_engine, EngineId::Cursor);
+        assert_eq!(record(&serde_json::to_string(&cursor).unwrap()), cursor);
+        let old = record(r#"{"state":"implementing","implSessionId":"s"}"#);
+        assert_eq!(old.impl_session_engine, EngineId::Claude);
     }
 
     #[test]

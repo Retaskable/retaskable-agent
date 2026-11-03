@@ -52,6 +52,7 @@ fn checking_record(lane: u32) -> RunRecord {
         state: "checking".into(),
         lane: Some(lane),
         impl_session_id: None,
+        impl_session_engine: Default::default(),
         branch: None,
         impl_context_tokens: None,
         slice: 1,

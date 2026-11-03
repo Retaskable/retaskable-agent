@@ -17,7 +17,7 @@ pub mod runner;
 pub mod summarize;
 pub mod transcripts;
 
-pub use choose::{Role, engine_for, has_lane_engines, lane_engine, other_engine_lanes};
+pub use choose::{Role, engine_for, has_lane_engines, lane_engine, other_engine_lanes, program_of};
 pub use engine::{
     Engine, EngineId, EngineReader, EphemeralSessionConfig, EventKind, SessionEvent, SessionResult, SessionSpec,
     SessionStart, describe_failure, engine_id_from_str, ephemeral_readonly_spec, is_signed_out, signed_out_text,
