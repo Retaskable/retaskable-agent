@@ -93,7 +93,7 @@ mod tests {
     use super::*;
 
     fn verdicts(pairs: &[(&str, BeatVerdict)]) -> HashMap<String, BeatVerdict> {
-        pairs.iter().map(|(t, v)| (t.to_string(), v.clone())).collect()
+        pairs.iter().map(|(t, v)| (t.to_string(), *v)).collect()
     }
 
     #[test]
