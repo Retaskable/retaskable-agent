@@ -240,6 +240,8 @@ pub struct ProjectLoop {
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
     pub(super) last_lane: BTreeMap<String, u32>,
+    /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
+    pub(super) draft: Option<super::drafts::RunningDraft>,
 }
 
 impl ProjectLoop {
@@ -281,6 +283,7 @@ impl ProjectLoop {
             max_resume_context_tokens,
             continuing: Vec::new(),
             last_lane: BTreeMap::new(),
+            draft: None,
         }
     }
 

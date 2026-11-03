@@ -928,6 +928,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
 }
 
 mod commands;
+mod drafts;
 mod playtests;
 mod reporting;
 mod restart;
