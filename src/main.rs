@@ -344,6 +344,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        checks: latest_checks.clone(),
         bugs: cfg
             .projects
             .iter()

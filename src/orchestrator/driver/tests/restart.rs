@@ -20,6 +20,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         tags: Vec::new(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
+        checks: Default::default(),
         bugs: Default::default(),
         bug_version: "test".into(),
     };

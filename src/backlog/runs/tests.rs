@@ -7,6 +7,13 @@ fn agent(tags: &[&str]) -> RunTakeAgent {
         environment: "Production".into(),
         base_branch: "main".into(),
         tags: tags.iter().map(|t| t.to_string()).collect(),
+        engines: vec!["claude".into()],
+        uses: RunTakeUses {
+            plan: "claude".into(),
+            build: "cursor".into(),
+            fix: "cursor".into(),
+            look: "claude".into(),
+        },
     }
 }
 
@@ -41,6 +48,11 @@ async fn run_take_sends_kinds_and_reads_a_run() {
     assert_eq!(sent["op"], "run_take");
     assert_eq!(sent["args"]["kinds"], json!(["build", "watch"]));
     assert!(sent["args"]["agent"].get("tags").is_none());
+    assert_eq!(sent["args"]["agent"]["engines"], json!(["claude"]));
+    assert_eq!(
+        sent["args"]["agent"]["uses"],
+        json!({ "plan": "claude", "build": "cursor", "fix": "cursor", "look": "claude" })
+    );
     assert_eq!(sent["args"]["agent"]["baseBranch"], "main");
 }
 
@@ -232,4 +244,16 @@ async fn run_done_limited_sends_engine_and_until_when_known() {
         json!({ "engine": "claude", "until": "2026-01-01T01:00:00.000Z" })
     );
     assert_eq!(seen[1]["args"]["result"], json!({ "engine": "claude" }));
+}
+
+#[test]
+fn the_agent_serializes_engines_and_uses_in_camel_case_next_to_tags() {
+    let v = serde_json::to_value(agent(&["gpu"])).unwrap();
+    assert_eq!(v["tags"], json!(["gpu"]));
+    assert_eq!(v["engines"], json!(["claude"]));
+    assert_eq!(v["baseBranch"], "main");
+    assert_eq!(
+        v["uses"],
+        json!({ "plan": "claude", "build": "cursor", "fix": "cursor", "look": "claude" })
+    );
 }

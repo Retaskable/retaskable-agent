@@ -29,6 +29,19 @@ pub struct RunTakeAgent {
     pub base_branch: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// The engines this computer can run sessions on now (pieces.md section 3.6).
+    pub engines: Vec<String>,
+    /// The engine each kind's role runs on here.
+    pub uses: RunTakeUses,
+}
+
+/// The engine each kind's role runs on: `plan` the planner, `build` and `fix` the implementer, `look` the triager.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RunTakeUses {
+    pub plan: String,
+    pub build: String,
+    pub fix: String,
+    pub look: String,
 }
 
 /// What `run_take` asks for: any run of some kinds, or one piece by name.
