@@ -561,6 +561,7 @@ async fn a_merge_run_is_asked_for_with_no_lane_free_and_its_lock_beats_with_it()
 #[tokio::test]
 async fn a_failure_from_outside_the_work_says_outside_and_an_ordinary_one_does_not() {
     let (mut rig, script) = setup(2).await;
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
     script.lock().unwrap().takes = VecDeque::from([run("a", "build"), run("b", "build")]);
@@ -573,4 +574,17 @@ async fn a_failure_from_outside_the_work_says_outside_and_an_ordinary_one_does_n
     assert_eq!(result("a")["outside"], true);
     assert_eq!(result("a")["why"], "connect ECONNREFUSED 127.0.0.1:443");
     assert!(result("b").get("outside").is_none());
+}
+
+#[tokio::test]
+async fn with_the_flag_off_a_failure_from_outside_the_work_sends_no_outside() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    pass(&mut rig, &starter, t0).await;
+    starter.finish("a", RunOutcome::Failed("connect ECONNREFUSED 127.0.0.1:443".into()));
+    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
+    let done = script.lock().unwrap().args("run_done");
+    assert!(done[0]["result"].get("outside").is_none());
 }

@@ -199,8 +199,10 @@ impl ProjectLoop {
             }
         }
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
+        let outside_flag = self.flags.on("run-limits-and-causes").await;
         for mut end in due {
-            if let RunOutcome::Failed(why) = &end.outcome
+            if outside_flag
+                && let RunOutcome::Failed(why) = &end.outcome
                 && crate::runs::is_outside(why)
             {
                 if !end.result.is_object() {
