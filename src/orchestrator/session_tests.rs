@@ -61,12 +61,12 @@ pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
     let r = root.display();
     if cfg!(windows) {
         let script = format!(
-            "@echo off\r\necho %* >> \"{r}\\gh.log\"\r\nif \"%1 %2\"==\"pr view\" type \"{r}\\gh_state\"\r\nif \"%1 %2\"==\"pr list\" type \"{r}\\gh_list\"\r\nif \"%1 %2\"==\"pr create\" (findstr \"^\" > \"{r}\\gh_body\" & echo https://github.com/o/p/pull/7)\r\n"
+            "@echo off\r\necho %* >> \"{r}\\gh.log\"\r\nif \"%1 %2\"==\"pr view\" type \"{r}\\gh_state\"\r\nif \"%1 %2\"==\"pr list\" type \"{r}\\gh_list\"\r\nif \"%1 %2\"==\"pr comment\" findstr \"^\" >> \"{r}\\gh_comment\"\r\nif \"%1 %2\"==\"pr create\" (findstr \"^\" > \"{r}\\gh_body\" & echo https://github.com/o/p/pull/7)\r\n"
         );
         std::fs::write(bin, script).unwrap();
     } else {
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr view\") cat '{r}/gh_state';;\n\"pr list\") cat '{r}/gh_list';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\nesac\n"
+            "#!/bin/sh\necho \"$@\" >> '{r}/gh.log'\ncase \"$1 $2\" in\n\"pr view\") cat '{r}/gh_state';;\n\"pr list\") cat '{r}/gh_list';;\n\"pr comment\") cat >> '{r}/gh_comment';;\n\"pr create\") cat > '{r}/gh_body'; echo https://github.com/o/p/pull/7;;\nesac\n"
         );
         crate::test_support::write_executable(bin, &script);
     }
@@ -938,6 +938,7 @@ pub(in crate::orchestrator) fn project_in(root: &Path, repo: &Path) -> ProjectCo
         base_branch: "main".into(),
         github_repo: "o/p".into(),
         max_check_rounds: 3,
+        max_review_rounds: 3,
         ..Default::default()
     };
     project.budget.implementer_usd = 5.0;
