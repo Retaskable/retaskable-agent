@@ -8,16 +8,15 @@ use std::path::PathBuf;
 use serde_json::{Map, Value, json};
 
 use super::driver::{RunRequest, RunStarter, piece_id};
-use super::one_at_a_time::{Cut, OneAtATime, base_or_repo, claude_project, spawn_run};
+use super::one_at_a_time::{Cut, OneAtATime, Setup, base_or_repo, claude_project, spawn_run};
 use super::session::quiet_timeout;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of,
     run_session_tracked,
 };
-use crate::env::Env;
 use crate::prompt::render_prompt;
 use crate::runs::winding_down;
 use crate::{paths, tiers};
@@ -206,43 +205,30 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
 
 /// Runs `plan` runs of the projects it was built with, one at a time on this computer.
 pub struct PlanRuns {
-    pub data_dir: PathBuf,
-    pub projects: Vec<ProjectConfig>,
-    pub choice: EngineChoiceConfig,
-    pub env: Env,
-    pub models: ModelsConfig,
+    pub setup: Setup,
     /// Shared with the look runner: one plan or look at a time.
     pub slot: OneAtATime,
 }
 
 impl PlanRuns {
-    pub fn new(
-        data_dir: PathBuf,
-        projects: Vec<ProjectConfig>,
-        choice: EngineChoiceConfig,
-        env: Env,
-        models: ModelsConfig,
-    ) -> Self {
+    pub fn new(setup: Setup) -> Self {
         Self {
-            data_dir,
-            projects,
-            choice,
-            env,
-            models,
+            setup,
             slot: OneAtATime::default(),
         }
     }
 
     fn planner_on_claude(&self, project: Option<&ProjectConfig>) -> bool {
         let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.choice, engines, Role::Planner, None) == Engine::Claude
+        engine_for(&self.setup.choice, engines, Role::Planner, None) == Engine::Claude
     }
 }
 
 impl RunStarter for PlanRuns {
     fn kinds(&self) -> Vec<RunKind> {
         // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
-        let claude = self.planner_on_claude(None) && self.projects.iter().all(|p| self.planner_on_claude(Some(p)));
+        let claude =
+            self.planner_on_claude(None) && self.setup.projects.iter().all(|p| self.planner_on_claude(Some(p)));
         if claude && self.slot.is_free() {
             vec![RunKind::Plan]
         } else {
@@ -251,13 +237,15 @@ impl RunStarter for PlanRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let (project, bin) = claude_project(&self.projects, &request, &self.env, |p| self.planner_on_claude(Some(p)))?;
+        let (project, bin) = claude_project(&self.setup.projects, &request, &self.setup.env, |p| {
+            self.planner_on_claude(Some(p))
+        })?;
         let held = self
             .slot
             .take()
             .ok_or("a plan or look run is already running on this computer")?;
         let job = Job {
-            data_dir: self.data_dir.clone(),
+            data_dir: self.setup.data_dir.clone(),
             project,
             bin,
             model: tiers::chore_tier().to_string(),

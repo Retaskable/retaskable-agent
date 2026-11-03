@@ -1,31 +1,12 @@
-use std::time::Duration;
-
 use super::*;
+use crate::config::{Engine, EngineChoiceConfig};
 use crate::lanes;
-use crate::orchestrator::starter_fixtures::{self as fixtures, Started, answer, end_of, fixture};
+use crate::orchestrator::starter_fixtures::{self as fixtures, Started, answer, end_of};
 
-struct Rig {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    starter: PlanRuns,
-}
+type Rig = fixtures::Rig<PlanRuns>;
 
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let f = fixture(out, extra);
-    let mut project = f.project;
-    project.budget.planner_usd = 1.5;
-    let starter = PlanRuns::new(
-        f.root.join("data"),
-        vec![project],
-        choice,
-        f.env,
-        ModelsConfig::default(),
-    );
-    Rig {
-        _dir: f._dir,
-        root: f.root,
-        starter,
-    }
+    fixtures::rig(out, extra, choice, |p| p.budget.planner_usd = 1.5, PlanRuns::new)
 }
 
 const GOOD: &str = r#"{"pieces":[{"title":"A","what":"w","doneWhen":"d","needs":[]},{"title":"B","what":"w","doneWhen":"d","needs":[1]}]}"#;
@@ -41,7 +22,7 @@ fn brief() -> Value {
 #[tokio::test]
 async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
-    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.projects[0].worktrees_dir));
+    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.setup.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
     let (req, mut s) = request(brief());
     assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
@@ -49,30 +30,11 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::Planned, "{:?}", end.result);
     assert_eq!(end.result["pieces"][1]["needs"], json!(["A"]));
-    let pwd = std::fs::read_to_string(r.root.join("pwd.txt")).unwrap();
-    assert_eq!(
-        std::fs::canonicalize(pwd.trim()).unwrap(),
-        std::fs::canonicalize(&base).unwrap()
-    );
-    let args = std::fs::read_to_string(r.root.join("args.txt")).unwrap();
-    assert!(
-        args.contains("--max-budget-usd 1.5") && args.contains("sonnet"),
-        "{args}"
-    );
-    assert!(
-        !args.contains("--dangerously") && args.contains("--disallowedTools") && args.contains("Edit Write"),
-        "{args}"
-    );
+    fixtures::assert_read_only_in(&r.root, &base, "1.5");
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(prompt.contains("Add the widget"), "{prompt}");
     // The flag clears once the run has ended.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while r.starter.kinds().is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    fixtures::until(|| !r.starter.kinds().is_empty()).await;
 }
 
 #[tokio::test]
@@ -126,20 +88,8 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
     let (second, _s2) = request(brief());
     assert!(r.starter.start(second).unwrap_err().contains("already running"));
     // Cutting the registered tree ends the run with nothing from the task.
-    let (token, tree) = tokio::time::timeout(Duration::from_secs(30), s.trees.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(token, "tok");
-    tree.cut();
-    tree.kill_and_wait(Duration::from_secs(5));
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while r.starter.kinds().is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    fixtures::cut_registered_tree(&mut s).await;
+    fixtures::until(|| !r.starter.kinds().is_empty()).await;
     assert!(s.ends.try_recv().is_err());
     assert!(!s.stop.stopped());
 

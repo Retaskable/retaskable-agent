@@ -1,31 +1,13 @@
-use std::time::Duration;
-
 use super::*;
+use crate::config::{Engine, EngineChoiceConfig};
+use crate::env::Env;
 use crate::lanes;
-use crate::orchestrator::starter_fixtures::{self as fixtures, Started, answer, end_of, fixture};
+use crate::orchestrator::starter_fixtures::{self as fixtures, Started, answer, end_of};
 
-struct Rig {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    starter: LookRuns,
-}
+type Rig = fixtures::Rig<LookRuns>;
 
 fn rig(out: &str, extra: &str, choice: EngineChoiceConfig) -> Rig {
-    let f = fixture(out, extra);
-    let mut project = f.project;
-    project.budget.reviewer_usd = 1.5;
-    let starter = LookRuns::new(
-        f.root.join("data"),
-        vec![project],
-        choice,
-        f.env,
-        ModelsConfig::default(),
-    );
-    Rig {
-        _dir: f._dir,
-        root: f.root,
-        starter,
-    }
+    fixtures::rig(out, extra, choice, |p| p.budget.reviewer_usd = 1.5, LookRuns::new)
 }
 
 const GOOD: &str = r#"{"decision":"again","reason":"it was close","instructions":"Mind the tests."}"#;
@@ -40,19 +22,13 @@ fn brief() -> Value {
 }
 
 async fn until_free(r: &Rig) {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while r.starter.kinds().is_empty() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    fixtures::until(|| !r.starter.kinds().is_empty()).await;
 }
 
 #[tokio::test]
 async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
-    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.projects[0].worktrees_dir));
+    let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.setup.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
     let (req, mut s) = request(
         brief(),
@@ -67,27 +43,14 @@ async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
         end.result,
         json!({ "decision": "again", "reason": "it was close", "instructions": "Mind the tests." })
     );
-    let pwd = std::fs::read_to_string(r.root.join("pwd.txt")).unwrap();
-    assert_eq!(
-        std::fs::canonicalize(pwd.trim()).unwrap(),
-        std::fs::canonicalize(&base).unwrap()
-    );
-    let args = std::fs::read_to_string(r.root.join("args.txt")).unwrap();
-    assert!(
-        args.contains("--max-budget-usd 1.5") && args.contains("sonnet"),
-        "{args}"
-    );
-    assert!(
-        !args.contains("--dangerously") && args.contains("--disallowedTools") && args.contains("Edit Write"),
-        "{args}"
-    );
+    fixtures::assert_read_only_in(&r.root, &base, "1.5");
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(
         prompt.contains("Show the thing") && prompt.contains("tests red") && prompt.contains("A known bug"),
         "{prompt}"
     );
     // The transcript goes under the run's folder, keyed by the piece.
-    let dir = paths::run_dir(&r.starter.data_dir, "p", "pc1");
+    let dir = paths::run_dir(&r.starter.setup.data_dir, "p", "pc1");
     assert!(
         dir.read_dir()
             .unwrap()
@@ -154,7 +117,7 @@ async fn another_engine_or_a_missing_binary_gives_the_run_back() {
     assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
 
     let mut r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
-    r.starter.env = Env::new(|k| (k == "RETASKABLE_CLAUDE").then(|| "/nowhere/claude".to_string()));
+    r.starter.setup.env = Env::new(|k| (k == "RETASKABLE_CLAUDE").then(|| "/nowhere/claude".to_string()));
     let (req, _s) = request(brief(), json!({}));
     assert!(r.starter.start(req).is_err());
     assert!(r.starter.slot.is_free());
@@ -169,13 +132,7 @@ async fn one_look_at_a_time_a_cut_run_sends_no_end_and_the_slot_frees() {
     let (second, _s2) = request(brief(), json!({}));
     assert!(r.starter.start(second).unwrap_err().contains("already running"));
     // The session's tree is registered with the run; cutting it ends the run with nothing sent.
-    let (token, tree) = tokio::time::timeout(Duration::from_secs(30), s.trees.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(token, "tok");
-    tree.cut();
-    tree.kill_and_wait(Duration::from_secs(5));
+    fixtures::cut_registered_tree(&mut s).await;
     until_free(&r).await;
     assert_eq!(r.starter.kinds(), vec![RunKind::Look]);
     assert!(s.ends.try_recv().is_err());

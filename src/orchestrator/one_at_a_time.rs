@@ -10,11 +10,21 @@ use serde_json::{Value, json};
 use super::driver::{RunEnd, RunRequest};
 use super::session::exists;
 use crate::backlog::runs::RunOutcome;
-use crate::config::ProjectConfig;
+use crate::config::{EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::env::Env;
 use crate::lanes;
 use crate::process_tree::ProcessTree;
+
+/// What a plan or look runner is built with.
+#[derive(Clone)]
+pub struct Setup {
+    pub data_dir: PathBuf,
+    pub projects: Vec<ProjectConfig>,
+    pub choice: EngineChoiceConfig,
+    pub env: Env,
+    pub models: ModelsConfig,
+}
 
 /// One slot; clones are the same slot.
 #[derive(Debug, Clone, Default)]

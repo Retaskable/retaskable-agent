@@ -8,9 +8,10 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::driver::{RunContext, RunEnd, RunEndSender, RunProcesses, RunRequest};
+use super::one_at_a_time::Setup;
 use super::session::tests::{fake_name, project_in};
 use crate::backlog::runs::RunKind;
-use crate::config::ProjectConfig;
+use crate::config::{EngineChoiceConfig, ProjectConfig};
 use crate::env::Env;
 use crate::process_tree::ProcessTree;
 
@@ -83,4 +84,76 @@ pub async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
         .await
         .expect("an end")
         .expect("the channel stays open")
+}
+
+/// A fixture's starter and where it lives.
+pub struct Rig<S> {
+    pub _dir: tempfile::TempDir,
+    pub root: PathBuf,
+    pub starter: S,
+}
+
+/// A rig whose project `tweak`s its config and whose starter `make`s from the setup.
+pub fn rig<S>(
+    out: &str,
+    extra: &str,
+    choice: EngineChoiceConfig,
+    tweak: impl FnOnce(&mut ProjectConfig),
+    make: impl FnOnce(Setup) -> S,
+) -> Rig<S> {
+    let f = fixture(out, extra);
+    let mut project = f.project;
+    tweak(&mut project);
+    let setup = Setup {
+        data_dir: f.root.join("data"),
+        projects: vec![project],
+        choice,
+        env: f.env,
+        models: Default::default(),
+    };
+    Rig {
+        _dir: f._dir,
+        root: f.root,
+        starter: make(setup),
+    }
+}
+
+/// Checks the fake `claude` ran in `dir`, read-only, on the budget and with the model tier.
+pub fn assert_read_only_in(root: &std::path::Path, dir: &std::path::Path, budget: &str) {
+    let pwd = std::fs::read_to_string(root.join("pwd.txt")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(pwd.trim()).unwrap(),
+        std::fs::canonicalize(dir).unwrap()
+    );
+    let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
+    assert!(
+        args.contains(&format!("--max-budget-usd {budget}")) && args.contains("sonnet"),
+        "{args}"
+    );
+    assert!(
+        !args.contains("--dangerously") && args.contains("--disallowedTools") && args.contains("Edit Write"),
+        "{args}"
+    );
+}
+
+/// Waits for the run's registered process tree and cuts it, as a beat's `stop` would.
+pub async fn cut_registered_tree(s: &mut Started) {
+    let (token, tree) = tokio::time::timeout(Duration::from_secs(30), s.trees.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(token, "tok");
+    tree.cut();
+    tree.kill_and_wait(Duration::from_secs(5));
+}
+
+/// Waits until `free` says so.
+pub async fn until(free: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !free() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
