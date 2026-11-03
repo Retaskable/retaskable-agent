@@ -42,6 +42,24 @@ fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The first open PR for `branch`, if any.
+fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
+    let mut list = Command::new(gh);
+    list.current_dir(dir).args([
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--json",
+        "number,url",
+    ]);
+    let listed = run(list, None, "gh pr list")?;
+    let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
+    Ok(open.into_iter().next())
+}
+
 /// Pushes `dir`'s `HEAD` to `origin/<branch>`, then returns the open PR for the branch, creating it against `base`
 /// with `title` and `body` when there is none.
 pub fn publish(
@@ -57,20 +75,7 @@ pub fn publish(
     push.current_dir(dir)
         .args(["push", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]);
     run(push, None, &format!("git push of {branch}"))?;
-    let mut list = Command::new(gh);
-    list.current_dir(dir).args([
-        "pr",
-        "list",
-        "--head",
-        branch,
-        "--state",
-        "open",
-        "--json",
-        "number,url",
-    ]);
-    let listed = run(list, None, "gh pr list")?;
-    let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
-    if let Some(pr) = open.into_iter().next() {
+    if let Some(pr) = open_change(gh, dir, branch)? {
         return Ok(Published {
             url: pr.url,
             number: pr.number,
@@ -114,20 +119,7 @@ pub fn publish(
 /// "closes any pull request still open for the item"). Never deletes the branch. `gh pr close` has no comment-file
 /// form, so the comment goes in `--comment`. Returns whether a PR was closed; none open is fine.
 pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Result<bool> {
-    let mut list = Command::new(gh);
-    list.current_dir(dir).args([
-        "pr",
-        "list",
-        "--head",
-        branch,
-        "--state",
-        "open",
-        "--json",
-        "number,url",
-    ]);
-    let listed = run(list, None, "gh pr list")?;
-    let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
-    let Some(pr) = open.into_iter().next() else {
+    let Some(pr) = open_change(gh, dir, branch)? else {
         return Ok(false);
     };
     let mut close = Command::new(gh);
