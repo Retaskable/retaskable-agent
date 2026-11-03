@@ -29,6 +29,7 @@ mod project;
 mod report;
 mod runs;
 mod settle;
+mod triage_facts;
 
 pub use drafts::{DraftHost, DraftJob};
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
