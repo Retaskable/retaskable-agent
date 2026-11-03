@@ -1,6 +1,6 @@
 //! The minute pass starting each project's try-out grouping round in the background.
-use crate::backlog::runs::RunKind;
 use super::*;
+use crate::backlog::runs::RunKind;
 use crate::config::Playtests;
 use std::path::Path;
 
