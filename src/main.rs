@@ -358,6 +358,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
                 orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
                     as Arc<dyn orchestrator::driver::RunStarter>,
+                Arc::new(orchestrator::plan_run::PlanRuns::new(
+                    dir.to_path_buf(),
+                    cfg.projects.clone(),
+                    config::engine_choice(cfg, env),
+                    env.clone(),
+                    cfg.machine.models,
+                )) as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),

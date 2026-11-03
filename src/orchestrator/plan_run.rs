@@ -1,11 +1,29 @@
 //! The pure half of the `plan` run (docs/specs/pieces.md section 3.2): the planner's prompt, the schema of its
-//! structured result, and reading that result into the `planned` result for `run_done`.
+//! structured result, and reading that result into the `planned` result for `run_done`; and [`PlanRuns`], which
+//! runs the store's `plan` runs: one read-only planner session in the project's base checkout, one at a time on
+//! this computer.
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
 
-use crate::backlog::runs::RunPiece;
+use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
+use super::session::{exists, quiet_timeout};
+use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
+use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::engines::claude::sandbox_enabled;
+use crate::engines::resolve::resolve_claude_on_path;
+use crate::engines::{
+    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of,
+    run_session_tracked,
+};
+use crate::env::Env;
+use crate::process_tree::ProcessTree;
 use crate::prompt::render_prompt;
+use crate::runs::winding_down;
+use crate::{lanes, paths, tiers};
 
 const TEMPLATE: &str = include_str!("../../prompts/planner.md");
 
@@ -188,6 +206,197 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     }
     Ok(Value::Object(result))
 }
+
+/// Runs `plan` runs of the projects it was built with, one at a time on this computer.
+pub struct PlanRuns {
+    pub data_dir: PathBuf,
+    pub projects: Vec<ProjectConfig>,
+    pub choice: EngineChoiceConfig,
+    pub env: Env,
+    pub models: ModelsConfig,
+    running: Arc<AtomicBool>,
+}
+
+impl PlanRuns {
+    pub fn new(
+        data_dir: PathBuf,
+        projects: Vec<ProjectConfig>,
+        choice: EngineChoiceConfig,
+        env: Env,
+        models: ModelsConfig,
+    ) -> Self {
+        Self {
+            data_dir,
+            projects,
+            choice,
+            env,
+            models,
+            running: Arc::default(),
+        }
+    }
+
+    fn planner_on_claude(&self, project: Option<&ProjectConfig>) -> bool {
+        let engines = project.and_then(|p| p.engines.as_ref());
+        engine_for(&self.choice, engines, Role::Planner, None) == Engine::Claude
+    }
+}
+
+/// Clears the computer's plan flag when the run's task ends, however it ends (a panic included).
+struct Running(Arc<AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl RunStarter for PlanRuns {
+    fn kinds(&self) -> Vec<RunKind> {
+        // Only Claude sessions run in the Rust agent yet; the role's engine is the machine's choice unless a project overrides it.
+        let claude = self.planner_on_claude(None) && self.projects.iter().all(|p| self.planner_on_claude(Some(p)));
+        if claude && !self.running.load(Ordering::SeqCst) {
+            vec![RunKind::Plan]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn start(&self, request: RunRequest) -> Result<(), String> {
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id_or_derived() == request.project)
+            .ok_or_else(|| format!("no project {} is configured", request.project))?
+            .clone();
+        if !self.planner_on_claude(Some(&project)) {
+            return Err("only Claude sessions run in the Rust agent yet".into());
+        }
+        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
+        if !exists(&bin, &self.env) {
+            return Err(format!("the claude binary wasn't found ({})", bin.display()));
+        }
+        if self.running.swap(true, Ordering::SeqCst) {
+            return Err("a plan run is already running on this computer".into());
+        }
+        let guard = Running(self.running.clone());
+        let job = Job {
+            data_dir: self.data_dir.clone(),
+            project,
+            bin,
+            model: tiers::chore_tier().to_string(),
+        };
+        let (ends, token) = (request.ends.clone(), request.token.clone());
+        let cut = Cut::default();
+        // The inner task is joined, so even a panic in it ends in exactly one end.
+        tokio::spawn(async move {
+            let _running = guard;
+            let end = match tokio::spawn(plan(job, request.clone(), cut.clone())).await {
+                Ok(end) => end,
+                Err(e) => Some((RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({}))),
+            };
+            // A run the loop already ended (a stop or the ceiling cut its tree) sends nothing.
+            if let Some((outcome, result)) = end.filter(|_| !request.stop.stopped() && !cut.is_cut()) {
+                ends.send(RunEnd { token, outcome, result });
+            }
+        });
+        Ok(())
+    }
+}
+
+struct Job {
+    data_dir: PathBuf,
+    project: ProjectConfig,
+    bin: PathBuf,
+    model: String,
+}
+
+/// The session's process tree, kept so a cut that lands after the loop has let the run go is still seen.
+#[derive(Clone, Default)]
+struct Cut(Arc<Mutex<Option<Arc<ProcessTree>>>>);
+
+impl Cut {
+    fn is_cut(&self) -> bool {
+        self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
+    }
+}
+
+fn failed(why: impl Into<String>) -> Option<(RunOutcome, Value)> {
+    Some((RunOutcome::Failed(why.into()), json!({})))
+}
+
+/// How the run ended; `None` when the loop ended it.
+async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Value)> {
+    let prompt = match build_plan_prompt(&request.piece) {
+        Ok(p) => p,
+        // Our own template or the brief, not the work: `outside` (section 3.6).
+        Err(e) => return Some((RunOutcome::Failed(e), json!({ "outside": true }))),
+    };
+    let project = &job.project;
+    let worktrees = PathBuf::from(&project.worktrees_dir);
+    let base = lanes::base_checkout_path(&worktrees);
+    let cwd = if base.exists() {
+        base
+    } else {
+        PathBuf::from(&project.repo_path)
+    };
+    let spec = EphemeralSessionConfig {
+        cwd: &cwd,
+        budget_usd: project.budget.planner_usd,
+        model: job.model.clone(),
+        local: None,
+        engine: Some(EngineId::Claude),
+        cursor: None,
+        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+        shell: true,
+    }
+    .spec(prompt, plan_schema());
+    let sink = TranscriptSink {
+        path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&request.piece))
+            .join(format!("plan-{}.jsonl", crate::telemetry::now_ms())),
+        lane: None,
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel::<Arc<ProcessTree>>();
+    let (processes, token, seen) = (request.processes.clone(), request.token.clone(), cut.clone());
+    tokio::spawn(async move {
+        if let Ok(tree) = rx.await {
+            *seen.0.lock().unwrap() = Some(tree.clone());
+            processes.add(&token, tree);
+        }
+    });
+    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let ran = async {
+        let engine = engine_of(Some(EngineId::Claude))?;
+        run_session_tracked(engine.as_ref(), &job.bin, &spec, "plan", Some(&sink), quiet, Some(tx)).await
+    }
+    .await;
+    if request.stop.stopped() || cut.is_cut() {
+        return None;
+    }
+    if winding_down() {
+        return Some((RunOutcome::Interrupted, json!({})));
+    }
+    let r = match ran {
+        Ok(r) => r,
+        Err(e) => return failed(format!("The planner session couldn't run: {e:#}")),
+    };
+    if !r.ok {
+        return failed(format!(
+            "The planner session {}",
+            describe_failure(&r, project.budget.planner_usd)
+        ));
+    }
+    let Some(structured) = r.structured else {
+        return failed("The planner session returned no plan.");
+    };
+    match read_plan(&structured) {
+        Ok(result) => Some((RunOutcome::Planned, result)),
+        Err(why) => failed(why),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "plan_run_tests.rs"]
+mod run_tests;
 
 #[cfg(test)]
 mod tests {

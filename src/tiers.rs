@@ -58,6 +58,11 @@ pub fn mid_tier(tier: &'static str) -> &'static str {
     if tier == OPUS { SONNET } else { tier }
 }
 
+/// The model for chores and read-only sessions that don't need the top tier.
+pub fn chore_tier() -> &'static str {
+    SONNET
+}
+
 /// `topTier` (section 7.1): the planner, the final reviewer and the triager's second look stay on Opus
 /// whatever the usage reading says.
 pub fn top_tier() -> &'static str {
