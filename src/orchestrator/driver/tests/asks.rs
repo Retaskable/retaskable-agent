@@ -1,6 +1,6 @@
 //! The ask step (`driver/asks.rs`): a fake store that records every op and a fake host whose answer is scripted.
 use super::*;
-use crate::engines::EngineId;
+use crate::engines::{EngineId, EventKind, SessionEvent};
 use crate::orchestrator::driver::{AskHost, AskJob, AskReply, AskStore, WAITING};
 use crate::view::AskCommand;
 
@@ -14,6 +14,8 @@ struct Host {
     /// The session fails: the host answers that it couldn't.
     crashed: AtomicBool,
     jobs: Mutex<Vec<AskCommand>>,
+    /// Tool events the session emits, a pause apart, before it answers.
+    reads: Mutex<Vec<&'static str>>,
 }
 
 impl AskHost for Host {
@@ -31,12 +33,24 @@ impl AskHost for Host {
         self.jobs.lock().unwrap().push(job.ask.clone());
         let (broken, hold) = (self.broken.load(Ordering::SeqCst), self.hold.load(Ordering::SeqCst));
         let crashed = self.crashed.load(Ordering::SeqCst);
+        let reads = std::mem::take(&mut *self.reads.lock().unwrap());
         async move {
             if crashed {
                 return Ok(AskReply {
                     answer: "Sorry, I couldn't answer that: claude crashed".into(),
                     actions: vec![],
                 });
+            }
+            for path in reads {
+                for _ in 0..3 {
+                    let tool = SessionEvent {
+                        at: 0,
+                        kind: EventKind::Tool,
+                        text: format!("Read: {path}"),
+                    };
+                    let _ = job.events.send(tool);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
             if hold {
                 std::future::pending::<()>().await;
@@ -260,4 +274,29 @@ async fn a_session_that_fails_is_answered_once_and_not_run_again() {
     quiet_passes(&mut rig).await;
     assert_eq!(host.jobs.lock().unwrap().len(), 1);
     assert_eq!(reports(&asked).len(), 1);
+}
+
+#[tokio::test]
+async fn progress_reports_rising_time_and_the_file_read_then_the_answer() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    rig.lp(0).asks.progress_every = Duration::from_millis(100);
+    *host.reads.lock().unwrap() = vec!["src/a.rs", "src/b.rs", "src/c.rs"];
+    push(&rig, ask("k1", "why?"));
+    let sent = loop {
+        let sent = until(&mut rig, &asked, 1).await;
+        if sent.iter().any(|r| r.get("answer").is_some()) {
+            break sent;
+        }
+    };
+    let last = sent.len() - 1;
+    assert!(
+        sent[last]["answer"].is_string(),
+        "the answer follows the last progress report: {sent:?}"
+    );
+    let progress: Vec<&str> = sent[..last].iter().map(|r| r["progress"].as_str().unwrap()).collect();
+    // 9 events came in about 750ms: debounced to a report per tick, not one per event.
+    assert!(progress.len() >= 2 && progress.len() < 9, "{progress:?}");
+    assert!(progress.iter().any(|p| p.ends_with("reading src/a.rs")), "{progress:?}");
+    assert!(progress.last().unwrap().ends_with("reading src/c.rs"), "{progress:?}");
+    assert!(progress[0].starts_with("Thinking for 0s"), "{progress:?}");
 }
