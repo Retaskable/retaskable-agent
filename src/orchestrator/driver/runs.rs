@@ -3,6 +3,7 @@
 //! path in `project.rs` is separate. What runs and how they are kept live is `crate::runs`; the work of a run
 //! is the [`RunStarter`]'s.
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
@@ -11,10 +12,12 @@ use tokio::sync::mpsc;
 
 use super::Shared;
 use super::project::ProjectLoop;
+use crate::backlog::Client;
 use crate::backlog::runs::{Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunWant};
+use crate::config::ProjectConfig;
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
-use crate::runs::{NoLane, Runs, needs_lane};
+use crate::runs::{NoLane, RunLocks, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
 /// How often the live runs are beaten.
@@ -46,6 +49,19 @@ impl RunEndSender {
     }
 }
 
+/// What a run that works without a lane needs of its project: where it is, and the store.
+#[derive(Debug, Clone)]
+pub struct RunContext {
+    pub project: String,
+    pub config: ProjectConfig,
+    pub client: Arc<Client>,
+    pub repo: u64,
+    /// The backlog link's token.
+    pub token: String,
+    /// Where the run takes and drops store locks; the loop beats them.
+    pub locks: RunLocks,
+}
+
 /// A run the store handed out, for the starter to do.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
@@ -56,6 +72,7 @@ pub struct RunRequest {
     /// The folder of the lane the run holds; `None` for a kind that runs in none.
     pub lane: Option<PathBuf>,
     pub ends: RunEndSender,
+    pub context: RunContext,
 }
 
 /// Does the work of runs. Built by the pieces that run each kind.
@@ -297,6 +314,14 @@ impl ProjectLoop {
             piece: run.piece,
             lane,
             ends: self.run_loop.ends_tx.clone(),
+            context: RunContext {
+                project: self.id.clone(),
+                config: self.project.clone(),
+                client: self.client.clone(),
+                repo,
+                token: token.unwrap_or_default().to_string(),
+                locks: self.run_loop.runs.locks(),
+            },
         };
         if let Err(why) = starter.start(request) {
             tracing::warn!("{}: the run {} didn't start: {why}", self.id, run.token);

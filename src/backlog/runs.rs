@@ -125,6 +125,13 @@ impl RunOutcome {
     }
 }
 
+/// What `lock_take` answers: its token, or who else holds the lock.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LockTake {
+    Held(String),
+    HeldBy { by: String, note: Option<String> },
+}
+
 /// Why `run_done` didn't take: the run is gone (throw the work away), or any other failure.
 #[derive(Debug)]
 pub enum RunDoneError {
@@ -208,6 +215,48 @@ impl Client {
             Err(e) if e.code() == Some("stale_run") => Err(RunDoneError::Stale),
             Err(e) => Err(RunDoneError::Other(e)),
         }
+    }
+
+    /// `lock_take { name, note? }` (pieces.md section 3.4): `{ held: true, token }` or `{ held: false, by, note? }`.
+    pub async fn lock_take(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        name: &str,
+        note: Option<&str>,
+    ) -> Result<LockTake, BacklogError> {
+        #[derive(Deserialize)]
+        struct Answer {
+            held: bool,
+            token: Option<String>,
+            by: Option<String>,
+            note: Option<String>,
+        }
+        let mut args = json!({ "name": name });
+        if let Some(note) = note {
+            args["note"] = json!(note);
+        }
+        let (status, body) = self.send(repo_id, token, "lock_take", args).await?;
+        let bad = |message: &str| BacklogError::BadAnswer {
+            status,
+            code: None,
+            message: message.into(),
+        };
+        let value = body.value.ok_or_else(|| bad("its answer had no value"))?;
+        let a: Answer =
+            serde_json::from_value(value).map_err(|e| bad(&format!("couldn't read the lock answer: {e}")))?;
+        match (a.held, a.token, a.by) {
+            (true, Some(token), _) => Ok(LockTake::Held(token)),
+            (false, _, Some(by)) => Ok(LockTake::HeldBy { by, note: a.note }),
+            _ => Err(bad("the lock answer had neither a token nor a holder")),
+        }
+    }
+
+    /// `lock_drop { token }`: lets a lock go.
+    pub async fn lock_drop(&self, repo_id: u64, token: Option<&str>, lock_token: &str) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "lock_drop", json!({ "token": lock_token }))
+            .await
+            .map(|_| ())
     }
 
     /// `runs_drop`: ends every run and lock this agent had as `interrupted`.

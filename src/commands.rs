@@ -10,7 +10,7 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
-//! `orchestrator::driver::lane_play`) and **draft_files** (answered live from the draft's worktree). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **draft_files** (answered live from the draft's worktree) and **draft_approve** / **merge_pr** `{ draftId }` (**Approve** and **Merge into main** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::galleries;
 use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, Exit, ItemCommand};
+use crate::view::{AgentView, DraftCommand, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -113,6 +113,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "retry" => item_command(cmd, project, view, data_dir, true),
         "play" | "stop" => play(cmd, project, view),
         "draft_files" => draft_files(cmd, project, view),
+        "draft_approve" | "merge_pr" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }
@@ -316,6 +317,36 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
         Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
         Err(e) => nack(&cmd.id, format!("Couldn't list draft {id}'s files: {e:#}")),
     }
+}
+
+/// `draft_approve { draftId }` (**Approve and merge**) or `merge_pr { draftId }` (**Merge into main**): queued for the
+/// loop, which takes the draft and lands it. A `merge_pr` for an item or the team branch isn't this agent's yet.
+fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let draft = cmd
+        .args
+        .get("draftId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if cmd.name == "merge_pr" && draft.is_empty() {
+        return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
+    }
+    if draft.is_empty() {
+        return nack(&cmd.id, "Approve needs the draft's id.".into());
+    }
+    if !view.item_commands.claim() {
+        return nack(
+            &cmd.id,
+            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
+        );
+    }
+    let (project, draft) = (project.to_string(), draft.to_string());
+    view.item_commands.push_draft(if cmd.name == "merge_pr" {
+        DraftCommand::Merge { project, draft }
+    } else {
+        DraftCommand::Approve { project, draft }
+    });
+    ack(&cmd.id)
 }
 
 fn ack(id: &str) -> Value {
@@ -879,6 +910,35 @@ mod tests {
             let answer = run_cmd(&cmd("draft_files", args), &v, &noop);
             assert_eq!(answer["type"], "nack", "{answer}");
         }
+    }
+
+    #[test]
+    fn approve_and_merge_into_main_are_queued_for_the_loop() {
+        let v = view();
+        let noop = |_: i32| {};
+        let args = json!({ "draftId": "d1" });
+        assert_eq!(run_cmd(&cmd("draft_approve", args.clone()), &v, &noop)["type"], "nack");
+        v.item_commands.set_claim(true);
+        assert_eq!(run_cmd(&cmd("draft_approve", args.clone()), &v, &noop)["type"], "ack");
+        assert_eq!(run_cmd(&cmd("merge_pr", args), &v, &noop)["type"], "ack");
+        assert_eq!(run_cmd(&cmd("draft_approve", json!({})), &v, &noop)["type"], "nack");
+        assert_eq!(
+            run_cmd(&cmd("merge_pr", json!({ "itemId": "x" })), &v, &noop)["type"],
+            "nack"
+        );
+        assert_eq!(
+            v.item_commands.take_drafts("one"),
+            [
+                DraftCommand::Approve {
+                    project: "one".into(),
+                    draft: "d1".into()
+                },
+                DraftCommand::Merge {
+                    project: "one".into(),
+                    draft: "d1".into()
+                }
+            ]
+        );
     }
 
     fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {

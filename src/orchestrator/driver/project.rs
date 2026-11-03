@@ -288,6 +288,8 @@ pub struct ProjectLoop {
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
+    /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
+    pub(super) landing: super::land::Landing,
 }
 
 impl ProjectLoop {
@@ -332,6 +334,7 @@ impl ProjectLoop {
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
             draft: None,
+            landing: Default::default(),
         }
     }
 
