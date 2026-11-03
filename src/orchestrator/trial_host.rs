@@ -19,14 +19,11 @@ use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, e
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
 use crate::tiers::{implementer_model, implementer_tier};
+use crate::trial_plan::{TRIAL_ID, TRIAL_TEXT};
 use crate::{lanes, paths};
 
-/// The fixed change the trial plan makes; it never varies.
-pub const TRIAL_TEXT: &str = "Add a line to the README saying this project uses Retaskable.";
 /// The trial's pull request title.
 pub const TRIAL_TITLE: &str = "Say hello to this repo";
-/// The synthetic item's id, for the prompt and the transcript folder.
-pub const TRIAL_ID: &str = "_trial";
 
 const TEMPLATE: &str = include_str!("../../prompts/implementer.md");
 

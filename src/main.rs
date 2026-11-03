@@ -378,6 +378,17 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 cfg.machine.models,
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
+        trial: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            (
+                orchestrator::trial_host::ClaudeTrial::new(
+                    dir.to_path_buf(),
+                    config::engine_choice(cfg, env),
+                    env.clone(),
+                    cfg.machine.models,
+                ) as Arc<dyn orchestrator::trial_host::TrialHost>,
+                latest_checks.clone(),
+            )
+        }),
         asks: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::ask_host::ClaudeAsks::new(
                 dir.to_path_buf(),

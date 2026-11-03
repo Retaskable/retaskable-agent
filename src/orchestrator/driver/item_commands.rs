@@ -56,6 +56,10 @@ impl ProjectLoop {
                     self.skip_stopped(pool, &item, false, shared).await;
                     continue;
                 }
+                ItemCommand::Ideas { fresh, .. } => {
+                    self.ideas_command(fresh, shared.links).await;
+                    continue;
+                }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
             };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);

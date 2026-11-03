@@ -324,6 +324,9 @@ async fn session(
     paused.mark_unchanged();
     let mut restart = view.restart.subscribe();
     restart.mark_unchanged();
+    let mut trial_saved = crate::store::subscribe_trial_changes();
+    trial_saved.mark_unchanged();
+    let mut trial_sent = view.trial_json(project, &cloud.dir);
     let mut gallery_status = galleries::subscribe_status_changes();
     gallery_status.mark_unchanged();
     let mut pending = HashMap::new();
@@ -347,6 +350,15 @@ async fn session(
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = trial_saved.changed() => {
+                let now = view.trial_json(project, &cloud.dir);
+                if now != trial_sent {
+                    trial_sent = now;
+                    Some(view.snapshot(project, &cloud.dir))
+                } else {
+                    None
+                }
+            },
             Ok(()) = gallery_status.changed() => {
                 let count = gallery_status.borrow().get(project).copied().unwrap_or(0);
                 if count != gallery_changes {

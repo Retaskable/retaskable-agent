@@ -111,6 +111,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
         "play" | "stop" => play(cmd, project, view),
+        "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
@@ -382,6 +383,23 @@ fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Val
             &base_branch,
             &dest,
         );
+    });
+    ack(&cmd.id)
+}
+
+/// `ideas_generate { fresh? }`: queued for the orchestrator loop, which starts one round of ideas
+/// (`orchestrator::driver::ideas_round`). Refused while the project is paused or before setup is finished.
+fn ideas_generate(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if !view.projects.iter().any(|p| p.id == project) {
+        return nack(&cmd.id, "Finish setup first.".to_string());
+    }
+    if view.paused.reason(project).is_some() {
+        return nack(&cmd.id, "The project is paused: resume it first.".to_string());
+    }
+    let fresh = cmd.args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+    view.item_commands.push(ItemCommand::Ideas {
+        project: project.to_string(),
+        fresh,
     });
     ack(&cmd.id)
 }

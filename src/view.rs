@@ -13,6 +13,9 @@ use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::lane_pool::LaneSizes;
 use crate::link::truncate;
+use crate::paths;
+use crate::store::Store;
+use crate::trial_plan::TrialState;
 
 /// A callback that ends the process, to run restart (connector.ts's `exit`, `commands.ts`'s `restart`).
 pub type Exit = dyn Fn(i32) + Send + Sync;
@@ -67,6 +70,8 @@ pub enum ItemCommand {
     Play { project: String, lane: u32 },
     /// **Stop** the game in lane `lane`.
     Stop { project: String, lane: u32 },
+    /// **Generate ideas** (`ideas_generate { fresh }`): one non-quiet ideas round; `fresh` drops the waiting ideas first.
+    Ideas { project: String, fresh: bool },
 }
 
 impl ItemCommand {
@@ -80,7 +85,8 @@ impl ItemCommand {
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
             | Self::Play { project, .. }
-            | Self::Stop { project, .. } => project,
+            | Self::Stop { project, .. }
+            | Self::Ideas { project, .. } => project,
         }
     }
 }
@@ -375,9 +381,7 @@ impl AgentView {
         if let Some(restart) = self.restart.report() {
             orchestrator["restart"] = restart;
         }
-        json!({
-            "type": "snapshot",
-            "state": {
+        let mut state = json!({
                 "orchestrator": orchestrator,
                 "usage": {},
                 "milestones": [],
@@ -388,8 +392,32 @@ impl AgentView {
                 "galleries": self.galleries_list(project, data_dir),
                 "drafts": [],
                 "asks": [],
-            },
-        })
+        });
+        if let Some(trial) = self.trial_json(project, data_dir) {
+            state["trial"] = trial;
+        }
+        json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `trial` (first-run-check.md section 3.3, "Reporting it"): the project's trial
+    /// record from its `state.json`, none before Setup. A skipped record reports as not started.
+    pub fn trial_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
+        self.projects.iter().find(|p| p.id == project)?;
+        let record = Store::load(&paths::project_dir(data_dir, project))
+            .map(|s| s.trial())
+            .unwrap_or_default();
+        let state = if record.skipped {
+            TrialState::NotStarted
+        } else {
+            record.state
+        };
+        let mut trial = json!({ "state": state });
+        if state == TrialState::Open
+            && let Some(url) = record.pr_url
+        {
+            trial["prUrl"] = json!(url);
+        }
+        Some(trial)
     }
 
     /// The snapshot's galleries (tray/05.3-private-galleries-and-pictures-from.md section 5.3.1):
@@ -542,6 +570,25 @@ mod tests {
             json!({ "status": "setup", "machine": "pc" })
         );
         assert_eq!(snap["state"]["galleries"], json!([]));
+    }
+
+    #[test]
+    fn snapshot_reports_the_trial_plan_from_the_projects_state_file() {
+        use crate::trial_plan::TrialRecord;
+        let dir = tempfile::tempdir().unwrap();
+        let v = view(vec![project("a", "o/a")]);
+        let trial = |v: &AgentView| v.snapshot("a", dir.path())["state"]["trial"].clone();
+        assert_eq!(trial(&v), json!({ "state": "not_started" }));
+        let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
+        store.set_trial(TrialRecord::started()).unwrap();
+        assert_eq!(trial(&v), json!({ "state": "running" }));
+        store.set_trial(TrialRecord::opened("https://x/pr/1")).unwrap();
+        assert_eq!(trial(&v), json!({ "state": "open", "prUrl": "https://x/pr/1" }));
+        store.set_trial(TrialRecord::dropped()).unwrap();
+        assert_eq!(trial(&v), json!({ "state": "failed" }));
+        store.set_trial(TrialRecord::skip()).unwrap();
+        assert_eq!(trial(&v), json!({ "state": "not_started" }));
+        assert!(v.snapshot("", dir.path())["state"].get("trial").is_none());
     }
 
     #[test]
