@@ -10,7 +10,7 @@ static OUTSIDE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?i)unfilled \{\{|is missing the \{\{[^}]*\}\} variable|spawn_error",
         r"|starting .+: .*\(os error \d+\)",
-        r"|found claude signed out",
+        r"|found claude signed out|this computer can't run .+ sessions yet",
         r"|\bEACCES\b|\bEPERM\b|permission denied|access is denied",
         r"|\bECONNREFUSED\b|\bENOTFOUND\b|\bETIMEDOUT\b|could not resolve host",
     ))
@@ -35,6 +35,7 @@ mod tests {
             "spawn_error: no such file",
             "starting /usr/bin/claude: No such file or directory (os error 2)",
             "found Claude signed out on this computer (Not logged in)",
+            "this computer can't run cursor sessions yet",
             "Not logged in · Please run /login",
             "EACCES: open '.git/index.lock'",
             "EPERM: operation not permitted",

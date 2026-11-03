@@ -222,10 +222,6 @@ async fn a_starter_error_gives_the_run_back() {
     let (mut req, _s) = request(&r, RunKind::Build, piece());
     req.project = "nope".into();
     assert!(r.starter.start(req).unwrap_err().contains("no project nope"));
-    let mut p = piece();
-    p["engine"] = json!("codex");
-    let (req, _s) = request(&r, RunKind::Build, p);
-    assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
 }
 
 #[tokio::test]
@@ -465,4 +461,86 @@ async fn cutting_a_review_session_ends_the_run_interrupted() {
     tree.kill_and_wait(crate::process_tree::KILL_LIMIT);
     assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
     assert!(comment(&r).is_empty());
+}
+
+fn with_flag(r: &mut Rig) {
+    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
+}
+
+#[tokio::test]
+async fn a_piece_on_an_engine_this_agent_cannot_run_ends_failed_outside_with_nothing_run() {
+    for engine in ["cursor", "steam"] {
+        let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+        with_flag(&mut r);
+        let mut p = piece();
+        p["engine"] = json!(engine);
+        let (req, mut s) = request(&r, RunKind::Build, p);
+        r.starter.start(req).unwrap();
+        let end = end_of(&mut s.ends).await;
+        assert_eq!(
+            end.outcome,
+            RunOutcome::Failed(format!("this computer can't run {engine} sessions yet"))
+        );
+        assert_eq!(end.result["outside"], true);
+        assert!(!r.root.join("prompt1.txt").exists());
+    }
+}
+
+#[tokio::test]
+async fn with_the_flag_off_such_a_piece_is_given_back() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let mut p = piece();
+    p["engine"] = json!("cursor");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
+}
+
+fn role_is_cursor(r: &mut Rig) {
+    let choice = serde_json::from_value(json!({ "default": "cursor" })).unwrap();
+    Arc::get_mut(&mut r.starter).unwrap().choice = choice;
+}
+
+#[tokio::test]
+async fn a_piece_naming_claude_runs_on_claude_even_when_the_role_is_cursor() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    role_is_cursor(&mut r);
+    let mut p = piece();
+    p["engine"] = json!("claude");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+}
+
+#[tokio::test]
+async fn a_piece_with_no_engine_follows_the_role() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    role_is_cursor(&mut r);
+    with_flag(&mut r);
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert_eq!(
+        end.outcome,
+        RunOutcome::Failed("this computer can't run cursor sessions yet".into())
+    );
+}
+
+#[tokio::test]
+async fn a_limit_ends_limited_naming_the_pieces_engine() {
+    let mut r = rig(
+        &[":"],
+        r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"limit","session_id":"s"}"#,
+    );
+    with_flag(&mut r);
+    let mut p = piece();
+    p["engine"] = json!("claude");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(
+        matches!(end.outcome, RunOutcome::Limited { ref engine, .. } if engine == "claude"),
+        "{:?}",
+        end.outcome
+    );
 }
