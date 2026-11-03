@@ -2,7 +2,9 @@
 //! section 3.3). Pure: time is passed in, and the store calls (`run_take`, `run_beat`, `run_done`) are the caller's;
 //! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
 //! state.json.
+mod build_end;
 mod wind;
+pub use build_end::{Pushed, end_from_answer, needs_push};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
