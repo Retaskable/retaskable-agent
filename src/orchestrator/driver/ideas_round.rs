@@ -1,7 +1,7 @@
 //! One round of ideas under the project's `ideas` lock (docs/specs/agent/09-web-ui.md section 9.3, "Ideas";
 //! `write()` in Retaskable.com's agent/src/ideas.ts): reads the store's ideas, runs the read-only `writer`
-//! session through [`crate::ideas::run_round`] and sends the new queue with `ideas_round`. A person's
-//! `ideas_generate` starts one ([`ProjectLoop::ideas_command`]); nothing else schedules it yet.
+//! session through [`crate::ideas::run_round`] and sends the new queue with `ideas_round`. The daily job
+//! ([`super::ideas_daily`]) and a person's `ideas_generate` ([`ProjectLoop::ideas_command`]) start it.
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;

@@ -25,6 +25,7 @@ mod item_commands;
 mod land;
 mod lane_play;
 pub use lane_play::LanePlay;
+mod ideas_daily;
 mod ideas_round;
 mod machine;
 mod playtest_round;

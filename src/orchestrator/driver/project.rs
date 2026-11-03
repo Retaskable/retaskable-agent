@@ -283,6 +283,8 @@ pub struct ProjectLoop {
     pub(super) playtest_round_running: Arc<AtomicBool>,
     /// Set while this project's ideas round is running, so a second one doesn't start on top of it.
     pub(super) ideas_round_running: Arc<AtomicBool>,
+    /// The daily ideas round's asker and last tried day ([`super::ideas_daily`]).
+    pub(super) ideas_daily: Arc<std::sync::Mutex<super::ideas_daily::State>>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
@@ -357,6 +359,7 @@ impl ProjectLoop {
             seen: report::Seen::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
             ideas_round_running: Arc::new(AtomicBool::new(false)),
+            ideas_daily: Default::default(),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
