@@ -588,3 +588,58 @@ async fn with_the_flag_off_a_failure_from_outside_the_work_sends_no_outside() {
     let done = script.lock().unwrap().args("run_done");
     assert!(done[0]["result"].get("outside").is_none());
 }
+
+fn check(ok: Option<bool>) -> crate::setup_check::SetupCheck {
+    crate::setup_check::SetupCheck {
+        ok,
+        detail: String::new(),
+        fix: None,
+    }
+}
+
+/// What the first `run_take`'s `agent` says, with `checks` as the latest setup checks.
+async fn agent_with(checks: Option<crate::setup_check::SetupChecks>, choice: EngineChoiceConfig) -> Value {
+    let (mut rig, script) = setup(1).await;
+    *rig.machine.links.checks.lock().unwrap() = checks;
+    rig.machine.links.engine_choice = choice;
+    pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), Instant::now()).await;
+    let takes = script.lock().unwrap().args("run_take");
+    takes[0]["agent"].clone()
+}
+
+fn checks_with(claude_signed_in: Option<bool>, cursor: bool) -> crate::setup_check::SetupChecks {
+    crate::setup_check::SetupChecks {
+        git: check(Some(true)),
+        gh_installed: check(Some(true)),
+        gh: check(Some(true)),
+        claude: check(Some(true)),
+        claude_signed_in: check(claude_signed_in),
+        cursor: check(Some(cursor)),
+        pi: Some(check(Some(true))),
+        codex: Some(check(Some(true))),
+    }
+}
+
+#[tokio::test]
+async fn run_take_sends_claude_only_when_installed_and_signed_in() {
+    let signed_in = agent_with(Some(checks_with(Some(true), true)), Default::default()).await;
+    assert_eq!(
+        signed_in["engines"],
+        json!(["claude"]),
+        "only Claude runs sessions here yet"
+    );
+    let signed_out = agent_with(Some(checks_with(Some(false), true)), Default::default()).await;
+    assert_eq!(signed_out["engines"], json!([]));
+    let none_yet = agent_with(None, Default::default()).await;
+    assert_eq!(none_yet["engines"], json!([]));
+}
+
+#[tokio::test]
+async fn run_take_uses_follow_the_configured_roles() {
+    let choice: EngineChoiceConfig = serde_json::from_value(json!({ "roles": { "implementer": "cursor" } })).unwrap();
+    let agent = agent_with(None, choice).await;
+    assert_eq!(
+        agent["uses"],
+        json!({ "plan": "claude", "build": "cursor", "fix": "cursor", "look": "claude" })
+    );
+}

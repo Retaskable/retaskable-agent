@@ -353,6 +353,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        checks: latest_checks.clone(),
         bugs: bugs.clone(),
         bug_version: bug_version.clone(),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {

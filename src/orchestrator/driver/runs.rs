@@ -10,11 +10,14 @@ use futures_util::FutureExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use super::Shared;
 use super::project::ProjectLoop;
+use super::{Links, Shared};
 use crate::backlog::Client;
-use crate::backlog::runs::{Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunWant};
+use crate::backlog::runs::{
+    Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
+};
 use crate::config::ProjectConfig;
+use crate::engines::{Role, engine_for};
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
@@ -314,6 +317,8 @@ impl ProjectLoop {
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.clone(),
+            engines: engines_here(shared.links),
+            uses: uses_here(shared.links, self.project.engines.as_ref()),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
@@ -395,5 +400,39 @@ impl ProjectLoop {
             return false;
         }
         true
+    }
+}
+
+/// The engines this computer tells the store it has: the latest setup checks' (Claude when installed and signed
+/// in, Cursor, Pi and Codex when present and passing), kept to those the Rust agent can run sessions on. Today
+/// that is Claude alone: every starter refuses another engine ("only Claude sessions run in the Rust agent yet"),
+/// so naming one would have the store hand this computer work it can't run. Empty until the checks have run.
+fn engines_here(links: &Links) -> Vec<String> {
+    let guard = links.checks.lock().unwrap();
+    let Some(c) = guard.as_ref() else { return Vec::new() };
+    let pass = |s: &Option<crate::setup_check::SetupCheck>| s.as_ref().is_some_and(|s| s.ok == Some(true));
+    let all = [
+        (
+            "claude",
+            c.claude.ok == Some(true) && c.claude_signed_in.ok == Some(true),
+        ),
+        ("cursor", c.cursor.ok == Some(true)),
+        ("pi", pass(&c.pi)),
+        ("codex", pass(&c.codex)),
+    ];
+    all.into_iter()
+        .filter(|(id, ok)| *ok && *id == "claude")
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// The engine each kind's role runs on here.
+fn uses_here(links: &Links, project_engines: Option<&Value>) -> RunTakeUses {
+    let on = |role| engine_for(&links.engine_choice, project_engines, role, None).to_string();
+    RunTakeUses {
+        plan: on(Role::Planner),
+        build: on(Role::Implementer),
+        fix: on(Role::Implementer),
+        look: on(Role::Triager),
     }
 }
