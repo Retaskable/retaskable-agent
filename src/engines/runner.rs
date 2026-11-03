@@ -97,6 +97,20 @@ struct SpawnSpec<'a> {
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 }
 
+/// The session's process couldn't be spawned (for example while Claude Code is updating): the error
+/// `spawn_and_read` fails with, so the orchestrator loop can tell this computer's own failure to start from a
+/// session that ran (`orchestrator::session`'s `downcast_ref`).
+#[derive(Debug)]
+pub struct CouldntStart(pub String);
+
+impl std::fmt::Display for CouldntStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CouldntStart {}
+
 /// What a silent session's own `SessionResult` says, once the watchdog has killed it
 /// (07-orchestrator-loop.md's "a session that prints nothing ... is killed"). Reusing the
 /// existing `SessionResult::Failed` path (via `classify`), this is handed back to the project's
@@ -158,7 +172,7 @@ async fn spawn_and_read(
     ProcessTree::prepare(&mut command);
     let mut child = command
         .spawn()
-        .with_context(|| format!("starting {}", spec.bin.display()))?;
+        .map_err(|e| anyhow::Error::new(CouldntStart(format!("starting {}: {e}", spec.bin.display()))))?;
     let tree = ProcessTree::join(&child).context("putting the session in its own process tree")?;
     if let Some(tx) = spec.tree_tx {
         let _ = tx.send(tree.clone());

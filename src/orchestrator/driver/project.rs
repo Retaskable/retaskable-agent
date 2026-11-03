@@ -258,6 +258,8 @@ pub struct ProjectLoop {
     pub(super) to_resume: Vec<String>,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
+    /// Own failures before any work handed back in a row, by item (`own-failure-handling`); kept in the state file.
+    pub(super) own_failures: BTreeMap<String, u32>,
     /// The item the store handed out for each lease held, by id, for the session that starts on it.
     pub(super) items: BTreeMap<String, Item>,
     /// Where this project's sessions report their end; replaced with the machine's by [`super::Machine::add`].
@@ -348,6 +350,7 @@ impl ProjectLoop {
             records: store.runs(),
             to_resume: Vec::new(),
             silenced: BTreeMap::new(),
+            own_failures: store.own_failures(),
             items: BTreeMap::new(),
             outcomes: super::OutcomeSender(mpsc::unbounded_channel().0),
             store,
@@ -525,6 +528,7 @@ impl ProjectLoop {
         self.store.set_unreleased(&self.unreleased);
         self.store.set_unskipped(&self.unskipped);
         self.store.set_unparked(&self.unparked);
+        self.store.set_own_failures(&self.own_failures);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {
@@ -604,6 +608,7 @@ impl ProjectLoop {
             self.remember(&id, lane, session, record.impl_context_tokens);
             if let Some(saved) = self.records.get_mut(&id) {
                 saved.silence_kills = record.silence_kills;
+                saved.start_failures = record.start_failures;
             }
         }
         self.save_leases();
