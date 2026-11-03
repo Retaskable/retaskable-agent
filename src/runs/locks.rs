@@ -87,3 +87,85 @@ impl RunLocks {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verdicts(pairs: &[(&str, BeatVerdict)]) -> HashMap<String, BeatVerdict> {
+        pairs.iter().map(|(t, v)| (t.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn lock_ceiling_is_an_hour_for_merge_locks_and_six_otherwise() {
+        assert_eq!(lock_ceiling("merge-main"), Duration::from_secs(3600));
+        assert_eq!(lock_ceiling("lane-1"), Duration::from_secs(6 * 3600));
+        assert_eq!(lock_ceiling("a-merge-x"), Duration::from_secs(6 * 3600));
+    }
+
+    #[test]
+    fn add_then_remove_tracks_tokens_and_count() {
+        let locks = RunLocks::default();
+        let now = Instant::now();
+        locks.add("t1", "merge-main", now);
+        locks.add("t2", "other", now);
+        assert_eq!(locks.count(), 2);
+        assert_eq!(locks.tokens(), vec!["t1".to_string(), "t2".to_string()]);
+        assert!(locks.held("t1"));
+        locks.remove("t1");
+        assert!(!locks.held("t1"));
+        assert_eq!(locks.tokens(), vec!["t2".to_string()]);
+    }
+
+    #[test]
+    fn an_unknown_token_is_not_held() {
+        assert!(!RunLocks::default().held("nope"));
+    }
+
+    #[test]
+    fn a_stop_verdict_marks_only_that_lock_lost() {
+        let locks = RunLocks::default();
+        let now = Instant::now();
+        locks.add("t1", "a", now);
+        locks.add("t2", "b", now);
+        locks.apply_beat(&verdicts(&[("t1", BeatVerdict::Stop), ("t2", BeatVerdict::Ok)]));
+        assert!(!locks.held("t1"));
+        assert!(locks.held("t2"));
+        assert_eq!(locks.tokens(), vec!["t2".to_string()]);
+        assert_eq!(locks.count(), 1);
+    }
+
+    #[test]
+    fn a_lost_lock_stays_lost_after_a_later_ok_verdict() {
+        let locks = RunLocks::default();
+        locks.add("t1", "a", Instant::now());
+        locks.apply_beat(&verdicts(&[("t1", BeatVerdict::Stop)]));
+        locks.apply_beat(&verdicts(&[("t1", BeatVerdict::Ok)]));
+        assert!(!locks.held("t1"));
+    }
+
+    #[test]
+    fn mark_past_ceilings_uses_each_locks_own_ceiling_less_the_margin() {
+        let locks = RunLocks::default();
+        let t0 = Instant::now();
+        locks.add("merge", "merge-main", t0);
+        locks.add("long", "other", t0);
+        let just_before = t0 + Duration::from_secs(3600) - CEILING_MARGIN - Duration::from_secs(1);
+        locks.mark_past_ceilings(just_before);
+        assert!(locks.held("merge"));
+        locks.mark_past_ceilings(t0 + Duration::from_secs(3600) - CEILING_MARGIN);
+        assert!(!locks.held("merge"));
+        assert!(locks.held("long"));
+        locks.mark_past_ceilings(t0 + Duration::from_secs(6 * 3600) - CEILING_MARGIN);
+        assert!(!locks.held("long"));
+    }
+
+    #[test]
+    fn clones_share_one_table() {
+        let a = RunLocks::default();
+        let b = a.clone();
+        a.add("t", "x", Instant::now());
+        assert!(b.held("t"));
+        assert_eq!(format!("{b:?}"), "RunLocks(1 held)");
+    }
+}
