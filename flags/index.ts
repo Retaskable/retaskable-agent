@@ -24,6 +24,3 @@ export const askClaude = (): boolean => flags.on("ask-claude");
 
 /** The `triage-session` flag: a session looks at stuck work and suggests what to do next. Off until there is an answer. */
 export const triageSession = (): boolean => flags.on("triage-session");
-
-/** The `triage-session` flag: a session looks into a stopped item and leaves what it found. Off until there is an answer. */
-export const triageSession = (): boolean => flags.on("triage-session");

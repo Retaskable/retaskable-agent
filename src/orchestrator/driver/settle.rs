@@ -286,7 +286,10 @@ impl ProjectLoop {
                     item: Some(item.to_string()),
                     from: Some(state_name(from).into()),
                     to: Some(state_name(to).into()),
-                    claude_on_it: (to == ItemState::NeedsHuman).then(|| self.claude_on_it(item)),
+                    claude_on_it: (to == ItemState::NeedsHuman
+                        && self.triage_flag
+                        && self.project.triage == crate::config::OnOff::On)
+                        .then(|| self.claude_on_it(item)),
                     ..Default::default()
                 }),
             );

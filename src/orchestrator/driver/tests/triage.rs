@@ -254,5 +254,5 @@ async fn with_the_triage_session_flag_off_nothing_looks_and_no_event_carries_cla
         rig.machine.pass().await;
     }
     assert_eq!(looks(&fake), 0);
-    assert!(on_it_events(&mut rig).iter().all(|v| *v == Some(false)));
+    assert!(on_it_events(&mut rig).is_empty());
 }
