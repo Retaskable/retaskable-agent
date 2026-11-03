@@ -14,6 +14,22 @@ pub struct Playtest {
     pub steps: Vec<String>,
 }
 
+/// The `questions` property of a result schema, shared with the reviewer's.
+pub fn questions_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "header": { "type": "string" },
+                "question": { "type": "string" },
+                "options": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["question", "options"]
+        }
+    })
+}
+
 /// One entry of `questions` (schemas.ts): a short, self-contained question with suggested options.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Question {
@@ -80,18 +96,7 @@ pub fn implementer_result_schema() -> Value {
                 },
                 "required": ["what", "steps"]
             },
-            "questions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "header": { "type": "string" },
-                        "question": { "type": "string" },
-                        "options": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["question", "options"]
-                }
-            }
+            "questions": questions_schema()
         },
         "required": ["status", "summary"]
     })

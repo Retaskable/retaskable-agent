@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::implementer::{Playtest, Question};
+use crate::implementer::{Playtest, Question, questions_schema};
 
 /// One problem the reviewer is noting on the PR (`comments`): the confirmed findings, or anything
 /// else worth knowing on an `approve`. `file`/`line` are optional — a comment can be general.
@@ -79,18 +79,7 @@ pub fn reviewer_result_schema() -> Value {
                     "required": ["scout", "file", "line", "reason"]
                 }
             },
-            "questions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "header": { "type": "string" },
-                        "question": { "type": "string" },
-                        "options": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["question", "options"]
-                }
-            },
+            "questions": questions_schema(),
             "playtest": {
                 "type": "object",
                 "properties": {
