@@ -103,6 +103,15 @@ pub struct Store {
     data: Map<String, Value>,
 }
 
+/// Counts every saved trial record, across projects, so the cloud link can look again at its own project's.
+static TRIAL_CHANGED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
+
+/// Subscribes to saved trial records (`Store::set_trial`); the value only counts them.
+pub fn subscribe_trial_changes() -> tokio::sync::watch::Receiver<u64> {
+    TRIAL_CHANGED.subscribe()
+}
+
 impl Store {
     /// Loads `<dir>/state.json` (empty when there's none yet), trims any legacy item and draft
     /// records (local-state-diet.md section 3), and saves at once if that dropped anything,
@@ -247,7 +256,9 @@ impl Store {
     /// Replaces `state.trialPlan` and saves at once, so a restart sees it before the session starts.
     pub fn set_trial(&mut self, record: TrialRecord) -> Result<()> {
         self.data.insert("trialPlan".to_string(), serde_json::json!(record));
-        self.save()
+        self.save()?;
+        TRIAL_CHANGED.send_modify(|n| *n += 1);
+        Ok(())
     }
 
     /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses

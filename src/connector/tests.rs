@@ -343,6 +343,27 @@ async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
 }
 
 #[tokio::test]
+async fn the_snapshot_is_sent_again_when_the_trial_record_changes() {
+    let project = "connector-trial-resend";
+    let (dir, c, mut first) = gallery_resend_setup(project).await;
+
+    let mut store = crate::store::Store::load(&crate::paths::project_dir(dir.path(), project)).unwrap();
+    store
+        .set_trial(crate::trial_plan::TrialRecord::opened("https://x/pr/1"))
+        .unwrap();
+    let mut again = read(&mut first).await;
+    while again["type"] == "alive" {
+        again = read(&mut first).await;
+    }
+    assert_eq!(again["type"], "snapshot");
+    assert_eq!(
+        again["state"]["trial"],
+        json!({ "state": "open", "prUrl": "https://x/pr/1" })
+    );
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn a_status_change_still_arrives_when_another_projects_changes_right_after() {
     // Two project ids of their own, as above: this test means to prove that a change on
     // `other`, landing right after this project's own change, doesn't make the connector miss
