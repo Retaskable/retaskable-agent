@@ -76,6 +76,14 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
     run(cmd, None, "git push").map(|_| ())
 }
 
+/// `gh pr close <pr> --delete-branch`, run in the project's checkout.
+pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir)
+        .args(["pr", "close", &pr.to_string(), "--delete-branch"]);
+    run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
+}
+
 /// Rebases the draft's branch (checked out in `dir`) onto `origin/<base>`, and force-pushes it with lease.
 /// False, with nothing changed, when the rebase conflicts.
 pub fn rebase(git: &Path, dir: &Path, branch: &str, base: &str) -> Result<bool> {
