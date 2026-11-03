@@ -4,7 +4,7 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **Continue** and **Start over** (`retry`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
+//! So far this runs **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
 //! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
@@ -111,6 +111,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
+        "skip" => skip(cmd, project, view),
         "play" | "stop" => play(cmd, project, view),
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
@@ -210,6 +211,26 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         ItemCommand::StartOver { project, item, notes }
     } else {
         ItemCommand::Continue { project, item, notes }
+    });
+    ack(&cmd.id)
+}
+
+/// **Skip** (`skip { id }`): queued for the orchestrator loop, which lets the item go and skips it in the store
+/// (`orchestrator::driver::item_commands`). Refused outside `claim` mode, like Continue.
+fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    if id.is_empty() {
+        return nack(&cmd.id, "Skip needs the item's id.".into());
+    }
+    if !view.item_commands.claim() {
+        return nack(
+            &cmd.id,
+            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
+        );
+    }
+    view.item_commands.push(ItemCommand::Skip {
+        project: project.to_string(),
+        item: id.to_string(),
     });
     ack(&cmd.id)
 }

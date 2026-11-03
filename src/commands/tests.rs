@@ -568,3 +568,22 @@ fn approve_and_merge_into_main_are_queued_for_the_loop() {
 fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {
     run(c, "one", &mut Seen::default(), v, exit, &data_dir())
 }
+
+#[test]
+fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
+    let v = claiming();
+    let go = |v: &AgentView, args| run(&cmd("skip", args), "one", &mut Seen::default(), v, &|_| {}, &data_dir());
+    assert_eq!(go(&v, json!({ "id": " a " }))["type"], "ack");
+    assert_eq!(
+        v.item_commands.take("one"),
+        vec![ItemCommand::Skip {
+            project: "one".into(),
+            item: "a".into()
+        }]
+    );
+    let no_id = go(&v, json!({}));
+    assert_eq!(no_id["type"], "nack");
+    assert!(no_id["reason"].as_str().unwrap().contains("Skip"));
+    assert!(v.item_commands.take("one").is_empty());
+    assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
+}
