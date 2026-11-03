@@ -359,6 +359,10 @@ pub(crate) fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
 }
 
 fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
+    fetch_with(&crate::git_bin::command, repo_path, unless_fresh)
+}
+
+fn fetch_with(git: &dyn Fn(&Path) -> Command, repo_path: &Path, unless_fresh: bool) -> Result<bool> {
     let key = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     if unless_fresh {
         let map = lock(&FETCHED_AT);
@@ -378,8 +382,13 @@ fn fetch(repo_path: &Path, unless_fresh: bool) -> Result<bool> {
 /// [`FRESH_FETCH`]: the locked, deduped fetch every caller outside this module needs before
 /// reading `origin/*` (docs/specs/agent/06.3-review.md's post-merge smoke is the first of those).
 pub(crate) fn fetch_latest(repo_path: &Path) -> Result<bool> {
+    fetch_latest_with(&crate::git_bin::command, repo_path)
+}
+
+/// [`fetch_latest`] starting git with `git` (a test passes plain `git`).
+pub(crate) fn fetch_latest_with(git: &dyn Fn(&Path) -> Command, repo_path: &Path) -> Result<bool> {
     let _guard = lock(&GIT_LOCK);
-    fetch(repo_path, true)
+    fetch_with(git, repo_path, true)
 }
 
 fn is_worktree(path: &Path) -> bool {
