@@ -1,5 +1,7 @@
 //! How sessions and steps that ended settle their item's lane and lease (`driver/settle.rs`).
 use super::*;
+use crate::orchestrator::steps::state_name;
+use crate::telemetry::{Event, event};
 use crate::orchestrator::driver::machine::poll_period;
 
 fn done(result: ImplementerOutcome) -> SessionResult {
@@ -447,7 +449,23 @@ async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_reco
         ("first problem", "implementing")
     );
     assert_eq!(ctx.automatic_decisions, 1);
-    assert!(ctx.timeline.iter().any(|n| n == "first problem") || ctx.timeline.is_empty());
+    assert!(
+        ctx.timeline.is_empty(),
+        "no noted item_state event yet: {:?}",
+        ctx.timeline
+    );
+    for note in ["older", "newer"] {
+        lp.events.add_in(
+            "p0",
+            Event::ItemState(event::ItemState {
+                item: Some("a".into()),
+                note: Some(note.into()),
+                ..Default::default()
+            }),
+        );
+    }
+    let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
+    assert_eq!(ctx.timeline, ["newer", "older"], "newest first");
 }
 
 #[tokio::test]
@@ -481,4 +499,35 @@ async fn a_run_that_needs_a_person_saves_its_stop_and_a_second_stop_clears_the_f
     );
     r.new_stop("merging", "Merge failed again", slice + 1);
     assert_eq!(r.triages, None);
+}
+
+#[tokio::test]
+async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
+    for (from, to_reason) in [
+        (ItemState::Checking, "The checks kept failing"),
+        (ItemState::Reviewing, "The review escalated"),
+        (ItemState::Merging, "The merge failed"),
+    ] {
+        let (mut rig, fake, _asked) = ended(done(ImplementerOutcome::Finished), &Default::default()).await;
+        rig.lp(0).events.add_in(
+            "p0",
+            Event::ItemState(event::ItemState {
+                item: Some("a".into()),
+                note: Some("an implementer progress note".into()),
+                ..Default::default()
+            }),
+        );
+        rig.lp(0).runs.get_mut("a").unwrap().state = from;
+        *fake.to.lock().unwrap() = Some(ItemState::NeedsHuman);
+        rig.machine.poll().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        rig.machine.poll().await;
+        let r = &rig.lp(0).records["a"];
+        assert_eq!(r.state, "needs_human", "{from:?}");
+        assert!(
+            r.needs_human_reason.as_deref().unwrap().starts_with(to_reason),
+            "{from:?}: {r:?}"
+        );
+        assert_eq!(r.failed_in.as_deref(), Some(state_name(from)));
+    }
 }
