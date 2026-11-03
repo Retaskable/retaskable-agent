@@ -24,6 +24,8 @@ pub const KILL_LIMIT: Duration = Duration::from_secs(5);
 /// [`kill_and_wait`]: ProcessTree::kill_and_wait
 pub struct ProcessTree {
     cut: AtomicBool,
+    /// The process has exited and been waited for, so its group id may be reused: never signal it.
+    done: AtomicBool,
     group: platform::Group,
     pid: u32,
 }
@@ -111,6 +113,7 @@ impl ProcessTree {
         let group = platform::Group::join(child)?;
         let tree = Arc::new(Self {
             cut: AtomicBool::new(false),
+            done: AtomicBool::new(false),
             group,
             pid,
         });
@@ -139,6 +142,7 @@ impl ProcessTree {
     pub fn join_sync(child: &std::process::Child) -> Result<Self> {
         Ok(Self {
             cut: AtomicBool::new(false),
+            done: AtomicBool::new(false),
             group: platform::Group::join_sync(child)?,
             pid: child.id(),
         })
@@ -152,6 +156,11 @@ impl ProcessTree {
         self.cut.store(true, Ordering::SeqCst);
     }
 
+    /// Records that the tree's process has exited and been reaped, so a later kill leaves it alone.
+    pub fn finished(&self) {
+        self.done.store(true, Ordering::SeqCst);
+    }
+
     /// Whether [`cut`] has been called on this tree.
     ///
     /// [`cut`]: ProcessTree::cut
@@ -162,6 +171,9 @@ impl ProcessTree {
     /// Kills everything in the tree and waits for it to be gone, up to `limit`. Returns whether
     /// it went within that time.
     pub fn kill_and_wait(&self, limit: Duration) -> bool {
+        if self.done.load(Ordering::SeqCst) {
+            return true;
+        }
         self.group.kill_and_wait(limit)
     }
 }

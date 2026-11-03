@@ -125,6 +125,8 @@ impl Runs {
     pub fn add_process(&mut self, token: &str, tree: Arc<ProcessTree>) -> bool {
         match self.live.iter_mut().find(|r| r.token == token) {
             Some(run) => {
+                // A tree whose worker let go of it has finished: cutting it later would signal a gone process group.
+                run.processes.retain(|t| Arc::strong_count(t) > 1);
                 run.processes.push(tree);
                 true
             }
