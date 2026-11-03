@@ -137,8 +137,8 @@ async fn a_build_run_opens_the_change_and_ends_pr_opened() {
     assert_eq!(files.count(), 1);
 }
 
-#[tokio::test]
-async fn a_fix_run_starts_from_the_pushed_branch() {
+/// A run of `kind` for a piece whose branch is already pushed: it carries on from that branch.
+async fn carries_on_from_the_pushed_branch(kind: RunKind) {
     let r = rig(
         &[
             "test -f pushed.rs && echo 'fn b() {}' > more.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm more",
@@ -165,7 +165,7 @@ async fn a_fix_run_starts_from_the_pushed_branch() {
     let mut p = piece();
     p["branch"] = json!("pushed-branch");
     p["next"] = json!({ "what": "Fix the red check." });
-    let (req, mut s) = request(&r, RunKind::Fix, p);
+    let (req, mut s) = request(&r, kind, p);
     r.starter.start(req).unwrap();
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened, "{:?}", end.result);
@@ -183,48 +183,13 @@ async fn a_fix_run_starts_from_the_pushed_branch() {
 }
 
 #[tokio::test]
+async fn a_fix_run_starts_from_the_pushed_branch() {
+    carries_on_from_the_pushed_branch(RunKind::Fix).await;
+}
+
+#[tokio::test]
 async fn a_build_run_for_a_piece_with_a_pushed_branch_carries_on_from_it() {
-    let r = rig(
-        &[
-            "test -f pushed.rs && echo 'fn b() {}' > more.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm more",
-        ],
-        &answer("pr_opened", ""),
-    );
-    let repo = r.root.join("repo");
-    let git = |args: &[&str]| {
-        assert!(
-            std::process::Command::new("git")
-                .current_dir(&repo)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    };
-    git(&["checkout", "-q", "-b", "pushed-branch"]);
-    std::fs::write(repo.join("pushed.rs"), "fn p() {}").unwrap();
-    git(&["add", "-A"]);
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pushed"]);
-    git(&["push", "-q", "origin", "pushed-branch"]);
-    git(&["checkout", "-q", "main"]);
-    let mut p = piece();
-    p["branch"] = json!("pushed-branch");
-    p["next"] = json!({ "what": "Fix the red check." });
-    let (req, mut s) = request(&r, RunKind::Build, p);
-    r.starter.start(req).unwrap();
-    let end = end_of(&mut s.ends).await;
-    assert_eq!(end.outcome, RunOutcome::PrOpened, "{:?}", end.result);
-    assert_eq!(end.result["branch"], "pushed-branch");
-    let tree = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(r.root.join("origin.git"))
-        .args(["ls-tree", "--name-only", "pushed-branch"])
-        .output()
-        .unwrap();
-    let tree = String::from_utf8_lossy(&tree.stdout);
-    assert!(tree.contains("pushed.rs") && tree.contains("more.rs"), "{tree}");
-    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
-    assert!(prompt.contains("Fix the red check."), "{prompt}");
+    carries_on_from_the_pushed_branch(RunKind::Build).await;
 }
 
 #[tokio::test]
