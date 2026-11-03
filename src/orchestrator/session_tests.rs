@@ -524,13 +524,13 @@ fn each_status_maps_to_what_the_ts_agent_does() {
 }
 
 #[test]
-fn a_watchdog_kill_is_an_own_failure_not_a_needs_human() {
+fn a_watchdog_kill_is_silenced_not_failed_or_needs_human() {
     let killed = Err(anyhow::Error::new(SilenceKilled(
         "ended with killed_for_silence: no output".into(),
     )));
     assert!(
-        matches!(session_result_for_answer(killed, None).0, SessionResult::Failed(_)),
-        "a session the watchdog killed should requeue, not need a person"
+        matches!(session_result_for_answer(killed, None).0, SessionResult::Silenced(_)),
+        "a session the watchdog killed is resumed, not requeued or sent to a person"
     );
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
     assert!(matches!(
@@ -549,7 +549,7 @@ fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     )));
     assert!(matches!(
         session_result_for_answer(killed, None).0,
-        SessionResult::Failed(_)
+        SessionResult::Silenced(_)
     ));
 
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
