@@ -11,7 +11,7 @@ use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
-use crate::orchestrator::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, picking_up_prompt};
+use crate::orchestrator::fresh_start::{FreshStart, picking_up_prompt};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
 
@@ -42,10 +42,6 @@ pub enum SessionResult {
     /// doesn't know — any of these may have left real work behind, so the run goes to `needs_human` instead
     /// of back to the queue, freeing its lane and keeping its lease. The text says why.
     NeedsHuman(String),
-    /// The session hit `error_max_turns` (06.2-implementer.md "at most maxTurns turns") before it finished. The
-    /// first time, a fresh session restarts in the same lane with a picking-up follow-up, keeping any uncommitted
-    /// work; a second one in a row goes to `needs_human` instead. The value is the turn cap that was hit.
-    MaxTurns(u32),
     /// Something outside the session — a restart or Quit (07.4-stopping-and-restarting.md) — cut its
     /// process tree and killed it before it answered, not the implementer giving up. The run stays
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
@@ -71,6 +67,9 @@ pub struct SessionOutcome {
     /// Lines for the item's timeline (the code gates' note, 06.2-implementer.md), logged as the session's
     /// end settles.
     pub notes: Vec<String>,
+    /// The id of the fresh session the job restarted in after running out of turns; kept on the item's record
+    /// so a later restart resumes that one.
+    pub session_id: Option<String>,
 }
 
 /// The sending end of the outcome channel: cloned into every [`StartRequest`](super::StartRequest).
@@ -264,16 +263,8 @@ impl ProjectLoop {
 
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
-    /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it. Running out
-    /// of turns restarts in the same lane the first time ([`restart_after_max_turns`](Self::restart_after_max_turns));
-    /// a second one in a row is treated like `NeedsHuman`.
-    async fn settle(
-        &mut self,
-        outcome: SessionOutcome,
-        pool: &mut LanePool,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) {
+    /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
+    async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
         let item = outcome.item_id;
         let lane = outcome.lane;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
@@ -287,6 +278,11 @@ impl ProjectLoop {
             && let Some(record) = self.records.get_mut(&item)
         {
             record.impl_context_tokens = Some(tokens);
+        }
+        if let Some(id) = outcome.session_id.clone()
+            && let Some(record) = self.records.get_mut(&item)
+        {
+            record.impl_session_id = Some(id);
         }
         if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
             self.store.set_usage(usage);
@@ -341,16 +337,6 @@ impl ProjectLoop {
                 self.moved(pool, &item, ItemState::Implementing, &note, shared.links)
                     .await;
             }
-            SessionResult::MaxTurns(max_turns) => {
-                if run.ran_out_of_turns() {
-                    let why = format!("Implementer ran out of turns ({max_turns}) twice in a row");
-                    run.escalate();
-                    self.moved(pool, &item, ItemState::Implementing, &why, shared.links)
-                        .await;
-                } else {
-                    self.restart_after_max_turns(pool, &item, lane, starter, shared).await;
-                }
-            }
         }
     }
 
@@ -370,23 +356,6 @@ impl ProjectLoop {
         );
         let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
         Launch::Continuing(picking_up_prompt(has_pr, &self.project.base_branch, follow_up))
-    }
-
-    /// Starts a fresh session in the same lane with the picking-up follow-up, bypassing the claim pipeline: the
-    /// lane and lease are already held by this item, so there's nothing to decide or claim again. Never resumes
-    /// the old session id: a session that ran out of turns gets a fresh one, as `launch` does for any other
-    /// fresh start. A starter that refuses gives the lane and lease back, exactly as a refused fresh start does
-    /// in `apply_starts`.
-    async fn restart_after_max_turns(
-        &mut self,
-        pool: &mut LanePool,
-        item_id: &str,
-        lane: u32,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) {
-        let kind = self.fresh_launch(item_id, lane, FreshStart::OutOfTurns, MAX_TURNS_FOLLOW_UP);
-        self.launch(pool, item_id, lane, kind, starter, shared).await;
     }
 
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means
@@ -453,7 +422,7 @@ impl Machine {
     }
 
     /// Settles the sessions that ended since the last wake.
-    pub(super) async fn settle_outcomes(&mut self, starter: &dyn SessionStarter) {
+    pub(super) async fn settle_outcomes(&mut self) {
         while let Ok(outcome) = self.outcomes.try_recv() {
             let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
@@ -461,7 +430,6 @@ impl Machine {
                     lp.settle(
                         outcome,
                         &mut self.pool,
-                        starter,
                         &mut Shared {
                             links: &self.links,
                             claim_paused_until: &mut self.claim_paused_until,
