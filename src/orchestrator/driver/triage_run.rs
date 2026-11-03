@@ -19,7 +19,8 @@ use crate::orchestrator::fresh_start::LIMIT_PAUSE;
 use crate::telemetry::{Event, event};
 use crate::triage::record::needs_human_facts;
 use crate::triage::schedule::{MAX_TRIAGES, claude_on_it, triage_count, wants_triage};
-use crate::triage::{RetaskableBug, TriageContext, TriageDecision};
+use crate::triage::second_look::{SecondLookResult, resolve};
+use crate::triage::{RetaskableBug, TriageButton, TriageContext, TriageDecision, TriageResult};
 
 /// Failed looks at one stop before the item waits for a person with a note.
 const MAX_FAILED_LOOKS: u32 = 3;
@@ -37,6 +38,35 @@ pub struct TriageRequest {
     pub usage: Option<Value>,
     /// Where the session reports how it ended.
     pub outcomes: OutcomeSender,
+}
+
+/// What a second-look session needs (06.9 bullet 3): the triager's request, plus its own answer.
+#[derive(Debug, Clone)]
+pub struct SecondLookRequest {
+    pub project: String,
+    pub item_id: String,
+    pub context: TriageContext,
+    pub lane: Option<u32>,
+    pub usage: Option<Value>,
+    pub outcomes: OutcomeSender,
+    pub triager_reason: String,
+    pub triager_suggest: TriageButton,
+    pub triager_instructions: String,
+}
+
+/// How a second-look session ended: its answer, or `None` when it failed or answered with nothing usable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondLookEnd {
+    pub agree: Option<(bool, String, String)>,
+}
+
+/// A triager's `human` answer waiting on its second look.
+#[derive(Debug, Clone)]
+pub(super) struct Held {
+    reason: String,
+    steps: Vec<String>,
+    instructions: String,
+    suggest: TriageButton,
 }
 
 /// Why a look failed.
@@ -61,6 +91,8 @@ pub enum TriageEnd {
         instructions: String,
         /// A bug in Retaskable itself the triager named, whatever it decided (06.9 bullet 19).
         bug: Option<RetaskableBug>,
+        /// The button a `human` answer offers first.
+        suggest: Option<TriageButton>,
     },
     Failed {
         note: String,
@@ -109,12 +141,28 @@ impl ProjectLoop {
     /// out, stopping or paused (the caller doesn't ask when paused), or the triager's engine is at its limit.
     pub(super) async fn triage_pass(
         &mut self,
-        pool: &LanePool,
+        pool: &mut LanePool,
         starter: &dyn SessionStarter,
         room: &mut u32,
-        shared: &Shared<'_>,
+        shared: &mut Shared<'_>,
     ) {
         self.bug_answers();
+        for (id, lane, held) in std::mem::take(&mut self.second_due) {
+            let (reason, steps, instructions) = (held.reason.clone(), held.steps.clone(), held.instructions.clone());
+            if !self.start_second_look(&id, lane, held, starter) {
+                self.decided(
+                    &id,
+                    TriageDecision::Human,
+                    &reason,
+                    &steps,
+                    &instructions,
+                    false,
+                    pool,
+                    shared,
+                )
+                .await;
+            }
+        }
         // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
         self.triage_flag = self.flags.on("triage-session").await;
         if !self.triage_flag
@@ -216,9 +264,23 @@ impl ProjectLoop {
                 steps,
                 instructions,
                 bug,
+                suggest,
             } => {
                 self.report_bug(item_id, bug, shared);
-                self.decided(item_id, decision, &reason, &steps, &instructions, pool, shared)
+                if let (TriageDecision::Human, Some(suggest)) = (decision, suggest)
+                    && self.records.get(item_id).is_some_and(|r| r.state == "needs_human")
+                {
+                    let held = Held {
+                        reason: reason.clone(),
+                        steps: steps.clone(),
+                        instructions: instructions.clone(),
+                        suggest,
+                    };
+                    // Started by the next `triage_pass`, which holds the starter; `claudeOnIt` stays on.
+                    self.second_due.push((item_id.to_string(), lane, held));
+                    return;
+                }
+                self.decided(item_id, decision, &reason, &steps, &instructions, false, pool, shared)
                     .await;
             }
             TriageEnd::Failed { note, why } => {
@@ -229,6 +291,93 @@ impl ProjectLoop {
                 self.look_ended(item_id, note, why);
             }
         }
+    }
+
+    /// Starts the top-tier second look at a `human` answer with a suggestion (06.9 bullet 3), keeping the item
+    /// `claudeOnIt` meanwhile. `false` when it didn't start: the answer stands as `human`.
+    fn start_second_look(&mut self, item_id: &str, lane: u32, held: Held, starter: &dyn SessionStarter) -> bool {
+        let Some(context) = self.triage_context(item_id, std::path::Path::new("")) else {
+            return false;
+        };
+        let lane = Some(lane).filter(|l| *l != 0);
+        let request = SecondLookRequest {
+            project: self.id.clone(),
+            item_id: item_id.to_string(),
+            context,
+            lane,
+            usage: self.store.usage(),
+            outcomes: self.outcomes.clone(),
+            triager_reason: held.reason.clone(),
+            triager_suggest: held.suggest,
+            triager_instructions: held.instructions.clone(),
+        };
+        self.events.add_in(
+            &self.id,
+            Event::SessionStart(event::SessionStart {
+                item: Some(item_id.to_string()),
+                lane,
+                role: Some("triager".into()),
+                ..Default::default()
+            }),
+        );
+        match starter.second_look(request) {
+            Ok(()) => {
+                self.second_looking.insert(item_id.to_string(), held);
+                true
+            }
+            Err(why) => {
+                tracing::warn!("{}: the second look at {item_id} didn't start: {why}", self.id);
+                false
+            }
+        }
+    }
+
+    /// A second look's end: folded into the triager's answer with [`resolve`] and carried out like it.
+    pub(super) async fn second_look_ended(
+        &mut self,
+        item_id: &str,
+        end: SecondLookEnd,
+        pool: &mut LanePool,
+        shared: &mut Shared<'_>,
+    ) {
+        let Some(held) = self.second_looking.remove(item_id) else {
+            return;
+        };
+        self.events.add_in(
+            &self.id,
+            Event::SessionEnd(event::SessionEnd {
+                item: Some(item_id.to_string()),
+                role: Some("triager".into()),
+                ok: Some(end.agree.is_some()),
+                ..Default::default()
+            }),
+        );
+        let triage = TriageResult {
+            decision: TriageDecision::Human,
+            person_steps: held.steps.clone(),
+            reason: held.reason,
+            instructions: held.instructions,
+            suggest: Some(held.suggest),
+            retaskable_bug: None,
+        };
+        let look = end.agree.map(|(agree, reason, instructions)| SecondLookResult {
+            agree,
+            reason,
+            instructions,
+        });
+        let r = resolve(&triage, look.as_ref());
+        let checked = r.decision != TriageDecision::Human;
+        self.decided(
+            item_id,
+            r.decision,
+            &r.reason,
+            &held.steps,
+            &r.instructions,
+            checked,
+            pool,
+            shared,
+        )
+        .await;
     }
 
     /// Carries out the triager's `decision` through the same code as the buttons (06.9 bullet 2). Continue and Start
@@ -242,6 +391,7 @@ impl ProjectLoop {
         reason: &str,
         steps: &[String],
         instructions: &str,
+        checked: bool,
         pool: &mut LanePool,
         shared: &mut Shared<'_>,
     ) {
@@ -292,7 +442,13 @@ impl ProjectLoop {
             _ => {}
         }
         self.save_leases();
-        self.look_note(item_id, format!("Claude decided to {verb}: {reason}"));
+        // After a second look, `reason` already reads "Claude decided to …, checked with a second look: …".
+        let line = if checked {
+            reason.to_string()
+        } else {
+            format!("Claude decided to {verb}: {reason}")
+        };
+        self.look_note(item_id, line);
         if decision == TriageDecision::Skip {
             self.skip_stopped(pool, item_id, true, shared).await;
         }
