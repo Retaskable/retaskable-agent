@@ -98,8 +98,10 @@ impl ProjectLoop {
         view: &AgentView,
         shared: &Shared<'_>,
     ) {
+        let on = self.flags.on("ask-claude").await;
+        shared.links.item_commands.set_ask_on(&self.id, on);
         let queued = shared.links.item_commands.take_asks(&self.id);
-        if !self.flags.on("ask-claude").await {
+        if !on {
             return; // Off is today's behaviour: no assistant, so the asks are not taken.
         }
         self.asking.waiting.extend(queued.into_iter().map(|a| (a, false)));
@@ -154,6 +156,10 @@ impl ProjectLoop {
                 };
                 if let Err(e) = client.ask_report(repo, Some(&token), &ask.id, &report).await {
                     tracing::warn!("{project}: an answer didn't reach the store: {e}");
+                    // Retry once so a blip doesn't leave the ask waiting forever.
+                    if let Err(e) = client.ask_report(repo, Some(&token), &ask.id, &report).await {
+                        tracing::error!("{project}: an answer was lost, the ask stays waiting: {e}");
+                    }
                 }
             }));
         }

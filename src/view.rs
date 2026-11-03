@@ -116,6 +116,7 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     asks: Arc<std::sync::Mutex<Vec<Ask>>>,
+    ask_on: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl PartialEq for ItemCommands {
@@ -140,6 +141,20 @@ impl ItemCommands {
 
     pub fn push_draft(&self, command: DraftCommand) {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Set by the loop each pass: whether the `ask-claude` flag is On for `project`.
+    pub fn set_ask_on(&self, project: &str, on: bool) {
+        let mut set = self.ask_on.lock().unwrap_or_else(|e| e.into_inner());
+        if on {
+            set.insert(project.to_string());
+        } else {
+            set.remove(project);
+        }
+    }
+
+    pub fn ask_on(&self, project: &str) -> bool {
+        self.ask_on.lock().unwrap_or_else(|e| e.into_inner()).contains(project)
     }
 
     pub fn push_ask(&self, ask: Ask) {

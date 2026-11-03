@@ -215,8 +215,11 @@ fn images_block(paths: &[std::path::PathBuf]) -> String {
 
 /// `ask { askId, text, replyTo?, about?, images? }` (cloud.md section 6; agent/06.6-ask-claude.md): a message in the
 /// chat, saved with its pictures as Continue's are and queued for the orchestrator loop, which answers it with
-/// `ask_report`. Acked once queued; refused outside `claim` mode.
+/// `ask_report`. Acked once queued; refused outside `claim` mode, and while the `ask-claude` flag is Off.
 fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    if !view.item_commands.ask_on(project) {
+        return nack(&cmd.id, "Not a command this agent takes yet: ask".into());
+    }
     let text_arg = |k: &str| match cmd.args.get(k) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),

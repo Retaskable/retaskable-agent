@@ -588,13 +588,19 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
 }
 
+fn asking() -> AgentView {
+    let v = claiming();
+    v.item_commands.set_ask_on("one", true);
+    v
+}
+
 fn ask_it(v: &AgentView, args: Value, dir: &Path) -> Value {
     run(&cmd("ask", args), "one", &mut Seen::default(), v, &|_| {}, dir)
 }
 
 #[test]
 fn an_ask_is_queued_with_its_thread_and_where_it_was_asked() {
-    let v = claiming();
+    let v = asking();
     let answer = ask_it(
         &v,
         json!({ "askId": "a1", "text": " why is step 5 stuck? ", "replyTo": "a0", "about": "item-3" }),
@@ -615,7 +621,7 @@ fn an_ask_is_queued_with_its_thread_and_where_it_was_asked() {
 
 #[test]
 fn an_ask_needs_its_id_and_text_and_claim_mode() {
-    let v = claiming();
+    let v = asking();
     for (args, word) in [
         (json!({ "text": "hi" }), "askId"),
         (json!({ "askId": "a" }), "text"),
@@ -629,13 +635,26 @@ fn an_ask_needs_its_id_and_text_and_claim_mode() {
     }
     assert!(v.item_commands.take_asks("one").is_empty());
     let off = view();
+    off.item_commands.set_ask_on("one", true);
     let answer = ask_it(&off, json!({ "askId": "a", "text": "hi" }), &data_dir());
     assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
 }
 
 #[test]
-fn an_asks_images_are_saved_and_listed_in_an_attached_images_block() {
+fn an_ask_is_refused_while_the_flag_is_off() {
     let v = claiming();
+    let dir = tempfile::tempdir().unwrap();
+    let args = json!({ "askId": "a", "text": "hi", "images": [{ "name": "a.png", "data": "aGk=" }] });
+    let answer = ask_it(&v, args, dir.path());
+    assert_eq!(answer["type"], "nack");
+    assert_eq!(answer["reason"], "Not a command this agent takes yet: ask");
+    assert!(v.item_commands.take_asks("one").is_empty());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn an_asks_images_are_saved_and_listed_in_an_attached_images_block() {
+    let v = asking();
     let dir = tempfile::tempdir().unwrap();
     let answer = ask_it(
         &v,
