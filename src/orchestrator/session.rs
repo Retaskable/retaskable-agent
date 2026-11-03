@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-use super::driver::{SessionOutcome, SessionResult, SessionStarter, StartRequest};
+use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
@@ -25,6 +25,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
+use crate::implementer::abandon::abandon;
 use crate::implementer::{
     ImplementerResult, Interrupted, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
     run_implementer, session_spec,
@@ -102,6 +103,8 @@ impl SessionStarter for ClaudeStarter {
             resume,
             follow_up,
             items,
+            attempt,
+            notes,
             ..
         } = request;
         let job = Job {
@@ -122,6 +125,8 @@ impl SessionStarter for ClaudeStarter {
             resume,
             follow_up,
             items,
+            attempt,
+            notes,
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -174,6 +179,33 @@ impl SessionStarter for ClaudeStarter {
         self.running.load(Ordering::SeqCst)
     }
 
+    fn abandon(&self, old: Abandon) -> BoxFuture<'static, Result<(), String>> {
+        let repo = self
+            .projects
+            .iter()
+            .find(|p| p.id_or_derived() == old.project)
+            .map(|p| PathBuf::from(&p.repo_path));
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        Box::pin(async move {
+            let repo = repo.ok_or_else(|| format!("no project {} is configured", old.project))?;
+            tokio::task::spawn_blocking(move || {
+                abandon(
+                    crate::git_bin::program(),
+                    &gh,
+                    &repo,
+                    old.branch.as_deref(),
+                    old.pr_url.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("{e:#}"))
+        })
+    }
+
     /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
     fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
         None
@@ -214,6 +246,9 @@ struct Job {
     /// Every item in the project's backlog; the unbuilt ones are listed in a fresh prompt, and a `waits_on`
     /// result is checked against them.
     items: Vec<Item>,
+    /// Start over's attempt (the branch's `-r<attempt>`), and its notes for a fresh session's first prompt.
+    attempt: u32,
+    notes: Option<String>,
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
@@ -224,8 +259,9 @@ pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
 const INTERRUPTED: &str = "You were interrupted. Continue from where you left off, then return the result.";
 
-/// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`.
-pub(super) fn branch_name(item: &Item) -> String {
+/// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
+/// slice over.
+pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
     let slug: String = item
         .title
         .to_lowercase()
@@ -236,7 +272,17 @@ pub(super) fn branch_name(item: &Item) -> String {
         .chars()
         .take(40)
         .collect();
-    format!("retaskable/{}-{}-s{}", item.id, slug.trim_end_matches('-'), item.slice)
+    let retry = if attempt > 0 {
+        format!("-r{attempt}")
+    } else {
+        String::new()
+    };
+    format!(
+        "retaskable/{}-{}-s{}{retry}",
+        item.id,
+        slug.trim_end_matches('-'),
+        item.slice
+    )
 }
 
 /// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at
@@ -263,13 +309,15 @@ async fn attempt(
         usage,
         models,
         items,
+        notes,
+        attempt: attempt_no,
         ..
     } = job;
     let session_id = &sid.to_string();
     let now = crate::telemetry::now_ms() / 1000;
     let tier = implementer_tier(usage.as_ref(), now, models);
     let model = implementer_model(tier, item).to_string();
-    let branch = branch_name(item);
+    let branch = branch_name(item, *attempt_no);
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let mut spec = session_spec(
         &Session {
@@ -282,6 +330,7 @@ async fn attempt(
             checks: &project.checks,
             code_gates: project.code_gates,
             where_to_start,
+            notes: notes.as_deref(),
             items,
             cwd,
             model,
@@ -361,7 +410,11 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
                 PathBuf::from(&job.project.repo_path),
                 PathBuf::from(&job.project.worktrees_dir),
             );
-            let (base, branch, lane) = (job.project.base_branch.clone(), branch_name(&job.item), job.lane);
+            let (base, branch, lane) = (
+                job.project.base_branch.clone(),
+                branch_name(&job.item, job.attempt),
+                job.lane,
+            );
             tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base))
                 .await
                 .context("preparing the lane")?
@@ -465,7 +518,7 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
         let (gh, dir, branch, base) = (
             job.gh.clone(),
             cwd.to_path_buf(),
-            branch_name(&job.item),
+            branch_name(&job.item, job.attempt),
             job.project.base_branch.clone(),
         );
         let published = tokio::task::spawn_blocking(move || {

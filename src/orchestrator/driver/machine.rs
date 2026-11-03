@@ -153,6 +153,8 @@ pub struct Machine {
     pub(super) links: Links,
     /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
+    /// Runs spec drafts. With none, no draft is claimed.
+    pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
     pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
@@ -181,6 +183,7 @@ impl Machine {
             last_served: None,
             links,
             starter: None,
+            drafts: None,
             run_starters: RunStarters::default(),
             concurrency,
             outcomes,
@@ -354,6 +357,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode claim and run spec drafts.
+    pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
+        self.drafts = Some(host);
+        self
+    }
+
     pub fn add(&mut self, mut project: ProjectLoop) {
         project.outcomes = self.outcome_sender.clone();
         self.projects.push(project);
@@ -486,6 +495,30 @@ impl Machine {
             }
         }
         let mut slots = (self.concurrency).saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
+        // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
+        if let (Some(host), Some(_)) = (self.drafts.clone(), starter.as_ref()) {
+            slots = slots.saturating_sub(
+                self.projects
+                    .iter_mut()
+                    .filter_map(|lp| lp.drafting().then_some(()))
+                    .count() as u32,
+            );
+            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
+                if live && !paused {
+                    let shared = Shared {
+                        links: &self.links,
+                        claim_paused_until: &mut self.claim_paused_until,
+                        claude_signed_out_until: &mut self.claude_signed_out_until,
+                        stopping,
+                    };
+                    lp.draft_pass(&mut slots, &host, &shared).await;
+                }
+                if live {
+                    let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
+                    lp.live.set_drafting(&lp.id, drafting);
+                }
+            }
+        }
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))
             .map(|((lp, &ready), &paused)| {
                 ready.then(|| Candidate {
@@ -595,6 +628,8 @@ pub struct SpawnArgs<'a> {
     pub tags: Vec<String>,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
+    /// Runs spec drafts in `claim` mode. None claims no draft.
+    pub drafts: Option<Arc<dyn super::DraftHost>>,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
@@ -639,6 +674,9 @@ pub fn spawn_all(args: SpawnArgs) {
     }
     if let Some(starter) = args.starter {
         machine = machine.with_starter(starter);
+        if let Some(drafts) = args.drafts {
+            machine = machine.with_drafts(drafts);
+        }
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");
     }
