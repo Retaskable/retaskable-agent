@@ -13,7 +13,7 @@ use regex::{Match, Regex, RegexBuilder};
 
 use crate::config::ProjectConfig;
 use crate::link::machine_name;
-use crate::text::truncate;
+use crate::text::{collapse_whitespace, truncate};
 
 use super::{KnownBug, RetaskableBug};
 
@@ -214,23 +214,6 @@ pub fn scrub(text: &str, words: &[ScrubWord], max: Option<usize>) -> String {
 
 fn is_slashed(s: &str) -> bool {
     s.contains('\\') || s.contains('/')
-}
-
-fn collapse_whitespace(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_was_space = false;
-    for c in s.chars() {
-        if c.is_whitespace() {
-            if !last_was_space {
-                out.push(' ');
-            }
-            last_was_space = true;
-        } else {
-            out.push(c);
-            last_was_space = false;
-        }
-    }
-    out
 }
 
 /// Quoted text, replaced with `"…"` unless it holds a `{{name}}` placeholder: a single quote

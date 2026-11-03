@@ -15,6 +15,7 @@ use regex::Regex;
 
 use crate::config::CodeGates;
 use crate::lanes;
+use crate::text::collapse_whitespace;
 
 /// Where a spec too big for [`CodeGates::max_spec_chars`] gets split into (docs/specs section
 /// 6.10); this agent has no shared constant for it yet, unlike Retaskable.com's `specsDir.ts`.
@@ -346,23 +347,6 @@ pub struct Copy {
 struct MeaningfulLine {
     line: u32,
     key: String,
-}
-
-fn collapse_whitespace(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_was_space = false;
-    for c in s.chars() {
-        if c.is_whitespace() {
-            if !last_was_space {
-                out.push(' ');
-            }
-            last_was_space = true;
-        } else {
-            out.push(c);
-            last_was_space = false;
-        }
-    }
-    out
 }
 
 /// The lines that say something, normalised: blank lines, braces, comments and imports are left
