@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
+use super::bug_link::BugOutcome;
 use super::*;
 use crate::config::GalleryConfig;
 use crate::lane_pool::LaneSizes;
@@ -652,5 +653,122 @@ async fn work_available_wakes_the_projects_loop_and_is_not_answered() {
         .await
         .unwrap();
     assert_eq!(read(&mut a).await["id"], "c1");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+/// A connected project's bug link, with the hub's hello and snapshot read.
+async fn bug_hub() -> (Connector, Accepted, Arc<BugLink>, tempfile::TempDir) {
+    let (c, a, dir) = connected_project(noop_exit()).await;
+    let link = c.bug_link("one").unwrap();
+    (c, a, link, dir)
+}
+
+fn bug(same_as: Option<&str>) -> crate::triage::bug_report::BugReportMessage {
+    crate::triage::bug_report::BugReportMessage {
+        signature: "sig".into(),
+        title: "A title".into(),
+        details: "Details".into(),
+        same_as: same_as.map(str::to_string),
+    }
+}
+
+async fn said(a: &mut Accepted, msg: Value) {
+    a.ws.send(Message::text(msg.to_string())).await.unwrap();
+}
+
+async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never: {what}");
+}
+
+#[tokio::test]
+async fn bug_consent_is_off_until_said_on_and_off_again_when_the_connection_closes() {
+    let (c, mut a, link, _dir) = bug_hub().await;
+    assert!(!link.consent());
+    said(
+        &mut a,
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+    )
+    .await;
+    until("on", || link.consent()).await;
+    assert_eq!(link.known()[0].id, "b1");
+    close(&mut a, 1000).await;
+    until("off", || !link.consent()).await;
+    assert!(link.known().is_empty());
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_bug_sent_while_on_is_answered_by_its_ref_and_same_as_must_be_listed() {
+    let (c, mut a, link, _dir) = bug_hub().await;
+    said(
+        &mut a,
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+    )
+    .await;
+    until("on", || link.consent()).await;
+    let sender = link.clone();
+    let listed = tokio::spawn(async move { sender.send(&bug(Some("b1")), "1.0 (abc)").await });
+    let sent = read_not_alive(&mut a).await;
+    assert_eq!(sent["type"], "bug_report");
+    assert_eq!(sent["sameAs"], "b1");
+    assert_eq!(sent["version"], "1.0 (abc)");
+    assert_eq!(sent["signature"], "sig");
+    said(&mut a, json!({ "type": "bug_reported", "ref": "other", "ok": false })).await;
+    said(
+        &mut a,
+        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "b1" }),
+    )
+    .await;
+    let BugOutcome::Answered(answer) = listed.await.unwrap() else {
+        panic!("not answered")
+    };
+    assert!(answer.ok && answer.duplicate);
+    assert_eq!(answer.item_id.as_deref(), Some("b1"));
+
+    let sender = link.clone();
+    let unlisted = tokio::spawn(async move { sender.send(&bug(Some("zzz")), "1.0").await });
+    let sent = read_not_alive(&mut a).await;
+    assert!(sent.get("sameAs").is_none());
+    said(
+        &mut a,
+        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": false, "reason": "no" }),
+    )
+    .await;
+    let BugOutcome::Answered(answer) = unlisted.await.unwrap() else {
+        panic!("not answered")
+    };
+    assert_eq!(answer.reason.as_deref(), Some("no"));
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_bug_sent_while_off_or_unanswered_is_not_sent_with_why() {
+    let (c, mut a, link, _dir) = bug_hub().await;
+    let BugOutcome::NotSent(why) = link.send(&bug(None), "1.0").await else {
+        panic!("sent")
+    };
+    assert!(why.contains("agreed"));
+    said(&mut a, json!({ "type": "bug_reports", "on": true })).await;
+    until("on", || link.consent()).await;
+    let quick = BugLink::new(Duration::from_millis(100));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    quick.opened(tx);
+    quick.consent_said(&json!({ "on": true }));
+    let BugOutcome::NotSent(why) = quick.send(&bug(None), "1.0").await else {
+        panic!("sent")
+    };
+    assert!(why.contains("no answer"));
+    assert_eq!(rx.recv().await.unwrap()["type"], "bug_report");
+    quick.closed();
+    let BugOutcome::NotSent(why) = quick.send(&bug(None), "1.0").await else {
+        panic!("sent")
+    };
+    assert!(why.contains("isn't connected"));
     c.stop(Duration::from_secs(1)).await;
 }

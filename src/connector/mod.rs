@@ -7,9 +7,11 @@
 //! galleries' real status and last shoot, and an orchestrator that runs no work yet (`AgentView`). A command from
 //! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause, Resume
 //! and Shoot — and refused otherwise.
+pub mod bug_link;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
@@ -19,10 +21,11 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
+use self::bug_link::BugLink;
 use crate::commands::{self, Seen};
 use crate::galleries;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name, truncate};
@@ -81,6 +84,7 @@ fn random() -> f64 {
 pub struct Connector {
     tokens: Arc<DeviceTokens>,
     tasks: Vec<JoinHandle<()>>,
+    cloud: Arc<Cloud>,
 }
 
 /// What every connection to one cloud shares.
@@ -95,6 +99,8 @@ struct Cloud {
     dir: PathBuf,
     /// For the audit log's `cloud` field: the same url every connection's token answer carries.
     url: String,
+    /// Each project's connection's bug-report consent and sender (bug_link.rs).
+    bugs: HashMap<String, Arc<BugLink>>,
 }
 
 impl Connector {
@@ -116,11 +122,16 @@ impl Connector {
         let cloud = Arc::new(Cloud {
             label,
             tokens: tokens.clone(),
-            view,
+            view: view.clone(),
             timing,
             exit,
             dir: dir.to_path_buf(),
             url: url.to_string(),
+            bugs: view
+                .keys()
+                .into_iter()
+                .map(|k| (k, Arc::new(BugLink::new(timing.connect))))
+                .collect(),
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -141,7 +152,13 @@ impl Connector {
                 })
             })
             .collect();
-        Self { tokens, tasks }
+        Self { tokens, tasks, cloud }
+    }
+
+    /// The bug-report link of `project`'s connection to this cloud (`""` before Setup): its consent and known bugs,
+    /// and sending a `bug_report`. Off and unsent while that connection isn't up.
+    pub fn bug_link(&self, project: &str) -> Option<Arc<BugLink>> {
+        self.cloud.bugs.get(project).cloned()
     }
 
     /// Stops every connection, once a token refresh under way has landed (up to `wait`): stopping in the middle of
@@ -269,6 +286,26 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 /// Runs an open connection: hello and a snapshot, then answers what the hub sends, and says it's alive in a quiet
 /// minute (sync-health.md section 3.1). The close code and reason when it closes.
 async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(String), seen: &mut Seen) -> (u16, String) {
+    let (out_tx, out_rx) = mpsc::unbounded_channel();
+    let bugs = cloud.bugs.get(project);
+    if let Some(bugs) = bugs {
+        bugs.opened(out_tx);
+    }
+    let closed = session(ws, cloud, project, log, seen, out_rx).await;
+    if let Some(bugs) = bugs {
+        bugs.closed();
+    }
+    closed
+}
+
+async fn session(
+    ws: Socket,
+    cloud: &Cloud,
+    project: &str,
+    log: &impl Fn(String),
+    seen: &mut Seen,
+    mut outbound: mpsc::UnboundedReceiver<Value>,
+) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
     for msg in [view.hello(project), view.snapshot(project, &cloud.dir)] {
@@ -299,6 +336,7 @@ async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(Strin
                 Some(Err(e)) => return (1006, cause(&e)),
                 None => return (1006, String::new()),
             },
+            Some(msg) = outbound.recv() => Some(msg),
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
@@ -330,6 +368,18 @@ fn receive(text: &str, cloud: &Cloud, project: &str, seen: &mut Seen, log: &impl
         Some("work_available") => {
             // Only wakes the project's run loop; nothing runs and nothing is answered.
             cloud.view.work.wake(project);
+            return None;
+        }
+        Some("bug_reports") => {
+            if let Some(bugs) = cloud.bugs.get(project) {
+                bugs.consent_said(&msg);
+            }
+            return None;
+        }
+        Some("bug_reported") => {
+            if let Some(bugs) = cloud.bugs.get(project) {
+                bugs.answered(&msg);
+            }
             return None;
         }
         _ => return None,
