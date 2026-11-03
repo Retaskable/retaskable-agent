@@ -105,6 +105,8 @@ pub struct Prompt<'a> {
     pub code_gates: CodeGates,
     /// [`super::start_files::render`]'s output, appended after the rules; empty for none.
     pub where_to_start: &'a str,
+    /// A Start over's notes: put under "Notes from the last attempt" in the first prompt.
+    pub notes: Option<&'a str>,
     /// The project's items as the store listed them: [`not_built_yet`] names the unbuilt others.
     pub items: &'a [Item],
 }
@@ -183,7 +185,17 @@ pub fn build_prompt(template: &str, p: &Prompt<'_>) -> Result<String> {
         ],
     )?;
     let mut out = filled;
-    for extra in [p.where_to_start.to_string(), items_not_built_text(p.items, &p.item.id)] {
+    let notes = p
+        .notes
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(|n| format!("## Notes from the last attempt\n\nA person started this slice over. Their notes:\n\n{n}"))
+        .unwrap_or_default();
+    for extra in [
+        notes,
+        p.where_to_start.to_string(),
+        items_not_built_text(p.items, &p.item.id),
+    ] {
         if !extra.is_empty() {
             out = format!("{out}\n\n{extra}");
         }
@@ -288,6 +300,7 @@ mod tests {
                 checks: &checks(),
                 code_gates: CodeGates::default(),
                 where_to_start: "## Where to start\n\n- `src/implementer/mod.rs`",
+                notes: None,
                 items: &[],
             },
         )
@@ -318,6 +331,7 @@ mod tests {
                 checks: &[],
                 code_gates: CodeGates::default(),
                 where_to_start: "",
+                notes: None,
                 items: &[],
             },
         )
