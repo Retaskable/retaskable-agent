@@ -252,6 +252,9 @@ pub struct ProjectLoop {
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
     pub(super) unreleased: BTreeMap<String, (String, String)>,
+    /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
+    /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in the state file.
+    pub(super) unskipped: std::collections::BTreeSet<String>,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
@@ -321,6 +324,7 @@ impl ProjectLoop {
             project,
             leases: store.leases(),
             unreleased: store.unreleased(),
+            unskipped: store.unskipped(),
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
@@ -487,6 +491,7 @@ impl ProjectLoop {
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
+        self.store.set_unskipped(&self.unskipped);
         self.store.set_unparked(&self.unparked);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);

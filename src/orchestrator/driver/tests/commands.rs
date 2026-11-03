@@ -1,11 +1,15 @@
-//! Item commands the loop carries out (`driver/item_commands.rs`): Continue.
+//! Item commands the loop carries out (`driver/item_commands.rs`): Continue, Start over and Skip.
 use super::*;
 use crate::view::ItemCommand;
 
 /// A live rig whose item "a" stopped (`needs_human`) after two rounds, holding no lane; `session` is the
 /// implementer session it left behind.
 fn stopped(lanes: u32, session: Option<&str>) -> (Rig, Arc<Fake>) {
-    let mut rig = rig(lanes, &["http://127.0.0.1:1"]);
+    stopped_at(lanes, session, "http://127.0.0.1:1")
+}
+
+fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>) {
+    let mut rig = rig(lanes, &[base]);
     let fake = rig.go_live();
     rig.queue(0, &["a"]);
     let lp = rig.lp(0);
@@ -248,4 +252,96 @@ async fn continue_waits_for_a_free_lane_and_starts_once_one_frees() {
     assert_eq!(fake.started.lock().unwrap().len(), 1);
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert!(rig.lp(0).continuing.is_empty());
+}
+
+fn skip_a(rig: &Rig, item: &str) {
+    rig.machine.links.item_commands.push(ItemCommand::Skip {
+        project: "p0".into(),
+        item: item.into(),
+    });
+}
+
+#[tokio::test]
+async fn skip_drops_a_stopped_item_releases_its_lease_and_skips_it_in_the_store() {
+    let (base, asked) = claim_stub(json!([]), None).await;
+    let (mut rig, fake) = stopped_at(2, Some("s1"), &base);
+    skip_a(&rig, "a");
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty());
+    assert!(!rig.lp(0).runs.contains_key("a"));
+    assert!(!rig.lp(0).leases.contains_key("a"));
+    assert!(rig.lp(0).unreleased.is_empty());
+    assert_eq!(ops(&asked)[..3], ["report", "release", "skip"]);
+    let sent = asked.lock().unwrap();
+    assert_eq!(sent[0].1["note"], "A person chose Skip.");
+    assert_eq!(sent[2].1, json!({ "id": "a" }));
+    drop(sent);
+    let moved = rig
+        .lp(0)
+        .events()
+        .recent()
+        .iter()
+        .map(Entry::to_value)
+        .find(|e| e["kind"] == "item_state")
+        .unwrap();
+    assert_eq!(
+        (moved["from"].clone(), moved["to"].clone()),
+        (json!("needs_human"), json!("skipped"))
+    );
+}
+
+#[tokio::test]
+async fn skip_stays_owed_while_the_release_is_refused_then_goes_through() {
+    let fail = Arc::new(AtomicBool::new(true));
+    let (base, asked) = claim_stub_with(json!([]), None, fail.clone()).await;
+    let (mut rig, _fake) = stopped_at(2, Some("s1"), &base);
+    skip_a(&rig, "a");
+    rig.machine.poll().await;
+    assert!(!ops(&asked).contains(&"skip".to_string()));
+    assert!(rig.lp(0).unreleased.contains_key("a"));
+    assert!(rig.lp(0).unskipped.contains("a"));
+    fail.store(false, Ordering::SeqCst);
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    let sent = ops(&asked);
+    let (release, skip) = (
+        sent.iter().position(|o| o == "release"),
+        sent.iter().position(|o| o == "skip"),
+    );
+    assert!(release.is_some() && release < skip, "{sent:?}");
+    assert!(rig.lp(0).unreleased.is_empty() && rig.lp(0).unskipped.is_empty());
+}
+
+#[tokio::test]
+async fn skip_stays_owed_when_only_the_skip_is_refused_then_goes_through() {
+    let fail_skip = Arc::new(AtomicBool::new(true));
+    let (base, asked) = claim_stub_failing(json!([]), None, Default::default(), fail_skip.clone()).await;
+    let (mut rig, _fake) = stopped_at(2, Some("s1"), &base);
+    skip_a(&rig, "a");
+    rig.machine.poll().await;
+    assert!(rig.lp(0).unreleased.is_empty());
+    assert!(rig.lp(0).unskipped.contains("a"));
+    fail_skip.store(false, Ordering::SeqCst);
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    let sent = ops(&asked);
+    assert!(
+        sent.contains(&"skip".to_string()) && !sent.contains(&"release".to_string()),
+        "{sent:?}"
+    );
+    assert!(rig.lp(0).unskipped.is_empty());
+}
+
+#[tokio::test]
+async fn skip_drops_an_item_that_is_unknown_or_not_stopped() {
+    let (base, asked) = claim_stub(json!([]), None).await;
+    let (mut rig, _fake) = stopped_at(2, Some("s1"), &base);
+    rig.queue(0, &["b"]);
+    rig.lp(0).runs.get_mut("b").unwrap().state = ItemState::Implementing;
+    skip_a(&rig, "b");
+    skip_a(&rig, "nope");
+    rig.machine.poll().await;
+    assert_eq!(rig.lp(0).runs["b"].state, ItemState::Implementing);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert!(!ops(&asked).contains(&"skip".to_string()));
 }

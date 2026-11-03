@@ -61,6 +61,8 @@ pub enum ItemCommand {
         item: String,
         notes: Option<String>,
     },
+    /// **Skip** on a stopped item: it's let go and skipped in the store, its branch kept.
+    Skip { project: String, item: String },
     /// **Play** in lane `lane` (> 0), decided by the loop, which owns the lanes.
     Play { project: String, lane: u32 },
     /// **Stop** the game in lane `lane`.
@@ -76,6 +78,7 @@ impl ItemCommand {
         match self {
             Self::Continue { project, .. }
             | Self::StartOver { project, .. }
+            | Self::Skip { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. } => project,
         }

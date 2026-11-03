@@ -557,6 +557,16 @@ async fn claim_stub(listed: Value, claim: Option<Value>) -> (String, Asked) {
 
 /// `claim_stub` that refuses `release` and `park` with a 500 while `fail_release` is set.
 async fn claim_stub_with(listed: Value, claim: Option<Value>, fail_release: Arc<AtomicBool>) -> (String, Asked) {
+    claim_stub_failing(listed, claim, fail_release, Arc::new(AtomicBool::new(false))).await
+}
+
+/// `claim_stub_with` that also refuses `skip` with a 500 while `fail_skip` is set.
+async fn claim_stub_failing(
+    listed: Value,
+    claim: Option<Value>,
+    fail_release: Arc<AtomicBool>,
+    fail_skip: Arc<AtomicBool>,
+) -> (String, Asked) {
     use axum::http::StatusCode;
     let asked: Asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
@@ -565,12 +575,15 @@ async fn claim_stub_with(listed: Value, claim: Option<Value>, fail_release: Arc<
         "/v1/repos/{id}/ops",
         post(move |Json(body): Json<Value>| {
             let (seen, listed, claim, served) = (seen.clone(), listed.clone(), claim.clone(), served.clone());
-            let fail_release = fail_release.clone();
+            let (fail_release, fail_skip) = (fail_release.clone(), fail_skip.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 match (op.as_str(), claim) {
                     ("release" | "park", _) if fail_release.load(Ordering::SeqCst) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
+                    }
+                    ("skip", _) if fail_skip.load(Ordering::SeqCst) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
                     }
                     ("release" | "park", _) => (StatusCode::OK, Json(json!({}))),

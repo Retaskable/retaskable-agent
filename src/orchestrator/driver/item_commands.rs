@@ -13,6 +13,10 @@
 //! merged slice is never touched), bumps the item's attempt, clears its rounds (`resume_from_needs_human`) and starts
 //! a fresh implementer on the new branch (`…-s<slice>-r<attempt>`, prepared from `origin/<base>`), the notes in its
 //! first prompt. If the old work can't be let go of, the item stays as it is.
+//!
+//! **Skip** (`skip`, and a triage `skip` decision) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
+//! run, frees its lane, gives the lease back with a note (`report`, `release`) and then skips the item in the store
+//! (`skip`), so no computer claims it again. Its branch and pull request are kept.
 use super::project::signed_out;
 use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
 use crate::item_lifecycle::ItemState;
@@ -39,6 +43,10 @@ impl ProjectLoop {
             let (name, item, notes, start_over) = match command {
                 ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
                 ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
+                ItemCommand::Skip { item, .. } => {
+                    self.skip_stopped(pool, &item, shared).await;
+                    continue;
+                }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
             };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
@@ -77,6 +85,37 @@ impl ProjectLoop {
                 self.starting_over.push((item, notes));
             }
         }
+    }
+
+    /// Skips a stopped item: the run is dropped (`item_state`, `needs_human` to `skipped`), the lane freed and the
+    /// lease released with a note, and the skip is kept owed (`unskipped`) until the store has taken the release and
+    /// the `skip`; `flush_owed` sends both again on later passes. An item that isn't stopped here has its command dropped and logged.
+    pub(super) async fn skip_stopped(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
+        if !self.runs.get(item_id).is_some_and(|r| r.state == ItemState::NeedsHuman) {
+            tracing::info!("{}: dropped a skip for {item_id}: it isn't stopped here", self.id);
+            return;
+        }
+        self.runs.remove(item_id);
+        self.items.remove(item_id);
+        self.free_lane(pool, item_id, "skipped", "a person chose Skip");
+        self.events.add_in(
+            &self.id,
+            Event::ItemState(event::ItemState {
+                item: Some(item_id.to_string()),
+                from: Some("needs_human".into()),
+                to: Some("skipped".into()),
+                note: Some("a person chose Skip".into()),
+                ..Default::default()
+            }),
+        );
+        let Some(lease) = self.leases.remove(item_id) else {
+            return;
+        };
+        self.unreleased
+            .insert(item_id.to_string(), (lease, "A person chose Skip.".into()));
+        self.unskipped.insert(item_id.to_string());
+        self.save_leases();
+        self.flush_owed(shared.links).await;
     }
 
     fn want(&self, item_id: &str) -> Want {

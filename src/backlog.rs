@@ -440,6 +440,13 @@ impl Client {
         Ok(())
     }
 
+    /// `skip`: marks item `id` skipped for good, sent after its lease was released. A `conflict` answer means
+    /// it was skipped (or finished) already.
+    pub async fn skip(&self, repo_id: u64, token: Option<&str>, id: &str) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "skip", json!({ "id": id })).await?;
+        Ok(())
+    }
+
     /// `park` (`HostedWork.park` in the TS agent): lets go of the lease on item `id` while it waits for
     /// `waits_for` (`answer`, `help`, `ci`, `tryout` or `merge`), staying its owner so it isn't handed out
     /// to another computer. The item is claimed back by name when the wait ends here.

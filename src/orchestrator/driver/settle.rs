@@ -190,7 +190,7 @@ impl ProjectLoop {
     pub(super) async fn flush_owed(&mut self, links: &Links) {
         let Some(repo) = self
             .repo
-            .filter(|_| !self.unreleased.is_empty() || !self.unparked.is_empty())
+            .filter(|_| !self.unreleased.is_empty() || !self.unparked.is_empty() || !self.unskipped.is_empty())
         else {
             return;
         };
@@ -217,6 +217,21 @@ impl ProjectLoop {
                 }
             }
             self.unreleased.remove(&id);
+        }
+        // A skip goes after its release; a `conflict` means the item is skipped (or finished) already.
+        for id in self.unskipped.clone() {
+            if self.unreleased.contains_key(&id) {
+                continue;
+            }
+            match self.client.skip(repo, Some(&token), &id).await {
+                Ok(()) => {}
+                Err(e) if e.code() == Some("conflict") => {}
+                Err(e) => {
+                    self.store_error("skip", &e);
+                    continue;
+                }
+            }
+            self.unskipped.remove(&id);
         }
         for (id, (lease, waits_for, state)) in self.unparked.clone() {
             match self.client.park(repo, Some(&token), &id, &lease, &waits_for).await {
