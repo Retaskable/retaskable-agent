@@ -5,11 +5,10 @@ use std::sync::Mutex;
 use axum::{Json, Router, extract::State, routing::post};
 
 use super::*;
-use crate::backlog::Client;
 use crate::backlog::runs::BeatVerdict;
 use crate::config::ProjectConfig;
-use crate::orchestrator::driver::{RunContext, RunEndSender, RunProcesses};
-use crate::runs::RunLocks;
+use crate::orchestrator::driver::RunEndSender;
+use crate::orchestrator::watch_run::tests::lane_free_request;
 use crate::test_support::{git as tgit, repo_with_origin, run as trun, write_executable};
 
 type Log = Arc<Mutex<(Vec<Value>, bool)>>;
@@ -115,25 +114,7 @@ async fn rig(held_by_other: bool) -> Rig {
         ..Default::default()
     };
     let piece = serde_json::from_value(json!({ "id": "p1", "title": "t", "branch": "feat", "change": 7 })).unwrap();
-    let (processes, processes_rx) = RunProcesses::channel();
-    std::mem::forget(processes_rx);
-    let request = RunRequest {
-        token: "M1".into(),
-        kind: RunKind::Merge,
-        piece,
-        lane: None,
-        ends,
-        project: "p".into(),
-        processes,
-        context: RunContext {
-            project: "p".into(),
-            config,
-            client: Arc::new(Client::new(&url)),
-            repo: 1,
-            token: "t".into(),
-            locks: RunLocks::default(),
-        },
-    };
+    let request = lane_free_request("M1", RunKind::Merge, piece, config, &url, ends);
     Rig {
         dir,
         repo,

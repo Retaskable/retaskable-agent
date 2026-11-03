@@ -66,6 +66,37 @@ pub(crate) fn calls(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// A run with no lane against the store at `url`; its process registrations are kept open (leaked) so a registered
+/// tree isn't cut as the loop's gone.
+pub(crate) fn lane_free_request(
+    token: &str,
+    kind: RunKind,
+    piece: crate::backlog::runs::RunPiece,
+    config: ProjectConfig,
+    url: &str,
+    ends: RunEndSender,
+) -> RunRequest {
+    let (processes, processes_rx) = RunProcesses::channel();
+    std::mem::forget(processes_rx);
+    RunRequest {
+        token: token.into(),
+        kind,
+        piece,
+        lane: None,
+        ends,
+        project: "p".into(),
+        processes,
+        context: RunContext {
+            project: "p".into(),
+            config,
+            client: std::sync::Arc::new(Client::new(url)),
+            repo: 1,
+            token: String::new(),
+            locks: RunLocks::default(),
+        },
+    }
+}
+
 fn request(repo: &Path, change: Value, max_minutes: u32) -> (RunRequest, tokio::sync::mpsc::UnboundedReceiver<RunEnd>) {
     let (ends, rx) = RunEndSender::channel();
     let mut config = ProjectConfig {
@@ -75,26 +106,7 @@ fn request(repo: &Path, change: Value, max_minutes: u32) -> (RunRequest, tokio::
     };
     config.tuning.ci_max_minutes = max_minutes;
     let piece = serde_json::from_value(json!({ "title": "t", "change": change })).unwrap();
-    // Kept open (leaked) so a registered tree isn't cut as the loop's gone.
-    let (processes, processes_rx) = RunProcesses::channel();
-    std::mem::forget(processes_rx);
-    let request = RunRequest {
-        token: "W1".into(),
-        kind: RunKind::Watch,
-        piece,
-        lane: None,
-        ends,
-        project: "p".into(),
-        processes,
-        context: RunContext {
-            project: "p".into(),
-            config,
-            client: std::sync::Arc::new(Client::new("http://127.0.0.1:1")),
-            repo: 1,
-            token: String::new(),
-            locks: RunLocks::default(),
-        },
-    };
+    let request = lane_free_request("W1", RunKind::Watch, piece, config, "http://127.0.0.1:1", ends);
     (request, rx)
 }
 
