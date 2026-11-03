@@ -1,7 +1,7 @@
 //! The assistant's result `{ answer, actions: [...] }` and the fixed list of actions it may take
 //! (spec 06.6). Pure code: an action that is unknown or malformed is dropped and its reason kept,
 //! so the orchestrator can report it with the answer.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// One action the orchestrator will run through the same code as the command a person could send.
 #[derive(Debug, Clone, PartialEq)]
@@ -205,15 +205,21 @@ mod tests {
     fn themes_are_kept_only_one_per_title() {
         let (t, th) = parts(draft(json!({ "titles": ["a", "b"], "themes": ["x", "y"] })));
         assert_eq!((t.len(), th), (2, vec!["x".to_string(), "y".to_string()]));
-        assert!(parts(draft(json!({ "titles": ["a", "b"], "themes": ["x"] })))
-            .1
-            .is_empty());
-        assert!(parts(draft(json!({ "titles": ["a"], "themes": ["x", "y"] })))
-            .1
-            .is_empty());
-        assert!(parts(draft(json!({ "titles": ["a", "b"], "themes": ["x", 1] })))
-            .1
-            .is_empty());
+        assert!(
+            parts(draft(json!({ "titles": ["a", "b"], "themes": ["x"] })))
+                .1
+                .is_empty()
+        );
+        assert!(
+            parts(draft(json!({ "titles": ["a"], "themes": ["x", "y"] })))
+                .1
+                .is_empty()
+        );
+        assert!(
+            parts(draft(json!({ "titles": ["a", "b"], "themes": ["x", 1] })))
+                .1
+                .is_empty()
+        );
         // Blank titles are dropped first, so the themes must match the kept ones.
         assert_eq!(parts(draft(json!({ "titles": ["a", ""], "themes": ["x"] }))).1, ["x"]);
     }
@@ -249,11 +255,13 @@ mod tests {
             ]
         });
         let required = assistant_result_schema()["required"].clone();
-        assert!(required
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|k| raw.get(k.as_str().unwrap()).is_some()));
+        assert!(
+            required
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|k| raw.get(k.as_str().unwrap()).is_some())
+        );
         let r = parse_assistant_result(&raw).unwrap();
         assert_eq!(r.answer, "On it.");
         assert_eq!(r.actions.len(), 2);
