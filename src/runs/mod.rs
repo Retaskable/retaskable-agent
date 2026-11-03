@@ -10,8 +10,7 @@ pub use locks::{RunLocks, lock_ceiling};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -40,47 +39,6 @@ pub fn needs_lane(kind: RunKind) -> bool {
     matches!(kind, RunKind::Build | RunKind::Fix)
 }
 
-/// What a run's worker and the loop share: the run's process trees, so a stop cuts them, and whether it was stopped.
-#[derive(Default)]
-pub struct RunHandle {
-    trees: Mutex<Vec<Arc<ProcessTree>>>,
-    stopped: AtomicBool,
-}
-
-impl std::fmt::Debug for RunHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RunHandle(stopped: {})", self.stopped())
-    }
-}
-
-impl RunHandle {
-    /// Whether the run was stopped or ended by the loop: its worker should give up.
-    pub fn stopped(&self) -> bool {
-        self.stopped.load(Ordering::SeqCst)
-    }
-
-    /// Adds a process tree to the run. One added after the stop is cut at once.
-    pub fn add(&self, tree: Arc<ProcessTree>) {
-        let mut trees = self.trees.lock().unwrap();
-        // A tree its starter let go of has finished.
-        trees.retain(|t| Arc::strong_count(t) > 1);
-        if self.stopped() {
-            tree.cut();
-            tree.kill_and_wait(KILL_LIMIT);
-        }
-        trees.push(tree);
-    }
-
-    fn cut(&self) {
-        let trees = self.trees.lock().unwrap();
-        self.stopped.store(true, Ordering::SeqCst);
-        for tree in trees.iter() {
-            tree.cut();
-            tree.kill_and_wait(KILL_LIMIT);
-        }
-    }
-}
-
 /// A run in progress here.
 pub struct LiveRun {
     pub token: String,
@@ -88,7 +46,7 @@ pub struct LiveRun {
     pub piece: String,
     pub lane: Option<u32>,
     /// The run's process trees, so it can be cut whole.
-    pub handle: Arc<RunHandle>,
+    pub processes: Vec<Arc<ProcessTree>>,
     pub started: Instant,
 }
 
@@ -157,7 +115,7 @@ impl Runs {
             kind,
             piece: piece.into(),
             lane,
-            handle: Arc::default(),
+            processes: Vec::new(),
             started: now,
         });
         Ok(())
@@ -167,7 +125,9 @@ impl Runs {
     pub fn add_process(&mut self, token: &str, tree: Arc<ProcessTree>) -> bool {
         match self.live.iter_mut().find(|r| r.token == token) {
             Some(run) => {
-                run.handle.add(tree);
+                // A tree whose worker let go of it has finished: cutting it later would signal a gone process group.
+                run.processes.retain(|t| Arc::strong_count(t) > 1);
+                run.processes.push(tree);
                 true
             }
             None => false,
@@ -218,7 +178,10 @@ impl Runs {
 
     fn cut_and_end(&mut self, pool: &mut LanePool, token: &str, outcome: RunOutcome, now: Instant) {
         if let Some(run) = self.live.iter().find(|r| r.token == token) {
-            run.handle.cut();
+            for tree in &run.processes {
+                tree.cut();
+                tree.kill_and_wait(KILL_LIMIT);
+            }
         }
         self.end(pool, token, outcome, json!({}), now);
     }

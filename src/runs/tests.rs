@@ -204,3 +204,22 @@ fn held_locks_count_in_held_until_dropped() {
     assert_eq!(runs.held(), 0);
     let _ = &mut runs;
 }
+
+#[test]
+fn a_finished_tree_is_dropped_from_the_run_when_the_next_is_added() {
+    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
+    runs.start(&mut pool, "w", RunKind::Watch, "x", t0).unwrap();
+    for _ in 0..5 {
+        // The worker lets go of its tree once its process is done; only the run still holds it.
+        let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" });
+        if cfg!(windows) {
+            cmd.args(["/C", "exit"]);
+        }
+        ProcessTree::prepare_sync(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        let tree = Arc::new(ProcessTree::join_sync(&child).unwrap());
+        child.wait().unwrap();
+        runs.add_process("w", tree);
+    }
+    assert_eq!(runs.live()[0].processes.len(), 1);
+}
