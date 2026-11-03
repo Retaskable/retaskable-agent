@@ -14,6 +14,7 @@ struct Host {
     jobs: Mutex<Vec<(String, bool, String)>>,
     published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
+    merges: Mutex<u32>,
 }
 
 impl DraftHost for Host {
@@ -45,6 +46,7 @@ impl DraftHost for Host {
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
     fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+        *self.merges.lock().unwrap() += 1;
         Ok(())
     }
     fn close(&self, _: &ProjectConfig, _: u64) -> Result<()> {
@@ -74,6 +76,10 @@ async fn store(draft: Value) -> (String, Asked) {
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "draft_take" => json!({ "token": "lease-t", "draft": {
+                        "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
+                        "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
+                        "requestedBy": "ada" } }),
                     "draft_claim_next" if !handed.swap(true, Ordering::SeqCst) => {
                         json!({ "draft": draft, "token": "lease-d" })
                     }
@@ -201,7 +207,8 @@ async fn questions_are_reported_for_a_person_to_answer() {
 
 #[tokio::test]
 async fn a_failed_draft_is_reported_failed() {
-    let (mut rig, host, asked) = rig_with(claimed(), vec![json!({"status": "failed", "summary": "No luck"})]).await;
+    let retried = json!({ "id": "d1", "request": "Add charts", "retried": true });
+    let (mut rig, host, asked) = rig_with(retried, vec![json!({"status": "failed", "summary": "No luck"})]).await;
     let sent = reports(&mut rig, &asked, 2).await;
     assert_eq!(sent[1]["detail"], "failed");
     assert_eq!(sent[1]["summary"], "No luck");
@@ -307,4 +314,56 @@ async fn answers_resume_the_session_and_are_marked_taken() {
         (taken[0]["id"].as_str(), taken[0]["token"].as_str()),
         (Some("d1"), Some("lease-d"))
     );
+}
+
+fn pr_opened(risk: Option<&str>) -> Value {
+    json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Charts", "risk": risk})
+}
+
+#[tokio::test]
+async fn a_plan_someone_asked_for_merges_on_its_own() {
+    let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
+    let (mut rig, host, asked) = rig_with(draft, vec![pr_opened(None)]).await;
+    let sent = reports(&mut rig, &asked, 3).await;
+    assert_eq!(sent[1]["detail"], "awaiting_approval");
+    assert_eq!(sent[2]["status"], "merged");
+    assert_eq!(*host.merges.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_risky_or_unrequested_plan_waits_for_a_person() {
+    for (draft, risk) in [
+        (
+            json!({ "id": "d1", "requestedBy": "ada" }),
+            Some("It changes how people sign in."),
+        ),
+        (json!({ "id": "d1" }), None),
+        (
+            json!({ "id": "d1", "requestedBy": "ada", "intake": { "trial": true } }),
+            None,
+        ),
+    ] {
+        let (mut rig, host, asked) = rig_with(draft, vec![pr_opened(risk)]).await;
+        reports(&mut rig, &asked, 2).await;
+        for _ in 0..20 {
+            rig.machine.pass().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(*host.merges.lock().unwrap(), 0);
+        assert!(!ops(&asked).contains(&"draft_take".to_string()));
+    }
+}
+
+#[tokio::test]
+async fn a_failed_plan_tries_again_once_and_then_waits_for_a_person() {
+    let failed = json!({"status": "failed", "summary": "No luck"});
+    let (mut rig, _, asked) = rig_with(claimed(), vec![failed.clone()]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    assert_eq!(sent[1]["status"], "queued");
+    assert_eq!(sent[1]["retried"], true);
+    let again = json!({ "id": "d1", "request": "Add charts", "retried": true });
+    let (mut rig, _, asked) = rig_with(again, vec![failed]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    assert_eq!(sent[1]["status"], "needs_person");
+    assert_eq!(sent[1]["detail"], "failed");
 }

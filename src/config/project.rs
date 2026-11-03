@@ -33,6 +33,16 @@ pub enum OnOff {
     Off,
 }
 
+/// `plans`: `risky` (the default) lets a plan someone asked for go ahead on that yes unless the drafter marked it
+/// risky; `ask` waits for Approve on every plan (agent/06.5-spec-drafts.md).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Plans {
+    #[default]
+    Risky,
+    Ask,
+}
+
 /// on: wait for the playtest before merging. after_merge: merge, then ask. off: never ask.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -308,6 +318,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub playtests: Playtests,
     #[serde(default)]
+    pub plans: Plans,
+    #[serde(default)]
     pub chores: OnOff,
     #[serde(default)]
     pub triage: OnOff,
@@ -526,6 +538,7 @@ mod tests {
             play_command: String::new(),
             galleries: default_galleries(),
             playtests: Playtests::default(),
+            plans: Plans::default(),
             chores: OnOff::default(),
             triage: OnOff::default(),
             max_review_rounds: default_max_review_rounds(),

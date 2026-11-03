@@ -99,6 +99,9 @@ pub struct DraftReport {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// A failed draft put back in the queue by itself, once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retried: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub titles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
