@@ -18,7 +18,7 @@ use crate::config::ProjectConfig;
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
-use crate::runs::{NoLane, RunLocks, Runs, needs_lane};
+use crate::runs::{NoLane, RunLocks, RunStop, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
 /// How often the live runs are beaten.
@@ -94,6 +94,8 @@ pub struct RunRequest {
     pub token: String,
     pub project: String,
     pub processes: RunProcesses,
+    /// Set once the loop has ended the run.
+    pub stop: RunStop,
     pub kind: RunKind,
     /// The piece's brief as the store sent it.
     pub piece: RunPiece,
@@ -334,18 +336,16 @@ impl ProjectLoop {
             }
             return false;
         }
-        let lane = self
-            .run_loop
-            .runs
-            .live()
-            .iter()
-            .find(|r| r.token == run.token)
+        let live = self.run_loop.runs.live().iter().find(|r| r.token == run.token);
+        let stop = live.map(|r| r.stop.clone()).unwrap_or_default();
+        let lane = live
             .and_then(|r| r.lane)
             .map(|k| lane_path(Path::new(&self.project.worktrees_dir), k));
         let request = RunRequest {
             token: run.token.clone(),
             project: self.id.clone(),
             processes: self.run_loop.processes_tx.clone(),
+            stop,
             kind: run.kind,
             piece: run.piece,
             lane,

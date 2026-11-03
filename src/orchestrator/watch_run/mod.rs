@@ -19,16 +19,16 @@ pub const POLL_EVERY: Duration = Duration::from_secs(15);
 /// The run's latest `gh` tree, kept so a stop that lands between polls is still seen after the loop has let the
 /// run go. Earlier trees are the loop's alone, so it can drop them once they finish.
 #[derive(Clone, Default)]
-struct Trees(Arc<Mutex<Option<Arc<ProcessTree>>>>);
+pub(super) struct Trees(Arc<Mutex<Option<Arc<ProcessTree>>>>);
 
 impl Trees {
-    fn add(&self, request: &RunRequest, tree: Arc<ProcessTree>) {
+    pub(super) fn add(&self, request: &RunRequest, tree: Arc<ProcessTree>) {
         // The previous one is let go before the loop hears of this one, so the loop's prune sees it as finished.
         *self.0.lock().unwrap() = Some(tree.clone());
         request.processes.add(&request.token, tree);
     }
 
-    fn stopped(&self) -> bool {
+    pub(super) fn stopped(&self) -> bool {
         self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
     }
 }
@@ -70,7 +70,7 @@ impl RunStarter for WatchRuns {
 }
 
 /// The change as `gh pr checks` takes it: a number or a URL. `None` when the piece has none.
-fn change_ref(change: &Value) -> Option<String> {
+pub(super) fn change_ref(change: &Value) -> Option<String> {
     match change {
         Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
         Value::Number(n) => Some(n.to_string()),

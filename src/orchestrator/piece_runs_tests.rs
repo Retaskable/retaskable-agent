@@ -77,6 +77,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         token: "tok".into(),
         project: "p".into(),
         processes,
+        stop: Default::default(),
         kind,
         piece: serde_json::from_value(piece).unwrap(),
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),

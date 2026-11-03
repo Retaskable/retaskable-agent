@@ -74,6 +74,47 @@ pub fn cut_all() {
     }
 }
 
+type Hook = Box<dyn Fn(Arc<ProcessTree>)>;
+
+thread_local! {
+    static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with every [`output_std`] on this thread handing its process tree to `hook`, so a blocking git
+/// routine that starts commands itself can still have them cut by a stop.
+pub fn with_hook<R>(hook: Hook, f: impl FnOnce() -> R) -> R {
+    let before = HOOK.with(|h| h.borrow_mut().replace(hook));
+    let out = f();
+    HOOK.with(|h| *h.borrow_mut() = before);
+    out
+}
+
+/// `command.output()`; under [`with_hook`] the child is a registered tree of its own.
+pub fn output_std(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    if HOOK.with(|h| h.borrow().is_none()) {
+        return command.output();
+    }
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    ProcessTree::prepare_sync(command);
+    let child = command.spawn()?;
+    let tree = child.id();
+    let tree = ProcessTree::join_sync(&child)
+        .map(Arc::new)
+        .map_err(|e| std::io::Error::other(format!("joining a process tree for pid {tree}: {e:#}")));
+    if let Ok(tree) = &tree {
+        HOOK.with(|h| h.borrow().as_ref().map(|hook| hook(tree.clone())));
+    }
+    let out = child.wait_with_output();
+    if let Ok(tree) = &tree {
+        tree.finished();
+    }
+    out
+}
+
 /// Resets the process-wide flag and registry `cut_all` uses, so a test that exercises it
 /// doesn't leave `stopping()` true, or stale entries behind, for whatever runs after it.
 #[cfg(test)]

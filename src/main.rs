@@ -347,6 +347,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
+                orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
+                    as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::piece_runs::PieceStarter {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),

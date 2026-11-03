@@ -523,3 +523,37 @@ async fn a_beat_stop_between_polls_ends_the_run_and_starts_no_more_gh() {
     assert_eq!(done.len(), 1, "{done:?}");
     assert_eq!(done[0]["outcome"], json!("interrupted"));
 }
+
+#[tokio::test]
+async fn a_merge_run_is_asked_for_with_no_lane_free_and_its_lock_beats_with_it() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Build, RunKind::Merge]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build"), run("m1", "merge")]);
+    pass(&mut rig, &starter, t0).await;
+    pass(&mut rig, &starter, t0).await;
+    let takes = script.lock().unwrap().args("run_take");
+    assert_eq!(takes[1]["kinds"], json!(["merge"]), "the build's lane is the only one");
+    assert_eq!(starter.started(), vec!["b1", "m1"]);
+
+    // The merge run takes its lock through the handle the loop gave it.
+    let context = starter.started.lock().unwrap()[1].context.clone();
+    let taken = context
+        .client
+        .lock_take(
+            context.repo,
+            Some(&context.token),
+            "merge-main",
+            Some("piece-m1 on here"),
+        )
+        .await
+        .unwrap();
+    let crate::backlog::runs::LockTake::Held(lock) = taken else {
+        panic!("{taken:?}")
+    };
+    context.locks.add(&lock, "merge-main", Instant::now());
+
+    pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
+    let beats = script.lock().unwrap().args("run_beat");
+    assert_eq!(beats, vec![json!({ "tokens": ["b1", "m1", "L1"] })]);
+}

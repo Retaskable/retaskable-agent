@@ -432,7 +432,7 @@ fn git_in_worktree(dir: &Path) -> Command {
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
-    let output = cmd.output().context("running git")?;
+    let output = crate::process_tree::output_std(cmd).context("running git")?;
     if !output.status.success() {
         bail!("git failed: {}", String::from_utf8_lossy(&output.stderr).trim());
     }

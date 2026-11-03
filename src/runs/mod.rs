@@ -11,6 +11,7 @@ pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -39,8 +40,24 @@ pub fn needs_lane(kind: RunKind) -> bool {
     matches!(kind, RunKind::Build | RunKind::Fix)
 }
 
+/// Set once the loop has ended a run (a beat's `stop`, its ceiling, or its own end), so a worker with no process
+/// running at that moment still learns of it. Clones share one flag.
+#[derive(Clone, Debug, Default)]
+pub struct RunStop(Arc<AtomicBool>);
+
+impl RunStop {
+    pub fn stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// A run in progress here.
 pub struct LiveRun {
+    pub stop: RunStop,
     pub token: String,
     pub kind: RunKind,
     pub piece: String,
@@ -111,6 +128,7 @@ impl Runs {
             None
         };
         self.live.push(LiveRun {
+            stop: RunStop::default(),
             token: token.into(),
             kind,
             piece: piece.into(),
@@ -193,6 +211,7 @@ impl Runs {
             return false;
         };
         let run = self.live.remove(at);
+        run.stop.set();
         if let Some(lane) = run.lane {
             pool.release(
                 lane,
