@@ -16,6 +16,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::sync::lock;
 
+mod manifest_scan;
+use manifest_scan::{file_or_link_values, path_eq_values, strip_line_comments};
+
 /// How recently a fetch of a repo must have begun for the next lane's prepare to skip its own
 /// (section 4.1: every lane shares the one object store).
 const FRESH_FETCH: Duration = Duration::from_secs(15);
@@ -455,86 +458,6 @@ fn add_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
 
 fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "remove", "--force"]).arg(lane_path))
-}
-
-/// Drops `# …` to end of line (a TOML comment) outside a quoted string, so a commented-out
-/// `path = "../…"` isn't scanned as a live dependency.
-fn strip_line_comments(manifest: &str) -> String {
-    let mut out = String::with_capacity(manifest.len());
-    for line in manifest.split('\n') {
-        // `None` outside a string, else the quote that opened it; a basic (`"`) string honours
-        // `\"`, a literal (`'`) string has no escapes.
-        let mut quote: Option<char> = None;
-        let mut escaped = false;
-        let mut end = line.len();
-        for (idx, ch) in line.char_indices() {
-            match (quote, ch) {
-                (Some('"'), _) if escaped => escaped = false,
-                (Some('"'), '\\') => escaped = true,
-                (Some(q), c) if c == q => quote = None,
-                (Some(_), _) => {}
-                (None, '"' | '\'') => quote = Some(ch),
-                (None, '#') => {
-                    end = idx;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        out.push_str(&line[..end]);
-        out.push('\n');
-    }
-    out
-}
-
-fn path_eq_values(manifest: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = manifest.as_bytes();
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        if &bytes[i..i + 4] == b"path" && word_boundary_before(bytes, i) {
-            let after = skip_ws(&manifest[i + 4..]);
-            if let Some(after) = after.strip_prefix('=') {
-                let after = skip_ws(after);
-                if let Some(value) = quoted_string(after) {
-                    out.push(value.to_string());
-                }
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-fn file_or_link_values(manifest: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for prefix in ["file:", "link:"] {
-        let mut rest = manifest;
-        while let Some(idx) = rest.find(prefix) {
-            if idx > 0 && rest.as_bytes()[idx - 1] == b'"' {
-                let after = &rest[idx + prefix.len()..];
-                if let Some(end) = after.find('"') {
-                    out.push(after[..end].to_string());
-                }
-            }
-            rest = &rest[idx + prefix.len()..];
-        }
-    }
-    out
-}
-
-fn word_boundary_before(bytes: &[u8], i: usize) -> bool {
-    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'
-}
-
-fn skip_ws(s: &str) -> &str {
-    s.trim_start_matches(|c: char| c.is_whitespace())
-}
-
-fn quoted_string(s: &str) -> Option<&str> {
-    let s = s.strip_prefix('"')?;
-    let end = s.find('"')?;
-    Some(&s[..end])
 }
 
 pub(crate) fn processes_in(dir: &Path) -> Result<Vec<u32>> {
