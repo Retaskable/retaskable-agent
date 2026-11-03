@@ -517,10 +517,10 @@ impl Machine {
                         lp.advance(&self.pool, starter);
                         let mut room = self.concurrency.saturating_sub(starter.active());
                         lp.triage_pass(
-                            &self.pool,
+                            &mut self.pool,
                             starter,
                             &mut room,
-                            &Shared {
+                            &mut Shared {
                                 links: &self.links,
                                 claim_paused_until: &mut self.claim_paused_until,
                                 claude_signed_out_until: &mut self.claude_signed_out_until,
