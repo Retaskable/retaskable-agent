@@ -142,6 +142,7 @@ fn the_prompt_settles_requests_mixed_messages_and_replies_to_retaskable() {
     let out = render(&[], None, None, ProjectType::Game);
     assert!(out.contains("a spec request, even when it ends in a question mark"));
     assert!(out.contains("A message has at most one `draft_spec`"));
+    assert!(out.contains("naming several features is not by itself a reason to split"));
     assert!(out.contains("approving is the **Approve** button under that message"));
     assert!(out.contains("Leaving a field out is not the same as `null`"));
     // The message is fenced off from the instructions, and the advice on answering comes after it.
