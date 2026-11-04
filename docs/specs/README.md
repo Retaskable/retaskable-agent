@@ -21,7 +21,7 @@ Only the specs whose subject is the computer itself:
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
 - [agent-ci.md](agent-ci.md): CI run on the agent computer, in Docker, on its own slot.
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
-- [repo-map.md](repo-map.md): the map of what a project defines where, put in a fresh session's prompt (Rust only; this file is its source).
+- [code-index.md](code-index.md): the index of what a project defines where, kept up to date and queried by sessions through tools (Rust only; this file is its source).
 
 ## What was cut
 
