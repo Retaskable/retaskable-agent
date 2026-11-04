@@ -36,10 +36,12 @@ pub fn checks_text(checks: &[CheckConfig]) -> String {
 /// doesn't spend a round finding out.
 pub fn gate_rule(cfg: &CodeGates) -> String {
     let asks: Vec<String> = [
+        // The soft target is half the hard limit: asked for, never checked.
         (cfg.max_file_lines > 0).then(|| {
             format!(
-                "keep every source file you touch at {} lines or fewer (split one that's already over)",
-                cfg.max_file_lines
+                "keep every source file you touch at {} lines or fewer (split one that's already over), aiming for {} or fewer (new code goes in a file of its own rather than growing one past that)",
+                cfg.max_file_lines,
+                cfg.max_file_lines / 2
             )
         }),
         (cfg.dup_lines > 0).then(|| "reuse the project's existing code rather than copying it".to_string()),
@@ -403,7 +405,7 @@ mod tests {
                 dup_lines: 8,
                 max_spec_chars: 0
             }),
-            " Keep every source file you touch at 1000 lines or fewer (split one that's already over), and reuse the project's existing code rather than copying it: Retaskable checks both before it pushes your branch, and sends the work back if not."
+            " Keep every source file you touch at 1000 lines or fewer (split one that's already over), aiming for 500 or fewer (new code goes in a file of its own rather than growing one past that), and reuse the project's existing code rather than copying it: Retaskable checks both before it pushes your branch, and sends the work back if not."
         );
         assert_eq!(
             gate_rule(&CodeGates {
@@ -427,7 +429,7 @@ mod tests {
                 dup_lines: 8,
                 max_spec_chars: 40000
             }),
-            " Keep every source file you touch at 1000 lines or fewer (split one that's already over), and reuse the project's existing code rather than copying it, and keep every spec you touch under 40000 characters (split one that's over into a section folder with an index): Retaskable checks these before it pushes your branch, and sends the work back if not."
+            " Keep every source file you touch at 1000 lines or fewer (split one that's already over), aiming for 500 or fewer (new code goes in a file of its own rather than growing one past that), and reuse the project's existing code rather than copying it, and keep every spec you touch under 40000 characters (split one that's over into a section folder with an index): Retaskable checks these before it pushes your branch, and sends the work back if not."
         );
     }
 

@@ -10,7 +10,7 @@ You are the planner for Retaskable. You split one backlog item into pieces: smal
 ## How to split
 
 - Use the spec's own named slices or steps when it has them, one piece each.
-- Each piece is one reviewable pull request that leaves the project working and tested: about 500 changed lines with its tests, and never past about 1,000.
+- Each piece is one reviewable pull request that leaves the project working and tested: 500 to 2,000 changed lines with its tests, one whole step rather than a fragment of one (every pull request waits for its checks, a review and a merge whatever its size). Source files are a separate limit: no file over 1,000 lines, and aim for 500.
 - Prefer pieces that don't need each other, so computers can build them at the same time.
 - Leave out what is already built on this branch.
 - One piece is fine for a small item. At most 30 pieces.
