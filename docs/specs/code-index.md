@@ -20,7 +20,7 @@ A fresh session's prompt also gets a short **map**: the index's most relevant en
 **Why.** Sessions spend their first turns looking for where things live. On 2026-10-20, even with "Where to start", implementers took a median of 19 turns of 54, and 36% of the session's cost, before their first edit (`start-report`, 20 sessions), 92% of those turns a single search or read. On 2026-10-30, drafters spent 26 of 40 turns before their first write. Every turn resends the conversation; one lookup that returns three lines replaces a grep that returns forty and the reads after it.
 
 **What it is not.**
-- **Not a database and not a source of truth.** The saved index is a cache file in the repo's `.git` folder, never committed, synced or sent. Deleting it loses nothing. CLAUDE.md's "no DB" is about the agent's state, and the index holds none: it's derived from the checkout and checked against it on every query.
+- **Nothing to install.** CLAUDE.md's "no DB" means nothing heavy a person must install or run. The parsers compile into the agent's binary, and the saved index is one cache file in the repo's `.git` folder, never committed, synced or sent. Deleting it loses nothing.
 - **Not embeddings.** "What it does" questions are answered by matching words against names, doc comments and paths (section 3.6). Section 2.1 says why vectors were left out.
 - **Not a replacement for Read and Grep.** It says where to look. Grep is still for text that isn't a name (an error message, a config key).
 
