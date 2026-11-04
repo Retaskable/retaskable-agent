@@ -87,4 +87,13 @@ mod tests {
         assert!(out.contains("retaskable/spec-1-x"));
         assert!(!out.contains("{{"));
     }
+
+    #[test]
+    fn the_prompt_says_how_to_cut_pieces_and_which_kind_line_each_gets() {
+        let out = include_str!("../../prompts/drafter.md");
+        assert!(out.contains(
+            "a piece is one thing that could be built and tried on its own. Naming several features is not on its own a reason to split"
+        ));
+        assert!(out.contains("a feature is `new`, a tweak is `change`, and a write-up is `write-up`"));
+    }
 }

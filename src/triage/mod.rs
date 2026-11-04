@@ -368,6 +368,10 @@ mod tests {
         assert!(prompt.contains("a web app"));
         assert!(prompt.contains("x/y"));
         assert!(prompt.contains("unclear which library to add"));
+        assert!(
+            prompt.contains("- `transcriptsDir`:"),
+            "every context field is explained"
+        );
     }
 
     #[test]

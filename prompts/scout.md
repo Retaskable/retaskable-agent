@@ -22,10 +22,11 @@ Results from the project's checks, for context:
 
 {{instructions}}
 
+Don't report style, naming or formatting.
+
 ## Your result
 
 - `findings`: each problem, with `severity` (`blocker` = must fix before merging, `major` = should fix, `minor` = worth knowing), the `file` and `line`, `evidence` (quote the code), and `body` (what's wrong and how to fix it).
-- Don't report style, naming or formatting.
 - `notes`: anything else the senior reviewer should know, in a sentence or two (or an empty string).
 
 Return the result through the structured output tool.

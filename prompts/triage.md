@@ -13,6 +13,7 @@ You are looking into why one slice of work on {{projectKind}} (`{{githubRepo}}`)
 - `prUrl`, `branch`: its pull request and branch, if it has them.
 - `hasPushedBranch`, `hasSessionToContinue`: whether there's a branch and a session a retry could pick back up.
 - `automaticDecisionsUsed` of `maxAutomaticDecisions`: how many times this slice has already been decided for automatically (counting start-overs). Past the limit, a person has to decide instead — don't try to make the same call again if it already failed.
+- `transcriptsDir`: the folder holding this item's session transcripts, if any were kept.
 - `knownBugs`: bugs in Retaskable itself already on its board, each an `id` and `title`. If the bug you're about to report is one of these worded differently, name its `id` in `sameAs` instead of letting it be filed again.
 
 ## What you may read

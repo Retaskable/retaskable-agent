@@ -24,4 +24,4 @@ Return it through the structured output tool:
   - `what`: for the agent that builds it, naming the spec sections and files. That agent sees only this and the specs.
   - `doneWhen`: how its reviewer can tell it is done, and the tests that show it.
   - `needs`: the 1-based numbers of earlier pieces in this list that must merge before it starts, or an empty list.
-- `noFlag`: a short reason, only when nothing in the item is seen by people (release-flags.md sections 2 and 3.6). Otherwise leave it out.
+- `noFlag`: a short reason, only when nothing in the item is seen by people, so it needs no release flag. Otherwise leave it out.

@@ -550,6 +550,9 @@ mod tests {
             "Build this piece whole, and nothing else",
             "return `failed` and say in `summary` how it should be split",
             "retaskable/p-build-the-prompt",
+            "- This run: `build`. A fresh branch from the base.",
+            "open no PR: return `status: \"nothing_left\"`",
+            "rustfmt --edition <the crate's edition> <file>",
         ] {
             assert!(out.contains(want), "missing {want:?}:\n{out}");
         }
