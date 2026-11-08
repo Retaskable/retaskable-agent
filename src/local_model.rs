@@ -7,7 +7,7 @@
 use crate::config::LocalModelConfig;
 use crate::engines::engine::LocalTarget;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -34,10 +34,41 @@ pub struct LocalModel {
     /// Bumped when `down()` changes, so the connector can send a new snapshot.
     changes: Arc<tokio::sync::watch::Sender<u64>>,
     slot: Arc<Semaphore>,
+    /// Sessions holding the slot (0 or 1) and sessions waiting for it.
+    holding: Arc<AtomicU32>,
+    waiting: Arc<AtomicU32>,
 }
 
 /// Holds the local model's one slot until it's dropped, however the holder's task ends (a panic included).
-pub struct LocalSlot(#[allow(dead_code)] OwnedSemaphorePermit);
+pub struct LocalSlot {
+    _permit: OwnedSemaphorePermit,
+    holding: Arc<AtomicU32>,
+}
+
+impl LocalSlot {
+    fn new(permit: OwnedSemaphorePermit, holding: &Arc<AtomicU32>) -> Self {
+        holding.fetch_add(1, Ordering::SeqCst);
+        Self {
+            _permit: permit,
+            holding: holding.clone(),
+        }
+    }
+}
+
+impl Drop for LocalSlot {
+    fn drop(&mut self) {
+        self.holding.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Counts a session as waiting for the slot until dropped, even if its future is cancelled.
+struct Waiting(Arc<AtomicU32>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// A session running on the local model: where it runs, holding the model's one slot until dropped.
 pub struct LocalRun {
@@ -54,6 +85,8 @@ impl LocalModel {
             checked: Arc::new(AtomicBool::new(false)),
             changes: Arc::new(tokio::sync::watch::channel(0).0),
             slot: Arc::new(Semaphore::new(1)),
+            holding: Arc::new(AtomicU32::new(0)),
+            waiting: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -112,7 +145,11 @@ impl LocalModel {
 
     /// The slot if it's free right now, else `None` at once (scouts and chores, which never wait for it).
     pub fn try_take(&self) -> Option<LocalSlot> {
-        self.slot.clone().try_acquire_owned().ok().map(LocalSlot)
+        self.slot
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|p| LocalSlot::new(p, &self.holding))
     }
 
     #[cfg(test)]
@@ -129,13 +166,25 @@ impl LocalModel {
 
     /// Waits for the slot (the fallback, which runs on the local model instead of waiting for the limit).
     pub async fn take(&self) -> LocalSlot {
-        LocalSlot(
-            self.slot
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("the local slot is never closed"),
-        )
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting(self.waiting.clone());
+        let permit = self
+            .slot
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the local slot is never closed");
+        LocalSlot::new(permit, &self.holding)
+    }
+
+    /// Sessions holding the slot right now: 0 or 1.
+    pub fn holding(&self) -> u32 {
+        self.holding.load(Ordering::SeqCst)
+    }
+
+    /// Sessions waiting in `take()` (so `claim()` and `run()` too) for the slot right now.
+    pub fn waiting(&self) -> u32 {
+        self.waiting.load(Ordering::SeqCst)
     }
 
     /// Whether a role on the tier ladder may be handed `local`: the `local-tier-ladder` flag is On and the model is
@@ -351,6 +400,47 @@ mod tests {
     fn target_gives_the_url_and_model() {
         let t = on("http://x:1".into()).target();
         assert_eq!((t.base_url.as_str(), t.model.as_str()), ("http://x:1", "m"));
+    }
+
+    #[tokio::test]
+    async fn holding_goes_0_1_0_across_a_slots_life_and_after_a_panic() {
+        let local = LocalModel::up();
+        assert_eq!(local.holding(), 0);
+        let slot = local.try_take().unwrap();
+        assert_eq!(local.holding(), 1);
+        drop(slot);
+        assert_eq!(local.holding(), 0);
+        let l = local.clone();
+        let panicked = tokio::spawn(async move {
+            let _slot = l.take().await;
+            assert_eq!(l.holding(), 1);
+            panic!("boom");
+        })
+        .await;
+        assert!(panicked.is_err());
+        assert_eq!(local.holding(), 0);
+    }
+
+    #[tokio::test]
+    async fn waiting_counts_a_blocked_take_until_granted_or_cancelled() {
+        let local = LocalModel::up();
+        let held = local.try_take().unwrap();
+        let l = local.clone();
+        let granted = tokio::spawn(async move { l.take().await });
+        tokio::task::yield_now().await;
+        assert_eq!((local.holding(), local.waiting()), (1, 1));
+        drop(held);
+        let slot = granted.await.unwrap();
+        assert_eq!((local.holding(), local.waiting()), (1, 0));
+        let l = local.clone();
+        let cancelled = tokio::spawn(async move { l.take().await });
+        tokio::task::yield_now().await;
+        assert_eq!(local.waiting(), 1);
+        cancelled.abort();
+        let _ = cancelled.await;
+        assert_eq!(local.waiting(), 0);
+        drop(slot);
+        assert_eq!(local.holding(), 0);
     }
 
     #[tokio::test]

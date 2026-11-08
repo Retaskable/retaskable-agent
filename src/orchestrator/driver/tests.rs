@@ -967,6 +967,7 @@ mod idea_accept;
 mod ideas;
 mod ideas_daily;
 mod lane_play;
+mod local_one_slot;
 mod main_sync;
 mod model_caps;
 mod own_failures;

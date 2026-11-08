@@ -10,11 +10,11 @@ use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+use super::run_starters::RunStarters;
 use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, deprecations,
-    ideas_daily, playtest_round, vet_daily,
+    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
+    playtest_round, vet_daily,
 };
-use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
@@ -180,6 +180,8 @@ pub struct Machine {
     pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
     pub(super) concurrency: u32,
+    /// The computer's local model: its slot holder doesn't count toward `concurrency` (`local-one-slot`).
+    pub(super) local: crate::local_model::LocalModel,
     /// Auto concurrency's pacer and the number it allows (`driver/auto.rs`).
     pub(super) auto: super::auto::Auto,
     /// Sessions report their end here; the receiver is read on each wake.
@@ -229,6 +231,7 @@ impl Machine {
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
+            local: crate::local_model::LocalModel::off(),
             auto: super::auto::Auto::new(AutoConcurrency {
                 enabled: false,
                 ..Default::default()
@@ -239,6 +242,22 @@ impl Machine {
             stopping_override: None,
             #[cfg(test)]
             clock: None,
+        }
+    }
+
+    /// Shares the computer's local model, so the session holding its slot can be left out of the count.
+    pub fn with_local(mut self, local: crate::local_model::LocalModel) -> Self {
+        self.local = local;
+        self
+    }
+
+    /// `concurrency` plus the session holding the local slot (already in the starter's counts), when `local-one-slot`
+    /// is On. Applied once, to the base number, so it can't be added back twice.
+    fn room_total(&self, concurrency: u32) -> u32 {
+        if crate::tiers::local_one_slot_on() {
+            concurrency + self.local.holding()
+        } else {
+            concurrency
         }
     }
 
@@ -677,7 +696,7 @@ impl Machine {
             self.settle_outcomes().await;
         }
         self.pace_step(ready, &live).await;
-        let concurrency = self.effective_concurrency();
+        let concurrency = self.room_total(self.effective_concurrency());
         if let Some(starter) = starter.as_deref() {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
@@ -803,29 +822,6 @@ impl Machine {
     }
 }
 
-/// The starters `runs` mode has, as one: asks for the kinds any of them can run and hands a run to the one that can.
-#[derive(Default)]
-pub(super) struct RunStarters(Vec<Arc<dyn RunStarter>>);
-
-impl RunStarter for RunStarters {
-    fn kinds(&self) -> Vec<RunKind> {
-        let mut kinds: Vec<RunKind> = Vec::new();
-        for kind in self.0.iter().flat_map(|s| s.kinds()) {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-        kinds
-    }
-
-    fn start(&self, request: RunRequest) -> Result<(), String> {
-        match self.0.iter().find(|s| s.kinds().contains(&request.kind)) {
-            Some(starter) => starter.start(request),
-            None => Err(format!("no runner for {:?} runs", request.kind)),
-        }
-    }
-}
-
 /// What a caught panic said.
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     (panic.downcast_ref::<&str>().map(ToString::to_string))
@@ -840,6 +836,8 @@ pub struct SpawnArgs<'a> {
     pub lane_count: u32,
     /// `concurrency`: how many sessions may run at once, across every project.
     pub concurrency: u32,
+    /// The computer's local model, shared with the session starters.
+    pub local: crate::local_model::LocalModel,
     /// `autoConcurrency`.
     pub auto_concurrency: AutoConcurrency,
     /// `pollIntervalSec`: how often the loop steps between the minute's passes.
@@ -919,7 +917,10 @@ pub fn spawn_all(args: SpawnArgs) {
         },
     );
     machine.engine_limits = limits;
-    machine = machine.with_auto(args.auto_concurrency).with_machine_dir(args.dir);
+    machine = machine
+        .with_local(args.local)
+        .with_auto(args.auto_concurrency)
+        .with_machine_dir(args.dir);
     if args.live.snapshot().mode == OrchestratorMode::Runs {
         machine = machine.with_run_starters(args.run_starters);
         let kinds = machine.run_starters.kinds();
