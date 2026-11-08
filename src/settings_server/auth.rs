@@ -2,7 +2,9 @@
 //! CSRF check, the wrong-try rate limit, and the Host and Origin checks every request goes
 //! through (agent-settings.md section 4.3).
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
+
+use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, header};
@@ -78,20 +80,29 @@ impl SettingsServer {
     /// while network access is on (section 3.1: "Turning it off keeps the hash" so it can be
     /// turned back on, but doesn't go on signing in while it's off).
     pub(super) fn verify_password(&self, password_attempt: &str) -> bool {
-        let access = match &self.env_network_access {
-            Some(access) => access.clone(),
-            None => {
-                let Ok(machine) = MachineStore::load(&self.dir) else {
-                    return false;
-                };
-                machine.network().unwrap_or_default()
-            }
+        let Some(access) = self.live_network_access() else {
+            return false;
         };
         access.enabled
             && access
                 .password_hash
                 .as_deref()
                 .is_some_and(|hash| password::verify_password(password_attempt, hash))
+    }
+
+    /// Network access as it is right now: the variable's, else `machine.json`'s, read on each
+    /// call so a save that turns it off takes effect at once (section 4.4). `None` when the file
+    /// can't be read (fail closed).
+    fn live_network_access(&self) -> Option<crate::network::NetworkAccess> {
+        match &self.env_network_access {
+            Some(access) => Some(access.clone()),
+            None => Some(MachineStore::load(&self.dir).ok()?.network().unwrap_or_default()),
+        }
+    }
+
+    /// Whether network access is on right now (not as the agent started).
+    pub(super) fn network_on(&self) -> bool {
+        self.live_network_access().is_some_and(|a| a.enabled)
     }
 
     pub(super) fn create_session(&self) -> (String, String) {
@@ -166,20 +177,9 @@ impl SettingsServer {
         self.state.lock().unwrap().failures.remove(&addr);
     }
 
-    /// Whether network access is on right now, read on each call: `RETASKABLE_NETWORK_PASSWORD`
-    /// wins, otherwise `machine.json` (section 4.4: turned off while running, other computers
-    /// are refused at once, though the socket stays as it was bound until the restart). An
-    /// unreadable `machine.json` reads as off.
-    pub(super) fn network_access_on(&self) -> bool {
-        match &self.env_network_access {
-            Some(access) => access.enabled,
-            None => MachineStore::load(&self.dir).is_ok_and(|m| m.network().unwrap_or_default().enabled),
-        }
-    }
-
-    /// Its Host is this computer's own, at the port it answered on (section 4.3): `127.0.0.1`,
-    /// `localhost` or `[::1]`, and while network access is on, an IP literal that is one of this
-    /// computer's own addresses. Never another DNS name: no DNS rebinding.
+    /// Its Host is this computer's own, at the port it answered on (section 4.3): no DNS
+    /// rebinding. `127.0.0.1`, `localhost` and `[::1]` always; while network access is on, also
+    /// an IP literal that is one of this computer's own interface addresses. Never another name.
     pub(super) fn host_is_allowed(&self, host_header: &str) -> bool {
         let (host, port) = split_host_port(host_header);
         if let Some(port) = port
@@ -187,29 +187,22 @@ impl SettingsServer {
         {
             return false;
         }
-        if matches!(
-            host.to_ascii_lowercase().as_str(),
-            "127.0.0.1" | "localhost" | "[::1]" | "::1"
-        ) {
+        let host = host.to_ascii_lowercase();
+        if matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1") {
             return true;
         }
-        let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+        let literal = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(&host);
         let Ok(ip) = literal.parse::<IpAddr>() else {
             return false;
         };
-        self.network_access_on() && (self.own_addresses)().contains(&ip)
+        self.network_on() && (self.own_addresses)().contains(&ip)
     }
 }
 
-/// This computer's own interface addresses, for [`SettingsServer::host_is_allowed`].
-pub(super) fn interface_addresses() -> Vec<IpAddr> {
-    if_addrs::get_if_addrs()
-        .map(|all| all.into_iter().map(|i| i.ip()).collect())
-        .unwrap_or_default()
-}
-
-/// Section 4.3, every request: a peer that isn't this computer is served only while network access
-/// is on, Host is this computer's own, and a POST's Origin is its own.
+/// Section 4.3, every request: Host is this computer's own, and a POST's Origin is its own.
 /// Anything else answers the same 404 as a path this agent doesn't serve, so it gives nothing
 /// away about which paths exist (agent/08-http-api.md: the port takes no command either way).
 pub(super) async fn security_envelope(
@@ -218,9 +211,6 @@ pub(super) async fn security_envelope(
     req: Request,
     next: Next,
 ) -> Response {
-    if !peer.ip().to_canonical().is_loopback() && !settings.network_access_on() {
-        return not_found_response();
-    }
     let Some(host) = req
         .headers()
         .get(header::HOST)
@@ -229,7 +219,8 @@ pub(super) async fn security_envelope(
     else {
         return not_found_response();
     };
-    if !settings.host_is_allowed(&host) {
+    // Another computer gets in only while network access is on, read live (section 4.4).
+    if (!peer.ip().is_loopback() && !settings.network_on()) || !settings.host_is_allowed(&host) {
         return not_found_response();
     }
     if req.method() == Method::POST {

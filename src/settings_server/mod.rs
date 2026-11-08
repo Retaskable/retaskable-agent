@@ -69,7 +69,7 @@ pub struct SettingsServer {
     /// process runs.
     env_network_access: Option<NetworkAccess>,
     env: Env,
-    /// This computer's own interface addresses, listed on each check (replaced in tests).
+    /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
     own_addresses: Box<dyn Fn() -> Vec<std::net::IpAddr> + Send + Sync>,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
@@ -103,7 +103,11 @@ impl SettingsServer {
             network_enabled,
             env_network_access,
             env,
-            own_addresses: Box::new(auth::interface_addresses),
+            own_addresses: Box::new(|| {
+                if_addrs::get_if_addrs()
+                    .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
+                    .unwrap_or_default()
+            }),
             now: Box::new(now),
             exit: Box::new(exit),
             keychain,
@@ -111,16 +115,6 @@ impl SettingsServer {
             status: OnceLock::new(),
             saved: OnceLock::new(),
         }
-    }
-
-    /// Replaces how this computer's own addresses are listed, so a test doesn't depend on its NICs.
-    #[cfg(test)]
-    pub(crate) fn with_own_addresses(
-        mut self,
-        list: impl Fn() -> Vec<std::net::IpAddr> + Send + Sync + 'static,
-    ) -> Self {
-        self.own_addresses = Box::new(list);
-        self
     }
 
     fn saver(&self) -> save::Saver<'_> {
@@ -417,8 +411,8 @@ pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
 }
 
 #[cfg(test)]
-mod network_tests;
-#[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod network_tests;

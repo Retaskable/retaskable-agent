@@ -22,34 +22,14 @@ pub(crate) fn app(settings: Arc<SettingsServer>) -> Router {
     super::router(settings).layer(MockConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 54321))))
 }
 
-/// [`app`] with the peer at `ip` instead of this computer, for a request "from another computer".
-pub(crate) fn app_from(settings: Arc<SettingsServer>, ip: IpAddr) -> Router {
-    super::router(settings).layer(MockConnectInfo(SocketAddr::new(ip, 54321)))
+/// Like [`app`], but the request comes from `peer` (e.g. a 192.168.x.x address).
+pub(crate) fn app_from(settings: Arc<SettingsServer>, peer: IpAddr) -> Router {
+    super::router(settings).layer(MockConnectInfo(SocketAddr::from((peer, 54321))))
 }
 
-/// A settings server whose own network addresses are `own`, with network access `stored` in
-/// machine.json (or none).
-pub(crate) fn settings_with_own_addresses(
-    dir: &Path,
-    stored: Option<NetworkAccess>,
-    own: Vec<IpAddr>,
-) -> Arc<SettingsServer> {
-    if let Some(network) = stored {
-        MachineStore::load(dir).unwrap().set_network(network).unwrap();
-    }
-    Arc::new(
-        SettingsServer::new(
-            dir.to_path_buf(),
-            4700,
-            4700,
-            false,
-            Env::empty(),
-            || 1_700_000_000,
-            |_: i32| {},
-            test_keychain(dir),
-        )
-        .with_own_addresses(move || own.clone()),
-    )
+/// Replaces the interface addresses a Host is checked against.
+pub(crate) fn set_own_addresses(settings: &mut SettingsServer, addrs: Vec<IpAddr>) {
+    settings.own_addresses = Box::new(move || addrs.clone());
 }
 
 pub(crate) fn request(method: &str, path: &str) -> axum::http::request::Builder {
