@@ -134,6 +134,9 @@ pub struct Item {
     /// On a `fix_main` item that ended without a merge: the commit fixing found nothing to fix.
     #[serde(default)]
     pub no_fix_sha: Option<String>,
+    /// The item's size (`S`, `M`, `L`, `XL`), when the store sends one.
+    #[serde(default)]
+    pub size: Option<String>,
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the

@@ -120,7 +120,7 @@ pub fn model_for(chore: Option<&Chore>, normal_tier: &'static str, item: &crate:
     match chore {
         _ if normal_tier == LOCAL => LOCAL,
         Some(c) if c.kind != ChoreKind::PlaytestFix => chore_tier(),
-        _ => implementer_model(normal_tier, item),
+        _ => implementer_model(normal_tier, item, 0),
     }
 }
 

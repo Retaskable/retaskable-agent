@@ -210,3 +210,27 @@ async fn an_anthropic_or_missing_transcript_resumes_on_sonnet_never_locally() {
         );
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_start_over_job_on_a_full_window_starts_on_opus_with_the_step_up_flag() {
+    for (attempt, flag, model) in [
+        (1, true, "--model opus"),
+        (0, true, "--model sonnet"),
+        (1, false, "--model sonnet"),
+    ] {
+        crate::tiers::set_step_up_for_test(flag);
+        let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+        recording_claude(&rig, 0);
+        let (mut request, mut rx) = request();
+        request.attempt = attempt;
+        request.usage = None;
+        rig.starter.start(request).unwrap();
+        tokio::time::timeout(Duration::from_secs(120), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert!(args.contains(model), "attempt {attempt}, flag {flag}: {args}");
+    }
+}

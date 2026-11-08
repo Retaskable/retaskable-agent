@@ -71,6 +71,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         draft_id: None,
         reopened: None,
         no_fix_sha: None,
+        size: None,
         red_sha: None,
     };
     let request = StartRequest {

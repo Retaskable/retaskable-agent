@@ -146,7 +146,7 @@ impl TrialHost for ClaudeTrial {
                 implementer_tier(job.usage.as_ref(), now, &models, up)
             };
             let local_run = if tier == LOCAL { Some(local.run().await) } else { None };
-            let model = implementer_model(tier, &item).to_string();
+            let model = implementer_model(tier, &item, 0).to_string();
             let mut spec = session_spec(
                 &Session {
                     template: TEMPLATE,

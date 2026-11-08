@@ -35,6 +35,7 @@ pub(crate) fn item(
         reopened: None,
         red_sha: None,
         no_fix_sha: None,
+        size: None,
     }
 }
 

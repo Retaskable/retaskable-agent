@@ -617,3 +617,12 @@ async fn auto_link_does_nothing_for_a_bad_backlog_url() {
     .unwrap();
     assert_eq!(id, None);
 }
+
+#[test]
+fn an_item_parses_with_and_without_a_size() {
+    let base = r#"{"id":"a","title":"A","status":"todo","rank":1"#;
+    let without: Item = serde_json::from_str(&format!("{base}}}")).unwrap();
+    assert_eq!(without.size, None);
+    let with: Item = serde_json::from_str(&format!(r#"{base},"size":"XL"}}"#)).unwrap();
+    assert_eq!(with.size.as_deref(), Some("XL"));
+}
