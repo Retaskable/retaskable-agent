@@ -491,7 +491,10 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             Default::default(),
             live.clone(),
             retaskable_agent::agent_ci::docker::in_agent_image(),
-        );
+        )
+        .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
+            retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
+        )));
         tokio::spawn(retaskable_agent::agent_ci::run(ci, dir.to_path_buf(), env.clone()));
     }
     if let Some(b) = build {

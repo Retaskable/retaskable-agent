@@ -3,6 +3,7 @@
 //! Each poll it checks Docker, then for each project looks for the project's CI files on its base branch and
 //! lists the pull requests to check. Checks are listed here, not run. `host.rs` is the fetch step; `report.rs`
 //! is the code host side: statuses and the failure comment.
+pub mod automerge;
 pub mod check;
 pub mod claim;
 pub mod container;
@@ -104,6 +105,8 @@ pub struct CiLoop {
     pub clock: Clock,
     /// How often a running check's claim is refreshed.
     pub refresh: Duration,
+    /// What squash-merges a green `automerge` pull request; none merges nothing (fail closed).
+    automerge: Option<automerge::Automerge>,
 }
 
 impl CiLoop {
@@ -119,7 +122,14 @@ impl CiLoop {
             seen: Arc::default(),
             clock: Arc::new(crate::telemetry::now_ms),
             refresh: claim::REFRESH,
+            automerge: None,
         }
+    }
+
+    /// Lets the loop merge green pull requests labelled `automerge`, under the store's merge lock.
+    pub fn with_automerge(mut self, automerge: automerge::Automerge) -> Self {
+        self.automerge = Some(automerge);
+        self
     }
 
     /// The slot: a check holds a permit from its claim to its last status.
@@ -236,6 +246,7 @@ impl CiLoop {
                     project: p.clone(),
                     image: image.clone(),
                     key,
+                    automerge: self.automerge.clone(),
                     clock: self.clock.clone(),
                     refresh: self.refresh,
                 };

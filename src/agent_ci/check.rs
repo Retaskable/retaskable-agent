@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::claim::{self, Verdict};
 use super::report::{self, Host, Kind, State};
-use super::{CheckKey, Programs, RunningCheck, container, host};
+use super::{CheckKey, Programs, RunningCheck, automerge, container, host};
 use crate::config::ProjectConfig;
 use crate::orchestrator::live::LiveHandle;
 use crate::telemetry::event::{Ci, Event};
@@ -25,6 +25,8 @@ pub struct Job {
     pub project: ProjectConfig,
     pub image: String,
     pub key: CheckKey,
+    /// Merges the pull request when the check is green; none merges nothing.
+    pub automerge: Option<automerge::Automerge>,
     pub clock: super::Clock,
     pub refresh: std::time::Duration,
 }
@@ -224,12 +226,34 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     match result {
         Ok(()) => {
             post(State::Success, report::passed_text(&me, minutes())).await;
+            land(j).await;
             true
         }
         Err((reason, log)) => {
             fail(reason, log).await;
             false
         }
+    }
+}
+
+/// A green check's `automerge`: the pull request is squash-merged under the merge lock, or says why not.
+async fn land(j: &Job) {
+    let Some(am) = &j.automerge else { return };
+    let repo = PathBuf::from(&j.project.repo_path);
+    let target = automerge::Target {
+        gh: &j.programs.gh,
+        git: &j.programs.git,
+        repo_dir: &repo,
+        github_repo: &j.project.github_repo,
+        base: &j.project.base_branch,
+        computer: &j.computer,
+        key: &j.key,
+    };
+    match automerge::run(am, &target).await {
+        automerge::Ended::Merged => tracing::info!("agent CI: merged PR #{}", j.key.pr),
+        automerge::Ended::MainMoved => tracing::info!("agent CI: main moved, PR #{} isn't merged", j.key.pr),
+        automerge::Ended::NotAsked => {}
+        automerge::Ended::Failed(why) => tracing::warn!("agent CI: merging PR #{} failed: {why}", j.key.pr),
     }
 }
 

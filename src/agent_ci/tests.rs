@@ -363,6 +363,69 @@ mod stubbed {
         assert!(r.ci.seen.lock().unwrap().is_empty());
     }
 
+    /// `pr_rig` with a `gh` that logs every call, answers `pr view` with `view` and a list with PR 7, and a fake
+    /// store lock; main is where the check saw it.
+    fn automerge_rig(docker_body: &str, view: &str) -> (Rig, Arc<std::sync::Mutex<Vec<String>>>) {
+        let mut r = pr_rig(docker_body);
+        let bin = r._dir.path().join("bin");
+        let log = r._dir.path().join("calls.log");
+        script(
+            &bin,
+            "gh",
+            &format!(
+                "echo \"gh $*\" >> {l}\nif [ \"$1\" = api ]; then [ \"$3\" = GET ] && echo '[]'; exit 0; fi\n\
+                 if [ \"$2\" = view ]; then echo '{view}'; exit 0; fi\n\
+                 [ \"$2\" = merge ] && exit 0\n\
+                 echo '[{{\"number\":7,\"isDraft\":false,\"labels\":[],\"headRefOid\":\"h7\"}}]'",
+                l = log.display()
+            ),
+        );
+        let store = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let locks = automerge::tests::FakeLocks {
+            busy: std::sync::Mutex::new(0),
+            log: store.clone(),
+        };
+        let am = automerge::Automerge {
+            locks: Arc::new(locks),
+            ask_every: Duration::from_millis(5),
+            wait: Duration::from_secs(5),
+        };
+        r.ci = std::mem::replace(
+            &mut r.ci,
+            CiLoop::new(Programs::default(), LiveHandle::default(), false),
+        )
+        .with_automerge(am);
+        (r, store)
+    }
+
+    const LABELLED: &str = r#"{"state":"OPEN","headRefOid":"h7","labels":[{"name":"automerge"}]}"#;
+
+    #[tokio::test]
+    async fn a_green_automerge_check_merges_and_a_red_one_does_not() {
+        for (docker, merged) in [("exit 0", true), ("echo boom >&2\nexit 1", false)] {
+            let (mut r, store) = automerge_rig(docker, LABELLED);
+            // The checked main is the real origin/main, so the merge sees it unmoved.
+            let main = std::process::Command::new("git")
+                .args(["rev-parse", "origin/main"])
+                .current_dir(r._dir.path().join("work"))
+                .output()
+                .unwrap();
+            let main = String::from_utf8(main.stdout).unwrap().trim().to_string();
+            let k = CheckKey { main, ..key(7, "h7") };
+            for t in go(&mut r, vec![k]).await {
+                t.await.unwrap();
+            }
+            assert_eq!(
+                calls(&r).contains("pr merge 7 --squash --delete-branch"),
+                merged,
+                "{}",
+                calls(&r)
+            );
+            let store = store.lock().unwrap().clone();
+            assert_eq!(store.len(), if merged { 2 } else { 0 }, "{store:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_failing_check_posts_failure_and_one_comment() {
         let mut r = pr_rig("echo boom; exit 1");

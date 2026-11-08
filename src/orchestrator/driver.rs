@@ -49,6 +49,7 @@ mod vet_daily;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
+pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
 use project::Launch;
 pub use project::{
