@@ -403,6 +403,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
             placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
             orchestrator::session::keep_cursor_guard_fresh();
+            retaskable_agent::tiers::set_flags(placement.clone());
+            placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
             let roster = orchestrator::plan_run::Roster {
                 data_dir: dir.to_path_buf(),
                 projects: cfg.projects.clone(),

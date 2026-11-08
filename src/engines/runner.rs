@@ -301,6 +301,14 @@ pub async fn run_session(
     run_session_tracked(engine, bin, spec, known_session_id, sink, watch, None).await
 }
 
+/// `spec` with no dollar cap, when `on_subscription` and it has one.
+fn uncapped_on(spec: &SessionSpec, on_subscription: bool) -> Option<SessionSpec> {
+    (on_subscription && spec.budget_usd > 0.0).then(|| SessionSpec {
+        budget_usd: 0.0,
+        ..spec.clone()
+    })
+}
+
 /// [`run_session`], handing the session's process tree to `tree_tx` once it has started, so a run can cut it.
 pub async fn run_session_tracked(
     engine: &dyn Engine,
@@ -311,6 +319,9 @@ pub async fn run_session_tracked(
     watch: Watch,
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 ) -> Result<SessionResult> {
+    // On a Claude subscription the usage window is the limit, so no session carries a dollar cap.
+    let uncapped = uncapped_on(spec, crate::tiers::machine_on_subscription(now_ms() / 1000));
+    let spec = uncapped.as_ref().unwrap_or(spec);
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;
     let result = spawn_and_read(
@@ -815,6 +826,29 @@ mod tests {
         .unwrap();
         let (bin, args) = print_file_command(&out);
         (bin, ArgsEngine { args })
+    }
+
+    #[test]
+    fn a_budget_is_dropped_only_on_a_subscription() {
+        let mut spec = SessionSpec {
+            engine: None,
+            model: "sonnet".to_string(),
+            prompt: "hi".to_string(),
+            schema: json!({"type": "object"}),
+            cwd: PathBuf::new(),
+            max_turns: None,
+            budget_usd: 5.0,
+            start: SessionStart::Ephemeral,
+            readonly: false,
+            shell: true,
+            cursor: None,
+            local: None,
+            sandbox: false,
+        };
+        assert_eq!(uncapped_on(&spec, true).unwrap().budget_usd, 0.0);
+        assert!(uncapped_on(&spec, false).is_none());
+        spec.budget_usd = 0.0;
+        assert!(uncapped_on(&spec, true).is_none());
     }
 
     #[tokio::test]

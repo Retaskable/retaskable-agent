@@ -57,7 +57,8 @@ pub struct SessionSpec {
     pub schema: Value,
     pub cwd: PathBuf,
     pub max_turns: Option<u32>,
-    /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check.
+    /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check. `run_session_tracked` runs
+    /// it as 0 on a Claude subscription (`tiers::machine_on_subscription`), whatever the settings say.
     pub budget_usd: f64,
     pub start: SessionStart,
     /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist,
