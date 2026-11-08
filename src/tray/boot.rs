@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::agent::{CloudSlot, Opener, Quit, SystemOpener, TrayAgent, TrayDeps};
 use super::helper::helper_path;
 use super::icons::{TrayState, load_tray_icon};
-use super::mode::{TrayMode, tray_mode, use_tui};
+use super::mode::{TrayMode, tray_mode};
 use super::run::{Icons, encode_icon, start};
 use super::term::StdTerm;
 use super::tui::{TerminalMenu, TuiOpener};
@@ -20,6 +20,7 @@ use crate::restart::RestartState;
 use crate::settings_server::SettingsServer;
 use crate::tags::{OsKind, current_os};
 use crate::terminal_menu::console::ConsoleCapture;
+use crate::terminal_menu::when::{UiMode, no_tray_reason, ui_mode};
 use crate::view::{AgentView, Exit};
 
 /// Everything the tray reads and acts on.
@@ -125,16 +126,44 @@ fn start_tui(deps: TrayDeps, quit: Arc<dyn Quit>) -> Option<Shutdown> {
     }))
 }
 
+/// Which UI starts: the terminal menu only with its flag On (Off leaves the tray or headless console as before).
+fn ui(args: &[String], env: &Env, has_helper: bool, interactive: bool, flag: bool) -> UiMode {
+    match ui_mode(args, env, std::env::consts::OS, has_helper, interactive) {
+        UiMode::TerminalMenu if !flag => UiMode::Console,
+        mode => mode,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_needs_its_flag_and_a_terminal() {
+        let args = vec!["--tui".to_string()];
+        let env = Env::from_map(Default::default());
+        assert_eq!(ui(&args, &env, true, true, true), UiMode::TerminalMenu);
+        assert_eq!(ui(&args, &env, true, true, false), UiMode::Console);
+        assert_eq!(ui(&args, &env, true, false, true), UiMode::Console);
+    }
+}
+
 /// The running tray or terminal menu, or `None` when the agent runs with the plain console (the console says why).
 pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
     let os = current_os();
     let exe = b.exe.unwrap_or(Path::new(""));
     let terminals = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let tui = use_tui(b.args, b.env, os, terminals);
+    let helper = helper_path(b.build, exe, b.env, os);
+    // Card flag `terminal-menu`: Off never draws the menu (the tray, or the console as before).
+    let tui_flag = crate::flags::Flags::from_env().on("terminal-menu").await;
+    let ui = ui(b.args, b.env, helper.is_some(), terminals, tui_flag);
+    if let Some(why) = no_tray_reason(b.args, b.env, std::env::consts::OS, helper.is_some()) {
+        tracing::info!("{why}");
+    }
+    let tui = ui == UiMode::TerminalMenu;
     let bin = if tui {
         None
     } else {
-        let helper = helper_path(b.build, exe, b.env, os);
         match tray_mode(b.args, b.env, os, helper) {
             TrayMode::Tray(bin) => Some(bin),
             TrayMode::Headless(why) => {
