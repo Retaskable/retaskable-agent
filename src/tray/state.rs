@@ -5,6 +5,11 @@ mod tests;
 
 use std::time::Duration;
 
+use crate::text::clip;
+
+/// Menu titles are one line: longer ones are cut.
+const TITLE_MAX: usize = 70;
+
 /// How long "restarted at 14:05" stays in the status line.
 const RESTARTED_SHOWN: Duration = Duration::from_secs(10 * 60);
 
@@ -15,7 +20,7 @@ pub enum LinkState {
     NotLinked,
     /// A link is waiting for its code to be approved.
     Waiting {
-        code: String,
+        code: Option<String>,
     },
     /// A token, but the cloud can't be reached.
     Offline,
@@ -66,78 +71,92 @@ pub enum IconState {
     Connected,
 }
 
-/// Section 4.1: the combination of the clouds' links, worst first. A waiting link comes first, since a cloud
-/// waiting for its code has no token yet; then no link at all, then any cloud that can't be reached.
+/// Section 4.1, following `trayState`: every linked cloud's state, worst first (Offline, Waiting, Connected);
+/// Not linked only when none of them is.
 pub fn icon_state(input: &TrayInput) -> IconState {
-    let links = || input.clouds.iter().map(|c| &c.link);
-    if links().any(|l| matches!(l, LinkState::Waiting { .. })) {
-        IconState::Waiting
-    } else if links().all(|l| matches!(l, LinkState::NotLinked)) {
-        IconState::NotLinked
-    } else if links().any(|l| matches!(l, LinkState::Offline | LinkState::UnlinkedOnTheWebsite)) {
+    let any = |f: fn(&LinkState) -> bool| input.clouds.iter().any(|c| f(&c.link));
+    if any(|l| matches!(l, LinkState::Offline | LinkState::UnlinkedOnTheWebsite)) {
         IconState::Offline
-    } else {
+    } else if any(|l| matches!(l, LinkState::Waiting { .. })) {
+        IconState::Waiting
+    } else if any(|l| matches!(l, LinkState::Connected)) {
         IconState::Connected
+    } else {
+        IconState::NotLinked
     }
 }
 
-fn word(link: &LinkState) -> &'static str {
+fn link_text(link: &LinkState) -> String {
     match link {
-        LinkState::NotLinked => "not linked",
-        LinkState::Waiting { .. } => "waiting",
-        LinkState::Offline | LinkState::UnlinkedOnTheWebsite => "offline",
-        LinkState::Connected => "connected",
+        LinkState::NotLinked => "not linked".into(),
+        LinkState::Waiting { code } => match code {
+            Some(code) => format!("waiting: {code}"),
+            None => "waiting for approval".into(),
+        },
+        LinkState::Offline => "offline".into(),
+        LinkState::UnlinkedOnTheWebsite => "unlinked on the website".into(),
+        LinkState::Connected => "connected".into(),
     }
 }
 
-/// Section 4.6: "Retaskable · Production: connected · Local: offline", clouds not linked left out (Production's
-/// state when none is), " · Paused" while every project is, " · 1 waiting for you" while the backlog waits.
+fn paused(input: &TrayInput) -> bool {
+    input.has_project && input.all_paused
+}
+
+/// Section 4.6, following `trayTooltip`: "Retaskable · Production: connected · Local: offline", clouds not linked
+/// left out (the first one shown when none is linked), " · Paused" while every project is, " · 1 waiting for you"
+/// while the backlog waits.
 pub fn tooltip(input: &TrayInput) -> String {
-    let mut out = String::from("Retaskable");
     let linked: Vec<&CloudInput> = input.clouds.iter().filter(|c| c.link != LinkState::NotLinked).collect();
-    if linked.is_empty() {
-        let first = input
-            .clouds
-            .iter()
-            .find(|c| c.name == "Production")
-            .or(input.clouds.first());
-        let (name, link) = first.map_or(("Production", &LinkState::NotLinked), |c| (c.name.as_str(), &c.link));
-        out.push_str(&format!(" · {name}: {}", word(link)));
-    }
-    for c in linked {
-        out.push_str(&format!(" · {}: {}", c.name, word(&c.link)));
-    }
-    if input.all_paused {
-        out.push_str(" · Paused");
+    let shown = if linked.is_empty() {
+        input.clouds.iter().take(1).collect()
+    } else {
+        linked
+    };
+    let mut parts = vec!["Retaskable".to_string()];
+    parts.extend(shown.iter().map(|c| format!("{}: {}", c.name, link_text(&c.link))));
+    if paused(input) {
+        parts.push("Paused".into());
     }
     if input.backlog_waits {
-        out.push_str(" · 1 waiting for you");
+        parts.push("1 waiting for you".into());
     }
-    out
+    parts.join(" · ")
 }
 
-/// The menu's first line (disabled).
+/// The menu's first line (disabled), following `statusLine`; "restarted at 14:05" ends the running, paused and
+/// idle lines for 10 minutes after a restart.
 pub fn status_line(input: &TrayInput) -> String {
-    let what = match &input.exit {
-        Exit::RestartingForNewCode => "restarting for new code".to_string(),
-        Exit::QuittingWhenIdle => "quitting when idle".to_string(),
-        Exit::Restarted { at, ago } if *ago < RESTARTED_SHOWN => format!("restarted at {at}"),
-        _ if input.sessions > 0 => {
-            let s = input.sessions;
-            format!("running ({s} session{})", if s == 1 { "" } else { "s" })
-        }
-        _ if !input.has_project => "no project yet".to_string(),
-        _ if input.all_paused => "paused".to_string(),
-        _ => "idle".to_string(),
+    let s = input.sessions;
+    let sessions = format!("{s} session{}", if s == 1 { "" } else { "s" });
+    let restarted = match &input.exit {
+        Exit::Restarted { at, ago } if *ago < RESTARTED_SHOWN => format!(" · restarted at {at}"),
+        _ => String::new(),
+    };
+    let what = if input.exit == Exit::QuittingWhenIdle {
+        let n = if s > 0 { format!(" ({sessions})") } else { String::new() };
+        format!("quitting when idle{n}")
+    } else if input.exit == Exit::RestartingForNewCode {
+        "restarting for new code".into()
+    } else if !input.has_project {
+        "no project set up yet".into()
+    } else if s > 0 {
+        format!("running ({sessions}){restarted}")
+    } else if paused(input) {
+        format!("paused{restarted}")
+    } else {
+        format!("idle{restarted}")
     };
     format!("Retaskable · {what}")
 }
 
-/// The greyed-out line under it: "jcnash-pc4 · tags: windows, gpu, display" (just the name with no tags).
+/// The greyed-out line under it: "jcnash-pc4 · tags: windows, gpu, display" ("tags: none" with none), cut to a
+/// menu title.
 pub fn computer_line(input: &TrayInput) -> String {
-    if input.tags.is_empty() {
-        input.machine.clone()
+    let tags = if input.tags.is_empty() {
+        "none".to_string()
     } else {
-        format!("{} · tags: {}", input.machine, input.tags.join(", "))
-    }
+        input.tags.join(", ")
+    };
+    clip(&format!("{} · tags: {tags}", input.machine), TITLE_MAX)
 }

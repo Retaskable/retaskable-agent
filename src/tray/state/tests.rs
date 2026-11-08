@@ -23,7 +23,7 @@ fn input(clouds: Vec<CloudInput>) -> TrayInput {
 
 fn waiting() -> LinkState {
     LinkState::Waiting {
-        code: "WXYZ-2345".into(),
+        code: Some("WXYZ-2345".into()),
     }
 }
 
@@ -53,7 +53,8 @@ fn icon_state_worst_first() {
     };
     assert_eq!(s(vec![Connected, NotLinked]), IconState::Connected);
     assert_eq!(s(vec![Connected, Offline, NotLinked]), IconState::Offline);
-    assert_eq!(s(vec![Connected, Offline, waiting(), NotLinked]), IconState::Waiting);
+    assert_eq!(s(vec![Connected, Offline, waiting(), NotLinked]), IconState::Offline);
+    assert_eq!(s(vec![Connected, waiting(), NotLinked]), IconState::Waiting);
     assert_eq!(s(vec![NotLinked, waiting()]), IconState::Waiting);
     assert_eq!(s(vec![]), IconState::NotLinked);
 }
@@ -65,7 +66,10 @@ fn invalid_grant_reads_offline() {
         cloud("Local", LinkState::Connected),
     ]);
     assert_eq!(icon_state(&i), IconState::Offline);
-    assert_eq!(tooltip(&i), "Retaskable · Production: offline · Local: connected");
+    assert_eq!(
+        tooltip(&i),
+        "Retaskable · Production: unlinked on the website · Local: connected"
+    );
 }
 
 #[test]
@@ -77,29 +81,32 @@ fn tooltip_forms() {
     ]);
     assert_eq!(tooltip(&i), "Retaskable · Production: connected · Local: offline");
     i.clouds[2].link = waiting();
-    assert_eq!(tooltip(&i), "Retaskable · Production: connected · Local: waiting");
+    assert_eq!(
+        tooltip(&i),
+        "Retaskable · Production: connected · Local: waiting: WXYZ-2345"
+    );
     i.all_paused = true;
     assert_eq!(
         tooltip(&i),
-        "Retaskable · Production: connected · Local: waiting · Paused"
+        "Retaskable · Production: connected · Local: waiting: WXYZ-2345 · Paused"
     );
     i.backlog_waits = true;
     assert_eq!(
         tooltip(&i),
-        "Retaskable · Production: connected · Local: waiting · Paused · 1 waiting for you"
+        "Retaskable · Production: connected · Local: waiting: WXYZ-2345 · Paused · 1 waiting for you"
     );
 }
 
 #[test]
-fn tooltip_with_nothing_linked_names_production() {
+fn tooltip_with_nothing_linked_names_the_first() {
     let i = input(vec![
         cloud("Staging", LinkState::NotLinked),
         cloud("Production", LinkState::NotLinked),
     ]);
-    assert_eq!(tooltip(&i), "Retaskable · Production: not linked");
+    assert_eq!(tooltip(&i), "Retaskable · Staging: not linked");
     let mut i = input(vec![]);
     i.backlog_waits = true;
-    assert_eq!(tooltip(&i), "Retaskable · Production: not linked · 1 waiting for you");
+    assert_eq!(tooltip(&i), "Retaskable · 1 waiting for you");
 }
 
 #[test]
@@ -114,30 +121,59 @@ fn status_line_variants() {
     i.all_paused = true;
     assert_eq!(status_line(&i), "Retaskable · paused");
     i.has_project = false;
-    assert_eq!(status_line(&i), "Retaskable · no project yet");
-    i.exit = Exit::QuittingWhenIdle;
-    assert_eq!(status_line(&i), "Retaskable · quitting when idle");
-    i.exit = Exit::RestartingForNewCode;
-    assert_eq!(status_line(&i), "Retaskable · restarting for new code");
+    assert_eq!(status_line(&i), "Retaskable · no project set up yet");
+    i.sessions = 2;
+    assert_eq!(status_line(&i), "Retaskable · no project set up yet");
 }
 
 #[test]
-fn restarted_shows_for_ten_minutes() {
+fn quitting_and_restarting_come_first() {
+    let mut i = input(vec![]);
+    i.exit = Exit::QuittingWhenIdle;
+    assert_eq!(status_line(&i), "Retaskable · quitting when idle");
+    i.sessions = 2;
+    assert_eq!(status_line(&i), "Retaskable · quitting when idle (2 sessions)");
+    i.exit = Exit::RestartingForNewCode;
+    assert_eq!(status_line(&i), "Retaskable · restarting for new code");
+    i.has_project = false;
+    i.exit = Exit::QuittingWhenIdle;
+    assert_eq!(status_line(&i), "Retaskable · quitting when idle (2 sessions)");
+}
+
+#[test]
+fn restarted_ends_the_line_for_ten_minutes() {
     let mut i = input(vec![]);
     let at = |secs| Exit::Restarted {
         at: "14:05".into(),
         ago: Duration::from_secs(secs),
     };
     i.exit = at(599);
-    assert_eq!(status_line(&i), "Retaskable · restarted at 14:05");
+    assert_eq!(status_line(&i), "Retaskable · idle · restarted at 14:05");
+    i.sessions = 2;
+    assert_eq!(
+        status_line(&i),
+        "Retaskable · running (2 sessions) · restarted at 14:05"
+    );
+    i.sessions = 0;
+    i.all_paused = true;
+    assert_eq!(status_line(&i), "Retaskable · paused · restarted at 14:05");
     i.exit = at(600);
-    assert_eq!(status_line(&i), "Retaskable · idle");
+    assert_eq!(status_line(&i), "Retaskable · paused");
 }
 
 #[test]
 fn computer_line_with_and_without_tags() {
     let mut i = input(vec![]);
-    assert_eq!(computer_line(&i), "jcnash-pc4");
+    assert_eq!(computer_line(&i), "jcnash-pc4 · tags: none");
     i.tags = vec!["windows".into(), "gpu".into(), "display".into()];
     assert_eq!(computer_line(&i), "jcnash-pc4 · tags: windows, gpu, display");
+}
+
+#[test]
+fn computer_line_is_cut_to_a_menu_title() {
+    let mut i = input(vec![]);
+    i.tags = vec!["x".repeat(100)];
+    let line = computer_line(&i);
+    assert_eq!(line.chars().count(), 70);
+    assert!(line.ends_with('…'));
 }
