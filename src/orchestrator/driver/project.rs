@@ -23,7 +23,7 @@ use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::{HeldItem, HeldLane, LiveHandle, now_iso8601};
+use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
@@ -625,28 +625,6 @@ impl ProjectLoop {
         });
         self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
         self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
-    }
-
-    /// The items this loop holds a lease on, for the snapshot's `items`: the backlog's title, branch and PR link
-    /// with the run record's state, lane and attempt. A lease whose item the backlog no longer lists is left out.
-    fn held_items(&self, items: &[Item]) -> Vec<HeldItem> {
-        items
-            .iter()
-            .filter(|i| self.leases.contains_key(&i.id))
-            .map(|i| {
-                let record = self.records.get(&i.id);
-                HeldItem {
-                    id: i.id.clone(),
-                    title: i.title.clone(),
-                    state: record.map_or_else(|| "queued".to_string(), |r| r.state.clone()),
-                    lane: record.and_then(|r| r.lane),
-                    branch: Some(branch_name(i, self.attempt_of(&i.id))),
-                    pr_url: i.pr_url.clone(),
-                    attempt: self.attempt_of(&i.id),
-                    chore: i.kind.as_deref() == Some("chore") || i.id.starts_with("chore-"),
-                }
-            })
-            .collect()
     }
 
     /// Writes the held and the unreleased leases to the state file.

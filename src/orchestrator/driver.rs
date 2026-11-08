@@ -36,6 +36,7 @@ mod ideas_daily;
 mod ideas_round;
 mod machine;
 mod playtest_round;
+mod held_items;
 mod project;
 mod report;
 mod resume;
