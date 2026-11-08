@@ -333,6 +333,14 @@ impl Client {
             .map(|_| ())
     }
 
+    /// `add { via: "deprecation", items: [removal item] }` (deprecate-feature.md section 3.1). An id already taken is
+    /// a `conflict`.
+    pub async fn add_removal(&self, repo_id: u64, token: Option<&str>, item: Value) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "add", json!({ "via": "deprecation", "items": [item] }))
+            .await
+            .map(|_| ())
+    }
+
     /// `runs_drop`: ends every run and lock this agent had as `interrupted`.
     pub async fn runs_drop(&self, repo_id: u64, token: Option<&str>) -> Result<(), BacklogError> {
         self.send(repo_id, token, "runs_drop", json!({})).await.map(|_| ())

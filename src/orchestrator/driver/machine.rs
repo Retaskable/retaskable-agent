@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, ideas_daily,
-    playtest_round, vet_daily,
+    OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, deprecations,
+    ideas_daily, playtest_round, vet_daily,
 };
 use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
@@ -357,6 +357,35 @@ impl Machine {
         for (running, daily) in jobs {
             tokio::spawn(async move {
                 ideas_daily::run(daily).await;
+                running.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+
+    /// Starts the daily deprecated-specs check for every live (or `runs`-mode) project that ticked this minute,
+    /// paused or not, unless one is still running. No lane and no session.
+    pub async fn deprecation_checks(&mut self, steps: &[Step]) {
+        let jobs: Vec<_> = (self.projects.iter().enumerate())
+            .filter(|(i, lp)| {
+                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
+                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
+            })
+            .map(|(_, lp)| lp)
+            .filter(|lp| !lp.deprecations_running.swap(true, Ordering::SeqCst))
+            .map(|lp| {
+                (
+                    lp.deprecations_running.clone(),
+                    deprecations::Daily {
+                        base: self.round_job(lp),
+                        flags: lp.flags.clone(),
+                        state: lp.deprecations.clone(),
+                    },
+                )
+            })
+            .collect();
+        for (running, daily) in jobs {
+            tokio::spawn(async move {
+                deprecations::run(daily).await;
                 running.store(false, Ordering::SeqCst);
             });
         }
@@ -875,6 +904,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             let steps = machine.pass().await;
             machine.playtest_rounds(&steps).await;
             machine.ideas_rounds(&steps).await;
+            machine.deprecation_checks(&steps).await;
             machine.vet_rounds(&steps).await;
         } else {
             machine.poll().await;

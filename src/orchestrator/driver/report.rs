@@ -344,7 +344,7 @@ async fn head(ctx: &Ctx, branch: &str) -> Option<String> {
 }
 
 /// The top-level specs on `at` (path and text): a split spec's Items header stays in its index (06.10-spec-layout.md).
-async fn spec_files(repo_path: &Path, at: &str) -> Option<Vec<(String, String)>> {
+pub(super) async fn spec_files(repo_path: &Path, at: &str) -> Option<Vec<(String, String)>> {
     let listed = git(
         repo_path,
         &["ls-tree", "--name-only", at, "--", &format!("{SPECS_DIR}/")],

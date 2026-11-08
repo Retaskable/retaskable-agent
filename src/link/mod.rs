@@ -7,6 +7,7 @@ mod tests;
 
 use crate::env::Env;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -334,6 +335,8 @@ const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 struct Held {
     access_token: String,
     until: Instant,
+    /// `DeviceTokens::epoch` when it was handed out: a forget since makes it no good.
+    epoch: u64,
 }
 
 /// One link's access token, refreshed from the stored refresh token when it runs out (link.ts `DeviceTokens`).
@@ -345,6 +348,10 @@ pub struct DeviceTokens {
     store: Arc<dyn TokenStore>,
     http: reqwest::Client,
     held: Mutex<Option<Held>>,
+    /// Counts `forget`s, so a refresh under way can tell it was forgotten and drop what it gets.
+    epoch: AtomicU64,
+    /// The cloud answered `invalid_grant` (its token deleted) and nothing has linked or forgotten since.
+    unlinked_on_site: AtomicBool,
 }
 
 impl DeviceTokens {
@@ -355,7 +362,27 @@ impl DeviceTokens {
             store,
             http,
             held: Mutex::new(None),
+            epoch: AtomicU64::new(0),
+            unlinked_on_site: AtomicBool::new(false),
         }
+    }
+
+    /// Whether a refresh token is stored (a store that can't be read counts as none).
+    pub fn linked(&self) -> bool {
+        matches!(self.store.get(&self.url), Ok(Some(_)))
+    }
+
+    /// Whether the cloud answered `invalid_grant`, until the next link (a stored token found) or forget.
+    pub fn unlinked_on_site(&self) -> bool {
+        self.unlinked_on_site.load(Ordering::SeqCst)
+    }
+
+    /// Deletes the refresh token and drops the access token in hand; a refresh under way stores nothing of what
+    /// it gets (link.ts `forget`).
+    pub fn forget(&self) -> Result<()> {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.unlinked_on_site.store(false, Ordering::SeqCst);
+        self.store.delete(&self.url)
     }
 
     /// The token in hand while it has a minute left, else a fresh one. `stale`: a token the caller found no good,
@@ -365,6 +392,7 @@ impl DeviceTokens {
         if let Some(h) = held.as_ref()
             && Some(h.access_token.as_str()) != stale
             && Instant::now() < h.until
+            && h.epoch == self.epoch.load(Ordering::SeqCst)
         {
             return TokenAnswer::Token {
                 url: self.url.clone(),
@@ -388,8 +416,13 @@ impl DeviceTokens {
     /// Swaps the refresh token for an access token, storing the new refresh token at once.
     async fn refresh(&self) -> (TokenAnswer, Option<Held>) {
         let url = &self.url;
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        let forgotten = || self.epoch.load(Ordering::SeqCst) != epoch;
         let refresh_token = match self.store.get(url) {
-            Ok(Some(token)) => token,
+            Ok(Some(token)) => {
+                self.unlinked_on_site.store(false, Ordering::SeqCst); // linked again
+                token
+            }
             Ok(None) => return (TokenAnswer::Idle, None), // not linked (yet)
             Err(e) => {
                 tracing::warn!("cloud ({url}): not connecting: {e:#}");
@@ -412,11 +445,19 @@ impl DeviceTokens {
         };
         let status = res.status();
         let json = res.json::<Value>().await.unwrap_or(Value::Null);
+        if forgotten() {
+            return (TokenAnswer::Idle, None); // forgotten while it was away: keep nothing
+        }
         let access = json.get("access_token").and_then(Value::as_str);
         let rotated = json.get("refresh_token").and_then(Value::as_str);
         if let (true, Some(access), Some(rotated)) = (status.is_success(), access, rotated) {
             if let Err(e) = self.store.set(url, rotated) {
                 tracing::warn!("cloud ({url}): couldn't keep the new refresh token: {e:#}");
+            }
+            if forgotten() {
+                // A forget landed between the check and the store.
+                let _ = self.store.delete(url);
+                return (TokenAnswer::Idle, None);
             }
             let seconds = json.get("expires_in").and_then(Value::as_u64).unwrap_or(0);
             let expires = Instant::now() + Duration::from_secs(seconds);
@@ -430,6 +471,7 @@ impl DeviceTokens {
                 Some(Held {
                     access_token: access.to_string(),
                     until,
+                    epoch,
                 }),
             );
         }
@@ -438,6 +480,7 @@ impl DeviceTokens {
             // Unlinked on the website (or the token was reused): the stored token is no good any more.
             let why = said("error_description").unwrap_or("invalid_grant");
             tracing::warn!("cloud ({url}): not linked any more: {why}");
+            self.unlinked_on_site.store(true, Ordering::SeqCst);
             if let Err(e) = self.store.delete(url) {
                 tracing::warn!("cloud ({url}): couldn't delete the old token: {e:#}");
             }

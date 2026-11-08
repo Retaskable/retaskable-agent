@@ -295,6 +295,10 @@ pub struct ProjectLoop {
     pub(super) vet_running: Arc<AtomicBool>,
     /// The daily ideas round's asker and last tried day ([`super::ideas_daily`]).
     pub(super) ideas_daily: Arc<std::sync::Mutex<super::ideas_daily::State>>,
+    /// Set while this project's deprecated-specs check is running, and its asker and last checked day
+    /// ([`super::deprecations`]).
+    pub(super) deprecations_running: Arc<AtomicBool>,
+    pub(super) deprecations: Arc<std::sync::Mutex<super::deprecations::State>>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
@@ -381,6 +385,8 @@ impl ProjectLoop {
             vet_daily: Default::default(),
             vet_running: Arc::new(AtomicBool::new(false)),
             ideas_daily: Default::default(),
+            deprecations_running: Default::default(),
+            deprecations: Default::default(),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),

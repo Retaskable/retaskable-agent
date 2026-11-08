@@ -817,3 +817,145 @@ async fn a_bug_sent_while_off_or_unanswered_is_not_sent_with_why() {
     assert!(why.contains("isn't connected"));
     c.stop(Duration::from_secs(1)).await;
 }
+
+fn start_with(url: &str, store: Arc<dyn TokenStore>, dir: &std::path::Path, timing: Timing) -> Connector {
+    Connector::start(
+        url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing,
+        noop_exit(),
+        dir,
+    )
+}
+
+async fn state_becomes(c: &Connector, want: CloudLink) {
+    until(&format!("{want:?}"), || c.connected() == want).await;
+}
+
+#[tokio::test]
+async fn a_fresh_connector_with_no_token_reads_not_linked() {
+    let (url, _, _rx) = cloud().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn TokenStore> = Arc::new(FileStore::new(dir.path().join("credentials.json"), "retaskable"));
+    let c = start_with(&url, store, dir.path(), timing());
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_token_reads_connected_while_the_cloud_accepts_and_offline_once_it_drops() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let slow = Timing {
+        backoff: Duration::from_secs(5),
+        ..timing()
+    };
+    let c = start_with(&url, store, dir.path(), slow);
+    let mut a = next(&mut rx).await;
+    state_becomes(&c, CloudLink::Connected).await;
+    close(&mut a, close::REPLACED).await;
+    state_becomes(&c, CloudLink::Offline).await;
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn invalid_grant_reads_unlinked_on_the_website_until_forgotten() {
+    async fn refuse() -> (axum::http::StatusCode, Json<Value>) {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_grant" })),
+        )
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route("/api/device/token", post(refuse));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (dir, store) = linked(&url);
+    let c = start_with(&url, store.clone(), dir.path(), timing());
+    state_becomes(&c, CloudLink::UnlinkedOnTheWebsite).await;
+    assert_eq!(store.get(&url).unwrap(), None);
+    // It stays so while waiting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(c.connected(), CloudLink::UnlinkedOnTheWebsite);
+    c.forget().unwrap();
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn forget_deletes_the_token_closes_the_socket_and_leaves_other_clouds_connected() {
+    let (url, _, mut rx) = cloud().await;
+    let (url2, _, mut rx2) = cloud().await;
+    let (dir, store) = linked(&url);
+    store.set(&url2, "r1").unwrap();
+    let c = start_with(&url, store.clone(), dir.path(), timing());
+    let c2 = start_with(&url2, store.clone(), dir.path(), timing());
+    let mut a = next(&mut rx).await;
+    let _b = next(&mut rx2).await;
+    state_becomes(&c, CloudLink::Connected).await;
+    state_becomes(&c2, CloudLink::Connected).await;
+    c.forget().unwrap();
+    assert_eq!(store.get(&url).unwrap(), None);
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    // The socket is closed: the fake cloud's side ends.
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), a.ws.next())
+            .await
+            .expect("closed")
+        {
+            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+            Some(Ok(_)) => {}
+        }
+    }
+    // It doesn't reconnect, and the other cloud is still up and still has its token.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), rx.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(c2.connected(), CloudLink::Connected);
+    assert!(store.get(&url2).unwrap().is_some());
+    // A later link reconnects it.
+    store.set(&url, "r9").unwrap();
+    next(&mut rx).await;
+    c.stop(Duration::from_secs(1)).await;
+    c2.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_refresh_that_lands_after_forget_stores_nothing() {
+    use tokio::sync::Notify;
+    #[derive(Clone)]
+    struct Slow {
+        arrived: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    async fn token(State(s): State<Slow>) -> Json<Value> {
+        s.arrived.notify_one();
+        s.release.notified().await;
+        Json(json!({ "access_token": "a1", "refresh_token": "r2", "expires_in": 3600 }))
+    }
+    let slow = Slow {
+        arrived: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/api/device/token", post(token))
+        .with_state(slow.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (dir, store) = linked(&url);
+    let c = start_with(&url, store.clone(), dir.path(), timing());
+    tokio::time::timeout(Duration::from_secs(10), slow.arrived.notified())
+        .await
+        .expect("a refresh under way");
+    c.forget().unwrap();
+    slow.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(store.get(&url).unwrap(), None);
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    c.stop(Duration::from_secs(1)).await;
+}
