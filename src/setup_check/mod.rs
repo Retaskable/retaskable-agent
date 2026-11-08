@@ -330,7 +330,7 @@ pub async fn run_setup_checks(env: &Env, probes: bool) -> SetupChecks {
 
 /// The Docker line (agent-ci.md section 3.6): `docker version` answers and, given the project's image, it runs.
 pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, image: Option<&str>) -> SetupCheck {
-    use crate::agent_ci::docker::{probe, probe_image, DockerState};
+    use crate::agent_ci::docker::{DockerState, probe, probe_image};
     let program = program.as_ref();
     let mut state = probe(program, in_image).await;
     if let (DockerState::Ok, Some(image)) = (&state, image) {
