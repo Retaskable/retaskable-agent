@@ -230,6 +230,10 @@ mod tests {
         repo
     }
 
+    fn fetch_pr(data: &Path, repo: &Path, head_ref: &str) -> Result<FetchOutcome> {
+        fetch(data, "p", repo, "main", Mode::PullRequest { head_ref })
+    }
+
     fn ready(outcome: FetchOutcome) -> (PathBuf, String) {
         match outcome {
             FetchOutcome::Ready { dir, commit } => (dir, commit),
@@ -242,16 +246,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = setup(root.path());
         let data = root.path().join("data");
-        let out = fetch(
-            &data,
-            "p",
-            &repo,
-            "main",
-            Mode::PullRequest {
-                head_ref: "refs/heads/feature",
-            },
-        )
-        .unwrap();
+        let out = fetch_pr(&data, &repo, "refs/heads/feature").unwrap();
         let (dir, commit) = ready(out);
         assert!(dir.starts_with(crate::paths::ci_dir(&data, "p")));
         assert_eq!(sh(&dir, &["rev-parse", "HEAD"]), commit);
@@ -273,16 +268,7 @@ mod tests {
         sh(&repo, &["commit", "-m", "clash"]);
         sh(&repo, &["push", "origin", "clash"]);
         let data = root.path().join("data");
-        let out = fetch(
-            &data,
-            "p",
-            &repo,
-            "main",
-            Mode::PullRequest {
-                head_ref: "refs/heads/clash",
-            },
-        )
-        .unwrap();
+        let out = fetch_pr(&data, &repo, "refs/heads/clash").unwrap();
         assert!(
             matches!(out, FetchOutcome::Conflict { ref reason } if reason.contains("c.txt")),
             "{out:?}"
@@ -308,16 +294,7 @@ mod tests {
             ],
         );
         let data = root.path().join("data");
-        let out = fetch(
-            &data,
-            "p",
-            &repo,
-            "main",
-            Mode::PullRequest {
-                head_ref: "refs/heads/feature",
-            },
-        )
-        .unwrap();
+        let out = fetch_pr(&data, &repo, "refs/heads/feature").unwrap();
         let (dir, _) = ready(out);
         let config = std::fs::read_to_string(dir.join(".git").join("config")).unwrap();
         assert!(!config.contains("[remote"), "{config}");
