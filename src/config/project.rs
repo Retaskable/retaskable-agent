@@ -346,6 +346,44 @@ pub struct ProjectConfig {
     pub engines: Option<Value>,
     #[serde(default)]
     pub tuning: TuningConfig,
+    /// The daily Lighthouse chore (daily-lighthouse.md section 2): kept in the store, only read here.
+    #[serde(default)]
+    pub lighthouse: LighthouseConfig,
+}
+
+/// `lighthouse: { enabled, pages, hour, minScore }`: off by default; pages are paths on the staging url.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LighthouseConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_lighthouse_pages")]
+    pub pages: Vec<String>,
+    #[serde(default = "default_lighthouse_hour")]
+    pub hour: u32,
+    #[serde(default = "default_lighthouse_min_score")]
+    pub min_score: f64,
+}
+
+impl Default for LighthouseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pages: default_lighthouse_pages(),
+            hour: default_lighthouse_hour(),
+            min_score: default_lighthouse_min_score(),
+        }
+    }
+}
+
+fn default_lighthouse_pages() -> Vec<String> {
+    vec!["/".to_string()]
+}
+fn default_lighthouse_hour() -> u32 {
+    6
+}
+fn default_lighthouse_min_score() -> f64 {
+    90.0
 }
 
 impl ProjectConfig {
@@ -427,6 +465,26 @@ mod tests {
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
         let t: TuningConfig = serde_json::from_str("{}").unwrap();
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+    }
+
+    #[test]
+    fn lighthouse_is_off_with_its_defaults_and_reads_what_is_set() {
+        let c: LighthouseConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            c,
+            LighthouseConfig {
+                enabled: false,
+                pages: vec!["/".into()],
+                hour: 6,
+                min_score: 90.0
+            }
+        );
+        let c: LighthouseConfig =
+            serde_json::from_str(r#"{"enabled":true,"pages":["/a","/b"],"hour":3,"minScore":80}"#).unwrap();
+        assert_eq!((c.enabled, c.pages.len(), c.hour, c.min_score), (true, 2, 3, 80.0));
+        let p: ProjectConfig = serde_json::from_str(r#"{"lighthouse":{"enabled":true}}"#).unwrap();
+        assert!(p.lighthouse.enabled && p.lighthouse.hour == 6);
+        assert!(!ProjectConfig::default().lighthouse.enabled);
     }
 
     #[test]
@@ -552,6 +610,7 @@ mod tests {
             phone: None,
             engines: None,
             tuning: TuningConfig::default(),
+            lighthouse: LighthouseConfig::default(),
         }
     }
 }

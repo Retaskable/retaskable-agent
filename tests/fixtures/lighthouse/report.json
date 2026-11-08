@@ -1,0 +1,47 @@
+{
+  "requestedUrl": "https://staging.example.com/",
+  "finalUrl": "https://staging.example.com/",
+  "categories": {
+    "performance": { "id": "performance", "title": "Performance", "score": 0.72 },
+    "accessibility": { "id": "accessibility", "title": "Accessibility", "score": 0.95 },
+    "best-practices": { "id": "best-practices", "title": "Best Practices", "score": 1 },
+    "seo": { "id": "seo", "title": "SEO", "score": 0.63 }
+  },
+  "audits": {
+    "largest-contentful-paint": { "id": "largest-contentful-paint", "title": "Largest Contentful Paint", "score": 0.4, "scoreDisplayMode": "numeric", "numericValue": 4200.5, "displayValue": "4.2 s" },
+    "first-contentful-paint": { "id": "first-contentful-paint", "title": "First Contentful Paint", "score": 0.9, "scoreDisplayMode": "numeric", "numericValue": 1500, "displayValue": "1.5 s" },
+    "total-blocking-time": { "id": "total-blocking-time", "title": "Total Blocking Time", "score": 0.95, "scoreDisplayMode": "numeric", "numericValue": 120, "displayValue": "120 ms" },
+    "cumulative-layout-shift": { "id": "cumulative-layout-shift", "title": "Cumulative Layout Shift", "score": 1, "scoreDisplayMode": "numeric", "numericValue": 0.01, "displayValue": "0.01" },
+    "unused-javascript": {
+      "id": "unused-javascript", "title": "Reduce unused JavaScript", "score": 0.3, "scoreDisplayMode": "metricSavings", "displayValue": "Potential savings of 400 KiB",
+      "details": { "items": [
+        { "url": "https://staging.example.com/app.js" },
+        { "url": "https://staging.example.com/b.js" },
+        { "url": "https://staging.example.com/c.js" },
+        { "url": "https://staging.example.com/d.js" }
+      ] }
+    },
+    "third-party-cookies": {
+      "id": "third-party-cookies", "title": "Uses third-party cookies", "score": 0, "scoreDisplayMode": "binary", "displayValue": "1 cookie found",
+      "details": { "items": [ { "name": "x", "url": "https://ads.other.com/tag.js" } ] }
+    },
+    "color-contrast": {
+      "id": "color-contrast", "title": "Low contrast", "score": 0, "scoreDisplayMode": "binary",
+      "details": { "items": [ { "node": { "selector": "div.hero > p" } } ] }
+    },
+    "is-crawlable": {
+      "id": "is-crawlable", "title": "Page is blocked from indexing", "score": 0, "scoreDisplayMode": "binary",
+      "details": { "items": [ { "source": { "url": "https://staging.example.com/robots.txt" } } ] }
+    },
+    "image-alt": { "id": "image-alt", "title": "Images have alt", "score": 1, "scoreDisplayMode": "binary" },
+    "uses-http2": { "id": "uses-http2", "title": "HTTP/2", "score": 0.1, "scoreDisplayMode": "informative" },
+    "manual-check": { "id": "manual-check", "title": "Manual", "score": null, "scoreDisplayMode": "manual" },
+    "csp-xss": {
+      "id": "csp-xss", "title": "Ensure CSP is effective against XSS attacks", "score": 1, "scoreDisplayMode": "informative", "displayValue": "1 directive found",
+      "details": { "items": [
+        { "severity": "High", "description": "No CSP found in enforcement mode" },
+        { "severity": "Medium", "description": "Something minor" }
+      ] }
+    }
+  }
+}
