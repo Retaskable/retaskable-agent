@@ -1,5 +1,6 @@
 //! How sessions and steps that ended settle their item's lane and lease (`driver/settle.rs`).
 use super::*;
+use crate::engines::EngineId;
 use crate::orchestrator::driver::machine::poll_period;
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
@@ -637,4 +638,84 @@ async fn with_the_flag_off_a_watchdog_kill_gives_the_item_back_as_before() {
     rig.machine.pass().await;
     assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
     assert!(rig.machine.claim_paused_until.is_some());
+}
+
+/// Lanes 1-2 on Claude and 3-4 on Cursor, `engine-start-rules` On, "a" waiting to be handed out.
+async fn mixed_rig() -> (Rig, Arc<Fake>, Asked) {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(4, &[&base]);
+    rig.machine.links.engine_choice =
+        serde_json::from_value(json!({ "lanes": ["claude", "claude", "cursor", "cursor"] })).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
+    let fake = rig.go_live();
+    (rig, fake, asked)
+}
+
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_the_item_is_claimed_and_starts_on_a_cursor_lane() {
+    let (mut rig, fake, asked) = mixed_rig().await;
+    rig.machine.claude_signed_out_until = Some(out_for(600));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+}
+
+#[tokio::test]
+async fn with_cursor_limited_the_item_starts_on_a_claude_lane() {
+    let (mut rig, fake, asked) = mixed_rig().await;
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].engine, EngineId::Claude);
+}
+
+#[tokio::test]
+async fn with_every_lanes_engine_out_nothing_is_asked_for() {
+    let (mut rig, fake, asked) = mixed_rig().await;
+    rig.machine.claude_signed_out_until = Some(out_for(600));
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(fake.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_cursor_lane_with_cursor_limited_starts_its_new_session_on_claude_used_elsewhere_here() {
+    let (base, _asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": ["cursor", "claude"] })).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!((started[0].lane, started[0].engine), (1, EngineId::Claude));
+}
+
+#[tokio::test]
+async fn a_computer_on_cursor_only_with_cursor_limited_claims_nothing() {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice =
+        serde_json::from_value(json!({ "default": "cursor", "lanes": ["cursor", "cursor"] })).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(fake.started.lock().unwrap().is_empty());
 }
