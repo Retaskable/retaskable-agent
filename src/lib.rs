@@ -36,6 +36,7 @@ pub mod lighthouse;
 pub mod link;
 pub mod local_model;
 pub mod looks;
+pub mod main_sync;
 pub mod merge_update;
 pub mod network;
 pub mod orchestrator;
