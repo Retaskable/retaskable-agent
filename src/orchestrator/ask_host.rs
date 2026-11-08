@@ -266,6 +266,7 @@ impl AskHost for ClaudeAsks {
                     ask_id: &ask.ask_id,
                     images_block: &ask.images_block,
                     items: &items,
+                    failures: Some(&store.failures),
                 },
             )
             .await;

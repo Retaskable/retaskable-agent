@@ -69,7 +69,8 @@ impl AskHost for Host {
     }
 }
 
-async fn store() -> (String, Asked) {
+/// A store that records every op, refusing the op `fail` with a 500.
+async fn store_failing(fail: &'static str) -> (String, Asked) {
     let asked: Asked = Default::default();
     let seen = asked.clone();
     let app = Router::new().route(
@@ -79,7 +80,14 @@ async fn store() -> (String, Asked) {
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
-                Json(json!({ "value": if op == "list" { json!([]) } else { Value::Null } }))
+                if op == fail {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "boom" })),
+                    );
+                }
+                let value = if op == "list" { json!([]) } else { Value::Null };
+                (axum::http::StatusCode::OK, Json(json!({ "value": value })))
             }
         }),
     );
@@ -90,10 +98,14 @@ async fn store() -> (String, Asked) {
 }
 
 async fn rig_with_host() -> (Rig, Arc<Host>, Asked) {
-    let (base, asked) = store().await;
+    rig_failing("").await
+}
+
+async fn rig_failing(fail: &'static str) -> (Rig, Arc<Host>, Asked) {
+    let (base, asked) = store_failing(fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude"]));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude", "watchdog-anomaly-rules"]));
     let host = Arc::new(Host::default());
     rig.machine.asks = Some(host.clone());
     (rig, host, asked)
@@ -366,4 +378,20 @@ async fn an_ask_waits_when_no_engine_may_start() {
     let sent = until(&mut rig, &asked, 1).await;
     assert_eq!(sent[0]["status"], "waiting");
     assert!(host.jobs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_ask_report_the_store_refuses_is_logged_as_a_store_error_for_the_ask() {
+    let (mut rig, _host, _asked) = rig_failing("ask_report").await;
+    push(&rig, ask("k1", "hello"));
+    for _ in 0..40 {
+        rig.machine.pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let logged: Vec<Value> = (rig.lp(0).events().recent().iter())
+        .map(|e| e.to_value())
+        .filter(|v| v["kind"] == "store_error" && v["op"] == "ask_report")
+        .collect();
+    assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
+    assert_eq!(logged[0]["item"], "k1");
 }

@@ -64,6 +64,7 @@ async fn performed(actions: Vec<Action>, v: &AgentView, items: &[Item], images: 
         ask_id: "a1",
         images_block: images,
         items,
+        failures: None,
     };
     let results = perform(&actions, &["bad one".to_string()], &cx).await;
     let sent = seen.lock().unwrap().clone();
@@ -152,6 +153,7 @@ async fn stop_then_play_of_lane_0_is_a_restart() {
         ask_id: "a1",
         images_block: "",
         items: &[],
+        failures: None,
     };
     assert_eq!(perform(&[Action::Play { lane: 0 }], &[], &cx).await[0]["ok"], true);
     assert!(crate::play::running(id));
@@ -228,6 +230,7 @@ async fn a_store_failure_is_the_actions_reason() {
         ask_id: "a1",
         images_block: "",
         items: &[],
+        failures: None,
     };
     let results = perform(&[draft("r", None)], &[], &cx).await;
     assert_eq!(results[0]["ok"], false);

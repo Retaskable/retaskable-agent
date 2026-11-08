@@ -333,6 +333,8 @@ pub struct ProjectLoop {
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
+    /// Store failures of the draft and ask tasks, written to the event log by [`Self::drain_failures`].
+    pub(super) failures: crate::backlog::failures::Failures,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
@@ -417,6 +419,7 @@ impl ProjectLoop {
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
             draft: None,
+            failures: Default::default(),
             landing: Default::default(),
             triaging: Default::default(),
             bug_sends: Vec::new(),
