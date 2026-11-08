@@ -617,6 +617,7 @@ fn checks_with(claude_signed_in: Option<bool>, cursor: bool) -> crate::setup_che
         cursor: check(Some(cursor)),
         pi: Some(check(Some(true))),
         codex: Some(check(Some(true))),
+        docker: None,
     }
 }
 

@@ -219,6 +219,7 @@ fn checks(claude: SetupCheck, claude_signed_in: SetupCheck, cursor: SetupCheck) 
         cursor,
         pi: None,
         codex: None,
+        docker: None,
     }
 }
 
@@ -405,4 +406,34 @@ fn optional_engine_check_passes_with_the_version_line_only_when_the_binary_ran()
         optional_engine_check("pi", Some(&out(0, "\n"))),
         Some(SetupCheck::pass("pi"))
     );
+}
+
+// docker line (agent-ci.md section 3.6)
+
+#[test]
+fn the_docker_line_shows_only_when_there_is_a_docker_check() {
+    let mut c = checks(
+        SetupCheck::pass("Claude Code 2.1.0"),
+        SetupCheck::pass("Claude Code is signed in"),
+        SetupCheck::pass("Cursor"),
+    );
+    assert!(!setup_check_report(&c).contains("Docker"));
+    c.docker = Some(SetupCheck::fail(
+        "Docker isn't running: this computer won't run CI",
+        fixes::DOCKER,
+    ));
+    let lines = setup_check_lines(&c);
+    assert_eq!(
+        lines.last().unwrap(),
+        "✗ Docker isn't running: this computer won't run CI: start Docker (or install it) on this computer."
+    );
+}
+
+#[tokio::test]
+async fn docker_check_reads_the_reason_from_the_probe() {
+    let c = docker_check("retaskable-no-such-docker", false, None).await;
+    assert_eq!(c.ok, Some(false));
+    assert!(c.detail.contains("isn't installed"));
+    let c = docker_check("docker", true, Some("img")).await;
+    assert!(c.detail.contains("own Docker image"));
 }
