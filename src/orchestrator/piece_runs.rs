@@ -505,9 +505,18 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             }
             Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
                 let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
+                // A main sync keeps its own title, not the session's.
+                let sync_main = sync_of(job).await.map(|c| c.main);
                 let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
                 let (gh, dir, branch, base) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string(), base.clone());
                 let published = tokio::task::spawn_blocking(move || {
+                    let title = match sync_main {
+                        Some(main) => {
+                            let n = crate::main_sync::behind_count(&dir, &base, &main)?;
+                            crate::main_sync::pr_title(&base, n as usize)
+                        }
+                        None => title,
+                    };
                     publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
                         .map(|change| Pushed { branch, change })
                 })

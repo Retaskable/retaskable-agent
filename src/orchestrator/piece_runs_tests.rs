@@ -812,10 +812,13 @@ async fn sync_run(r: &Rig) -> RunEnd {
 
 #[tokio::test]
 async fn a_main_sync_runs_on_its_own_branch_and_ends_pr_opened_without_a_review() {
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let mut r = rig(&[COMMIT], &answer("pr_opened", r#","change_title":"Resolved it""#));
     sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
     let end = sync_run(&r).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened);
+    let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap();
+    assert!(log.contains("--title Sync: main into main (0 commits)"), "{log}");
+    assert!(!log.contains("Resolved it"), "{log}");
     assert!(origin_has(&r, "retaskable/sync-main-0123456"));
     assert!(!origin_has(&r, BRANCH));
     let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
