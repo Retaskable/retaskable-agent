@@ -7,7 +7,7 @@ use anyhow::Result;
 use super::model::{AssistantResult, assistant_result_schema, parse_assistant_result};
 use super::prompt::{AssistantInput, build_prompt};
 use crate::config::{Engine, ProjectBudget};
-use crate::engines::engine::{EngineId, LocalTarget};
+use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
 
 /// What an assistant session runs with.
@@ -23,6 +23,8 @@ pub struct Session<'a> {
     /// The project's base checkout, on the base branch.
     pub cwd: &'a Path,
     pub local: Option<LocalTarget>,
+    /// Only on Cursor: the model name (`scout` for the assistant).
+    pub cursor: Option<CursorOptions>,
 }
 
 /// The assistant's `SessionSpec`: fresh and read-only, in the base checkout.
@@ -41,7 +43,7 @@ pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
         assistant_result_schema(),
         s.cwd.to_path_buf(),
         s.budget.ask_usd,
-        None,
+        s.cursor.clone(),
         if s.engine == Engine::Local {
             s.local.clone()
         } else {
@@ -113,6 +115,7 @@ mod tests {
             budget: &budget,
             cwd: Path::new("base"),
             local: None,
+            cursor: None,
         };
         f(session_spec(&s).unwrap())
     }

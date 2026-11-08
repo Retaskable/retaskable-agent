@@ -38,6 +38,8 @@ pub struct TriageRequest {
     pub usage: Option<Value>,
     /// Where the session reports how it ended.
     pub outcomes: OutcomeSender,
+    /// The `engine-placement` flag: Off keeps the triager on Claude only.
+    pub placement: bool,
 }
 
 /// What a second-look session needs (06.9 bullet 3): the triager's request, plus its own answer.
@@ -52,6 +54,8 @@ pub struct SecondLookRequest {
     pub triager_reason: String,
     pub triager_suggest: TriageButton,
     pub triager_instructions: String,
+    /// The `engine-placement` flag: Off keeps the second look on Claude.
+    pub placement: bool,
 }
 
 /// How a second-look session ended: its answer, or `None` when it failed or answered with nothing usable.
@@ -226,6 +230,7 @@ impl ProjectLoop {
                 lane,
                 usage: self.store.usage(),
                 outcomes: self.outcomes.clone(),
+                placement: self.flags.last("engine-placement"),
             };
             match starter.triage(request) {
                 Ok(()) => *room -= 1,
@@ -310,6 +315,7 @@ impl ProjectLoop {
             triager_reason: held.reason.clone(),
             triager_suggest: held.suggest,
             triager_instructions: held.instructions.clone(),
+            placement: self.flags.last("engine-placement"),
         };
         self.events.add_in(
             &self.id,
