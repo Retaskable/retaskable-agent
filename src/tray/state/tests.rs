@@ -1,0 +1,143 @@
+use super::*;
+
+fn cloud(name: &str, link: LinkState) -> CloudInput {
+    CloudInput {
+        name: name.into(),
+        host: format!("{}.example", name.to_lowercase()),
+        link,
+    }
+}
+
+fn input(clouds: Vec<CloudInput>) -> TrayInput {
+    TrayInput {
+        clouds,
+        all_paused: false,
+        sessions: 0,
+        has_project: true,
+        exit: Exit::None,
+        backlog_waits: false,
+        machine: "jcnash-pc4".into(),
+        tags: vec![],
+    }
+}
+
+fn waiting() -> LinkState {
+    LinkState::Waiting {
+        code: "WXYZ-2345".into(),
+    }
+}
+
+#[test]
+fn icon_state_for_one_to_four_clouds() {
+    use LinkState::*;
+    let names = ["Production", "Staging", "Local", "Custom"];
+    for n in 1..=4 {
+        let all = |l: LinkState| input(names[..n].iter().map(|x| cloud(x, l.clone())).collect());
+        assert_eq!(icon_state(&all(NotLinked)), IconState::NotLinked);
+        assert_eq!(icon_state(&all(waiting())), IconState::Waiting);
+        assert_eq!(icon_state(&all(Offline)), IconState::Offline);
+        assert_eq!(icon_state(&all(Connected)), IconState::Connected);
+    }
+}
+
+#[test]
+fn icon_state_worst_first() {
+    use LinkState::*;
+    let s = |ls: Vec<LinkState>| {
+        icon_state(&input(
+            ls.into_iter()
+                .enumerate()
+                .map(|(i, l)| cloud(&format!("C{i}"), l))
+                .collect(),
+        ))
+    };
+    assert_eq!(s(vec![Connected, NotLinked]), IconState::Connected);
+    assert_eq!(s(vec![Connected, Offline, NotLinked]), IconState::Offline);
+    assert_eq!(s(vec![Connected, Offline, waiting(), NotLinked]), IconState::Waiting);
+    assert_eq!(s(vec![NotLinked, waiting()]), IconState::Waiting);
+    assert_eq!(s(vec![]), IconState::NotLinked);
+}
+
+#[test]
+fn invalid_grant_reads_offline() {
+    let i = input(vec![
+        cloud("Production", LinkState::UnlinkedOnTheWebsite),
+        cloud("Local", LinkState::Connected),
+    ]);
+    assert_eq!(icon_state(&i), IconState::Offline);
+    assert_eq!(tooltip(&i), "Retaskable · Production: offline · Local: connected");
+}
+
+#[test]
+fn tooltip_forms() {
+    let mut i = input(vec![
+        cloud("Production", LinkState::Connected),
+        cloud("Staging", LinkState::NotLinked),
+        cloud("Local", LinkState::Offline),
+    ]);
+    assert_eq!(tooltip(&i), "Retaskable · Production: connected · Local: offline");
+    i.clouds[2].link = waiting();
+    assert_eq!(tooltip(&i), "Retaskable · Production: connected · Local: waiting");
+    i.all_paused = true;
+    assert_eq!(
+        tooltip(&i),
+        "Retaskable · Production: connected · Local: waiting · Paused"
+    );
+    i.backlog_waits = true;
+    assert_eq!(
+        tooltip(&i),
+        "Retaskable · Production: connected · Local: waiting · Paused · 1 waiting for you"
+    );
+}
+
+#[test]
+fn tooltip_with_nothing_linked_names_production() {
+    let i = input(vec![
+        cloud("Staging", LinkState::NotLinked),
+        cloud("Production", LinkState::NotLinked),
+    ]);
+    assert_eq!(tooltip(&i), "Retaskable · Production: not linked");
+    let mut i = input(vec![]);
+    i.backlog_waits = true;
+    assert_eq!(tooltip(&i), "Retaskable · Production: not linked · 1 waiting for you");
+}
+
+#[test]
+fn status_line_variants() {
+    let mut i = input(vec![]);
+    assert_eq!(status_line(&i), "Retaskable · idle");
+    i.sessions = 1;
+    assert_eq!(status_line(&i), "Retaskable · running (1 session)");
+    i.sessions = 2;
+    assert_eq!(status_line(&i), "Retaskable · running (2 sessions)");
+    i.sessions = 0;
+    i.all_paused = true;
+    assert_eq!(status_line(&i), "Retaskable · paused");
+    i.has_project = false;
+    assert_eq!(status_line(&i), "Retaskable · no project yet");
+    i.exit = Exit::QuittingWhenIdle;
+    assert_eq!(status_line(&i), "Retaskable · quitting when idle");
+    i.exit = Exit::RestartingForNewCode;
+    assert_eq!(status_line(&i), "Retaskable · restarting for new code");
+}
+
+#[test]
+fn restarted_shows_for_ten_minutes() {
+    let mut i = input(vec![]);
+    let at = |secs| Exit::Restarted {
+        at: "14:05".into(),
+        ago: Duration::from_secs(secs),
+    };
+    i.exit = at(599);
+    assert_eq!(status_line(&i), "Retaskable · restarted at 14:05");
+    i.exit = at(600);
+    assert_eq!(status_line(&i), "Retaskable · idle");
+}
+
+#[test]
+fn computer_line_with_and_without_tags() {
+    let mut i = input(vec![]);
+    assert_eq!(computer_line(&i), "jcnash-pc4");
+    i.tags = vec!["windows".into(), "gpu".into(), "display".into()];
+    assert_eq!(computer_line(&i), "jcnash-pc4 · tags: windows, gpu, display");
+}
