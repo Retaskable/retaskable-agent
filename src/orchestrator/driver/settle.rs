@@ -132,7 +132,7 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
-    /// At the weekly cutoff (`tiers::week_cut_off_until`) Claude counts limited on this computer until the week's
+    /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited on this computer until the week's
     /// reset, so nothing new starts while running sessions finish.
     pub(super) fn cut_off_for_week(
         id: &str,
@@ -142,11 +142,13 @@ impl ProjectLoop {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        if let Some(resets_at) = crate::tiers::week_cut_off_until(usage, now) {
+        if let Some(resets_at) =
+            crate::tiers::week_cutoff_until(Some(usage), now, &crate::config::ModelsConfig::default())
+        {
             tracing::info!(
                 "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
                 id,
-                crate::tiers::WEEK_CUTOFF_PCT
+                crate::config::ModelsConfig::default().week_cutoff_pct
             );
             let wait = Duration::from_secs((resets_at - now) as u64);
             limits.hit(crate::engines::EngineId::Claude, Instant::now() + wait);
