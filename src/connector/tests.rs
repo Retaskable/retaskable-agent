@@ -10,10 +10,9 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseC
 use super::bug_link::BugOutcome;
 use super::*;
 use crate::config::GalleryConfig;
-use crate::lane_pool::LaneSizes;
 use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
-use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState};
+use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 
 mod live;
 mod smoke;
@@ -99,25 +98,15 @@ fn timing() -> Timing {
 }
 
 fn view(projects: &[&str]) -> Arc<AgentView> {
-    Arc::new(AgentView {
-        machine: "pc".into(),
-        tags: vec!["windows".into()],
-        projects: projects
+    Arc::new(crate::test_support::agent_view(
+        vec!["windows".into()],
+        projects
             .iter()
             .map(|id| crate::test_support::project_view(id))
             .collect(),
-        version: "9.9.9".into(),
-        lanes: 2,
-        chore_lane: Some(2),
-        lane_sizes: LaneSizes::default(),
-        paused: PauseState::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-        settings: Default::default(),
-        local: Default::default(),
-        live: Default::default(),
-    })
+        "9.9.9",
+        2,
+    ))
 }
 
 fn view_with_models_gallery(project: &str) -> Arc<AgentView> {

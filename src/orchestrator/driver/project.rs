@@ -503,6 +503,11 @@ impl ProjectLoop {
                     Some(HeldLane {
                         lane,
                         title: items.iter().find(|i| &i.id == item).map(|i| i.title.clone()),
+                        branch: items
+                            .iter()
+                            .find(|i| &i.id == item)
+                            .map(|i| branch_name(i, self.attempt_of(item))),
+                        playing: self.playing.contains_key(&lane),
                         item_id: item.clone(),
                     })
                 }

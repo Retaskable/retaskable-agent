@@ -2,10 +2,8 @@ use super::*;
 use crate::config::{LaneEngine, RoleEngines};
 use crate::engines::EngineId;
 use crate::engines::choose::Role;
-use crate::lane_pool::LaneSizes;
 use crate::orchestrator::live::sessions::SessionInfo;
 use crate::orchestrator::live::{HeldLane, ProjectLive, StoreFailure};
-use crate::view::PauseState;
 
 fn check(ok: Option<bool>, detail: &str) -> SetupCheck {
     SetupCheck {
@@ -31,25 +29,15 @@ fn checks(claude_signed_in: Option<bool>) -> SetupChecks {
 
 fn source(projects: &[&str]) -> StatusSource {
     StatusSource {
-        view: AgentView {
-            machine: "pc".into(),
-            tags: vec![],
-            projects: projects
+        view: crate::test_support::agent_view(
+            vec![],
+            projects
                 .iter()
                 .map(|id| crate::test_support::project_view(id))
                 .collect(),
-            version: "1.2.3".into(),
-            lanes: 3,
-            chore_lane: Some(3),
-            lane_sizes: LaneSizes::default(),
-            paused: PauseState::default(),
-            item_commands: Default::default(),
-            work: Default::default(),
-            restart: Default::default(),
-            settings: Default::default(),
-            local: Default::default(),
-            live: Default::default(),
-        },
+            "1.2.3",
+            3,
+        ),
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),
         live: LiveHandle::default(),
@@ -266,11 +254,15 @@ fn a_held_lane_is_busy_with_its_holder() {
                 lane: 2,
                 item_id: "i1".into(),
                 title: Some("Add a thing".into()),
+                branch: None,
+                playing: false,
             },
             HeldLane {
                 lane: 9,
                 item_id: "gone".into(),
                 title: None,
+                branch: None,
+                playing: false,
             },
         ],
         decision: Some("would ask for work".into()),
