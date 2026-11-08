@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::config::ProjectConfig;
 
+pub mod run;
 #[cfg(test)]
 mod tests;
 
