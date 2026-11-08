@@ -59,6 +59,11 @@ impl LocalModel {
         self.config.enabled && self.up.load(Ordering::SeqCst)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_up(&self, up: bool) {
+        self.up.store(up, Ordering::SeqCst);
+    }
+
     /// Where a local session runs.
     pub fn target(&self) -> LocalTarget {
         LocalTarget {

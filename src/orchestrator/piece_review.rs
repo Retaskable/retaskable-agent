@@ -18,13 +18,14 @@ use crate::engines::{
 };
 use crate::implementer::publish::run as run_command;
 use crate::implementer::{Interrupted, Playtest};
+use crate::local_model::{LocalModel, LocalSlot};
 use crate::orchestrator::live::sessions::model_name;
 use crate::review_context::{ReviewContext, piece_slice_description};
 use crate::review_run::{StageInput, review_lane};
 use crate::reviewer::{Reviewer, ReviewerResult};
 use crate::runs::Pushed;
 use crate::scouts::{Scouts, parse_scout_info};
-use crate::tiers::{OPUS, SONNET};
+use crate::tiers::{LOCAL, OPUS, SONNET, scout_tier, top_tier};
 
 const SCOUT_TEMPLATE: &str = include_str!("../../prompts/scout.md");
 const SCOUT_INFO: &str = include_str!("../../prompts/scouts.json");
@@ -76,17 +77,42 @@ fn placement(job: &Job, role: Role) -> Result<Placement> {
     place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
 }
 
-async fn run_session(job: &Job, bins: &[&Placement], spec: SessionSpec) -> Result<SessionResult> {
+/// The local model's slot for a review session, if it runs there: a session already set to `local` waits for the
+/// slot; a scout whose tier isn't `local` takes it when it is free right now (and then runs `local`), else
+/// carries on at once. Cursor never takes it. The slot is held until the returned value is dropped.
+async fn claim_local(
+    local: &LocalModel,
+    ladder: bool,
+    program: EngineId,
+    role: Role,
+    spec: &mut SessionSpec,
+) -> Option<LocalSlot> {
+    if !ladder || program != EngineId::Claude {
+        None
+    } else if spec.model == LOCAL {
+        Some(local.take().await)
+    } else if role == Role::Scout && local.available() {
+        local.try_take().inspect(|_| {
+            spec.model = LOCAL.to_string();
+            spec.local = Some(local.target());
+        })
+    } else {
+        None
+    }
+}
+
+async fn run_session(
+    job: &Job,
+    bins: &[&Placement],
+    ladder: bool,
+    role: Role,
+    mut spec: SessionSpec,
+) -> Result<SessionResult> {
     let program = spec.engine.unwrap_or(EngineId::Claude);
     let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
     let engine = engine_of(Some(program))?;
     let quiet = watch_for(&job.project, program);
-    // The reviewer runs on the top tier; any other session of the review is a scout.
-    let role = if spec.model == OPUS {
-        Role::Reviewer
-    } else {
-        Role::Scout
-    };
+    let _slot = claim_local(&job.local, ladder, program, role, &mut spec).await;
     let mut info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
     // A scout holds no lane.
     if role == Role::Scout {
@@ -112,7 +138,7 @@ fn session_config<'a>(
         cwd,
         budget_usd,
         model: model.to_string(),
-        local: None,
+        local: (model == LOCAL).then(|| job.local.target()),
         engine: Some(placed.engine),
         cursor: placed.cursor.clone(),
         sandbox: crate::engines::claude::sandbox_enabled(job.project.sandbox, cfg!(windows)),
@@ -148,6 +174,7 @@ fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()>
 
 /// Reviews the lane's change, posts the comment and says what happens next. A failure to review is `Err`: the
 /// caller ends the run `failed`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn review(
     job: &Job,
     cwd: &Path,
@@ -156,6 +183,7 @@ pub(super) async fn review(
     playtest: Option<&Playtest>,
     checks: &str,
     state: &mut ReviewState,
+    usage: Option<&Value>,
 ) -> Result<Reviewed> {
     let project = &job.project;
     let item = piece_item(&job.piece);
@@ -173,6 +201,18 @@ pub(super) async fn review(
     };
     let (scout_at, reviewer_at) = (placement(job, Role::Scout)?, placement(job, Role::Reviewer)?);
     let info = parse_scout_info(SCOUT_INFO)?;
+    // With `local-tier-ladder` Off, scouts run on Sonnet and the reviewer on Opus.
+    let ladder = job.flags.on("local-tier-ladder").await;
+    let (scout_model, top_model) = if ladder {
+        let now = crate::telemetry::now_ms() / 1000;
+        let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
+        (
+            scout_tier(usage, now, &job.models, up(&scout_at)),
+            top_tier(usage, now, &job.models, up(&reviewer_at)),
+        )
+    } else {
+        (SONNET, OPUS)
+    };
     let input = StageInput {
         base_branch: &project.base_branch,
         review: project.review,
@@ -188,18 +228,18 @@ pub(super) async fn review(
         },
         scouts: Scouts {
             template: SCOUT_TEMPLATE,
-            session: session_config(job, cwd, SONNET, project.budget.scout_usd, &scout_at),
+            session: session_config(job, cwd, scout_model, project.budget.scout_usd, &scout_at),
         },
         scout_info: &info,
         reviewer: Reviewer {
             template: REVIEWER_TEMPLATE,
-            session: session_config(job, cwd, OPUS, project.budget.reviewer_usd, &reviewer_at),
+            session: session_config(job, cwd, top_model, project.budget.reviewer_usd, &reviewer_at),
         },
         playtest,
         manual_approvals: "(none)",
     };
     let bins = [&scout_at, &reviewer_at];
-    let review = review_lane(cwd, &input, |spec| run_session(job, &bins, spec)).await;
+    let review = review_lane(cwd, &input, |role, spec| run_session(job, &bins, ladder, role, spec)).await;
     let review = match review {
         Ok(r) => r,
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => {
@@ -253,4 +293,72 @@ pub(super) async fn review(
             "The review gave an unknown verdict, {other}"
         ))),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engines::engine::test_spec;
+
+    fn up() -> LocalModel {
+        let local = LocalModel::new(crate::config::LocalModelConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:1".into(),
+            model: "m".into(),
+        });
+        local.set_up(true);
+        local
+    }
+
+    async fn claim(
+        local: &LocalModel,
+        ladder: bool,
+        program: EngineId,
+        role: Role,
+        model: &str,
+    ) -> (SessionSpec, bool) {
+        let mut spec = test_spec(Path::new("."), "p");
+        spec.model = model.into();
+        let slot = claim_local(local, ladder, program, role, &mut spec).await;
+        (spec, slot.is_some())
+    }
+
+    #[tokio::test]
+    async fn one_scout_takes_the_free_slot_and_the_rest_stay_on_sonnet_without_waiting() {
+        let local = up();
+        let mut first = test_spec(Path::new("."), "p");
+        first.model = SONNET.into();
+        let held = claim_local(&local, true, EngineId::Claude, Role::Scout, &mut first).await;
+        assert!(held.is_some());
+        assert_eq!(first.model, LOCAL);
+        assert_eq!(first.local, Some(local.target()));
+        // The first still holds the slot while the others start.
+        let mut held = test_spec(Path::new("."), "p");
+        held.model = SONNET.into();
+        let slot = claim_local(&local, true, EngineId::Claude, Role::Scout, &mut held).await;
+        assert!(slot.is_none());
+        assert_eq!((held.model.as_str(), held.local), (SONNET, None));
+    }
+
+    #[tokio::test]
+    async fn scouts_stay_on_sonnet_with_local_down_off_the_flag_or_on_cursor() {
+        let off = LocalModel::off();
+        for (local, ladder, program) in [
+            (&off, true, EngineId::Claude),
+            (&up(), false, EngineId::Claude),
+            (&up(), true, EngineId::Cursor),
+        ] {
+            let (spec, took) = claim(local, ladder, program, Role::Scout, SONNET).await;
+            assert_eq!((spec.model.as_str(), spec.local, took), (SONNET, None, false));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_reviewer_never_takes_the_slot_unless_its_tier_is_local() {
+        let local = up();
+        let (spec, took) = claim(&local, true, EngineId::Claude, Role::Reviewer, OPUS).await;
+        assert_eq!((spec.model.as_str(), took), (OPUS, false));
+        let (spec, took) = claim(&local, true, EngineId::Claude, Role::Reviewer, LOCAL).await;
+        assert_eq!((spec.model.as_str(), took), (LOCAL, true));
+    }
 }

@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::config::ReviewConfig;
-use crate::engines::{SessionResult, SessionSpec};
+use crate::engines::{Role, SessionResult, SessionSpec};
 use crate::implementer::Playtest;
 use crate::review_context::ReviewContext;
 use crate::reviewer::{self, Reviewer, ReviewerContext, ReviewerResult};
@@ -56,7 +56,7 @@ pub struct StageReview {
 /// the findings the reviewer reads (and so in its comment) without failing the review.
 pub async fn review_lane<F, Fut>(lane_dir: &Path, input: &StageInput<'_>, run: F) -> Result<StageReview>
 where
-    F: Fn(SessionSpec) -> Fut,
+    F: Fn(Role, SessionSpec) -> Fut,
     Fut: Future<Output = Result<SessionResult>>,
 {
     let diff = scouts::diff_info(lane_dir, input.base_branch, "")?;
@@ -68,12 +68,14 @@ where
     let scout_text = if jobs.is_empty() {
         no_scouts_note(&diff, input.common.range)
     } else {
-        scouts::run_scouts(&jobs, &input.scouts, &input.common, input.scout_info, &run)
-            .await
-            .iter()
-            .map(|(label, r)| scouts::format_scout(label, r))
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        scouts::run_scouts(&jobs, &input.scouts, &input.common, input.scout_info, |spec| {
+            run(Role::Scout, spec)
+        })
+        .await
+        .iter()
+        .map(|(label, r)| scouts::format_scout(label, r))
+        .collect::<Vec<_>>()
+        .join("\n\n")
     };
     let ctx = ReviewerContext {
         common: input.common,
@@ -82,7 +84,7 @@ where
         playtest: input.playtest,
         manual_approvals: input.manual_approvals,
     };
-    let r = run(reviewer::session_spec(&input.reviewer, &ctx)?)
+    let r = run(Role::Reviewer, reviewer::session_spec(&input.reviewer, &ctx)?)
         .await
         .context("running the final reviewer")?;
     if !r.ok {
@@ -170,7 +172,7 @@ mod tests {
             manual_approvals: "(none)",
         };
         let seen = Mutex::new(Vec::new());
-        let r = review_lane(&repo, &input, |spec: SessionSpec| {
+        let r = review_lane(&repo, &input, |_, spec: SessionSpec| {
             seen.lock().unwrap().push(spec.clone());
             let is_review = spec.prompt.starts_with("REVIEW");
             let fail = scout_fails && !is_review && spec.prompt.contains("SCOUT") && spec.prompt.contains(" c "); // correctness
