@@ -329,38 +329,50 @@ fn piece_brief(p: &PiecePrompt<'_>) -> (&'static str, String) {
     (kind_line, briefs)
 }
 
-/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what to fix (for a
-/// `fix`); a look's `instructions` come from `looks[]`.
-pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
+/// Fills a piece-shaped template: the variables both the piece and the chore prompt share, plus `extra`, then
+/// the where-to-start section.
+fn fill_piece(
+    template: &str,
+    p: &PiecePrompt<'_>,
+    kind_line: &str,
+    briefs: String,
+    extra: Vec<(&str, String)>,
+) -> Result<String> {
     let words = project_words(p.project_type);
-    let piece = p.piece;
-    let (kind_line, briefs) = piece_brief(p);
-    let filled = render_prompt(
-        template,
-        &[
-            ("pr", "PR".to_string()),
-            ("change", "pull request".to_string()),
-            ("title", piece.title.clone()),
-            ("what", piece.what.clone()),
-            ("doneWhen", piece.done_when.clone()),
-            ("kindLine", kind_line.to_string()),
-            ("briefSection", briefs),
-            ("branch", p.branch.to_string()),
-            ("baseBranch", p.base_branch.to_string()),
-            ("githubRepo", p.github_repo.to_string()),
-            ("checks", checks_text(p.checks)),
-            ("codeLimits", gate_rule(&p.code_gates)),
-            ("projectNoun", words.noun.to_string()),
-            ("projectUser", words.user.to_string()),
-            ("projectExamples", words.examples.to_string()),
-            ("projectSteps", words.steps.to_string()),
-        ],
-    )?;
+    let mut vars = vec![
+        ("pr", "PR".to_string()),
+        ("change", "pull request".to_string()),
+        ("kindLine", kind_line.to_string()),
+        ("briefSection", briefs),
+        ("branch", p.branch.to_string()),
+        ("baseBranch", p.base_branch.to_string()),
+        ("githubRepo", p.github_repo.to_string()),
+        ("checks", checks_text(p.checks)),
+        ("codeLimits", gate_rule(&p.code_gates)),
+        ("projectNoun", words.noun.to_string()),
+        ("projectUser", words.user.to_string()),
+        ("projectExamples", words.examples.to_string()),
+        ("projectSteps", words.steps.to_string()),
+    ];
+    vars.extend(extra);
+    let filled = render_prompt(template, &vars)?;
     Ok(if p.where_to_start.is_empty() {
         filled
     } else {
         format!("{filled}\n\n{}", p.where_to_start)
     })
+}
+
+/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what to fix (for a
+/// `fix`); a look's `instructions` come from `looks[]`.
+pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
+    let (kind_line, briefs) = piece_brief(p);
+    let extra = vec![
+        ("title", p.piece.title.clone()),
+        ("what", p.piece.what.clone()),
+        ("doneWhen", p.piece.done_when.clone()),
+    ];
+    fill_piece(template, p, kind_line, briefs, extra)
 }
 
 /// The chore's label and what its session does (docs/specs/agent/06.7-chores-never-idle.md, the kinds table).
@@ -405,7 +417,6 @@ pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) ->
     let Some((label, instructions)) = chore_task(chore, &p.piece.what) else {
         return Ok(None);
     };
-    let words = project_words(p.project_type);
     let (kind_line, briefs) = piece_brief(p);
     let recent = if chore.recent.is_empty() {
         String::new()
@@ -416,32 +427,12 @@ pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) ->
             lines.join("\n")
         )
     };
-    let filled = render_prompt(
-        template,
-        &[
-            ("pr", "PR".to_string()),
-            ("change", "pull request".to_string()),
-            ("label", label.to_string()),
-            ("instructions", instructions),
-            ("recentSection", recent),
-            ("kindLine", kind_line.to_string()),
-            ("briefSection", briefs),
-            ("branch", p.branch.to_string()),
-            ("baseBranch", p.base_branch.to_string()),
-            ("githubRepo", p.github_repo.to_string()),
-            ("checks", checks_text(p.checks)),
-            ("codeLimits", gate_rule(&p.code_gates)),
-            ("projectNoun", words.noun.to_string()),
-            ("projectUser", words.user.to_string()),
-            ("projectExamples", words.examples.to_string()),
-            ("projectSteps", words.steps.to_string()),
-        ],
-    )?;
-    Ok(Some(if p.where_to_start.is_empty() {
-        filled
-    } else {
-        format!("{filled}\n\n{}", p.where_to_start)
-    }))
+    let extra = vec![
+        ("label", label.to_string()),
+        ("instructions", instructions),
+        ("recentSection", recent),
+    ];
+    fill_piece(template, p, kind_line, briefs, extra).map(Some)
 }
 
 #[cfg(test)]
