@@ -3,7 +3,7 @@
 //! seconds and at once when a watched signal changes, and runs the action of the item as last shown when one is
 //! chosen. Everything it does to the world is behind a small trait, so tests use fakes.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

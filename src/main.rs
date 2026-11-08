@@ -148,7 +148,10 @@ async fn main() -> Result<()> {
                     .with_writer(log)
                     .init(),
                 Err(e) => {
-                    tracing_subscriber::fmt().with_env_filter(filter()).init();
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter())
+                        .with_writer(tray::tui::ConsoleWriter)
+                        .init();
                     tracing::warn!("couldn't open {}: {e}", logs_dir.join("retaskable.log").display());
                 }
             }
@@ -160,7 +163,11 @@ async fn main() -> Result<()> {
                 );
             }));
         }
-        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+        // The terminal menu keeps the console's lines in its log pane while it is up.
+        None => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_writer(tray::tui::ConsoleWriter)
+            .init(),
     }
     let cfg = config::load(&dir)?;
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
@@ -302,7 +309,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
     // Card flag `tray-icon-menu`: the tray, when it runs, is told to exit before a restart ends the process.
-    let tray_slot: Arc<std::sync::OnceLock<tray::run::TrayHandle>> = Arc::default();
+    let tray_slot: Arc<std::sync::OnceLock<tray::boot::Shutdown>> = Arc::default();
     let tray_down = tray_slot.clone();
     let exit = runtime::restart_handler(
         is_release,
@@ -313,7 +320,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         view.restart.clone(),
         Arc::new(move || {
             if let Some(t) = tray_down.get() {
-                t.shutdown();
+                t();
             }
         }),
     );
@@ -579,7 +586,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     .await?;
     if let Some(tray) = tray_slot.get() {
         // Quit, Ctrl+C or SIGTERM: the helper is told to exit and its input closed.
-        tokio::task::block_in_place(|| tray.shutdown());
+        tokio::task::block_in_place(|| tray());
     }
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
