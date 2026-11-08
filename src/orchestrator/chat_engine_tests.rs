@@ -40,27 +40,8 @@ fn models() -> CursorModels {
     }
 }
 
-/// Stubs for the four programs (except `missing`), each logging its arguments and printing `out`.
 fn stubs(root: &std::path::Path, out: &str, missing: &[&str]) -> Env {
-    std::fs::write(root.join("out.jsonl"), out).unwrap();
-    let mut vars = Vec::new();
-    for (var, program) in [
-        ("RETASKABLE_CLAUDE", "claude"),
-        ("RETASKABLE_CURSOR", "cursor-agent"),
-        ("RETASKABLE_PI", "pi"),
-        ("RETASKABLE_CODEX", "codex"),
-    ] {
-        let bin = root.join(format!("{program}.sh"));
-        if !missing.contains(&program) {
-            let script = format!(
-                "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\ncat '{r}/out.jsonl'\n",
-                r = root.display()
-            );
-            crate::test_support::write_executable(&bin, &script);
-        }
-        vars.push((var, bin.to_string_lossy().into_owned()));
-    }
-    Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone()))
+    crate::test_support::stub_engines(root, out, "", missing)
 }
 
 fn calls(root: &std::path::Path) -> Vec<String> {
@@ -90,20 +71,7 @@ async fn empty_store() -> String {
 async fn ask(root: &std::path::Path, choice: EngineChoiceConfig, env: Env, placement: bool) -> String {
     let base = empty_store().await;
     let repo = crate::test_support::repo_with_origin(root);
-    let view = Arc::new(AgentView {
-        machine: "pc".into(),
-        tags: vec![],
-        projects: vec![],
-        version: "1".into(),
-        lanes: 1,
-        chore_lane: None,
-        lane_sizes: Default::default(),
-        paused: Default::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-        settings: Default::default(),
-    });
+    let view = Arc::new(AgentView::blank());
     let host = ClaudeAsks::new(
         root.join("data"),
         choice,

@@ -330,3 +330,30 @@ pub(crate) fn repo_with_origin(root: &Path) -> PathBuf {
     run(git(&repo).args(["push", "-u", "--quiet", "origin", "main"]));
     repo
 }
+
+/// Stub binaries for claude, cursor-agent, pi and codex (except those in `missing`) in `root`, each logging
+/// `<program> <args>` to `calls.txt`, running `claude_step` first when it is claude, and printing `out.jsonl`.
+/// Gives an `Env` whose `RETASKABLE_*` variables name them.
+#[cfg(unix)]
+pub(crate) fn stub_engines(root: &Path, out: &str, claude_step: &str, missing: &[&str]) -> crate::env::Env {
+    std::fs::write(root.join("out.jsonl"), out).unwrap();
+    let mut vars = Vec::new();
+    for (var, program) in [
+        ("RETASKABLE_CLAUDE", "claude"),
+        ("RETASKABLE_CURSOR", "cursor-agent"),
+        ("RETASKABLE_PI", "pi"),
+        ("RETASKABLE_CODEX", "codex"),
+    ] {
+        let bin = root.join(format!("{program}.sh"));
+        if !missing.contains(&program) {
+            let step = if program == "claude" { claude_step } else { "" };
+            let script = format!(
+                "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\n{step}\ncat '{r}/out.jsonl'\n",
+                r = root.display()
+            );
+            write_executable(&bin, &script);
+        }
+        vars.push((var, bin.to_string_lossy().into_owned()));
+    }
+    crate::env::Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone()))
+}
