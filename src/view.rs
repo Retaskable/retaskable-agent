@@ -14,6 +14,7 @@ use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
 mod orchestrator;
+mod usage;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
 pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
@@ -61,6 +62,8 @@ pub struct AgentView {
     pub local: crate::local_model::LocalModel,
     /// What the orchestrator loops are doing, for the snapshot's orchestrator block.
     pub live: crate::orchestrator::live::LiveHandle,
+    /// The computer's `models` config, for the snapshot's usage tiers.
+    pub models: crate::config::ModelsConfig,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -383,6 +386,7 @@ impl AgentView {
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
+            models: Default::default(),
         }
     }
 
@@ -443,6 +447,11 @@ impl AgentView {
         }
         if let Some((allowed, reason)) = self.item_commands.auto() {
             state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
+        }
+        if let Some(Value::Object(extra)) = self.usage_json(project, data_dir)
+            && let Some(usage) = state["usage"].as_object_mut()
+        {
+            usage.extend(extra);
         }
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
@@ -548,6 +557,7 @@ mod tests {
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
+            models: Default::default(),
         }
     }
 
@@ -745,6 +755,18 @@ mod tests {
             })),
         );
         v
+    }
+
+    #[test]
+    fn snapshot_usage_windows_come_only_with_the_flag_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage = |on| reporting_view(on).snapshot("a", dir.path())["state"]["usage"].clone();
+        assert_eq!(usage(false), json!({}));
+        let on = usage(true);
+        assert_eq!(on["status"], "unknown");
+        assert_eq!(on["leftPct"], Value::Null);
+        assert_eq!(on["tier"], "opus");
+        assert_eq!(on["localUp"], Value::Null);
     }
 
     #[test]

@@ -49,6 +49,7 @@ fn source(projects: &[&str]) -> StatusSource {
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
+            models: Default::default(),
         },
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),

@@ -33,5 +33,6 @@ pub fn agent_view(
         restart: Default::default(),
         settings: hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone(), default_port, flags),
         live: Default::default(),
+        models: cfg.machine.models,
     }
 }
