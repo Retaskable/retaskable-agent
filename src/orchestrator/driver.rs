@@ -39,6 +39,7 @@ mod resume;
 mod runs;
 mod settle;
 mod signed_out;
+mod start_gate;
 mod store_errors;
 mod triage_bug;
 mod triage_facts;

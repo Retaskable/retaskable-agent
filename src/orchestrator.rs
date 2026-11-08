@@ -83,6 +83,19 @@ pub enum Action {
 /// items never get the same lane), and only once none can is a free lane offered to `claim_next`.
 /// The caller applies each action itself (`apply`), or, like the dry driver, none of them.
 pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, cfg: &ProjectConfig) -> Vec<Action> {
+    decide_where(project, paused, runs, pool, cfg, |_| true)
+}
+
+/// `decide`, where new work (a queued item, and the `AskForWork` check) only
+/// takes a lane `may` accepts, i.e. one whose own engine may start. Items taking back a lane they hold (`retake_lane`, `readopt`, resumes) don't go through `decide`, so aren't filtered.
+pub fn decide_where(
+    project: &str,
+    paused: bool,
+    runs: &ProjectRuns,
+    pool: &LanePool,
+    cfg: &ProjectConfig,
+    may: impl Fn(u32) -> bool,
+) -> Vec<Action> {
     let mut actions = Vec::new();
     if paused {
         return actions;
@@ -96,7 +109,9 @@ pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, 
             last_lane: scratch.lane_of(project, item_id),
             fix_queued: false,
         };
-        let Some(lane) = scratch.claim(&want) else { break };
+        let Some(lane) = scratch.claim_where(&want, &may) else {
+            break;
+        };
         let mut after = *run;
         after.claimed(cfg);
         if after.state == ItemState::NeedsHuman {
@@ -125,7 +140,7 @@ pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, 
         last_lane: None,
         fix_queued: false,
     };
-    if scratch.claim_lane(&ask_want).is_some() {
+    if scratch.claim_lane_where(&ask_want, &may).is_some() {
         actions.push(Action::AskForWork);
     }
     actions
@@ -336,6 +351,21 @@ mod tests {
         assert!(second.is_empty(), "the lane is held, so b neither starts nor asks");
         assert_eq!(b["y"].state, ItemState::Queued);
         assert_eq!(pool.lane_of("a", "x"), Some(1));
+    }
+
+    #[test]
+    fn new_work_only_takes_lanes_the_filter_accepts() {
+        let runs = queued(&["a"]);
+        let actions = decide_where("proj", false, &runs, &pool(2), &cfg(), |k| k == 2);
+        assert_eq!(
+            actions[0],
+            Action::StartImplementer {
+                item_id: "a".into(),
+                lane: 2
+            }
+        );
+        let none = |_: u32| false;
+        assert!(decide_where("proj", false, &runs, &pool(2), &cfg(), none).is_empty());
     }
 
     #[test]

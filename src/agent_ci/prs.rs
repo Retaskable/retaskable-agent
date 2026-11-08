@@ -12,7 +12,7 @@ use super::priority::low_priority_tokio;
 pub const READY_LABEL: &str = "ci-ready";
 
 /// One check to run: a pull request at a head merged with a main.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CheckKey {
     pub pr: u64,
     pub head: String,

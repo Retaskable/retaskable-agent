@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 use super::report;
 pub(super) use super::signed_out::signed_out;
+use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
 use crate::backlog::{ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
@@ -25,7 +26,7 @@ use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepRequest, state_name};
-use crate::orchestrator::{Action, ProjectRuns, apply, decide, tick_payload};
+use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
 use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
@@ -776,12 +777,15 @@ impl ProjectLoop {
                 .map(|r| r.impl_session_engine)
                 .unwrap_or_default(),
             None if let Some(to) = on_engine => to,
-            None => program_of(engine_for(
-                &shared.links.engine_choice,
-                self.project.engines.as_ref(),
-                Role::Implementer,
-                Some(lane),
-            )),
+            None => match StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared) {
+                Some(gate) => gate.engine_now(self, shared, lane),
+                None => program_of(engine_for(
+                    &shared.links.engine_choice,
+                    self.project.engines.as_ref(),
+                    Role::Implementer,
+                    Some(lane),
+                )),
+            },
         };
         // A resumed session keeps its last known size; a fresh or picking-up one starts with none of its own yet.
         let context_tokens = resume
@@ -845,10 +849,13 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> u32 {
-        let blocked_from_starting = signed_out(shared) || shared.stopping;
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        let blocked_from_starting = gate.is_none() && signed_out(shared) || shared.stopping;
         let mut started = 0;
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
-            if blocked_from_starting && matches!(action, Action::StartImplementer { .. }) {
+            if let Action::StartImplementer { lane, .. } = action
+                && (blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)))
+            {
                 continue;
             }
             if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
@@ -875,15 +882,20 @@ impl ProjectLoop {
         if shared
             .claim_paused_until
             .is_some_and(|until| std::time::Instant::now() < until)
-            || signed_out(shared)
             || shared.stopping
         {
+            return None;
+        }
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
             return None;
         }
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
-            let asks = decide(&self.id, false, &self.runs, pool, &self.project).contains(&Action::AskForWork);
+            let asks = self
+                .decide_gated(pool, shared, gate.as_ref())
+                .contains(&Action::AskForWork);
             if *slots == 0 || !asks {
                 break;
             }
@@ -945,7 +957,8 @@ impl ProjectLoop {
             }
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.take_lease(&item, token, ItemState::Queued);
-                let actions = decide(&self.id, false, &self.runs, pool, &self.project);
+                let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+                let actions = self.decide_gated(pool, shared, gate.as_ref());
                 *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
                 let kept = self.runs.contains_key(&item.id);
