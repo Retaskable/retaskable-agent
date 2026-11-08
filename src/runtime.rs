@@ -194,16 +194,32 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
     }
 }
 
+/// The setup checks, plus the Docker line (agent-ci.md section 3.6) only with the `agent-ci` flag On.
+async fn checks_with_docker(env: &Env, flags: &crate::flags::Flags) -> setup_check::SetupChecks {
+    let mut checks = setup_check::run_setup_checks(env).await;
+    if flags.on(crate::hello_settings::CI_FLAG).await {
+        let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
+        let image = image.as_deref().map(str::trim).filter(|i| !i.is_empty());
+        let in_image = crate::agent_ci::docker::in_agent_image();
+        checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
+    }
+    checks
+}
+
 /// first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
 /// Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`. A
 /// release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
 /// The settings page's Now tab reads the latest result (agent-settings.md section 4.5), so it's
 /// kept and run again every ten minutes, quietly.
-pub fn spawn_setup_checks(is_release: bool, env: Env) -> Arc<Mutex<Option<setup_check::SetupChecks>>> {
+pub fn spawn_setup_checks(
+    is_release: bool,
+    env: Env,
+    flags: Arc<crate::flags::Flags>,
+) -> Arc<Mutex<Option<setup_check::SetupChecks>>> {
     let latest = Arc::new(Mutex::new(None));
     let kept = latest.clone();
     tokio::spawn(async move {
-        let checks = setup_check::run_setup_checks(&env).await;
+        let checks = checks_with_docker(&env, &flags).await;
         let report = setup_check::setup_check_report(&checks);
         if is_release {
             tracing::info!("{report}");
@@ -213,7 +229,7 @@ pub fn spawn_setup_checks(is_release: bool, env: Env) -> Arc<Mutex<Option<setup_
         *kept.lock().unwrap() = Some(checks);
         loop {
             tokio::time::sleep(Duration::from_secs(600)).await;
-            let checks = setup_check::run_setup_checks(&env).await;
+            let checks = checks_with_docker(&env, &flags).await;
             *kept.lock().unwrap() = Some(checks);
         }
     });

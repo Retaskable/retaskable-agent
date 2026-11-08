@@ -25,6 +25,7 @@ fn checks(claude_signed_in: Option<bool>) -> SetupChecks {
         cursor: check(Some(false), "Cursor's agent isn't installed"),
         pi: None,
         codex: Some(check(Some(true), "codex-cli 0.5.0")),
+        docker: None,
     }
 }
 

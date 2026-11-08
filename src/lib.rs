@@ -2,6 +2,7 @@
 //! docs/specs/agent.md there. Split out from `main.rs` so a module can be ported with its tests
 //! before the orchestrator loop that will call it exists: a `pub` item here is this crate's own
 //! API, not dead code just because `main` doesn't reach it yet.
+pub mod agent_ci;
 pub mod api;
 pub mod app_menu;
 pub mod ask;
