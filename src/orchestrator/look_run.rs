@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::driver::{RunRequest, RunStarter, piece_id};
 use super::plan_run::{Cut, Job, Roster, spawn_run};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 pub use super::slot::Slot;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
 use crate::connector::bug_link::BugLink;
@@ -116,7 +116,7 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
             processes.add(&token, tree);
         }
     });
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, job.engine);
     let (sessions, info) = (job.sessions.clone(), job.info.clone());
     let decided = decide(&looker, &brief, |spec| async move {
         let engine = engine_of(Some(job.engine))?;

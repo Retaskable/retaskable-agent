@@ -764,6 +764,35 @@ fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
     assert_eq!(quiet_timeout(20), Some(Duration::from_secs(20 * 60)));
 }
 
+#[test]
+fn watch_gives_only_cursor_its_own_projects_time_limit() {
+    let mut a = ProjectConfig::default();
+    a.budget.cursor_max_minutes = 5;
+    let mut b = ProjectConfig::default();
+    b.budget.cursor_max_minutes = 90;
+    let mut zero = ProjectConfig::default();
+    zero.budget.cursor_max_minutes = 0;
+    assert_eq!(
+        watch_for(&a, EngineId::Cursor).longest,
+        Some(Duration::from_secs(5 * 60))
+    );
+    assert_eq!(
+        watch_for(&b, EngineId::Cursor).longest,
+        Some(Duration::from_secs(90 * 60))
+    );
+    assert_eq!(
+        watch_for(&zero, EngineId::Cursor).longest,
+        Some(Duration::from_secs(60 * 60))
+    );
+    for engine in [EngineId::Claude, EngineId::Codex, EngineId::Pi] {
+        assert_eq!(watch_for(&a, engine).longest, None);
+    }
+    assert_eq!(
+        watch_for(&a, EngineId::Claude).quiet,
+        quiet_timeout(a.tuning.session_quiet_minutes)
+    );
+}
+
 #[cfg(unix)]
 const OUT_OF_TURNS: &str =
     r#"printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":false,"session_id":"s"}'; exit 0"#;

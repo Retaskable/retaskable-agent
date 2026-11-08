@@ -25,7 +25,7 @@ use crate::ideas::{
     IDEAS_LOCK, IDEAS_MAX_WAITS_DEFAULT, Ideas, QUEUE, Writer, gather_live, live_titles, profiles_for,
     queue_from_store, round_context, run_round,
 };
-use crate::orchestrator::session::quiet_timeout;
+use crate::orchestrator::session::watch_for;
 
 const TEMPLATE: &str = include_str!("../../../prompts/ideas.md");
 
@@ -98,7 +98,7 @@ pub(super) async fn run(mut job: Job, ask: Ask) -> Outcome {
     let bin = placed.bin.clone();
     let program = placed.engine;
     job.placed = Some(placed);
-    let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
+    let quiet = watch_for(&job.project, program);
     let (sessions, id) = (job.sessions.clone(), job.id.clone());
     run_with(job, ask, |spec| async move {
         let engine = engine_of(Some(program))?;

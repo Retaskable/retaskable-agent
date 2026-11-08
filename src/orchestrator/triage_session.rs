@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::driver::{
     LookFailure, SecondLookEnd, SecondLookRequest, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
 };
-use super::session::{ClaudeStarter, quiet_timeout};
+use super::session::{ClaudeStarter, watch_for};
 use crate::config::{Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{
@@ -124,7 +124,7 @@ impl ClaudeStarter {
         let info = triager_info(&project_id, &item_id, lane, &placed, &model);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let quiet = watch_for(&project, placed.engine);
             let end = match tokio::spawn(async move {
                 let triager = Triager {
                     template: TEMPLATE,
@@ -229,7 +229,7 @@ impl ClaudeStarter {
         let info = triager_info(&project_id, &item_id, lane, &placed, top_tier());
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let quiet = watch_for(&project, placed.engine);
             let agree = tokio::spawn(async move {
                 let second = SecondLook {
                     template: CHECK_TEMPLATE,

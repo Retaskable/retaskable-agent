@@ -24,7 +24,8 @@ use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, Proj
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{
-    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, Watch, engine_of, lane_engine, place, program_of,
+    run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
@@ -307,6 +308,19 @@ pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
     (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 
+/// The watch for one session, from that session's own project and engine: the watchdog on every
+/// engine, and the Cursor time limit (`budget.cursorMaxMinutes`, 0 meaning the 60 default) on Cursor only.
+pub(crate) fn watch_for(project: &ProjectConfig, engine: EngineId) -> Watch {
+    let minutes = match project.budget.cursor_max_minutes {
+        0 => 60,
+        m => m,
+    };
+    Watch {
+        quiet: quiet_timeout(project.tuning.session_quiet_minutes),
+        longest: (engine == EngineId::Cursor).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60)),
+    }
+}
+
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
 const INTERRUPTED: &str = "You were interrupted. Continue from where you left off, then return the result.";
 
@@ -392,7 +406,7 @@ async fn attempt(
         model: model_name(placed.engine, &model, cursor.as_ref()),
     };
     let branch = branch_name(item, *attempt_no);
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, placed.engine);
     let mut spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,

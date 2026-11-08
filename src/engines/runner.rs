@@ -74,6 +74,15 @@ fn open_sink(sink: &TranscriptSink, spec: &SessionSpec) -> Result<std::fs::File>
     Ok(file)
 }
 
+/// The two clocks that kill a session still running: `quiet` is the watchdog (no output line for that
+/// long), `longest` the Cursor runaway guard (that long since spawn, even while lines keep arriving).
+/// `None` turns each off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Watch {
+    pub quiet: Option<Duration>,
+    pub longest: Option<Duration>,
+}
+
 /// What [`spawn_and_read`] needs to start the process and feed it its prompt, bundled so the
 /// function takes one argument instead of seven.
 struct SpawnSpec<'a> {
@@ -89,7 +98,7 @@ struct SpawnSpec<'a> {
     /// 07-orchestrator-loop.md's `tuning.sessionQuietMinutes`), resetting on every line. `None`
     /// turns it off. Only watches while no result has been read yet: once one has, `end_after_result`
     /// (a much shorter wait) takes over instead.
-    quiet: Option<Duration>,
+    watch: Watch,
     /// Given the session's process tree right after it joins, so a caller outside this loop — a
     /// restart or Quit (07.4-stopping-and-restarting.md), or this module's own test — can mark it
     /// `cut` and kill it while this loop is still reading its output. `None` when nothing needs to
@@ -114,6 +123,18 @@ fn killed_for_silence(known_session_id: &str, quiet: Duration) -> SessionResult 
         context_tokens: None,
         usage: None,
         tokens: None,
+    }
+}
+
+/// What a Cursor session's own `SessionResult` says once it has run past `budget.cursorMaxMinutes`.
+fn killed_for_time(known_session_id: &str, longest: Duration) -> SessionResult {
+    SessionResult {
+        subtype: "cursor_time".to_string(),
+        error: Some(format!(
+            "killed after {} minutes, past its time limit",
+            longest.as_secs() / 60
+        )),
+        ..killed_for_silence(known_session_id, longest)
     }
 }
 
@@ -195,6 +216,8 @@ async fn spawn_and_read(
     let mut result = None;
     let mut ends_at = None;
     let mut silenced = false;
+    let mut overtime = false;
+    let deadline = spec.watch.longest.map(|l| tokio::time::Instant::now() + l);
     loop {
         let next = match ends_at {
             Some(at) => match tokio::time::timeout_at(at, lines.next_line()).await {
@@ -205,18 +228,27 @@ async fn spawn_and_read(
                     break;
                 }
             },
-            None => match spec.quiet {
-                Some(quiet) => match tokio::time::timeout(quiet, lines.next_line()).await {
-                    Ok(next) => next,
-                    Err(_) => {
-                        let tree = tree.clone();
-                        let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
-                        silenced = true;
-                        break;
-                    }
-                },
-                None => lines.next_line().await,
-            },
+            None => {
+                let quiet_at = spec.watch.quiet.map(|q| tokio::time::Instant::now() + q);
+                let (at, by_time) = match (quiet_at, deadline) {
+                    (Some(q), Some(d)) if d <= q => (Some(d), true),
+                    (Some(q), _) => (Some(q), false),
+                    (None, d) => (d, true),
+                };
+                match at {
+                    Some(at) => match tokio::time::timeout_at(at, lines.next_line()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            let tree = tree.clone();
+                            let _ = tokio::task::spawn_blocking(move || tree.kill_and_wait(KILL_LIMIT)).await;
+                            overtime = by_time;
+                            silenced = !by_time;
+                            break;
+                        }
+                    },
+                    None => lines.next_line().await,
+                }
+            }
         };
         let Some(line) = next.context("reading the session's output")? else {
             break;
@@ -240,8 +272,10 @@ async fn spawn_and_read(
 
     Ok(if tree.was_cut() {
         interrupted(spec.known_session_id)
+    } else if overtime {
+        killed_for_time(spec.known_session_id, spec.watch.longest.expect("set when overtime"))
     } else if silenced {
-        killed_for_silence(spec.known_session_id, spec.quiet.expect("set when silenced"))
+        killed_for_silence(spec.known_session_id, spec.watch.quiet.expect("set when silenced"))
     } else {
         result.unwrap_or_else(|| reader.no_result(status.code(), &stderr_text, spec.known_session_id))
     })
@@ -255,16 +289,16 @@ async fn spawn_and_read(
 /// reason for existing); given one, its file is created (or replaced) before the session starts.
 /// Calls `engine.prepare(spec)` first (a no-op for Claude Code; Cursor's own allowlist and isolate
 /// config, sections 4 and 6), so a failed prepare never leaves an empty transcript file behind.
-/// `quiet` is the project's watchdog timeout (`tuning.sessionQuietMinutes`); `None` leaves it off.
+/// `watch` is the project's watchdog timeout (`tuning.sessionQuietMinutes`) and, for Cursor, its time limit.
 pub async fn run_session(
     engine: &dyn Engine,
     bin: &Path,
     spec: &SessionSpec,
     known_session_id: &str,
     sink: Option<&TranscriptSink>,
-    quiet: Option<Duration>,
+    watch: Watch,
 ) -> Result<SessionResult> {
-    run_session_tracked(engine, bin, spec, known_session_id, sink, quiet, None).await
+    run_session_tracked(engine, bin, spec, known_session_id, sink, watch, None).await
 }
 
 /// [`run_session`], handing the session's process tree to `tree_tx` once it has started, so a run can cut it.
@@ -274,7 +308,7 @@ pub async fn run_session_tracked(
     spec: &SessionSpec,
     known_session_id: &str,
     sink: Option<&TranscriptSink>,
-    quiet: Option<Duration>,
+    watch: Watch,
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 ) -> Result<SessionResult> {
     engine.prepare(spec)?;
@@ -288,7 +322,7 @@ pub async fn run_session_tracked(
             prompt: &engine.prompt(spec),
             known_session_id,
             end_after_result: engine.ends_on_result().then_some(END_AFTER_RESULT),
-            quiet,
+            watch,
             tree_tx,
         },
         engine.reader(spec),
@@ -335,7 +369,7 @@ mod tests {
         args: &'a [String],
         cwd: &'a Path,
         end_after_result: Option<Duration>,
-        quiet: Option<Duration>,
+        watch: Watch,
         tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
     ) -> SpawnSpec<'a> {
         SpawnSpec {
@@ -346,7 +380,7 @@ mod tests {
             prompt: "hi",
             known_session_id: "known",
             end_after_result,
-            quiet,
+            watch,
             tree_tx,
         }
     }
@@ -361,9 +395,13 @@ mod tests {
         quiet: Option<Duration>,
         reader: Box<dyn super::super::engine::EngineReader>,
     ) -> SessionResult {
-        spawn_and_read(spec(bin, args, cwd, end_after_result, quiet, None), reader, None)
-            .await
-            .unwrap()
+        spawn_and_read(
+            spec(bin, args, cwd, end_after_result, Watch { quiet, longest: None }, None),
+            reader,
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     /// Runs `spawn_and_read` against a command that prints `out`'s contents, the shared shape
@@ -401,7 +439,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let missing = dir.join("retaskable-no-such-claude");
         let err = spawn_and_read(
-            spec(&missing, &[], &dir, None, None, None),
+            spec(&missing, &[], &dir, None, Watch::default(), None),
             Box::new(SessionReader::new(false)),
             None,
         )
@@ -526,7 +564,7 @@ mod tests {
         let (bin, args) = silent_command(20);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let run = spawn_and_read(
-            spec(&bin, &args, dir.path(), None, None, Some(tx)),
+            spec(&bin, &args, dir.path(), None, Watch::default(), Some(tx)),
             Box::new(SessionReader::new(false)),
             None,
         );
@@ -593,6 +631,64 @@ mod tests {
         .await;
         assert!(result.ok, "{:?}", result.error);
         assert_eq!(result.session_id, "sess-1");
+    }
+
+    /// Prints a line every 300 ms for `secs` seconds, so it is never quiet.
+    #[cfg(unix)]
+    fn chatty_command(secs: u32) -> (PathBuf, Vec<String>) {
+        let script = format!(
+            "i=0; while [ $i -lt {} ]; do echo tick; sleep 0.3; i=$((i+1)); done",
+            secs * 3
+        );
+        (PathBuf::from("sh"), vec!["-c".to_string(), script])
+    }
+
+    #[cfg(unix)]
+    async fn run_chatty(secs: u32, watch: Watch) -> SessionResult {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, args) = chatty_command(secs);
+        let spec = spec(&bin, &args, dir.path(), None, watch, None);
+        spawn_and_read(spec, Box::new(SessionReader::new(false)), None)
+            .await
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_and_read_kills_a_chatty_session_past_its_longest() {
+        let watch = Watch {
+            quiet: Some(Duration::from_secs(5)),
+            longest: Some(Duration::from_millis(900)),
+        };
+        let started = std::time::Instant::now();
+        let result = run_chatty(30, watch).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it let the chatty session run on"
+        );
+        assert!(!result.ok);
+        assert_eq!(result.subtype, "cursor_time");
+        assert_eq!(result.session_id, "known");
+        assert!(result.error.unwrap().contains("past its time limit"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_and_read_leaves_a_session_that_ends_before_longest_alone() {
+        let watch = Watch {
+            quiet: None,
+            longest: Some(Duration::from_secs(30)),
+        };
+        let result = run_chatty(1, watch).await;
+        assert_ne!(result.subtype, "cursor_time");
+        assert_ne!(result.subtype, "killed_for_silence");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_and_read_with_no_longest_keeps_a_chatty_session_running() {
+        let result = run_chatty(2, Watch::default()).await;
+        assert_ne!(result.subtype, "cursor_time");
     }
 
     #[test]
@@ -740,7 +836,9 @@ mod tests {
             local: None,
             sandbox: false,
         };
-        let result = run_session(&engine, &bin, &spec, "known", None, None).await.unwrap();
+        let result = run_session(&engine, &bin, &spec, "known", None, Watch::default())
+            .await
+            .unwrap();
         assert!(result.ok);
         assert_eq!(result.session_id, "sess-1");
     }
@@ -766,7 +864,7 @@ mod tests {
         .unwrap();
 
         spawn_and_read(
-            spec(&bin, &args, dir.path(), None, None, None),
+            spec(&bin, &args, dir.path(), None, Watch::default(), None),
             Box::new(SessionReader::new(false)),
             Some(file),
         )
@@ -795,9 +893,16 @@ mod tests {
             lane: Some(2),
         };
 
-        let result = run_session(&engine, &bin, &base_spec(dir.path()), "sess-1", Some(&sink), None)
-            .await
-            .unwrap();
+        let result = run_session(
+            &engine,
+            &bin,
+            &base_spec(dir.path()),
+            "sess-1",
+            Some(&sink),
+            Watch::default(),
+        )
+        .await
+        .unwrap();
         assert!(result.ok);
 
         let started = crate::engines::transcripts::started_on(data_dir.path(), "proj", "A1", "sess-1").unwrap();

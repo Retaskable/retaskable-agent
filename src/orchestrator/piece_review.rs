@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::piece_runs::{Job, piece_item, tree_sender};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 use crate::backlog::runs::RunOutcome;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
@@ -79,7 +79,7 @@ async fn run_session(job: &Job, bins: &[&Placement], spec: SessionSpec) -> Resul
     let program = spec.engine.unwrap_or(EngineId::Claude);
     let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
     let engine = engine_of(Some(program))?;
-    let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
+    let quiet = watch_for(&job.project, program);
     // The reviewer runs on the top tier; any other session of the review is a scout.
     let role = if spec.model == OPUS {
         Role::Reviewer
