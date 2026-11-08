@@ -175,6 +175,17 @@ impl Store {
         self.data.get("usage").cloned()
     }
 
+    /// Replaces `state.weekUsage`, the last reading that carried the weekly window (kept apart from `usage`,
+    /// which `implementer_tier` reads). Doesn't save on its own; call `save` after.
+    pub fn set_week_usage(&mut self, usage: Value) {
+        self.data.insert("weekUsage".to_string(), usage);
+    }
+
+    /// The last-saved `state.weekUsage`, if any.
+    pub fn week_usage(&self) -> Option<Value> {
+        self.data.get("weekUsage").cloned()
+    }
+
     /// Replaces `state.smoke` with the post-merge smoke's latest result
     /// (docs/specs/agent/06.3-review.md: "`State.smoke = {sha, status, at, url, tail?}`").
     /// Doesn't save on its own; call `save` after, as every other change here does.
@@ -449,6 +460,19 @@ mod tests {
             store.usage(),
             Some(serde_json::json!({"status": "allowed", "resetsAt": 1000}))
         );
+    }
+
+    #[test]
+    fn week_usage_round_trips_and_leaves_usage_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.week_usage(), None);
+        let week = serde_json::json!({"rateLimitType": "seven_day", "utilization": 0.96});
+        store.set_week_usage(week.clone());
+        store.save().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.week_usage(), Some(week));
+        assert_eq!(store.usage(), None);
     }
 
     #[test]
