@@ -19,7 +19,7 @@ use super::engine::{Engine, EngineId, EngineReader, SessionEvent, SessionSpec, S
 use super::json_result::fenced_json_instructions;
 
 mod allow;
-pub use allow::with_project;
+pub use allow::{with_project, with_project_or_gh};
 mod allowlist;
 mod reader;
 mod result;

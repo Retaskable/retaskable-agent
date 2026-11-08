@@ -234,6 +234,26 @@ pub fn set_tier_kept_on_resume_for_test(on: bool) {
     KEPT_ON_RESUME_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
+/// Whether the `cursor-allow-derive` flag was On at its last answer; Off until the flags client is handed over.
+pub fn cursor_allow_derive_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = ALLOW_DERIVE_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("cursor-allow-derive"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static ALLOW_DERIVE_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `cursor-allow-derive` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_cursor_allow_derive_for_test(on: bool) {
+    ALLOW_DERIVE_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
 /// The usage to read a Claude tier from (section 7.1's last row): when Claude is `at_limit` on this computer
 /// (`EngineLimits::claude_at_limit`), the `local-limit-fallback` flag is On and the model is `local_available`,
 /// a reading in the floor band whatever `state.usage` says; otherwise `usage` as it is.

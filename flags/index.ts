@@ -28,5 +28,8 @@ export const triageSession = (): boolean => flags.on("triage-session");
 /** The `cursor-give-back` flag: give a Cursor-limited item with nothing pushed back to the shared backlog. Off until there is an answer. */
 export const cursorGiveBack = (): boolean => flags.on("cursor-give-back");
 
+/** The `cursor-allow-derive` flag: Cursor sessions get an allowlist derived from the project's checks, galleries and settings. Off until there is an answer. */
+export const cursorAllowDerive = (): boolean => flags.on("cursor-allow-derive");
+
 /** The `watchdog-anomaly-rules` flag: the watchdog's newer rules (restart_wait, and idle_lanes while a restart is pending). Off until there is an answer. */
 export const watchdogAnomalyRules = (): boolean => flags.on("watchdog-anomaly-rules");

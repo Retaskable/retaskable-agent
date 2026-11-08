@@ -122,10 +122,24 @@ fn host_cli_of(url: &str) -> Option<&'static str> {
     }
 }
 
-/// `base` (the model `place` set) with the project's allowlist extras and code host's CLI, read from
+/// Today's options for the implementer and trial sessions with the flag Off: `gh` when the project names a repo.
+pub fn with_project_or_gh(project: &ProjectConfig, base: CursorOptions) -> CursorOptions {
+    if crate::tiers::cursor_allow_derive_on() {
+        return with_project(project, base);
+    }
+    CursorOptions {
+        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
+        ..base
+    }
+}
+
+/// With the `cursor-allow-derive` flag On, `base` (the model `place` set) with the project's allowlist extras and code host's CLI, read from
 /// `project` as it is now (`hostCli`). Read-only roles are given the same; `prepare_cursor` ignores the
 /// extras for them. The host comes from the repo's `origin`, else GitHub when the project names a repo.
 pub fn with_project(project: &ProjectConfig, base: CursorOptions) -> CursorOptions {
+    if !crate::tiers::cursor_allow_derive_on() {
+        return base;
+    }
     let mut allow = command_shells(&project.checks, &project.galleries);
     let typed = project
         .engines
