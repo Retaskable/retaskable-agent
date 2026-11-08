@@ -143,7 +143,8 @@ impl TrialHost for ClaudeTrial {
             let tier = if up && placed.local {
                 LOCAL
             } else {
-                implementer_tier(job.usage.as_ref(), now, &models, up)
+                let floored = crate::tiers::limit_floor(job.usage.as_ref(), job.sessions.claude_at_limit(), up);
+                implementer_tier(floored.as_ref(), now, &models, up)
             };
             let local_run = if tier == LOCAL { Some(local.run().await) } else { None };
             let model = implementer_model(tier, &item, 0).to_string();

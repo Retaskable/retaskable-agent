@@ -153,6 +153,11 @@ impl Sessions {
         self.lock().limits.clone()
     }
 
+    /// Whether Claude is limited on this computer now (`EngineLimits::claude_at_limit`).
+    pub fn claude_at_limit(&self) -> bool {
+        self.lock().limits.claude_at_limit(Instant::now())
+    }
+
     /// Adds a row; it goes when the returned guard drops.
     pub fn register(&self, info: SessionInfo) -> SessionGuard {
         let now = Instant::now();

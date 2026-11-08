@@ -98,9 +98,10 @@ impl DraftHost for ClaudeDrafts {
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
             let titles = titles_text(&draft.titles, &themes);
             let up = local.ladder_for(chosen == Engine::Claude);
+            let floored = crate::tiers::limit_floor(job.usage.as_ref(), job.sessions.claude_at_limit(), up);
             let tier = drafter_tier(
                 draft.request.as_deref().unwrap_or(""),
-                implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up),
+                implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, up),
             );
             // Held until the session ends.
             let claimed = local.claim(tier).await;

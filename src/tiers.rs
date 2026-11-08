@@ -194,6 +194,38 @@ pub fn set_local_ladder_for_test(on: bool) {
     LADDER_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
+/// Whether the `local-limit-fallback` flag was On at its last answer; Off until the flags client is handed over.
+pub fn local_limit_fallback_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = LIMIT_FALLBACK_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("local-limit-fallback"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIMIT_FALLBACK_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-limit-fallback` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_local_limit_fallback_for_test(on: bool) {
+    LIMIT_FALLBACK_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
+/// The usage to read a Claude tier from (section 7.1's last row): when Claude is `at_limit` on this computer
+/// (`EngineLimits::claude_at_limit`), the `local-limit-fallback` flag is On and the model is `local_available`,
+/// a reading in the floor band whatever `state.usage` says; otherwise `usage` as it is.
+pub fn limit_floor(usage: Option<&Value>, at_limit: bool, local_available: bool) -> Option<Value> {
+    if at_limit && local_available && local_limit_fallback_on() {
+        return Some(
+            serde_json::json!({ "unifiedWindows": { "five_hour": { "utilization": 1.0, "resetsAt": i64::MAX } } }),
+        );
+    }
+    usage.cloned()
+}
+
 /// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
 /// environment maps onto the local model (section 7.2).
 pub fn claude_model(tier: &'static str) -> &'static str {
@@ -680,6 +712,34 @@ mod tests {
             assert_eq!(scout_tier(Some(&rej), NOW, &m, avail), local(LOCAL));
             assert_eq!(top_tier(Some(&rej), NOW, &m, avail), if avail { LOCAL } else { OPUS });
         }
+    }
+
+    #[test]
+    fn limited_claude_reads_the_floor_only_with_the_flag_and_the_model() {
+        let m = models();
+        let allowed = json!({"status": "allowed", "resetsAt": NOW + 100});
+        let tiers = |u: &Option<Value>, up| {
+            let u = u.as_ref();
+            [
+                implementer_tier(u, NOW, &m, up),
+                scout_tier(u, NOW, &m, up),
+                top_tier(u, NOW, &m, up),
+                mid_tier(implementer_tier(u, NOW, &m, up)),
+            ]
+        };
+        set_local_limit_fallback_for_test(true);
+        let floored = limit_floor(Some(&allowed), true, true);
+        assert_eq!(tiers(&floored, true), [LOCAL; 4]);
+        // Not limited, or the model down: today's tiers.
+        for (limited, up) in [(false, true), (true, false)] {
+            let u = limit_floor(Some(&allowed), limited, up);
+            assert_eq!(u.as_ref(), Some(&allowed));
+            assert_eq!(tiers(&u, up), [OPUS, SONNET, OPUS, SONNET]);
+        }
+        set_local_limit_fallback_for_test(false);
+        let u = limit_floor(Some(&allowed), true, true);
+        assert_eq!(u.as_ref(), Some(&allowed));
+        assert_eq!(tiers(&u, true), [OPUS, SONNET, OPUS, SONNET]);
     }
 
     #[test]

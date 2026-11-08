@@ -41,8 +41,11 @@ pub(super) fn usage_view(
     models: &ModelsConfig,
     now: i64,
     local_up: Option<bool>,
+    at_limit: bool,
 ) -> Value {
     let local = local_up == Some(true);
+    let floored = tiers::limit_floor(five, at_limit, local);
+    let tier_usage = floored.as_ref();
     let window = five.and_then(five_hour);
     let resets_at = window.and_then(|w| w.get("resetsAt")).and_then(Value::as_i64);
     let fresh = resets_at.is_some_and(|r| r > now);
@@ -68,9 +71,9 @@ pub(super) fn usage_view(
         "resetsAt": iso_if_future(resets_at, now),
         "weekUsedPct": week_used.filter(|_| week_live).map(|u| (u * 100.0).round()),
         "weekResetsAt": iso_if_future(week_resets, now),
-        "tier": tiers::implementer_tier(five, now, models, local),
-        "scoutTier": tiers::scout_tier(five, now, models, local),
-        "topTier": tiers::top_tier(five, now, models, local),
+        "tier": tiers::implementer_tier(tier_usage, now, models, local),
+        "scoutTier": tiers::scout_tier(tier_usage, now, models, local),
+        "topTier": tiers::top_tier(tier_usage, now, models, local),
         "localUp": local_up,
         "subscription": tiers::on_subscription(five, now),
     })
@@ -94,6 +97,7 @@ impl AgentView {
             &models,
             now,
             local_up,
+            self.live.sessions().claude_at_limit(),
         ))
     }
 }
@@ -105,7 +109,14 @@ mod tests {
     const NOW: i64 = 1_700_000_000;
 
     fn view(five: Option<Value>, week: Option<Value>, local_up: Option<bool>) -> Value {
-        usage_view(five.as_ref(), week.as_ref(), &ModelsConfig::default(), NOW, local_up)
+        usage_view(
+            five.as_ref(),
+            week.as_ref(),
+            &ModelsConfig::default(),
+            NOW,
+            local_up,
+            false,
+        )
     }
 
     fn five(left_used: f64, resets: i64) -> Value {

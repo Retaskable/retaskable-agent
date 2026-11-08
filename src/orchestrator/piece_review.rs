@@ -88,9 +88,18 @@ fn review_models(
     now: i64,
     models: &crate::config::ModelsConfig,
     up: (bool, bool),
+    at_limit: bool,
 ) -> (&'static str, &'static str) {
     if ladder {
-        (scout_tier(usage, now, models, up.0), top_tier(usage, now, models, up.1))
+        // Claude at its limit reads as the floor for a role the model can run (`local-limit-fallback`).
+        let (s, t) = (
+            crate::tiers::limit_floor(usage, at_limit, up.0),
+            crate::tiers::limit_floor(usage, at_limit, up.1),
+        );
+        (
+            scout_tier(s.as_ref(), now, models, up.0),
+            top_tier(t.as_ref(), now, models, up.1),
+        )
     } else {
         (SONNET, OPUS)
     }
@@ -248,6 +257,7 @@ pub(super) async fn review(
             crate::telemetry::now_ms() / 1000,
             &job.models,
             (up(&scout_at), up(&reviewer_at)),
+            job.sessions.claude_at_limit(),
         );
         let input = StageInput {
             base_branch: &project.base_branch,
@@ -445,10 +455,19 @@ mod tests {
         let m = crate::config::ModelsConfig::default();
         let now = 1_000_000;
         let (low, full) = (reading(0.99), reading(0.1));
-        assert_eq!(review_models(true, Some(&low), now, &m, (true, true)).1, LOCAL);
-        assert_eq!(review_models(true, Some(&low), now, &m, (true, false)).1, OPUS); // a Cursor reviewer
-        assert_eq!(review_models(true, Some(&low), now, &m, (false, false)), (SONNET, OPUS)); // local down
-        assert_eq!(review_models(true, Some(&full), now, &m, (true, true)), (SONNET, OPUS));
-        assert_eq!(review_models(false, Some(&low), now, &m, (true, true)), (SONNET, OPUS)); // flag Off
+        assert_eq!(review_models(true, Some(&low), now, &m, (true, true), false).1, LOCAL);
+        assert_eq!(review_models(true, Some(&low), now, &m, (true, false), false).1, OPUS); // a Cursor reviewer
+        assert_eq!(
+            review_models(true, Some(&low), now, &m, (false, false), false),
+            (SONNET, OPUS)
+        ); // local down
+        assert_eq!(
+            review_models(true, Some(&full), now, &m, (true, true), false),
+            (SONNET, OPUS)
+        );
+        assert_eq!(
+            review_models(false, Some(&low), now, &m, (true, true), false),
+            (SONNET, OPUS)
+        ); // flag Off
     }
 }

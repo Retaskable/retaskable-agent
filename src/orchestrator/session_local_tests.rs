@@ -162,6 +162,12 @@ async fn an_engine_set_to_local_with_local_down_runs_on_the_roles_tier() {
 /// resumes it with local up or down; returns the arguments the fake `claude` got on the resume.
 #[cfg(unix)]
 async fn resume_after(first: Option<&str>, local: LocalModel) -> String {
+    resume_limited(first, local, false).await
+}
+
+/// [`resume_after`], with Claude limited on this computer before the resume when `limited`.
+#[cfg(unix)]
+async fn resume_limited(first: Option<&str>, local: LocalModel, limited: bool) -> String {
     crate::tiers::set_local_ladder_for_test(false);
     let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
     recording_claude(&rig, 0);
@@ -174,6 +180,13 @@ async fn resume_after(first: Option<&str>, local: LocalModel) -> String {
         None => std::fs::remove_file(&file).unwrap(),
     }
     crate::tiers::set_local_ladder_for_test(true);
+    if limited {
+        crate::tiers::set_local_limit_fallback_for_test(true);
+        rig.starter
+            .sessions
+            .limits()
+            .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
+    }
     let (mut request, mut rx) = request();
     request.usage = low_usage();
     request.resume = true;
@@ -233,4 +246,57 @@ async fn a_start_over_job_on_a_full_window_starts_on_opus_with_the_step_up_flag(
         let args = std::fs::read_to_string(&rig.args).unwrap();
         assert!(args.contains(model), "attempt {attempt}, flag {flag}: {args}");
     }
+}
+
+/// A reading that says `allowed` with room to spare, so the saved usage alone gives an Anthropic tier.
+fn allowed_usage() -> Option<Value> {
+    Some(serde_json::json!({"status": "allowed", "resetsAt": i64::MAX}))
+}
+
+/// Starts a fresh session with Claude limited and `allowed` saved usage; returns the arguments `claude` got.
+#[cfg(unix)]
+async fn limited_start(flag: bool, local: LocalModel) -> String {
+    crate::tiers::set_local_ladder_for_test(true);
+    crate::tiers::set_local_limit_fallback_for_test(flag);
+    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
+    recording_claude(&rig, 0);
+    rig.starter
+        .sessions
+        .limits()
+        .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
+    let (mut request, mut rx) = request();
+    request.usage = allowed_usage();
+    rig.starter.start(request).unwrap();
+    rx.recv().await.unwrap();
+    std::fs::read_to_string(&rig.args).unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_the_saved_reading_says() {
+    let args = limited_start(true, LocalModel::up()).await;
+    assert!(
+        args.contains("BASE=http://127.0.0.1:11436") && args.contains("--model sonnet"),
+        "{args}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn with_the_limit_flag_off_or_local_down_a_limited_claude_starts_as_it_does_today() {
+    for (flag, local) in [(false, LocalModel::up()), (true, LocalModel::off())] {
+        let args = limited_start(flag, local).await;
+        assert!(args.contains("--model sonnet") && !args.contains("BASE=http"), "{args}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resumed_anthropic_session_never_takes_the_model_at_the_limit() {
+    let line = r#"{"type":"retaskable_meta","engine":"claude","model":"opus"}"#;
+    let args = resume_limited(Some(line), LocalModel::up(), true).await;
+    assert!(
+        args.contains("--model sonnet") && !args.contains("BASE=http://"),
+        "{args}"
+    );
 }
