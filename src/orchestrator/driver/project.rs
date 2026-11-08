@@ -476,6 +476,7 @@ impl ProjectLoop {
         &mut self,
         items: Vec<Item>,
         paused: bool,
+        cant_start: Option<&'static str>,
         actions: Vec<Action>,
         pool: &LanePool,
         live: Option<Option<String>>,
@@ -541,14 +542,55 @@ impl ProjectLoop {
             );
         }
         let restart_rules = self.flags.on("watchdog-anomaly-rules").await;
-        self.check_watchdog(paused, &actions, pool, restart_rules);
+        let cant_start = cant_start.filter(|_| restart_rules);
+        self.check_watchdog(paused, cant_start, &actions, pool, restart_rules);
         Step::Ticked { would }
+    }
+
+    /// Why no new work can start on this computer right now, for the watchdog: a claim pause, Claude signed out
+    /// (when it's the only engine the lanes use), or every engine the lanes run at its usage limit.
+    pub(super) fn start_blocked(
+        &self,
+        links: &super::machine::Links,
+        claim_paused_until: Option<std::time::Instant>,
+        signed_out_until: Option<std::time::Instant>,
+        limits: &crate::orchestrator::fresh_start::EngineLimits,
+        pool: &LanePool,
+    ) -> Option<&'static str> {
+        let now = std::time::Instant::now();
+        if claim_paused_until.is_some_and(|u| now < u) {
+            return Some("claim paused");
+        }
+        let engines: std::collections::BTreeSet<EngineId> = (1..=pool.limit().max(1))
+            .map(|lane| {
+                program_of(engine_for(
+                    &links.engine_choice,
+                    self.project.engines.as_ref(),
+                    Role::Implementer,
+                    Some(lane),
+                ))
+            })
+            .collect();
+        if signed_out_until.is_some_and(|u| now < u) && engines.iter().all(|e| *e == EngineId::Claude) {
+            return Some("Claude signed out");
+        }
+        engines
+            .iter()
+            .all(|e| limits.is_limited(*e, now))
+            .then_some("usage limit")
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool, restart_rules: bool) {
+    fn check_watchdog(
+        &mut self,
+        paused: bool,
+        cant_start: Option<&str>,
+        actions: &[Action],
+        pool: &LanePool,
+        restart_rules: bool,
+    ) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -563,6 +605,7 @@ impl ProjectLoop {
         let found = watchdog::check(&watchdog::Input {
             project: &self.id,
             paused,
+            cant_start,
             runs: &self.runs,
             leases: &self.leases,
             records: &self.records,

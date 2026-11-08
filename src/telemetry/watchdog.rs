@@ -83,6 +83,9 @@ impl RestartView {
 pub struct Input<'a> {
     pub project: &'a str,
     pub paused: bool,
+    /// Why new work can't start besides a pause (a claim pause, Claude signed out, every engine at its limit);
+    /// `idle_lanes` and `no_progress` say nothing while it's set.
+    pub cant_start: Option<&'a str>,
     pub runs: &'a BTreeMap<String, crate::item_lifecycle::ItemRun>,
     pub leases: &'a BTreeMap<String, String>,
     pub records: &'a BTreeMap<String, RunRecord>,
@@ -173,7 +176,7 @@ fn double_lane(input: &Input, out: &mut Vec<Found>) {
 
 /// Lanes sit free while this project has work a tick would start or ask the store for.
 fn idle_lanes(input: &Input, out: &mut Vec<Found>) {
-    if input.paused {
+    if input.paused || input.cant_start.is_some() {
         return;
     }
     let held = input.pool.held_lanes().count() as u32;
@@ -249,7 +252,7 @@ fn repeat_error(input: &Input, out: &mut Vec<Found>) {
 /// An item in `checking`, `reviewing` or `merging` with nothing running for it and, for the two that need a
 /// lane, holding one (so it isn't simply waiting its turn for a free one).
 fn no_progress(input: &Input, out: &mut Vec<Found>) {
-    if input.paused {
+    if input.paused || input.cant_start.is_some() {
         return;
     }
     for (item_id, run) in input.runs {
@@ -297,23 +300,43 @@ fn restart_wait(input: &Input, out: &mut Vec<Found>) {
     });
 }
 
-/// Strips digits (ids, hashes, PR numbers) so the same error at different counts or ids still groups
-/// together, the way 05-item-lifecycle's retry count or a PR number would otherwise make every line unique.
+/// Strips digits and hex hashes (7 or more hex characters with at least one digit, e.g. a git SHA) so the
+/// same error at different counts, ids or commits still groups together.
 fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut last_was_digit = false;
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.len() >= 7 && word.chars().any(|c| c.is_ascii_digit()) {
+            out.push('#');
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
     for ch in text.chars() {
+        if ch.is_ascii_hexdigit() {
+            word.push(ch);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    // Then digit runs collapse to one `#`.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_was_digit = false;
+    for ch in out.chars() {
         if ch.is_ascii_digit() {
             if !last_was_digit {
-                out.push('#');
+                collapsed.push('#');
             }
             last_was_digit = true;
         } else {
-            out.push(ch);
+            collapsed.push(ch);
             last_was_digit = false;
         }
     }
-    out
+    collapsed
 }
 
 #[cfg(test)]

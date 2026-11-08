@@ -637,8 +637,15 @@ impl Machine {
         for (((lp, items), paused), (actions, live)) in
             (self.projects.iter_mut().zip(read_items).zip(paused)).zip(scheduled)
         {
+            let cant_start = lp.start_blocked(
+                &self.links,
+                self.claim_paused_until,
+                self.claude_signed_out_until,
+                &self.engine_limits,
+                &self.pool,
+            );
             match items {
-                Some(items) => steps.push(lp.record(items, paused, actions, &self.pool, live).await),
+                Some(items) => steps.push(lp.record(items, paused, cant_start, actions, &self.pool, live).await),
                 None => steps.push(Step::Skipped),
             }
         }
