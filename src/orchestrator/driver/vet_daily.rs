@@ -113,9 +113,13 @@ pub(super) async fn run(daily: Daily) {
         }
     };
     let (bin, program) = (placed.bin.clone(), placed.engine);
+    let (sessions, id) = (daily.base.sessions.clone(), daily.base.id.clone());
     run_with(daily, Some(placed), |spec| async move {
         let engine = engine_of(Some(program))?;
-        run_session(engine.as_ref(), &bin, &spec, "vet", None, quiet).await
+        let listed = sessions.register_spec(&id, "vet", None, Role::Scout, &spec);
+        listed
+            .scope(run_session(engine.as_ref(), &bin, &spec, "vet", None, quiet))
+            .await
     })
     .await
 }

@@ -53,6 +53,8 @@ pub struct AskJob {
     pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
     /// The `engine-placement` release flag: Off, Claude alone answers.
     pub placement: bool,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// The answer and what each action it asked for came to (`perform`'s results).
@@ -180,6 +182,7 @@ impl ProjectLoop {
                 runs: self.records.clone(),
                 events,
                 placement: self.flags.on("engine-placement").await,
+                sessions: self.live.sessions().clone(),
             };
             let (host, queue) = (host.clone(), shared.links.item_commands.clone());
             tracing::info!("{}: answering ask {}", self.id, job.ask.ask_id);

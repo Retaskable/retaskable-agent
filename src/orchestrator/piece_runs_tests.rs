@@ -54,6 +54,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         models: ModelsConfig::default(),
         flags: Arc::new(crate::flags::Flags::fixed(&[])),
         machine: "pc".into(),
+        sessions: Default::default(),
     });
     Rig {
         _dir: dir,
@@ -540,6 +541,31 @@ async fn a_review_on_cursor_runs_scouts_on_the_scout_model_and_the_reviewer_on_t
     let log = std::fs::read_to_string(r.root.join("cursor.log")).unwrap();
     assert!(log.contains("--model gpt-scout"), "{log}");
     assert!(log.contains("--model gpt-top"), "{log}");
+}
+
+#[tokio::test]
+async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
+    let root = std::env::temp_dir().join(format!("scout-go-{}", std::process::id()));
+    let go = root.join("go");
+    std::fs::create_dir_all(&root).unwrap();
+    let hold = format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display());
+    let mut r = rig(&[COMMIT, &hold, &hold, &hold], &answer("pr_opened", ""));
+    Arc::get_mut(&mut r.starter).unwrap().projects[0]
+        .review
+        .min_scout_diff_lines = 0;
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let rows = r.starter.sessions.rows_when_running().await;
+    let info = &rows[0].info;
+    assert_eq!((info.project.as_str(), info.item_id.as_str()), ("p", "pc1"));
+    assert_eq!(info.title.as_deref(), Some("Show the thing"));
+    assert_eq!((info.role, info.lane), (crate::engines::Role::Scout, None));
+    assert_eq!(info.engine, crate::engines::EngineId::Claude);
+    assert!(rows.iter().all(|row| row.info.role == crate::engines::Role::Scout));
+    std::fs::write(&go, "").unwrap();
+    end_of(&mut s.ends).await;
+    assert!(r.starter.sessions.snapshot().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn with_flag(r: &mut Rig) {

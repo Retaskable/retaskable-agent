@@ -40,6 +40,8 @@ pub struct TriageRequest {
     pub outcomes: OutcomeSender,
     /// The `engine-placement` release flag: Off, Claude alone runs it.
     pub placement: bool,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// What a second-look session needs (06.9 bullet 3): the triager's request, plus its own answer.
@@ -56,6 +58,8 @@ pub struct SecondLookRequest {
     pub triager_instructions: String,
     /// The `engine-placement` release flag: Off, the second look runs on Claude.
     pub placement: bool,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// How a second-look session ended: its answer, or `None` when it failed or answered with nothing usable.
@@ -232,6 +236,7 @@ impl ProjectLoop {
                 usage: self.store.usage(),
                 outcomes: self.outcomes.clone(),
                 placement: self.placement_flag,
+                sessions: self.live.sessions().clone(),
             };
             match starter.triage(request) {
                 Ok(()) => *room -= 1,
@@ -317,6 +322,7 @@ impl ProjectLoop {
             triager_suggest: held.suggest,
             triager_instructions: held.instructions.clone(),
             placement: self.placement_flag,
+            sessions: self.live.sessions().clone(),
         };
         self.events.add_in(
             &self.id,

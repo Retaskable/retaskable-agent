@@ -321,6 +321,7 @@ impl Machine {
             backlog_url: self.links.backlog_url.clone(),
             keychain: self.links.keychain.clone(),
             locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
+            sessions: lp.live.sessions().clone(),
         }
     }
 

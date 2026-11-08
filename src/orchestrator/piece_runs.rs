@@ -46,6 +46,8 @@ pub struct PieceStarter {
     pub flags: std::sync::Arc<crate::flags::Flags>,
     /// This computer, for a chore lock's note.
     pub machine: String,
+    /// The sessions running now: a review's scouts are listed while they run.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 impl PieceStarter {
@@ -136,6 +138,7 @@ impl PieceStarter {
             flags: self.flags.clone(),
             context: request.context,
             machine: self.machine.clone(),
+            sessions: self.sessions.clone(),
             lock: None,
         };
         let ends = request.ends;
@@ -176,6 +179,7 @@ pub(super) struct Job {
     pub(super) flags: std::sync::Arc<crate::flags::Flags>,
     pub(super) context: crate::orchestrator::driver::RunContext,
     pub(super) machine: String,
+    pub(super) sessions: crate::orchestrator::live::sessions::Sessions,
     /// The token of the chore lock the run holds, checked before it pushes.
     pub(super) lock: Option<String>,
 }

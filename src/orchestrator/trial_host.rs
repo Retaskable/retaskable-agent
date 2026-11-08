@@ -37,6 +37,8 @@ pub struct TrialJob {
     pub usage: Option<Value>,
     /// The `engine-placement` flag: Off, only a Claude trial runs.
     pub placement: bool,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// How the trial ended. `Dropped` carries why; the trial isn't retried.
@@ -162,8 +164,20 @@ impl TrialHost for ClaudeTrial {
             let engine = engine_of(Some(placed.engine))?;
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
             let id = job.session_id.clone();
+            let sessions = job.sessions.clone();
+            let project_id = project.id_or_derived();
             let (answer, _) = run_implementer(spec, |spec| async move {
-                run_session(engine.as_ref(), &placed.bin, &spec, &id, Some(&sink), quiet).await
+                let listed = sessions.register_spec(&project_id, TRIAL_ID, None, Role::Implementer, &spec);
+                listed
+                    .scope(run_session(
+                        engine.as_ref(),
+                        &placed.bin,
+                        &spec,
+                        &id,
+                        Some(&sink),
+                        quiet,
+                    ))
+                    .await
             })
             .await;
             let result = match answer {

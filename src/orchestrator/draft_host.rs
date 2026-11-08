@@ -115,7 +115,20 @@ impl DraftHost for ClaudeDrafts {
             };
             let engine = engine_of(spec.engine)?;
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
-            let r = run_session(engine.as_ref(), &placed.bin, &spec, &job.session_id, Some(&sink), quiet).await?;
+            let title = draft.titles.first().map(String::as_str);
+            let listed = job
+                .sessions
+                .register_spec(&project.id_or_derived(), &draft.id, title, Role::Drafter, &spec);
+            let r = listed
+                .scope(run_session(
+                    engine.as_ref(),
+                    &placed.bin,
+                    &spec,
+                    &job.session_id,
+                    Some(&sink),
+                    quiet,
+                ))
+                .await?;
             if r.subtype == "interrupted" {
                 return Err(anyhow::Error::new(Interrupted(
                     "the drafter was cut by a restart".into(),
@@ -214,6 +227,7 @@ mod tests {
             follow_up: "Revise it.".into(),
             usage: None,
             placement,
+            sessions: Default::default(),
         };
         assert!(host.run(job("fresh-id", false, false)).await.is_err());
         let first = host.run(job("fresh-id", false, true)).await.unwrap();
@@ -229,5 +243,49 @@ mod tests {
             revision.contains("--model gpt-5 ") && revision.contains("--resume chat-1"),
             "{revision}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_draft_is_listed_with_no_lane_while_the_drafter_runs_and_not_after() {
+        use crate::orchestrator::live::sessions::Sessions;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let repo = crate::test_support::repo_with_origin(&root);
+        let go = root.join("go");
+        let step = format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display());
+        let env = crate::test_support::stub_engines(&root, DONE, &step, &[]);
+        let host = ClaudeDrafts::new(
+            root.join("data"),
+            Default::default(),
+            env,
+            ModelsConfig::default(),
+            Default::default(),
+        );
+        let sessions = Sessions::default();
+        let job = DraftJob {
+            project: project_in(&root, &repo),
+            draft: serde_json::from_value(
+                serde_json::json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"] }),
+            )
+            .unwrap(),
+            dir: root.clone(),
+            branch: "retaskable/spec-d1".into(),
+            session_id: "s1".into(),
+            resume: false,
+            follow_up: String::new(),
+            usage: None,
+            placement: true,
+            sessions: sessions.clone(),
+        };
+        let task = tokio::spawn(host.run(job));
+        let rows = sessions.rows_when_running().await;
+        assert_eq!(rows.len(), 1);
+        let info = &rows[0].info;
+        assert_eq!(info.item_id, "d1");
+        assert_eq!(info.title.as_deref(), Some("Charts"));
+        assert_eq!((info.role, info.lane), (crate::engines::Role::Drafter, None));
+        std::fs::write(go, "").unwrap();
+        let _ = task.await.unwrap();
+        assert!(sessions.snapshot().is_empty());
     }
 }

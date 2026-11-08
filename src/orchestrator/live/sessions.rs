@@ -69,6 +69,26 @@ impl Sessions {
         }
     }
 
+    /// Lists a session named for what `spec` runs, with no lane (an ask, a draft, a scout, a triage or a round); it goes when the guard drops.
+    pub fn register_spec(
+        &self,
+        project: &str,
+        item_id: &str,
+        title: Option<&str>,
+        role: Role,
+        spec: &crate::engines::SessionSpec,
+    ) -> SessionGuard {
+        self.register(SessionInfo {
+            project: project.into(),
+            item_id: item_id.into(),
+            title: title.map(String::from),
+            role,
+            lane: None,
+            engine: spec.engine.unwrap_or_default(),
+            model: spec.model.clone(),
+        })
+    }
+
     /// The rows, in the order the sessions started.
     pub fn snapshot(&self) -> Vec<SessionRow> {
         self.lock()
@@ -80,6 +100,19 @@ impl Sessions {
                 last_output: *stamp.lock().unwrap_or_else(PoisonError::into_inner),
             })
             .collect()
+    }
+
+    /// The rows once at least one is listed; fails the test if none shows up.
+    #[cfg(test)]
+    pub async fn rows_when_running(&self) -> Vec<SessionRow> {
+        for _ in 0..600 {
+            let rows = self.snapshot();
+            if !rows.is_empty() {
+                return rows;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("no session was ever listed");
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {

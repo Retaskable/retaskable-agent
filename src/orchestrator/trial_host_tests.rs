@@ -71,6 +71,7 @@ async fn run(rig: &Rig) -> TrialEnd {
         session_id: crate::implementer::new_session_id(),
         usage: None,
         placement: false,
+        sessions: Default::default(),
     };
     rig.host.run(job).await.unwrap()
 }
@@ -179,6 +180,7 @@ async fn the_trial_runs_on_the_implementers_chosen_engine_with_placement_on() {
         session_id: crate::implementer::new_session_id(),
         usage: None,
         placement,
+        sessions: Default::default(),
     };
     let TrialEnd::Dropped { reason } = rig.host.run(job(false)).await.unwrap() else {
         panic!("placement Off should drop a pi trial")
