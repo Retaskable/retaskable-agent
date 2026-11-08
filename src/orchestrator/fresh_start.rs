@@ -59,6 +59,12 @@ impl EngineLimits {
         map.get(&engine).is_some_and(|until| *until > now)
     }
 
+    /// When `engine`'s limit lifts, if it is limited at `now`.
+    pub fn limited_until(&self, engine: EngineId, now: Instant) -> Option<Instant> {
+        let map = self.until.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(&engine).copied().filter(|until| *until > now)
+    }
+
     /// Turns recording from every role's sessions on or off (the `engine-limit-records` flag).
     pub fn record_any_role(&self, on: bool) {
         self.any_role.store(on, Ordering::Relaxed);

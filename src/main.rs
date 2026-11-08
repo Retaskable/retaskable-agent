@@ -380,7 +380,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let bug_version = connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default());
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
-    let live = orchestrator::live::LiveHandle::new(mode).with_machine_dir(dir.to_path_buf());
+    let live = view.live.clone().with_mode(mode).with_machine_dir(dir.to_path_buf());
     let tray_sessions = live.sessions().clone();
     view.item_commands
         .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);

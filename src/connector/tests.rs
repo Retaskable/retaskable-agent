@@ -91,6 +91,7 @@ fn timing() -> Timing {
         connect: Duration::from_secs(5),
         backoff: Duration::from_millis(10),
         stable: Duration::from_secs(30),
+        live_coalesce: Duration::from_millis(100),
     }
 }
 
@@ -112,6 +113,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         restart: Default::default(),
         settings: Default::default(),
         local: Default::default(),
+        live: Default::default(),
     })
 }
 
@@ -292,6 +294,40 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
     }
     assert_eq!(again["type"], "snapshot");
     assert_eq!(again["state"]["lanes"][0]["diskGb"], 3.3);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_change_in_the_loops_live_state_resends_the_snapshot_once_and_an_unchanged_tick_does_not() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one"]);
+    let c = start_connector(&url, store, &view, dir.path());
+    let mut first = next(&mut rx).await;
+    read(&mut first).await; // hello
+    read(&mut first).await; // snapshot
+    view.live.register("one");
+    view.live.ticked("one", false, "t1".into(), vec![], "d".into());
+    assert_eq!(read_not_alive(&mut first).await["type"], "snapshot");
+    // A burst of changes sends one snapshot.
+    view.live.set_limit("one", Some("2026-11-08T12:00:00Z".into()));
+    view.live.set_concurrency(2);
+    view.live.ticked("one", true, "t2".into(), vec![], "d".into());
+    assert_eq!(read_not_alive(&mut first).await["type"], "snapshot");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), read_not_alive(&mut first))
+            .await
+            .is_err(),
+        "one snapshot for the burst"
+    );
+    // A tick that changes nothing reported sends none.
+    view.live.ticked("one", true, "t3".into(), vec![], "e".into());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), read_not_alive(&mut first))
+            .await
+            .is_err(),
+        "an unchanged tick"
+    );
     c.stop(Duration::from_secs(1)).await;
 }
 

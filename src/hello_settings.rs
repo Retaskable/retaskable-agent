@@ -113,6 +113,13 @@ impl HelloSettings {
         self.source.as_ref().is_some_and(|s| s.flags.last(FLAG))
     }
 
+    /// Whether the `snapshot-reporting` flag was On at the last answer, without asking; Off until there is one.
+    pub fn snapshot_reporting_on(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|s| s.flags.last(crate::view::SNAPSHOT_REPORTING_FLAG))
+    }
+
     /// The directory holding `config.json`, when something says where it is.
     pub fn dir(&self) -> Option<&Path> {
         self.source.as_ref().map(|s| s.dir.as_path())

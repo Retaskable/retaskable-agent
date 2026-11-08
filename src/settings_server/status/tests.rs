@@ -48,6 +48,7 @@ fn source(projects: &[&str]) -> StatusSource {
             restart: Default::default(),
             settings: Default::default(),
             local: Default::default(),
+            live: Default::default(),
         },
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),
@@ -191,6 +192,7 @@ fn live(mode: OrchestratorMode, projects: &[(&str, ProjectLive)]) -> LiveState {
         run_kinds: Vec::new(),
         projects: projects.iter().map(|(id, p)| (id.to_string(), p.clone())).collect(),
         ci: None,
+        concurrency: 0,
     }
 }
 
