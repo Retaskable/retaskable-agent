@@ -325,7 +325,7 @@ fn setup_check_report_has_the_setup_check_header_and_indented_lines() {
 
 #[tokio::test]
 async fn run_setup_checks_completes_promptly_and_builds_every_field() {
-    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(&Env::empty())).await;
+    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(&Env::empty(), true)).await;
     let c = result.expect("run_setup_checks should finish within its own 20s check budget");
     for check in [
         &c.git,
@@ -392,18 +392,71 @@ async fn run_timeout_kills_a_hung_process_once_the_budget_runs_out() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-// optional_engine_check
+// pi_check / codex_check
 
 #[test]
-fn optional_engine_check_passes_with_the_version_line_only_when_the_binary_ran() {
-    assert_eq!(optional_engine_check("pi", None), None);
-    assert_eq!(optional_engine_check("pi", Some(&out(1, "oops"))), None);
+fn pi_check_has_three_states() {
+    assert_eq!(pi_check(None), SetupCheck::fail("pi isn't installed", fixes::PI));
+    let long = "x".repeat(300);
+    let failed = pi_check(Some(&out_err(1, "", &format!("\n{long}\nsecond"))));
+    assert_eq!(failed, SetupCheck::fail("x".repeat(200), fixes::PI));
+    assert_eq!(pi_check(Some(&out(0, "pi 1.2.3\n"))), SetupCheck::pass("pi 1.2.3"));
+    assert_eq!(pi_check(Some(&out(0, "\n"))), SetupCheck::pass("pi"));
+}
+
+#[test]
+fn codex_check_has_four_states() {
+    let signed_in = out(0, "Logged in\n");
     assert_eq!(
-        optional_engine_check("Codex", Some(&out(0, "codex-cli 0.5.0\n"))),
+        codex_check(None, None),
+        SetupCheck::fail("Codex isn't installed", fixes::CODEX)
+    );
+    assert_eq!(
+        codex_check(Some(&out_err(2, "", "bad flag\nmore")), None),
+        SetupCheck::fail("bad flag", fixes::CODEX)
+    );
+    let long = "y".repeat(300);
+    assert_eq!(
+        codex_check(Some(&out_err(1, "", &long)), None),
+        SetupCheck::fail("y".repeat(200), fixes::CODEX)
+    );
+    let version = out(0, "codex-cli 0.46.0\n");
+    assert_eq!(
+        codex_check(Some(&version), Some(&signed_in)),
+        SetupCheck::pass("codex-cli 0.46.0")
+    );
+    let signed_out = codex_check(Some(&version), Some(&out(1, "")));
+    assert_eq!(
+        signed_out,
+        SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN)
+    );
+    assert_eq!(codex_check(Some(&version), None), signed_out);
+}
+
+#[test]
+fn a_signed_out_codex_leaves_the_checks_passing() {
+    let mut c = checks(
+        SetupCheck::pass("Claude Code 2.1.0"),
+        SetupCheck::pass("Claude Code is signed in"),
+        SetupCheck::fail("Cursor's agent isn't installed", fixes::CURSOR_MISSING),
+    );
+    c.codex = Some(SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN));
+    c.pi = Some(SetupCheck::fail("pi isn't installed", fixes::PI));
+    assert!(setup_checks_pass(&c));
+    assert!(engine_ready(&c));
+    assert!(claude_ready(&c));
+}
+
+#[test]
+fn the_flag_off_keeps_the_old_pi_and_codex_result() {
+    assert_eq!(plain_engine_check("pi", None), None);
+    assert_eq!(plain_engine_check("pi", Some(&out(1, "oops"))), None);
+    assert_eq!(
+        plain_engine_check("Codex", Some(&out(0, "codex-cli 0.5.0\n"))),
         Some(SetupCheck::pass("codex-cli 0.5.0"))
     );
     assert_eq!(
-        optional_engine_check("pi", Some(&out(0, "\n"))),
+        plain_engine_check("pi", Some(&out(0, "\n"))),
         Some(SetupCheck::pass("pi"))
     );
 }

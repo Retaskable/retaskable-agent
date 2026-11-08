@@ -14,7 +14,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::engines::resolve::{
-    resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
+    codex_found, pi_found, resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
 };
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -28,6 +28,9 @@ mod fixes {
     pub const CURSOR_MISSING: &str = "Install Cursor's agent from cursor.com/cli, then run `cursor-agent login`.";
     pub const DOCKER: &str = "Start Docker (or install it) on this computer.";
     pub const CURSOR: &str = "Run `cursor-agent login`.";
+    pub const PI: &str = "Install pi from pi.dev.";
+    pub const CODEX: &str = "Install Codex: `npm install -g @openai/codex`, then run `codex login`.";
+    pub const CODEX_SIGNED_IN: &str = "Run `codex login`.";
 }
 
 /// One check: `ok: None` means "couldn't tell", matching `SetupCheck` in `shared/types.ts`.
@@ -218,20 +221,42 @@ fn cursor_check(installed: bool, status: Option<&RunOutput>) -> SetupCheck {
     }
 }
 
-/// `optionalEngineCheck`: a pass naming the first line of `--version`, only when the binary ran.
-fn optional_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck> {
-    let r = r?;
+/// pi's probe (engines/09-setup.md section 9.1): not installed, a `--version` that failed (its
+/// stderr's first line), or a pass naming the first line of `--version`. pi has no sign-in check.
+fn pi_check(version: Option<&RunOutput>) -> SetupCheck {
+    version_check("pi", version, fixes::PI)
+}
+
+/// Codex's probe: pi's three states, then `codex login status` after a good `--version`.
+fn codex_check(version: Option<&RunOutput>, login: Option<&RunOutput>) -> SetupCheck {
+    let check = version_check("Codex", version, fixes::CODEX);
+    if check.ok == Some(true) && !matches!(login, Some(r) if r.code == Some(0)) {
+        return SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN);
+    }
+    check
+}
+
+fn version_check(name: &str, r: Option<&RunOutput>, fix: &str) -> SetupCheck {
+    let Some(r) = r else {
+        return SetupCheck::fail(format!("{name} isn't installed"), fix);
+    };
     if r.code != Some(0) {
-        return None;
+        return SetupCheck::fail(first_line(&r.stderr), fix);
     }
     let line = first_line(&r.stdout);
-    Some(SetupCheck::pass(if line.is_empty() { name.to_string() } else { line }))
+    SetupCheck::pass(if line.is_empty() { name.to_string() } else { line })
+}
+
+/// Before the `engine-setup-probes` flag: a pass naming the first line of `--version`, only when the binary ran.
+fn plain_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck> {
+    r.filter(|r| r.code == Some(0))
+        .map(|r| version_check(name, Some(r), ""))
 }
 
 /// `runSetupChecks()`: runs every probe, never through a shell, the git/`gh`/engine probes
 /// concurrently the same way the TypeScript agent does so a missing binary's 20s timeout doesn't
 /// stack with the others.
-pub async fn run_setup_checks(env: &Env) -> SetupChecks {
+pub async fn run_setup_checks(env: &Env, probes: bool) -> SetupChecks {
     let claude_bin = resolve_claude_on_path(env).ok();
     let cursor_bin = resolve_cursor_on_path(env);
     let api_key = env.get("ANTHROPIC_API_KEY").is_some();
@@ -253,7 +278,8 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
     let claude_ok = claude.ok == Some(true);
     let cursor_installed = matches!(&cursor_version, Some(r) if r.code == Some(0));
 
-    let (claude_auth, cursor_status) = tokio::join!(
+    let codex_ok = matches!(&codex_version, Some(r) if r.code == Some(0));
+    let (claude_auth, cursor_status, codex_login) = tokio::join!(
         async {
             if claude_ok && !api_key {
                 run_opt(claude_bin.as_deref(), &["auth", "status"]).await
@@ -268,7 +294,26 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
                 None
             }
         },
+        async {
+            if probes && codex_ok {
+                run(&codex_bin, &["login", "status"]).await
+            } else {
+                None
+            }
+        },
     );
+    let dirs = crate::env_path::path_dirs(env);
+    let (pi, codex) = if probes {
+        (
+            pi_found(env, cfg!(windows), &dirs).then(|| pi_check(pi_version.as_ref())),
+            codex_found(env, cfg!(windows), &dirs).then(|| codex_check(codex_version.as_ref(), codex_login.as_ref())),
+        )
+    } else {
+        (
+            plain_engine_check("pi", pi_version.as_ref()),
+            plain_engine_check("Codex", codex_version.as_ref()),
+        )
+    };
 
     SetupChecks {
         git,
@@ -277,8 +322,8 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
         claude,
         claude_signed_in: claude_signed_in_check(claude_ok, claude_auth.as_ref(), api_key),
         cursor: cursor_check(cursor_installed, cursor_status.as_ref()),
-        pi: optional_engine_check("pi", pi_version.as_ref()),
-        codex: optional_engine_check("Codex", codex_version.as_ref()),
+        pi,
+        codex,
         docker: None,
     }
 }

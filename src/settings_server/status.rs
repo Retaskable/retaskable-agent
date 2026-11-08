@@ -505,7 +505,7 @@ fn engine_row(e: Engine, settled: &Settled, checks: Option<&SetupChecks>) -> Eng
     // Local: this agent has no probe for the server, so enabled reads as "not known".
     let found = match e {
         Engine::Local => (!local.enabled).then_some(false),
-        Engine::Pi | Engine::Codex => checks.map(|_| check.is_some()),
+        Engine::Pi | Engine::Codex => checks.map(|_| check.is_some_and(|c| !c.detail.contains("isn't installed"))),
         _ => check.map(|c| c.ok == Some(true) || !c.detail.contains("isn't installed")),
     };
     let signed_in = (e == Engine::Claude).then(|| checks.and_then(|c| c.claude_signed_in.ok));
@@ -524,7 +524,9 @@ fn engine_row(e: Engine, settled: &Settled, checks: Option<&SetupChecks>) -> Eng
         };
     } else if signed_in == Some(Some(true)) {
         state_text = "Signed in";
-    } else if e == Engine::Cursor && check.is_some_and(|c| c.ok == Some(false)) {
+    } else if matches!(e, Engine::Cursor | Engine::Codex)
+        && check.is_some_and(|c| c.ok == Some(false) && c.detail.contains("isn't signed in"))
+    {
         (state, state_text) = ("problem", "Not signed in");
     }
     EngineRow {

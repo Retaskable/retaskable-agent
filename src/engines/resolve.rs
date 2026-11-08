@@ -84,6 +84,25 @@ pub fn resolve_pi(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Whether pi is there to probe: `RETASKABLE_PI` names it, or `pi[.exe]` is a file in a `PATH` directory.
+pub fn pi_found(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> bool {
+    found(env, "RETASKABLE_PI", if windows { "pi.exe" } else { "pi" }, path_dirs)
+}
+
+/// Whether Codex is there to probe: `RETASKABLE_CODEX` names it, or `codex[.exe]` is on `PATH`.
+pub fn codex_found(env: &Env, windows: bool, path_dirs: &[PathBuf]) -> bool {
+    found(
+        env,
+        "RETASKABLE_CODEX",
+        if windows { "codex.exe" } else { "codex" },
+        path_dirs,
+    )
+}
+
+fn found(env: &Env, var: &str, name: &str, path_dirs: &[PathBuf]) -> bool {
+    env.get(var).is_some() || path_dirs.iter().any(|d| d.join(name).is_file())
+}
+
 /// `resolve_pi`, reading `PATH` itself the way the real agent does.
 pub fn resolve_pi_on_path(env: &Env) -> PathBuf {
     let dirs = crate::env_path::path_dirs(env);
@@ -208,6 +227,20 @@ mod tests {
         );
         assert_eq!(resolve_codex(&none, false, &[]), PathBuf::from("codex"));
         assert_eq!(resolve_codex(&none, true, &[]), PathBuf::from("codex.exe"));
+    }
+
+    #[test]
+    fn pi_and_codex_are_found_only_by_the_env_or_a_file_on_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = [dir.path().to_path_buf()];
+        let none = Env::empty();
+        assert!(!pi_found(&none, false, &dirs) && !codex_found(&none, false, &dirs));
+        std::fs::write(dir.path().join("pi"), "").unwrap();
+        std::fs::write(dir.path().join("codex.exe"), "").unwrap();
+        assert!(pi_found(&none, false, &dirs));
+        assert!(!codex_found(&none, false, &dirs) && codex_found(&none, true, &dirs));
+        let named = Env::from_pairs([("RETASKABLE_PI", "/nope/pi"), ("RETASKABLE_CODEX", "/nope/codex")]);
+        assert!(pi_found(&named, false, &[]) && codex_found(&named, false, &[]));
     }
 
     #[test]
