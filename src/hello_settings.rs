@@ -16,9 +16,10 @@ use crate::tags;
 
 /// agent-settings.md section 3.2: the environment variables that set a computer-only setting. The settings page greys
 /// each one out and the hello lists it as set or not.
-pub const AGENT_ENV_VARS: [&str; 9] = [
+pub const AGENT_ENV_VARS: [&str; 10] = [
     "RETASKABLE_PORT",
     "RETASKABLE_LANES",
+    "RETASKABLE_CI_SLOTS",
     "RETASKABLE_POLL_SEC",
     "RETASKABLE_TAGS",
     "RETASKABLE_LOCAL_MODEL",
@@ -47,6 +48,9 @@ pub struct HelloSettings {
 
 /// The release flag that shows the settings in the hello; Off leaves the hello as it was.
 pub const FLAG: &str = "machine-settings";
+
+/// The release flag that shows the CI slots setting (agent-ci.md); Off leaves the hello and the page as they were.
+pub const CI_FLAG: &str = "agent-ci";
 
 #[derive(Clone)]
 struct Source {
@@ -124,10 +128,15 @@ impl HelloSettings {
         if !s.flags.on(FLAG).await {
             return None;
         }
-        let mut out = match config::load(&s.dir) {
-            Ok(cfg) => from_config(&cfg, s),
-            Err(_) => Map::new(),
+        let (mut out, ci_slots) = match config::load(&s.dir) {
+            Ok(cfg) => (from_config(&cfg, s), Some(config::ci_slots(&cfg, &s.env))),
+            Err(_) => (Map::new(), None),
         };
+        if let Some(n) = ci_slots
+            && s.flags.on(CI_FLAG).await
+        {
+            out.insert("ciSlots".into(), json!(n));
+        }
         out.insert("envVars".into(), env_vars_json(&s.env));
         Some(Value::Object(out))
     }

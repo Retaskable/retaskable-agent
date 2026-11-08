@@ -18,6 +18,9 @@ pub const DEFAULT_PORT: u16 = 4700;
 pub struct MachineConfig {
     #[serde(default = "default_lanes")]
     pub lanes: u32,
+    /// `ciSlots` (agent-ci.md section 2): how many pull requests' CI runs at once in Docker; 0 turns it off.
+    #[serde(default = "default_ci_slots")]
+    pub ci_slots: u32,
     /// `laneScaling` (04-architecture.md section 4.1); dropped when it isn't a `{ base, belowUsedPct }`.
     #[serde(default, deserialize_with = "deserialize_lenient")]
     pub lane_scaling: Option<LaneScaling>,
@@ -66,6 +69,7 @@ impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             lanes: default_lanes(),
+            ci_slots: default_ci_slots(),
             lane_scaling: None,
             chore_lane: None,
             concurrency: default_concurrency(),
@@ -87,6 +91,9 @@ impl Default for MachineConfig {
 
 fn default_lanes() -> u32 {
     2
+}
+fn default_ci_slots() -> u32 {
+    1
 }
 fn default_concurrency() -> u32 {
     1
@@ -411,6 +418,23 @@ pub fn lanes(cfg: &ConfigFile, env: &Env) -> u32 {
         .unwrap_or(cfg.machine.lanes)
 }
 
+pub(crate) fn ci_slots_in_range(n: u32) -> bool {
+    n <= 8
+}
+
+/// "CI slots": `RETASKABLE_CI_SLOTS`, a whole number from 0 to 8 (0 turns agent CI off). A file value out of range
+/// is the default, 1.
+pub fn ci_slots(cfg: &ConfigFile, env: &Env) -> u32 {
+    env.get("RETASKABLE_CI_SLOTS")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| ci_slots_in_range(n))
+        .unwrap_or(if ci_slots_in_range(cfg.machine.ci_slots) {
+            cfg.machine.ci_slots
+        } else {
+            default_ci_slots()
+        })
+}
+
 /// "Local model": `RETASKABLE_LOCAL_MODEL` turns it on with that model's name, or off with
 /// `off`, `false`, `0` or `no`; `RETASKABLE_LOCAL_URL` sets its address. Each is independent of
 /// the other and of the file's own value.
@@ -671,6 +695,30 @@ mod tests {
         let high_end = Env::from_pairs([("RETASKABLE_POLL_SEC", "3600")]);
         assert_eq!(poll_interval_sec(&cfg, &low_end), 2);
         assert_eq!(poll_interval_sec(&cfg, &high_end), 3600);
+    }
+
+    #[test]
+    fn ci_slots_prefers_the_env_then_the_file_then_the_default_of_1() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.ci_slots = 3;
+        assert_eq!(ci_slots(&cfg, &Env::from_pairs([("RETASKABLE_CI_SLOTS", "5")])), 5);
+        assert_eq!(ci_slots(&cfg, &Env::empty()), 3);
+        assert_eq!(ci_slots(&ConfigFile::default(), &Env::empty()), 1);
+    }
+
+    #[test]
+    fn ci_slots_accepts_0_to_8_and_anything_else_falls_through() {
+        let mut cfg = ConfigFile::default();
+        cfg.machine.ci_slots = 2;
+        for (v, want) in [("0", 0), ("8", 8), ("-1", 2), ("9", 2), ("two", 2), ("1.5", 2), ("", 2)] {
+            assert_eq!(
+                ci_slots(&cfg, &Env::from_pairs([("RETASKABLE_CI_SLOTS", v)])),
+                want,
+                "{v}"
+            );
+        }
+        cfg.machine.ci_slots = 9;
+        assert_eq!(ci_slots(&cfg, &Env::empty()), 1);
     }
 
     #[test]

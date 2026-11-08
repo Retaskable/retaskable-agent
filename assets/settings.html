@@ -240,6 +240,12 @@
               <p class="hint" id="pollHint" hidden></p>
               <button type="button" class="btn save" id="savePoll">Save</button>
             </div>
+            <div class="field group" id="ciGroup" hidden>
+              <label for="ciSlots">CI slots (0&ndash;8; 0 turns CI off on this computer)</label>
+              <input type="number" id="ciSlots" min="0" max="8" />
+              <p class="hint" id="ciHint" hidden></p>
+              <button type="button" class="btn save" id="saveCi">Save</button>
+            </div>
             <div class="field group" id="tagsGroup">
               <label for="tags">Tags</label>
               <textarea id="tags" rows="3" placeholder="one tag per line"></textarea>
@@ -386,6 +392,7 @@
     { groupId: "tagsGroup", hintId: "tagsHint", vars: ["RETASKABLE_TAGS"] },
     { groupId: "portGroup", hintId: "portHint", vars: ["RETASKABLE_PORT"] },
     { groupId: "pollGroup", hintId: "pollHint", vars: ["RETASKABLE_POLL_SEC"] },
+    { groupId: "ciGroup", hintId: "ciHint", vars: ["RETASKABLE_CI_SLOTS"] },
     { groupId: "localGroup", hintId: "localHint", vars: ["RETASKABLE_LOCAL_MODEL", "RETASKABLE_LOCAL_URL"] },
     { groupId: "engineGroup", hintId: "engineHint", vars: ["RETASKABLE_ENGINES"] },
     { groupId: "cursorGroup", hintId: "cursorHint", vars: ["RETASKABLE_CURSOR_MODELS"] },
@@ -418,6 +425,8 @@
     $("tags").value = s.tags.effective.join("\n");
     $("port").value = s.port;
     $("pollIntervalSec").value = s.pollIntervalSec;
+    $("ciGroup").hidden = s.ciSlots === undefined;
+    if (s.ciSlots !== undefined) $("ciSlots").value = s.ciSlots;
     $("lanesNote").textContent = s.lanes + (s.lanes === 1 ? " lane" : " lanes") + " (set on retaskable.com or in config.json).";
     $("localEnabled").checked = s.local.enabled;
     $("localModel").value = s.local.model;
@@ -679,6 +688,9 @@
   });
   $("savePort").addEventListener("click", function () {
     save({ port: Number($("port").value) }, RESTART_MESSAGE);
+  });
+  $("saveCi").addEventListener("click", function () {
+    save({ ciSlots: Number($("ciSlots").value) });
   });
   $("savePoll").addEventListener("click", function () {
     save({ pollIntervalSec: Number($("pollIntervalSec").value) });

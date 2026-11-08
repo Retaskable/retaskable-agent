@@ -395,3 +395,70 @@ async fn a_successful_save_fires_the_hello_signal_and_a_refused_one_does_not() {
     assert_eq!(res.status(), StatusCode::OK);
     assert!(seen.has_changed().unwrap());
 }
+
+fn ci_server(dir: &std::path::Path, env: Env, flag: bool) -> Arc<SettingsServer> {
+    let settings = Arc::new(SettingsServer::new(
+        dir.to_path_buf(),
+        4700,
+        4700,
+        false,
+        env,
+        || 1_700_000_000,
+        |_: i32| {},
+        test_keychain(dir),
+    ));
+    settings.set_agent_ci_flag(flag);
+    settings
+}
+
+#[tokio::test]
+async fn saving_ci_slots_validates_0_to_8_and_round_trips_with_the_flag_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = ci_server(dir.path(), Env::empty(), true);
+    assert_eq!(signed_in_settings(&settings).await["ciSlots"], json!(1));
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let too_high = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 9 })).await;
+    assert_eq!(too_high.status(), StatusCode::BAD_REQUEST);
+    let negative = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": -1 })).await;
+    assert_eq!(negative.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 0 })).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.ci_slots, 0);
+    assert_eq!(signed_in_settings(&settings).await["ciSlots"], json!(0));
+}
+
+#[tokio::test]
+async fn ci_slots_is_greyed_out_and_refused_when_the_variable_sets_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = ci_server(dir.path(), Env::from_pairs([("RETASKABLE_CI_SLOTS", "4")]), true);
+    let body = signed_in_settings(&settings).await;
+    assert_eq!(
+        (body["ciSlots"].clone(), body["envVars"]["RETASKABLE_CI_SLOTS"].clone()),
+        (json!(4), json!(true))
+    );
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let res = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 2 })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        json_body(res).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("RETASKABLE_CI_SLOTS")
+    );
+}
+
+#[tokio::test]
+async fn ci_slots_is_absent_and_refused_with_the_flag_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = ci_server(dir.path(), Env::empty(), false);
+    assert!(signed_in_settings(&settings).await.get("ciSlots").is_none());
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let res = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 2 })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(config::load(dir.path()).unwrap().machine.ci_slots, 1);
+}
