@@ -24,8 +24,14 @@ pub enum FetchOutcome {
     Conflict { reason: String },
 }
 
+/// git at below-normal priority (agent-ci.md section 3.1). The fetch uses only the host's global
+/// or system git credentials; nothing is written to the clone's config.
+fn git_command(dir: &Path) -> std::process::Command {
+    git_bin::command_from(super::priority::low_priority(git_bin::program()), dir)
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = git_bin::command(dir)
+    let output = git_command(dir)
         .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .output()
@@ -189,6 +195,17 @@ pub fn sweep(data_dir: &Path, project: &str) {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn git_runs_under_nice() {
+        let cmd = git_command(Path::new("."));
+        assert_eq!(cmd.get_program(), "nice");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], "-n");
+        assert_eq!(args[1], "10");
+        assert_eq!(args[2], git_bin::program().as_os_str());
+    }
 
     fn sh(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
