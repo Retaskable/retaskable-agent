@@ -45,7 +45,7 @@ The Rust agent's own repo already carries the project side of it: `.agent-ci/ima
 
 The directory is deleted when the check ends, on a restart's recovery, and for any left from before at start; a container still running from a cut check is removed by its name (`retaskable-ci-<repo>-<short sha>`).
 
-A push to main runs the same steps with `push`, on main alone, for the baseline the orchestrator reads (agent.md section 6.7, fix main).
+A push to main runs the same steps with `push`, on main alone, for the baseline the orchestrator reads (agent.md section 6.7, fix main). As built, each poll lists main's check beside the pull requests' (`CheckKey::push`, pr 0, key = main's short sha alone). It is claimed, held under a permit and reported like any key, but under the `ci/agent/push/ci` context on main's commit, with `checks.sh push` on a fetch of main alone, and a failure posts no comment (there is no pull request). A main sha already run (here or on another computer) isn't run again; a new sha is a new run.
 
 ### 3.3 Statuses, merging and the hold
 

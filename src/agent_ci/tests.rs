@@ -200,9 +200,10 @@ mod stubbed {
     async fn both_files_on_main_give_the_project_agent_ci_and_its_keys() {
         let mut r = rig(&["image", "checks.sh"], &[], false, ONE_PR);
         let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
-        assert_eq!(keys["p"].len(), 1);
+        assert_eq!(keys["p"].len(), 2);
         assert_eq!(keys["p"][0].pr, 7);
         assert_eq!(keys["p"][0].main.len(), 40);
+        assert!(keys["p"][1].is_push() && keys["p"][1].head == keys["p"][0].main);
         let c = r.live.snapshot().ci.unwrap();
         assert_eq!((c.docker, c.running, c.slots), ("ok", 0, 1));
         assert!(c.reasons.is_empty());
@@ -244,7 +245,7 @@ mod stubbed {
           {"number":2,"isDraft":false,"labels":[],"headRefOid":"b"}]"#;
         let mut r = rig(&["image", "checks.sh"], &[], true, json);
         let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
-        assert_eq!(keys["p"].iter().map(|k| k.pr).collect::<Vec<_>>(), [1]);
+        assert_eq!(keys["p"].iter().map(|k| k.pr).collect::<Vec<_>>(), [1, 0]);
     }
 
     /// A rig whose origin serves pull requests 7 and 8 (a clean change) and 9 (conflicting with main), with a `gh`
@@ -464,6 +465,7 @@ mod stubbed {
     #[tokio::test]
     async fn a_finished_check_does_not_rerun_after_a_poll_that_could_not_read_the_list() {
         let mut r = pr_rig("exit 0");
+        r.cfg.machine.ci_slots = 2; // the pull request and the push to main
         let env = Env::from_map(Default::default());
         let data = r._dir.path().join("data");
         let keys = r.ci.poll(&r.cfg, &env).await;
@@ -476,18 +478,18 @@ mod stubbed {
                 calls(r).matches("docker run").count(),
             )
         };
-        assert_eq!(count(&r), (1, 1));
+        assert_eq!(count(&r), (2, 2));
         // Still listed: not run again.
         let keys = r.ci.poll(&r.cfg, &env).await;
         assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
         // A poll that can't read the list (ciSlots 0), then a healthy one with the same key listed.
         r.cfg.machine.ci_slots = 0;
         r.ci.poll(&r.cfg, &env).await;
-        r.cfg.machine.ci_slots = 1;
+        r.cfg.machine.ci_slots = 2;
         let keys = r.ci.poll(&r.cfg, &env).await;
-        assert_eq!(keys["p"].len(), 1);
+        assert_eq!(keys["p"].len(), 2);
         assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
-        assert_eq!(count(&r), (1, 1));
+        assert_eq!(count(&r), (2, 2));
     }
 
     /// A `gh` that keeps commit statuses in `statuses.txt` (`state|description|time`), for claims.
@@ -632,5 +634,66 @@ mod stubbed {
         run_as(&mut r, "a").await;
         let store = std::fs::read_to_string(r._dir.path().join("statuses.txt")).unwrap();
         assert!(store.lines().last().unwrap().starts_with("success|"), "{store}");
+    }
+
+    async fn poll_and_start(r: &mut Rig) -> Vec<tokio::task::JoinHandle<()>> {
+        let env = Env::from_map(Default::default());
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        let data = r._dir.path().join("data");
+        r.ci.start(&r.cfg, &env, &data, keys).await
+    }
+
+    #[tokio::test]
+    async fn a_new_main_sha_gets_one_push_run_with_statuses_on_main_and_no_comment() {
+        let mut r = pr_rig("exit 0");
+        r.cfg.projects[0].require_ci = true;
+        r.cfg.projects[0].ci_when_ready = true; // no pull request is ready: only the push runs
+        let main = Command::new("git")
+            .args(["rev-parse", "origin/main"])
+            .current_dir(r._dir.path().join("work"))
+            .output()
+            .unwrap();
+        let main = String::from_utf8(main.stdout).unwrap().trim().to_string();
+        for t in poll_and_start(&mut r).await {
+            t.await.unwrap();
+        }
+        let c = calls(&r);
+        assert!(c.contains("bash .agent-ci/checks.sh push"), "{c}");
+        assert!(c.contains(&format!("statuses/{main}")), "{c}");
+        assert!(
+            c.contains("context=ci/agent/push/ci") && !c.contains("ci/agent/pr/ci"),
+            "{c}"
+        );
+        assert!(c.contains("state=pending") && c.contains("state=success"), "{c}");
+        assert!(!c.contains("/comments"), "{c}");
+        assert!(events(&r).contains("push main"));
+        // The same main sha isn't run again.
+        assert!(poll_and_start(&mut r).await.is_empty());
+        assert_eq!(docker_runs(&r), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_push_run_posts_failure_on_main_and_no_comment() {
+        let mut r = pr_rig("echo boom; exit 1");
+        r.cfg.projects[0].require_ci = true;
+        r.cfg.projects[0].ci_when_ready = true;
+        for t in poll_and_start(&mut r).await {
+            t.await.unwrap();
+        }
+        let c = calls(&r);
+        assert!(c.contains("state=failure") && !c.contains("/comments"), "{c}");
+    }
+
+    #[tokio::test]
+    async fn a_push_run_takes_a_permit_like_a_pull_request_check() {
+        let mut r = pr_rig("sleep 1");
+        // One slot, a pull request and the push: the push waits for the permit.
+        let tasks = poll_and_start(&mut r).await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(r.ci.slot().available_permits(), 0);
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(poll_and_start(&mut r).await.len(), 1);
     }
 }

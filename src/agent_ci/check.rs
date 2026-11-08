@@ -38,12 +38,24 @@ pub enum Ran {
     Lost,
 }
 
+/// The status context the key's check posts under.
+fn context_of(k: &CheckKey) -> &'static str {
+    if k.is_push() {
+        report::PUSH_CONTEXT
+    } else {
+        report::PR_CONTEXT
+    }
+}
+
 fn short(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
 /// `<head>-<main>`, short: the key as the failure comment and events carry it.
 pub fn key_text(k: &CheckKey) -> String {
+    if k.is_push() {
+        return short(&k.main);
+    }
     format!("{}-{}", short(&k.head), short(&k.main))
 }
 
@@ -52,7 +64,11 @@ fn emit(j: &Job, state: &str, ms: u128) {
     let mut log = EventLog::new();
     log.open(&crate::paths::project_dir(&j.data_dir, &j.id).join("events"));
     let mut ci = Ci {
-        item: Some(format!("PR #{}", j.key.pr)),
+        item: Some(if j.key.is_push() {
+            "push main".into()
+        } else {
+            format!("PR #{}", j.key.pr)
+        }),
         state: Some(state.into()),
         ms: Some(ms as f64),
         ..Default::default()
@@ -83,7 +99,11 @@ pub async fn run(j: Job) -> Ran {
         dir: PathBuf::from(&j.project.repo_path),
     });
     let key = key_text(&j.key);
-    match claim::claim(&host_api, &j.key.head, &key, &j.computer, || (j.clock)()).await {
+    match claim::claim(&host_api, context_of(&j.key), &j.key.head, &key, &j.computer, || {
+        (j.clock)()
+    })
+    .await
+    {
         Ok(Verdict::Run { stale }) => {
             if !stale.is_empty() {
                 tracing::info!("agent CI: taking over {key} from {}", stale.join(", "));
@@ -129,11 +149,11 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     let key = key_text(&j.key);
     let head = j.key.head.clone();
     let minutes = || begun.elapsed().as_secs() / 60;
+    let context = context_of(&j.key);
     let post = |state: State, text: String| {
         let (h, head, text) = (host_api.clone(), head.clone(), claim::describe(&text, &key));
         async move {
-            let r =
-                tokio::task::spawn_blocking(move || h.post_status(&head, report::PR_CONTEXT, state, &text, None)).await;
+            let r = tokio::task::spawn_blocking(move || h.post_status(&head, context, state, &text, None)).await;
             match r {
                 Ok(Err(e)) => tracing::warn!("agent CI: posting a status failed: {e:#}"),
                 Err(e) => tracing::warn!("agent CI: posting a status failed: {e}"),
@@ -150,6 +170,10 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
         let post_status = post(State::Failure, text);
         async move {
             post_status.await;
+            // A push to main has no pull request to comment on.
+            if pr == 0 {
+                return;
+            }
             let _ = tokio::task::spawn_blocking(move || {
                 if let Err(e) = h.post_failure_comment(pr, "agent CI", &head, &key, &log) {
                     tracing::warn!("agent CI: posting the failure comment failed: {e:#}");
@@ -164,13 +188,18 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     let result: Result<(), (String, String)> = claim::refreshing(j.refresh, refresh, async {
         let (data, id, main) = (j.data_dir.clone(), j.id.clone(), j.project.base_branch.clone());
         let head_ref = format!("refs/pull/{}/head", j.key.pr);
+        let push = j.key.is_push();
         let fetched = tokio::task::spawn_blocking(move || {
             host::fetch(
                 &data,
                 &id,
                 &repo,
                 &main,
-                host::Mode::PullRequest { head_ref: &head_ref },
+                if push {
+                    host::Mode::Push
+                } else {
+                    host::Mode::PullRequest { head_ref: &head_ref }
+                },
             )
         })
         .await;
@@ -200,7 +229,11 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
             sha: &j.key.head,
             dir: &dir,
             image: &j.image,
-            mode: container::Mode::PullRequest,
+            mode: if push {
+                container::Mode::Push
+            } else {
+                container::Mode::PullRequest
+            },
             log_dir: &log_dir,
             ceiling: container::CEILING,
         })

@@ -287,7 +287,10 @@ impl CiLoop {
         discovery::discover(git, repo, base).await?;
         let main = discovery::git(git, repo, &["rev-parse", &format!("origin/{base}")]).await?;
         let list = prs::list(&self.programs.gh, repo, &p.github_repo, base).await?;
-        prs::ready(&list, main.trim(), ci_when_ready_active(p))
+        let mut keys = prs::ready(&list, main.trim(), ci_when_ready_active(p))?;
+        // The baseline: main's own push run (the key is main's sha alone, so a new sha is a new run).
+        keys.push(CheckKey::push(main.trim()));
+        Ok(keys)
     }
 }
 
