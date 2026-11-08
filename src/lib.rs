@@ -84,6 +84,7 @@ pub mod telemetry;
 mod test_support;
 pub mod text;
 pub mod tiers;
+pub mod tray;
 pub mod triage;
 pub mod trial_plan;
 pub mod vet;
