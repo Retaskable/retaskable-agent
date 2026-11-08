@@ -1,7 +1,9 @@
 use std::sync::atomic::Ordering;
 
 use super::*;
+use crate::terminal_menu::console::ConsoleWriter;
 use crate::tray::agent::tests::rig;
+use std::io::Write as _;
 
 #[derive(Default)]
 struct FakeTerm {
@@ -40,14 +42,14 @@ impl Term for FakeTerm {
 
 struct Setup {
     term: Arc<FakeTerm>,
-    log: Arc<Log>,
+    log: Arc<ConsoleCapture>,
     menu: Arc<TerminalMenu>,
     rig: crate::tray::agent::tests::Rig,
 }
 
 fn setup() -> Setup {
     let rig = rig(false);
-    let (term, log) = (FakeTerm::new(), Arc::new(Log::default()));
+    let (term, log) = (FakeTerm::new(), Arc::new(ConsoleCapture::new()));
     let menu = TerminalMenu::start(term.clone(), log.clone(), rig.quit.clone()).unwrap();
     menu.attach(&rig.agent);
     let _ = rig.view.forward.set(menu.clone());
@@ -171,25 +173,20 @@ fn a_panic_restores_before_its_message() {
 #[test]
 fn the_console_is_kept_and_printed_again_when_it_closes() {
     let s = setup();
-    assert!(s.log.push("\x1b[32mINFO\x1b[0m first\nsecond\n"));
+    // Through the writer `main` installs.
+    use tracing_subscriber::fmt::MakeWriter;
+    ConsoleWriter(s.log.clone())
+        .make_writer()
+        .write_all(b"\x1b[32mINFO\x1b[0m first\nsecond\n")
+        .unwrap();
     s.menu.draw(&s.rig.agent.frame()).unwrap();
     assert!(s.term.text().contains("INFO first"));
     s.menu.close();
     let text = s.term.text();
     assert!(text.ends_with("INFO first\nsecond\n"), "{text:?}");
-    assert!(!s.log.push("later"), "after it closes the console prints as before");
-}
-
-#[test]
-fn only_the_last_2000_lines_are_kept() {
-    let log = Log::default();
-    log.start();
-    for n in 0..2500 {
-        log.push(&format!("line {n}"));
-    }
-    let all = log.finish();
-    assert_eq!(all.len(), KEPT);
-    assert_eq!(all[0], "line 500");
+    let mut later = Vec::new();
+    s.log.write_to(b"later\n", &mut later).unwrap();
+    assert_eq!(later, b"later\n", "after it closes the console prints as before");
 }
 
 #[test]

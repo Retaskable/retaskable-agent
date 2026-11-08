@@ -11,7 +11,7 @@ use super::icons::{TrayState, load_tray_icon};
 use super::mode::{TrayMode, tray_mode, use_tui};
 use super::run::{Icons, encode_icon, start};
 use super::term::StdTerm;
-use super::tui::{Log, TerminalMenu, TuiOpener};
+use super::tui::{TerminalMenu, TuiOpener};
 use crate::connector::CloudHandle;
 use crate::env::Env;
 use crate::link::pending::Links;
@@ -19,6 +19,7 @@ use crate::release::Build;
 use crate::restart::RestartState;
 use crate::settings_server::SettingsServer;
 use crate::tags::{OsKind, current_os};
+use crate::terminal_menu::console::ConsoleCapture;
 use crate::view::{AgentView, Exit};
 
 /// Everything the tray reads and acts on.
@@ -101,7 +102,7 @@ pub type Shutdown = Arc<dyn Fn() + Send + Sync>;
 
 /// The terminal menu in place of the tray; `None` (the plain console) when the terminal can't be taken over.
 fn start_tui(deps: TrayDeps, quit: Arc<dyn Quit>) -> Option<Shutdown> {
-    let menu = match TerminalMenu::start(Arc::new(StdTerm::default()), Log::console(), quit) {
+    let menu = match TerminalMenu::start(Arc::new(StdTerm::default()), ConsoleCapture::console(), quit) {
         Ok(menu) => menu,
         Err(e) => {
             tracing::warn!("Tray: running with the plain console, the terminal menu couldn't start: {e}.");

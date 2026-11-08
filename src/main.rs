@@ -150,7 +150,9 @@ async fn main() -> Result<()> {
                 Err(e) => {
                     tracing_subscriber::fmt()
                         .with_env_filter(filter())
-                        .with_writer(tray::tui::ConsoleWriter)
+                        .with_writer(retaskable_agent::terminal_menu::console::ConsoleWriter(
+                            retaskable_agent::terminal_menu::console::ConsoleCapture::console(),
+                        ))
                         .init();
                     tracing::warn!("couldn't open {}: {e}", logs_dir.join("retaskable.log").display());
                 }
@@ -166,7 +168,9 @@ async fn main() -> Result<()> {
         // The terminal menu keeps the console's lines in its log pane while it is up.
         None => tracing_subscriber::fmt()
             .with_env_filter(filter())
-            .with_writer(tray::tui::ConsoleWriter)
+            .with_writer(retaskable_agent::terminal_menu::console::ConsoleWriter(
+                retaskable_agent::terminal_menu::console::ConsoleCapture::console(),
+            ))
             .init(),
     }
     let cfg = config::load(&dir)?;
@@ -896,7 +900,10 @@ async fn auto_link_backlog(
     version: String,
 ) {
     let shown = |code: &link::DeviceCode| {
-        println!("Approve the shared backlog: {}", code.verification_uri_complete);
+        retaskable_agent::terminal_menu::console::say(&format!(
+            "Approve the shared backlog: {}",
+            code.verification_uri_complete
+        ));
         links.set_backlog(Some(link::pending::BacklogWaiting::approve(
             &code.verification_uri_complete,
         )));
