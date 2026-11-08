@@ -86,6 +86,20 @@ pub fn chore_of(piece: &RunPiece) -> Option<Chore> {
     })
 }
 
+/// The store lock a chore of this kind holds through its run (section 6.7, pieces.md section 3.4); `None` for a
+/// playtest fix, which takes none. A main sync is per base branch.
+pub fn chore_lock_name(kind: ChoreKind, base: &str) -> Option<String> {
+    Some(match kind {
+        ChoreKind::Tidy => "chore-tidy".into(),
+        ChoreKind::Tests => "chore-tests".into(),
+        ChoreKind::Bugs => "chore-bugs".into(),
+        ChoreKind::Specs => "chore-specs".into(),
+        ChoreKind::FixMain => "fix_main".into(),
+        ChoreKind::SyncMain => format!("sync_main-{base}"),
+        ChoreKind::PlaytestFix => return None,
+    })
+}
+
 /// The model an implementer runs on: the chore tier for a chore (a playtest fix aside), else the normal tier.
 pub fn model_for(chore: Option<&Chore>, normal_tier: &'static str, item: &crate::backlog::Item) -> &'static str {
     match chore {
@@ -141,6 +155,18 @@ mod tests {
         let mut p = json!({ "title": "t" });
         p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         serde_json::from_value(p).unwrap()
+    }
+
+    #[test]
+    fn chore_lock_name_for_every_kind() {
+        let name = |k| chore_lock_name(k, "main");
+        assert_eq!(name(ChoreKind::Tidy).as_deref(), Some("chore-tidy"));
+        assert_eq!(name(ChoreKind::Tests).as_deref(), Some("chore-tests"));
+        assert_eq!(name(ChoreKind::Bugs).as_deref(), Some("chore-bugs"));
+        assert_eq!(name(ChoreKind::Specs).as_deref(), Some("chore-specs"));
+        assert_eq!(name(ChoreKind::FixMain).as_deref(), Some("fix_main"));
+        assert_eq!(name(ChoreKind::SyncMain).as_deref(), Some("sync_main-main"));
+        assert_eq!(name(ChoreKind::PlaytestFix), None);
     }
 
     #[test]

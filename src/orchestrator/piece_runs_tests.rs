@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -52,6 +52,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         max_turns: 50,
         models: ModelsConfig::default(),
         flags: Arc::new(crate::flags::Flags::fixed(&[])),
+        machine: "pc".into(),
     });
     Rig {
         _dir: dir,
@@ -553,7 +554,9 @@ async fn a_chore_that_asks_questions_ends_failed_and_its_change_is_closed() {
     std::fs::write(r.root.join("gh_list"), r#"[{"number":7,"url":"https://x/pull/7"}]"#).unwrap();
     let mut p = piece();
     p["chore"] = json!({ "kind": "tidy" });
-    let (req, mut s) = request(&r, RunKind::Build, p);
+    let (url, _log) = lock_store("free").await;
+    let (mut req, mut s) = request(&r, RunKind::Build, p);
+    on_store(&mut req, &url);
     r.starter.start(req).unwrap();
     let end = end_of(&mut s.ends).await;
     let RunOutcome::Failed(why) = &end.outcome else {
@@ -562,4 +565,149 @@ async fn a_chore_that_asks_questions_ends_failed_and_its_change_is_closed() {
     assert!(why.contains("Which?"), "{why}");
     let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap_or_default();
     assert!(log.contains("pr close 7 --comment"), "{log}");
+}
+
+/// A store whose `lock_take` answers per `mode` ("free", "held" by another, "error"); every op body is logged.
+async fn lock_store(mode: &'static str) -> (String, Arc<Mutex<Vec<Value>>>) {
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    let log: Arc<Mutex<Vec<Value>>> = Default::default();
+    let app = Router::new()
+        .route(
+            "/v1/repos/{id}/ops",
+            post(
+                move |State(s): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
+                    s.lock().unwrap().push(body.clone());
+                    let value = match (body["op"].as_str().unwrap(), mode) {
+                        ("lock_take", "held") => json!({ "held": false, "by": "other-pc", "note": "pc9 on x" }),
+                        ("lock_take", _) => json!({ "held": true, "token": "L1" }),
+                        _ => Value::Null,
+                    };
+                    if mode == "error" {
+                        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))).into_response();
+                    }
+                    Json(json!({ "value": value })).into_response()
+                },
+            ),
+        )
+        .with_state(log.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), log)
+}
+
+fn ops(log: &Arc<Mutex<Vec<Value>>>) -> Vec<String> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .map(|b| b["op"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn chore_rig(r: &mut Rig) {
+    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
+}
+
+fn chore_piece(kind: &str) -> Value {
+    let mut p = piece();
+    p["chore"] = json!({ "kind": kind });
+    p
+}
+
+fn on_store(req: &mut RunRequest, url: &str) {
+    req.context.client = Arc::new(crate::backlog::Client::new(url));
+}
+
+#[tokio::test]
+async fn a_tidy_chore_takes_its_lock_then_runs_then_drops_it() {
+    let (url, log) = lock_store("free").await;
+    let mut r = rig(
+        &[COMMIT],
+        &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
+    );
+    chore_rig(&mut r);
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("tidy"));
+    on_store(&mut req, &url);
+    let locks = req.context.locks.clone();
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::PrOpened), "{:?}", end.outcome);
+    assert_eq!(ops(&log), ["lock_take", "lock_drop"]);
+    let first = log.lock().unwrap()[0].clone();
+    assert_eq!(first["args"]["name"], "chore-tidy");
+    assert_eq!(first["args"]["note"], "pc1 on pc");
+    assert!(r.root.join("prompt1.txt").exists(), "the session ran");
+    assert_eq!(locks.count(), 0);
+}
+
+#[tokio::test]
+async fn a_lock_held_by_another_ends_interrupted_with_no_session() {
+    let (url, log) = lock_store("held").await;
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    chore_rig(&mut r);
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("tests"));
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Interrupted), "{:?}", end.outcome);
+    assert_eq!(ops(&log), ["lock_take"]);
+    assert!(!r.root.join("prompt1.txt").exists());
+}
+
+#[tokio::test]
+async fn a_store_error_ends_failed_outside_with_nothing_started() {
+    let (url, log) = lock_store("error").await;
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    chore_rig(&mut r);
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("bugs"));
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Failed(_)), "{:?}", end.outcome);
+    assert_eq!(end.result["outside"], true);
+    assert_eq!(ops(&log), ["lock_take"]);
+    assert!(!r.root.join("prompt1.txt").exists());
+}
+
+#[tokio::test]
+async fn a_lock_lost_mid_run_stops_the_push() {
+    use crate::backlog::runs::BeatVerdict;
+    let (url, log) = lock_store("free").await;
+    let wait = format!("touch started; while [ ! -f go ]; do sleep 0.1; done; {COMMIT}");
+    let mut r = rig(
+        &[&wait],
+        &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
+    );
+    chore_rig(&mut r);
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("specs"));
+    on_store(&mut req, &url);
+    let locks = req.context.locks.clone();
+    r.starter.start(req).unwrap();
+    let lane = lanes::lane_path(&r.root.join("worktrees"), 1);
+    while !lane.join("started").exists() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    locks.apply_beat(&[("L1".to_string(), BeatVerdict::Stop)].into_iter().collect());
+    std::fs::write(lane.join("go"), "").unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Interrupted), "{:?}", end.outcome);
+    assert!(!origin_has(&r, "retaskable/pc1-show-the-thing"), "nothing pushed");
+    assert_eq!(ops(&log), ["lock_take", "lock_drop"]);
+}
+
+#[tokio::test]
+async fn a_roadmap_piece_and_a_playtest_fix_send_no_lock_take() {
+    for p in [piece(), chore_piece("playtest_fix")] {
+        let (url, log) = lock_store("free").await;
+        let mut r = rig(
+            &[COMMIT],
+            &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
+        );
+        chore_rig(&mut r);
+        let (mut req, mut s) = request(&r, RunKind::Build, p);
+        on_store(&mut req, &url);
+        r.starter.start(req).unwrap();
+        end_of(&mut s.ends).await;
+        assert!(ops(&log).is_empty(), "{:?}", ops(&log));
+    }
 }

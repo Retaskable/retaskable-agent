@@ -36,6 +36,8 @@ pub struct ProjectLive {
     pub store_error: Option<StoreFailure>,
     /// The id of the spec draft being written now, if any (it holds no lane).
     pub drafting: Option<String>,
+    /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
+    pub chores: Option<crate::backlog::runs::ChoreCount>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -85,12 +87,18 @@ impl LiveHandle {
             decision: Some(decision),
             store_error: None,
             drafting: entry.drafting.take(),
+            chores: entry.chores,
         };
     }
 
     /// Says which draft the project is writing now, or none.
     pub fn set_drafting(&self, project: &str, draft: Option<String>) {
         self.lock().projects.entry(project.to_string()).or_default().drafting = draft;
+    }
+
+    /// The store's last chore count for the project.
+    pub fn set_chores(&self, project: &str, chores: crate::backlog::runs::ChoreCount) {
+        self.lock().projects.entry(project.to_string()).or_default().chores = Some(chores);
     }
 
     /// A pass that was skipped for a store error. The tick fields stay as the last good pass left them.

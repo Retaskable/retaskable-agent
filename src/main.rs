@@ -391,6 +391,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     max_turns: cfg.machine.max_turns,
                     models: cfg.machine.models,
                     flags: Arc::new(retaskable_agent::flags::Flags::from_env()),
+                    machine: link::machine_name(env),
                 }) as Arc<dyn orchestrator::driver::RunStarter>,
             ]
         } else {

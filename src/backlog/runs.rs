@@ -33,6 +33,28 @@ pub struct RunTakeAgent {
     pub engines: Vec<String>,
     /// The engine each kind's role runs on here.
     pub uses: RunTakeUses,
+    /// `false` when the project has chores off, so the store hands out no rotation chore; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chores: Option<bool>,
+}
+
+/// The store's count of rotation chores started today and its limit (`chores: { today, limit }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChoreCount {
+    pub today: u32,
+    pub limit: u32,
+}
+
+impl ChoreCount {
+    /// The count in an answer's fields, or `None` when it is missing or malformed.
+    pub fn read(fields: &Map<String, Value>) -> Option<Self> {
+        let c = fields.get("chores")?;
+        let num = |k: &str| c.get(k)?.as_u64().and_then(|n| u32::try_from(n).ok());
+        Some(Self {
+            today: num("today")?,
+            limit: num("limit")?,
+        })
+    }
 }
 
 /// The engine each kind's role runs on: `plan` the planner, `build` and `fix` the implementer, `look` the triager.

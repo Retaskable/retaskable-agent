@@ -309,3 +309,18 @@ fn runs_mode_says_it_runs_on_runs_and_which_kinds() {
         "Orchestrator running on runs: it can take build, watch runs"
     );
 }
+
+#[test]
+fn the_chore_count_shows_only_once_the_store_has_answered_one() {
+    let none = status_with(&live(OrchestratorMode::Runs, &[("a", ProjectLive::default())]));
+    assert_eq!(none.orchestrator.projects[0].chores, None);
+    let counted = ProjectLive {
+        chores: Some(crate::backlog::runs::ChoreCount { today: 2, limit: 3 }),
+        ..Default::default()
+    };
+    let s = status_with(&live(OrchestratorMode::Runs, &[("a", counted)]));
+    assert_eq!(
+        s.orchestrator.projects[0].chores.as_deref(),
+        Some("Chores today: 2 of 3")
+    );
+}
