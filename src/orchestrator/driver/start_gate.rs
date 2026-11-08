@@ -54,6 +54,11 @@ impl StartGate {
         engine_now(chosen, &self.used, &self.out)
     }
 
+    /// Whether `engine` may start now.
+    pub(super) fn may_start(&self, engine: EngineId) -> bool {
+        may_start(engine, &self.out)
+    }
+
     /// Whether a fresh implementer in `lane` is held back: its engine is still out after `engine_now`.
     pub(super) fn holds(&self, lp: &ProjectLoop, shared: &Shared<'_>, lane: u32) -> bool {
         !may_start(self.engine_now(lp, shared, lane), &self.out)
@@ -71,5 +76,13 @@ impl ProjectLoop {
     /// Claude's sign-out holds every claim only while the start rules are Off.
     pub(super) fn claim_held_by_sign_out(shared: &Shared<'_>, gate: Option<&StartGate>) -> bool {
         gate.is_none() && signed_out(shared)
+    }
+}
+
+impl ProjectLoop {
+    /// Whether the start rules (On) hold a session on `lane` back: the engine it would run on is out.
+    pub(super) async fn start_held(&mut self, pool: &LanePool, shared: &Shared<'_>, lane: u32) -> bool {
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        gate.is_some_and(|g| g.holds(self, shared, lane))
     }
 }

@@ -108,7 +108,7 @@ fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
 }
 
 impl Host {
-    fn api(&self, method: &str, endpoint: &str, fields: &[(&str, &str)]) -> Result<String> {
+    pub(super) fn api(&self, method: &str, endpoint: &str, fields: &[(&str, &str)]) -> Result<String> {
         let mut command = Command::new(&self.program);
         command
             .current_dir(&self.dir)

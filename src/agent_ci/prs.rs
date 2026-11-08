@@ -77,7 +77,7 @@ pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result
     cmd.args([
         "pr", "list", "--repo", repo, "--state", "open", "--base", base, "--limit", "200",
     ])
-    .args(["--json", "number,isDraft,labels,headRefOid"])
+    .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
     .current_dir(repo_dir)
     .stdin(Stdio::null())
     .kill_on_drop(true);

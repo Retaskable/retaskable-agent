@@ -6,6 +6,7 @@ pub mod console;
 pub mod keys;
 #[cfg(test)]
 mod tests;
+pub mod when;
 
 use crate::tray::menu::{Item, Menu, SEPARATOR};
 
