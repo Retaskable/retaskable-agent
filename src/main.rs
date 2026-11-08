@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, link, local_model, network, orchestrator, release,
-    runtime, setup_check, setup_questions, spec_split, store, tags, telemetry, tray, view,
+    api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
+    setup_questions, spec_split, store, tags, telemetry, tray, view,
 };
 
 mod agent_view;
