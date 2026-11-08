@@ -262,6 +262,43 @@ fn snapshot_reporting_shows_each_lanes_item_branch_and_game() {
 }
 
 #[test]
+fn snapshot_reporting_lists_the_items_held_and_the_chores_milestone() {
+    use crate::orchestrator::live::HeldItem;
+    let held = |id: &str, chore| HeldItem {
+        id: id.into(),
+        title: format!("T {id}"),
+        state: "building".into(),
+        lane: Some(2),
+        branch: format!("retaskable/{id}-s1"),
+        pr_url: None,
+        attempt: 1,
+        chore,
+    };
+    let of = |v: &AgentView| {
+        let s = v.snapshot("a", Path::new("."))["state"].clone();
+        (s["items"].clone(), s["milestones"].clone())
+    };
+    let v = reporting_view(true);
+    v.live.register("a");
+    assert_eq!(of(&v), (json!([]), json!([])));
+    v.live.set_items("a", vec![held("x", false)]);
+    let (items, milestones) = of(&v);
+    assert_eq!(
+        (&items[0]["id"], &items[0]["state"], &items[0]["lane"]),
+        (&json!("x"), &json!("building"), &json!(2))
+    );
+    assert_eq!(items[0]["chore"], false);
+    assert_eq!(milestones, json!([]));
+    v.live.set_items("a", vec![held("x", false), held("chore-y", true)]);
+    assert_eq!(of(&v).1, json!([{ "id": "chores", "title": "Chores" }]));
+    v.live.set_items("a", vec![]);
+    assert_eq!(of(&v), (json!([]), json!([])));
+    let off = reporting_view(false);
+    off.live.set_items("a", vec![held("x", true)]);
+    assert_eq!(of(&off), (json!([]), json!([])));
+}
+
+#[test]
 fn main_playing_is_true_while_play_main_runs() {
     let root = tempfile::tempdir().unwrap();
     let mut p = project("a", "o/a");

@@ -533,7 +533,9 @@ impl ProjectLoop {
             Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
             Some(Action::NeedsHuman { .. }) => unreachable!("the plan lists no needs_human"),
         };
+        let held_items = self.held_items(&items, &held);
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
+        self.live.set_items(&self.id, held_items);
         let mut payload = payload;
         if let Some(ci) = self.live.snapshot().ci {
             payload.extra.insert("ci".into(), ci.tick_json());

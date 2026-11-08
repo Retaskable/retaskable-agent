@@ -24,6 +24,20 @@ pub struct HeldLane {
     pub playing: bool,
 }
 
+/// An item this computer holds a lease on, as the snapshot's `items` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldItem {
+    pub id: String,
+    pub title: String,
+    /// The item's status, as the backlog spells it.
+    pub state: String,
+    pub lane: Option<u32>,
+    pub branch: String,
+    pub pr_url: Option<String>,
+    pub attempt: u32,
+    pub chore: bool,
+}
+
 /// The backlog could not be reached (or answered something unreadable) on the last pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreFailure {
@@ -39,6 +53,8 @@ pub struct ProjectLive {
     /// When the last pass finished with a tick (ISO 8601); `None` before the first.
     pub last_tick: Option<String>,
     pub held: Vec<HeldLane>,
+    /// The items the loop holds a lease on, as of its last pass.
+    pub items: Vec<HeldItem>,
     /// What the last tick would have done: "would ask for work", "would start <item> on lane N".
     pub decision: Option<String>,
     /// Set while the last attempt failed; cleared by the next tick.
@@ -77,7 +93,7 @@ pub struct LiveState {
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
 type Reported = (
     u32,
-    BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldLane>)>,
+    BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldLane>, Vec<HeldItem>)>,
 );
 
 fn reported(state: &LiveState) -> Reported {
@@ -87,7 +103,13 @@ fn reported(state: &LiveState) -> Reported {
         .map(|(id, p)| {
             (
                 id.clone(),
-                (p.paused, p.limit_resets_at.clone(), p.anomalies.clone(), p.held.clone()),
+                (
+                    p.paused,
+                    p.limit_resets_at.clone(),
+                    p.anomalies.clone(),
+                    p.held.clone(),
+                    p.items.clone(),
+                ),
             )
         })
         .collect();
@@ -183,6 +205,11 @@ impl LiveHandle {
         self.edit(|s| s.projects.entry(project.to_string()).or_default().anomalies = anomalies);
     }
 
+    /// The items the project holds a lease on, as of this pass.
+    pub fn set_items(&self, project: &str, items: Vec<HeldItem>) {
+        self.edit(|s| s.projects.entry(project.to_string()).or_default().items = items);
+    }
+
     pub fn snapshot(&self) -> LiveState {
         self.lock().clone()
     }
@@ -207,6 +234,7 @@ impl LiveHandle {
                 paused,
                 last_tick: Some(at),
                 held,
+                items: std::mem::take(&mut entry.items),
                 decision: Some(decision),
                 store_error: None,
                 drafting: entry.drafting.take(),
