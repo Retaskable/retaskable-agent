@@ -266,6 +266,10 @@ pub struct ProjectLoop {
     pub(super) to_resume: Vec<String>,
     /// Whether the saved `state.usage` has been checked once against the weekly cutoff (`weekly-limit-reading`).
     pub(super) week_checked: bool,
+    /// Claude sessions' usage readings that settled since the pacer last took them (`driver/auto.rs`).
+    pub(super) pace_readings: Vec<Value>,
+    /// Whether the saved usage has been given to the pacer once.
+    pub(super) pace_checked: bool,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
     /// Claude implementer starts made in this scheduling pass, which haven't taken a model slot yet.
@@ -329,6 +333,8 @@ pub struct ProjectLoop {
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
+    /// Store failures of the draft and ask tasks, written to the event log by [`Self::drain_failures`].
+    pub(super) failures: crate::backlog::failures::Failures,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
@@ -378,6 +384,8 @@ impl ProjectLoop {
             records: store.runs(),
             to_resume: Vec::new(),
             week_checked: false,
+            pace_readings: Vec::new(),
+            pace_checked: false,
             silenced: BTreeMap::new(),
             claude_starts: 0,
             own_failures: store.own_failures(),
@@ -411,6 +419,7 @@ impl ProjectLoop {
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
             draft: None,
+            failures: Default::default(),
             landing: Default::default(),
             triaging: Default::default(),
             bug_sends: Vec::new(),
@@ -563,6 +572,10 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            // Behind `watchdog-anomaly-rules`: Off, no restart reaches the rules.
+            restart: anomaly_rules
+                .then(|| watchdog::RestartView::of(crate::restart::state()))
+                .flatten(),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
             idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
             no_progress_minutes: self.project.tuning.no_progress_minutes,
@@ -612,8 +625,11 @@ impl ProjectLoop {
     /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
     /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
     /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
-    /// holds no lease and isn't here: the store hands it back when it is answered.
-    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool) {
+    /// holds no lease and isn't here: the store hands it back when it is answered. With `give_back_on` (the
+    /// `cursor-give-back` flag) and this computer's name, a needs_human item held only for Cursor's limit with
+    /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
+    /// give-back note, for `flush_owed` to send.
+    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, give_back_on: Option<&str>) {
         if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
             return;
         }
@@ -623,6 +639,22 @@ impl ProjectLoop {
                 tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
                 continue;
             };
+            if let Some(machine) = give_back_on
+                && item.pr_url.is_none()
+                && record.as_ref().is_some_and(|r| {
+                    r.state == "needs_human"
+                        && r.needs_human_reason.as_deref() == Some(super::settle::CURSOR_LIMIT_STOP)
+                })
+                && matches!(
+                    item.status,
+                    ItemStatus::Claimed | ItemStatus::Building | ItemStatus::NeedsPerson
+                )
+            {
+                tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
+                let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
+                self.unreleased.insert(id, (token, why));
+                continue;
+            }
             let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
             let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
                 Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),

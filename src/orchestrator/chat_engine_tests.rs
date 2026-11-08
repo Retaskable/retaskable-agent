@@ -109,6 +109,7 @@ async fn ask_listed(
             client: Arc::new(Client::new(base)),
             repo: 1,
             token: "t".into(),
+            failures: Default::default(),
         },
         usage: None,
         lanes: vec![],

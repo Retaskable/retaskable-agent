@@ -956,6 +956,7 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
 
 mod approve;
 mod asks;
+mod auto_concurrency;
 mod commands;
 mod cursor_limit;
 mod deprecations;

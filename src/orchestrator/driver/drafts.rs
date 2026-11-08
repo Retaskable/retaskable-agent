@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use super::Shared;
 use super::project::{ProjectLoop, signed_out};
 use super::start_gate::StartGate;
+use super::store_errors::WATCH;
 use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
@@ -107,6 +108,7 @@ pub(super) fn rebase_request(reason: &str) -> String {
 impl ProjectLoop {
     /// Whether a draft is running here now; a finished one is forgotten.
     pub(super) fn drafting(&mut self) -> bool {
+        self.drain_failures();
         if self.draft.as_ref().is_some_and(|d| d.task.is_finished()) {
             self.draft = None;
         }
@@ -160,6 +162,7 @@ impl ProjectLoop {
                 .draft_release(repo, Some(&token), &claim.draft.id, &claim.token);
             if let Err(e) = released.await {
                 tracing::warn!("{}: couldn't let go of draft {}: {e}", self.id, claim.draft.id);
+                self.store_failure("draft_release", &claim.draft.id, &e).await;
             }
             return;
         }
@@ -171,6 +174,7 @@ impl ProjectLoop {
             repo,
             token,
             lease: claim.token,
+            failures: self.failures.when(self.flags.on(WATCH).await),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -217,6 +221,7 @@ struct Ctx {
     repo: u64,
     token: String,
     lease: String,
+    failures: crate::backlog::failures::Failures,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
@@ -229,9 +234,13 @@ struct Ctx {
 
 impl Ctx {
     async fn report(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
-        self.client
+        let sent = (self.client)
             .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
-            .await
+            .await;
+        if let Err(e) = &sent {
+            self.failures.add("draft_report", id, e);
+        }
+        sent
     }
 
     /// Retaskable's own message in the chat about `draft`: into the ask that wanted it, or a new conversation. The draft's
@@ -319,9 +328,13 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     };
     // The session now has the person's answers: the store clears them, and keeps them off the next claim.
     if draft.answer.is_some() {
-        ctx.client
+        let taken = (ctx.client)
             .draft_answer_taken(ctx.repo, Some(&ctx.token), &id, &ctx.lease)
-            .await?;
+            .await;
+        if let Err(e) = &taken {
+            ctx.failures.add("draft_answer_taken", &id, e);
+        }
+        taken?;
     }
     let job_session = session_id.clone();
     let job = DraftJob {

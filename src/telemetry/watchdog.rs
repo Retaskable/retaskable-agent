@@ -22,6 +22,8 @@ pub const NO_PROGRESS_MINUTES: u32 = 20;
 /// `LANE_MISMATCH_MS`: a lane the pool holds disagreeing with an item's own record must hold this long
 /// before it counts (a start fills the pool before the record catches up).
 pub const LANE_MISMATCH_MINUTES: u32 = 2;
+/// `RESTART_WAIT_MS`: a restart pending this long is an anomaly.
+pub const RESTART_WAIT_MS: i64 = 15 * 60_000;
 /// `REPEAT_ERRORS` in `REPEAT_WINDOW_MS`.
 pub const REPEAT_ERRORS: usize = 3;
 pub const REPEAT_WINDOW_MINUTES: i64 = 30;
@@ -49,6 +51,37 @@ pub struct RecentEvent<'a> {
     pub event: &'a Event,
 }
 
+/// A pending restart, as the rules need it: when it was asked (epoch ms, `restart::Why::at`) and what it is
+/// still finishing first (`restart::Step::Waiting`'s list; empty once it is past waiting).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestartView {
+    pub at_ms: i64,
+    pub waiting_on: Vec<String>,
+}
+
+impl RestartView {
+    /// The pending restart of `state`, `None` when there isn't one.
+    pub fn of(state: &crate::restart::RestartState) -> Option<Self> {
+        let why = state.why()?;
+        let waiting_on = match state.step()? {
+            crate::restart::Step::Waiting(on) => on,
+            crate::restart::Step::Now => Vec::new(),
+        };
+        Some(Self {
+            at_ms: why.at,
+            waiting_on,
+        })
+    }
+
+    fn finishing(&self) -> String {
+        if self.waiting_on.is_empty() {
+            "nothing listed".to_string()
+        } else {
+            self.waiting_on.join(", ")
+        }
+    }
+}
+
 /// What a minute's check is given: this project's in-memory state, nothing else (section 4: "No other I/O").
 pub struct Input<'a> {
     pub project: &'a str,
@@ -61,6 +94,7 @@ pub struct Input<'a> {
     pub actions: &'a [Action],
     pub recent: &'a [RecentEvent<'a>],
     pub now_ms: i64,
+    pub restart: Option<RestartView>,
     pub lease_idle_minutes: u32,
     pub idle_lanes_minutes: u32,
     pub no_progress_minutes: u32,
@@ -79,6 +113,7 @@ pub fn check(input: &Input) -> Vec<Found> {
     if input.anomaly_rules {
         sync_failing(input, &mut found);
     }
+    restart_wait(input, &mut found);
     found
 }
 
@@ -156,14 +191,21 @@ fn idle_lanes(input: &Input, out: &mut Vec<Found>) {
         .actions
         .iter()
         .any(|a| matches!(a, Action::StartImplementer { .. } | Action::AskForWork));
-    if free == 0 || !work_ready {
+    if free == 0 || !(work_ready || input.restart.is_some()) {
         return;
     }
+    let text = match &input.restart {
+        Some(restart) => format!(
+            "{free} of {limit} lanes free while a restart is pending, finishing first: {}",
+            restart.finishing()
+        ),
+        None => format!("{free} of {limit} lanes free while work is ready to start"),
+    };
     out.push(Found {
         id: "idle_lanes".to_string(),
         rule: "idle_lanes",
         item: None,
-        text: format!("{free} of {limit} lanes free while work is ready to start"),
+        text,
         details: json!({ "free": free, "limit": limit }),
         threshold_minutes: input.idle_lanes_minutes,
     });
@@ -269,6 +311,27 @@ fn no_progress(input: &Input, out: &mut Vec<Found>) {
             threshold_minutes: input.no_progress_minutes,
         });
     }
+}
+
+/// A restart pending for `RESTART_WAIT_MS`. It has no item; it says what the restart is still finishing first.
+fn restart_wait(input: &Input, out: &mut Vec<Found>) {
+    let Some(restart) = &input.restart else { return };
+    let pending_ms = input.now_ms - restart.at_ms;
+    if pending_ms < RESTART_WAIT_MS {
+        return;
+    }
+    out.push(Found {
+        id: "restart_wait".to_string(),
+        rule: "restart_wait",
+        item: None,
+        text: format!(
+            "a restart has been pending {} min, still finishing first: {}",
+            pending_ms / 60_000,
+            restart.finishing()
+        ),
+        details: json!({ "waitingOn": restart.waiting_on }),
+        threshold_minutes: 0,
+    });
 }
 
 /// Strips digits (ids, hashes, PR numbers) so the same error at different counts or ids still groups
