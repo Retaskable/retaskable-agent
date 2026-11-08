@@ -63,6 +63,11 @@ impl Flags {
         self.state.lock().unwrap().flags.get(name) == Some(&true)
     }
 
+    /// Whether `name` was On at the last answer, without asking again: Off until there has been one.
+    pub fn last(&self, name: &str) -> bool {
+        self.state.lock().unwrap().flags.get(name) == Some(&true)
+    }
+
     async fn refresh_if_stale(&self) {
         if self.key.is_empty() {
             return;

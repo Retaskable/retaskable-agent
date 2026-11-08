@@ -366,11 +366,14 @@ impl AgentView {
             "agentVersion": truncate(&self.version, 50),
             "os": platform(),
             "machine": truncate(&self.machine, 200),
-            "capabilities": [AGENT_SETTINGS_CAPABILITY],
+            "capabilities": [],
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags,
         });
+        if self.settings.on().await {
+            hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
+        }
         if let Some(settings) = self.settings.json().await {
             hello["settings"] = settings;
         }
@@ -584,7 +587,9 @@ mod tests {
             4700,
             Arc::new(crate::flags::Flags::fixed(&[])),
         );
-        assert!(v.hello("").await.get("settings").is_none());
+        let off = v.hello("").await;
+        assert!(off.get("settings").is_none());
+        assert_eq!(off["capabilities"], json!([]));
         // The name is there, but the value 30 shows only as the computed pollIntervalSec, never as the variable's.
         assert!(!s["envVars"].to_string().contains("30"));
     }

@@ -113,7 +113,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "play" | "stop" => play(cmd, project, view),
         "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
-        "agent_settings" => agent_settings(cmd, view),
+        "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),

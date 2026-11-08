@@ -96,6 +96,19 @@ impl HelloSettings {
         self.saved.send_modify(|n| *n += 1);
     }
 
+    /// Whether the `machine-settings` flag is On, asking again when the last answer is stale; no source means Off.
+    pub async fn on(&self) -> bool {
+        match &self.source {
+            Some(s) => s.flags.on(FLAG).await,
+            None => false,
+        }
+    }
+
+    /// The same from the last answer, without asking (for code that isn't async); Off until there is one.
+    pub fn on_now(&self) -> bool {
+        self.source.as_ref().is_some_and(|s| s.flags.last(FLAG))
+    }
+
     /// The directory holding `config.json`, when something says where it is.
     pub fn dir(&self) -> Option<&Path> {
         self.source.as_ref().map(|s| s.dir.as_path())

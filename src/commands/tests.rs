@@ -795,7 +795,7 @@ fn settings_view(dir: &Path) -> (AgentView, tokio::sync::watch::Receiver<u64>) {
         dir.to_path_buf(),
         crate::env::Env::empty(),
         4700,
-        std::sync::Arc::new(crate::flags::Flags::fixed(&[])),
+        std::sync::Arc::new(crate::flags::Flags::fixed(&["machine-settings"])),
     );
     let mut seen = v.settings.subscribe();
     seen.mark_unchanged();
@@ -862,4 +862,19 @@ fn computer_tags_and_settings_request_are_refused() {
     }
     assert!(!dir.path().join("config.json").exists());
     assert!(!seen.has_changed().unwrap());
+}
+
+#[test]
+fn agent_settings_is_an_unknown_command_while_the_flag_is_off_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut v = view();
+    v.settings = crate::hello_settings::HelloSettings::new(
+        dir.path().to_path_buf(),
+        crate::env::Env::empty(),
+        4700,
+        std::sync::Arc::new(crate::flags::Flags::fixed(&[])),
+    );
+    let answer = send(&v, "agent_settings", json!({ "dailyUsd": 12 }));
+    assert_eq!(answer["reason"], "Not a command this agent takes yet: agent_settings");
+    assert!(!dir.path().join("config.json").exists());
 }
