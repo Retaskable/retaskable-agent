@@ -440,15 +440,9 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
-        if self.settings.snapshot_reporting_on() {
-            let held = self
-                .loop_state(project)
-                .and_then(|s| s.projects.get(project).map(|p| p.items.clone()))
-                .unwrap_or_default();
-            if held.iter().any(|i| i.chore) {
-                state["milestones"] = json!([{ "id": "chores", "title": "Chores" }]);
-            }
-            state["items"] = held.iter().map(held_item_json).collect();
+        if let Some((items, milestones)) = self.items_block(project) {
+            state["items"] = items;
+            state["milestones"] = milestones;
         }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;
@@ -469,6 +463,40 @@ impl AgentView {
             state["smoke"] = smoke;
         }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `items` and `milestones` (09.2): with `snapshot-reporting` On, the items this agent holds a
+    /// lease on, and the Chores milestone when one is a chore.
+    fn items_block(&self, project: &str) -> Option<(Value, Value)> {
+        if !self.settings.snapshot_reporting_on() {
+            return None;
+        }
+        let held = self
+            .loop_state(project)
+            .and_then(|s| s.projects.get(project).map(|p| p.items.clone()))
+            .unwrap_or_default();
+        let items: Vec<Value> = held
+            .iter()
+            .map(|i| {
+                let mut item = json!({
+                    "id": i.id, "title": i.title, "state": i.state, "branch": i.branch,
+                    "attempt": i.attempt, "chore": i.chore,
+                });
+                if let Some(lane) = i.lane {
+                    item["lane"] = json!(lane);
+                }
+                if let Some(pr) = &i.pr_url {
+                    item["prUrl"] = json!(pr);
+                }
+                item
+            })
+            .collect();
+        let milestones = if held.iter().any(|i| i.chore) {
+            json!([{ "id": "chores", "title": "Chores" }])
+        } else {
+            json!([])
+        };
+        Some((json!(items), milestones))
     }
 
     /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with `snapshot-reporting` On and a
@@ -548,21 +576,6 @@ impl AgentView {
             })
             .collect()
     }
-}
-
-/// A held item as the shared `Item` type has it, with the fields this agent knows.
-fn held_item_json(i: &crate::orchestrator::live::HeldItem) -> Value {
-    let mut item = json!({ "id": i.id, "title": i.title, "state": i.state, "attempt": i.attempt, "chore": i.chore });
-    if let Some(lane) = i.lane {
-        item["lane"] = json!(lane);
-    }
-    if let Some(branch) = &i.branch {
-        item["branch"] = json!(branch);
-    }
-    if let Some(pr) = &i.pr_url {
-        item["prUrl"] = json!(pr);
-    }
-    item
 }
 
 /// The chore lane's note in the lanes list (pageView.ts).

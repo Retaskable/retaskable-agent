@@ -24,14 +24,15 @@ pub struct HeldLane {
     pub playing: bool,
 }
 
-/// An item this agent holds a lease on, as the snapshot's `items` reports it.
+/// An item this computer holds a lease on, as the snapshot's `items` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldItem {
     pub id: String,
     pub title: String,
+    /// The item's status, as the backlog spells it.
     pub state: String,
     pub lane: Option<u32>,
-    pub branch: Option<String>,
+    pub branch: String,
     pub pr_url: Option<String>,
     pub attempt: u32,
     pub chore: bool,
@@ -52,6 +53,8 @@ pub struct ProjectLive {
     /// When the last pass finished with a tick (ISO 8601); `None` before the first.
     pub last_tick: Option<String>,
     pub held: Vec<HeldLane>,
+    /// The items the loop holds a lease on, as of its last pass.
+    pub items: Vec<HeldItem>,
     /// What the last tick would have done: "would ask for work", "would start <item> on lane N".
     pub decision: Option<String>,
     /// Set while the last attempt failed; cleared by the next tick.
@@ -72,8 +75,6 @@ pub struct ProjectLive {
     pub limit_until: Option<std::time::Instant>,
     /// The watchdog's open anomalies as of its last minute, oldest first.
     pub anomalies: Vec<crate::telemetry::debounce::OpenAnomaly>,
-    /// The items the loop holds a lease on, as of its last pass.
-    pub items: Vec<HeldItem>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -233,6 +234,7 @@ impl LiveHandle {
                 paused,
                 last_tick: Some(at),
                 held,
+                items: std::mem::take(&mut entry.items),
                 decision: Some(decision),
                 store_error: None,
                 drafting: entry.drafting.take(),
@@ -243,7 +245,6 @@ impl LiveHandle {
                 limit_resets_at: entry.limit_resets_at.take(),
                 limit_until: entry.limit_until.take(),
                 anomalies: std::mem::take(&mut entry.anomalies),
-                items: std::mem::take(&mut entry.items),
             };
         });
     }
