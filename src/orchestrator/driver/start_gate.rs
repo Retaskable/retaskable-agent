@@ -91,11 +91,38 @@ impl StartGate {
 }
 
 impl ProjectLoop {
-    /// `decide`, with new work limited to lanes whose engine may start while the gate is on.
-    pub(super) fn decide_gated(&self, pool: &LanePool, shared: &Shared<'_>, gate: Option<&StartGate>) -> Vec<Action> {
+    /// `decide`, with new work limited to lanes whose engine may start while the gate is on, and, with `model_full`
+    /// (the model cap), to lanes that don't run a Claude implementer.
+    pub(super) fn decide_gated(
+        &self,
+        pool: &LanePool,
+        shared: &Shared<'_>,
+        gate: Option<&StartGate>,
+        model_full: bool,
+    ) -> Vec<Action> {
         decide_where(&self.id, false, &self.runs, pool, &self.project, |k| {
-            gate.is_none_or(|g| g.lane_may_start(self, shared, k))
+            gate.is_none_or(|g| g.lane_may_start(self, shared, k)) && !(model_full && self.runs_claude(shared, gate, k))
         })
+    }
+
+    /// Whether a fresh implementer in `lane` would run on Claude.
+    pub(super) fn runs_claude(&self, shared: &Shared<'_>, gate: Option<&StartGate>, lane: u32) -> bool {
+        let engine = match gate {
+            Some(g) => g.engine_now(self, shared, lane),
+            None => program_of(engine_for(
+                &shared.links.engine_choice,
+                self.project.engines.as_ref(),
+                Role::Implementer,
+                Some(lane),
+            )),
+        };
+        engine == EngineId::Claude
+    }
+
+    /// Whether `model-concurrency-caps` is On and the starter says the model a fresh implementer would run on has
+    /// no slot free: Claude lanes then claim and start nothing new this pass.
+    pub(super) fn model_full(&self, starter: &dyn super::project::SessionStarter, caps_on: bool) -> bool {
+        caps_on && !starter.implementer_may_start(self.store.usage().as_ref(), self.claude_starts)
     }
 
     /// Claude's sign-out holds every claim only while the start rules are Off.

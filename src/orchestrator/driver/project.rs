@@ -15,7 +15,7 @@ use super::report;
 pub(super) use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
-use crate::backlog::{ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
+use crate::backlog::{Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::env::Env;
@@ -206,6 +206,11 @@ pub trait SessionStarter: Send + Sync {
     fn start(&self, request: StartRequest) -> Result<(), String>;
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
+    /// Whether a fresh Claude implementer start may begin now, given the project's `state.usage`: no when the model
+    /// it would run on has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet. Asked only while `model-concurrency-caps` is On.
+    fn implementer_may_start(&self, _usage: Option<&serde_json::Value>, _pending: u32) -> bool {
+        true
+    }
     /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
     /// no PR. A slice that was merged is never touched. An `Err` stops the Start over, leaving the item as it is.
     fn abandon(&self, _old: Abandon) -> BoxFuture<'static, Result<(), String>> {
@@ -263,6 +268,8 @@ pub struct ProjectLoop {
     pub(super) week_checked: bool,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
+    /// Claude implementer starts made in this scheduling pass, which haven't taken a model slot yet.
+    pub(super) claude_starts: u32,
     /// Each item's own failures in a row (`state.ownFailures`): a session that wouldn't start, or a hand-back.
     pub(super) own_failures: BTreeMap<String, u32>,
     /// Items whose session was started as a `Launch::Fresh` and hasn't ended yet; one that couldn't start is
@@ -370,6 +377,7 @@ impl ProjectLoop {
             to_resume: Vec::new(),
             week_checked: false,
             silenced: BTreeMap::new(),
+            claude_starts: 0,
             own_failures: store.own_failures(),
             fresh_launched: Default::default(),
             items: BTreeMap::new(),
@@ -856,128 +864,43 @@ impl ProjectLoop {
     ) -> u32 {
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
         let blocked_from_starting = gate.is_none() && signed_out(shared) || shared.stopping;
+        let caps_on = self.flags.on("model-concurrency-caps").await;
         let mut started = 0;
-        for action in actions.iter().filter(|a| **a != Action::AskForWork) {
-            if let Action::StartImplementer { lane, .. } = action
-                && (blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)))
-            {
-                continue;
+        let mut todo = actions.to_vec();
+        // Starts the model cap held off a Claude lane are placed again on the lanes it leaves (a Cursor lane).
+        for round in 0..2 {
+            let mut capped = 0;
+            for action in todo.iter().filter(|a| **a != Action::AskForWork) {
+                if let Action::StartImplementer { lane, .. } = action {
+                    if blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)) {
+                        continue;
+                    }
+                    if self.runs_claude(shared, gate.as_ref(), *lane) && self.model_full(starter, caps_on) {
+                        capped += 1;
+                        continue;
+                    }
+                }
+                if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
+                    continue;
+                }
+                if let Action::StartImplementer { item_id, lane } = action {
+                    let on_claude = self.runs_claude(shared, gate.as_ref(), *lane);
+                    let ok = self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await;
+                    started += u32::from(ok);
+                    self.claude_starts += u32::from(ok && on_claude);
+                }
             }
-            if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
-                continue;
+            if round == 1 || capped == 0 {
+                break;
             }
-            if let Action::StartImplementer { item_id, lane } = action {
-                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
-            }
+            todo = self
+                .decide_gated(pool, shared, gate.as_ref(), true)
+                .into_iter()
+                .filter(|a| matches!(a, Action::StartImplementer { .. }))
+                .take(capped)
+                .collect();
         }
         started
-    }
-
-    /// Asks the store for work while a lane is free and a session slot is left (`slots`, used up as work
-    /// starts), and starts what it hands out. The tick's `claim`, the last answer: the item id, `none` or
-    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, an own failure's claim pause,
-    /// Claude signed out on this computer, or no link).
-    pub(super) async fn claim(
-        &mut self,
-        pool: &mut LanePool,
-        slots: &mut u32,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) -> Option<String> {
-        if shared
-            .claim_paused_until
-            .is_some_and(|until| std::time::Instant::now() < until)
-            || shared.stopping
-        {
-            return None;
-        }
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
-            return None;
-        }
-        let mut last = None;
-        // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
-        for _ in 0..pool.rules().lanes {
-            let asks = self
-                .decide_gated(pool, shared, gate.as_ref())
-                .contains(&Action::AskForWork);
-            if *slots == 0 || !asks {
-                break;
-            }
-            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared).await else {
-                break;
-            };
-            last = Some(answer);
-            if !more {
-                break;
-            }
-        }
-        last
-    }
-
-    /// One `claim_next`, with its `claim` event: the answer and whether to ask again (something was handed out).
-    pub(super) async fn claim_once(
-        &mut self,
-        pool: &mut LanePool,
-        slots: &mut u32,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) -> Option<(String, bool)> {
-        // Asked before every claim, so a TS agent started since is noticed at once.
-        if let Some(guard) = self.guard.clone()
-            && let Some(why) = guard.refusal().await
-        {
-            tracing::error!("{}: not claiming: {why}", self.id);
-            return None;
-        }
-        let repo = self.repo?;
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
-            Ok(Some(token)) => token,
-            Ok(None) => return None,
-            Err(e) => {
-                self.cant_start(format!("reading the backlog link: {e:#}"));
-                return None;
-            }
-        };
-        let agent = ClaimNextAgent {
-            machine: shared.links.machine.clone(),
-            environment: shared.links.environment.clone(),
-            base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
-        };
-        let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
-            Err(e) => {
-                self.store_error("claim_next", &e);
-                ("failed".to_string(), false)
-            }
-            Ok(ClaimNextAnswer::Nothing) => ("none".to_string(), false),
-            // Handed out again while this computer still has it: it isn't taken twice.
-            Ok(ClaimNextAnswer::Item { item, .. }) if self.runs.contains_key(&item.id) => {
-                tracing::warn!(
-                    "{}: the store handed out {} again, which this computer has",
-                    self.id,
-                    item.id
-                );
-                (item.id, false)
-            }
-            Ok(ClaimNextAnswer::Item { item, token }) => {
-                self.take_lease(&item, token, ItemState::Queued);
-                let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-                let actions = self.decide_gated(pool, shared, gate.as_ref());
-                *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
-                // A start refused hands the item back; asking again now could only be handed it again.
-                let kept = self.runs.contains_key(&item.id);
-                (item.id, kept)
-            }
-        };
-        self.events.add_in(
-            &self.id,
-            Event::Claim(event::Claim {
-                answer: Some(json!(answer)),
-                ..Default::default()
-            }),
-        );
-        Some((answer, more))
     }
 }
 
