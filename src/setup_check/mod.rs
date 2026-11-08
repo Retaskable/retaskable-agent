@@ -26,6 +26,7 @@ mod fixes {
     pub const CLAUDE: &str = "Install Claude Code: `npm install -g @anthropic-ai/claude-code`.";
     pub const CLAUDE_SIGNED_IN: &str = "Run `claude` in a terminal on this computer and sign in.";
     pub const CURSOR_MISSING: &str = "Install Cursor's agent from cursor.com/cli, then run `cursor-agent login`.";
+    pub const DOCKER: &str = "Start Docker (or install it) on this computer.";
     pub const CURSOR: &str = "Run `cursor-agent login`.";
 }
 
@@ -76,6 +77,8 @@ pub struct SetupChecks {
     pub pi: Option<SetupCheck>,
     /// `codex --version`, same rules as `pi`.
     pub codex: Option<SetupCheck>,
+    /// Docker for agent CI (agent-ci.md section 3.6); `None` unless the `agent-ci` flag is On.
+    pub docker: Option<SetupCheck>,
 }
 
 struct RunOutput {
@@ -276,6 +279,21 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
         cursor: cursor_check(cursor_installed, cursor_status.as_ref()),
         pi: optional_engine_check("pi", pi_version.as_ref()),
         codex: optional_engine_check("Codex", codex_version.as_ref()),
+        docker: None,
+    }
+}
+
+/// The Docker line (agent-ci.md section 3.6): `docker version` answers and, given the project's image, it runs.
+pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, image: Option<&str>) -> SetupCheck {
+    use crate::agent_ci::docker::{DockerState, probe, probe_image};
+    let program = program.as_ref();
+    let mut state = probe(program, in_image).await;
+    if let (DockerState::Ok, Some(image)) = (&state, image) {
+        state = probe_image(program, image).await;
+    }
+    match state {
+        DockerState::Ok => SetupCheck::pass("Docker is running"),
+        DockerState::Missing(why) | DockerState::Stopped(why) => SetupCheck::fail(why, fixes::DOCKER),
     }
 }
 
@@ -319,13 +337,14 @@ pub fn setup_check_line(check: &SetupCheck) -> String {
     }
 }
 
-/// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, and Cursor only when shown.
+/// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, Cursor only when shown, and Docker only with the `agent-ci` flag On.
 /// `ghInstalled` is a separate check, not one of these lines.
 pub fn setup_check_lines(c: &SetupChecks) -> Vec<String> {
     let mut shown = vec![&c.git, &c.gh, &c.claude, &c.claude_signed_in];
     if show_cursor(c) {
         shown.push(&c.cursor);
     }
+    shown.extend(c.docker.as_ref());
     shown.into_iter().map(setup_check_line).collect()
 }
 

@@ -121,6 +121,7 @@ mod tests {
             cursor: check(false),
             pi: None,
             codex: None,
+            docker: None,
         }
     }
 

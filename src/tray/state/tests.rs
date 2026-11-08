@@ -10,7 +10,7 @@ fn cloud(name: &str, link: LinkState) -> CloudInput {
     }
 }
 
-pub(in crate::tray) fn input(clouds: Vec<CloudInput>) -> TrayInput {
+pub(crate) fn input(clouds: Vec<CloudInput>) -> TrayInput {
     TrayInput {
         clouds,
         all_paused: false,
