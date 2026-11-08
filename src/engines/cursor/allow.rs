@@ -170,7 +170,7 @@ pub fn with_project(project: &ProjectConfig, base: CursorOptions) -> CursorOptio
     }
 }
 
-pub(super) fn split_allow_entries(text: &str) -> Vec<String> {
+/// The typed entries, split on commas and new lines, trimmed, empties dropped.
 pub(crate) fn split_allow_entries(text: &str) -> Vec<String> {
     text.split([',', '\n'])
         .map(str::trim)
