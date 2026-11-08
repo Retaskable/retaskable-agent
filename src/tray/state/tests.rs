@@ -3,6 +3,8 @@ use super::*;
 fn cloud(name: &str, link: LinkState) -> CloudInput {
     CloudInput {
         name: name.into(),
+        url: format!("https://{}.example", name.to_lowercase()),
+        link_page: None,
         host: format!("{}.example", name.to_lowercase()),
         link,
     }
@@ -15,7 +17,10 @@ fn input(clouds: Vec<CloudInput>) -> TrayInput {
         sessions: 0,
         has_project: true,
         exit: Exit::None,
-        backlog_waits: false,
+        backlog: None,
+        is_release: false,
+        start_at_login: false,
+        windows: false,
         machine: "jcnash-pc4".into(),
         tags: vec![],
     }
@@ -90,7 +95,11 @@ fn tooltip_forms() {
         tooltip(&i),
         "Retaskable · Production: connected · Local: waiting: WXYZ-2345 · Paused"
     );
-    i.backlog_waits = true;
+    i.backlog = Some(BacklogWait {
+        host: "store.example".into(),
+        link_page: None,
+        unlinked: false,
+    });
     assert_eq!(
         tooltip(&i),
         "Retaskable · Production: connected · Local: waiting: WXYZ-2345 · Paused · 1 waiting for you"
@@ -105,7 +114,11 @@ fn tooltip_with_nothing_linked_names_the_first() {
     ]);
     assert_eq!(tooltip(&i), "Retaskable · Staging: not linked");
     let mut i = input(vec![]);
-    i.backlog_waits = true;
+    i.backlog = Some(BacklogWait {
+        host: "store.example".into(),
+        link_page: None,
+        unlinked: false,
+    });
     assert_eq!(tooltip(&i), "Retaskable · 1 waiting for you");
 }
 
