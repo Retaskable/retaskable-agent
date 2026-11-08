@@ -62,13 +62,17 @@ pub fn apply(host: &Host, base: &str, list: &str, ready: &HashSet<u64>, me: &str
             break;
         }
     }
-    for p in prs.iter().filter(|p| !is_agent(p) && !p.is_draft) {
-        let statuses = host.read_statuses(&p.head_ref_oid)?;
+    // A held draft is released too; one whose statuses can't be read is skipped, not left to stop the rest.
+    for p in prs.iter().filter(|p| !is_agent(p)) {
+        let Ok(statuses) = host.read_statuses(&p.head_ref_oid) else {
+            tracing::warn!("merge hold: statuses of PR #{} unreadable", p.number);
+            continue;
+        };
         let held = statuses
             .iter()
             .find(|s| s.context == HOLD_CONTEXT)
             .is_some_and(|s| s.state == "pending");
-        if holding && !held {
+        if holding && !held && !p.is_draft {
             host.post_status(&p.head_ref_oid, HOLD_CONTEXT, State::Pending, &waiting_text(me), None)?;
         } else if !holding && held {
             host.post_status(&p.head_ref_oid, HOLD_CONTEXT, State::Success, &released_text(me), None)?;
@@ -89,7 +93,7 @@ mod tests {
         let program = dir.join("fake");
         write_executable(
             &program,
-            "#!/bin/sh\nprintf 'CALL %s\\n' \"$*\" >> calls.log\n\
+            "#!/bin/sh\n[ -n \"$1\" ] || exit 0\nprintf 'CALL %s\\n' \"$*\" >> calls.log\n\
              case \"$*\" in *compare*) cat behind.json;; \
              *commits/*/statuses*) sha=${4#*commits/}; sha=${sha%%/*}; cat \"$sha.json\" 2>/dev/null || echo '[]';; esac\n",
         );
