@@ -132,26 +132,24 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
-    /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited on this computer until the week's
-    /// reset, so nothing new starts while running sessions finish.
+    /// Whether the weekly window is read: `weekly-limit-reading` or `weekly-cutoff` is On.
+    pub(super) async fn weekly_on(flags: &crate::flags::Flags) -> bool {
+        flags.on("weekly-limit-reading").await || flags.on("weekly-cutoff").await
+    }
+
+    /// At the weekly cutoff Claude counts limited on this computer until the week's reset
+    /// ([`EngineLimits::cut_off_for_week`](crate::orchestrator::fresh_start::EngineLimits::cut_off_for_week)).
     pub(super) fn cut_off_for_week(
         id: &str,
         usage: &Value,
         limits: &mut crate::orchestrator::fresh_start::EngineLimits,
     ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        if let Some(resets_at) =
-            crate::tiers::week_cutoff_until(Some(usage), now, &crate::config::ModelsConfig::default())
-        {
+        if limits.cut_off_for_week(usage) {
             tracing::info!(
                 "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
                 id,
                 crate::config::ModelsConfig::default().week_cutoff_pct
             );
-            let wait = Duration::from_secs((resets_at - now) as u64);
-            limits.hit(crate::engines::EngineId::Claude, Instant::now() + wait);
         }
     }
 
@@ -193,6 +191,35 @@ impl ProjectLoop {
                     item: Some(item_id.to_string()),
                     change: Some("released".into()),
                     state: Some(state.into()),
+                    ..Default::default()
+                }),
+            );
+            self.flush_owed(shared.links).await;
+        }
+    }
+
+    /// Gives a Cursor-limited item with nothing pushed back to the shared backlog at once (engines/03 section
+    /// 3.2, behind `cursor-give-back`): the run and its record are dropped, the lane freed and the lease moved to
+    /// `unreleased` with the note and released. The computer's limit, not an own failure: no claim pause and no
+    /// `error` event (Cursor's own stamp in `engine_limits` already keeps Cursor lanes from claiming).
+    async fn give_back(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
+        let why = format!(
+            "Given back: Cursor's usage limit was hit on {} before anything was pushed",
+            shared.links.machine
+        );
+        self.runs.remove(item_id);
+        self.items.remove(item_id);
+        self.free_lane(pool, item_id, "queued", &why);
+        if let Some(token) = self.leases.remove(item_id) {
+            let note = crate::text::truncate(&why, MAX_NOTE_CHARS);
+            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.save_leases();
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(item_id.to_string()),
+                    change: Some("released".into()),
+                    state: Some("queued".into()),
                     ..Default::default()
                 }),
             );
@@ -390,17 +417,26 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        let weekly = self.flags.on("weekly-limit-reading").await;
+        let weekly = ProjectLoop::weekly_on(&self.flags).await;
         if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
-        if let Some(usage) = outcome
+        let week = outcome
             .usage
             .clone()
-            .filter(|u| crate::tiers::is_usage_reading(u, weekly))
-        {
-            crate::tiers::note_usage(&usage);
-            self.store.set_usage(usage);
+            .filter(|u| weekly && crate::tiers::carries_week(u));
+        let five_hour = outcome
+            .usage
+            .clone()
+            .filter(|u| crate::tiers::is_usage_reading(u, weekly));
+        if week.is_some() || five_hour.is_some() {
+            if let Some(usage) = week {
+                self.store.set_week_usage(usage);
+            }
+            if let Some(usage) = five_hour {
+                crate::tiers::note_usage(&usage);
+                self.store.set_usage(usage);
+            }
             if let Err(e) = self.store.save() {
                 tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
             }
@@ -507,6 +543,8 @@ impl ProjectLoop {
         }
         // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
         let cursor_flag = self.flags.on("cursor-limit-retry").await;
+        let give_back_flag = self.flags.on("cursor-give-back").await;
+        let mut give_back = false;
         // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
         let fall_over = self.flags.on("engine-fall-over").await;
         let carry_on = match self.records.get(&item) {
@@ -548,6 +586,11 @@ impl ProjectLoop {
                 && record.impl_session_engine == EngineId::Cursor;
             if !cursor_hit {
                 record.cursor_limit_hits = 0;
+            } else if give_back_flag
+                && self.mode == super::OrchestratorMode::Claim
+                && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none()
+            {
+                give_back = true;
             } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
                 record.cursor_limit_hits += 1;
                 self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
@@ -569,6 +612,10 @@ impl ProjectLoop {
                 record.cursor_limit_hits = 0;
                 result = SessionResult::NeedsHuman("Cursor's usage limit was hit 3 times in a row".into());
             }
+        }
+        if give_back {
+            self.give_back(pool, &item, shared).await;
+            return;
         }
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and

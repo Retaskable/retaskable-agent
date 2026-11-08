@@ -146,6 +146,7 @@ impl PieceStarter {
             machine: self.machine.clone(),
             sessions: self.sessions.clone(),
             local: self.local.clone(),
+            wants_local: placement.local,
             lock: None,
         };
         let ends = request.ends;
@@ -166,6 +167,8 @@ impl PieceStarter {
 
 pub(super) struct Job {
     pub(super) local: crate::local_model::LocalModel,
+    /// The engine was set to `local` (`Placement::local`).
+    pub(super) wants_local: bool,
     pub(super) data_dir: PathBuf,
     pub(super) project: ProjectConfig,
     pub(super) bin: PathBuf,
@@ -375,7 +378,18 @@ async fn session(
     let now = crate::telemetry::now_ms() / 1000;
     // With `chore-rotation` Off, a chore piece is run like any other.
     let chore = chore_for(job).await;
-    let tier = tier_for(chore.as_ref(), now, &job.models);
+    // Held until the session ends. Only a Claude session behind the `local-tier-ladder` flag may use the model.
+    // Never on a resume (a gate round's fix): an Anthropic session isn't resumed against the local server.
+    let ladder =
+        job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && crate::tiers::local_ladder_on();
+    let (tier, local_run) = tier_for(
+        chore.as_ref(),
+        now,
+        &job.models,
+        ladder.then_some(&job.local),
+        job.wants_local,
+    )
+    .await;
     let model = model_for(chore.as_ref(), tier, &item).to_string();
     let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
@@ -397,7 +411,7 @@ async fn session(
             max_turns: Some(job.max_turns),
             engine: Some(job.engine),
             cursor: job.cursor.clone(),
-            local: None,
+            local: local_run.as_ref().map(|r| r.target.clone()),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,
@@ -427,7 +441,11 @@ async fn session(
     let info = job.session_info(
         Role::Implementer,
         job.engine,
-        model_name(job.engine, &spec.model, job.cursor.as_ref()),
+        if local_run.is_some() {
+            crate::tiers::LOCAL.to_string()
+        } else {
+            model_name(job.engine, &spec.model, job.cursor.as_ref())
+        },
     );
     let (answer, usage) = job
         .sessions

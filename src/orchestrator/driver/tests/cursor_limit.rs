@@ -219,3 +219,66 @@ async fn fall_over_on_with_only_cursor_still_waits_and_goes_to_a_person_after_th
     }
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
 }
+
+const GIVE_BACK: &[&str] = &["cursor-limit-retry", "cursor-give-back"];
+
+fn cursor_choice() -> Value {
+    json!({ "default": "cursor", "lanes": ["cursor", "cursor"] })
+}
+
+#[tokio::test]
+async fn a_cursor_limit_with_nothing_pushed_gives_the_item_back_at_once() {
+    let (mut rig, fake, asked) = hit_with(GIVE_BACK, cursor_choice(), None, false).await;
+    let machine = rig.machine.links.machine.clone();
+    let sent = ops(&asked);
+    let at = sent.iter().position(|o| o == "report").unwrap();
+    assert_eq!(sent[at + 1], "release");
+    let note = asked.lock().unwrap().iter().find(|(o, _)| o == "report").unwrap().1["note"].clone();
+    assert_eq!(
+        note,
+        format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed")
+    );
+    assert!(!rig.lp(0).runs.contains_key("a"));
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    assert!(!rig.lp(0).leases.contains_key("a"));
+    assert!(rig.lp(0).unreleased.is_empty());
+    assert!(!rig.lp(0).store.runs().contains_key("a"));
+    assert!(rig.machine.claim_paused_until.is_none(), "claiming isn't paused");
+    assert!(!rig.lp(0).silenced.contains_key("a"));
+    rig.machine.engine_limits = Default::default();
+    rig.machine.pass().await;
+    assert!(
+        fake.started.lock().unwrap().iter().all(|s| !s.resume),
+        "not resumed after 30 minutes"
+    );
+}
+
+#[tokio::test]
+async fn a_cursor_limit_with_a_pull_request_keeps_the_retries_even_with_give_back_on() {
+    let (base, _asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice = serde_json::from_value(cursor_choice()).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(GIVE_BACK));
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(cursor_limited());
+    rig.machine.pass().await;
+    rig.lp(0).items.get_mut("a").unwrap().pr_url = Some("https://github.com/o/p/pull/3".into());
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
+    for _ in 0..2 {
+        wait_over(&mut rig, &fake, cursor_limited()).await;
+        rig.machine.pass().await;
+    }
+    wait_over(&mut rig, &fake, cursor_limited()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+}
+
+#[tokio::test]
+async fn a_cursor_limit_with_claude_free_carries_on_instead_of_giving_back() {
+    let choice = json!({ "default": "cursor", "lanes": ["cursor", "claude"] });
+    let (mut rig, _fake, asked) = hit_with(GIVE_BACK, choice, None, false).await;
+    assert!(!ops(&asked).iter().any(|o| o == "release"));
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+}

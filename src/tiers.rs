@@ -81,7 +81,8 @@ pub fn scout_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, 
 /// `rateLimitType` says. With `weekly`, a reading labeled `"seven_day"` whose `status` is `rejected` counts too:
 /// it is what turned the session away, and its reset is the week's. Anything else — an older build's lone
 /// non-rejected `seven_day` event, say — would otherwise overwrite a usable 5-hour reading with one this agent
-/// can't read a tier from, each time Claude Code happens to report it.
+/// can't read a tier from, each time Claude Code happens to report it. A weekly reading dropped here is still
+/// saved, as `state.weekUsage` (`carries_week`), so a restart keeps the weekly cutoff.
 pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
     if usage.get("unifiedWindows").and_then(|w| w.get("five_hour")).is_some() {
         return true;
@@ -93,9 +94,18 @@ pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
     }
 }
 
-/// Whether the `weekly-limit-reading` flag was On at its last answer; Off until the flags client is handed over.
+/// Whether a reading carries the weekly window (`unifiedWindows.seven_day`, or `rateLimitType: "seven_day"`): the
+/// ones saved as `state.weekUsage`, whether or not `is_usage_reading` keeps them as `state.usage`.
+pub fn carries_week(usage: &Value) -> bool {
+    usage.get("unifiedWindows").and_then(|w| w.get("seven_day")).is_some()
+        || usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day")
+}
+
+/// Whether the `weekly-limit-reading` or `weekly-cutoff` flag was On at its last answer; Off until the flags
+/// client is handed over.
 pub fn weekly_reading_on() -> bool {
-    FLAG.get().is_some_and(|f| f.last("weekly-limit-reading"))
+    FLAG.get()
+        .is_some_and(|f| f.last("weekly-limit-reading") || f.last("weekly-cutoff"))
 }
 
 /// Whether a window's `utilization` is full, read like `frac` (a whole number over 1 is a percentage).
@@ -142,6 +152,42 @@ pub fn note_usage(usage: &Value) {
 /// Hands over the Retaskable flags client the `subscription-zero-budget` flag is read from.
 pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
     let _ = FLAG.set(flags);
+}
+
+/// Whether the `local-tier-ladder` flag was On at its last answer; Off until the flags client is handed over.
+pub fn local_ladder_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = LADDER_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("local-tier-ladder"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static LADDER_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-tier-ladder` flag on or off for the calling test's thread (each test runs on its own).
+#[cfg(test)]
+pub fn set_local_ladder_for_test(on: bool) {
+    LADDER_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
+/// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
+/// environment maps onto the local model (section 7.2).
+pub fn claude_model(tier: &'static str) -> &'static str {
+    if tier == LOCAL { SONNET } else { tier }
+}
+
+/// The model name a session on `engine` gets for `tier`: [`claude_model`] on Claude, the tier as it is elsewhere.
+pub fn claude_model_for(engine: crate::engines::engine::EngineId, tier: &str) -> String {
+    if engine == crate::engines::engine::EngineId::Claude && tier == LOCAL {
+        SONNET
+    } else {
+        tier
+    }
+    .to_string()
 }
 
 /// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.

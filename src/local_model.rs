@@ -35,6 +35,12 @@ pub struct LocalModel {
 /// Holds the local model's one slot until it's dropped, however the holder's task ends (a panic included).
 pub struct LocalSlot(#[allow(dead_code)] OwnedSemaphorePermit);
 
+/// A session running on the local model: where it runs, holding the model's one slot until dropped.
+pub struct LocalRun {
+    pub target: LocalTarget,
+    _slot: LocalSlot,
+}
+
 impl LocalModel {
     /// Down until the first check answers.
     pub fn new(config: LocalModelConfig) -> Self {
@@ -43,6 +49,18 @@ impl LocalModel {
             up: Arc::new(AtomicBool::new(false)),
             slot: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    /// A local model that is on and up, for tests of what runs on it.
+    #[cfg(test)]
+    pub fn up() -> Self {
+        let local = Self::new(LocalModelConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:11436".into(),
+            model: "tiel-coder-35b".into(),
+        });
+        local.up.store(true, Ordering::SeqCst);
+        local
     }
 
     /// A local model that is turned off.
@@ -86,6 +104,45 @@ impl LocalModel {
                 .await
                 .expect("the local slot is never closed"),
         )
+    }
+
+    /// Whether a role on the tier ladder may be handed `local`: the `local-tier-ladder` flag is On and the model is
+    /// available (section 7.1). A role's own slot waiting and engine checks come on top.
+    pub fn ladder(&self) -> bool {
+        crate::tiers::local_ladder_on() && self.available()
+    }
+
+    /// [`Self::ladder`] for a session on `engine`: only Claude Code runs on the local model.
+    pub fn ladder_for(&self, on_claude: bool) -> bool {
+        on_claude && self.ladder()
+    }
+
+    /// For a session whose tier came out `local`: waits for the one slot and gives it with the target to run on
+    /// (the fallback rows wait, they don't skip the slot). `None` for any other tier.
+    pub async fn claim(&self, tier: &str) -> Option<(LocalSlot, LocalTarget)> {
+        if tier != crate::tiers::LOCAL {
+            return None;
+        }
+        Some((self.take().await, self.target()))
+    }
+
+    /// The slot and target for a session whose tier is `local`, waiting for the slot (the fallback).
+    pub async fn run(&self) -> LocalRun {
+        LocalRun {
+            _slot: self.take().await,
+            target: self.target(),
+        }
+    }
+
+    /// The same without waiting: `None` when the model is down or its slot is busy (extra capacity).
+    pub fn try_run(&self) -> Option<LocalRun> {
+        if !self.available() {
+            return None;
+        }
+        Some(LocalRun {
+            _slot: self.try_take()?,
+            target: self.target(),
+        })
     }
 
     /// One check, written to the up flag. Returns whether it changed.
@@ -233,6 +290,66 @@ mod tests {
         assert!(local.try_take().is_none());
         drop(got);
         assert!(local.try_take().is_some());
+    }
+
+    #[tokio::test]
+    async fn claim_gives_the_target_only_for_the_local_tier_and_a_second_claim_waits() {
+        let local = LocalModel::up();
+        assert!(local.claim("sonnet").await.is_none());
+        assert!(local.claim("opus").await.is_none());
+        let (slot, target) = local.claim("local").await.expect("the local tier claims");
+        assert_eq!(target.model, "tiel-coder-35b");
+        let l = local.clone();
+        let second = tokio::spawn(async move { l.claim("local").await.is_some() });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!second.is_finished(), "a second local session waits for the slot");
+        drop(slot);
+        assert!(second.await.unwrap());
+    }
+
+    /// What each role does with the gate and the claim, as the drafter, triager, ask and second look call them.
+    #[tokio::test]
+    async fn each_role_is_local_only_in_its_rows_and_falls_back_with_local_down() {
+        use crate::tiers::{LOCAL, OPUS, SONNET, implementer_tier, mid_tier, top_tier};
+        let m = crate::config::ModelsConfig::default();
+        let usage = |used: f64| serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
+        crate::tiers::set_local_ladder_for_test(true);
+        let up = LocalModel::up();
+        let down = LocalModel::off();
+        // (used, mid/asks tier with local up, with it down, top tier up, down)
+        for (used, mid_up, mid_down, top_up, top_down) in [
+            (0.2, SONNET, SONNET, OPUS, OPUS),
+            (0.9, LOCAL, SONNET, OPUS, OPUS),
+            (0.99, LOCAL, SONNET, LOCAL, OPUS),
+        ] {
+            let u = usage(used);
+            let tier = |l: &LocalModel| mid_tier(implementer_tier(Some(&u), 0, &m, l.ladder_for(true)));
+            assert_eq!(tier(&up), mid_up, "{used}");
+            assert_eq!(tier(&down), mid_down, "{used}");
+            assert_eq!(top_tier(Some(&u), 0, &m, up.ladder_for(true)), top_up, "{used}");
+            assert_eq!(top_tier(Some(&u), 0, &m, down.ladder_for(true)), top_down, "{used}");
+            // Above the limit nothing is claimed, so the free slot stays free.
+            if mid_up != LOCAL {
+                assert!(up.claim(mid_up).await.is_none());
+                assert!(up.try_take().is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn the_ladder_needs_the_model_up_and_the_flag_on() {
+        // No flags client is handed over in a unit test, so the flag reads Off.
+        assert!(!LocalModel::up().ladder());
+        let ladder = |on: bool, up: bool, claude: bool| {
+            crate::tiers::set_local_ladder_for_test(on);
+            let local = if up { LocalModel::up() } else { LocalModel::off() };
+            local.ladder_for(claude)
+        };
+        assert!(ladder(true, true, true));
+        assert!(!ladder(false, true, true), "flag Off");
+        assert!(!ladder(true, false, true), "local down");
+        assert!(!ladder(true, true, false), "not on Claude");
+        assert!(!LocalModel::off().ladder());
     }
 
     #[tokio::test]

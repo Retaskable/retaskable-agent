@@ -121,6 +121,8 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 3 <= bytes.len()
+            // `from_str_radix` also takes a leading `+`, which isn't a percent-escape.
+            && bytes[i + 1..i + 3].iter().all(u8::is_ascii_hexdigit)
             && let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
         {
             out.push(byte);

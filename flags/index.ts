@@ -24,3 +24,6 @@ export const askClaude = (): boolean => flags.on("ask-claude");
 
 /** The `triage-session` flag: a session looks at stuck work and suggests what to do next. Off until there is an answer. */
 export const triageSession = (): boolean => flags.on("triage-session");
+
+/** The `cursor-give-back` flag: give a Cursor-limited item with nothing pushed back to the shared backlog. Off until there is an answer. */
+export const cursorGiveBack = (): boolean => flags.on("cursor-give-back");
