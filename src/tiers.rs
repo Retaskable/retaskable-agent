@@ -101,6 +101,26 @@ pub fn carries_week(usage: &Value) -> bool {
         || usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day")
 }
 
+/// The weekly window of a reading: `unifiedWindows.seven_day`, else the reading itself when its `rateLimitType` is
+/// `seven_day`.
+fn week_window(usage: &Value) -> Option<&Value> {
+    match usage.get("unifiedWindows").and_then(|w| w.get("seven_day")) {
+        Some(w) => Some(w),
+        None if usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day") => Some(usage),
+        None => None,
+    }
+}
+
+/// The week's `(utilization 0–1 read like `frac`, resetsAt)` of a reading, either shape (`week_window`); each is
+/// `None` when the reading doesn't carry it (a status-only reading), and the whole is `None` with no weekly window.
+pub fn week_reading(usage: &Value) -> Option<(Option<f64>, Option<i64>)> {
+    let w = week_window(usage)?;
+    Some((
+        w.get("utilization").and_then(Value::as_f64).map(frac),
+        w.get("resetsAt").and_then(Value::as_i64),
+    ))
+}
+
 /// Whether the `weekly-limit-reading` or `weekly-cutoff` flag was On at its last answer; Off until the flags
 /// client is handed over.
 pub fn weekly_reading_on() -> bool {
@@ -350,18 +370,10 @@ pub(crate) fn frac(value: f64) -> f64 {
 /// weekly figure.
 pub fn week_cutoff_until(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig) -> Option<i64> {
     let usage = usage?;
-    let window = match usage.get("unifiedWindows").and_then(|w| w.get("seven_day")) {
-        Some(w) => w,
-        None if usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day") => usage,
-        None => return None,
-    };
-    let used = window
-        .get("utilization")
-        .and_then(Value::as_f64)
-        .map(|u| frac(u) * 100.0);
-    let cut = window.get("status").and_then(Value::as_str) == Some("rejected")
-        || used.is_some_and(|u| u >= f64::from(models.week_cutoff_pct));
-    let resets_at = window.get("resetsAt").and_then(Value::as_i64)?;
+    let (used, resets_at) = week_reading(usage)?;
+    let rejected = week_window(usage)?.get("status").and_then(Value::as_str) == Some("rejected");
+    let cut = rejected || used.is_some_and(|u| u * 100.0 >= f64::from(models.week_cutoff_pct));
+    let resets_at = resets_at?;
     (cut && resets_at > now_epoch).then_some(resets_at)
 }
 

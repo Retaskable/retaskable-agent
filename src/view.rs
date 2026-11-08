@@ -13,6 +13,11 @@ use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
+mod orchestrator;
+
+/// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
+pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
+
 /// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
 pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
@@ -54,6 +59,8 @@ pub struct AgentView {
     pub settings: HelloSettings,
     /// The computer's local model, for the snapshot's `usage.localDown`.
     pub local: crate::local_model::LocalModel,
+    /// What the orchestrator loops are doing, for the snapshot's orchestrator block.
+    pub live: crate::orchestrator::live::LiveHandle,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -375,6 +382,7 @@ impl AgentView {
             restart: Default::default(),
             settings: Default::default(),
             local: Default::default(),
+            live: Default::default(),
         }
     }
 
@@ -417,16 +425,7 @@ impl AgentView {
     /// empty, since this agent runs no work yet, but a project's galleries report their real
     /// status and last shoot (agent/09-web-ui.md section 9.2), and an orchestrator that says so.
     pub fn snapshot(&self, project: &str, data_dir: &Path) -> Value {
-        let orchestrator = if project.is_empty() {
-            json!({ "status": "setup", "machine": self.machine })
-        } else {
-            let reason = self.paused.reason(project).unwrap_or_else(|| NO_WORK_YET.to_string());
-            json!({ "status": "paused", "machine": self.machine, "pausedReason": reason })
-        };
-        let mut orchestrator = orchestrator;
-        if let Some(restart) = self.restart.report() {
-            orchestrator["restart"] = restart;
-        }
+        let orchestrator = self.orchestrator_block(project);
         let mut state = json!({
                 "orchestrator": orchestrator,
                 "usage": {},
@@ -548,6 +547,7 @@ mod tests {
             restart: Default::default(),
             settings: Default::default(),
             local: Default::default(),
+            live: Default::default(),
         }
     }
 
@@ -730,6 +730,74 @@ mod tests {
         assert_eq!(orch(&v)["pausedReason"], NO_WORK_YET);
         v.paused.set("a", Some("Paused from the site".into()));
         assert_eq!(orch(&v)["pausedReason"], "Paused from the site");
+    }
+
+    fn reporting_view(on: bool) -> AgentView {
+        let mut v = view(vec![project("a", "o/a")]);
+        v.settings = HelloSettings::new(
+            PathBuf::new(),
+            crate::env::Env::empty(),
+            4700,
+            Arc::new(crate::flags::Flags::fixed(if on {
+                &[SNAPSHOT_REPORTING_FLAG]
+            } else {
+                &[]
+            })),
+        );
+        v
+    }
+
+    #[test]
+    fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
+        let v = reporting_view(true);
+        let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        assert_eq!(orch(&v)["pausedReason"], NO_WORK_YET, "no loop running");
+        assert_eq!(orch(&v)["status"], "paused");
+        v.live.register("a");
+        v.live.set_concurrency(3);
+        assert_eq!(
+            orch(&v),
+            json!({ "status": "running", "machine": "pc", "concurrency": 3 })
+        );
+        v.live.set_limit(
+            "a",
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        );
+        let o = orch(&v);
+        assert_eq!(
+            (&o["status"], o["resetsAt"].is_string()),
+            (&json!("waiting_for_limit"), true)
+        );
+        v.paused.set("a", Some("Paused from the site".into()));
+        let o = orch(&v);
+        assert_eq!(
+            (&o["status"], &o["pausedReason"]),
+            (&json!("paused"), &json!("Paused from the site"))
+        );
+        v.paused.set("a", None);
+        v.live.set_limit("a", None);
+        v.item_commands.set_auto(Some((2, "On pace".into())));
+        assert_eq!(
+            orch(&v)["concurrency"],
+            2,
+            "auto concurrency's number once it has stepped"
+        );
+        assert_eq!(
+            v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
+            "setup"
+        );
+    }
+
+    #[test]
+    fn snapshot_reporting_off_leaves_the_orchestrator_block_as_it_was() {
+        let v = reporting_view(false);
+        v.live.register("a");
+        v.live.set_concurrency(3);
+        let orch = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        assert_eq!(
+            orch,
+            json!({ "status": "paused", "machine": "pc", "pausedReason": NO_WORK_YET })
+        );
     }
 
     #[test]

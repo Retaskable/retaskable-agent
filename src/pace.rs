@@ -7,7 +7,7 @@ use std::fmt;
 use serde_json::Value;
 
 use crate::config::AutoConcurrency;
-use crate::tiers::frac;
+use crate::tiers::{frac, week_reading};
 
 /// Samples older than this are ignored.
 const KEEP_SECS: i64 = 30 * 60;
@@ -100,9 +100,14 @@ fn five_hour(usage: &Value) -> Option<(f64, i64)> {
     Some((frac(u.as_f64()?), r.as_i64()?))
 }
 
-fn seven_day(usage: &Value) -> Option<(f64, i64)> {
-    let w = usage.get("unifiedWindows")?.get("seven_day")?;
-    Some((frac(w.get("utilization")?.as_f64()?), w.get("resetsAt")?.as_i64()?))
+/// The week's `(utilization 0–1, resetsAt)`: `unifiedWindows.seven_day` and, with `lone`, also a lone
+/// `rateLimitType: "seven_day"` reading (`tiers::week_reading`). A reading missing either figure gives `None`.
+fn seven_day(usage: &Value, lone: bool) -> Option<(f64, i64)> {
+    if !lone && usage.get("unifiedWindows")?.get("seven_day").is_none() {
+        return None;
+    }
+    let (u, r) = week_reading(usage)?;
+    Some((u?, r?))
 }
 
 /// What `.retaskable/machine.json` keeps of the pacer (`autoConcurrency`), so a restart in the same window keeps its
@@ -158,6 +163,11 @@ impl Pacer {
 
     /// Takes a Claude Code `rate_limit_info` reading seen at `now`.
     pub fn record(&mut self, now: i64, usage: &Value) {
+        self.record_with(now, usage, false);
+    }
+
+    /// `record`, and with `lone_week` a lone `rateLimitType: "seven_day"` reading is also read as the week.
+    pub fn record_with(&mut self, now: i64, usage: &Value, lone_week: bool) {
         if let Some((utilization, resets_at)) = five_hour(usage) {
             self.samples
                 .retain(|s| s.resets_at == resets_at && now - s.at <= KEEP_SECS);
@@ -167,7 +177,7 @@ impl Pacer {
                 resets_at,
             });
         }
-        if let Some(week) = seven_day(usage) {
+        if let Some(week) = seven_day(usage, lone_week) {
             self.week = Some(week);
         }
     }
@@ -374,6 +384,28 @@ mod tests {
             &json!({"unifiedWindows": {"seven_day": {"utilization": 0.55, "resetsAt": NOW + WEEK_SECS / 2}}}),
         );
         assert_eq!(p.pace(NOW, 5, 5, true, &cfg()).allowed, 6);
+    }
+
+    #[test]
+    fn a_lone_seven_day_reading_is_the_week_only_with_the_flag_on() {
+        let lone = |u: f64| json!({"rateLimitType": "seven_day", "utilization": u, "resetsAt": NOW + WEEK_SECS / 2});
+        let mut p = pacer(NOW, 0.30, NEEDED * 0.5);
+        p.record_with(NOW, &lone(0.8), true);
+        assert_eq!(p.samples.len(), 2, "a lone weekly reading is no 5-hour sample");
+        let r = p.pace(NOW, 5, 5, true, &cfg());
+        assert_eq!((r.allowed, r.reason), (4, PaceReason::AheadOnWeek));
+        assert_eq!(p.pace(NOW, 2, 5, true, &cfg()).allowed, 2);
+        p.record_with(NOW, &json!({"rateLimitType": "seven_day", "status": "allowed"}), true);
+        assert_eq!(
+            p.pace(NOW, 5, 5, true, &cfg()).reason,
+            PaceReason::AheadOnWeek,
+            "status only keeps the week"
+        );
+        p.record_with(NOW, &lone(0.55), true);
+        assert_eq!(p.pace(NOW, 5, 5, true, &cfg()).allowed, 6, "within the margin");
+        let mut off = pacer(NOW, 0.30, NEEDED * 0.5);
+        off.record_with(NOW, &lone(0.8), false);
+        assert_eq!(off.pace(NOW, 5, 5, true, &cfg()).allowed, 6, "flag Off ignores it");
     }
 
     #[test]

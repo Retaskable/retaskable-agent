@@ -663,6 +663,7 @@ impl Machine {
             (self.projects.iter_mut().zip(read_items).zip(paused)).zip(scheduled)
         {
             let cant_start = lp.start_blocked(&shared!(self, false), &self.pool).await;
+            lp.report_limit(cant_start, &self.engine_limits);
             match items {
                 Some(items) => steps.push(lp.record(items, paused, cant_start, actions, &self.pool, live).await),
                 None => steps.push(Step::Skipped),
@@ -696,7 +697,7 @@ impl Machine {
             self.settle_outcomes().await;
         }
         self.pace_step(ready, &live).await;
-        let concurrency = self.room_total(self.effective_concurrency());
+        let concurrency = self.room_total(self.report_concurrency());
         if let Some(starter) = starter.as_deref() {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {

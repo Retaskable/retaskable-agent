@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
+
 use super::driver::OrchestratorMode;
 
 pub mod sessions;
@@ -46,6 +48,10 @@ pub struct ProjectLive {
     pub chores: Option<crate::backlog::runs::ChoreCount>,
     /// The last vet run's counts by verdict name; `None` before a run.
     pub vet: Option<BTreeMap<String, usize>>,
+    /// When Claude's limit lifts (ISO 8601), while the loop can't start work because Claude is at its limit.
+    pub limit_resets_at: Option<String>,
+    /// The instant `limit_resets_at` was made from, so the same limit keeps the same string pass after pass.
+    pub limit_until: Option<std::time::Instant>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -57,13 +63,39 @@ pub struct LiveState {
     pub projects: BTreeMap<String, ProjectLive>,
     /// Agent CI's slot, Docker and discovery (agent-ci.md); `None` unless the `agent-ci` loop runs.
     pub ci: Option<crate::agent_ci::CiLive>,
+    /// How many sessions the shared pool allows at once (auto concurrency's number once it has stepped); 0 before a pass.
+    pub concurrency: u32,
+}
+
+/// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
+type Reported = (u32, BTreeMap<String, (bool, Option<String>)>);
+
+fn reported(state: &LiveState) -> Reported {
+    let projects = state
+        .projects
+        .iter()
+        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone())))
+        .collect();
+    (state.concurrency, projects)
 }
 
 /// Shared between the loops (writers) and the status handler (reader).
 #[derive(Debug, Clone, Default)]
-pub struct LiveHandle(Arc<Mutex<LiveState>>, sessions::Sessions);
+pub struct LiveHandle(Arc<Mutex<LiveState>>, sessions::Sessions, Arc<watch::Sender<u64>>);
+
+impl PartialEq for LiveHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 impl LiveHandle {
+    /// Sets the machine-wide mode, once it is known.
+    pub fn with_mode(self, mode: OrchestratorMode) -> Self {
+        self.lock().mode = mode;
+        self
+    }
+
     pub fn new(mode: OrchestratorMode) -> Self {
         Self(
             Arc::new(Mutex::new(LiveState {
@@ -71,8 +103,10 @@ impl LiveHandle {
                 run_kinds: Vec::new(),
                 projects: BTreeMap::new(),
                 ci: None,
+                concurrency: 0,
             })),
             sessions::Sessions::default(),
+            Arc::default(),
         )
     }
 
@@ -83,12 +117,45 @@ impl LiveHandle {
 
     /// Has session ends add Cursor's and Codex's tokens to machine.json in `dir`.
     pub fn with_machine_dir(self, dir: std::path::PathBuf) -> Self {
-        Self(self.0, self.1.with_machine_dir(dir))
+        Self(self.0, self.1.with_machine_dir(dir), self.2)
     }
 
     /// Says which kinds of run `runs` mode can take.
     pub fn set_run_kinds(&self, kinds: Vec<String>) {
         self.lock().run_kinds = kinds;
+    }
+
+    /// Changes whenever a project's reported fields (paused, the limit's reset, a loop appearing) or `concurrency`
+    /// change; a pass that leaves them as they were doesn't.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.2.subscribe()
+    }
+
+    /// Runs `f` on the state and signals [`subscribe`](Self::subscribe) when what the snapshot reports changed.
+    fn edit(&self, f: impl FnOnce(&mut LiveState)) {
+        let mut state = self.lock();
+        let before = reported(&state);
+        f(&mut state);
+        if reported(&state) != before {
+            self.2.send_modify(|n| *n += 1);
+        }
+    }
+
+    /// The shared pool's effective concurrency, as of the last pass.
+    pub fn set_concurrency(&self, concurrency: u32) {
+        self.edit(|s| s.concurrency = concurrency);
+    }
+
+    /// Says when Claude's limit lifts while the project can't start work for it, or nothing.
+    pub fn set_limit(&self, project: &str, until: Option<std::time::Instant>) {
+        self.edit(|s| {
+            let entry = s.projects.entry(project.to_string()).or_default();
+            if entry.limit_until != until {
+                entry.limit_until = until;
+                entry.limit_resets_at =
+                    until.map(|u| iso8601_in(u.saturating_duration_since(std::time::Instant::now())));
+            }
+        });
     }
 
     pub fn snapshot(&self) -> LiveState {
@@ -102,25 +169,30 @@ impl LiveHandle {
 
     /// Registers a project's loop, so the page knows it runs before its first pass ends.
     pub fn register(&self, project: &str) {
-        self.lock().projects.entry(project.to_string()).or_default();
+        self.edit(|s| {
+            s.projects.entry(project.to_string()).or_default();
+        });
     }
 
     /// A pass that ticked: replaces the entry and clears any store error.
     pub fn ticked(&self, project: &str, paused: bool, at: String, held: Vec<HeldLane>, decision: String) {
-        let mut state = self.lock();
-        let entry = state.projects.entry(project.to_string()).or_default();
-        *entry = ProjectLive {
-            paused,
-            last_tick: Some(at),
-            held,
-            decision: Some(decision),
-            store_error: None,
-            drafting: entry.drafting.take(),
-            fix_main: entry.fix_main.take(),
-            sync_main: entry.sync_main.take(),
-            chores: entry.chores,
-            vet: entry.vet.take(),
-        };
+        self.edit(|state| {
+            let entry = state.projects.entry(project.to_string()).or_default();
+            *entry = ProjectLive {
+                paused,
+                last_tick: Some(at),
+                held,
+                decision: Some(decision),
+                store_error: None,
+                drafting: entry.drafting.take(),
+                fix_main: entry.fix_main.take(),
+                sync_main: entry.sync_main.take(),
+                chores: entry.chores,
+                vet: entry.vet.take(),
+                limit_resets_at: entry.limit_resets_at.take(),
+                limit_until: entry.limit_until.take(),
+            };
+        });
     }
 
     /// Says which draft the project is writing now, or none.
@@ -163,7 +235,12 @@ impl LiveHandle {
 
 /// Now, as ISO 8601 (UTC).
 pub fn now_iso8601() -> String {
-    time::OffsetDateTime::now_utc()
+    iso8601_in(std::time::Duration::ZERO)
+}
+
+/// `after` from now, as ISO 8601 (UTC).
+pub fn iso8601_in(after: std::time::Duration) -> String {
+    (time::OffsetDateTime::now_utc() + after)
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
@@ -223,6 +300,37 @@ mod tests {
         live.ticked("p", false, "t2".into(), vec![], "d".into());
         live.failed("p", "t3".into(), "y".into());
         assert_eq!(live.snapshot().projects["p"].store_error.as_ref().unwrap().since, "t3");
+    }
+
+    #[test]
+    fn subscribers_hear_only_of_changes_to_what_the_snapshot_reports() {
+        let live = LiveHandle::default();
+        let mut rx = live.subscribe();
+        let changed = |rx: &mut watch::Receiver<u64>| {
+            rx.has_changed().unwrap() && {
+                rx.borrow_and_update();
+                true
+            }
+        };
+        live.register("p");
+        assert!(changed(&mut rx), "a loop appearing");
+        live.register("p");
+        live.ticked("p", false, "t1".into(), vec![], "d".into());
+        live.ticked("p", false, "t2".into(), held(1, "a"), "e".into());
+        assert!(!changed(&mut rx), "ticks that change nothing reported");
+        live.ticked("p", true, "t3".into(), vec![], "d".into());
+        assert!(changed(&mut rx), "paused");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        live.set_limit("p", Some(until));
+        assert!(changed(&mut rx), "limit");
+        live.ticked("p", true, "t4".into(), vec![], "d".into());
+        assert!(live.snapshot().projects["p"].limit_resets_at.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        live.set_limit("p", Some(until));
+        live.set_concurrency(0);
+        assert!(!changed(&mut rx), "same values");
+        live.set_concurrency(2);
+        assert!(changed(&mut rx), "concurrency");
     }
 
     #[test]
