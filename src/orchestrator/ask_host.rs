@@ -35,9 +35,13 @@ pub struct ClaudeAsks {
     /// The machine's `budget.dailyUsd`; 0 is no cap.
     daily_usd: f64,
     view: Arc<AgentView>,
+    /// The computer's local model, for the tier ladder.
+    #[allow(dead_code)] // read by the tier ladder's later pieces
+    local: crate::local_model::LocalModel,
 }
 
 impl ClaudeAsks {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: PathBuf,
         choice: EngineChoiceConfig,
@@ -46,6 +50,7 @@ impl ClaudeAsks {
         cursor_models: CursorModels,
         daily_usd: f64,
         view: Arc<AgentView>,
+        local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -55,6 +60,7 @@ impl ClaudeAsks {
             cursor_models,
             daily_usd,
             view,
+            local,
         })
     }
 }

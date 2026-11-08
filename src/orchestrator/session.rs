@@ -60,6 +60,8 @@ pub struct ClaudeStarter {
     pub(super) running: Arc<AtomicU32>,
     /// The sessions running now: each one lists itself while it runs.
     pub(super) sessions: Sessions,
+    /// The computer's local model, for the tier ladder.
+    pub(super) local: crate::local_model::LocalModel,
 }
 
 impl ClaudeStarter {
@@ -74,6 +76,7 @@ impl ClaudeStarter {
         max_resume_context_tokens: u32,
         cursor_models: CursorModels,
         sessions: Sessions,
+        local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -86,6 +89,7 @@ impl ClaudeStarter {
             cursor_models,
             running: Arc::new(AtomicU32::new(0)),
             sessions,
+            local,
         })
     }
 }
@@ -142,6 +146,7 @@ impl SessionStarter for ClaudeStarter {
             ..
         } = request;
         let job = Job {
+            local: self.local.clone(),
             data_dir: self.data_dir.clone(),
             project,
             project_id: project_id.clone(),
@@ -283,6 +288,8 @@ pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
 }
 
 struct Job {
+    #[allow(dead_code)] // read by the tier ladder's later pieces
+    local: crate::local_model::LocalModel,
     data_dir: PathBuf,
     project: ProjectConfig,
     project_id: String,
