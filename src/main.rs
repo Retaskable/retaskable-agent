@@ -172,6 +172,13 @@ async fn main() -> Result<()> {
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
+    // Card flag `machine-settings`: Off keeps today's behaviour (the keys ignored, silently, and left in the file).
+    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await {
+        config::set_retiring_project_lanes(true);
+        if let Some(note) = config::retired_keys_note(&dir) {
+            tracing::info!("{note}");
+        }
+    }
     // agent-settings.md section 3.1: which program runs each kind of work (engines.md section
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
     // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
