@@ -324,6 +324,8 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
+    /// The `engine-placement` release flag, read with `triage_flag`.
+    pub(super) placement_flag: bool,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
@@ -388,6 +390,7 @@ impl ProjectLoop {
             second_due: Vec::new(),
             claude_pending: Default::default(),
             triage_flag: false,
+            placement_flag: false,
             asks: Default::default(),
             trial: None,
             backlog_items: 0,
