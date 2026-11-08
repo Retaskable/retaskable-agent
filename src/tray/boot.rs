@@ -20,6 +20,7 @@ use crate::restart::RestartState;
 use crate::settings_server::SettingsServer;
 use crate::tags::{OsKind, current_os};
 use crate::terminal_menu::console::ConsoleCapture;
+use crate::terminal_menu::when::{UiMode, no_tray_reason, ui_mode};
 use crate::view::{AgentView, Exit};
 
 /// Everything the tray reads and acts on.
@@ -39,6 +40,8 @@ pub struct Boot<'a> {
     pub exit: Arc<Exit>,
     /// Quit now: the agent's own shutdown.
     pub quit_now: Arc<tokio::sync::Notify>,
+    /// Card flag `terminal-menu`.
+    pub terminal_menu: bool,
     pub link_backlog: Arc<dyn Fn() + Send + Sync>,
     /// Said (with why) when the helper stops after it started.
     pub on_stopped: Box<dyn FnOnce(String) + Send>,
@@ -125,20 +128,39 @@ fn start_tui(deps: TrayDeps, quit: Arc<dyn Quit>) -> Option<Shutdown> {
     }))
 }
 
+/// Whether the terminal menu is drawn. With the `terminal-menu` flag Off, `use_tui` decides as it always did; On, `ui_mode`.
+fn ui(args: &[String], env: &Env, os: OsKind, has_helper: bool, interactive: bool, flag: bool) -> bool {
+    if flag {
+        ui_mode(args, env, std::env::consts::OS, has_helper, interactive) == UiMode::TerminalMenu
+    } else {
+        use_tui(args, env, os, interactive)
+    }
+}
+
 /// The running tray or terminal menu, or `None` when the agent runs with the plain console (the console says why).
 pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
     let os = current_os();
     let exe = b.exe.unwrap_or(Path::new(""));
     let terminals = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let tui = use_tui(b.args, b.env, os, terminals);
+    let helper = helper_path(b.build, exe, b.env, os);
+    let tui = ui(b.args, b.env, os, helper.is_some(), terminals, b.terminal_menu);
+    // Card flag `terminal-menu`: On says why there is no tray (once); Off keeps the console as it was.
+    let reason = b
+        .terminal_menu
+        .then(|| no_tray_reason(b.args, b.env, std::env::consts::OS, helper.is_some()))
+        .flatten();
+    if let Some(why) = &reason {
+        tracing::info!("{why}");
+    }
     let bin = if tui {
         None
     } else {
-        let helper = helper_path(b.build, exe, b.env, os);
         match tray_mode(b.args, b.env, os, helper) {
             TrayMode::Tray(bin) => Some(bin),
             TrayMode::Headless(why) => {
-                tracing::info!("Tray: running headless, {why}.");
+                if reason.is_none() {
+                    tracing::info!("Tray: running headless, {why}.");
+                }
                 return None;
             }
         }
@@ -184,5 +206,27 @@ pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
             tracing::warn!("Tray: running headless, {e}.");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_needs_its_flag_to_use_ui_mode_and_a_terminal() {
+        let args = vec!["--tui".to_string()];
+        let env = Env::from_map(Default::default());
+        let os = current_os();
+        assert!(ui(&args, &env, os, true, true, true));
+        assert!(!ui(&args, &env, os, true, false, true));
+    }
+
+    #[test]
+    fn with_the_flag_off_use_tui_still_decides() {
+        let args = vec!["--tui".to_string()];
+        let env = Env::from_map(Default::default());
+        assert!(ui(&args, &env, current_os(), true, true, false));
+        assert!(!ui(&args, &env, current_os(), true, false, false));
     }
 }
