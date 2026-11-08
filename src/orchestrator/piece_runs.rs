@@ -29,6 +29,20 @@ use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
+const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
+
+/// Our own template or the brief could not be filled: not the work's fault, so the run ends `failed` with
+/// `outside: true` (section 3.6), as the plan run does.
+#[derive(Debug)]
+struct PromptUnfilled(String);
+
+impl std::fmt::Display for PromptUnfilled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PromptUnfilled {}
 
 /// Runs `build` and `fix` runs of the projects it was built with.
 pub struct PieceStarter {
@@ -189,6 +203,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     };
     let (outcome, result) = match build(&job, &cwd, &branch).await {
         Ok(end) => end,
+        Err(e) if e.is::<PromptUnfilled>() => (RunOutcome::Failed(format!("{e:#}")), json!({ "outside": true })),
         Err(e) => failed(format!("{e:#}")),
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
@@ -276,7 +291,8 @@ async fn session(
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,
-    )?;
+    )
+    .map_err(|e| PromptUnfilled(format!("{e:#}")))?;
     let id = match &spec.start {
         SessionStart::Fresh(id) | SessionStart::Resume(id) => id.clone(),
         SessionStart::Ephemeral => String::new(),
@@ -320,10 +336,25 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let where_to_start = start_files::render(
         &start_files::build(crate::git_bin::program(), cwd, &base_ref, &piece_item(&job.piece)).await,
     );
-    let start = Start::Piece {
-        template: PIECE_TEMPLATE,
-        kind: job.kind,
-        piece: &job.piece,
+    // With `chore-rotation` Off, a chore piece gets the piece prompt like any other.
+    let chore = if job.flags.on("chore-rotation").await {
+        chore_of(&job.piece)
+    } else {
+        None
+    };
+    let start = match &chore {
+        Some(chore) => Start::Chore {
+            template: CHORE_TEMPLATE,
+            piece_template: PIECE_TEMPLATE,
+            chore,
+            kind: job.kind,
+            piece: &job.piece,
+        },
+        None => Start::Piece {
+            template: PIECE_TEMPLATE,
+            kind: job.kind,
+            piece: &job.piece,
+        },
     };
     let ids = Mutex::new(String::new());
     let first = session(job, cwd, branch, start, &where_to_start, &ids).await?;

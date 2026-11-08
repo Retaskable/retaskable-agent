@@ -20,6 +20,10 @@ pub enum ChoreKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chore {
     pub kind: ChoreKind,
+    /// The recent chores of this kind, one line each (`title: outcome`), so the session doesn't repeat them.
+    pub recent: Vec<String>,
+    /// The failing checks or the staging smoke report a `fix_main` chore starts from.
+    pub report: String,
 }
 
 /// The piece's chore, or `None` for a roadmap piece or an unknown kind.
@@ -34,7 +38,34 @@ pub fn chore_of(piece: &RunPiece) -> Option<Chore> {
         "playtest_fix" => ChoreKind::PlaytestFix,
         _ => return None,
     };
-    Some(Chore { kind })
+    let chore = piece.other.get("chore")?;
+    // Each recent chore is a line of text, or `{ title, outcome }`.
+    let recent = chore
+        .get("recent")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| match r {
+            Value::String(s) => Some(s.trim().to_string()),
+            Value::Object(_) => {
+                let word = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").trim();
+                Some(match (word("title"), word("outcome")) {
+                    (t, "") => t.to_string(),
+                    ("", o) => o.to_string(),
+                    (t, o) => format!("{t}: {o}"),
+                })
+            }
+            _ => None,
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    let report = chore
+        .get("report")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Some(Chore { kind, recent, report })
 }
 
 /// The model an implementer runs on: the chore tier for a chore (a playtest fix aside), else the normal tier.
@@ -106,8 +137,18 @@ mod tests {
             ("playtest_fix", ChoreKind::PlaytestFix),
         ] {
             let p = piece(json!({ "chore": { "kind": name, "recent": ["x"] } }));
-            assert_eq!(chore_of(&p), Some(Chore { kind }));
+            assert_eq!(chore_of(&p).map(|c| c.kind), Some(kind));
         }
+    }
+
+    #[test]
+    fn recent_chores_and_the_report_are_read() {
+        let p = piece(json!({ "chore": { "kind": "tidy", "report": " r ", "recent": [
+            "a: merged", { "title": "b", "outcome": "failed" }, { "title": "c" }, 3, ""
+        ] } }));
+        let c = chore_of(&p).unwrap();
+        assert_eq!(c.recent, ["a: merged", "b: failed", "c"]);
+        assert_eq!(c.report, "r");
     }
 
     #[test]
@@ -121,10 +162,12 @@ mod tests {
     fn the_tier_is_the_chore_tier_except_for_a_playtest_fix_or_a_roadmap_piece() {
         let models = crate::config::ModelsConfig::default();
         let normal = implementer_tier(None, 0, &models);
-        let tidy = Chore { kind: ChoreKind::Tidy };
-        let fix = Chore {
-            kind: ChoreKind::PlaytestFix,
+        let of = |kind| Chore {
+            kind,
+            recent: vec![],
+            report: String::new(),
         };
+        let (tidy, fix) = (of(ChoreKind::Tidy), of(ChoreKind::PlaytestFix));
         assert_eq!(tier_for(Some(&tidy), 0, &models), chore_tier());
         assert_eq!(tier_for(Some(&fix), 0, &models), normal);
         assert_eq!(tier_for(None, 0, &models), normal);

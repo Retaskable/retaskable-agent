@@ -10,6 +10,7 @@ use crate::backlog::{Item, ItemStatus};
 use crate::config::{CheckConfig, CodeGates, ProjectType};
 use crate::decisions::{Decision, decisions_text};
 use crate::prompt::{project_words, render_prompt};
+use crate::runs::chore::{Chore, ChoreKind};
 use crate::text::capitalize;
 
 /// `checksText` (agent/src/steps.ts): the prompt's bulleted list of a project's checks, one per
@@ -286,10 +287,9 @@ pub struct PiecePrompt<'a> {
     pub where_to_start: &'a str,
 }
 
-/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what to fix (for a
-/// `fix`); a look's `instructions` come from `looks[]`.
-pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
-    let words = project_words(p.project_type);
+/// The kind line and the brief sections (what to fix, a look's instructions, earlier attempts, a person's
+/// decisions and finished steps) that the piece prompt and the chore prompt both carry.
+fn piece_brief(p: &PiecePrompt<'_>) -> (&'static str, String) {
     let piece = p.piece;
     let next_what = piece
         .other
@@ -326,6 +326,15 @@ pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String>
     } else {
         format!("{}\n\n", sections.join("\n\n"))
     };
+    (kind_line, briefs)
+}
+
+/// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what to fix (for a
+/// `fix`); a look's `instructions` come from `looks[]`.
+pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
+    let words = project_words(p.project_type);
+    let piece = p.piece;
+    let (kind_line, briefs) = piece_brief(p);
     let filled = render_prompt(
         template,
         &[
@@ -352,6 +361,87 @@ pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String>
     } else {
         format!("{filled}\n\n{}", p.where_to_start)
     })
+}
+
+/// The chore's label and what its session does (docs/specs/agent/06.7-chores-never-idle.md, the kinds table).
+/// `None` for a playtest fix and a main sync, which keep the piece prompt.
+fn chore_task(chore: &Chore, what: &str) -> Option<(&'static str, String)> {
+    let report = [what.trim(), chore.report.as_str()]
+        .iter()
+        .filter(|t| !t.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(match chore.kind {
+        ChoreKind::FixMain => (
+            "Fix main",
+            format!(
+                "The base branch's own checks are failing (or the staging smoke failed after a merge), which blocks everything else. Make them pass.\n\n{report}\n\nFind out why and fix the root causes, with a test that would have caught it where you can. Don't delete, skip or loosen a test unless it's plainly wrong, and if so say why in the PR."
+            ),
+        ),
+        ChoreKind::Tidy => (
+            "Tidy up",
+            "Make the code cleaner without changing what it does: fix compiler and linter warnings, remove dead code, merge duplicated logic, split functions or files that have grown too long, and make names say what things are. Pick one coherent area (one module, or one kind of warning across the code) and keep the PR easy to review (a few hundred lines at most). No behaviour change.".into(),
+        ),
+        ChoreKind::Tests => (
+            "Write tests",
+            "Find important behaviour that has no test, pure logic first (the parts the specs care about most), and add focused tests for it. Don't change behaviour. If a test you write shows a real bug, leave that test out, and describe the bug in your summary instead.".into(),
+        ),
+        ChoreKind::Bugs => (
+            "Fix a bug",
+            "Hunt for one real bug: read recent commits (`git log -p -20`), compare the code against what the specs say, and look for edge cases (empty inputs, boundaries, saves and loads, ordering). Fix one bug you can prove, with a test that fails before your fix and passes after. If the spec is the thing that's wrong, don't change code: describe the mismatch in your summary.".into(),
+        ),
+        ChoreKind::Specs => (
+            "Write a spec draft",
+            "Write a spec draft (section 6.5): pick ONE existing spec (or one section of one) that the next items on the backlog will need and that is thin, vague, or out of date with the code, and flesh it out: concrete numbers, edge cases, how it interacts with other systems, what the person sees. Change only spec files, keep the project's style, and mark every new idea as a proposal. Don't change anything marked decided. A person approves the draft before it merges.".into(),
+        ),
+        ChoreKind::SyncMain | ChoreKind::PlaytestFix => return None,
+    })
+}
+
+/// Fills `prompts/chore.md` for a chore piece's `build` or `fix` session, or `None` when the chore is a playtest fix
+/// or a main sync (those keep [`build_piece_prompt`]'s).
+pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) -> Result<Option<String>> {
+    let Some((label, instructions)) = chore_task(chore, &p.piece.what) else {
+        return Ok(None);
+    };
+    let words = project_words(p.project_type);
+    let (kind_line, briefs) = piece_brief(p);
+    let recent = if chore.recent.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = chore.recent.iter().map(|r| format!("- {r}")).collect();
+        format!(
+            "## Recent chores of this kind (don't repeat them)\n\n{}\n\n",
+            lines.join("\n")
+        )
+    };
+    let filled = render_prompt(
+        template,
+        &[
+            ("pr", "PR".to_string()),
+            ("change", "pull request".to_string()),
+            ("label", label.to_string()),
+            ("instructions", instructions),
+            ("recentSection", recent),
+            ("kindLine", kind_line.to_string()),
+            ("briefSection", briefs),
+            ("branch", p.branch.to_string()),
+            ("baseBranch", p.base_branch.to_string()),
+            ("githubRepo", p.github_repo.to_string()),
+            ("checks", checks_text(p.checks)),
+            ("codeLimits", gate_rule(&p.code_gates)),
+            ("projectNoun", words.noun.to_string()),
+            ("projectUser", words.user.to_string()),
+            ("projectExamples", words.examples.to_string()),
+            ("projectSteps", words.steps.to_string()),
+        ],
+    )?;
+    Ok(Some(if p.where_to_start.is_empty() {
+        filled
+    } else {
+        format!("{filled}\n\n{}", p.where_to_start)
+    }))
 }
 
 #[cfg(test)]
@@ -523,6 +613,91 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn chore_prompt(kind: &str, extra: serde_json::Value) -> Option<String> {
+        let mut chore = serde_json::json!({ "kind": kind });
+        chore
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let p = piece(serde_json::json!({ "chore": chore, "what": "main is red: cargo test fails" }));
+        let template = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("prompts")
+                .join("chore.md"),
+        )
+        .unwrap();
+        build_chore_prompt(
+            &template,
+            &crate::runs::chore::chore_of(&p).unwrap(),
+            &PiecePrompt {
+                kind: RunKind::Build,
+                piece: &p,
+                project_type: ProjectType::Cli,
+                branch: "b",
+                base_branch: "main",
+                github_repo: "x/y",
+                checks: &checks(),
+                code_gates: CodeGates {
+                    max_file_lines: 1000,
+                    ..CodeGates::default()
+                },
+                where_to_start: "",
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn each_chore_kind_names_its_own_task_and_not_the_others() {
+        let marks = [
+            ("fix_main", "checks are failing"),
+            ("tidy", "No behaviour change"),
+            ("tests", "has no test"),
+            ("bugs", "fails before your fix"),
+            ("specs", "Write a spec draft (section 6.5)"),
+        ];
+        for (kind, mark) in marks {
+            let out = chore_prompt(kind, serde_json::json!({})).unwrap();
+            assert!(out.contains(mark), "{kind}: {out}");
+            for (other, other_mark) in marks {
+                assert!(other == kind || !out.contains(other_mark), "{kind} has {other}'s task");
+            }
+            // The backlog-file rule, the "nothing to do" exit and the code limits.
+            assert!(out.contains("Don't touch the backlog file"), "{out}");
+            assert!(
+                out.contains("\"nothing to do\"") && out.contains("lines or fewer"),
+                "{out}"
+            );
+            assert!(!out.contains("{{"), "{out}");
+        }
+        let main = chore_prompt("fix_main", serde_json::json!({ "report": "smoke: 500 on /" })).unwrap();
+        assert!(main.contains("main is red") && main.contains("smoke: 500 on /"));
+    }
+
+    #[test]
+    fn recent_chores_are_listed_and_none_leaves_no_heading() {
+        let out = chore_prompt(
+            "tidy",
+            serde_json::json!({ "recent": [{ "title": "Drop dead code", "outcome": "merged" }] }),
+        )
+        .unwrap();
+        assert!(out.contains("Recent chores of this kind") && out.contains("- Drop dead code: merged"));
+        let out = chore_prompt("tidy", serde_json::json!({ "recent": [] })).unwrap();
+        assert!(!out.contains("Recent chores"));
+    }
+
+    #[test]
+    fn a_playtest_fix_and_a_main_sync_have_no_chore_prompt() {
+        assert_eq!(chore_prompt("playtest_fix", serde_json::json!({})), None);
+        assert_eq!(chore_prompt("sync_main", serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn a_chore_prompt_carries_earlier_attempts() {
+        let out = chore_prompt("tests", serde_json::json!({})).unwrap();
+        assert!(out.contains("too big"), "{out}");
     }
 
     #[test]

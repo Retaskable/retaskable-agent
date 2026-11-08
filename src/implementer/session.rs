@@ -15,8 +15,9 @@ use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 
 use super::model::{ImplementerResult, implementer_result_schema};
-use super::prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt};
+use super::prompt::{PiecePrompt, Prompt, build_chore_prompt, build_piece_prompt, build_prompt};
 use crate::backlog::runs::{RunKind, RunPiece};
+use crate::runs::chore::Chore;
 
 /// What an implementer session runs with, besides how it starts ([`Start`]).
 pub struct Session<'a> {
@@ -46,6 +47,34 @@ pub struct Session<'a> {
     pub sandbox: bool,
 }
 
+/// A piece's first prompt: the chore prompt for a chore that has one, else the piece prompt.
+fn piece_prompt(
+    s: &Session<'_>,
+    template: &str,
+    kind: RunKind,
+    piece: &RunPiece,
+    chore: Option<(&Chore, &str)>,
+) -> Result<String> {
+    let p = PiecePrompt {
+        kind,
+        piece,
+        project_type: s.project_type,
+        branch: s.branch,
+        base_branch: s.base_branch,
+        github_repo: s.github_repo,
+        checks: s.checks,
+        code_gates: s.code_gates,
+        where_to_start: s.where_to_start,
+    };
+    if let Some((chore, piece_template)) = chore {
+        return Ok(match build_chore_prompt(template, chore, &p)? {
+            Some(prompt) => prompt,
+            None => build_piece_prompt(piece_template, &p)?,
+        });
+    }
+    build_piece_prompt(template, &p)
+}
+
 /// How this session begins (`SessionStart`, keyed to this one item rather than a bare id/prompt
 /// pair, so the caller can't accidentally re-template a follow-up).
 pub enum Start<'a> {
@@ -56,6 +85,15 @@ pub enum Start<'a> {
     /// `prompts/implementer-piece.md`, `kind` is `Build` or `Fix`, and the session's `branch` is the piece's.
     Piece {
         template: &'a str,
+        kind: RunKind,
+        piece: &'a RunPiece,
+    },
+    /// A brand new session on a chore piece: `template` is `prompts/chore.md`. A playtest fix and a main sync have
+    /// no chore prompt and get the piece prompt from `piece_template`.
+    Chore {
+        template: &'a str,
+        piece_template: &'a str,
+        chore: &'a Chore,
         kind: RunKind,
         piece: &'a RunPiece,
     },
@@ -116,23 +154,20 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
         }
-        Start::Piece { template, kind, piece } => {
-            let prompt = build_piece_prompt(
-                template,
-                &PiecePrompt {
-                    kind,
-                    piece,
-                    project_type: s.project_type,
-                    branch: s.branch,
-                    base_branch: s.base_branch,
-                    github_repo: s.github_repo,
-                    checks: s.checks,
-                    code_gates: s.code_gates,
-                    where_to_start: s.where_to_start,
-                },
-            )?;
-            (SessionStart::Fresh(new_session_id()), prompt)
-        }
+        Start::Piece { template, kind, piece } => (
+            SessionStart::Fresh(new_session_id()),
+            piece_prompt(s, template, kind, piece, None)?,
+        ),
+        Start::Chore {
+            template,
+            piece_template,
+            chore,
+            kind,
+            piece,
+        } => (
+            SessionStart::Fresh(new_session_id()),
+            piece_prompt(s, template, kind, piece, Some((chore, piece_template)))?,
+        ),
         Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),
         Start::Resume {
             session_id,
