@@ -18,9 +18,9 @@ use crate::backlog::runs::{
     ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
 };
 use crate::config::ProjectConfig;
-use crate::config::{EngineChoiceConfig, OnOff};
+use crate::config::{Engine, EngineChoiceConfig, OnOff};
 use crate::engines::start_rules::{engine_now, engines_out, engines_used_here, lane_may_start};
-use crate::engines::{EngineId, Role, engine_for, program_of};
+use crate::engines::{EngineId, Role, engine_for, program_of, start_engine};
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
@@ -93,6 +93,28 @@ pub struct RunContext {
     pub token: String,
     /// Where the run takes and drops store locks; the loop beats them.
     pub locks: RunLocks,
+    /// With `engine-fall-over` On: the engines out and the ones this computer uses, so a run's own sessions (a
+    /// piece's `engine`, the review roles) go to the engine that takes over. `None` places them as chosen.
+    pub fall: Option<FallOver>,
+}
+
+/// The engines out now and the ones this computer runs (docs/specs/engines/03-choosing-the-engine.md section 3.5).
+#[derive(Debug, Clone, Default)]
+pub struct FallOver {
+    pub out: BTreeSet<EngineId>,
+    pub used: Vec<EngineId>,
+}
+
+impl RunContext {
+    /// `chosen`, or the engine that takes over while it is out. A pi choice never falls over.
+    pub fn engine_now(&self, chosen: Engine) -> Engine {
+        let Some(f) = &self.fall else { return chosen };
+        let program = program_of(chosen);
+        match engine_now(program, &f.used, &f.out) {
+            now if now == program => chosen,
+            now => start_engine(Some(now), chosen),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +128,7 @@ impl RunContext {
             repo: 1,
             token: "tok".into(),
             locks: Default::default(),
+            fall: None,
         }
     }
 }
@@ -125,6 +148,8 @@ pub struct RunRequest {
     pub other: serde_json::Map<String, serde_json::Value>,
     /// The folder of the lane the run holds; `None` for a kind that runs in none.
     pub lane: Option<PathBuf>,
+    /// With `engine-fall-over` On: the engine the run's session starts on when its chosen one is out.
+    pub engine: Option<EngineId>,
     pub ends: RunEndSender,
     pub context: RunContext,
 }
@@ -416,6 +441,10 @@ impl ProjectLoop {
         start: Option<&StartRules>,
         now: Instant,
     ) -> bool {
+        let fall = match start {
+            Some(s) if self.flags.on("engine-fall-over").await => Some(s),
+            _ => None,
+        };
         let piece_id = piece_id(&run.piece).to_string();
         // An older store may hand out a rotation chore though chores are off: given back before any lane work.
         let stray = self.chores_off()
@@ -468,6 +497,7 @@ impl ProjectLoop {
             piece: run.piece,
             other: run.other,
             lane,
+            engine: fall.and_then(|s| s.takes_over(run.kind)),
             ends: self.run_loop.ends_tx.clone(),
             context: RunContext {
                 project: self.id.clone(),
@@ -476,6 +506,10 @@ impl ProjectLoop {
                 repo,
                 token: token.unwrap_or_default().to_string(),
                 locks: self.run_loop.runs.locks(),
+                fall: fall.map(|s| FallOver {
+                    out: s.out.clone(),
+                    used: s.used.clone(),
+                }),
             },
         };
         if let Err(why) = starter.start(request) {
@@ -510,13 +544,24 @@ impl StartRules {
 
     /// Whether a run of `kind` may be asked for: its role's engine, after `engine_now`, isn't out.
     fn kind_may_start(&self, kind: RunKind) -> bool {
-        let role = match kind {
-            RunKind::Plan => Role::Planner,
-            RunKind::Build | RunKind::Fix => Role::Implementer,
-            RunKind::Look => Role::Triager,
-            RunKind::Watch | RunKind::Merge => return true,
-        };
-        !self.out.contains(&self.engine_now(role))
+        role_of(kind).is_none_or(|role| !self.out.contains(&self.engine_now(role)))
+    }
+
+    /// The engine a run of `kind` starts on when that isn't its role's chosen one.
+    fn takes_over(&self, kind: RunKind) -> Option<EngineId> {
+        let role = role_of(kind)?;
+        let now = self.engine_now(role);
+        (now != program_of(engine_for(&self.choice, self.project_engines.as_ref(), role, None))).then_some(now)
+    }
+}
+
+/// The role whose session a run of `kind` is.
+fn role_of(kind: RunKind) -> Option<Role> {
+    match kind {
+        RunKind::Plan => Some(Role::Planner),
+        RunKind::Build | RunKind::Fix => Some(Role::Implementer),
+        RunKind::Look => Some(Role::Triager),
+        RunKind::Watch | RunKind::Merge => None,
     }
 }
 
