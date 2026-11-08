@@ -113,10 +113,37 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "play" | "stop" => play(cmd, project, view),
         "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
+        "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
+    }
+}
+
+/// **agent_settings** (agent-settings.md section 2.1): saved at once, with no one at the computer to allow it. The hub
+/// checked who sent it; this re-checks nothing about the sender. A key outside the owner's five is refused, and a
+/// refused change writes nothing. A save fires the new-hello signal so every project's hub sees the new values.
+// There is no session pool yet: when there is, `pool.configure` goes here, after the save.
+fn agent_settings(cmd: &Command, view: &AgentView) -> Value {
+    let change: crate::site_settings::AgentSettings = match serde_json::from_value(cmd.args.clone()) {
+        Ok(c) => c,
+        Err(_) => {
+            return nack(
+                &cmd.id,
+                "Not a command this agent takes: agent_settings with those settings".into(),
+            );
+        }
+    };
+    let Some(dir) = view.settings.dir() else {
+        return nack(&cmd.id, "This computer's settings can't be found.".into());
+    };
+    match crate::site_settings::save_agent_settings(dir, &change) {
+        Ok(()) => {
+            view.settings.fire();
+            ack(&cmd.id)
+        }
+        Err(e) => nack(&cmd.id, e.to_string()),
     }
 }
 

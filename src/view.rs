@@ -12,6 +12,9 @@ use tokio::sync::watch;
 use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::hello_settings::HelloSettings;
+
+/// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
+pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
 use crate::paths;
 use crate::store::Store;
@@ -368,6 +371,9 @@ impl AgentView {
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags,
         });
+        if self.settings.on().await {
+            hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
+        }
         if let Some(settings) = self.settings.json().await {
             hello["settings"] = settings;
         }
@@ -573,7 +579,7 @@ mod tests {
         assert!(s["engines"]["roles"].is_object() && s["cursorModels"].is_object() && s["tags"].is_array());
         assert_eq!(s["envVars"]["RETASKABLE_POLL_SEC"], true);
         assert_eq!(s["envVars"]["RETASKABLE_LANES"], false);
-        assert_eq!(hello["capabilities"], json!([]));
+        assert_eq!(hello["capabilities"], json!(["agent_settings"]));
         // Off, the hello has no settings at all.
         v.settings = HelloSettings::new(
             dir.path().to_path_buf(),
@@ -581,7 +587,9 @@ mod tests {
             4700,
             Arc::new(crate::flags::Flags::fixed(&[])),
         );
-        assert!(v.hello("").await.get("settings").is_none());
+        let off = v.hello("").await;
+        assert!(off.get("settings").is_none());
+        assert_eq!(off["capabilities"], json!([]));
         // The name is there, but the value 30 shows only as the computed pollIntervalSec, never as the variable's.
         assert!(!s["envVars"].to_string().contains("30"));
     }
