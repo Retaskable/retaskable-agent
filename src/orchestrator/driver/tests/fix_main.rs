@@ -8,17 +8,17 @@ use std::path::Path;
 use std::time::Instant;
 
 #[derive(Default)]
-struct Script {
-    log: Vec<Value>,
-    items: Vec<Value>,
-    lock: Option<Value>,
-    list_fails: bool,
+pub(super) struct Script {
+    pub(super) log: Vec<Value>,
+    pub(super) items: Vec<Value>,
+    pub(super) lock: Option<Value>,
+    pub(super) list_fails: bool,
 }
 
-type Store_ = Arc<Mutex<Script>>;
+pub(super) type Store_ = Arc<Mutex<Script>>;
 
 impl Script {
-    fn args(&self, op: &str) -> Vec<Value> {
+    pub(super) fn args(&self, op: &str) -> Vec<Value> {
         self.log
             .iter()
             .filter(|b| b["op"] == op)
@@ -27,7 +27,7 @@ impl Script {
     }
 }
 
-async fn store() -> (String, Store_) {
+pub(super) async fn store() -> (String, Store_) {
     let script: Store_ = Arc::default();
     let app = Router::new()
         .route(
@@ -53,7 +53,7 @@ async fn store() -> (String, Store_) {
     (format!("http://{addr}"), script)
 }
 
-struct Idle;
+pub(super) struct Idle;
 impl RunStarter for Idle {
     fn kinds(&self) -> Vec<RunKind> {
         vec![RunKind::Build]

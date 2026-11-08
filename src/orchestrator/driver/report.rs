@@ -375,7 +375,7 @@ async fn git_out(repo_path: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The repo's default branch on GitHub (`gh api repos/<repo> --jq .default_branch`).
-async fn default_branch(github_repo: &str) -> Option<String> {
+pub(super) async fn default_branch(github_repo: &str) -> Option<String> {
     if github_repo.is_empty() {
         return None;
     }

@@ -23,6 +23,7 @@ mod asks;
 mod deprecations;
 mod drafts;
 mod fix_main;
+mod main_sync;
 mod idea_accept;
 mod item_commands;
 mod land;

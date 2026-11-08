@@ -146,6 +146,7 @@ pub struct RunLoop {
     /// The last `run_take` of the pass handed out nothing (not an error, not a wait): the project is idle.
     idle: bool,
     pub(super) fix_main: super::fix_main::State,
+    pub(super) main_sync: super::main_sync::State,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
     processes_tx: RunProcesses,
@@ -163,6 +164,7 @@ impl RunLoop {
             last_beat: None,
             idle: false,
             fix_main: Default::default(),
+            main_sync: Default::default(),
             ends_tx,
             ends_rx,
             processes_tx,
@@ -242,6 +244,8 @@ impl ProjectLoop {
             let machine = shared.links.machine.clone();
             self.idle_baseline(repo, token, pool, &machine, now).await;
         }
+        self.main_sync(repo, token, &shared.links.machine, shared.stopping, now)
+            .await;
         crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
 

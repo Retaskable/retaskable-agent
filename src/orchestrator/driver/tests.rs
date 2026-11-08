@@ -945,6 +945,7 @@ mod idea_accept;
 mod ideas;
 mod ideas_daily;
 mod lane_play;
+mod main_sync;
 mod own_failures;
 mod playtests;
 mod reporting;

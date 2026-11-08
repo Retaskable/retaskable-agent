@@ -144,6 +144,8 @@ pub struct OrchestratorProject {
     pub chores: Option<String>,
     /// What the idle baseline last found on the base branch, when it matters.
     pub fix_main: Option<String>,
+    /// Why the last main sync didn't start, when it didn't.
+    pub sync_main: Option<String>,
 }
 
 fn orchestrator_note(live: &LiveState) -> String {
@@ -334,6 +336,7 @@ pub fn build(
                     last_tick: p.last_tick.clone(),
                     decision: p.decision.clone(),
                     fix_main: p.fix_main.clone(),
+                    sync_main: p.sync_main.clone(),
                     chores: p.chores.map(|c| format!("Chores today: {} of {}", c.today, c.limit)),
                 })
                 .collect(),
