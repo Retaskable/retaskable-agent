@@ -46,9 +46,10 @@ pub type ProjectRuns = BTreeMap<String, ItemRun>;
 /// The minute summary for one project (agent-telemetry.md section 3.3's `tick`), as `Pool.minute` in
 /// `agent/src/pool.ts` writes it: `status` is `paused` or `running` here. The TS agent also has `setup`
 /// (no config yet) and `waiting_for_limit` (`Orchestrator.status`); neither has a source in this crate
-/// yet. `sessions` is 0 because no session runs here yet. `states` and `claim` are left for the caller
+/// yet. `sessions` is `sessions`, the number of rows in the live session registry (every row, lane or not;
+/// agent-settings.md section 4.5); the caller passes 0 while `live-sessions-reporting` is Off. `states` and `claim` are left for the caller
 /// that knows them.
-pub fn tick_payload(paused: bool, pool: &LanePool) -> event::Tick {
+pub fn tick_payload(paused: bool, pool: &LanePool, sessions: usize) -> event::Tick {
     let busy: Vec<u32> = pool.held_lanes().collect();
     let lanes = pool.rules().lanes;
     let free = lanes.saturating_sub(busy.iter().filter(|&&k| k <= lanes).count() as u32);
@@ -57,7 +58,7 @@ pub fn tick_payload(paused: bool, pool: &LanePool) -> event::Tick {
         lanes: Some(lanes),
         busy: Some(busy),
         free: Some(free.into()),
-        sessions: Some(0.into()),
+        sessions: Some(sessions.into()),
         ..Default::default()
     }
 }
@@ -348,8 +349,8 @@ mod tests {
             }
         ));
         let mut events = EventLog::with_now(|| 0);
-        events.add_in("proj", Event::Tick(tick_payload(false, &pool)));
-        events.add_in("proj", Event::Tick(tick_payload(true, &pool)));
+        events.add_in("proj", Event::Tick(tick_payload(false, &pool, 3)));
+        events.add_in("proj", Event::Tick(tick_payload(true, &pool, 0)));
         assert_eq!(
             events.recent()[0].to_value(),
             serde_json::json!({
@@ -360,7 +361,7 @@ mod tests {
                 "lanes": 3,
                 "busy": [2],
                 "free": 2,
-                "sessions": 0
+                "sessions": 3
             })
         );
         assert_eq!(events.recent()[1].to_value()["status"], "paused");

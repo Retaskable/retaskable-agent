@@ -175,6 +175,30 @@ fn would(step: &Step) -> Vec<&str> {
 }
 
 #[tokio::test]
+async fn the_tick_counts_every_registered_session_only_with_live_sessions_reporting_on() {
+    for (on, want) in [(true, 2), (false, 0)] {
+        let (base, _asked) = stub().await;
+        let mut rig = rig(2, &[&base]);
+        let flags: &[&str] = if on { &["live-sessions-reporting"] } else { &[] };
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
+        let info = |lane| crate::orchestrator::live::sessions::SessionInfo {
+            project: "p0".into(),
+            item_id: "x".into(),
+            title: None,
+            role: crate::engines::choose::Role::Implementer,
+            lane,
+            engine: Default::default(),
+            model: "m".into(),
+        };
+        let _a = rig.live.sessions().register(info(Some(1)));
+        let _b = rig.live.sessions().register(info(None));
+        rig.machine.pass().await;
+        let tick = rig.lp(0).events().recent()[0].to_value();
+        assert_eq!(tick["sessions"], want, "flag on: {on}");
+    }
+}
+
+#[tokio::test]
 async fn one_dry_tick_writes_a_tick_event_and_asks_the_store_only_to_list() {
     let (base, asked) = stub().await;
     let mut rig = rig(2, &[&base]);

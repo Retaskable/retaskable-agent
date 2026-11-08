@@ -1,7 +1,7 @@
 //! What the tray shows, as plain functions over what the agent knows (tray/04-the-tray-agent.md sections 4.1 and
 //! 4.6): the icon's state, the tooltip, the status line and the greyed-out computer line. No I/O.
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;
 
 use std::time::Duration;
 

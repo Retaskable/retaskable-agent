@@ -81,6 +81,7 @@ pub mod store;
 mod sync;
 pub mod tags;
 pub mod telemetry;
+pub mod terminal_menu;
 #[cfg(test)]
 mod test_support;
 pub mod text;

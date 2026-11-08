@@ -1,8 +1,11 @@
 //! The settings page's Now tab (agent-settings.md section 4.5): `GET /api/settings/status`, a
 //! read-only snapshot of the computer's lanes and engines, ported from `agent/src/computerStatus.ts`
-//! and `shared/computerStatus.ts`. Names and numbers only. This agent has no session pool yet, so
-//! no session runs and an engine's limit is "Not reported". Lanes the orchestrator loop holds
-//! (`orchestrator::live`) show busy; the rest are free. The shape is the same as the TypeScript
+//! and `shared/computerStatus.ts`. Names and numbers only. An engine's limit is "Not reported".
+//! Behind the `live-sessions-reporting` flag, each lane shows the session on it from the live
+//! registry (`orchestrator::live::sessions`), the `sessions` list holds every session with no lane,
+//! and lanes busy counts lanes with a session; Off, lanes the orchestrator loop holds
+//! (`orchestrator::live`) show busy, a project's spec draft is the one lane-less row, and the rest
+//! are free. A session row holds names and times, never a prompt or transcript. The shape is the same as the TypeScript
 //! agent's so the page reads either, plus an `orchestrator` block for the loop's mode and decisions.
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -19,6 +22,7 @@ use super::SettingsServer;
 use crate::config::{self, Engine, EngineChoiceConfig, LocalModelConfig};
 use crate::engines::choose::{self, Role};
 use crate::orchestrator::driver::OrchestratorMode;
+use crate::orchestrator::live::sessions::SessionRow as SessionRowLive;
 use crate::orchestrator::live::{LiveHandle, LiveState};
 use crate::setup_check::{SetupCheck, SetupChecks};
 use crate::store::MachineStore;
@@ -66,6 +70,9 @@ pub struct Lane {
     /// The item holding it, when the orchestrator loop does.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item: Option<LaneItem>,
+    /// The session on it, with live sessions on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionRow>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -75,12 +82,53 @@ pub struct LaneItem {
     pub project: String,
 }
 
-/// A running session with no lane.
+/// A running session with no lane (or, on a lane, the session on it).
 #[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionRow {
     pub id: String,
     pub project: String,
-    pub title: &'static str,
+    pub title: String,
+    /// Only with live sessions on: what the session does, and on what.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_sec: Option<u64>,
+}
+
+impl SessionRow {
+    fn drafting(id: &str, project: &str) -> Self {
+        Self {
+            id: id.into(),
+            project: project.into(),
+            title: group_word("drafter").into(),
+            role: None,
+            engine: None,
+            model: None,
+            run_sec: None,
+            quiet_sec: None,
+        }
+    }
+
+    fn live(r: &SessionRowLive) -> Self {
+        let i = &r.info;
+        Self {
+            id: i.item_id.clone(),
+            project: i.project.clone(),
+            title: i.title.clone().unwrap_or_else(|| i.item_id.clone()),
+            role: Some(format!("{:?}", i.role).to_lowercase()),
+            engine: Some(i.engine.to_string()),
+            model: Some(i.model.clone()),
+            run_sec: Some(r.started.elapsed().as_secs()),
+            quiet_sec: Some(r.last_output.elapsed().as_secs()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -117,7 +165,7 @@ pub struct ComputerStatus {
     pub header: Header,
     pub alerts: Vec<Alert>,
     pub lanes: Vec<Lane>,
-    /// Sessions that hold no lane: a project's spec draft, as a "Drafting specs" row.
+    /// Sessions that hold no lane: every one with live sessions on, else a project's spec draft.
     pub sessions: Vec<SessionRow>,
     pub engines: Vec<EngineRow>,
     pub orchestrator: Orchestrator,
@@ -225,6 +273,8 @@ pub struct Settled {
     pub lanes: u32,
     pub codex_tokens: Option<u64>,
     pub cursor_tokens: Option<u64>,
+    /// Card flag `live-sessions-reporting`: show the session registry's rows.
+    pub live_sessions: bool,
 }
 
 /// `computerStatus`: builds the snapshot. Pure, so it's tested without a server.
@@ -257,11 +307,29 @@ pub fn build(
                 state_text: "Free",
                 note: note.to_string(),
                 item: None,
+                session: None,
             }
         })
         .collect();
     let mut lanes_busy = 0;
-    for (project, p) in &live.projects {
+    let rows = if settled.live_sessions {
+        source.live.sessions().snapshot()
+    } else {
+        Vec::new()
+    };
+    let mut lane_less = Vec::new();
+    for r in &rows {
+        let Some(lane) = r.info.lane.and_then(|k| lanes.iter_mut().find(|l| l.k == k)) else {
+            lane_less.push(SessionRow::live(r));
+            continue;
+        };
+        lanes_busy += 1;
+        lane.state = "busy";
+        lane.state_text = "Busy";
+        lane.note = format!("Running for {}", r.info.project);
+        lane.session = Some(SessionRow::live(r));
+    }
+    for (project, p) in live.projects.iter().filter(|_| !settled.live_sessions) {
         for held in &p.held {
             let Some(lane) = lanes.iter_mut().find(|l| l.k == held.lane) else {
                 continue;
@@ -337,15 +405,13 @@ pub fn build(
         },
         alerts,
         lanes,
-        sessions: (live.projects.iter())
-            .filter_map(|(project, p)| {
-                p.drafting.as_ref().map(|id| SessionRow {
-                    id: id.clone(),
-                    project: project.clone(),
-                    title: group_word("drafter"),
-                })
-            })
-            .collect(),
+        sessions: if settled.live_sessions {
+            lane_less
+        } else {
+            (live.projects.iter())
+                .filter_map(|(project, p)| p.drafting.as_ref().map(|id| SessionRow::drafting(id, project)))
+                .collect()
+        },
         engines,
         orchestrator: Orchestrator {
             mode: live.mode.name(),
@@ -459,6 +525,7 @@ impl SettingsServer {
                 lanes: config::lanes(&cfg, env),
                 codex_tokens: machine.codex_today_tokens(),
                 cursor_tokens: machine.cursor_today_tokens(),
+                live_sessions: self.live_sessions_flag.load(std::sync::atomic::Ordering::Relaxed),
             };
             let checks = source.checks.lock().unwrap().clone();
             Ok(build(&settled, source, checks.as_ref(), &source.live.snapshot()))
