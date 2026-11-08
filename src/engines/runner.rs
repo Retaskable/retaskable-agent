@@ -972,7 +972,7 @@ mod tests {
             ..base_spec(dir.path())
         };
         let started = std::time::Instant::now();
-        let runs = (0..n).map(|_| run_session_tracked(&fake, Path::new("sh"), &spec, "k", None, None, None));
+        let runs = (0..n).map(|_| run_session_tracked(&fake, Path::new("sh"), &spec, "k", None, Watch::default(), None));
         for r in futures_util::future::join_all(runs).await {
             assert!(r.unwrap().ok);
         }
