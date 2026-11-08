@@ -26,12 +26,17 @@ static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(HashMap::new()));
 pub enum Baseline {
     /// Something else has the base checkout; ask again shortly.
     Busy,
+    /// The base branch has moved on from `base_sha`: nothing ran, and nothing is cached for the
+    /// old commit. Ask again with `head`, the commit it is at now.
+    Stale { head: String },
     /// Every check that ran on `base_sha` (the install first when it failed), passed or not.
     Done(Arc<Vec<CheckRun>>),
 }
 
 /// Runs `project`'s `checks` at `base_sha` in the base checkout (reset onto `origin/<base_branch>`,
-/// installing dependencies first when it needs it), unless that commit was already run.
+/// installing dependencies first when it needs it), unless that commit was already run. Results
+/// are only ever stored under the commit the checks ran on: if the checkout lands on another
+/// commit than `base_sha`, it answers [`Baseline::Stale`].
 pub fn baseline(
     project: &str,
     repo_path: &Path,
@@ -48,6 +53,10 @@ pub fn baseline(
         return Ok(Baseline::Busy);
     };
     let dir = lanes::prepare_base_checkout(repo_path, worktrees_dir, base_branch)?;
+    let head = lanes::head_sha(&dir)?;
+    if head != base_sha {
+        return Ok(Baseline::Stale { head });
+    }
     let runs = Arc::new(checks::run_all(&dir, checks, &proc::run_command_with_timeout));
     lock(&CACHE).insert(key, runs.clone());
     Ok(Baseline::Done(runs))
@@ -83,6 +92,10 @@ mod tests {
         ]
     }
 
+    fn sha(repo: &Path) -> String {
+        lanes::head_sha(repo).unwrap()
+    }
+
     fn runs(counter: &Path) -> usize {
         std::fs::read_to_string(counter).map_or(0, |s| s.lines().count())
     }
@@ -94,8 +107,9 @@ mod tests {
         let wt = root.path().join("wt");
         let counter = root.path().join("counter");
         let checks = counted(&counter);
+        let sha1 = sha(&repo);
 
-        let Baseline::Done(first) = baseline("bl-t1", &repo, &wt, "main", "sha1", &checks).unwrap() else {
+        let Baseline::Done(first) = baseline("bl-t1", &repo, &wt, "main", &sha1, &checks).unwrap() else {
             panic!("busy");
         };
         assert!(first[0].passed());
@@ -103,7 +117,7 @@ mod tests {
         assert!(first[1].output_tail.contains("broke"));
         assert_eq!(runs(&counter), 2);
 
-        let Baseline::Done(again) = baseline("bl-t1", &repo, &wt, "main", "sha1", &checks).unwrap() else {
+        let Baseline::Done(again) = baseline("bl-t1", &repo, &wt, "main", &sha1, &checks).unwrap() else {
             panic!("busy");
         };
         assert_eq!(again, first);
@@ -111,11 +125,36 @@ mod tests {
 
         run_git(git(&repo).args(["commit", "--quiet", "--allow-empty", "-m", "more"]));
         run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
+        let sha2 = sha(&repo);
+        assert_ne!(sha1, sha2);
         assert!(matches!(
-            baseline("bl-t1", &repo, &wt, "main", "sha2", &checks).unwrap(),
+            baseline("bl-t1", &repo, &wt, "main", &sha2, &checks).unwrap(),
             Baseline::Done(_)
         ));
         assert_eq!(runs(&counter), 4);
+    }
+
+    #[test]
+    fn an_old_sha_after_main_moved_is_stale_and_stores_nothing_under_it() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = root.path().join("wt");
+        let counter = root.path().join("counter");
+        let checks = counted(&counter);
+        let old = sha(&repo);
+        run_git(git(&repo).args(["commit", "--quiet", "--allow-empty", "-m", "more"]));
+        run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
+        let head = sha(&repo);
+
+        let got = baseline("bl-t4", &repo, &wt, "main", &old, &checks).unwrap();
+
+        assert_eq!(got, Baseline::Stale { head: head.clone() });
+        assert_eq!(runs(&counter), 0);
+        assert!(!lock(&CACHE).contains_key(&("bl-t4".to_string(), old)));
+        assert!(matches!(
+            baseline("bl-t4", &repo, &wt, "main", &head, &checks).unwrap(),
+            Baseline::Done(_)
+        ));
     }
 
     #[test]

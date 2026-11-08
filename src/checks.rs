@@ -181,7 +181,7 @@ fn run_timed(
 }
 
 /// `checksSummary` (checks.ts): each check as "✓ name" or "✗ name (non-blocking)", one per line
-/// — the evidence a scout or the stage 3 reviewer reads for context, with " — fails on main" for
+/// — the evidence a scout or the stage 3 reviewer reads for context, with " (fails on main)" for
 /// a `preexisting` failure. `CheckRun` doesn't track a duration, so this is simpler than the
 /// TypeScript original.
 pub fn checks_summary(checks: &[CheckRun]) -> String {
