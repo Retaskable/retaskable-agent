@@ -210,6 +210,26 @@ pub fn claude_model_for(engine: crate::engines::engine::EngineId, tier: &str) ->
     .to_string()
 }
 
+/// Whether the `tier-kept-on-resume` flag was On at its last answer; Off until the flags client is handed over.
+pub fn tier_kept_on_resume_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = KEPT_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("tier-kept-on-resume"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static KEPT_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `tier-kept-on-resume` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_tier_kept_on_resume_for_test(on: bool) {
+    KEPT_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
 /// Whether the `local-one-slot` flag was On at its last answer; Off until the flags client is handed over.
 pub fn local_one_slot_on() -> bool {
     #[cfg(test)]
