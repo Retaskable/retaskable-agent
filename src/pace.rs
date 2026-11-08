@@ -175,9 +175,18 @@ impl Pacer {
             }
         }
         let Some(latest) = latest else {
-            return Pace {
-                allowed: current,
-                reason: PaceReason::NoReading,
+            // No reading in the last half hour: no burn rate, so lean in while work waits.
+            let up = (current + 1).min(max);
+            return if work_waiting {
+                Pace {
+                    allowed: up,
+                    reason: PaceReason::Leaning { from: current, to: up },
+                }
+            } else {
+                Pace {
+                    allowed: current,
+                    reason: PaceReason::NoReading,
+                }
             };
         };
         let kept: Vec<Sample> = self
