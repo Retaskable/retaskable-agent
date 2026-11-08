@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
-use crate::backlog::runs::{short_sha, LockTake};
 use crate::backlog::ItemStatus;
+use crate::backlog::runs::{LockTake, short_sha};
 use crate::config::SyncMain;
 use crate::git_bin::command;
-use crate::main_sync::{attempt, behind_count, item_title, pr_body, pr_title, push, sync_due, Attempt};
+use crate::main_sync::{Attempt, attempt, behind_count, item_title, pr_body, pr_title, push, sync_due};
 use crate::merge_update::run as git;
-use crate::runs::chore::{chore_lock_name, ChoreKind};
+use crate::runs::chore::{ChoreKind, chore_lock_name};
 
 /// How often a project looks at whether main moved.
 const LOOK_EVERY: Duration = Duration::from_secs(60);
