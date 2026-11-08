@@ -38,7 +38,7 @@ use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
-use crate::tiers::{implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, implementer_model, implementer_tier};
 use crate::{lanes, paths};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
@@ -272,7 +272,6 @@ pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
 }
 
 struct Job {
-    #[allow(dead_code)] // read by the tier ladder's later pieces
     local: crate::local_model::LocalModel,
     data_dir: PathBuf,
     project: ProjectConfig,
@@ -389,7 +388,15 @@ async fn attempt(
         ..c
     });
     let now = crate::telemetry::now_ms() / 1000;
-    let tier = implementer_tier(usage.as_ref(), now, models, false);
+    // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
+    // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
+    let ladder = placed.engine == EngineId::Claude && crate::tiers::local_ladder_on();
+    let tier = implementer_tier(usage.as_ref(), now, models, ladder && job.local.available());
+    let local_run = if tier == LOCAL {
+        Some(job.local.run().await)
+    } else {
+        None
+    };
     let model = implementer_model(tier, item).to_string();
     let info = SessionInfo {
         project: project_id.clone(),
@@ -398,7 +405,11 @@ async fn attempt(
         role: Role::Implementer,
         lane: Some(*lane),
         engine: placed.engine,
-        model: model_name(placed.engine, &model, cursor.as_ref()),
+        model: if local_run.is_some() {
+            LOCAL.to_string()
+        } else {
+            model_name(placed.engine, &model, cursor.as_ref())
+        },
     };
     let branch = branch_name(item, *attempt_no);
     let quiet = watch_for(project, placed.engine);
@@ -421,7 +432,7 @@ async fn attempt(
             max_turns: Some(*max_turns),
             engine: Some(placed.engine),
             cursor,
-            local: None,
+            local: local_run.as_ref().map(|r| r.target.clone()),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,

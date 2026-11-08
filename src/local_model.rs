@@ -35,6 +35,12 @@ pub struct LocalModel {
 /// Holds the local model's one slot until it's dropped, however the holder's task ends (a panic included).
 pub struct LocalSlot(#[allow(dead_code)] OwnedSemaphorePermit);
 
+/// A session running on the local model: where it runs, holding the model's one slot until dropped.
+pub struct LocalRun {
+    pub target: LocalTarget,
+    _slot: LocalSlot,
+}
+
 impl LocalModel {
     /// Down until the first check answers.
     pub fn new(config: LocalModelConfig) -> Self {
@@ -43,6 +49,18 @@ impl LocalModel {
             up: Arc::new(AtomicBool::new(false)),
             slot: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    /// A local model that is on and up, for tests of what runs on it.
+    #[cfg(test)]
+    pub fn up() -> Self {
+        let local = Self::new(LocalModelConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:11436".into(),
+            model: "tiel-coder-35b".into(),
+        });
+        local.up.store(true, Ordering::SeqCst);
+        local
     }
 
     /// A local model that is turned off.
@@ -81,6 +99,25 @@ impl LocalModel {
                 .await
                 .expect("the local slot is never closed"),
         )
+    }
+
+    /// The slot and target for a session whose tier is `local`, waiting for the slot (the fallback).
+    pub async fn run(&self) -> LocalRun {
+        LocalRun {
+            _slot: self.take().await,
+            target: self.target(),
+        }
+    }
+
+    /// The same without waiting: `None` when the model is down or its slot is busy (extra capacity).
+    pub fn try_run(&self) -> Option<LocalRun> {
+        if !self.available() {
+            return None;
+        }
+        Some(LocalRun {
+            _slot: self.try_take()?,
+            target: self.target(),
+        })
     }
 
     /// One check, written to the up flag. Returns whether it changed.
