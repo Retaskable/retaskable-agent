@@ -140,6 +140,8 @@ pub struct OrchestratorProject {
     pub paused: bool,
     pub last_tick: Option<String>,
     pub decision: Option<String>,
+    /// "Chores today: 2 of 3", once the store has answered a count.
+    pub chores: Option<String>,
 }
 
 fn orchestrator_note(live: &LiveState) -> String {
@@ -329,6 +331,7 @@ pub fn build(
                     paused: p.paused,
                     last_tick: p.last_tick.clone(),
                     decision: p.decision.clone(),
+                    chores: p.chores.map(|c| format!("Chores today: {} of {}", c.today, c.limit)),
                 })
                 .collect(),
         },
