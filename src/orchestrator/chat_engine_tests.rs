@@ -123,7 +123,7 @@ async fn an_ask_on_codex_or_pi_runs_that_engine_not_the_claude_apology() {
         let dir = tempfile::tempdir().unwrap();
         let env = stubs(dir.path(), "", &[]);
         let answer = ask(dir.path(), chat_on(engine), env, true).await;
-        assert!(!answer.contains("only Claude"), "{answer}");
+        assert!(!answer.contains("Claude alone"), "{answer}");
         let calls = calls(dir.path());
         assert!(
             calls.len() == 1 && calls[0].starts_with(&format!("{program} ")),
@@ -212,7 +212,7 @@ async fn with_placement_off_only_claude_answers() {
     let dir = tempfile::tempdir().unwrap();
     let env = stubs(dir.path(), "", &[]);
     let answer = ask(dir.path(), chat_on(Engine::Cursor), env, false).await;
-    assert!(answer.contains("only Claude sessions run"), "{answer}");
+    assert!(answer.contains("Claude alone starts sessions"), "{answer}");
     assert!(calls(dir.path()).is_empty());
 }
 
@@ -223,5 +223,5 @@ fn a_triage_with_placement_off_is_refused_on_another_engine() {
     let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
     let (mut request, _rx) = triage_request();
     request.placement = false;
-    assert!(starter.start_triage(request).unwrap_err().contains("only Claude"));
+    assert!(starter.start_triage(request).unwrap_err().contains("Claude alone"));
 }

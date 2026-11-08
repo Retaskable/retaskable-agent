@@ -329,7 +329,7 @@ impl ProjectLoop {
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.clone(),
-            engines: engines_here(shared.links),
+            engines: engines_here(shared.links, self.flags.on("engine-placement").await),
             uses: uses_here(shared.links, self.project.engines.as_ref()),
             chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
         };
@@ -449,10 +449,9 @@ impl ProjectLoop {
 }
 
 /// The engines this computer tells the store it has: the latest setup checks' (Claude when installed and signed
-/// in, Cursor, Pi and Codex when present and passing), kept to those the Rust agent can run sessions on. Today
-/// that is Claude alone: every starter refuses another engine ("only Claude sessions run in the Rust agent yet"),
-/// so naming one would have the store hand this computer work it can't run. Empty until the checks have run.
-fn engines_here(links: &Links) -> Vec<String> {
+/// in, Cursor, Pi and Codex when present and passing). With `engine-placement` Off, Claude alone is reported, as
+/// every starter then refuses another engine. Empty until the checks have run.
+fn engines_here(links: &Links, placement: bool) -> Vec<String> {
     let guard = links.checks.lock().unwrap();
     let Some(c) = guard.as_ref() else { return Vec::new() };
     let pass = |s: &Option<crate::setup_check::SetupCheck>| s.as_ref().is_some_and(|s| s.ok == Some(true));
@@ -466,7 +465,7 @@ fn engines_here(links: &Links) -> Vec<String> {
         ("codex", pass(&c.codex)),
     ];
     all.into_iter()
-        .filter(|(id, ok)| *ok && *id == "claude")
+        .filter(|(id, ok)| *ok && (placement || *id == "claude"))
         .map(|(id, _)| id.to_string())
         .collect()
 }

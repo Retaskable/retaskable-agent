@@ -38,7 +38,7 @@ pub struct TriageRequest {
     pub usage: Option<Value>,
     /// Where the session reports how it ended.
     pub outcomes: OutcomeSender,
-    /// The `engine-placement` release flag: Off, only Claude runs it.
+    /// The `engine-placement` release flag: Off, Claude alone runs it.
     pub placement: bool,
 }
 

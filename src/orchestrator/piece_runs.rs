@@ -89,7 +89,7 @@ impl RunStarter for PieceStarter {
                 None,
             )),
         };
-        // With `engine-placement` Off, only Claude runs; any other engine is refused as before.
+        // With `engine-placement` Off, Claude alone runs; any other engine is refused as before.
         let placed = self.flags.last("engine-placement");
         let engine = match chosen {
             Ok(Engine::Claude) => Engine::Claude,
