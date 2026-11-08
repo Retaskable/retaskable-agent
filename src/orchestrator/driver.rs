@@ -28,7 +28,6 @@ mod land;
 mod lane_play;
 pub use lane_play::LanePlay;
 mod ideas_daily;
-mod vet_daily;
 mod ideas_round;
 mod machine;
 mod playtest_round;
@@ -43,6 +42,7 @@ mod triage_bug;
 mod triage_facts;
 mod triage_run;
 mod trial;
+mod vet_daily;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
