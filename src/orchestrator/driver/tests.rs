@@ -139,6 +139,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         tags: Vec::new(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
+        cursor_models: Default::default(),
         checks: Default::default(),
         bugs: Default::default(),
         bug_version: "test".into(),

@@ -12,13 +12,12 @@ use std::time::Instant;
 
 use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, EphemeralSessionConfig, Role, engine_for, engine_of, run_session};
+use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::link::TokenStore;
-use crate::orchestrator::session::{exists, quiet_timeout};
+use crate::orchestrator::session::quiet_timeout;
 use crate::playtest_groups::{LastGrouped, Planner, PlaytestEntry, TRYOUT_GROUPS_LOCK, plan, should_group, signature};
 use crate::runs::RunLocks;
 use crate::telemetry::now_ms;
@@ -34,6 +33,8 @@ pub(super) struct Job {
     pub project: ProjectConfig,
     pub env: Env,
     pub engine_choice: EngineChoiceConfig,
+    /// The Cursor model names a Cursor-placed round session runs with.
+    pub cursor_models: crate::config::CursorModels,
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
@@ -44,8 +45,7 @@ pub(super) struct Job {
 
 /// Runs one round for `job`'s project: nothing if there's no repo id yet, no backlog link, the
 /// store can't be reached, fewer than [`crate::playtest_groups::MIN_TO_GROUP`] are waiting, or
-/// another computer holds the lock. A `Role::Planner` on anything but Claude, or a Claude binary
-/// that can't be found, also skips the round rather than failing it loudly: the next minute's pass
+/// another computer holds the lock. A planner engine whose binary can't be found also skips the round rather than failing it loudly: the next minute's pass
 /// tries again.
 pub(super) async fn run(job: Job) {
     let Some(repo) = job.repo else {
@@ -80,27 +80,13 @@ pub(super) async fn run(job: Job) {
         return;
     }
     let engine = engine_for(&job.engine_choice, job.project.engines.as_ref(), Role::Planner, None);
-    if engine != Engine::Claude {
-        tracing::info!(
-            "{}: playtest grouping round skipped: only Claude runs a planner session yet",
-            job.id
-        );
-        return;
-    }
-    let bin = match resolve_claude_on_path(&job.env) {
-        Ok(bin) => bin,
+    let placed = match place(engine, Role::Planner, &job.env, &job.cursor_models) {
+        Ok(placed) => placed,
         Err(e) => {
-            tracing::warn!("{}: playtest grouping round skipped: {e:#}", job.id);
+            tracing::warn!("{}: playtest grouping round skipped: {e}", job.id);
             return;
         }
     };
-    if !exists(&bin, &job.env) {
-        tracing::warn!(
-            "{}: playtest grouping round skipped: the claude binary wasn't found",
-            job.id
-        );
-        return;
-    }
     let lock_token = match &job.locks {
         None => {
             let answer = match job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, true).await {
@@ -153,16 +139,16 @@ pub(super) async fn run(job: Job) {
             budget_usd: job.project.budget.planner_usd,
             model: "sonnet".to_string(),
             local: None,
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            engine: Some(placed.engine),
+            cursor: placed.cursor.clone(),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },
     };
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
     let planned = plan(&planner, &entries, |spec| async move {
-        let engine = engine_of(Some(EngineId::Claude))?;
-        run_session(engine.as_ref(), &bin, &spec, "playtest-groups", None, quiet).await
+        let engine = engine_of(Some(placed.engine))?;
+        run_session(engine.as_ref(), &placed.bin, &spec, "playtest-groups", None, quiet).await
     })
     .await;
     let still_held = match (&job.locks, &lock_token) {
@@ -348,6 +334,7 @@ mod tests {
             project,
             env,
             engine_choice: EngineChoiceConfig::default(),
+            cursor_models: Default::default(),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),

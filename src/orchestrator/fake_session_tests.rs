@@ -91,6 +91,7 @@ pub(super) fn roster(
         choice,
         env,
         models: Default::default(),
+        cursor_models: Default::default(),
     };
     (dir, root, roster)
 }

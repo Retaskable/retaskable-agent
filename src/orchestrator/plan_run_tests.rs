@@ -4,6 +4,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
+use crate::env::Env;
 use crate::orchestrator::driver::{RunEndSender, RunProcesses};
 use crate::orchestrator::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
 use crate::orchestrator::look_run::LookRuns;
@@ -134,7 +135,7 @@ async fn an_unfillable_prompt_ends_failed_outside() {
 }
 
 #[tokio::test]
-async fn one_plan_at_a_time_and_none_for_another_engine() {
+async fn one_plan_at_a_time() {
     let r = rig(&answer(GOOD), "sleep 60", EngineChoiceConfig::default());
     let (req, mut s) = request(brief());
     r.starter.start(req).unwrap();
@@ -152,10 +153,55 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
     .unwrap();
     assert!(s.ends.try_recv().is_err());
     assert!(!s.stop.stopped());
+}
 
-    let mut other = EngineChoiceConfig::default();
-    other.roles.planner = Some(Engine::Codex);
-    assert!(rig(&answer(GOOD), "", other).starter.kinds().is_empty());
+/// A rig whose planner is on `engine`, with a stub `RETASKABLE_<var>` binary that records its arguments.
+fn rig_on(engine: Engine, var: &'static str, stub: bool) -> Rig {
+    let mut choice = EngineChoiceConfig::default();
+    choice.roles.planner = Some(engine);
+    let mut r = rig("", "", choice);
+    let bin = r.root.join(if stub {
+        crate::orchestrator::session::tests::fake_name()
+    } else {
+        "nothing-here"
+    });
+    if stub {
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" > '{}'\n",
+            r.root.join("other-args.txt").display()
+        );
+        crate::test_support::write_executable(&bin, &script);
+    }
+    let path = bin.to_string_lossy().into_owned();
+    r.starter.roster.env = Env::new(move |k| (k == var).then(|| path.clone()));
+    r.starter.roster.cursor_models.top = Some("gpt-5".into());
+    r
+}
+
+#[tokio::test]
+async fn the_planner_on_another_engine_runs_its_binary() {
+    for (engine, var) in [
+        (Engine::Cursor, "RETASKABLE_CURSOR"),
+        (Engine::Codex, "RETASKABLE_CODEX"),
+        (Engine::Pi, "RETASKABLE_PI"),
+    ] {
+        let r = rig_on(engine, var, true);
+        assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
+        let (req, mut s) = request(brief());
+        r.starter.start(req).unwrap();
+        assert!(matches!(end_of(&mut s.ends).await.outcome, RunOutcome::Failed(_)));
+        let args = std::fs::read_to_string(r.root.join("other-args.txt")).unwrap();
+        assert_eq!(args.contains("--model gpt-5"), engine == Engine::Cursor, "{args}");
+    }
+}
+
+#[tokio::test]
+async fn a_missing_binary_for_the_planners_engine_gives_the_run_back() {
+    let r = rig_on(Engine::Codex, "RETASKABLE_CODEX", false);
+    assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
+    let (req, _s) = request(brief());
+    assert!(r.starter.start(req).unwrap_err().contains("codex binary wasn't found"));
+    assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
 }
 
 #[tokio::test]

@@ -180,15 +180,35 @@ async fn a_session_that_fails_ends_failed() {
 }
 
 #[tokio::test]
-async fn another_engine_or_a_missing_binary_gives_the_run_back() {
+async fn a_look_on_another_engine_runs_its_binary_and_a_missing_binary_gives_the_run_back() {
     let other = EngineChoiceConfig {
-        default: Some(Engine::Codex),
+        default: Some(Engine::Cursor),
         ..Default::default()
     };
-    let r = rig(&answer(AGAIN), "", other);
-    assert!(r.starter.kinds().is_empty());
+    let mut r = rig(&answer(AGAIN), "", other);
+    assert_eq!(r.starter.kinds(), vec![RunKind::Look]);
     let (req, _s) = request(brief());
-    assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
+    assert!(
+        r.starter
+            .start(req)
+            .unwrap_err()
+            .contains("cursor-agent binary wasn't found")
+    );
+    let stub = r.root.join(crate::orchestrator::session::tests::fake_name());
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" > '{}'\n",
+        r.root.join("other-args.txt").display()
+    );
+    crate::test_support::write_executable(&stub, &script);
+    let path = stub.to_string_lossy().into_owned();
+    r.starter.roster.env = Env::new(move |k| (k == "RETASKABLE_CURSOR").then(|| path.clone()));
+    r.starter.roster.cursor_models.top = Some("gpt-5".into());
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    assert!(matches!(end_of(&mut s.ends).await.outcome, RunOutcome::Failed(_)));
+    let args = std::fs::read_to_string(r.root.join("other-args.txt")).unwrap();
+    assert!(args.contains("--model gpt-5"), "{args}");
+    until_free(&r).await;
 
     let mut r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
     let gone = r.root.join("nothing-here").to_string_lossy().into_owned();
