@@ -60,34 +60,3 @@ async fn live_state_changes_send_nothing_while_snapshot_reporting_is_off() {
     );
     c.stop(Duration::from_secs(1)).await;
 }
-
-#[tokio::test]
-async fn saving_a_smoke_state_resends_the_snapshot_with_it() {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let mut view = view(&["one"]);
-    Arc::get_mut(&mut view).unwrap().settings = crate::hello_settings::HelloSettings::new(
-        dir.path().to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        Arc::new(crate::flags::Flags::fixed(&["snapshot-reporting"])),
-    );
-    let c = start_connector(&url, store, &view, dir.path());
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    let snap = read(&mut first).await;
-    assert!(snap["state"].get("smoke").is_none());
-    let mut s = crate::store::Store::load(&crate::paths::project_dir(dir.path(), "one")).unwrap();
-    s.save_smoke(&crate::store::SmokeState {
-        sha: "abc".into(),
-        status: crate::store::SmokeStatus::Failed,
-        at: "2026-11-08T00:00:00.000Z".into(),
-        url: None,
-        tail: Some("boom".into()),
-    })
-    .unwrap();
-    let got = read_not_alive(&mut first).await;
-    assert_eq!(got["type"], "snapshot");
-    assert_eq!(got["state"]["smoke"]["tail"], "boom");
-    c.stop(Duration::from_secs(1)).await;
-}

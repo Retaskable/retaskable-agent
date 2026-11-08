@@ -15,7 +15,6 @@ use crate::hello_settings::HelloSettings;
 
 mod cursor;
 mod orchestrator;
-mod smoke;
 mod usage;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
@@ -460,6 +459,20 @@ impl AgentView {
             state["smoke"] = smoke;
         }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with `snapshot-reporting` On and a
+    /// smoke to report. `tail` is kept only for a failure or timeout.
+    pub fn smoke_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
+        use crate::store::SmokeStatus;
+        if !self.settings.snapshot_reporting_on() || !self.projects.iter().any(|p| p.id == project) {
+            return None;
+        }
+        let mut smoke = Store::load(&paths::project_dir(data_dir, project)).ok()?.smoke()?;
+        if !matches!(smoke.status, SmokeStatus::Failed | SmokeStatus::Timeout) {
+            smoke.tail = None;
+        }
+        Some(json!(smoke))
     }
 
     /// The snapshot's `trial` (first-run-check.md section 3.3, "Reporting it"): the project's trial

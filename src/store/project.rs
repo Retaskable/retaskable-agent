@@ -116,13 +116,22 @@ pub struct Store {
     data: Map<String, Value>,
 }
 
-/// Counts every saved trial record and smoke state, across projects, so the cloud link can look again at its own project's.
+/// Counts every saved trial record, across projects, so the cloud link can look again at its own project's.
 static TRIAL_CHANGED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
 
-/// Subscribes to saved trial records (`Store::set_trial`) and smoke states (`Store::save_smoke`); the value only counts them.
+/// Subscribes to saved trial records (`Store::set_trial`); the value only counts them.
 pub fn subscribe_trial_changes() -> tokio::sync::watch::Receiver<u64> {
     TRIAL_CHANGED.subscribe()
+}
+
+/// Counts every save of a state that holds a smoke, across projects.
+static SMOKE_SAVED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
+
+/// Subscribes to saves of a state holding a smoke (`set_smoke`, then `save`); the value only counts them.
+pub fn subscribe_smoke_changes() -> tokio::sync::watch::Receiver<u64> {
+    SMOKE_SAVED.subscribe()
 }
 
 impl Store {
@@ -158,7 +167,11 @@ impl Store {
     /// Writes the state file atomically (a temp file, then a rename), compact: no indentation,
     /// since nothing reads it by line (local-state-diet.md section 3).
     pub fn save(&self) -> Result<()> {
-        write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)
+        write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)?;
+        if self.data.contains_key("smoke") {
+            SMOKE_SAVED.send_modify(|n| *n += 1);
+        }
+        Ok(())
     }
 
     /// Replaces `state.usage` with a session's latest 5-hour usage reading
@@ -194,14 +207,6 @@ impl Store {
             "smoke".to_string(),
             serde_json::to_value(smoke).expect("SmokeState always serializes"),
         );
-    }
-
-    /// Sets `state.smoke` and saves at once, then tells the cloud link to look again.
-    pub fn save_smoke(&mut self, smoke: &SmokeState) -> Result<()> {
-        self.set_smoke(smoke);
-        self.save()?;
-        TRIAL_CHANGED.send_modify(|n| *n += 1);
-        Ok(())
     }
 
     /// The lease token of each item this computer holds in the shared backlog, by item id
