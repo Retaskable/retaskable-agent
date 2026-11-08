@@ -27,6 +27,7 @@ fn make_input<'a>(
     Input {
         project: PROJECT,
         paused: false,
+        cant_start: None,
         runs,
         leases,
         records,
@@ -283,6 +284,52 @@ fn no_progress_waits_quietly_for_a_free_lane() {
 fn normalize_strips_runs_of_digits() {
     assert_eq!(normalize("PR 101 not found"), "PR # not found");
     assert_eq!(normalize("lease on R-12 moved on"), "lease on R-# moved on");
+}
+
+#[test]
+fn normalize_strips_git_shas() {
+    assert_eq!(normalize("merge a1b2c3d failed"), normalize("merge 9f8e7d6c5b failed"));
+    assert_eq!(normalize("deadbeef is not a hash"), "deadbeef is not a hash");
+}
+
+#[test]
+fn a_cant_start_reason_keeps_idle_lanes_quiet_until_it_clears() {
+    let (runs, leases, records, running, pool, ready, recent) = (
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Running::default(),
+        pool(2),
+        vec![Action::AskForWork],
+        Vec::new(),
+    );
+    let mut input = make_input(&runs, &leases, &records, &running, &pool, &ready, &recent);
+    assert!(check(&input).iter().any(|f| f.id == "idle_lanes"));
+    input.cant_start = Some("usage limit");
+    assert!(check(&input).is_empty());
+    input.cant_start = None;
+    assert!(check(&input).iter().any(|f| f.id == "idle_lanes"));
+}
+
+#[test]
+fn a_cant_start_reason_keeps_no_progress_quiet() {
+    let mut runs = BTreeMap::new();
+    runs.insert("R-1".to_string(), leased_run(ItemState::Checking));
+    let (leases, records, running, mut pool, actions, recent) = (
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Running::default(),
+        pool(2),
+        Vec::new(),
+        Vec::new(),
+    );
+    take_for_item(&mut pool, 1, "R-1");
+    let mut input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
+    assert!(check(&input).iter().any(|f| f.id == "no_progress:R-1"));
+    input.cant_start = Some("usage limit");
+    assert!(check(&input).is_empty());
+    input.cant_start = None;
+    assert!(check(&input).iter().any(|f| f.id == "no_progress:R-1"));
 }
 
 /// Runs `body` against an input with no runs, leases, records, actions or events and a pool of `lanes`.
