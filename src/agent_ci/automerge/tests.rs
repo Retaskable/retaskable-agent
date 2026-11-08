@@ -38,8 +38,16 @@ struct Rig {
 
 fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::write(&path, format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A test thread forking at the same moment can still hold the file open for writing ("Text file busy"): run it
+    // once until that clears, so the real call never meets it.
+    for _ in 0..200 {
+        match std::process::Command::new(&path).arg("--probe").status() {
+            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(Duration::from_millis(5)),
+            _ => break,
+        }
+    }
     path
 }
 
