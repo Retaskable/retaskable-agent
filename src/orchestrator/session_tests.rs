@@ -758,6 +758,12 @@ fn the_branch_is_the_id_a_short_slug_and_the_slice() {
     );
 }
 
+#[test]
+fn quiet_timeout_turns_off_at_zero_and_is_minutes_otherwise() {
+    assert_eq!(quiet_timeout(0), None);
+    assert_eq!(quiet_timeout(20), Some(Duration::from_secs(20 * 60)));
+}
+
 #[cfg(unix)]
 const OUT_OF_TURNS: &str =
     r#"printf '%s\n' '{"type":"result","subtype":"error_max_turns","is_error":false,"session_id":"s"}'; exit 0"#;

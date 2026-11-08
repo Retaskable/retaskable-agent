@@ -117,7 +117,7 @@ impl DraftHost for ClaudeDrafts {
                 lane: None,
             };
             let engine = engine_of(spec.engine)?;
-            let quiet = watch_for(project, placed.engine);
+            let quiet = watch_for(project, spec.engine.unwrap_or_default());
             let title = draft.titles.first().map(String::as_str);
             let listed = job
                 .sessions

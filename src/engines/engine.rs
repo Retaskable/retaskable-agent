@@ -247,24 +247,15 @@ pub struct SessionResult {
     pub tokens: Option<Tokens>,
 }
 
-/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead. With
-/// `weekly` (the `weekly-limit-reading` flag), when the weekly window is what rejected it is the week's reset: a
-/// top-level `rateLimitType: "seven_day"` uses its own `resetsAt`; a reading with `unifiedWindows.seven_day`
-/// rejected (or full) takes the later of that window's `resetsAt` and the top-level one.
-pub fn resets_in(usage: Option<&Value>, weekly: bool) -> Option<std::time::Duration> {
+/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead.
+pub fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
     let usage = usage.filter(|u| u["status"] == "rejected")?;
-    let mut at = usage["resetsAt"].as_u64();
-    if weekly
-        && let Some(week) = usage.get("unifiedWindows").and_then(|w| w.get("seven_day"))
-        && (week["status"] == "rejected" || week["utilization"].as_f64().is_some_and(crate::tiers::utilization_full))
-    {
-        at = at.max(week["resetsAt"].as_u64());
-    }
+    let at = usage["resetsAt"].as_u64()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    at?.checked_sub(now).map(std::time::Duration::from_secs)
+    at.checked_sub(now).map(std::time::Duration::from_secs)
 }
 
 /// One result's token counts (`tokensOf` in `cursor.ts`). Cache tokens are left out — they're not
@@ -438,49 +429,7 @@ pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, er
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
-
-    fn in_secs(n: u64) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + n
-    }
-
-    fn secs(d: Option<std::time::Duration>) -> u64 {
-        d.expect("a reset ahead").as_secs()
-    }
-
-    #[test]
-    fn resets_in_a_top_level_weekly_rejection_is_its_own_reset() {
-        let u = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": in_secs(500_000)});
-        assert!(secs(resets_in(Some(&u), true)) > 499_000);
-    }
-
-    #[test]
-    fn resets_in_a_weekly_window_rejection_takes_the_later_reset() {
-        let u = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
-            "five_hour": {"utilization": 0.4, "resetsAt": in_secs(3600)},
-            "seven_day": {"status": "rejected", "utilization": 1.0, "resetsAt": in_secs(500_000)}}});
-        assert!(secs(resets_in(Some(&u), true)) > 499_000);
-        assert!(secs(resets_in(Some(&u), false)) <= 3600, "Off keeps today's behaviour");
-        let pct = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
-            "seven_day": {"utilization": 100, "resetsAt": in_secs(500_000)}}});
-        assert!(secs(resets_in(Some(&pct), true)) > 499_000);
-    }
-
-    #[test]
-    fn resets_in_a_five_hour_rejection_is_unchanged_and_no_rejection_is_none() {
-        let u = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
-            "seven_day": {"utilization": 0.3, "resetsAt": in_secs(500_000)}}});
-        assert!(secs(resets_in(Some(&u), true)) <= 3600);
-        let ok = json!({"status": "allowed", "resetsAt": in_secs(3600)});
-        assert_eq!(resets_in(Some(&ok), true), None);
-        assert_eq!(resets_in(None, true), None);
-    }
 
     #[test]
     fn signed_out_is_only_a_failed_claude_result_never_cursor() {

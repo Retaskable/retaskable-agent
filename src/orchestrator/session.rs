@@ -16,15 +16,15 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
+pub use super::cursor_guard::keep_cursor_guard_fresh;
+pub(crate) use super::cursor_guard::watch_for;
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::DEFAULT_CURSOR_MAX_MINUTES;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::runner::Watch;
 use crate::engines::{
     CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
 };
@@ -307,19 +307,6 @@ struct Job {
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
 pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
     (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
-}
-
-/// The timers for a session of `project` on `engine`: the watchdog, and for Cursor alone that
-/// project's own `budget.cursorMaxMinutes` (0 meaning the default of 60).
-pub(super) fn watch_for(project: &ProjectConfig, engine: EngineId) -> Watch {
-    let minutes = match project.budget.cursor_max_minutes {
-        0 => DEFAULT_CURSOR_MAX_MINUTES,
-        m => m,
-    };
-    Watch {
-        quiet: quiet_timeout(project.tuning.session_quiet_minutes),
-        longest: (engine == EngineId::Cursor).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60)),
-    }
 }
 
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
@@ -973,10 +960,6 @@ fn session_result_for_answer(
 #[cfg(test)]
 #[path = "session_tests.rs"]
 pub(super) mod tests;
-
-#[cfg(test)]
-#[path = "session_watch_tests.rs"]
-mod watch_tests;
 
 #[cfg(test)]
 #[path = "session_engine_tests.rs"]

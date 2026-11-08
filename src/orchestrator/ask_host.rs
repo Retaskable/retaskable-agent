@@ -220,7 +220,7 @@ impl AskHost for ClaudeAsks {
                 Ok(engine) => engine,
                 Err(e) => return Ok(sorry(e)),
             };
-            let quiet = watch_for(&project, placed.engine);
+            let quiet = watch_for(&project, spec.engine.unwrap_or_default());
             let follower = follow(sink.path.clone(), engine_of(spec.engine)?, events);
             let listed = sessions.register_spec(&project_id, &ask.ask_id, None, Role::Assistant, &spec);
             let r = listed
