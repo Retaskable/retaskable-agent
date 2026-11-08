@@ -475,3 +475,10 @@ async fn a_copy_that_cant_replace_itself_or_a_refused_signature_asks_for_no_rest
     assert!(!data_dir2.path().join("updates").join("1.4.3").exists());
     assert!(joined(&h2.logs).contains("signed by CN=Mallory"));
 }
+
+#[test]
+fn a_plus_after_a_percent_is_not_an_escape_in_the_file_name() {
+    // `%+1` isn't a percent-escape: it must stay literal (then be made safe), not decode to byte 0x01.
+    assert_eq!(update_file_name("https://d.test/a%+1b.zip"), "a__1b.zip");
+    assert_eq!(update_file_name("https://d.test/a%41b.zip"), "aAb.zip");
+}
