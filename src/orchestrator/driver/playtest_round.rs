@@ -352,6 +352,22 @@ mod tests {
         }
     }
 
+    fn fake_dir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        (dir, bin)
+    }
+
+    fn four_waiting() -> Value {
+        json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false),
+        ])
+    }
+
     fn ops(seen: &Arc<Mutex<Vec<(String, Value)>>>) -> Vec<String> {
         seen.lock().unwrap().iter().map(|(op, _)| op.clone()).collect()
     }
@@ -360,25 +376,16 @@ mod tests {
     async fn too_few_waiting_skips_the_round_without_touching_the_lock() {
         let waiting = json!([tryout("k1", false), tryout("k2", false), tryout("k3", false)]);
         let (base, seen) = store(waiting, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         run(job(&base, &bin, dir.path())).await;
         assert_eq!(ops(&seen), vec!["tryouts_list"]);
     }
 
     #[tokio::test]
     async fn a_due_round_locks_plans_sends_the_grouping_and_releases_the_lock() {
-        let waiting = json!([
-            tryout("k1", false),
-            tryout("k2", false),
-            tryout("k3", false),
-            tryout("k4", false),
-        ]);
+        let waiting = four_waiting();
         let (base, seen) = store(waiting, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         run(job(&base, &bin, dir.path())).await;
         assert_eq!(
             ops(&seen),
@@ -394,32 +401,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_round_already_locked_by_another_machine_is_skipped() {
-        let waiting = json!([
-            tryout("k1", false),
-            tryout("k2", false),
-            tryout("k3", false),
-            tryout("k4", false),
-        ]);
+        let waiting = four_waiting();
         let (base, seen) = store(waiting, Some("other-pc")).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         run(job(&base, &bin, dir.path())).await;
         assert_eq!(ops(&seen), vec!["tryouts_list", "chore_lock"]);
     }
 
     /// Four waiting entries, a Codex planner, and `codex` pointing at `codex_bin`: the ops the store saw.
     async fn codex_round(flag_on: bool, codex_bin: &str) -> Vec<String> {
-        let waiting = json!([
-            tryout("k1", false),
-            tryout("k2", false),
-            tryout("k3", false),
-            tryout("k4", false),
-        ]);
+        let waiting = four_waiting();
         let (base, seen) = store(waiting, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         let mut job = job(&base, &bin, dir.path());
         let codex = codex_bin.replace("{bin}", &bin.to_string_lossy());
         job.env = Env::new(move |k| (k == "RETASKABLE_CODEX").then(|| codex.clone()));
@@ -450,9 +443,7 @@ mod tests {
             tryout("k5", true),
         ]);
         let (base, seen) = store(waiting, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         run(job(&base, &bin, dir.path())).await;
         let recorded = seen.lock().unwrap();
         let groups_args = recorded.iter().find(|(op, _)| op == "tryout_groups").unwrap().1.clone();
@@ -475,9 +466,7 @@ mod tests {
             tryout("k4", false)
         ]);
         let (base, seen) = store(waiting, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         let (job, locks) = runs_job(&base, &bin, dir.path());
         run(job).await;
         assert_eq!(
@@ -499,9 +488,7 @@ mod tests {
             tryout("k4", false)
         ]);
         let (base, seen) = store(waiting, Some("other-pc")).await;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let (dir, bin) = fake_dir();
         let (job, locks) = runs_job(&base, &bin, dir.path());
         run(job).await;
         assert_eq!(ops(&seen), vec!["tryouts_list", "lock_take"]);

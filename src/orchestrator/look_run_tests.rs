@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::super::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
+use super::super::fake_session_tests::{
+    assert_ran_as, assert_ran_read_only_in, cut_registered_tree, placed_on, roster,
+};
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
 use crate::connector::bug_link::BugLink;
@@ -203,28 +205,6 @@ async fn another_engine_or_a_missing_binary_gives_the_run_back() {
     assert!(r.starter.start(req).unwrap_err().contains("no project other"));
 }
 
-/// `r` placed on `engine` for `role` with `engine-placement` On: every engine's binary is the fake, and the
-/// Cursor `top` model is `gpt-5`.
-fn placed_on(roster: &mut Roster, root: &std::path::Path, engine: Engine, role: Role) {
-    let bin = root
-        .join(crate::orchestrator::session::tests::fake_name())
-        .to_string_lossy()
-        .into_owned();
-    roster.env = Env::new(move |k| {
-        matches!(
-            k,
-            "RETASKABLE_CLAUDE" | "RETASKABLE_CURSOR" | "RETASKABLE_CODEX" | "RETASKABLE_PI"
-        )
-        .then(|| bin.clone())
-    });
-    roster.flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
-    roster.cursor_models.top = Some("gpt-5".into());
-    match role {
-        Role::Planner => roster.choice.roles.planner = Some(engine),
-        _ => roster.choice.roles.chat = Some(engine),
-    }
-}
-
 #[tokio::test]
 async fn with_placement_on_a_session_runs_on_the_chosen_engine() {
     for engine in [Engine::Cursor, Engine::Codex, Engine::Pi] {
@@ -234,11 +214,7 @@ async fn with_placement_on_a_session_runs_on_the_chosen_engine() {
         let (req, mut s) = request(brief());
         r.starter.start(req).unwrap();
         end_of(&mut s.ends).await;
-        let args = std::fs::read_to_string(r.root.join("args.txt")).unwrap();
-        assert!(!args.contains("--max-budget-usd"), "{engine:?}: {args}");
-        if engine == Engine::Cursor {
-            assert!(args.contains("--model gpt-5"), "{args}");
-        }
+        assert_ran_as(&r.root, engine);
     }
 }
 
