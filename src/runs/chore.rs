@@ -116,11 +116,17 @@ pub fn chore_lock_name(kind: ChoreKind, base: &str) -> Option<String> {
 
 /// The model an implementer runs on: the chore tier for a chore (a playtest fix aside), else the normal tier.
 /// A `local` tier stays `local`: the engine starts it as `--model sonnet`, which its environment maps onto the model.
-pub fn model_for(chore: Option<&Chore>, normal_tier: &'static str, item: &crate::backlog::Item) -> &'static str {
+/// `retry` is a piece with earlier failed attempts (a `limited` one counts none), which `implementer_model` steps up.
+pub fn model_for(
+    chore: Option<&Chore>,
+    normal_tier: &'static str,
+    item: &crate::backlog::Item,
+    retry: bool,
+) -> &'static str {
     match chore {
         _ if normal_tier == LOCAL => LOCAL,
         Some(c) if c.kind != ChoreKind::PlaytestFix => chore_tier(),
-        _ => implementer_model(normal_tier, item, 0),
+        _ => implementer_model(normal_tier, item, u32::from(retry)),
     }
 }
 
@@ -272,7 +278,7 @@ mod tests {
         let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
         let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
         assert_eq!(tier, LOCAL);
-        assert_eq!(model_for(Some(&tidy), tier, &Default::default()), LOCAL);
+        assert_eq!(model_for(Some(&tidy), tier, &Default::default(), true), LOCAL);
         assert!(run.is_some() && local.try_take().is_none(), "the chore holds the slot");
         // Busy: no waiting.
         let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
