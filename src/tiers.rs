@@ -6,6 +6,8 @@
 //! wired to anything that can act on them (no session starts against a local server, and no
 //! "waiting for the limit" state), so both run on `sonnet` for now, same as everything below
 //! `opusAbovePct`.
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use serde_json::Value;
 
 use crate::backlog::Item;
@@ -50,6 +52,58 @@ pub fn is_five_hour_reading(usage: &Value) -> bool {
         Some(rate_limit_type) => rate_limit_type == "five_hour",
         None => true,
     }
+}
+
+/// A five-hour reading counts as "on a subscription" for this long after its window's reset
+/// (`onSubscription` in `agent/src/tiers.ts`).
+const SUBSCRIPTION_WEEK_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Whether Claude Code has reported a five-hour usage window in the last week, i.e. this computer is on a Claude
+/// subscription rather than an API key (`onSubscription`, docs/specs/engines/03-choosing-the-engine.md section 3.4).
+/// False with no reading, a reading that isn't a five-hour one, or one whose window reset over a week ago.
+pub fn on_subscription(usage: Option<&Value>, now_epoch: i64) -> bool {
+    usage
+        .and_then(five_hour_resets_at)
+        .is_some_and(|resets_at| resets_at >= now_epoch - SUBSCRIPTION_WEEK_SECS)
+}
+
+/// The `resetsAt` of a five-hour reading: its `unifiedWindows.five_hour`'s, else the top-level one.
+fn five_hour_resets_at(usage: &Value) -> Option<i64> {
+    if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
+        return window.get("resetsAt").and_then(Value::as_i64);
+    }
+    if usage.get("rateLimitType").and_then(Value::as_str) != Some("five_hour") && usage.get("rateLimitType").is_some() {
+        return None;
+    }
+    usage.get("resetsAt").and_then(Value::as_i64)
+}
+
+/// The computer's latest five-hour reset across every project's saved usage (0 when none). One signal for the whole
+/// machine: a project's reading counts for every session (`subscription-zero-budget`).
+static LATEST_FIVE_HOUR_RESET: AtomicI64 = AtomicI64::new(0);
+static FLAG: std::sync::OnceLock<std::sync::Arc<crate::flags::Flags>> = std::sync::OnceLock::new();
+
+/// Notes a project's saved usage reading in the machine-wide signal.
+pub fn note_usage(usage: &Value) {
+    if let Some(resets_at) = five_hour_resets_at(usage) {
+        LATEST_FIVE_HOUR_RESET.fetch_max(resets_at, Ordering::Relaxed);
+    }
+}
+
+/// Hands over the Retaskable flags client the `subscription-zero-budget` flag is read from.
+pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
+    let _ = FLAG.set(flags);
+}
+
+/// Whether sessions run with no dollar cap right now: the flag is On and the computer is on a subscription.
+pub fn machine_on_subscription(now_epoch: i64) -> bool {
+    FLAG.get().is_some_and(|f| f.last("subscription-zero-budget")) && signal_on(now_epoch)
+}
+
+/// The machine-wide signal alone: some project has saved a five-hour reading from the last week.
+pub fn signal_on(now_epoch: i64) -> bool {
+    let resets_at = LATEST_FIVE_HOUR_RESET.load(Ordering::Relaxed);
+    on_subscription(Some(&serde_json::json!({"resetsAt": resets_at})), now_epoch)
 }
 
 /// `midTier` (agent/src/tiers.ts, section 7.1): `tier`, but never Opus. The drafter and the triager
@@ -152,6 +206,27 @@ mod tests {
     const NOW: i64 = 1_700_000_000;
     fn models() -> ModelsConfig {
         ModelsConfig::default()
+    }
+
+    #[test]
+    fn on_subscription_reads_a_recent_five_hour_window() {
+        let w = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 10}}});
+        assert!(on_subscription(Some(&w), NOW));
+        assert!(on_subscription(
+            Some(&json!({"status": "allowed", "resetsAt": NOW - 3600})),
+            NOW
+        ));
+    }
+
+    #[test]
+    fn on_subscription_is_false_without_a_recent_five_hour_reading() {
+        assert!(!on_subscription(None, NOW));
+        let seven = json!({"rateLimitType": "seven_day", "resetsAt": NOW + 10});
+        assert!(!on_subscription(Some(&seven), NOW));
+        let old = json!({"status": "allowed", "resetsAt": NOW - 8 * 24 * 3600});
+        assert!(!on_subscription(Some(&old), NOW));
+        let old_window = json!({"unifiedWindows": {"five_hour": {"resetsAt": NOW - 8 * 24 * 3600}}});
+        assert!(!on_subscription(Some(&old_window), NOW));
     }
 
     #[test]

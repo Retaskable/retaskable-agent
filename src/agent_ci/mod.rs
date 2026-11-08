@@ -300,7 +300,7 @@ impl CiLoop {
         discovery::discover(git, repo, base).await?;
         let main = discovery::git(git, repo, &["rev-parse", &format!("origin/{base}")]).await?;
         let list = prs::list(&self.programs.gh, repo, &p.github_repo, base).await?;
-        let ready = prs::ready(&list, main.trim(), ci_when_ready_active(p))?;
+        let mut ready = prs::ready(&list, main.trim(), ci_when_ready_active(p))?;
         // The person's-merge hold (section 3.3). A host that can't be read holds no one.
         let host = report::Host {
             program: self.programs.gh.clone().into(),
@@ -315,6 +315,8 @@ impl CiLoop {
             Err(e) => tracing::warn!("{id}: merge hold: {e}"),
             Ok(Ok(())) => {}
         }
+        // The baseline: main's own push run (the key is main's sha alone, so a new sha is a new run).
+        ready.push(CheckKey::push(main.trim()));
         Ok(ready)
     }
 }

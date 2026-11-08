@@ -32,8 +32,8 @@ pub fn describe(text: &str, key: &str) -> String {
 }
 
 /// The computer that wrote a status for `key`, from `agent-ci <computer>: ... (<key>)`.
-fn computer_of<'a>(s: &'a Status, key: &str) -> Option<&'a str> {
-    if s.context != report::PR_CONTEXT || !s.description.ends_with(&format!(" ({key})")) {
+fn computer_of<'a>(s: &'a Status, context: &str, key: &str) -> Option<&'a str> {
+    if s.context != context || !s.description.ends_with(&format!(" ({key})")) {
         return None;
     }
     s.description
@@ -65,9 +65,14 @@ fn claim_span(mut times: Vec<i64>) -> Option<(i64, i64)> {
 
 /// Decides from the statuses read back. `me` counts as a claimant starting `now_ms` when it has posted none yet.
 pub fn decide(statuses: &[Status], key: &str, me: &str, now_ms: i64) -> Verdict {
+    decide_in(report::PR_CONTEXT, statuses, key, me, now_ms)
+}
+
+/// `decide` over the statuses of one context (a pull request's or a push's).
+pub fn decide_in(context: &str, statuses: &[Status], key: &str, me: &str, now_ms: i64) -> Verdict {
     let mut pending: std::collections::BTreeMap<&str, Vec<i64>> = Default::default();
     for s in statuses {
-        let Some(computer) = computer_of(s, key) else {
+        let Some(computer) = computer_of(s, context, key) else {
             continue;
         };
         match s.state.as_str() {
@@ -107,6 +112,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Sen
 /// host that can't be reached gives an error: the check doesn't run (fail closed).
 pub async fn claim(
     host: &std::sync::Arc<Host>,
+    context: &'static str,
     sha: &str,
     key: &str,
     computer: &str,
@@ -116,14 +122,14 @@ pub async fn claim(
         let (h, sha) = (host.clone(), sha.to_string());
         blocking(move || h.read_statuses(&sha))
     };
-    let first = decide(&read().await?, key, computer, now_ms());
+    let first = decide_in(context, &read().await?, key, computer, now_ms());
     if !matches!(first, Verdict::Run { .. }) {
         return Ok(first);
     }
     let (h, sha_s) = (host.clone(), sha.to_string());
     let text = describe(&report::running_text(&report::me(computer)), key);
-    blocking(move || h.post_status(&sha_s, report::PR_CONTEXT, State::Pending, &text, None)).await?;
-    Ok(decide(&read().await?, key, computer, now_ms()))
+    blocking(move || h.post_status(&sha_s, context, State::Pending, &text, None)).await?;
+    Ok(decide_in(context, &read().await?, key, computer, now_ms()))
 }
 
 /// Runs `work`, calling `post` every `every` meanwhile (the claim's refresh). Returns `work`'s output.

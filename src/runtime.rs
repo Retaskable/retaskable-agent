@@ -306,6 +306,9 @@ pub fn start_project(
 ) {
     let project_dir = dir.join("projects").join(project.id_or_derived());
     trim_state(&project_dir);
+    if let Some(usage) = crate::store::Store::load(&project_dir).ok().and_then(|s| s.usage()) {
+        crate::tiers::note_usage(&usage);
+    }
     // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
     // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
     // Only the dry orchestrator loop (`orchestrator::driver`, RETASKABLE_ORCHESTRATOR) writes events

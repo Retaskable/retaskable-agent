@@ -364,7 +364,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let bug_version = connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default());
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
-    let live = orchestrator::live::LiveHandle::new(mode);
+    let live = orchestrator::live::LiveHandle::new(mode).with_machine_dir(dir.to_path_buf());
     let tray_sessions = live.sessions().clone();
     view.item_commands
         .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
@@ -402,6 +402,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             // background so a role on another engine is offered a run before any run has asked.
             let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
             placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
+            retaskable_agent::tiers::set_flags(placement.clone());
+            placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
             let roster = orchestrator::plan_run::Roster {
                 data_dir: dir.to_path_buf(),
                 projects: cfg.projects.clone(),
