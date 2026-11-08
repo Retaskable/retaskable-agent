@@ -262,8 +262,6 @@ mod tests {
         let cfg = load(dir.path()).unwrap();
         let p = &cfg.projects[0];
         assert_eq!(p.base_branch, "main");
-        assert_eq!(p.sync_main, SyncMain::Off);
-        assert_eq!(ProjectConfig::default().sync_main, SyncMain::Auto);
         assert_eq!(p.checks.len(), 1);
         assert_eq!(p.checks[0].command, "cargo test");
     }
@@ -423,6 +421,8 @@ mod tests {
         assert_eq!(p.repo_path, "C:/Users/mail/working/Personal/Games/void-miner");
         assert_eq!(p.github_repo, "jamez667/void-miner");
         assert_eq!(p.checks.len(), 1);
+        assert_eq!(p.sync_main, SyncMain::Off);
+        assert_eq!(ProjectConfig::default().sync_main, SyncMain::Auto);
         assert_eq!(p.checks[0].command, "cargo test");
         assert_eq!(p.review.max_scout_diff_lines, 2000);
         assert_eq!(p.review.min_scout_diff_lines, 1000);
