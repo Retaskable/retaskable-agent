@@ -66,13 +66,22 @@ impl Machine {
             .filter(|(_, live)| **live)
             .map(|(lp, _)| lp.flags.clone())
             .collect();
-        for flag in flags {
+        for flag in &flags {
             if self.auto.cfg.enabled && flag.on("auto-concurrency").await {
                 on = true;
                 break;
             }
         }
         self.auto.on = on;
+        let mut lone_week = false;
+        if on {
+            for flag in &flags {
+                if flag.on("auto-concurrency-week").await {
+                    lone_week = true;
+                    break;
+                }
+            }
+        }
         if !on {
             self.links.item_commands.set_auto(None);
         }
@@ -87,7 +96,7 @@ impl Machine {
                 readings.extend([lp.store.usage(), lp.store.week_usage()].into_iter().flatten());
             }
             for usage in readings {
-                self.auto.pacer.record(now, &usage);
+                self.auto.pacer.record_with(now, &usage, lone_week);
             }
         }
         if !on || !self.auto.pacer.due(now) {
