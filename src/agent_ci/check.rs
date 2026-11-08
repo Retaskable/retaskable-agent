@@ -143,23 +143,25 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     };
     // The claim is already posted; it is posted again every few minutes until the last status.
     let refresh = || post(State::Pending, report::running_text(&me));
-    claim::refreshing(j.refresh, refresh, async {
-        let fail = |reason: String, log: String| {
-            let (h, key, head) = (host_api.clone(), key_text(&j.key), j.key.head.clone());
-            let pr = j.key.pr;
-            let text = report::failed_text(&me, minutes(), &reason);
-            let post_status = post(State::Failure, text);
-            async move {
-                post_status.await;
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = h.post_failure_comment(pr, "agent CI", &head, &key, &log) {
-                        tracing::warn!("agent CI: posting the failure comment failed: {e:#}");
-                    }
-                })
-                .await;
-            }
-        };
+    let fail = |reason: String, log: String| {
+        let (h, key, head) = (host_api.clone(), key_text(&j.key), j.key.head.clone());
+        let pr = j.key.pr;
+        let text = report::failed_text(&me, minutes(), &reason);
+        let post_status = post(State::Failure, text);
+        async move {
+            post_status.await;
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = h.post_failure_comment(pr, "agent CI", &head, &key, &log) {
+                    tracing::warn!("agent CI: posting the failure comment failed: {e:#}");
+                }
+            })
+            .await;
+        }
+    };
 
+    // Only the fetch and the run are refreshed: the final status and the comment are posted after the last
+    // refresh, so a late refresh can't turn the finished check pending again.
+    let result: Result<(), (String, String)> = claim::refreshing(j.refresh, refresh, async {
         let (data, id, main) = (j.data_dir.clone(), j.id.clone(), j.project.base_branch.clone());
         let head_ref = format!("refs/pull/{}/head", j.key.pr);
         let fetched = tokio::task::spawn_blocking(move || {
@@ -176,8 +178,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
             Ok(Ok(host::FetchOutcome::Ready { dir, .. })) => dir,
             Ok(Ok(host::FetchOutcome::Conflict { reason })) => {
                 let line = format!("conflicts with {}: {}", j.project.base_branch, last_line(&reason));
-                fail(line, reason).await;
-                return false;
+                return Err((line, reason));
             }
             other => {
                 let why = match other {
@@ -186,8 +187,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
                     Ok(Ok(_)) => unreachable!(),
                 };
                 tracing::warn!("agent CI: fetch failed: {why}");
-                fail(format!("fetch failed: {}", last_line(&why)), why).await;
-                return false;
+                return Err((format!("fetch failed: {}", last_line(&why)), why));
             }
         };
 
@@ -208,26 +208,29 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
         host::cleanup(&dir);
         let _ = std::fs::remove_file(name_file(&dir));
         match outcome {
-            Ok(o) if o.exit_code == Some(0) => {
-                post(State::Success, report::passed_text(&me, minutes())).await;
-                true
-            }
+            Ok(o) if o.exit_code == Some(0) => Ok(()),
             Ok(o) => {
                 let reason = if o.timed_out {
                     "timed out".to_string()
                 } else {
                     last_line(&o.tail).to_string()
                 };
-                fail(reason, o.tail).await;
-                false
+                Err((reason, o.tail))
             }
-            Err(e) => {
-                fail(format!("couldn't run: {e:#}"), format!("{e:#}")).await;
-                false
-            }
+            Err(e) => Err((format!("couldn't run: {e:#}"), format!("{e:#}"))),
         }
     })
-    .await
+    .await;
+    match result {
+        Ok(()) => {
+            post(State::Success, report::passed_text(&me, minutes())).await;
+            true
+        }
+        Err((reason, log)) => {
+            fail(reason, log).await;
+            false
+        }
+    }
 }
 
 /// Recovery (agent.md section 7.4), at start: removes the container each leftover check named, then every

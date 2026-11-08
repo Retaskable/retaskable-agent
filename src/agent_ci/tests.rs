@@ -614,4 +614,23 @@ mod stubbed {
         assert!(calls(&r).matches("state=pending").count() >= 4, "{}", calls(&r));
         assert_eq!(calls(&r).matches("state=success").count(), 1);
     }
+
+    #[tokio::test]
+    async fn the_final_status_is_the_last_even_when_posting_it_is_slow() {
+        let mut r = pr_rig("sleep 1");
+        claim_gh(&mut r, &[]);
+        // A `gh` that takes a while to post the final status, long enough for a refresh to come due.
+        let bin = r._dir.path().join("bin");
+        let body = std::fs::read_to_string(bin.join("gh")).unwrap();
+        let slow = body.replacen(
+            "if [ \"$3\" = POST ]; then ",
+            "if [ \"$3\" = POST ]; then case \"$*\" in *state=success*|*state=failure*) sleep 1;; esac; ",
+            1,
+        );
+        script(&bin, "gh", slow.split_once('\n').unwrap().1);
+        r.ci.refresh = Duration::from_millis(200);
+        run_as(&mut r, "a").await;
+        let store = std::fs::read_to_string(r._dir.path().join("statuses.txt")).unwrap();
+        assert!(store.lines().last().unwrap().starts_with("success|"), "{store}");
+    }
 }
