@@ -423,7 +423,9 @@ async fn attempt(
         ..
     } = job;
     let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
-    let cursor = placed.cursor.map(|c| crate::engines::cursor::with_project_or_gh(project, c));
+    let cursor = placed
+        .cursor
+        .map(|c| crate::engines::cursor::with_project_or_gh(project, c));
     let now = crate::telemetry::now_ms() / 1000;
     // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
     // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
