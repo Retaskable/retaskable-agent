@@ -14,10 +14,10 @@ use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
 mod cursor;
-mod orchestrator;
-mod usage;
 #[cfg(test)]
 mod held_tests;
+mod orchestrator;
+mod usage;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
 pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";

@@ -1,9 +1,9 @@
 //! The snapshot's `orchestrator` block (cloud.md section 5.2): what the project's loop is doing.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{AgentView, NO_WORK_YET};
 use crate::telemetry::debounce::OpenAnomaly;
-use crate::telemetry::events::{iso_utc_millis, scrub, MAX_TEXT};
+use crate::telemetry::events::{MAX_TEXT, iso_utc_millis, scrub};
 
 /// The most open anomalies one snapshot carries; the rest are counted in `anomaliesMore`.
 const MAX_ANOMALIES: usize = 20;

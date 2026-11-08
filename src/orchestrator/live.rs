@@ -87,13 +87,26 @@ pub struct LiveState {
 }
 
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
-type Reported = (u32, BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldItem>)>);
+type Reported = (
+    u32,
+    BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldItem>)>,
+);
 
 fn reported(state: &LiveState) -> Reported {
     let projects = state
         .projects
         .iter()
-        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone(), p.anomalies.clone(), p.items.clone())))
+        .map(|(id, p)| {
+            (
+                id.clone(),
+                (
+                    p.paused,
+                    p.limit_resets_at.clone(),
+                    p.anomalies.clone(),
+                    p.items.clone(),
+                ),
+            )
+        })
         .collect();
     (state.concurrency, projects)
 }
