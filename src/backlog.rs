@@ -14,6 +14,7 @@
 pub mod asks;
 pub mod drafts;
 pub mod runs;
+pub mod suggestions;
 
 use crate::env::Env;
 use std::sync::Arc;
@@ -328,6 +329,11 @@ impl BacklogError {
             BacklogError::BadAnswer { code, .. } => code.as_deref(),
             BacklogError::Unreachable(_) => None,
         }
+    }
+
+    /// The store refused a suggestion's verdict because it already has one (`already_answered`).
+    pub fn is_already_answered(&self) -> bool {
+        self.code() == Some("already_answered")
     }
 }
 

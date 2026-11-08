@@ -318,6 +318,14 @@ impl Default for LighthouseConfig {
     }
 }
 
+/// The vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VetSuggestionsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -386,6 +394,8 @@ pub struct ProjectConfig {
     pub tuning: TuningConfig,
     #[serde(default)]
     pub lighthouse: LighthouseConfig,
+    #[serde(default)]
+    pub vet_suggestions: VetSuggestionsConfig,
 }
 
 impl ProjectConfig {
@@ -483,6 +493,14 @@ mod tests {
                 min_score: 80
             }
         );
+    }
+
+    #[test]
+    fn vet_suggestions_is_off_by_default_and_reads_enabled() {
+        let p: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert!(!p.vet_suggestions.enabled);
+        let p: ProjectConfig = serde_json::from_str(r#"{"vetSuggestions":{"enabled":true}}"#).unwrap();
+        assert!(p.vet_suggestions.enabled);
     }
 
     #[test]
@@ -619,6 +637,7 @@ mod tests {
             engines: None,
             tuning: TuningConfig::default(),
             lighthouse: LighthouseConfig::default(),
+            vet_suggestions: VetSuggestionsConfig::default(),
         }
     }
 }
