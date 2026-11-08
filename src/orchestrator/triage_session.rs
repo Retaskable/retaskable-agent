@@ -36,6 +36,19 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(&project.repo_path))
 }
 
+/// The row a triager session (or its second look) lists itself as.
+fn triager_info(project: &str, item: &str, lane: Option<u32>, placed: &Placement, model: &str) -> SessionInfo {
+    SessionInfo {
+        project: project.to_string(),
+        item_id: item.to_string(),
+        title: None,
+        role: Role::Triager,
+        lane,
+        engine: placed.engine,
+        model: model_name(placed.engine, model, placed.cursor.as_ref()),
+    }
+}
+
 impl ClaudeStarter {
     /// Where the triager (and its second look) runs: the engine chosen for the role and its binary. With
     /// `engine-placement` Off (`placement`), the engine chosen is not used: Claude alone runs. Only the triager itself is refused then when it isn't on Claude (`start_triage`); a second look always was Claude.
@@ -96,15 +109,7 @@ impl ClaudeStarter {
         .to_string();
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let sessions = self.sessions.clone();
-        let info = SessionInfo {
-            project: project_id.clone(),
-            item_id: item_id.clone(),
-            title: None,
-            role: Role::Triager,
-            lane,
-            engine: placed.engine,
-            model: model_name(placed.engine, &model, placed.cursor.as_ref()),
-        };
+        let info = triager_info(&project_id, &item_id, lane, &placed, &model);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -209,15 +214,7 @@ impl ClaudeStarter {
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let sessions = self.sessions.clone();
-        let info = SessionInfo {
-            project: project_id.clone(),
-            item_id: item_id.clone(),
-            title: None,
-            role: Role::Triager,
-            lane,
-            engine: placed.engine,
-            model: model_name(placed.engine, top_tier(), placed.cursor.as_ref()),
-        };
+        let info = triager_info(&project_id, &item_id, lane, &placed, top_tier());
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
