@@ -102,6 +102,20 @@ pub fn new_session_id() -> String {
     )
 }
 
+fn piece_prompt<'a>(s: &Session<'a>, kind: RunKind, piece: &'a RunPiece) -> PiecePrompt<'a> {
+    PiecePrompt {
+        kind,
+        piece,
+        project_type: s.project_type,
+        branch: s.branch,
+        base_branch: s.base_branch,
+        github_repo: s.github_repo,
+        checks: s.checks,
+        code_gates: s.code_gates,
+        where_to_start: s.where_to_start,
+    }
+}
+
 /// The `SessionSpec` for `s`, either starting fresh (templating the full prompt) or resuming one
 /// already running (the follow-up text alone).
 pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
@@ -124,46 +138,19 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
         }
-        Start::Piece { template, kind, piece } => {
-            let prompt = build_piece_prompt(
-                template,
-                &PiecePrompt {
-                    kind,
-                    piece,
-                    project_type: s.project_type,
-                    branch: s.branch,
-                    base_branch: s.base_branch,
-                    github_repo: s.github_repo,
-                    checks: s.checks,
-                    code_gates: s.code_gates,
-                    where_to_start: s.where_to_start,
-                },
-            )?;
-            (SessionStart::Fresh(new_session_id()), prompt)
-        }
+        Start::Piece { template, kind, piece } => (
+            SessionStart::Fresh(new_session_id()),
+            build_piece_prompt(template, &piece_prompt(s, kind, piece))?,
+        ),
         Start::Chore {
             template,
             kind,
             piece,
             chore,
-        } => {
-            let prompt = build_chore_prompt(
-                template,
-                chore,
-                &PiecePrompt {
-                    kind,
-                    piece,
-                    project_type: s.project_type,
-                    branch: s.branch,
-                    base_branch: s.base_branch,
-                    github_repo: s.github_repo,
-                    checks: s.checks,
-                    code_gates: s.code_gates,
-                    where_to_start: s.where_to_start,
-                },
-            )?;
-            (SessionStart::Fresh(new_session_id()), prompt)
-        }
+        } => (
+            SessionStart::Fresh(new_session_id()),
+            build_chore_prompt(template, chore, &piece_prompt(s, kind, piece))?,
+        ),
         Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),
         Start::Resume {
             session_id,

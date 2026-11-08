@@ -290,7 +290,6 @@ pub struct PiecePrompt<'a> {
 /// Fills `prompts/implementer-piece.md` for a fresh `build` or `fix` session. `next.what` is what to fix (for a
 /// `fix`); a look's `instructions` come from `looks[]`.
 pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String> {
-    let words = project_words(p.project_type);
     let piece = p.piece;
     let next_what = piece
         .other
@@ -314,40 +313,56 @@ pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String>
         (Some(w), false) => format!("## Instructions\n\n{w}"),
         (None, false) => String::new(),
     };
-    let mut sections = vec![
-        brief,
-        look_text(piece),
-        attempts_text(&piece.attempts),
-        piece_decisions(piece),
-        done_steps_text(piece),
-    ];
+    fill_template(
+        template,
+        p,
+        vec![
+            brief,
+            look_text(piece),
+            attempts_text(&piece.attempts),
+            piece_decisions(piece),
+            done_steps_text(piece),
+        ],
+        vec![
+            ("title", piece.title.clone()),
+            ("what", piece.what.clone()),
+            ("doneWhen", piece.done_when.clone()),
+            ("kindLine", kind_line.to_string()),
+        ],
+    )
+}
+
+/// The parts both piece templates share: the brief sections, the branch, checks, code limits and project words,
+/// then the "where to start" files.
+fn fill_template(
+    template: &str,
+    p: &PiecePrompt<'_>,
+    mut sections: Vec<String>,
+    own: Vec<(&str, String)>,
+) -> Result<String> {
+    let words = project_words(p.project_type);
     sections.retain(|s| !s.is_empty());
     let briefs = if sections.is_empty() {
         String::new()
     } else {
         format!("{}\n\n", sections.join("\n\n"))
     };
-    let filled = render_prompt(
-        template,
-        &[
-            ("pr", "PR".to_string()),
-            ("change", "pull request".to_string()),
-            ("title", piece.title.clone()),
-            ("what", piece.what.clone()),
-            ("doneWhen", piece.done_when.clone()),
-            ("kindLine", kind_line.to_string()),
-            ("briefSection", briefs),
-            ("branch", p.branch.to_string()),
-            ("baseBranch", p.base_branch.to_string()),
-            ("githubRepo", p.github_repo.to_string()),
-            ("checks", checks_text(p.checks)),
-            ("codeLimits", gate_rule(&p.code_gates)),
-            ("projectNoun", words.noun.to_string()),
-            ("projectUser", words.user.to_string()),
-            ("projectExamples", words.examples.to_string()),
-            ("projectSteps", words.steps.to_string()),
-        ],
-    )?;
+    let mut vars = vec![
+        ("pr", "PR".to_string()),
+        ("change", "pull request".to_string()),
+        ("briefSection", briefs),
+        ("branch", p.branch.to_string()),
+        ("baseBranch", p.base_branch.to_string()),
+        ("githubRepo", p.github_repo.to_string()),
+        ("checks", checks_text(p.checks)),
+        ("codeLimits", gate_rule(&p.code_gates)),
+        ("projectNoun", words.noun.to_string()),
+        ("projectUser", words.user.to_string()),
+        ("projectExamples", words.examples.to_string()),
+        ("projectSteps", words.steps.to_string()),
+    ];
+    vars.extend(own);
+    let filled = render_prompt(template, &vars)?;
     Ok(if p.where_to_start.is_empty() {
         filled
     } else {
@@ -389,7 +404,6 @@ fn chore_task(chore: &Chore, what: &str) -> Result<(&'static str, String)> {
 /// Fills `prompts/chore.md` for a chore piece's `build` or `fix` session: the kind's task, its recent chores, then
 /// earlier attempts and a look's instructions as for a piece.
 pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) -> Result<String> {
-    let words = project_words(p.project_type);
     let piece = p.piece;
     let (label, instructions) = chore_task(chore, piece.what.trim())?;
     let recent = if chore.recent.is_empty() {
@@ -416,37 +430,16 @@ pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) ->
         }
         _ => String::new(),
     };
-    let mut sections = vec![fix, look_text(piece), attempts_text(&piece.attempts)];
-    sections.retain(|s| !s.is_empty());
-    let briefs = if sections.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n\n", sections.join("\n\n"))
-    };
-    let filled = render_prompt(
+    fill_template(
         template,
-        &[
-            ("pr", "PR".to_string()),
-            ("change", "pull request".to_string()),
+        p,
+        vec![fix, look_text(piece), attempts_text(&piece.attempts)],
+        vec![
             ("label", label.to_string()),
             ("instructions", instructions),
             ("recentSection", recent),
-            ("briefSection", briefs),
-            ("branch", p.branch.to_string()),
-            ("baseBranch", p.base_branch.to_string()),
-            ("checks", checks_text(p.checks)),
-            ("codeLimits", gate_rule(&p.code_gates)),
-            ("projectNoun", words.noun.to_string()),
-            ("projectUser", words.user.to_string()),
-            ("projectExamples", words.examples.to_string()),
-            ("projectSteps", words.steps.to_string()),
         ],
-    )?;
-    Ok(if p.where_to_start.is_empty() {
-        filled
-    } else {
-        format!("{filled}\n\n{}", p.where_to_start)
-    })
+    )
 }
 
 #[cfg(test)]
