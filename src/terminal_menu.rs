@@ -2,6 +2,7 @@
 //! `render_screen` turns the tray's menu model, a cursor, the terminal's size and the console's last lines into
 //! screen lines (plain ANSI), and `handle_key` turns a key into a new cursor and what to do. The cursor holds item
 //! ids, not positions, so it stays on the same item as the menu changes.
+pub mod term;
 #[cfg(test)]
 mod tests;
 
