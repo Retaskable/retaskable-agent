@@ -246,6 +246,17 @@ pub struct SessionResult {
     pub tokens: Option<Tokens>,
 }
 
+/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead.
+pub fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
+    let usage = usage.filter(|u| u["status"] == "rejected")?;
+    let at = usage["resetsAt"].as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    at.checked_sub(now).map(std::time::Duration::from_secs)
+}
+
 /// One result's token counts (`tokensOf` in `cursor.ts`). Cache tokens are left out — they're not
 /// part of what the session was billed for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
