@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use anyhow::Result;
 
@@ -19,7 +18,6 @@ use crate::engines::{
 };
 use crate::flags::Flags;
 use crate::ideas::Ideas;
-use crate::jobs_due::DueAsker;
 use crate::orchestrator::session::quiet_timeout;
 use crate::vet::{Judged, PastVerdict, Vetter, plan, take_batch};
 
@@ -38,19 +36,23 @@ pub(crate) struct Last {
 
 #[derive(Default)]
 pub(super) struct State {
-    asker: Option<Arc<DueAsker>>,
-    /// The last day a pass was started for, on this computer.
-    tried: Option<String>,
+    due: super::ideas_daily::Due,
     pub(crate) last: Option<Last>,
     /// The last [`PAST_KEPT`] verdicts given, oldest first.
     pub(crate) recent: Vec<PastVerdict>,
+}
+
+impl AsMut<super::ideas_daily::Due> for State {
+    fn as_mut(&mut self) -> &mut super::ideas_daily::Due {
+        &mut self.due
+    }
 }
 
 impl State {
     /// Lets the next minute ask the store again at once (tests).
     #[cfg(test)]
     pub(super) fn forget_asker(&mut self) {
-        self.asker = None;
+        self.due.forget_asker();
     }
 }
 
@@ -103,38 +105,9 @@ where
     if !flags.on("chore-vetting-suggestions").await || !base.project.vet_suggestions.enabled {
         return;
     }
-    let Some(repo) = base.repo else {
+    let Some((repo, token, day)) = super::ideas_daily::due_day(&base, &state, JOB, "vet pass").await else {
         return;
     };
-    let token = match base.keychain.get(&base.backlog_url) {
-        Ok(Some(token)) => token,
-        Ok(None) => return,
-        Err(e) => {
-            tracing::warn!("{}: vet pass skipped: reading the backlog link: {e:#}", base.id);
-            return;
-        }
-    };
-    let asker = {
-        let mut st = state.lock().unwrap();
-        st.asker
-            .get_or_insert_with(|| {
-                let start = Instant::now();
-                Arc::new(DueAsker::new(
-                    base.client.clone(),
-                    repo,
-                    Some(token.clone()),
-                    JOB,
-                    move || start.elapsed().as_millis() as u64,
-                ))
-            })
-            .clone()
-    };
-    let Some(day) = asker.ask().await else {
-        return;
-    };
-    if state.lock().unwrap().tried.replace(day.clone()).as_deref() == Some(day.as_str()) {
-        return;
-    }
     let lock = format!("vet-{day}");
     if let Some(yesterday) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d")
         .ok()
