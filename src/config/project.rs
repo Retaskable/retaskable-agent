@@ -307,6 +307,14 @@ fn default_lighthouse_min_score() -> u32 {
     90
 }
 
+/// The daily vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VetSuggestionsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 impl Default for LighthouseConfig {
     fn default() -> Self {
         Self {
@@ -316,14 +324,6 @@ impl Default for LighthouseConfig {
             min_score: default_lighthouse_min_score(),
         }
     }
-}
-
-/// The vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VetSuggestionsConfig {
-    #[serde(default)]
-    pub enabled: bool,
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).

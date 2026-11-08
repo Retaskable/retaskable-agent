@@ -331,9 +331,9 @@ impl BacklogError {
         }
     }
 
-    /// The store refused a suggestion's verdict because it already has one (`already_answered`).
+    /// The store refused a suggestion's verdict because it already has an answer for it.
     pub fn is_already_answered(&self) -> bool {
-        self.code() == Some("already_answered")
+        self.code() == Some(suggestions::ALREADY_ANSWERED)
     }
 }
 
