@@ -138,79 +138,64 @@ fn the_target_is_none_when_off_and_a_note_without_a_staging_url() {
     );
 }
 
-fn draft(status: &str, ago_days: i64) -> Option<DraftState> {
-    let now = 100 * 86_400_000;
-    Some(DraftState {
+const NOW: i64 = 100 * DAY_MS;
+
+fn known(status: &str, days_ago: i64) -> Known {
+    let d = DraftState {
         status: status.into(),
-        last_entry_ms: now - ago_days * 86_400_000,
-    })
-}
-
-const NOW: i64 = 100 * 86_400_000;
-
-fn known(d: Option<DraftState>) -> Known {
-    Known::from([("/ mobile a".to_string(), d)])
+        last_entry_ms: NOW - days_ago * DAY_MS,
+    };
+    Known::from([("k".to_string(), Some(d))])
 }
 
 #[test]
-fn a_key_is_quiet_while_its_draft_is_open_merged_or_recently_discarded() {
-    assert!(!is_new_finding("/ mobile a", &known(draft("open", 90)), NOW));
-    assert!(!is_new_finding("/ mobile a", &known(draft("merged", 90)), NOW));
-    assert!(!is_new_finding("/ mobile a", &known(draft("discarded", 29)), NOW));
-    assert!(is_new_finding("/ mobile a", &known(draft("discarded", 31)), NOW));
-    assert!(is_new_finding("/ mobile a", &known(draft("failed", 1)), NOW));
-    assert!(is_new_finding("/ mobile a", &known(None), NOW));
-    assert!(is_new_finding("/ mobile b", &known(draft("open", 1)), NOW));
-}
-
-fn summary(keys: &[&str]) -> Summary {
-    Summary {
-        page: "/".into(),
-        preset: "mobile".into(),
-        scores: Scores {
-            performance: Some(62),
-            ..Scores::default()
-        },
-        findings: keys
-            .iter()
-            .map(|k| Finding {
-                key: format!("/ mobile {k}"),
-                title: format!("Title of {k}"),
-                display_value: "900 KiB".into(),
-                items: vec![format!("https://staging.example.com/{k}.js")],
-            })
-            .collect(),
-        ..Summary::default()
-    }
+fn a_key_is_quiet_while_its_draft_is_open_or_merged() {
+    assert!(is_new_finding("other", &known("open", 1), NOW));
+    assert!(!is_new_finding("k", &known("open", 90), NOW));
+    assert!(!is_new_finding("k", &known("merged", 90), NOW));
 }
 
 #[test]
-fn new_findings_keep_each_key_once_and_only_if_new() {
-    let s = [summary(&["a", "b"]), summary(&["b", "c"])];
-    let k = known(draft("open", 1));
-    let keys: Vec<&str> = new_findings(&s, &k, NOW).iter().map(|(_, f)| f.key.as_str()).collect();
-    assert_eq!(keys, ["/ mobile b", "/ mobile c"]);
+fn a_discarded_draft_is_quiet_for_30_days() {
+    assert!(!is_new_finding("k", &known("discarded", 29), NOW));
+    assert!(is_new_finding("k", &known("discarded", 31), NOW));
 }
 
 #[test]
-fn the_request_names_each_finding_with_scores_and_items_and_carries_the_tag_and_keys() {
-    let s = [summary(&["a", "b"])];
-    let new = new_findings(&s, &Known::new(), NOW);
-    let d = lighthouse_request("https://staging.example.com", &s, &new, "- a.md: Alpha")
-        .unwrap()
-        .unwrap();
+fn a_failed_or_missing_draft_makes_the_finding_new() {
+    assert!(is_new_finding("k", &known("failed", 1), NOW));
+    assert!(is_new_finding("k", &Known::from([("k".to_string(), None)]), NOW));
+}
+
+fn two_summaries() -> Vec<Summary> {
+    let s = summarize(&report(), "/", "mobile", 90, false);
+    vec![s.clone(), s]
+}
+
+#[test]
+fn duplicates_are_kept_once_and_known_keys_dropped() {
+    let sums = two_summaries();
+    let all = new_findings(&sums, &Known::new(), NOW);
+    assert_eq!(all.len(), sums[0].findings.len());
+    let key = sums[0].findings[0].key.clone();
+    let mut k = known("open", 1);
+    k.insert(key.clone(), k["k"].clone());
+    assert!(new_findings(&sums, &k, NOW).iter().all(|(_, f)| f.key != key));
+}
+
+#[test]
+fn the_request_names_each_finding_with_scores_and_items_and_is_tagged() {
+    let sums = two_summaries();
+    let new = new_findings(&sums, &Known::new(), NOW);
+    let d = lighthouse_request(&sums, &new, "- docs/specs/a.md").unwrap();
     assert!(d.request.starts_with("[Lighthouse]"));
-    for want in [
-        "/ mobile a",
-        "Title of b",
-        "900 KiB",
-        "https://staging.example.com/b.js",
-        "performance 62",
-        "- a.md: Alpha",
-    ] {
-        assert!(d.request.contains(want), "{want}");
+    assert!(is_lighthouse_request(&d.request));
+    assert!(d.request.contains("docs/specs/a.md"));
+    assert!(d.request.contains("accessibility"));
+    for (_, f) in &new {
+        assert!(d.request.contains(&f.key), "{}", f.key);
+        assert!(f.items.iter().all(|i| d.request.contains(i.as_str())));
     }
     let note = d.intake.unwrap()["note"].as_str().unwrap().to_string();
-    assert!(note.contains("/ mobile a") && note.contains("/ mobile b"));
-    assert!(lighthouse_request("u", &s, &[], "").unwrap().is_none());
+    assert!(note.contains(&new[0].1.key));
 }

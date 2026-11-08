@@ -158,7 +158,6 @@ impl Ctx {
             follow_up: rebase_request(reason),
             usage: None,
             placement: self.placement,
-            lighthouse: false,
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
         if result.status == DrafterStatus::Failed {

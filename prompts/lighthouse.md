@@ -1,25 +1,21 @@
-{{tag}} A Lighthouse run on {{url}} found new problems. Turn them into a spec.
+Lighthouse ran on the staging deploy and found new problems. Write them up as a spec.
 
 ## Pages and scores
 
 {{pages}}
-
 ## New findings
 
-Each finding is `<page> <preset> <audit id>` (or `score <category>`), with Lighthouse's own words and up to 3 items it names.
+Each finding's key is in backticks, with its offending items below it.
 
 {{findings}}
-
 ## The repo's specs
 
 {{specsIndex}}
 
 ## What to write
 
-Write **one** spec that covers these findings, or extend an existing spec above that already owns the area. It must say:
+Write **one spec**, or **extend one** of the specs above if a finding belongs to it. For the findings above, say:
 
-1. **What's wrong**, with the numbers above (scores, display values, items).
-2. **What to change**, concretely enough to build.
-3. **How to check it's fixed**: run Lighthouse on the same page and preset and look for the audit or score named in the finding.
-
-Staging is blocked from indexing on purpose, so ignore anything about crawling or SEO.
+1. **What's wrong**, with the numbers (the scores and values shown).
+2. **What to change**, as concrete behaviour, naming the offending items.
+3. **How to check it's fixed**: run Lighthouse on the same pages and presets and confirm the score or audit passes.
