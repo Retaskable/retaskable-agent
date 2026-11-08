@@ -13,20 +13,7 @@ impl ProjectLoop {
     /// The engine that can take over from `started_on` while it is at its usage limit: another one the
     /// implementer role may use here (any lane's, or the default's) that isn't limited too.
     pub(super) fn takeover(&self, pool: &LanePool, shared: &Shared<'_>, started_on: EngineId) -> Option<EngineId> {
-        let choice = &shared.links.engine_choice;
-        let engines: Vec<EngineId> = (1..=pool.rules().lanes)
-            .map(Some)
-            .chain([None])
-            .map(|lane| {
-                program_of(engine_for(
-                    choice,
-                    self.project.engines.as_ref(),
-                    Role::Implementer,
-                    lane,
-                ))
-            })
-            .collect();
-        shared.engine_limits.takeover(started_on, &engines, Instant::now())
+        takeover_in(&self.project, pool, shared, started_on)
     }
 
     /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
@@ -103,4 +90,20 @@ impl ProjectLoop {
             }
         }
     }
+}
+
+/// [`ProjectLoop::takeover`] for a caller that holds a borrow of the loop's runs.
+pub(super) fn takeover_in(
+    project: &crate::config::ProjectConfig,
+    pool: &LanePool,
+    shared: &Shared<'_>,
+    started_on: EngineId,
+) -> Option<EngineId> {
+    let choice = &shared.links.engine_choice;
+    let engines: Vec<EngineId> = (1..=pool.rules().lanes)
+        .map(Some)
+        .chain([None])
+        .map(|lane| program_of(engine_for(choice, project.engines.as_ref(), Role::Implementer, lane)))
+        .collect();
+    shared.engine_limits.takeover(started_on, &engines, Instant::now())
 }
