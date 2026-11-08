@@ -119,6 +119,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
+        settings: Default::default(),
     })
 }
 
@@ -242,6 +243,33 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
 
     // A quiet spell: it says it's alive.
     assert_eq!(read(&mut first).await, json!({ "type": "alive" }));
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one", "two"]);
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        view.clone(),
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut one = next(&mut rx).await;
+    let mut two = next(&mut rx).await;
+    for a in [&mut one, &mut two] {
+        assert_eq!(read(a).await["type"], "hello");
+        assert_eq!(read(a).await["type"], "snapshot");
+    }
+    view.settings.fire();
+    for a in [&mut one, &mut two] {
+        assert_eq!(read_not_alive(a).await["type"], "hello");
+    }
     c.stop(Duration::from_secs(1)).await;
 }
 

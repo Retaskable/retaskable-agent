@@ -299,7 +299,7 @@ impl From<anyhow::Error> for SaveError {
 
 /// `engineChoice` as both `GET /api/settings` returns it and `config.json` stores it: the same
 /// shape either way, so a save can write back exactly what a read would show.
-pub(super) fn engine_choice_json(cfg: &config::EngineChoiceConfig) -> Value {
+pub(crate) fn engine_choice_json(cfg: &config::EngineChoiceConfig) -> Value {
     json!({
         "default": cfg.default.map(|e| e.to_string()),
         "roles": {

@@ -34,6 +34,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
+        settings: Default::default(),
     }
 }
 

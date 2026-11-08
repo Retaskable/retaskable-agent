@@ -311,7 +311,7 @@ async fn session(
 ) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    for msg in [view.hello(project), view.snapshot(project, &cloud.dir)] {
+    for msg in [view.hello(project).await, view.snapshot(project, &cloud.dir)] {
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
@@ -325,6 +325,8 @@ async fn session(
     paused.mark_unchanged();
     let mut restart = view.restart.subscribe();
     restart.mark_unchanged();
+    let mut settings_saved = view.settings.subscribe();
+    settings_saved.mark_unchanged();
     let mut trial_saved = crate::store::subscribe_trial_changes();
     trial_saved.mark_unchanged();
     let mut trial_sent = view.trial_json(project, &cloud.dir);
@@ -349,6 +351,7 @@ async fn session(
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = trial_saved.changed() => {

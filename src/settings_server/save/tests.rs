@@ -367,3 +367,31 @@ async fn saving_network_access_needs_a_long_enough_password_and_turning_it_off_k
     assert!(!saved_off.enabled);
     assert_eq!(saved_off.password_hash, Some(hash));
 }
+
+#[tokio::test]
+async fn a_successful_save_fires_the_hello_signal_and_a_refused_one_does_not() {
+    let (settings, _dir) = test_server();
+    let signal = crate::hello_settings::HelloSettings::default();
+    let mut seen = signal.subscribe();
+    seen.mark_unchanged();
+    settings.set_saved_signal(signal);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let post = |body: String| {
+        app.clone().oneshot(
+            request("POST", "/api/settings")
+                .header("Origin", format!("http://{HOST}"))
+                .header("Cookie", cookie.clone())
+                .header("X-CSRF-Token", csrf.clone())
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    let res = post(r#"{"dailyUsd":5}"#.to_string()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(!seen.has_changed().unwrap());
+    let found = tags::found_tags(&tags::machine_facts(&Env::empty()));
+    let res = post(json!({ "tags": found }).to_string()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(seen.has_changed().unwrap());
+}
