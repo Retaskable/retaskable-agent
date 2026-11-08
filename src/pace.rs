@@ -145,6 +145,7 @@ impl Pacer {
     ) -> Pace {
         let (min, max) = (cfg.min, cfg.max);
         let new_window = self.new_window();
+        let stale = self.samples.last().is_some_and(|s| now - s.at > KEEP_SECS);
         self.last_resets = self.samples.last().map(|s| s.resets_at).or(self.last_resets);
         self.last_step = Some(now);
         if new_window {
@@ -154,7 +155,7 @@ impl Pacer {
             };
         }
         let current = current.clamp(min, max);
-        let latest = self.samples.last().copied();
+        let latest = self.samples.last().copied().filter(|_| !stale);
         if latest.is_some_and(|s| s.utilization * 100.0 >= f64::from(cfg.target_pct)) {
             return Pace {
                 allowed: min,
@@ -164,6 +165,7 @@ impl Pacer {
         if let Some((used, resets_at)) = self.week {
             let elapsed = 1.0 - ((resets_at - now) as f64 / WEEK_SECS as f64).clamp(0.0, 1.0);
             if (used - elapsed) * 100.0 > f64::from(cfg.week_margin_pct) {
+                // The floor is the spec's, whatever `min` is: with min 3 and floor 2 the week may go to 2.
                 let floor = cfg.week_floor.min(max);
                 let allowed = current.saturating_sub(1).max(floor).min(current);
                 return Pace {
@@ -351,6 +353,26 @@ mod tests {
         assert_eq!(p.pace(NOW, 3, 2, true, &cfg()).allowed, 4);
         assert_eq!(p.pace(NOW, 3, 2, false, &cfg()).allowed, 3);
         assert_eq!(p.pace(NOW, 8, 2, true, &cfg()).allowed, 8);
+    }
+
+    #[test]
+    fn a_stale_newest_sample_does_not_panic() {
+        let mut p = Pacer::default();
+        p.record(NOW, &reading(0.05, RESET));
+        let r = p.pace(NOW + 31 * 60, 2, 2, true, &cfg());
+        assert_eq!(r.reason, PaceReason::Leaning { from: 2, to: 3 });
+        assert_eq!(p.pace(NOW + 31 * 60, 2, 2, false, &cfg()).reason, PaceReason::NoReading);
+    }
+
+    #[test]
+    fn the_week_floor_may_go_below_min() {
+        let mut p = Pacer::default();
+        p.record(
+            NOW,
+            &json!({"unifiedWindows": {"seven_day": {"utilization": 0.9, "resetsAt": NOW + WEEK_SECS / 2}}}),
+        );
+        let c = AutoConcurrency { min: 3, ..cfg() };
+        assert_eq!(p.pace(NOW, 3, 3, true, &c).allowed, 2);
     }
 
     #[test]
