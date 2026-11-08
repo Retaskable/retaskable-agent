@@ -120,6 +120,16 @@ impl HelloSettings {
             .is_some_and(|s| s.flags.last(crate::view::SNAPSHOT_REPORTING_FLAG))
     }
 
+    /// What `project` has cost today on this computer, and the machine's `budget.dailyUsd` (0 when unset).
+    pub fn spend_today(&self, project: &str) -> (f64, f64) {
+        let Some(dir) = self.dir() else {
+            return (0.0, 0.0);
+        };
+        let spent = MachineStore::load(dir).map_or(0.0, |m| m.spend_today(project));
+        let daily = config::load(dir).map_or(0.0, |c| c.machine.budget.daily_usd);
+        (spent, daily)
+    }
+
     /// The directory holding `config.json`, when something says where it is.
     pub fn dir(&self) -> Option<&Path> {
         self.source.as_ref().map(|s| s.dir.as_path())

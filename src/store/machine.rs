@@ -71,7 +71,7 @@ impl MachineStore {
         self.tokens_on("cursorTokens", chrono::Local::now().date_naive())
     }
 
-    /// Adds a finished Cursor session's tokens to today's, the same way (never to `spend`).
+    /// Adds a finished Cursor session's tokens to today's, the same way (never to `spend`, which holds costs).
     /// A later piece calls it when a Cursor session ends.
     pub fn add_cursor_tokens(&mut self, input: u64, output: u64) -> Result<()> {
         self.add_tokens("cursorTokens", input, output, chrono::Local::now().date_naive())
@@ -131,6 +131,44 @@ impl MachineStore {
         Some(day.map_or(0, |d| {
             d["input"].as_u64().unwrap_or(0) + d["output"].as_u64().unwrap_or(0)
         }))
+    }
+
+    /// Adds a finished session's cost to the project's total for today, dropping days older than the week.
+    pub fn add_spend(&mut self, project: &str, usd: f64) -> Result<()> {
+        self.add_spend_on(project, usd, chrono::Local::now().date_naive())
+    }
+
+    /// What the project's sessions cost today on this computer.
+    pub fn spend_today(&self, project: &str) -> f64 {
+        self.spend_on(project, chrono::Local::now().date_naive())
+    }
+
+    fn add_spend_on(&mut self, project: &str, usd: f64, today: NaiveDate) -> Result<()> {
+        let all = self
+            .data
+            .entry("spend".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(all) = all.as_object_mut() else {
+            return Ok(());
+        };
+        let keep: Vec<String> = (0..7).map(|i| day_key(today - chrono::Days::new(i))).collect();
+        let days = all
+            .entry(project.to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(days) = days.as_object_mut() else {
+            return Ok(());
+        };
+        let day = days.entry(day_key(today)).or_insert_with(|| Value::from(0.0));
+        *day = Value::from(day.as_f64().unwrap_or(0.0) + usd);
+        days.retain(|k, _| keep.contains(k));
+        self.save()
+    }
+
+    fn spend_on(&self, project: &str, today: NaiveDate) -> f64 {
+        self.data
+            .get("spend")
+            .and_then(|s| s.get(project)?.get(day_key(today))?.as_f64())
+            .unwrap_or(0.0)
     }
 
     /// Network access to the settings page, and its password's hash.
@@ -408,6 +446,23 @@ mod tests {
         let keys: Vec<&String> = saved["cursorTokens"].as_object().unwrap().keys().collect();
         assert_eq!(keys, vec!["2026-3-9"]);
         assert!(saved.get("spend").is_none());
+    }
+
+    #[test]
+    fn spend_adds_up_per_project_and_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 3, 9).unwrap();
+        let yesterday = day - chrono::Days::new(1);
+        store.add_spend_on("a", 1.5, yesterday).unwrap();
+        store.add_spend_on("a", 0.25, day).unwrap();
+        store.add_spend_on("a", 0.5, day).unwrap();
+        store.add_spend_on("b", 2.0, day).unwrap();
+        assert_eq!((store.spend_on("a", day), store.spend_on("b", day)), (0.75, 2.0));
+        assert_eq!(store.spend_on("a", yesterday), 1.5);
+        assert_eq!(store.spend_on("c", day), 0.0);
+        store.add_spend_on("a", 1.0, day + chrono::Days::new(10)).unwrap();
+        assert_eq!(store.spend_on("a", day), 0.0, "old days are dropped");
     }
 
     #[test]
