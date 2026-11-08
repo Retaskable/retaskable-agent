@@ -61,11 +61,12 @@ pub(super) fn usage_view(
         });
     let week_reading = [week, five].into_iter().flatten().find_map(tiers::week_reading);
     let (week_used, week_resets) = week_reading.unwrap_or((None, None));
+    let week_live = week_resets.is_some_and(|at| at > now);
     json!({
         "leftPct": left,
         "status": status,
         "resetsAt": iso_if_future(resets_at, now),
-        "weekUsedPct": week_used.map(|u| (u * 100.0).round()),
+        "weekUsedPct": week_used.filter(|_| week_live).map(|u| (u * 100.0).round()),
         "weekResetsAt": iso_if_future(week_resets, now),
         "tier": tiers::implementer_tier(five, now, models, local),
         "scoutTier": tiers::scout_tier(five, now, models, local),
@@ -137,7 +138,18 @@ mod tests {
         assert_eq!(v["resetsAt"], Value::Null);
         assert_eq!(v["weekResetsAt"], Value::Null);
         assert_eq!(v["leftPct"], Value::Null);
-        assert_eq!(v["weekUsedPct"], 40.0);
+        assert_eq!(v["weekUsedPct"], Value::Null);
+    }
+
+    #[test]
+    fn a_week_reading_with_no_reset_time_has_no_used_share() {
+        let v = view(
+            None,
+            Some(json!({"rateLimitType": "seven_day", "utilization": 0.9})),
+            None,
+        );
+        assert_eq!(v["weekUsedPct"], Value::Null);
+        assert_eq!(v["weekResetsAt"], Value::Null);
     }
 
     #[test]
