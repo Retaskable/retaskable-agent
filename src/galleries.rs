@@ -39,6 +39,7 @@ use tokio::sync::watch;
 
 use crate::config::GalleryConfig;
 use crate::lanes;
+use crate::orchestrator::live::now_iso8601;
 use crate::paths;
 use crate::proc;
 use crate::sync::lock;
@@ -708,10 +709,4 @@ fn shrink_to(img: image::DynamicImage, max_width: u32) -> image::DynamicImage {
     }
     let new_h = ((h as u64 * max_width as u64) / w as u64).max(1) as u32;
     img.resize_exact(max_width, new_h, image::imageops::FilterType::Lanczos3)
-}
-
-fn now_iso8601() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
 }
