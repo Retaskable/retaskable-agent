@@ -81,6 +81,11 @@ impl LiveHandle {
         &self.1
     }
 
+    /// Has session ends add Cursor's and Codex's tokens to machine.json in `dir`.
+    pub fn with_machine_dir(self, dir: std::path::PathBuf) -> Self {
+        Self(self.0, self.1.with_machine_dir(dir))
+    }
+
     /// Says which kinds of run `runs` mode can take.
     pub fn set_run_kinds(&self, kinds: Vec<String>) {
         self.lock().run_kinds = kinds;
