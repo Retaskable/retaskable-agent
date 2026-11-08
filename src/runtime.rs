@@ -220,7 +220,7 @@ pub fn spawn_setup_checks(
     let kept = latest.clone();
     tokio::spawn(async move {
         let checks = checks_with_docker(&env, &flags).await;
-        let report = setup_check::setup_check_report(&checks);
+        let report = setup_check::setup_check_report(&checks, flags.on("engine-setup-probes").await);
         if is_release {
             tracing::info!("{report}");
         } else {
