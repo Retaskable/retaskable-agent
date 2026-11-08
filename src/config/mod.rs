@@ -7,6 +7,7 @@
 //!
 //! Split by responsibility: this file reads the whole file and ties its two halves together; `machine` holds
 //! the settings shared by every project here (docs/specs/agent-settings.md); `project` holds each project's own.
+mod concurrency;
 mod machine;
 mod project;
 
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
+pub use concurrency::{AutoConcurrency, ModelConcurrency};
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
     ModelsConfig, RoleEngines, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
