@@ -10,6 +10,7 @@ use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+use super::panic::panic_message;
 use super::run_starters::RunStarters;
 use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
@@ -826,13 +827,6 @@ impl Machine {
         self.auto.work_waiting = slots == 0 && starter.is_some() && self.work_waits(&live, paused);
         scheduled
     }
-}
-
-/// What a caught panic said.
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
-    (panic.downcast_ref::<&str>().map(ToString::to_string))
-        .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_default()
 }
 
 /// What `spawn_all` starts the orchestrator from.
