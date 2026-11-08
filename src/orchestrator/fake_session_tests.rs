@@ -42,8 +42,8 @@ pub(super) fn fake_claude(out: &str, extra: &str) -> Fake {
     }
 }
 
-/// The fake `claude` ran in `dir`, read-only, on Sonnet, with a $1.5 budget.
-pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path) {
+/// The fake `claude` ran in `dir`, read-only, on `model`, with a $1.5 budget.
+pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path, model: &str) {
     let pwd = std::fs::read_to_string(root.join("pwd.txt")).unwrap();
     assert_eq!(
         std::fs::canonicalize(pwd.trim()).unwrap(),
@@ -51,7 +51,7 @@ pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path) {
     );
     let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
     assert!(
-        args.contains("--max-budget-usd 1.5") && args.contains("sonnet"),
+        args.contains("--max-budget-usd 1.5") && args.contains(&format!("--model {model}")),
         "{args}"
     );
     assert!(

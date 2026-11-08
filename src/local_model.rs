@@ -45,6 +45,18 @@ impl LocalModel {
         }
     }
 
+    /// A turned-on local model that is up, for tests of the roles that read it.
+    #[cfg(test)]
+    pub fn up_for_test() -> Self {
+        let local = Self::new(LocalModelConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:1".into(),
+            model: "m".into(),
+        });
+        local.up.store(true, Ordering::SeqCst);
+        local
+    }
+
     /// A local model that is turned off.
     pub fn off() -> Self {
         Self::new(LocalModelConfig {
@@ -81,6 +93,21 @@ impl LocalModel {
                 .await
                 .expect("the local slot is never closed"),
         )
+    }
+
+    /// Whether a role on the tier ladder may be handed `local`: the `local-tier-ladder` flag is On and the model is
+    /// available (section 7.1). A role's own slot waiting and engine checks come on top.
+    pub fn ladder(&self) -> bool {
+        crate::tiers::local_ladder_on() && self.available()
+    }
+
+    /// For a session whose tier came out `local`: waits for the one slot and gives it with the target to run on
+    /// (the fallback rows wait, they don't skip the slot). `None` for any other tier.
+    pub async fn claim(&self, tier: &str) -> Option<(LocalSlot, LocalTarget)> {
+        if tier != crate::tiers::LOCAL {
+            return None;
+        }
+        Some((self.take().await, self.target()))
     }
 
     /// One check, written to the up flag. Returns whether it changed.
@@ -228,6 +255,28 @@ mod tests {
         assert!(local.try_take().is_none());
         drop(got);
         assert!(local.try_take().is_some());
+    }
+
+    #[tokio::test]
+    async fn claim_gives_the_target_only_for_the_local_tier_and_a_second_claim_waits() {
+        let local = LocalModel::up_for_test();
+        assert!(local.claim("sonnet").await.is_none());
+        assert!(local.claim("opus").await.is_none());
+        let (slot, target) = local.claim("local").await.expect("the local tier claims");
+        assert_eq!(target.model, "m");
+        let l = local.clone();
+        let second = tokio::spawn(async move { l.claim("local").await.is_some() });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!second.is_finished(), "a second local session waits for the slot");
+        drop(slot);
+        assert!(second.await.unwrap());
+    }
+
+    #[test]
+    fn the_ladder_needs_the_model_up_and_the_flag_on() {
+        // No flags client is handed over in a unit test, so the flag reads Off.
+        assert!(!LocalModel::up_for_test().ladder());
+        assert!(!LocalModel::off().ladder());
     }
 
     #[tokio::test]

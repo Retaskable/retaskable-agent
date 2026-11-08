@@ -412,6 +412,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
             placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
             placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
+            placement.keep_fresh("local-tier-ladder", std::time::Duration::from_secs(30));
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );

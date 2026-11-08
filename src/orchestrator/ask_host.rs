@@ -92,7 +92,7 @@ impl AskHost for ClaudeAsks {
     }
 
     fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
-        let (data_dir, choice, env, models, cursor_models, daily_usd, view) = (
+        let (data_dir, choice, env, models, cursor_models, daily_usd, view, local) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
@@ -100,6 +100,7 @@ impl AskHost for ClaudeAsks {
             self.cursor_models.clone(),
             self.daily_usd,
             self.view.clone(),
+            self.local.clone(),
         );
         Box::pin(async move {
             let AskJob {
@@ -192,7 +193,10 @@ impl AskHost for ClaudeAsks {
                 Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
             };
             let repo_path = PathBuf::from(&project.repo_path);
-            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, false);
+            let up = chosen == Engine::Claude && local.ladder();
+            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
+            // Held until the session ends.
+            let claimed = local.claim(tier).await;
             let spec = match session_spec(&Session {
                 template: TEMPLATE,
                 input: AssistantInput {
@@ -211,7 +215,7 @@ impl AskHost for ClaudeAsks {
                 tier,
                 budget: &project.budget,
                 cwd: &repo_path,
-                local: None,
+                local: claimed.as_ref().map(|(_, target)| target.clone()),
                 cursor: placed.cursor.clone(),
             }) {
                 Ok(spec) => spec,

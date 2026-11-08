@@ -18,7 +18,7 @@ use crate::engines::{
 };
 use crate::implementer::new_session_id;
 use crate::orchestrator::live::sessions::{SessionInfo, model_name};
-use crate::tiers::{implementer_tier, mid_tier, top_tier};
+use crate::tiers::{claude_model_for, implementer_tier, mid_tier, top_tier};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
 use crate::triage::{Triager, decide};
@@ -114,19 +114,21 @@ impl ClaudeStarter {
                 .display()
                 .to_string(),
         );
-        let model = mid_tier(implementer_tier(
+        let tier = mid_tier(implementer_tier(
             usage.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
-            false,
-        ))
-        .to_string();
+            placed.engine == EngineId::Claude && self.local.ladder(),
+        ));
+        let (model, local) = (tier.to_string(), self.local.clone());
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let info = triager_info(&project_id, &item_id, lane, &placed, &model);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = watch_for(&project, placed.engine);
             let end = match tokio::spawn(async move {
+                // Waits for the local model's slot when the tier is `local`; held until the session ends.
+                let claimed = local.claim(tier).await;
                 let triager = Triager {
                     template: TEMPLATE,
                     project_type: project.project_type,
@@ -134,8 +136,8 @@ impl ClaudeStarter {
                     session: EphemeralSessionConfig {
                         cwd: &cwd,
                         budget_usd: project.budget.reviewer_usd,
-                        model,
-                        local: None,
+                        model: claude_model_for(placed.engine, tier),
+                        local: claimed.as_ref().map(|(_, target)| target.clone()),
                         engine: Some(placed.engine),
                         cursor: placed.cursor.clone(),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
@@ -227,12 +229,19 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let top = top_tier(None, 0, &self.models, false);
+        let top = top_tier(
+            None,
+            0,
+            &self.models,
+            placed.engine == EngineId::Claude && self.local.ladder(),
+        );
+        let local = self.local.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = watch_for(&project, placed.engine);
             let agree = tokio::spawn(async move {
+                let claimed = local.claim(top).await;
                 let second = SecondLook {
                     template: CHECK_TEMPLATE,
                     project_type: project.project_type,
@@ -240,8 +249,8 @@ impl ClaudeStarter {
                     session: EphemeralSessionConfig {
                         cwd: &cwd,
                         budget_usd: project.budget.reviewer_usd,
-                        model: top.to_string(),
-                        local: None,
+                        model: claude_model_for(placed.engine, top),
+                        local: claimed.as_ref().map(|(_, target)| target.clone()),
                         engine: Some(placed.engine),
                         cursor: placed.cursor.clone(),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),

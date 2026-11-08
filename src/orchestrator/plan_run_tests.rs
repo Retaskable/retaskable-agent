@@ -81,7 +81,7 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::Planned, "{:?}", end.result);
     assert_eq!(end.result["pieces"][1]["needs"], json!(["A"]));
-    assert_ran_read_only_in(&r.root, &base);
+    assert_ran_read_only_in(&r.root, &base, "opus");
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(prompt.contains("Add the widget"), "{prompt}");
     // The flag clears once the run has ended.
@@ -107,10 +107,7 @@ async fn a_plan_is_listed_while_it_runs_and_not_after() {
         ("p", "it1", Role::Planner)
     );
     assert_eq!((info.title.as_deref(), info.lane), (Some("Add the widget"), None));
-    assert_eq!(
-        (info.engine, info.model.as_str()),
-        (EngineId::Claude, tiers::chore_tier())
-    );
+    assert_eq!((info.engine, info.model.as_str()), (EngineId::Claude, tiers::OPUS));
     end_of(&mut s.ends).await;
     assert!(r.starter.roster.sessions.snapshot().is_empty());
 }
@@ -225,6 +222,8 @@ async fn a_plan_told_to_start_on_claude_while_the_planner_is_cursor_runs_on_clau
 #[tokio::test]
 async fn with_placement_off_a_plan_told_to_start_on_cursor_is_given_back() {
     let mut r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
+    let root = r.root.clone();
+    on_every_engine(&mut r.starter.roster, &root);
     r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
     let (mut req, _s) = request(brief());
     req.engine = Some(EngineId::Cursor);
@@ -278,4 +277,51 @@ async fn with_the_flag_off_only_a_role_on_claude_runs() {
     assert!(r.starter.kinds().is_empty());
     let (req, _s) = request(brief());
     assert!(r.starter.start(req).unwrap_err().contains("Claude alone"));
+}
+
+/// What `begin` offered the tier closure as "local may be used" for a rig with the flag and the local model as given.
+fn offered_local(flag: bool, up: bool, engine: Engine) -> bool {
+    let mut choice = EngineChoiceConfig::default();
+    choice.roles.planner = Some(engine);
+    let mut r = rig(&answer(GOOD), "", choice);
+    let root = r.root.clone();
+    on_every_engine(&mut r.starter.roster, &root);
+    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(if flag {
+        &["engine-placement", "local-tier-ladder"]
+    } else {
+        &["engine-placement"]
+    }));
+    if up {
+        r.starter.roster.local = crate::local_model::LocalModel::up_for_test();
+    }
+    let (req, _s) = request(brief());
+    let mut offered = None;
+    r.starter
+        .roster
+        .begin(Role::Planner, &req, &Slot::default(), |local| {
+            offered = Some(local);
+            tiers::OPUS
+        })
+        .unwrap();
+    offered.unwrap()
+}
+
+#[test]
+fn the_tier_is_offered_the_local_model_only_with_the_flag_on_and_the_model_up_on_claude() {
+    assert!(offered_local(true, true, Engine::Claude));
+    assert!(!offered_local(false, true, Engine::Claude), "flag Off");
+    assert!(!offered_local(true, false, Engine::Claude), "local down");
+    assert!(!offered_local(true, true, Engine::Cursor), "not on Claude");
+}
+
+#[test]
+fn the_planner_is_on_the_top_tier_and_stays_off_a_free_local_slot_above_the_limit() {
+    let m = ModelsConfig::default();
+    let usage =
+        |used: f64| json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
+    // 80%, 94% used: Opus even with local up; only below `pauseBelowPct` is it `local`.
+    assert_eq!(tiers::top_tier(Some(&usage(0.8)), 0, &m, true), tiers::OPUS);
+    assert_eq!(tiers::top_tier(Some(&usage(0.94)), 0, &m, true), tiers::OPUS);
+    assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, true), tiers::LOCAL);
+    assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, false), tiers::OPUS);
 }
