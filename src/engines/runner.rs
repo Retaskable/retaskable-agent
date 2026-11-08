@@ -279,7 +279,7 @@ pub async fn run_session_tracked(
 ) -> Result<SessionResult> {
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;
-    spawn_and_read(
+    let result = spawn_and_read(
         SpawnSpec {
             bin,
             args: &engine.args(spec),
@@ -294,7 +294,9 @@ pub async fn run_session_tracked(
         engine.reader(spec),
         file,
     )
-    .await
+    .await?;
+    crate::orchestrator::live::sessions::record_session_end(spec.engine.unwrap_or_default(), &result);
+    Ok(result)
 }
 
 #[cfg(test)]

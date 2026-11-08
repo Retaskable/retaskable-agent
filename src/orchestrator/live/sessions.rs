@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use crate::engines::choose::Role;
-use crate::engines::engine::{CursorOptions, EngineId};
+use crate::engines::engine::{CursorOptions, EngineId, SessionResult};
+use crate::orchestrator::fresh_start::{EngineLimits, LIMIT_PAUSE};
 
 /// What a person registers a session as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,7 @@ type Stamp = Arc<Mutex<Instant>>;
 
 #[derive(Debug, Default)]
 struct Inner {
+    limits: EngineLimits,
     next: u64,
     rows: BTreeMap<u64, (SessionInfo, Instant, Stamp)>,
 }
@@ -57,6 +59,22 @@ pub struct Sessions(Arc<Mutex<Inner>>);
 
 tokio::task_local! {
     static CURRENT: Stamp;
+    static LIMITS: EngineLimits;
+}
+
+/// A session of `engine` ended with `result`: when it ended at the engine's limit, that engine is limited until
+/// the usage reading's reset, else for [`LIMIT_PAUSE`] (engines/03-choosing-the-engine.md section 3.5). A no-op
+/// when no session is scoped, or the `engine-limit-records` flag is Off.
+pub fn record_session_end(engine: EngineId, result: &SessionResult) {
+    if !result.limit_hit {
+        return;
+    }
+    let _ = LIMITS.try_with(|limits| {
+        if limits.records_any_role() {
+            let wait = crate::engines::engine::resets_in(result.usage.as_ref()).unwrap_or(LIMIT_PAUSE);
+            limits.hit(engine, Instant::now() + wait);
+        }
+    });
 }
 
 /// Marks the current session (if one is scoped) as having just printed a line. A no-op otherwise.
@@ -65,6 +83,11 @@ pub fn touch() {
 }
 
 impl Sessions {
+    /// The engines' limits on this computer, shared with the driver.
+    pub fn limits(&self) -> EngineLimits {
+        self.lock().limits.clone()
+    }
+
     /// Adds a row; it goes when the returned guard drops.
     pub fn register(&self, info: SessionInfo) -> SessionGuard {
         let now = Instant::now();
@@ -148,7 +171,8 @@ pub struct SessionGuard {
 impl SessionGuard {
     /// Runs `fut` with this row as the current session, so the runner's [`touch`] updates it.
     pub async fn scope<F: Future>(&self, fut: F) -> F::Output {
-        CURRENT.scope(self.stamp.clone(), fut).await
+        let limits = self.sessions.limits();
+        LIMITS.scope(limits, CURRENT.scope(self.stamp.clone(), fut)).await
     }
 }
 
@@ -213,5 +237,86 @@ mod tests {
         let after = s.snapshot();
         assert!(after[0].last_output > before[0].last_output);
         assert_eq!(after[1].last_output, before[1].last_output);
+    }
+
+    fn ended(limit_hit: bool, usage: Option<serde_json::Value>) -> SessionResult {
+        SessionResult {
+            ok: !limit_hit,
+            subtype: String::new(),
+            structured: None,
+            error: None,
+            cost_usd: None,
+            session_id: String::new(),
+            limit_hit,
+            signed_out: false,
+            context_tokens: None,
+            usage,
+            tokens: None,
+        }
+    }
+
+    async fn end_in_scope(s: &Sessions, engine: EngineId, result: SessionResult) {
+        let mut i = info("a");
+        i.role = Role::Planner;
+        s.track(i, async { record_session_end(engine, &result) }).await;
+    }
+
+    #[tokio::test]
+    async fn a_non_implementer_session_at_its_limit_limits_only_its_engine_for_30_minutes() {
+        for engine in [EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
+            let s = Sessions::default();
+            s.limits().record_any_role(true);
+            end_in_scope(&s, engine, ended(true, None)).await;
+            let now = Instant::now();
+            for e in [EngineId::Claude, EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
+                assert_eq!(s.limits().is_limited(e, now), e == engine);
+            }
+            assert!(
+                s.limits()
+                    .is_limited(engine, now + LIMIT_PAUSE - std::time::Duration::from_secs(5))
+            );
+            assert!(
+                !s.limits()
+                    .is_limited(engine, now + LIMIT_PAUSE + std::time::Duration::from_secs(5))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_reading_sets_the_reset() {
+        let s = Sessions::default();
+        s.limits().record_any_role(true);
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600;
+        let usage = serde_json::json!({"status": "rejected", "resetsAt": at});
+        end_in_scope(&s, EngineId::Claude, ended(true, Some(usage))).await;
+        let now = Instant::now();
+        assert!(
+            s.limits()
+                .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(590))
+        );
+        assert!(
+            !s.limits()
+                .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(620))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_did_not_hit_the_limit_or_ran_with_the_flag_off_records_nothing() {
+        let s = Sessions::default();
+        s.limits().record_any_role(true);
+        end_in_scope(&s, EngineId::Cursor, ended(false, None)).await;
+        assert!(!s.limits().is_limited(EngineId::Cursor, Instant::now()));
+        let off = Sessions::default();
+        end_in_scope(&off, EngineId::Cursor, ended(true, None)).await;
+        assert!(!off.limits().is_limited(EngineId::Cursor, Instant::now()));
+    }
+
+    #[test]
+    fn a_session_outside_any_scope_records_nothing_and_does_not_panic() {
+        record_session_end(EngineId::Cursor, &ended(true, None));
     }
 }
