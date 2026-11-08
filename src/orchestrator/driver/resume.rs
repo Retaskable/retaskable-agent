@@ -23,6 +23,17 @@ impl ProjectLoop {
         takeover_in(&self.project, pool, shared, started_on, any_engine)
     }
 
+    /// Whether `session` of `item_id` is a Claude session that started on the local model while `local-limit-fallback`
+    /// is in force with the model up: it resumes on the model whatever Claude's limit says (section 7.1).
+    pub(super) fn stays_local(&self, shared: &Shared<'_>, item_id: &str, session: &str, engine: EngineId) -> bool {
+        engine == EngineId::Claude
+            && Self::limit_fallback(shared)
+            && self.data_dir.as_deref().is_some_and(|dir| {
+                crate::engines::transcripts::started_on(dir, &self.id, item_id, session)
+                    .is_some_and(|s| s.model == crate::tiers::LOCAL)
+            })
+    }
+
     /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
     /// known size is over `max_resume_context_tokens` starts fresh instead (06.2-implementer.md "A session
     /// that's grown starts fresh"), keeping its lane as-is. Left for a
@@ -50,9 +61,13 @@ impl ProjectLoop {
             }) = record
             {
                 let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
-                let takeover = self.takeover(pool, shared, impl_session_engine, fall_over);
+                // A session that started on the local model stays on it (section 7.1): Claude's limit doesn't hold it.
+                let local = self.stays_local(shared, &id, &session, impl_session_engine);
+                let takeover = self
+                    .takeover(pool, shared, impl_session_engine, fall_over)
+                    .filter(|_| !local);
                 let reason = fresh_for_engine(impl_session_engine, lane_now, takeover);
-                if let Some(gate) = &gate {
+                if let Some(gate) = gate.as_ref().filter(|_| !local) {
                     // The engine its session runs on now: the takeover's, or the one it started on.
                     let on = if self.fresh_launched.contains(&id) {
                         gate.engine_now(self, shared, lane)

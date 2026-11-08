@@ -2,7 +2,7 @@
 //! starting work for that project alone. The lanes and the sessions across every project are the
 //! [`super::Machine`]'s.
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -264,6 +264,8 @@ pub struct ProjectLoop {
     pub(super) records: BTreeMap<String, RunRecord>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
+    /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
+    pub(super) data_dir: Option<PathBuf>,
     /// Whether the saved `state.usage` has been checked once against the weekly cutoff (`weekly-limit-reading`).
     pub(super) week_checked: bool,
     /// Claude sessions' usage readings that settled since the pacer last took them (`driver/auto.rs`).
@@ -388,6 +390,7 @@ impl ProjectLoop {
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
+            data_dir: None,
             week_checked: false,
             pace_readings: Vec::new(),
             pace_checked: false,
@@ -455,7 +458,7 @@ impl ProjectLoop {
         let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
         let mut events = EventLog::new();
         events.open(&project_dir.join("events"));
-        Ok(Self::new(
+        let mut lp = Self::new(
             id,
             project.clone(),
             store,
@@ -464,7 +467,9 @@ impl ProjectLoop {
             live,
             max_resume_context_tokens,
         )
-        .with_guard(guard))
+        .with_guard(guard);
+        lp.data_dir = Some(dir.to_path_buf());
+        Ok(lp)
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
@@ -890,7 +895,9 @@ impl ProjectLoop {
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
         let fall_over = self.flags.on("engine-fall-over").await;
-        let takeover = self.takeover(pool, shared, engine, fall_over);
+        let takeover = self
+            .takeover(pool, shared, engine, fall_over)
+            .filter(|_| !(resume.is_some() && self.stays_local(shared, item_id, &session_id, engine)));
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
