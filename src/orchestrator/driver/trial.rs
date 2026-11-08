@@ -103,8 +103,9 @@ impl ProjectLoop {
             return;
         }
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        let placement = self.flags.on("engine-placement").await;
         let engine = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Implementer) {
+            Some(gate) => match gate.role_start(self, shared, Role::Implementer, placement) {
                 Some(engine) => engine,
                 None => return,
             },

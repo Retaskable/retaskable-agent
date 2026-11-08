@@ -191,7 +191,7 @@ impl ProjectLoop {
         }
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
         let (engine, start_on) = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Triager) {
+            Some(gate) => match gate.role_start(self, shared, Role::Triager, self.placement_flag) {
                 Some(Some(now)) => (now, Some(now)),
                 Some(None) => (self.triager_engine(shared), None),
                 None => return,

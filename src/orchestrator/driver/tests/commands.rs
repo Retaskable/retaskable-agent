@@ -1,5 +1,6 @@
 //! Item commands the loop carries out (`driver/item_commands.rs`): Continue, Start over and Skip.
 use super::*;
+use crate::engines::EngineId;
 use crate::view::ItemCommand;
 
 /// A live rig whose item "a" stopped (`needs_human`) after two rounds, holding no lane; `session` is the
@@ -375,4 +376,37 @@ async fn with_own_failure_handling_off_a_persons_continue_with_nothing_to_contin
     rig.machine.poll().await;
     let notes = rig.lp(0).item_notes("a", 20);
     assert!(notes.iter().any(|n| n == "a person chose Start over"), "{notes:?}");
+}
+
+/// `stopped`, lanes on `engines`, `engine-start-rules` On and Claude signed out for ten minutes.
+fn stopped_claude_out(engines: serde_json::Value) -> (Rig, Arc<Fake>) {
+    let (mut rig, fake) = stopped(2, Some("s1"));
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": engines })).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
+    rig.machine.claude_signed_out_until = Some(std::time::Instant::now() + Duration::from_secs(600));
+    (rig, fake)
+}
+
+#[tokio::test]
+async fn with_the_start_rules_on_a_continue_on_a_cursor_lane_is_carried_out_while_claude_is_signed_out() {
+    let (mut rig, fake) = stopped_claude_out(json!(["cursor", "cursor"]));
+    continue_a(&rig, "a", Some("Use the other API."));
+    rig.machine.poll().await;
+    let started = fake.started.lock().unwrap();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+}
+
+#[tokio::test]
+async fn with_the_start_rules_on_a_continue_and_a_start_over_on_claude_only_wait_while_claude_is_signed_out() {
+    let (mut rig, fake) = stopped_claude_out(json!(["claude", "claude"]));
+    continue_a(&rig, "a", Some("Use the other API."));
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty());
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    assert_eq!(rig.lp(0).continuing.len(), 1);
+    rig.machine.claude_signed_out_until = None;
+    rig.machine.poll().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
 }

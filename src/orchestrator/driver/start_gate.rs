@@ -55,17 +55,33 @@ impl StartGate {
         engine_now(chosen, &self.used, &self.out)
     }
 
-    /// What a new session of `role` does now: `None` while its engine, after `engine_now`, is out; else
-    /// `Some(engine)`, the one to start on when that isn't the role's chosen one.
-    pub(super) fn role_start(&self, lp: &ProjectLoop, shared: &Shared<'_>, role: Role) -> Option<Option<EngineId>> {
+    /// What a new session of `role` does now: `None` while its engine is out; else `Some(engine)`, the one to start
+    /// on when that isn't the role's chosen one. Only a fresh session with `engine-placement` On (`switch`) moves to
+    /// `engine_now`; a resume keeps the engine it ran on and waits while that is out.
+    pub(super) fn role_start(
+        &self,
+        lp: &ProjectLoop,
+        shared: &Shared<'_>,
+        role: Role,
+        switch: bool,
+    ) -> Option<Option<EngineId>> {
         let chosen = program_of(engine_for(
             &shared.links.engine_choice,
             lp.project.engines.as_ref(),
             role,
             None,
         ));
-        let now = engine_now(chosen, &self.used, &self.out);
+        let now = if switch {
+            engine_now(chosen, &self.used, &self.out)
+        } else {
+            chosen
+        };
         may_start(now, &self.out).then_some((now != chosen).then_some(now))
+    }
+
+    /// Whether `engine` may start now.
+    pub(super) fn may_start(&self, engine: EngineId) -> bool {
+        may_start(engine, &self.out)
     }
 
     /// Whether a fresh implementer in `lane` is held back: its engine is still out after `engine_now`.
@@ -85,5 +101,13 @@ impl ProjectLoop {
     /// Claude's sign-out holds every claim only while the start rules are Off.
     pub(super) fn claim_held_by_sign_out(shared: &Shared<'_>, gate: Option<&StartGate>) -> bool {
         gate.is_none() && signed_out(shared)
+    }
+}
+
+impl ProjectLoop {
+    /// Whether the start rules (On) hold a session on `lane` back: the engine it would run on is out.
+    pub(super) async fn start_held(&mut self, pool: &LanePool, shared: &Shared<'_>, lane: u32) -> bool {
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        gate.is_some_and(|g| g.holds(self, shared, lane))
     }
 }

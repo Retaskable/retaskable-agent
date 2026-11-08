@@ -79,7 +79,8 @@ impl ProjectLoop {
                 queue.push((item, notes.filter(|n| !n.trim().is_empty())));
             }
         }
-        if signed_out(shared) || shared.stopping {
+        let rules_on = self.flags.on("engine-start-rules").await;
+        if (!rules_on && signed_out(shared)) || shared.stopping {
             return;
         }
         for (item, notes) in std::mem::take(&mut self.continuing) {
@@ -187,6 +188,17 @@ impl ProjectLoop {
         );
     }
 
+    /// Hands back a lane claimed for `item_id` that can't be used yet.
+    fn give_back_lane(&self, pool: &mut LanePool, item_id: &str, lane: u32) {
+        pool.release(
+            lane,
+            &Holder::Item {
+                project: self.id.clone(),
+                item: item_id.to_string(),
+            },
+        );
+    }
+
     /// Claims a lane for the item and records it.
     fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
         let lane = pool.claim(&self.want(item_id))?;
@@ -228,6 +240,10 @@ impl ProjectLoop {
         let Some(lane) = self.take_lane(pool, item_id) else {
             return false;
         };
+        if !checks_only && self.start_held(pool, shared, lane).await {
+            self.give_back_lane(pool, item_id, lane);
+            return false;
+        }
         let run = self.runs.get_mut(item_id).expect("checked above");
         if at_limit {
             run.resume_past_slice_limit(&self.project);
@@ -282,6 +298,10 @@ impl ProjectLoop {
         let Some(lane) = pool.claim(&self.want(item_id)) else {
             return false;
         };
+        if self.start_held(pool, shared, lane).await {
+            self.give_back_lane(pool, item_id, lane);
+            return false;
+        }
         let item = self.items.get(item_id);
         let old = Abandon {
             project: self.id.clone(),

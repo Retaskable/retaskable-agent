@@ -347,13 +347,11 @@ impl ProjectLoop {
             return;
         }
         let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
+        // A rebase resumes the drafter's own session: it waits while that engine is out and never moves.
         let engine = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Drafter) {
-                Some(engine) => engine,
-                None => return,
-            },
+            Some(gate) if gate.role_start(self, shared, Role::Drafter, false).is_none() => return,
             None if signed_out(shared) => return,
-            None => None,
+            _ => None,
         };
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {

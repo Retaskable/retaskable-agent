@@ -208,7 +208,7 @@ fn out_for(secs: u64) -> std::time::Instant {
 /// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
 fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    let mut on = vec!["engine-start-rules"];
+    let mut on = vec!["engine-start-rules", "engine-placement"];
     on.extend(flags);
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();

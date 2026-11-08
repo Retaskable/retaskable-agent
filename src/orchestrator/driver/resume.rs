@@ -2,6 +2,7 @@
 use std::time::Instant;
 
 use super::project::{Launch, ProjectLoop, signed_out};
+use super::start_gate::StartGate;
 use super::{SessionStarter, Shared};
 use crate::engines::{EngineId, Role, engine_for, lane_engine, program_of};
 use crate::lane_pool::LanePool;
@@ -39,7 +40,8 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) {
-        if signed_out(shared) {
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        if gate.is_none() && signed_out(shared) {
             return;
         }
         for id in std::mem::take(&mut self.to_resume) {
@@ -52,6 +54,25 @@ impl ProjectLoop {
                 ..
             }) = record
             {
+                let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
+                let takeover = self.takeover(pool, shared, impl_session_engine);
+                let reason = fresh_for_engine(impl_session_engine, lane_now, takeover);
+                if let Some(gate) = &gate {
+                    // The engine its session runs on now: the takeover's, or the one it started on.
+                    let on = if self.fresh_launched.contains(&id) {
+                        gate.engine_now(self, shared, lane)
+                    } else {
+                        match reason {
+                            Some(FreshStart::LaneEngine { to, .. } | FreshStart::EngineLimited { to, .. }) => to,
+                            _ => impl_session_engine,
+                        }
+                    };
+                    if !gate.may_start(on) {
+                        tracing::info!("{}: {id} waits: its engine can't start now", self.id);
+                        self.to_resume.push(id);
+                        continue;
+                    }
+                }
                 if self.fresh_launched.contains(&id) {
                     // Its session never started, so there is nothing to resume: start it again.
                     tracing::info!(
@@ -61,10 +82,8 @@ impl ProjectLoop {
                     self.launch(pool, &id, lane, Launch::Fresh, starter, shared).await;
                     continue;
                 }
-                let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
-                let takeover = self.takeover(pool, shared, impl_session_engine);
                 let kind = match impl_context_tokens {
-                    _ if let Some(reason) = fresh_for_engine(impl_session_engine, lane_now, takeover) => {
+                    _ if let Some(reason) = reason => {
                         tracing::info!("{}: {id}'s session can't resume ({reason:?}), starting fresh", self.id);
                         self.fresh_launch(&id, lane, reason, "Carry on with the slice.")
                     }

@@ -126,8 +126,9 @@ impl ProjectLoop {
             return;
         }
         let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
+        let placement = self.flags.on("engine-placement").await;
         let engine = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Drafter) {
+            Some(gate) => match gate.role_start(self, shared, Role::Drafter, placement) {
                 Some(engine) => engine,
                 None => return,
             },
@@ -146,8 +147,23 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
-        *slots -= 1;
         let resume = claim.draft.session_id.is_some();
+        // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
+        let engine = if resume { None } else { engine };
+        if resume
+            && gate
+                .as_ref()
+                .is_some_and(|g| g.role_start(self, shared, Role::Drafter, false).is_none())
+        {
+            let released = self
+                .client
+                .draft_release(repo, Some(&token), &claim.draft.id, &claim.token);
+            if let Err(e) = released.await {
+                tracing::warn!("{}: couldn't let go of draft {}: {e}", self.id, claim.draft.id);
+            }
+            return;
+        }
+        *slots -= 1;
         let session_id = claim.draft.session_id.clone().unwrap_or_else(new_session_id);
         let ctx = Ctx {
             client: self.client.clone(),

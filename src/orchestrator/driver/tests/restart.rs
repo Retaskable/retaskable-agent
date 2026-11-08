@@ -301,7 +301,7 @@ async fn a_restart_resumes_when_its_engine_is_limited_but_nothing_else_can_take_
 }
 
 #[tokio::test]
-async fn with_the_engine_start_rules_on_an_item_taking_back_its_lane_is_not_held_by_its_engine_being_out() {
+async fn with_the_engine_start_rules_on_an_item_taking_back_its_lane_waits_while_its_engine_is_out() {
     let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
@@ -317,6 +317,44 @@ async fn with_the_engine_start_rules_on_an_item_taking_back_its_lane_is_not_held
     rig.machine.pass().await;
     drop(fake);
     let started = fake_after.started.lock().unwrap().clone();
+    assert!(started.is_empty());
+    assert!(rig.machine.pool.lane_of("p0", "a").is_some());
+}
+
+/// A claimed "a" on lanes of `engines`, the computer restarted with `engine-start-rules` On and Claude signed out.
+async fn restarted_claude_out(engines: serde_json::Value) -> (Rig, Arc<Fake>) {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": engines })).unwrap();
+    rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": engines })).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
+    rig.machine.claude_signed_out_until = Some(std::time::Instant::now() + Duration::from_secs(600));
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    (rig, fake)
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_and_the_start_rules_on_a_cursor_session_resumes() {
+    let (_rig, fake) = restarted_claude_out(json!(["cursor", "cursor"])).await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(started[0].resume);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_and_the_start_rules_on_a_claude_session_waits_then_resumes() {
+    let (mut rig, fake) = restarted_claude_out(json!(["claude", "claude"])).await;
+    assert!(fake.started.lock().unwrap().is_empty());
+    rig.machine.claude_signed_out_until = None;
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert!(started[0].resume);
 }

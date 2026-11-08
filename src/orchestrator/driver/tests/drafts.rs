@@ -460,7 +460,7 @@ fn out_for(secs: u64) -> std::time::Instant {
 /// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
 fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    let mut on = vec!["engine-start-rules"];
+    let mut on = vec!["engine-start-rules", "engine-placement"];
     on.extend(flags);
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
@@ -524,4 +524,22 @@ async fn a_draft_waits_when_no_engine_may_start() {
     }
     assert_eq!(claims(&asked), 0);
     assert!(host.jobs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_draft_with_a_saved_session_waits_for_its_own_engine_instead_of_moving_to_cursor() {
+    let draft = json!({"id": "d1", "request": "Add charts", "titles": [], "sessionId": "sess-9", "branch": "retaskable/spec-d1-x"});
+    let (mut rig, host, asked) = rig_with(draft, vec![charts()]).await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"planner": "cursor"}}),
+        true,
+        false,
+    );
+    for _ in 0..3 {
+        rig.machine.pass().await;
+    }
+    assert!(host.jobs.lock().unwrap().is_empty());
+    assert!(ops(&asked).contains(&"draft_release".to_string()), "{:?}", ops(&asked));
 }

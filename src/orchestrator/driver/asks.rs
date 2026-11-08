@@ -152,8 +152,9 @@ impl ProjectLoop {
             pool.rules().lanes,
             shared,
         );
+        let placement = self.flags.on("engine-placement").await;
         let (mut hold, start_on) = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Assistant) {
+            Some(gate) => match gate.role_start(self, shared, Role::Assistant, placement) {
                 Some(engine) => (paused, engine),
                 None => (true, None),
             },
