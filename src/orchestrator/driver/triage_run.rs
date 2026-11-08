@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use super::start_gate::StartGate;
 use super::{OutcomeSender, ProjectLoop, SessionStarter, Shared};
 use crate::config::OnOff;
 use crate::engines::{EngineId, Role, engine_for, program_of};
@@ -40,6 +41,8 @@ pub struct TriageRequest {
     pub outcomes: OutcomeSender,
     /// The `engine-placement` release flag: Off, Claude alone runs it.
     pub placement: bool,
+    /// With `engine-start-rules` On, the engine to start on when it isn't the triager's chosen one.
+    pub engine: Option<EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -147,6 +150,15 @@ impl ProjectLoop {
 
     /// Starts a triager on each stopped item that wants one while `room` session slots are free. Not while signed
     /// out, stopping or paused (the caller doesn't ask when paused), or the triager's engine is at its limit.
+    fn triager_engine(&self, shared: &Shared<'_>) -> EngineId {
+        program_of(engine_for(
+            &shared.links.engine_choice,
+            self.project.engines.as_ref(),
+            Role::Triager,
+            None,
+        ))
+    }
+
     pub(super) async fn triage_pass(
         &mut self,
         pool: &mut LanePool,
@@ -174,22 +186,24 @@ impl ProjectLoop {
         // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
         self.triage_flag = self.flags.on("triage-session").await;
         self.placement_flag = self.flags.on("engine-placement").await;
-        if !self.triage_flag
-            || self.project.triage != OnOff::On
-            || shared.stopping
-            || super::project::signed_out(shared)
-        {
+        if !self.triage_flag || self.project.triage != OnOff::On || shared.stopping {
             return;
         }
-        let engine = program_of(engine_for(
-            &shared.links.engine_choice,
-            self.project.engines.as_ref(),
-            Role::Triager,
-            None,
-        ));
-        if shared.engine_limits.is_limited(engine, Instant::now()) {
-            return;
-        }
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        let (engine, start_on) = match &gate {
+            Some(gate) => match gate.role_start(self, shared, Role::Triager, self.placement_flag) {
+                Some(Some(now)) => (now, Some(now)),
+                Some(None) => (self.triager_engine(shared), None),
+                None => return,
+            },
+            None => {
+                let engine = self.triager_engine(shared);
+                if super::project::signed_out(shared) || shared.engine_limits.is_limited(engine, Instant::now()) {
+                    return;
+                }
+                (engine, None)
+            }
+        };
         let now = Utc::now();
         let wanted: Vec<String> = (self.records.iter())
             .filter(|(id, r)| {
@@ -236,6 +250,7 @@ impl ProjectLoop {
                 usage: self.store.usage(),
                 outcomes: self.outcomes.clone(),
                 placement: self.placement_flag,
+                engine: start_on,
                 sessions: self.live.sessions().clone(),
             };
             match starter.triage(request) {

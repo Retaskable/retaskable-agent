@@ -13,7 +13,7 @@ use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, Proj
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
-use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session};
+use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
 use crate::tiers::implementer_tier;
@@ -76,7 +76,10 @@ impl DraftHost for ClaudeDrafts {
         );
         Box::pin(async move {
             let project = &job.project;
-            let chosen = engine_for(&choice, project.engines.as_ref(), Role::Drafter, None);
+            let chosen = start_engine(
+                job.engine,
+                engine_for(&choice, project.engines.as_ref(), Role::Drafter, None),
+            );
             if chosen != Engine::Claude && !job.placement {
                 return Err(anyhow!("{chosen} sessions don't run yet"));
             }
@@ -218,6 +221,7 @@ mod tests {
         };
         let host = ClaudeDrafts::new(root.join("data"), choice, env, ModelsConfig::default(), models);
         let job = |session_id: &str, resume: bool, placement: bool| DraftJob {
+            engine: None,
             project: project_in(&root, &repo),
             draft: serde_json::from_value(serde_json::json!({ "id": "d1", "request": "Add charts" })).unwrap(),
             dir: root.clone(),
@@ -263,6 +267,7 @@ mod tests {
         );
         let sessions = Sessions::default();
         let job = DraftJob {
+            engine: None,
             project: project_in(&root, &repo),
             draft: serde_json::from_value(
                 serde_json::json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"] }),

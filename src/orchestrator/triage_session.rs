@@ -13,7 +13,8 @@ use super::session::{ClaudeStarter, quiet_timeout};
 use crate::config::{Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{
-    EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
+    EngineId, EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
+    start_engine,
 };
 use crate::implementer::new_session_id;
 use crate::orchestrator::live::sessions::{SessionInfo, model_name};
@@ -52,8 +53,16 @@ fn triager_info(project: &str, item: &str, lane: Option<u32>, placed: &Placement
 impl ClaudeStarter {
     /// Where the triager (and its second look) runs: the engine chosen for the role and its binary. With
     /// `engine-placement` Off (`placement`), the engine chosen is not used: Claude alone runs. Only the triager itself is refused then when it isn't on Claude (`start_triage`); a second look always was Claude.
-    fn place_triager(&self, project: &ProjectConfig, placement: bool) -> Result<Placement, String> {
-        let chosen = engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None);
+    fn place_triager(
+        &self,
+        project: &ProjectConfig,
+        placement: bool,
+        now: Option<EngineId>,
+    ) -> Result<Placement, String> {
+        let chosen = start_engine(
+            now,
+            engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None),
+        );
         place(
             if placement { chosen } else { Engine::Claude },
             Role::Triager,
@@ -82,11 +91,14 @@ impl ClaudeStarter {
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
         if !request.placement
-            && engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None) != Engine::Claude
+            && start_engine(
+                request.engine,
+                engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None),
+            ) != Engine::Claude
         {
             return Err("Claude alone starts sessions while engine-placement is off".into());
         }
-        let placed = self.place_triager(&project, request.placement)?;
+        let placed = self.place_triager(&project, request.placement, request.engine)?;
         let TriageRequest {
             project: project_id,
             item_id,
@@ -195,7 +207,7 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let placed = self.place_triager(&project, request.placement)?;
+        let placed = self.place_triager(&project, request.placement, None)?;
         let SecondLookRequest {
             project: project_id,
             item_id,

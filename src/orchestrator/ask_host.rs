@@ -16,7 +16,7 @@ use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, Sta
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig};
-use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session};
+use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::Interrupted;
 use crate::implementer::session::new_session_id;
@@ -105,6 +105,7 @@ impl AskHost for ClaudeAsks {
                 runs,
                 events,
                 placement,
+                engine,
                 sessions,
             } = job;
             let (client, repo, token) = (&store.client, store.repo, Some(store.token.as_str()));
@@ -168,7 +169,10 @@ impl AskHost for ClaudeAsks {
             };
             let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
             // The local model places as Claude Code with no local target, like `place` says.
-            let chosen = match engine_for(&choice, project.engines.as_ref(), Role::Assistant, None) {
+            let chosen = match start_engine(
+                engine,
+                engine_for(&choice, project.engines.as_ref(), Role::Assistant, None),
+            ) {
                 Engine::Local => Engine::Claude,
                 other => other,
             };

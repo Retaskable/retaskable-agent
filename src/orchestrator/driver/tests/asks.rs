@@ -14,6 +14,7 @@ struct Host {
     /// The session fails: the host answers that it couldn't.
     crashed: AtomicBool,
     jobs: Mutex<Vec<AskCommand>>,
+    engines: Mutex<Vec<Option<EngineId>>>,
     /// Tool events the session emits, a pause apart, before it answers.
     reads: Mutex<Vec<&'static str>>,
 }
@@ -31,6 +32,7 @@ impl AskHost for Host {
     }
     fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
         self.jobs.lock().unwrap().push(job.ask.clone());
+        self.engines.lock().unwrap().push(job.engine);
         let (broken, hold) = (self.broken.load(Ordering::SeqCst), self.hold.load(Ordering::SeqCst));
         let crashed = self.crashed.load(Ordering::SeqCst);
         let reads = std::mem::take(&mut *self.reads.lock().unwrap());
@@ -299,4 +301,69 @@ async fn progress_reports_rising_time_and_the_file_read_then_the_answer() {
     assert!(progress.iter().any(|p| p.ends_with("reading src/a.rs")), "{progress:?}");
     assert!(progress.last().unwrap().ends_with("reading src/c.rs"), "{progress:?}");
     assert!(progress[0].starts_with("Thinking for 0s"), "{progress:?}");
+}
+
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// Cursor is at its limit.
+fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
+    let mut on = vec!["engine-start-rules", "engine-placement"];
+    on.extend(flags);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+    rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
+    if cursor_out {
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Cursor, out_for(600));
+    }
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_an_ask_on_cursor_is_answered() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"chat": "cursor"}}),
+        true,
+        false,
+    );
+    push(&rig, ask("k1", "hello"));
+    until(&mut rig, &asked, 1).await;
+    assert_eq!(*host.engines.lock().unwrap(), vec![None]);
+}
+
+#[tokio::test]
+async fn an_ask_on_claude_with_claude_out_is_answered_on_cursor_used_here() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"planner": "cursor"}}),
+        true,
+        false,
+    );
+    push(&rig, ask("k1", "hello"));
+    until(&mut rig, &asked, 1).await;
+    assert_eq!(*host.engines.lock().unwrap(), vec![Some(EngineId::Cursor)]);
+}
+
+#[tokio::test]
+async fn an_ask_waits_when_no_engine_may_start() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"planner": "cursor"}}),
+        true,
+        true,
+    );
+    push(&rig, ask("k1", "hello"));
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "waiting");
+    assert!(host.jobs.lock().unwrap().is_empty());
 }

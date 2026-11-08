@@ -694,11 +694,12 @@ impl Machine {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live && !paused {
                     let shared = shared!(self, stopping);
-                    lp.draft_pass(&mut slots, &host, &shared).await;
+                    lp.draft_pass(&mut slots, &host, &shared, self.pool.rules().lanes).await;
                 }
                 if live {
                     let shared = shared!(self, stopping);
-                    lp.land_drafts(&host, &shared, self.merge_wait).await;
+                    lp.land_drafts(&host, &shared, self.merge_wait, self.pool.rules().lanes)
+                        .await;
                     let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
                     lp.live.set_drafting(&lp.id, drafting);
                 }

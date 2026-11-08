@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::project::{ProjectLoop, signed_out};
+use super::start_gate::StartGate;
 use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
 use crate::backlog::asks::AskReport;
@@ -53,6 +54,8 @@ pub struct AskJob {
     pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
     /// The `engine-placement` release flag: Off, Claude alone answers.
     pub placement: bool,
+    /// With `engine-start-rules` On, the engine to start on when it isn't the assistant's chosen one.
+    pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -143,8 +146,23 @@ impl ProjectLoop {
             Role::Assistant,
             None,
         ));
-        let mut hold =
-            paused || signed_out(shared) || shared.engine_limits.is_limited(engine, std::time::Instant::now());
+        let gate = StartGate::for_lanes(
+            self.flags.on("engine-start-rules").await,
+            self,
+            pool.rules().lanes,
+            shared,
+        );
+        let placement = self.flags.on("engine-placement").await;
+        let (mut hold, start_on) = match &gate {
+            Some(gate) => match gate.role_start(self, shared, Role::Assistant, placement) {
+                Some(engine) => (paused, engine),
+                None => (true, None),
+            },
+            None => (
+                paused || signed_out(shared) || shared.engine_limits.is_limited(engine, std::time::Instant::now()),
+                None,
+            ),
+        };
         if !hold {
             hold = match host.blocked(&store()).await {
                 Ok(blocked) => blocked,
@@ -182,6 +200,7 @@ impl ProjectLoop {
                 runs: self.records.clone(),
                 events,
                 placement: self.flags.on("engine-placement").await,
+                engine: start_on,
                 sessions: self.live.sessions().clone(),
             };
             let (host, queue) = (host.clone(), shared.links.item_commands.clone());

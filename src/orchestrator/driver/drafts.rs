@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::project::{ProjectLoop, signed_out};
+use super::start_gate::StartGate;
 use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
@@ -22,6 +23,7 @@ use crate::drafts::approval::approves_itself;
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
+use crate::engines::Role;
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
@@ -43,6 +45,8 @@ pub struct DraftJob {
     pub usage: Option<Value>,
     /// The `engine-placement` flag: Off, only a Claude drafter runs.
     pub placement: bool,
+    /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
+    pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -116,10 +120,21 @@ impl ProjectLoop {
         slots: &mut u32,
         host: &std::sync::Arc<dyn DraftHost>,
         shared: &Shared<'_>,
+        lanes: u32,
     ) {
-        if self.drafting() || *slots == 0 || shared.stopping || signed_out(shared) {
+        if self.drafting() || *slots == 0 || shared.stopping {
             return;
         }
+        let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
+        let placement = self.flags.on("engine-placement").await;
+        let engine = match &gate {
+            Some(gate) => match gate.role_start(self, shared, Role::Drafter, placement) {
+                Some(engine) => engine,
+                None => return,
+            },
+            None if signed_out(shared) => return,
+            None => None,
+        };
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
@@ -132,8 +147,23 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
-        *slots -= 1;
         let resume = claim.draft.session_id.is_some();
+        // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
+        let engine = if resume { None } else { engine };
+        if resume
+            && gate
+                .as_ref()
+                .is_some_and(|g| g.role_start(self, shared, Role::Drafter, false).is_none())
+        {
+            let released = self
+                .client
+                .draft_release(repo, Some(&token), &claim.draft.id, &claim.token);
+            if let Err(e) = released.await {
+                tracing::warn!("{}: couldn't let go of draft {}: {e}", self.id, claim.draft.id);
+            }
+            return;
+        }
+        *slots -= 1;
         let session_id = claim.draft.session_id.clone().unwrap_or_else(new_session_id);
         let ctx = Ctx {
             client: self.client.clone(),
@@ -149,6 +179,7 @@ impl ProjectLoop {
                 project: self.id.clone(),
             },
             sessions: self.live.sessions().clone(),
+            engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
         };
         let id = claim.draft.id.clone();
@@ -191,6 +222,7 @@ struct Ctx {
     host: std::sync::Arc<dyn DraftHost>,
     /// The draft already went back to the queue once by itself.
     retried: bool,
+    engine: Option<crate::engines::EngineId>,
     approve: Approve,
     sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -302,6 +334,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         resume,
         usage: ctx.usage.clone(),
         placement: ctx.flags.on("engine-placement").await,
+        engine: ctx.engine,
         sessions: ctx.sessions.clone(),
     };
     let result = match ctx.host.run(job).await {

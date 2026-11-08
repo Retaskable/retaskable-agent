@@ -65,6 +65,7 @@ fn answer(status: &str) -> String {
 
 async fn run(rig: &Rig) -> TrialEnd {
     let job = TrialJob {
+        engine: None,
         project: rig.project.clone(),
         lane: 1,
         branch: "retaskable/trial-plan".into(),
@@ -174,6 +175,7 @@ async fn the_trial_runs_on_the_implementers_chosen_engine_with_placement_on() {
         Default::default(),
     );
     let job = |placement| TrialJob {
+        engine: None,
         project: rig.project.clone(),
         lane: 1,
         branch: "retaskable/trial-plan".into(),

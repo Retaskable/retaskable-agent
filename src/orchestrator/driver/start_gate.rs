@@ -20,14 +20,15 @@ pub(super) struct StartGate {
 impl StartGate {
     /// `None` while `engine-start-rules` (`on`) is Off.
     pub(super) fn new(on: bool, lp: &ProjectLoop, pool: &LanePool, shared: &Shared<'_>) -> Option<StartGate> {
+        StartGate::for_lanes(on, lp, pool.rules().lanes, shared)
+    }
+
+    /// `new`, for a pass that knows the computer's lane count but holds no pool.
+    pub(super) fn for_lanes(on: bool, lp: &ProjectLoop, lanes: u32, shared: &Shared<'_>) -> Option<StartGate> {
         if !on {
             return None;
         }
-        let used = engines_used_here(
-            &shared.links.engine_choice,
-            lp.project.engines.as_ref(),
-            pool.rules().lanes,
-        );
+        let used = engines_used_here(&shared.links.engine_choice, lp.project.engines.as_ref(), lanes);
         let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, Instant::now());
         Some(StartGate { used, out })
     }
@@ -52,6 +53,30 @@ impl StartGate {
             Some(lane),
         ));
         engine_now(chosen, &self.used, &self.out)
+    }
+
+    /// What a new session of `role` does now: `None` while its engine is out; else `Some(engine)`, the one to start
+    /// on when that isn't the role's chosen one. Only a fresh session with `engine-placement` On (`switch`) moves to
+    /// `engine_now`; a resume keeps the engine it ran on and waits while that is out.
+    pub(super) fn role_start(
+        &self,
+        lp: &ProjectLoop,
+        shared: &Shared<'_>,
+        role: Role,
+        switch: bool,
+    ) -> Option<Option<EngineId>> {
+        let chosen = program_of(engine_for(
+            &shared.links.engine_choice,
+            lp.project.engines.as_ref(),
+            role,
+            None,
+        ));
+        let now = if switch {
+            engine_now(chosen, &self.used, &self.out)
+        } else {
+            chosen
+        };
+        may_start(now, &self.out).then_some((now != chosen).then_some(now))
     }
 
     /// Whether `engine` may start now.
