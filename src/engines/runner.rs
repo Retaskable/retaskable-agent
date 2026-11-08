@@ -285,23 +285,10 @@ pub async fn run_session_tracked(
     quiet: Option<Duration>,
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 ) -> Result<SessionResult> {
-    let slots = crate::tiers::model_caps_on().then(super::model_slots::global).flatten();
-    run_session_in(slots, engine, bin, spec, known_session_id, sink, quiet, tree_tx).await
-}
-
-/// [`run_session_tracked`], holding a Claude session to its model's slot in `slots` (if any) until it ends. Cursor, pi
-/// and Codex sessions count toward `concurrency` only.
-#[allow(clippy::too_many_arguments)]
-async fn run_session_in(
-    slots: Option<&super::model_slots::ModelSlots>,
-    engine: &dyn Engine,
-    bin: &Path,
-    spec: &SessionSpec,
-    known_session_id: &str,
-    sink: Option<&TranscriptSink>,
-    quiet: Option<Duration>,
-    tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
-) -> Result<SessionResult> {
+    // A Claude session is held to its model's slot until it ends; Cursor, pi and Codex count toward `concurrency` only.
+    let slots = (cfg!(test) || crate::tiers::model_caps_on())
+        .then(super::model_slots::global)
+        .flatten();
     let _slot = match slots {
         Some(slots) if spec.engine.unwrap_or_default() == EngineId::Claude => Some(slots.acquire(&spec.model).await),
         _ => None,
@@ -867,7 +854,7 @@ mod tests {
 
     /// How long `n` sessions on `model`/`engine` take under `slots`, each a 300ms command that prints one result.
     #[cfg(unix)]
-    async fn timed(slots: &super::super::model_slots::ModelSlots, n: usize, model: &str, engine: EngineId) -> Duration {
+    async fn timed(n: usize, model: &str, engine: EngineId) -> Duration {
         let dir = tempfile::tempdir().unwrap();
         let (_, _) = success_session(dir.path());
         let out = dir.path().join("out.jsonl");
@@ -880,7 +867,7 @@ mod tests {
             ..base_spec(dir.path())
         };
         let started = std::time::Instant::now();
-        let runs = (0..n).map(|_| run_session_in(Some(slots), &fake, Path::new("sh"), &spec, "k", None, None, None));
+        let runs = (0..n).map(|_| run_session_tracked(&fake, Path::new("sh"), &spec, "k", None, None, None));
         for r in futures_util::future::join_all(runs).await {
             assert!(r.unwrap().ok);
         }
@@ -890,14 +877,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_opus_cap_of_one_runs_opus_sessions_one_after_the_other() {
-        let slots = super::super::model_slots::ModelSlots::new(crate::config::ModelConcurrency {
-            opus: Some(1),
-            sonnet: None,
-        });
-        assert!(timed(&slots, 2, "opus", EngineId::Claude).await >= Duration::from_millis(600));
-        assert!(timed(&slots, 2, "sonnet", EngineId::Claude).await < Duration::from_millis(600));
+        super::super::model_slots::set_global(super::super::model_slots::ModelSlots::new(
+            crate::config::ModelConcurrency {
+                opus: Some(1),
+                sonnet: None,
+            },
+        ));
+        assert!(timed(2, "opus", EngineId::Claude).await >= Duration::from_millis(600));
+        assert!(timed(2, "sonnet", EngineId::Claude).await < Duration::from_millis(600));
         for engine in [EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
-            assert!(timed(&slots, 2, "opus", engine).await < Duration::from_millis(600));
+            assert!(timed(2, "opus", engine).await < Duration::from_millis(600));
         }
     }
 
