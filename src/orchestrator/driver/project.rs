@@ -541,43 +541,30 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
-        let restart_rules = self.flags.on("watchdog-anomaly-rules").await;
-        let cant_start = cant_start.filter(|_| restart_rules);
-        self.check_watchdog(paused, cant_start, &actions, pool, restart_rules);
+        let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
+        let cant_start = cant_start.filter(|_| anomaly_rules);
+        self.check_watchdog(paused, cant_start, &actions, pool, anomaly_rules);
         Step::Ticked { would }
     }
 
-    /// Why no new work can start on this computer right now, for the watchdog: a claim pause, Claude signed out
-    /// (when it's the only engine the lanes use), or every engine the lanes run at its usage limit.
-    pub(super) fn start_blocked(
-        &self,
-        links: &super::machine::Links,
-        claim_paused_until: Option<std::time::Instant>,
-        signed_out_until: Option<std::time::Instant>,
-        limits: &crate::orchestrator::fresh_start::EngineLimits,
-        pool: &LanePool,
-    ) -> Option<&'static str> {
-        let now = std::time::Instant::now();
-        if claim_paused_until.is_some_and(|u| now < u) {
+    /// Why no new work can start on this computer right now, for the watchdog, by the same rules `claim` uses:
+    /// a claim pause; with the start rules Off, Claude signed out or the weekly cutoff; with them On, no lane
+    /// whose engine (after fall-over) may start.
+    pub(super) async fn start_blocked(&mut self, shared: &Shared<'_>, pool: &LanePool) -> Option<&'static str> {
+        if shared.claim_paused_until.is_some_and(|u| std::time::Instant::now() < u) {
             return Some("claim paused");
         }
-        let engines: std::collections::BTreeSet<EngineId> = (1..=pool.limit().max(1))
-            .map(|lane| {
-                program_of(engine_for(
-                    &links.engine_choice,
-                    self.project.engines.as_ref(),
-                    Role::Implementer,
-                    Some(lane),
-                ))
-            })
-            .collect();
-        if signed_out_until.is_some_and(|u| now < u) && engines.iter().all(|e| *e == EngineId::Claude) {
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
             return Some("Claude signed out");
         }
-        engines
-            .iter()
-            .all(|e| limits.is_limited(*e, now))
-            .then_some("usage limit")
+        let Some(gate) = gate else {
+            let week =
+                self.flags.on("weekly-cutoff").await && shared.engine_limits.week_cut_off(std::time::Instant::now());
+            return week.then_some("weekly limit");
+        };
+        let lanes = pool.rules().lanes;
+        (lanes > 0 && !(1..=lanes).any(|k| gate.lane_may_start(self, shared, k))).then_some("usage limit")
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
@@ -589,7 +576,7 @@ impl ProjectLoop {
         cant_start: Option<&str>,
         actions: &[Action],
         pool: &LanePool,
-        restart_rules: bool,
+        anomaly_rules: bool,
     ) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
@@ -614,8 +601,9 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            anomaly_rules,
             // Behind `watchdog-anomaly-rules`: Off, no restart reaches the rules.
-            restart: restart_rules
+            restart: anomaly_rules
                 .then(|| watchdog::RestartView::of(crate::restart::state()))
                 .flatten(),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,

@@ -975,6 +975,7 @@ mod reporting;
 mod restart;
 mod runs;
 mod settling;
+mod start_blocked;
 mod starter;
 mod triage;
 mod trial;

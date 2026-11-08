@@ -126,27 +126,3 @@ async fn a_session_that_answers_clears_the_count() {
     rig.machine.pass().await;
     assert!(rig.lp(0).store.own_failures().is_empty());
 }
-
-#[tokio::test]
-async fn a_claim_pause_or_an_engine_at_its_limit_is_a_reason_new_work_cant_start() {
-    let (mut rig, _fake, _) = start(true, SessionResult::Failed("lane prep".into()), 0).await;
-    let blocked = |rig: &mut Rig| {
-        let m = &rig.machine;
-        m.projects[0].start_blocked(
-            &m.links,
-            m.claim_paused_until,
-            m.claude_signed_out_until,
-            &m.engine_limits,
-            &m.pool,
-        )
-    };
-    assert_eq!(blocked(&mut rig), None);
-    rig.machine.claim_paused_until = Some(std::time::Instant::now() + Duration::from_secs(60));
-    assert_eq!(blocked(&mut rig), Some("claim paused"));
-    rig.machine.claim_paused_until = None;
-    rig.machine.engine_limits.hit(
-        crate::engines::EngineId::Claude,
-        std::time::Instant::now() + Duration::from_secs(60),
-    );
-    assert_eq!(blocked(&mut rig), Some("usage limit"));
-}
