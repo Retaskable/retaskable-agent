@@ -318,6 +318,8 @@ mod tests {
             kind: None,
             milestone: None,
             reopened: None,
+            red_sha: None,
+            no_fix_sha: None,
         }
     }
 

@@ -141,6 +141,9 @@ pub struct RunLoop {
     /// The store said it waits for something this computer lacks: no asking until `work_available`.
     waiting: bool,
     last_beat: Option<Instant>,
+    /// The last `run_take` of the pass handed out nothing (not an error, not a wait): the project is idle.
+    idle: bool,
+    pub(super) fix_main: super::fix_main::State,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
     processes_tx: RunProcesses,
@@ -156,6 +159,8 @@ impl RunLoop {
             dropped: false,
             waiting: false,
             last_beat: None,
+            idle: false,
+            fix_main: Default::default(),
             ends_tx,
             ends_rx,
             processes_tx,
@@ -224,11 +229,16 @@ impl ProjectLoop {
             }
             self.run_loop.runs.end_sent(&end.token, answer, now);
         }
+        self.run_loop.idle = false;
         for _ in 0..MAX_ASKS {
             if shared.stopping || self.run_loop.waiting || !self.ask_once(repo, token, pool, starter, shared, now).await
             {
                 break;
             }
+        }
+        if self.run_loop.idle && !shared.stopping {
+            let machine = shared.links.machine.clone();
+            self.idle_baseline(repo, token, pool, &machine, now).await;
         }
         crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
@@ -325,7 +335,10 @@ impl ProjectLoop {
                 self.store_error("run_take", &e);
                 (json!("failed"), false)
             }
-            Ok(RunTakeAnswer::Nothing) => (json!("none"), false),
+            Ok(RunTakeAnswer::Nothing) => {
+                self.run_loop.idle = true;
+                (json!("none"), false)
+            }
             Ok(RunTakeAnswer::WaitingFor(waiting)) => {
                 self.run_loop.waiting = true;
                 (json!({ "waitingFor": waiting }), false)

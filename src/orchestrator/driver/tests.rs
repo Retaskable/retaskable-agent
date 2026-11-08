@@ -937,6 +937,7 @@ mod approve;
 mod asks;
 mod commands;
 mod drafts;
+mod fix_main;
 mod idea_accept;
 mod ideas;
 mod ideas_daily;

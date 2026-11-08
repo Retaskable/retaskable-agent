@@ -286,6 +286,8 @@ mod tests {
                 at: Some("2026-10-29T00:00:00Z".into()),
                 by: None,
             }),
+            red_sha: None,
+            no_fix_sha: None,
         }
     }
 
