@@ -99,6 +99,7 @@ struct Rig {
     log: Log,
     request: RunRequest,
     ends: tokio::sync::mpsc::UnboundedReceiver<RunEnd>,
+    flags: Arc<crate::flags::Flags>,
 }
 
 async fn rig(held_by_other: bool) -> Rig {
@@ -121,6 +122,7 @@ async fn rig(held_by_other: bool) -> Rig {
         log,
         request,
         ends: rx,
+        flags: Arc::new(crate::flags::Flags::fixed(&["chore-rotation", "chore-main-sync"])),
     }
 }
 
@@ -132,6 +134,7 @@ impl Rig {
             "here".into(),
             Duration::from_millis(10),
             wait,
+            self.flags.clone(),
         );
         runner.start(self.request.clone()).unwrap();
         tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
@@ -291,6 +294,7 @@ fn start_runner(rig: &Rig) {
         "here".into(),
         Duration::from_millis(10),
         None,
+        rig.flags.clone(),
     );
     runner.start(rig.request.clone()).unwrap();
 }
@@ -328,4 +332,85 @@ async fn a_stop_between_processes_drops_the_lock_and_merges_nothing() {
     rig.assert_lock_dropped();
     assert_eq!(rig.request.context.locks.count(), 0);
     assert!(rig.ends.try_recv().is_err());
+}
+
+/// Makes the rig's piece a main sync on a project merging with `method`.
+fn into_sync(rig: &mut Rig, method: &str) {
+    rig.request.piece = serde_json::from_value(
+        json!({ "id": "p1", "title": "t", "branch": "feat", "change": 7, "chore": { "kind": "sync_main" } }),
+    )
+    .unwrap();
+    rig.request.context.config.github = Some(json!({ "mergeMethod": method }));
+}
+
+#[tokio::test]
+async fn a_main_sync_merges_with_a_merge_commit_whatever_the_projects_method() {
+    for method in ["squash", "rebase"] {
+        let mut rig = rig(false).await;
+        into_sync(&mut rig, method);
+        let end = rig.run(None).await;
+        assert_eq!(end.outcome, RunOutcome::Merged, "{method}");
+        let calls = calls(rig.dir.path());
+        assert!(
+            calls.contains(&"pr merge 7 --merge --delete-branch".to_string()),
+            "{calls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_of_merge_commits_ends_waiting_on_a_person() {
+    let mut rig = rig(false).await;
+    into_sync(&mut rig, "squash");
+    set(rig.dir.path(), "merge-code", "1");
+    set(
+        rig.dir.path(),
+        "merge-err",
+        "Merge commits are not allowed on this repository.",
+    );
+    let end = rig.run(None).await;
+    assert_eq!(end.outcome, RunOutcome::Questions);
+    let q = end.result["questions"][0]["question"].as_str().unwrap();
+    assert_eq!(q, "Allow merge commits in the repo's settings, or sync by hand");
+    rig.assert_lock_dropped();
+}
+
+#[tokio::test]
+async fn a_conflicting_sync_is_told_to_merge_the_base_in_again_never_to_rebase() {
+    let mut rig = rig(false).await;
+    into_sync(&mut rig, "squash");
+    commit(&rig.repo, "feat.txt", "main's");
+    trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
+    let end = rig.run(None).await;
+    assert_eq!(end.outcome, RunOutcome::Conflict);
+    let text = end.result["instruction"].as_str().unwrap();
+    assert!(
+        text.contains("Merge origin/main into your branch again") && text.contains("never a rebase"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_roadmap_piece_still_squashes_and_a_non_squash_project_still_refuses_it() {
+    let mut rig = rig(false).await;
+    rig.request.context.config.github = Some(json!({ "mergeMethod": "rebase" }));
+    assert!(matches!(rig.run(None).await.outcome, RunOutcome::Failed(_)));
+    assert!(calls(rig.dir.path()).is_empty());
+    let mut rig = self::rig(false).await;
+    assert_eq!(rig.run(None).await.outcome, RunOutcome::Merged);
+    assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
+}
+
+#[tokio::test]
+async fn with_the_flag_off_a_sync_piece_merges_like_any_other() {
+    let mut rig = rig(false).await;
+    into_sync(&mut rig, "squash");
+    rig.flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
+    assert_eq!(rig.run(None).await.outcome, RunOutcome::Merged);
+    assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
+
+    let mut rig = self::rig(false).await;
+    into_sync(&mut rig, "rebase");
+    rig.flags = Arc::new(crate::flags::Flags::fixed(&[]));
+    assert!(matches!(rig.run(None).await.outcome, RunOutcome::Failed(_)));
 }
