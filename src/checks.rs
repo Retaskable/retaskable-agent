@@ -54,9 +54,12 @@ pub struct StageOneResult {
 }
 
 impl StageOneResult {
-    /// The blocking checks that didn't pass, in the order they ran.
+    /// The blocking checks that didn't pass, in the order they ran, except those that fail on main too.
     pub fn blocking_failures(&self) -> Vec<&CheckRun> {
-        self.checks.iter().filter(|c| c.blocking && !c.passed()).collect()
+        self.checks
+            .iter()
+            .filter(|c| c.blocking && !c.passed() && !c.preexisting)
+            .collect()
     }
 
     /// `Failed` when any blocking check (or a failed install, which counts as one) didn't pass;
@@ -376,6 +379,28 @@ mod tests {
             },
         ];
         assert_eq!(checks_summary(&checks), "✓ test\n✗ lint (non-blocking)");
+    }
+
+    #[test]
+    fn a_failure_that_fails_on_main_too_does_not_block() {
+        let mut test = CheckRun {
+            name: "test".to_string(),
+            command: "exit 1".to_string(),
+            blocking: true,
+            exit_code: 1,
+            timed_out: false,
+            output_tail: String::new(),
+            preexisting: true,
+        };
+        let result = |c: &CheckRun| StageOneResult {
+            checks: vec![c.clone()],
+            diff_stat: String::new(),
+            changed_files: vec![],
+            backlog_changed: false,
+        };
+        assert_eq!(result(&test).outcome(), CheckOutcome::Passed);
+        test.preexisting = false;
+        assert_eq!(result(&test).outcome(), CheckOutcome::Failed);
     }
 
     #[test]

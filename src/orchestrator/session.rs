@@ -474,23 +474,31 @@ pub(super) struct ChecksStage<'a> {
     pub backlog_path: &'a str,
     pub on_tree: std::sync::Arc<dyn Fn(std::sync::Arc<crate::process_tree::ProcessTree>) + Send + Sync>,
     pub result: &'a std::sync::Mutex<Option<crate::checks::StageOneResult>>,
+    /// Tells a failure that main has too from the change's own; `None` without `chore-rotation`.
+    pub baseline: Option<super::baseline_wait::BaselineStage<'a>>,
 }
 
 impl ChecksStage<'_> {
     /// Runs the checks in `cwd`; a blocking failure is `(names of the failing checks, the message to send back)`.
-    async fn run(&self, cwd: &Path, base: &str) -> Result<Option<(String, String)>> {
-        let (dir, base) = (cwd.to_path_buf(), base.to_string());
+    /// With a baseline, a failure that main has too is marked `preexisting` and doesn't count; the notes say what
+    /// the comparison did.
+    async fn run(&self, cwd: &Path, base: &str, notes: &mut Vec<String>) -> Result<Option<(String, String)>> {
+        let (dir, base_owned) = (cwd.to_path_buf(), base.to_string());
         let (checks, backlog, on_tree) = (
             self.checks.to_vec(),
             self.backlog_path.to_string(),
             self.on_tree.clone(),
         );
         let stage = tokio::task::spawn_blocking(move || {
-            crate::checks::run_registered(&dir, &base, &checks, &backlog, &*on_tree)
+            crate::checks::run_registered(&dir, &base_owned, &checks, &backlog, &*on_tree)
         })
         .await
         .context("running the checks")?
         .context("running the checks")?;
+        let mut stage = stage;
+        if let (Some(baseline), false) = (&self.baseline, stage.blocking_failures().is_empty()) {
+            notes.extend(baseline.mark(cwd, base, &mut stage.checks).await);
+        }
         let failures: Vec<_> = stage.blocking_failures().into_iter().cloned().collect();
         *self.result.lock().unwrap() = Some(stage);
         if failures.is_empty() {
@@ -585,7 +593,7 @@ where
         let found = match (found, g.checks) {
             (Some(f), _) => f,
             (None, None) => break,
-            (None, Some(stage)) => match stage.run(g.cwd, g.base_branch).await? {
+            (None, Some(stage)) => match stage.run(g.cwd, g.base_branch, &mut notes).await? {
                 Some((names, message)) => ("checks", names, message),
                 None => break,
             },
