@@ -15,6 +15,7 @@ use crate::hello_settings::HelloSettings;
 
 mod cursor;
 mod orchestrator;
+mod usage;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
 pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
@@ -439,6 +440,9 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some(window) = self.usage_block(project, data_dir) {
+            state["usage"] = window;
+        }
         if self.local.down() {
             state["usage"]["localDown"] = json!(true);
         }
@@ -790,6 +794,29 @@ mod tests {
             v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
             "setup"
         );
+    }
+
+    #[test]
+    fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600;
+        store.set_usage(json!({"utilization": 0.25, "status": "allowed", "resetsAt": soon}));
+        store.set_week_usage(json!({"rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": soon}));
+        store.save().unwrap();
+        let usage = |on| reporting_view(on).snapshot("a", dir.path())["state"]["usage"].clone();
+        let u = usage(true);
+        assert_eq!(
+            (&u["leftPct"], &u["status"], &u["weekUsedPct"]),
+            (&json!(75.0), &json!("allowed"), &json!(40.0))
+        );
+        assert_eq!(u["tier"], "opus");
+        assert!(u["resetsAt"].is_string() && u["weekResetsAt"].is_string());
+        assert_eq!(usage(false), json!({}), "flag Off");
     }
 
     #[test]
