@@ -43,6 +43,7 @@ mod runs;
 mod settle;
 mod signed_out;
 mod start_gate;
+mod step_events;
 mod store_errors;
 mod triage_bug;
 mod triage_facts;

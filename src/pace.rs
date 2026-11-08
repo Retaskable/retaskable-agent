@@ -105,7 +105,57 @@ fn seven_day(usage: &Value) -> Option<(f64, i64)> {
     Some((frac(w.get("utilization")?.as_f64()?), w.get("resetsAt")?.as_i64()?))
 }
 
+/// What `.retaskable/machine.json` keeps of the pacer (`autoConcurrency`), so a restart in the same window keeps its
+/// number and its 5-minute clock.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PacerState {
+    pub allowed: u32,
+    pub reason: String,
+    /// The `resetsAt` of the window it was paced in, epoch seconds.
+    pub resets_at: i64,
+    /// When the pacer last stepped, epoch seconds.
+    pub last_step: i64,
+    /// The latest samples as `[at, utilization, resetsAt]`.
+    #[serde(default)]
+    pub samples: Vec<(i64, f64, i64)>,
+}
+
+const SAVED_SAMPLES: usize = 12;
+
 impl Pacer {
+    /// The state to save with the number the pacer just gave; `None` before a step in a window.
+    pub fn state(&self, allowed: u32, reason: String) -> Option<PacerState> {
+        let skip = self.samples.len().saturating_sub(SAVED_SAMPLES);
+        Some(PacerState {
+            allowed,
+            reason,
+            resets_at: self.last_resets?,
+            last_step: self.last_step?,
+            samples: (self.samples[skip..].iter())
+                .map(|s| (s.at, s.utilization, s.resets_at))
+                .collect(),
+        })
+    }
+
+    /// Takes a saved state back when its window hasn't reset yet; says whether it did.
+    pub fn restore(&mut self, now: i64, saved: &PacerState) -> bool {
+        if saved.resets_at <= now {
+            return false;
+        }
+        self.last_resets = Some(saved.resets_at);
+        self.last_step = Some(saved.last_step);
+        self.samples = (saved.samples.iter())
+            .filter(|s| s.2 == saved.resets_at && now - s.0 <= KEEP_SECS)
+            .map(|&(at, utilization, resets_at)| Sample {
+                at,
+                utilization,
+                resets_at,
+            })
+            .collect();
+        true
+    }
+
     /// Takes a Claude Code `rate_limit_info` reading seen at `now`.
     pub fn record(&mut self, now: i64, usage: &Value) {
         if let Some((utilization, resets_at)) = five_hour(usage) {
