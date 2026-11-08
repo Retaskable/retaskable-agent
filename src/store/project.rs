@@ -79,6 +79,10 @@ pub struct RunRecord {
     /// session ends with an answer.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub silence_kills: u32,
+    /// Cursor usage-limit hits of this item's implementer in a row, kept so a restart doesn't reset it; cleared
+    /// by any other session end.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cursor_limit_hits: u32,
     /// The item's session couldn't start and is waiting to be started fresh again: its saved session id never
     /// ran, so a restart must not resume it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

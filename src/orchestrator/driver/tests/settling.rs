@@ -749,6 +749,94 @@ async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
     );
 }
 
+/// The 30 minutes are up: Cursor's stamp has lapsed and the resume is due now.
+async fn wait_over(rig: &mut Rig, fake: &Fake, next: SessionResult) {
+    rig.machine.engine_limits = Default::default();
+    resume_now(rig, fake, next).await;
+}
+
+fn cursor_limited() -> SessionResult {
+    SessionResult::Limited {
+        why: "usage limit".into(),
+        resets_in: None,
+    }
+}
+
+/// "a" claimed on a Cursor lane with `cursor-limit-retry` as asked, its first session ended at Cursor's limit.
+async fn cursor_hit(flag: bool, engine: &str) -> (Rig, Arc<Fake>, Asked) {
+    let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": [engine, engine] })).unwrap();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
+        &["cursor-limit-retry"]
+    } else {
+        &[]
+    }));
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(cursor_limited());
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    (rig, fake, asked)
+}
+
+#[tokio::test]
+async fn a_cursor_limit_keeps_the_item_implementing_and_resumes_it_after_30_minutes() {
+    let (mut rig, fake, asked) = cursor_hit(true, "cursor").await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(!ops(&asked).iter().any(|o| o == "release" || o == "park"));
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
+    let due = rig.lp(0).silenced["a"];
+    let wait = due - std::time::Instant::now();
+    assert!(wait > Duration::from_secs(29 * 60) && wait <= Duration::from_secs(30 * 60));
+    assert_eq!(fake.started.lock().unwrap().len(), 1, "not resumed before the wait");
+    wait_over(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 2);
+    assert!(started[1].resume && started[1].session_id == started[0].session_id);
+}
+
+#[tokio::test]
+async fn the_fourth_cursor_limit_in_a_row_goes_to_a_person() {
+    let (mut rig, fake, _) = cursor_hit(true, "cursor").await;
+    for _ in 0..2 {
+        wait_over(&mut rig, &fake, cursor_limited()).await;
+        rig.machine.pass().await;
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    }
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 3);
+    wait_over(&mut rig, &fake, cursor_limited()).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    let record = rig.lp(0).store.runs()["a"].clone();
+    assert_eq!(
+        record.needs_human_reason.as_deref(),
+        Some("Cursor's usage limit was hit 3 times in a row")
+    );
+    assert_eq!(record.cursor_limit_hits, 0);
+}
+
+#[tokio::test]
+async fn an_answer_between_cursor_limits_resets_the_count_and_it_survives_a_reload() {
+    let (mut rig, fake, _) = cursor_hit(true, "cursor").await;
+    let saved = rig.lp(0).store.runs()["a"].clone();
+    let back: crate::store::RunRecord = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+    assert_eq!(back.cursor_limit_hits, 1);
+    wait_over(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
+}
+
+#[tokio::test]
+async fn a_claude_limit_or_the_flag_off_goes_to_a_person_as_before() {
+    for (flag, engine) in [(true, "claude"), (false, "cursor")] {
+        let (mut rig, _fake, _) = cursor_hit(flag, engine).await;
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman, "{flag} {engine}");
+        assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
+    }
+}
+
 async fn settle_usage(flag_on: bool, usage: Value) -> Option<Value> {
     let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
@@ -787,4 +875,101 @@ async fn a_weekly_rejection_is_saved_as_the_usage_reading_with_the_week_as_its_r
 async fn a_non_rejected_weekly_reading_does_not_overwrite_the_usage_reading() {
     let week = json!({"status": "allowed", "rateLimitType": "seven_day", "resetsAt": 4_000_000_000u64});
     assert_eq!(settle_usage(true, week).await, Some(json!({"status": "allowed"})));
+}
+
+#[tokio::test]
+async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let reading = |u: f64| {
+        json!({"unifiedWindows": {
+            "five_hour": {"utilization": 0.1, "resetsAt": now + 3600},
+            "seven_day": {"utilization": u, "resetsAt": now + 86_400}}})
+    };
+    for (u, limited) in [(0.96, true), (0.94, false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+        rig.go_live();
+        at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+        rig.machine.outcome_sender().send(SessionOutcome {
+            project: "p0".into(),
+            item_id: "a".into(),
+            lane: 1,
+            result: SessionResult::NeedsHuman("x".into()),
+            usage: Some(reading(u)),
+            context_tokens: None,
+            notes: vec![],
+            session_id: None,
+        });
+        rig.machine.poll().await;
+        let t = std::time::Instant::now();
+        let id = crate::engines::EngineId::Claude;
+        assert_eq!(rig.machine.engine_limits.is_limited(id, t), limited);
+        assert!(
+            !rig.machine
+                .engine_limits
+                .is_limited(id, t + Duration::from_secs(86_402))
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::Limited {
+            why: "five hour".into(),
+            resets_in: Some(Duration::from_secs(3600)),
+        },
+        usage: Some(json!({"unifiedWindows": {"seven_day": {"utilization": 0.96, "resetsAt": now + 86_400}}})),
+        context_tokens: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.poll().await;
+    let later = std::time::Instant::now() + Duration::from_secs(7200);
+    assert!(
+        rig.machine
+            .engine_limits
+            .is_limited(crate::engines::EngineId::Claude, later)
+    );
+}
+
+#[tokio::test]
+async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (u, limited) in [(0.96, true), (0.94, false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+        rig.lp(0)
+            .store
+            .set_usage(json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": now + 86_400}}}));
+        rig.go_live();
+        rig.machine.poll().await;
+        let t = std::time::Instant::now();
+        assert_eq!(
+            rig.machine
+                .engine_limits
+                .is_limited(crate::engines::EngineId::Claude, t),
+            limited
+        );
+    }
 }

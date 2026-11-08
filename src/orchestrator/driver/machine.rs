@@ -631,6 +631,16 @@ impl Machine {
     /// session slots left (`concurrency` less the starter's `active`), and the live ones apply them and ask the
     /// store for the lanes and slots still free. Each project's actions, and for a live one its claim answer.
     async fn schedule(&mut self, ready: &[bool], paused: &[bool]) -> Vec<(Vec<Action>, Option<Option<String>>)> {
+        for (lp, ready) in self.projects.iter_mut().zip(ready) {
+            if *ready && !lp.week_checked {
+                lp.week_checked = true;
+                if lp.flags.on("weekly-limit-reading").await
+                    && let Some(usage) = lp.store.usage()
+                {
+                    ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
+                }
+            }
+        }
         let stopping = self.stopping();
         let starter = self.starter.clone();
         let live: Vec<bool> = (self.projects.iter().zip(ready))

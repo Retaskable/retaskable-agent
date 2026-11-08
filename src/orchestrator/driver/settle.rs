@@ -8,6 +8,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
+use crate::engines::EngineId;
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
@@ -30,6 +31,7 @@ pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
 
 /// Watchdog kills in a row that are resumed; the next one goes to a person.
 const MAX_SILENCE_RESUMES: u32 = 3;
+const MAX_CURSOR_LIMIT_HITS: u32 = 3;
 
 /// Own failures in a row (a session that wouldn't start, or a hand-back) that are retried or handed back; the
 /// next one goes to a person.
@@ -127,6 +129,27 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
+    /// At the weekly cutoff (`tiers::week_cut_off_until`) Claude counts limited on this computer until the week's
+    /// reset, so nothing new starts while running sessions finish.
+    pub(super) fn cut_off_for_week(
+        id: &str,
+        usage: &Value,
+        limits: &mut crate::orchestrator::fresh_start::EngineLimits,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        if let Some(resets_at) = crate::tiers::week_cut_off_until(usage, now) {
+            tracing::info!(
+                "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
+                id,
+                crate::tiers::WEEK_CUTOFF_PCT
+            );
+            let wait = Duration::from_secs((resets_at - now) as u64);
+            limits.hit(crate::engines::EngineId::Claude, Instant::now() + wait);
+        }
+    }
+
     /// Gives an item's lane and lease back: its run is dropped, the lane freed (`lane_freed`), and the lease
     /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
     /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
@@ -363,6 +386,9 @@ impl ProjectLoop {
             record.impl_session_id = Some(id);
         }
         let weekly = self.flags.on("weekly-limit-reading").await;
+        if weekly && let Some(usage) = &outcome.usage {
+            Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
+        }
         if let Some(usage) = outcome
             .usage
             .clone()
@@ -473,6 +499,36 @@ impl ProjectLoop {
         } else if let Some(record) = self.records.get_mut(&item) {
             // Any answer ends the run of kills.
             record.silence_kills = 0;
+        }
+        // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
+        let cursor_flag = self.flags.on("cursor-limit-retry").await;
+        if let Some(record) = self.records.get_mut(&item) {
+            let cursor_hit = matches!(result, SessionResult::Limited { .. })
+                && cursor_flag
+                && record.impl_session_engine == EngineId::Cursor;
+            if !cursor_hit {
+                record.cursor_limit_hits = 0;
+            } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
+                record.cursor_limit_hits += 1;
+                self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
+                if let SessionResult::Limited { why, .. } = result {
+                    result = SessionResult::Silenced(why);
+                }
+                self.events.add_in(
+                    &self.id,
+                    Event::ItemState(event::ItemState {
+                        item: Some(item.clone()),
+                        from: Some("implementing".into()),
+                        to: Some("implementing".into()),
+                        note: Some("Hit Cursor's usage limit; trying again in 30 minutes".into()),
+                        lane: Some(outcome.lane),
+                        ..Default::default()
+                    }),
+                );
+            } else {
+                record.cursor_limit_hits = 0;
+                result = SessionResult::NeedsHuman("Cursor's usage limit was hit 3 times in a row".into());
+            }
         }
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and

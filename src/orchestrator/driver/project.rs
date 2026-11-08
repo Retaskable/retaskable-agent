@@ -259,6 +259,8 @@ pub struct ProjectLoop {
     pub(super) records: BTreeMap<String, RunRecord>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
+    /// Whether the saved `state.usage` has been checked once against the weekly cutoff (`weekly-limit-reading`).
+    pub(super) week_checked: bool,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
     /// Each item's own failures in a row (`state.ownFailures`): a session that wouldn't start, or a hand-back.
@@ -366,6 +368,7 @@ impl ProjectLoop {
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
+            week_checked: false,
             silenced: BTreeMap::new(),
             own_failures: store.own_failures(),
             fresh_launched: Default::default(),
@@ -639,6 +642,7 @@ impl ProjectLoop {
             self.remember(&id, lane, session, record.impl_context_tokens);
             if let Some(saved) = self.records.get_mut(&id) {
                 saved.silence_kills = record.silence_kills;
+                saved.cursor_limit_hits = record.cursor_limit_hits;
                 saved.not_started = record.not_started;
                 if record.not_started {
                     self.fresh_launched.insert(id.clone());
