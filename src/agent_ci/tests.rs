@@ -360,7 +360,7 @@ mod stubbed {
         // A key no longer listed (this one isn't) is forgotten at the next poll.
         let env = Env::from_map(Default::default());
         r.ci.poll(&r.cfg, &env).await;
-        assert!(r.ci.seen.is_empty());
+        assert!(r.ci.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -488,5 +488,130 @@ mod stubbed {
         assert_eq!(keys["p"].len(), 1);
         assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
         assert_eq!(count(&r), (1, 1));
+    }
+
+    /// A `gh` that keeps commit statuses in `statuses.txt` (`state|description|time`), for claims.
+    fn claim_gh(r: &mut Rig, preloaded: &[(&str, &str, i64)]) {
+        let root = r._dir.path().to_path_buf();
+        let (store, log) = (root.join("statuses.txt"), root.join("calls.log"));
+        let lines: String = preloaded
+            .iter()
+            .map(|(state, desc, at)| {
+                let t = chrono::DateTime::from_timestamp_millis(*at)
+                    .unwrap()
+                    .format("%Y-%m-%dT%H:%M:%SZ");
+                format!("{state}|{desc}|{t}\n")
+            })
+            .collect();
+        std::fs::write(&store, lines).unwrap();
+        let body = format!(
+            "if [ \"$1\" = api ]; then\n echo \"gh $*\" >> {l}\n \
+             if [ \"$3\" = POST ]; then for a in \"$@\"; do case \"$a\" in state=*) s=${{a#state=}};; description=*) d=${{a#description=}};; esac; done\n \
+             echo \"$s|$d|$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> {st}; exit 0; fi\n \
+             echo '['; sep=; [ -f {st} ] && while IFS='|' read -r s d t; do printf '%s{{\"context\":\"ci/agent/pr/ci\",\"state\":\"%s\",\"description\":\"%s\",\"updated_at\":\"%s\"}}' \"$sep\" \"$s\" \"$d\" \"$t\"; sep=,; done < {st}; echo ']'; exit 0; fi\n\
+             echo '[{{\"number\":7,\"isDraft\":false,\"labels\":[],\"headRefOid\":\"h7\"}}]'",
+            l = log.display(),
+            st = store.display()
+        );
+        script(&root.join("bin"), "gh", &body);
+    }
+
+    fn named(name: &str) -> Env {
+        Env::from_map([("RETASKABLE_MACHINE".to_string(), name.to_string())].into())
+    }
+
+    const KEY_TEXT: &str = "h7-mmmmmmm";
+
+    fn now() -> i64 {
+        crate::telemetry::now_ms()
+    }
+
+    async fn run_as(r: &mut Rig, name: &str) {
+        let env = named(name);
+        let data = r._dir.path().join("data");
+        r.ci.poll(&r.cfg, &env).await;
+        for t in
+            r.ci.start(&r.cfg, &env, &data, [("p".to_string(), vec![key(7, "h7")])].into())
+                .await
+        {
+            t.await.unwrap();
+        }
+    }
+
+    fn docker_runs(r: &Rig) -> usize {
+        calls(r).matches("docker run").count()
+    }
+
+    #[tokio::test]
+    async fn two_loops_sharing_one_host_run_a_key_once() {
+        let mut a = pr_rig("sleep 1");
+        claim_gh(&mut a, &[]);
+        let mut b = CiLoop::new(a.ci.programs.clone(), LiveHandle::default(), false);
+        b.live
+            .ticked("p", false, "t".into(), Vec::<HeldLane>::new(), "d".into());
+        let (env_a, env_b) = (named("a"), named("b"));
+        let data = a._dir.path().join("data");
+        let keys: BTreeMap<_, _> = [("p".to_string(), vec![key(7, "h7")])].into();
+        a.ci.poll(&a.cfg, &env_a).await;
+        b.poll(&a.cfg, &env_b).await;
+        let ta = a.ci.start(&a.cfg, &env_a, &data, keys.clone()).await;
+        // Wait for a's claim to be posted before b looks.
+        while !calls(&a).contains("state=pending") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let tb = b.start(&a.cfg, &env_b, &data, keys).await;
+        for t in ta.into_iter().chain(tb) {
+            t.await.unwrap();
+        }
+        assert_eq!(docker_runs(&a), 1, "{}", calls(&a));
+        // The loser forgets the key so it looks again; the winner's finished key is not run again.
+        assert!(b.seen.lock().unwrap().is_empty());
+        assert_eq!(a.ci.seen.lock().unwrap().len(), 1);
+        run_as(&mut a, "c").await;
+        assert_eq!(docker_runs(&a), 1);
+    }
+
+    #[tokio::test]
+    async fn a_claim_fifteen_minutes_old_is_taken_over_and_fourteen_is_not() {
+        let desc = format!("agent-ci z: running ({KEY_TEXT})");
+        let mut r = pr_rig("exit 0");
+        claim_gh(&mut r, &[("pending", &desc, now() - 14 * 60_000)]);
+        let t = now();
+        r.ci.clock = Arc::new(move || t);
+        run_as(&mut r, "a").await;
+        assert_eq!(docker_runs(&r), 0, "{}", calls(&r));
+        assert!(!calls(&r).contains("-X POST"));
+
+        let mut r = pr_rig("exit 0");
+        claim_gh(&mut r, &[("pending", &desc, now() - 15 * 60_000)]);
+        run_as(&mut r, "a").await;
+        assert_eq!(docker_runs(&r), 1, "{}", calls(&r));
+        let ev = events(&r);
+        assert!(ev.contains("stale_taken_over") && ev.contains("claimed"), "{ev}");
+    }
+
+    #[tokio::test]
+    async fn a_finished_key_is_never_rerun() {
+        for state in ["success", "failure"] {
+            let mut r = pr_rig("exit 0");
+            claim_gh(
+                &mut r,
+                &[(state, &format!("agent-ci z: done ({KEY_TEXT})"), now() - 60_000)],
+            );
+            run_as(&mut r, "a").await;
+            assert_eq!(docker_runs(&r), 0);
+            assert!(!calls(&r).contains("-X POST"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_long_run_refreshes_its_claim() {
+        let mut r = pr_rig("sleep 1");
+        claim_gh(&mut r, &[]);
+        r.ci.refresh = Duration::from_millis(250);
+        run_as(&mut r, "a").await;
+        // The claim, then a refresh each interval of the second-long run, then success.
+        assert!(calls(&r).matches("state=pending").count() >= 4, "{}", calls(&r));
+        assert_eq!(calls(&r).matches("state=success").count(), 1);
     }
 }
