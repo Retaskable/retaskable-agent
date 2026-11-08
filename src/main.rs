@@ -13,7 +13,8 @@ use retaskable_agent::{
     setup_questions, spec_split, store, tags, telemetry, tray, view,
 };
 
-mod main_view;
+mod agent_view;
+use agent_view::agent_view;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -314,7 +315,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(main_view::agent_view(
+    let view = Arc::new(agent_view(
         cfg,
         tag_list.clone(),
         version,
@@ -423,6 +424,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
             placement.keep_fresh("weekly-cutoff", std::time::Duration::from_secs(30));
             placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
+            placement.keep_fresh("local-tier-ladder", std::time::Duration::from_secs(30));
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );
@@ -482,6 +484,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     env.clone(),
                     cfg.machine.models,
                     config::cursor_models(cfg, env),
+                    local.clone(),
                 ) as Arc<dyn orchestrator::trial_host::TrialHost>,
                 latest_checks.clone(),
             )

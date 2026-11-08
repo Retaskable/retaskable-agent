@@ -48,6 +48,7 @@ fn rig(answer: &str, gh_fails: bool, claude_missing: bool) -> Rig {
         env,
         ModelsConfig::default(),
         Default::default(),
+        crate::local_model::LocalModel::off(),
     );
     Rig {
         _dir: dir,
@@ -173,6 +174,7 @@ async fn the_trial_runs_on_the_implementers_chosen_engine_with_placement_on() {
         env,
         ModelsConfig::default(),
         Default::default(),
+        crate::local_model::LocalModel::off(),
     );
     let job = |placement| TrialJob {
         engine: None,
