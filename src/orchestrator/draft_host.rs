@@ -27,6 +27,9 @@ pub struct ClaudeDrafts {
     env: Env,
     models: ModelsConfig,
     cursor_models: CursorModels,
+    /// The computer's local model, for the tier ladder.
+    #[allow(dead_code)] // read by the tier ladder's later pieces
+    local: crate::local_model::LocalModel,
 }
 
 impl ClaudeDrafts {
@@ -36,6 +39,7 @@ impl ClaudeDrafts {
         env: Env,
         models: ModelsConfig,
         cursor_models: CursorModels,
+        local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -43,6 +47,7 @@ impl ClaudeDrafts {
             env,
             models,
             cursor_models,
+            local,
         })
     }
 }
@@ -219,7 +224,14 @@ mod tests {
             top: Some("gpt-5".into()),
             ..Default::default()
         };
-        let host = ClaudeDrafts::new(root.join("data"), choice, env, ModelsConfig::default(), models);
+        let host = ClaudeDrafts::new(
+            root.join("data"),
+            choice,
+            env,
+            ModelsConfig::default(),
+            models,
+            crate::local_model::LocalModel::off(),
+        );
         let job = |session_id: &str, resume: bool, placement: bool| DraftJob {
             engine: None,
             project: project_in(&root, &repo),
@@ -264,6 +276,7 @@ mod tests {
             env,
             ModelsConfig::default(),
             Default::default(),
+            crate::local_model::LocalModel::off(),
         );
         let sessions = Sessions::default();
         let job = DraftJob {

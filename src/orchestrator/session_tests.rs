@@ -45,6 +45,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         150_000,
         Default::default(),
         Default::default(),
+        crate::local_model::LocalModel::off(),
     );
     Rig {
         _dir: dir,
@@ -729,6 +730,7 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         150_000,
         Default::default(),
         Default::default(),
+        crate::local_model::LocalModel::off(),
     )
 }
 

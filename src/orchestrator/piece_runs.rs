@@ -49,6 +49,8 @@ pub struct PieceStarter {
     pub machine: String,
     /// The sessions running now: a run's sessions list themselves while they run.
     pub sessions: Sessions,
+    /// The computer's local model, for the tier ladder.
+    pub local: crate::local_model::LocalModel,
 }
 
 impl PieceStarter {
@@ -140,6 +142,7 @@ impl PieceStarter {
             context: request.context,
             machine: self.machine.clone(),
             sessions: self.sessions.clone(),
+            local: self.local.clone(),
             lock: None,
         };
         let ends = request.ends;
@@ -159,6 +162,8 @@ impl PieceStarter {
 }
 
 pub(super) struct Job {
+    #[allow(dead_code)] // read by the tier ladder's later pieces
+    pub(super) local: crate::local_model::LocalModel,
     pub(super) data_dir: PathBuf,
     pub(super) project: ProjectConfig,
     pub(super) bin: PathBuf,

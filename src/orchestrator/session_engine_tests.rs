@@ -43,6 +43,7 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
         150_000,
         cursor_models,
         Default::default(),
+        crate::local_model::LocalModel::off(),
     );
     Rig {
         _dir: dir,

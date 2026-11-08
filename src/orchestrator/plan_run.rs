@@ -222,6 +222,8 @@ pub struct Roster {
     pub flags: Arc<crate::flags::Flags>,
     /// The sessions running now: a plan or look lists itself while it runs.
     pub sessions: Sessions,
+    /// The computer's local model, for the tier ladder.
+    pub local: crate::local_model::LocalModel,
 }
 
 /// What a plan or look session runs with.
@@ -235,6 +237,8 @@ pub(super) struct Job {
     pub sessions: Sessions,
     /// The row the session lists itself as.
     pub info: SessionInfo,
+    #[allow(dead_code)] // read by the tier ladder's later pieces
+    pub local: crate::local_model::LocalModel,
 }
 
 impl Roster {
@@ -292,6 +296,7 @@ impl Roster {
             bin: placed.bin,
             cursor: placed.cursor,
             model,
+            local: self.local.clone(),
         };
         Ok((job, guard))
     }
