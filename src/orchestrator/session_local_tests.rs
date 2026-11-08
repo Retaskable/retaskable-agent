@@ -158,24 +158,55 @@ async fn an_engine_set_to_local_with_local_down_runs_on_the_roles_tier() {
     assert!(args.contains("--model opus") && !args.contains("BASE=http"), "{args}");
 }
 
+/// Runs a first try (which makes the lane), then swaps its transcript's first line for `first` (none when `None`) and
+/// resumes it with local up or down; returns the arguments the fake `claude` got on the resume.
+#[cfg(unix)]
+async fn resume_after(first: Option<&str>, local: LocalModel) -> String {
+    crate::tiers::set_local_ladder_for_test(false);
+    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
+    recording_claude(&rig, 0);
+    let (first_try, mut rx) = request();
+    let file = paths::run_dir(&rig.starter.data_dir, &first_try.project, &first_try.item.id).join("sess-1.jsonl");
+    rig.starter.start(first_try).unwrap();
+    rx.recv().await.unwrap();
+    match first {
+        Some(line) => std::fs::write(&file, format!("{line}\n")).unwrap(),
+        None => std::fs::remove_file(&file).unwrap(),
+    }
+    crate::tiers::set_local_ladder_for_test(true);
+    let (mut request, mut rx) = request();
+    request.usage = low_usage();
+    request.resume = true;
+    rig.starter.start(request).unwrap();
+    rx.recv().await.unwrap();
+    std::fs::read_to_string(&rig.args).unwrap()
+}
+
 #[cfg(unix)]
 #[tokio::test]
-async fn a_resumed_session_never_takes_the_local_model_even_with_local_up() {
-    crate::tiers::set_local_ladder_for_test(true);
-    let local = LocalModel::up();
-    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local.clone());
-    recording_claude(&rig, 0);
-    for resume in [false, true] {
-        let (mut request, mut rx) = request();
-        request.usage = low_usage();
-        request.resume = resume;
-        rig.starter.start(request).unwrap();
-        rx.recv().await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert_eq!(args.contains("BASE=http://"), !resume, "resume={resume}: {args}");
-        assert!(args.contains("--model sonnet"), "{args}");
-        if resume {
-            assert!(args.contains("--resume"), "{args}");
-        }
+async fn a_local_transcript_resumes_locally_while_local_is_up_and_on_its_tier_when_down() {
+    let line = r#"{"type":"retaskable_meta","engine":"claude","model":"local"}"#;
+    let up = resume_after(Some(line), LocalModel::up()).await;
+    assert!(
+        up.contains("BASE=http://127.0.0.1:11436") && up.contains("--resume"),
+        "{up}"
+    );
+    let down = resume_after(Some(line), LocalModel::off()).await;
+    assert!(
+        !down.contains("BASE=http://") && down.contains("--model sonnet"),
+        "{down}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_anthropic_or_missing_transcript_resumes_on_sonnet_never_locally() {
+    let line = r#"{"type":"retaskable_meta","engine":"claude","model":"opus"}"#;
+    for first in [Some(line), None] {
+        let args = resume_after(first, LocalModel::up()).await;
+        assert!(
+            args.contains("--model sonnet") && !args.contains("BASE=http://"),
+            "{args}"
+        );
     }
 }

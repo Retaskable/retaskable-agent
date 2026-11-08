@@ -60,14 +60,10 @@ impl RunStarter for LookRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let model = mid_tier(implementer_tier(
-            None,
-            crate::telemetry::now_ms() / 1000,
-            &self.roster.models,
-            false,
-        ))
-        .to_string();
-        let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, model)?;
+        let models = &self.roster.models;
+        let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, |local| {
+            mid_tier(implementer_tier(None, crate::telemetry::now_ms() / 1000, models, local))
+        })?;
         let cut = Cut::default();
         let work = look(job, request.clone(), cut.clone(), self.bugs.clone());
         spawn_run(guard, request, cut, async move { Some(work.await) });
@@ -89,6 +85,8 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
         piece: request.piece.clone(),
         other: request.other.clone(),
     });
+    // Waits for the local model's slot when the tier is `local`; held until the session ends.
+    let claimed = job.local.claim(&job.model).await;
     let looker = Looker {
         template: TEMPLATE,
         project_type: project.project_type,
@@ -96,8 +94,8 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
         session: EphemeralSessionConfig {
             cwd: &cwd,
             budget_usd: project.budget.reviewer_usd,
-            model: job.model.clone(),
-            local: None,
+            model: crate::tiers::claude_model_for(job.engine, &job.model),
+            local: claimed.as_ref().map(|(_, target)| target.clone()),
             engine: Some(job.engine),
             cursor: job.cursor.clone(),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),

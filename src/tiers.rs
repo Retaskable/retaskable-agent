@@ -174,6 +174,22 @@ pub fn set_local_ladder_for_test(on: bool) {
     LADDER_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
+/// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
+/// environment maps onto the local model (section 7.2).
+pub fn claude_model(tier: &'static str) -> &'static str {
+    if tier == LOCAL { SONNET } else { tier }
+}
+
+/// The model name a session on `engine` gets for `tier`: [`claude_model`] on Claude, the tier as it is elsewhere.
+pub fn claude_model_for(engine: crate::engines::engine::EngineId, tier: &str) -> String {
+    if engine == crate::engines::engine::EngineId::Claude && tier == LOCAL {
+        SONNET
+    } else {
+        tier
+    }
+    .to_string()
+}
+
 /// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.
 pub fn model_caps_on() -> bool {
     FLAG.get().is_some_and(|f| f.last("model-concurrency-caps"))

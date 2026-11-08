@@ -6,6 +6,8 @@ In the Rust agent, finding a phone (section 3) and the first-install warning (se
 
 Theme: UI
 
+Kind: change
+
 ## 1. What it is
 
 A project's Android app is a Capacitor project in its repo (say `phone/`). Without this, trying it on a phone means running its sync (`npm run sync -w phone`), opening Android Studio and pressing Run. **Play on phone** does that from Retaskable: the agent notices an Android phone plugged into this computer with USB debugging on, and offers **Play on phone** (the app shows the button), which builds the app from the base branch and installs and launches it on that phone.
@@ -66,6 +68,12 @@ The first time Play on phone is asked for a phone (by serial), the app shows a d
 - **Nothing else can be passed.** The `phone_play` command takes `{ serial, confirmed?, uninstall? }` and nothing more: no command, no adb arguments, no path. A serial that isn't a currently authorised phone is refused. The first install to a phone without `confirmed: true` is refused with the warning's text. `uninstall: true` (with `confirmed: true`) runs `adb -s <serial> uninstall <appId>`, then steps 1 and 2 again (the base checkout may have moved since).
 - **While it runs**, `phone.run` shows the step ("Building…", "Installing on Pixel 8…"). `phone_stop` ends the running step. A failure keeps the step's last 30 lines of output on the machine; a launch is `done`. It's refused while the base checkout is busy (a backlog sync, a gallery shoot, or another Play on phone), and a backlog sync, the baseline checks, a gallery shoot and Play main wait for it, as for Play main. Once the app has launched on the phone, it's done: Retaskable doesn't keep a process running for it.
 - **No automated step ever runs it.** No agent, chore, playtest or Ask Claude action installs to a phone. Ask Claude doesn't get a `play_on_phone` action either.
+
+**[Proposal]** Slices in the Rust agent, in `src/phone.rs` (grown, or split into a `phone/` folder) once section 3's finding and section 4's warning are in, each one pull request:
+
+1. **phone-build-install**: the two steps above run by a function that takes a checked serial: the dependencies' install and `buildCommand` in the base checkout, then `cap run android --target <serial> --no-sync` with the fixed environment; a 30-minute timeout per step; on failure the step's last 30 lines of output kept on the machine (not sent up, section 6); refused while the base checkout is busy, and the backlog sync, baseline checks, gallery shoot and Play main wait for it (they take the same checkout lock). Tests: steps in order, the serial re-checked after the build, the timeout, the 30-line tail, the busy refusal, the environment without `NoDefaultCurrentDirectoryInExePath`.
+2. **phone-snapshot-block**: `phone` (`phones` with `warned`, `appId`, `wip`, `status`, `run` and the last run without its output) in the snapshot, sent whole in a patch when it changes (section 6). Tests: a patch on a phone plugging in, `run` stepping, and no failed-run output in it.
+3. **phone-play-commands**: `phone_play` `{ serial, confirmed?, uninstall? }` and `phone_stop` on the command list, with the checks of section 5 and 6 (set up, the serial a `device`, the warning or uninstall confirmed, the serial's characters), the `ack` once started, and `phone_stop` ending the running step. Tests: each refusal, an unconfirmed first install returning the warning's text, and `phone_stop` mid-build.
 
 ## 6. From retaskable.com
 
