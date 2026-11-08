@@ -566,6 +566,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             restart: view.restart.clone(),
             exit: exit.clone(),
             quit_now: quit_now.clone(),
+            terminal_menu: retaskable_agent::flags::Flags::from_env().on("terminal-menu").await,
             link_backlog: Arc::new(move || {
                 tokio::spawn(auto_link_backlog(
                     backlog_links.clone(),

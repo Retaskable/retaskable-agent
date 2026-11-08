@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::agent::{CloudSlot, Opener, Quit, SystemOpener, TrayAgent, TrayDeps};
 use super::helper::helper_path;
 use super::icons::{TrayState, load_tray_icon};
-use super::mode::{TrayMode, tray_mode};
+use super::mode::{TrayMode, tray_mode, use_tui};
 use super::run::{Icons, encode_icon, start};
 use super::term::StdTerm;
 use super::tui::{TerminalMenu, TuiOpener};
@@ -40,6 +40,8 @@ pub struct Boot<'a> {
     pub exit: Arc<Exit>,
     /// Quit now: the agent's own shutdown.
     pub quit_now: Arc<tokio::sync::Notify>,
+    /// Card flag `terminal-menu`.
+    pub terminal_menu: bool,
     pub link_backlog: Arc<dyn Fn() + Send + Sync>,
     /// Said (with why) when the helper stops after it started.
     pub on_stopped: Box<dyn FnOnce(String) + Send>,
@@ -126,11 +128,12 @@ fn start_tui(deps: TrayDeps, quit: Arc<dyn Quit>) -> Option<Shutdown> {
     }))
 }
 
-/// Which UI starts: the terminal menu only with its flag On (Off leaves the tray or headless console as before).
-fn ui(args: &[String], env: &Env, has_helper: bool, interactive: bool, flag: bool) -> UiMode {
-    match ui_mode(args, env, std::env::consts::OS, has_helper, interactive) {
-        UiMode::TerminalMenu if !flag => UiMode::Console,
-        mode => mode,
+/// Whether the terminal menu is drawn. With the `terminal-menu` flag Off, `use_tui` decides as it always did; On, `ui_mode`.
+fn ui(args: &[String], env: &Env, os: OsKind, has_helper: bool, interactive: bool, flag: bool) -> bool {
+    if flag {
+        ui_mode(args, env, std::env::consts::OS, has_helper, interactive) == UiMode::TerminalMenu
+    } else {
+        use_tui(args, env, os, interactive)
     }
 }
 
@@ -140,20 +143,24 @@ pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
     let exe = b.exe.unwrap_or(Path::new(""));
     let terminals = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let helper = helper_path(b.build, exe, b.env, os);
-    // Card flag `terminal-menu`: Off never draws the menu (the tray, or the console as before).
-    let tui_flag = crate::flags::Flags::from_env().on("terminal-menu").await;
-    let ui = ui(b.args, b.env, helper.is_some(), terminals, tui_flag);
-    if let Some(why) = no_tray_reason(b.args, b.env, std::env::consts::OS, helper.is_some()) {
+    let tui = ui(b.args, b.env, os, helper.is_some(), terminals, b.terminal_menu);
+    // Card flag `terminal-menu`: On says why there is no tray (once); Off keeps the console as it was.
+    let reason = b
+        .terminal_menu
+        .then(|| no_tray_reason(b.args, b.env, std::env::consts::OS, helper.is_some()))
+        .flatten();
+    if let Some(why) = &reason {
         tracing::info!("{why}");
     }
-    let tui = ui == UiMode::TerminalMenu;
     let bin = if tui {
         None
     } else {
         match tray_mode(b.args, b.env, os, helper) {
             TrayMode::Tray(bin) => Some(bin),
             TrayMode::Headless(why) => {
-                tracing::info!("Tray: running headless, {why}.");
+                if reason.is_none() {
+                    tracing::info!("Tray: running headless, {why}.");
+                }
                 return None;
             }
         }
@@ -207,11 +214,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_needs_its_flag_and_a_terminal() {
+    fn the_menu_needs_its_flag_to_use_ui_mode_and_a_terminal() {
         let args = vec!["--tui".to_string()];
         let env = Env::from_map(Default::default());
-        assert_eq!(ui(&args, &env, true, true, true), UiMode::TerminalMenu);
-        assert_eq!(ui(&args, &env, true, true, false), UiMode::Console);
-        assert_eq!(ui(&args, &env, true, false, true), UiMode::Console);
+        let os = current_os();
+        assert!(ui(&args, &env, os, true, true, true));
+        assert!(!ui(&args, &env, os, true, false, true));
+    }
+
+    #[test]
+    fn with_the_flag_off_use_tui_still_decides() {
+        let args = vec!["--tui".to_string()];
+        let env = Env::from_map(Default::default());
+        assert!(ui(&args, &env, current_os(), true, true, false));
+        assert!(!ui(&args, &env, current_os(), true, false, false));
     }
 }
