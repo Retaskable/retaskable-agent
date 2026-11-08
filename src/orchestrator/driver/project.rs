@@ -894,6 +894,13 @@ impl ProjectLoop {
         if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
             return None;
         }
+        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
+        if gate.is_none()
+            && self.flags.on("weekly-cutoff").await
+            && shared.engine_limits.week_cut_off(std::time::Instant::now())
+        {
+            return None;
+        }
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
