@@ -41,12 +41,11 @@ pub struct EngineLimits {
 }
 
 impl EngineLimits {
-    /// `engine` hit its limit; it counts as limited until `until`.
+    /// `engine` hit its limit; it counts as limited until `until`, or until a later time already recorded.
     pub fn hit(&self, engine: EngineId, until: Instant) {
-        self.until
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(engine, until);
+        let mut map = self.until.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = map.entry(engine).or_insert(until);
+        *slot = (*slot).max(until);
     }
 
     /// Whether `engine` is limited at `now`.

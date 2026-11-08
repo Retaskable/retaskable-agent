@@ -827,3 +827,61 @@ async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::Limited {
+            why: "five hour".into(),
+            resets_in: Some(Duration::from_secs(3600)),
+        },
+        usage: Some(json!({"unifiedWindows": {"seven_day": {"utilization": 0.96, "resetsAt": now + 86_400}}})),
+        context_tokens: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.poll().await;
+    let later = std::time::Instant::now() + Duration::from_secs(7200);
+    assert!(
+        rig.machine
+            .engine_limits
+            .is_limited(crate::engines::EngineId::Claude, later)
+    );
+}
+
+#[tokio::test]
+async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (u, limited) in [(0.96, true), (0.94, false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+        rig.lp(0)
+            .store
+            .set_usage(json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": now + 86_400}}}));
+        rig.go_live();
+        rig.machine.poll().await;
+        let t = std::time::Instant::now();
+        assert_eq!(
+            rig.machine
+                .engine_limits
+                .is_limited(crate::engines::EngineId::Claude, t),
+            limited
+        );
+    }
+}
