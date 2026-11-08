@@ -51,7 +51,7 @@ pub struct AskJob {
     pub runs: BTreeMap<String, RunRecord>,
     /// Where the host sends the session's summarized events as they happen; the loop reports them as progress.
     pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
-    /// The `engine-placement` flag: Off keeps the assistant on Claude only.
+    /// The `engine-placement` release flag: Off, only Claude answers.
     pub placement: bool,
 }
 
@@ -166,7 +166,6 @@ impl ProjectLoop {
             self.asks.waiting = waiting;
             return;
         }
-        let placement = self.flags.on("engine-placement").await;
         for ask in waiting {
             self.asks.reported.remove(&ask.ask_id);
             *slots = slots.saturating_sub(1);
@@ -180,7 +179,7 @@ impl ProjectLoop {
                 lanes: self.ask_lanes(pool),
                 runs: self.records.clone(),
                 events,
-                placement,
+                placement: self.flags.on("engine-placement").await,
             };
             let (host, queue) = (host.clone(), shared.links.item_commands.clone());
             tracing::info!("{}: answering ask {}", self.id, job.ask.ask_id);

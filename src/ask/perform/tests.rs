@@ -12,7 +12,7 @@ const LONG_RUNNING: &str = "ping -n 60 127.0.0.1 >nul";
 #[cfg(not(windows))]
 const LONG_RUNNING: &str = "sleep 60";
 
-pub(crate) fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
+fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
     AgentView {
         machine: "pc".into(),
         tags: vec![],

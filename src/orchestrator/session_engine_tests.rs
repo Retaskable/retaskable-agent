@@ -24,16 +24,17 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
-    let mut vars = crate::test_support::engine_stubs(
-        &root,
-        missing,
-        |p| if p == "claude" { claude_step } else { "" }.to_string(),
-        |_| FINISHED.to_string(),
-    );
+    let stubs = crate::test_support::stub_engines(&root, FINISHED, claude_step, missing);
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
-    vars.push(("RETASKABLE_GH", gh.to_string_lossy().into_owned()));
-    let env = Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone()));
+    let gh_path = gh.to_string_lossy().into_owned();
+    let env = Env::new(move |k| {
+        if k == "RETASKABLE_GH" {
+            Some(gh_path.clone())
+        } else {
+            stubs.get(k)
+        }
+    });
     let cursor_models = crate::config::CursorModels {
         implementer: Some("gpt-5".into()),
         ..Default::default()
@@ -45,8 +46,8 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
         env,
         50,
         ModelsConfig::default(),
-        150_000,
         cursor_models,
+        150_000,
     );
     Rig {
         _dir: dir,

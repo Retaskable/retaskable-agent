@@ -23,7 +23,7 @@ pub struct Session<'a> {
     /// The project's base checkout, on the base branch.
     pub cwd: &'a Path,
     pub local: Option<LocalTarget>,
-    /// Only on Cursor: the model name (`scout` for the assistant).
+    /// Only on Cursor: the `scout` model name (`engines::place`).
     pub cursor: Option<CursorOptions>,
 }
 
@@ -82,6 +82,15 @@ mod tests {
     use crate::tiers::mid_tier;
 
     fn with_session<T>(engine: Engine, tier: &'static str, f: impl FnOnce(SessionSpec) -> T) -> T {
+        with_cursor(engine, tier, None, f)
+    }
+
+    fn with_cursor<T>(
+        engine: Engine,
+        tier: &'static str,
+        cursor: Option<CursorOptions>,
+        f: impl FnOnce(SessionSpec) -> T,
+    ) -> T {
         let budget = ProjectBudget {
             ask_usd: 1.5,
             ..Default::default()
@@ -115,7 +124,7 @@ mod tests {
             budget: &budget,
             cwd: Path::new("base"),
             local: None,
-            cursor: None,
+            cursor,
         };
         f(session_spec(&s).unwrap())
     }
@@ -143,6 +152,19 @@ mod tests {
         with_session(Engine::Local, "opus", |s| {
             assert_eq!((s.engine, s.model.as_str()), (None, "local"));
         });
+    }
+
+    #[test]
+    fn a_cursor_session_carries_its_model_name() {
+        let cursor = CursorOptions {
+            model: Some("fast".into()),
+            ..CursorOptions::default()
+        };
+        with_cursor(Engine::Cursor, "sonnet", Some(cursor), |s| {
+            assert_eq!(s.engine, Some(EngineId::Cursor));
+            assert_eq!(s.cursor.unwrap().model.as_deref(), Some("fast"));
+        });
+        with_session(Engine::Claude, "sonnet", |s| assert!(s.cursor.is_none()));
     }
 
     fn done(v: serde_json::Value) -> SessionResult {

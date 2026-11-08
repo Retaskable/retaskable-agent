@@ -30,6 +30,8 @@ pub mod session;
 pub mod slot;
 pub mod steps;
 mod triage_session;
+#[cfg(test)]
+mod triage_session_tests;
 pub mod trial_host;
 pub mod watch_run;
 

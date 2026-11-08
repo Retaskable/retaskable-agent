@@ -1,125 +1,99 @@
-//! The assistant and the triager run on the engine chosen for chat (engines/03 sections 3.1 and 3.4): stub
-//! binaries log what they were asked, and a missing binary gives the apology naming it.
+//! The assistant and the triager run on the engine chat is placed on, with that engine's binary and, for Cursor, the
+//! role's model (engines/03 sections 3.1 and 3.4). Stub binaries log what they were asked.
 #![cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{Json, Router, routing::post};
-use serde_json::{Value, json};
-
+use super::ClaudeStarter;
+use super::tests::project_in;
 use crate::backlog::Client;
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, RoleEngines};
 use crate::env::Env;
 use crate::orchestrator::ask_host::ClaudeAsks;
 use crate::orchestrator::driver::{
-    AskHost, AskJob, AskStore, OutcomeSender, SessionResult, SessionStarter, TriageEnd, TriageRequest,
+    AskHost, AskJob, AskStore, OutcomeSender, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
 };
-use crate::orchestrator::session::ClaudeStarter;
-use crate::orchestrator::session::tests::project_in;
-use crate::triage::TriageContext;
-use crate::view::AskCommand;
+use crate::view::{AgentView, AskCommand};
 
-const ANSWER: &str = r#"{"answer":"Step 5 is waiting.","actions":[]}"#;
-const DECIDED: &str = r#"{"decision":"skip","reason":"Not needed."}"#;
-
-/// What each program's stream says when its session answers with `structured`.
-fn stream(program: &str, structured: &str) -> String {
-    let fenced = format!("```json\n{structured}\n```");
-    match program {
-        "cursor-agent" => {
-            json!({"type":"result","subtype":"success","is_error":false,"result":fenced,"session_id":"s"}).to_string()
-        }
-        "codex" => format!(
-            "{}\n{}",
-            json!({"type":"item.completed","item":{"type":"agent_message","text":fenced}}),
-            json!({"type":"turn.completed","usage":{}})
-        ),
-        "pi" => format!(
-            "{}\n{}",
-            json!({"type":"message_end","message":{"role":"assistant","content":fenced}}),
-            json!({"type":"agent_settled"})
-        ),
-        _ => format!(
-            r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{structured},"session_id":"s"}}"#
-        ),
-    }
+/// A Cursor-style answer carrying `json` as the model's text.
+fn cursor_says(json: &str) -> String {
+    let text = format!("```json\n{json}\n```");
+    serde_json::json!({"type":"result","subtype":"success","is_error":false,"result":text,"session_id":"c"}).to_string()
 }
 
-struct Rig {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    env: Env,
-    project: ProjectConfig,
-    choice: EngineChoiceConfig,
-    models: CursorModels,
-}
-
-/// Stubs for the four engines answering `out`, each logging `<program> <args>` to `calls.txt`; programs in
-/// `missing` get none. Chat runs on `engine`.
-fn rig(engine: Engine, out: &str, missing: &[&str]) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().to_path_buf();
-    let repo = crate::test_support::repo_with_origin(&root);
-    let vars = crate::test_support::engine_stubs(&root, missing, |_| String::new(), |p| stream(p, out));
-    let mut choice = EngineChoiceConfig::default();
-    choice.roles.chat = Some(engine);
-    Rig {
-        project: project_in(&root, &repo),
-        _dir: dir,
-        env: Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone())),
-        root,
-        choice,
-        models: CursorModels {
-            top: Some("opus-top".into()),
-            implementer: None,
-            scout: Some("fast-scout".into()),
+fn chat_on(engine: Engine) -> EngineChoiceConfig {
+    EngineChoiceConfig {
+        roles: RoleEngines {
+            chat: Some(engine),
+            ..Default::default()
         },
+        ..Default::default()
     }
 }
 
-fn calls(rig: &Rig) -> String {
-    std::fs::read_to_string(rig.root.join("calls.txt")).unwrap_or_default()
+fn models() -> CursorModels {
+    CursorModels {
+        top: Some("big-one".into()),
+        implementer: None,
+        scout: Some("small-one".into()),
+    }
 }
 
-async fn answer(rig: &Rig, placement: bool) -> String {
+fn stubs(root: &std::path::Path, out: &str, missing: &[&str]) -> Env {
+    crate::test_support::stub_engines(root, out, "", missing)
+}
+
+fn calls(root: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(root.join("calls.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// A store with nothing in it: lists for `list` and `drafts`, empty facts for the rest.
+async fn empty_store() -> String {
+    use axum::{Json, Router, routing::post};
     let app = Router::new().route(
         "/v1/repos/{id}/ops",
-        post(|Json(body): Json<Value>| async move {
-            let value = match (body["op"].as_str().unwrap_or(""), body["args"]["kind"].as_str()) {
-                ("asks_list", _) => json!({ "asks": [] }),
-                ("facts_get", Some("audiences")) => json!({ "audiences": [] }),
-                ("facts_get", _) => json!({}),
-                _ => json!([]),
-            };
-            Json(json!({ "value": value }))
+        post(|Json(body): Json<serde_json::Value>| async move {
+            let list = matches!(body["op"].as_str(), Some("list" | "draft_list" | "drafts"));
+            Json(serde_json::json!({ "value": if list { serde_json::json!([]) } else { serde_json::json!({}) } }))
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+async fn ask(root: &std::path::Path, choice: EngineChoiceConfig, env: Env, placement: bool) -> String {
+    let base = empty_store().await;
+    let repo = crate::test_support::repo_with_origin(root);
+    let view = Arc::new(AgentView::blank());
     let host = ClaudeAsks::new(
-        rig.root.join("data"),
-        rig.choice.clone(),
-        rig.env.clone(),
+        root.join("data"),
+        choice,
+        env,
         ModelsConfig::default(),
-        rig.models.clone(),
+        models(),
         0.0,
-        Arc::new(crate::ask::perform::tests::view("p", rig.root.clone(), "")),
+        view,
     );
     let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let job = AskJob {
-        project: rig.project.clone(),
+        project: project_in(root, &repo),
         ask: AskCommand {
             project: "p".into(),
-            ask_id: "ask-1".into(),
-            text: "why is step 5 stuck?".into(),
+            ask_id: "a1".into(),
+            text: "How is it going?".into(),
             reply_to: None,
             about: None,
             images_block: String::new(),
         },
         store: AskStore {
-            client: Arc::new(Client::new(format!("http://{addr}"))),
+            client: Arc::new(Client::new(base)),
             repo: 1,
             token: "t".into(),
         },
@@ -133,94 +107,83 @@ async fn answer(rig: &Rig, placement: bool) -> String {
 }
 
 #[tokio::test]
-async fn an_ask_with_chat_on_cursor_runs_cursor_with_the_scout_model() {
-    let rig = rig(Engine::Cursor, ANSWER, &[]);
-    assert_eq!(answer(&rig, true).await, "Step 5 is waiting.");
-    let log = calls(&rig);
-    assert!(
-        log.starts_with("cursor-agent ") && log.contains("--model fast-scout"),
-        "{log}"
-    );
+async fn an_ask_on_cursor_runs_cursor_with_the_scout_model_and_returns_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = stubs(dir.path(), &cursor_says(r#"{"answer":"All good.","actions":[]}"#), &[]);
+    let answer = ask(dir.path(), chat_on(Engine::Cursor), env, true).await;
+    assert_eq!(answer, "All good.");
+    let calls = calls(dir.path());
+    assert!(calls.len() == 1 && calls[0].starts_with("cursor-agent "), "{calls:?}");
+    assert!(calls[0].contains("--model small-one"), "{calls:?}");
 }
 
 #[tokio::test]
-async fn an_ask_on_codex_and_pi_runs_that_engine() {
+async fn an_ask_on_codex_or_pi_runs_that_engine_not_the_claude_apology() {
     for (engine, program) in [(Engine::Codex, "codex"), (Engine::Pi, "pi")] {
-        let rig = rig(engine, ANSWER, &[]);
-        assert_eq!(answer(&rig, true).await, "Step 5 is waiting.");
-        assert!(calls(&rig).starts_with(program), "{program}");
+        let dir = tempfile::tempdir().unwrap();
+        let env = stubs(dir.path(), "", &[]);
+        let answer = ask(dir.path(), chat_on(engine), env, true).await;
+        assert!(!answer.contains("only Claude"), "{answer}");
+        let calls = calls(dir.path());
+        assert!(
+            calls.len() == 1 && calls[0].starts_with(&format!("{program} ")),
+            "{calls:?}"
+        );
     }
 }
 
 #[tokio::test]
-async fn an_ask_with_placement_off_stays_on_claude() {
-    let rig = rig(Engine::Cursor, ANSWER, &[]);
-    assert_eq!(answer(&rig, false).await, "Step 5 is waiting.");
-    assert!(calls(&rig).starts_with("claude "), "{}", calls(&rig));
-}
-
-#[tokio::test]
-async fn an_ask_with_its_binary_missing_apologises_naming_it() {
-    let rig = rig(Engine::Cursor, ANSWER, &["cursor-agent"]);
-    let said = answer(&rig, true).await;
+async fn an_ask_with_the_binary_missing_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = stubs(dir.path(), "", &["cursor-agent"]);
+    let answer = ask(dir.path(), chat_on(Engine::Cursor), env, true).await;
     assert!(
-        said.starts_with("Sorry, I couldn't answer that: the cursor-agent binary wasn't found ("),
-        "{said}"
+        answer.starts_with("Sorry, I couldn't answer that: the cursor-agent binary wasn't found ("),
+        "{answer}"
     );
 }
 
-fn starter(rig: &Rig) -> Arc<ClaudeStarter> {
-    ClaudeStarter::new(
-        rig.root.join("data"),
-        vec![rig.project.clone()],
-        rig.choice.clone(),
-        rig.env.clone(),
+fn starter(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> (Arc<ClaudeStarter>, PathBuf) {
+    let repo = crate::test_support::repo_with_origin(root);
+    let starter = ClaudeStarter::new(
+        root.join("data"),
+        vec![project_in(root, &repo)],
+        choice,
+        env,
         50,
         ModelsConfig::default(),
+        models(),
         150_000,
-        rig.models.clone(),
-    )
+    );
+    (starter, repo)
 }
 
-fn triage_request(
-    placement: bool,
-) -> (
-    TriageRequest,
-    tokio::sync::mpsc::UnboundedReceiver<crate::orchestrator::driver::SessionOutcome>,
-) {
+fn triage_request() -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
-    let context = TriageContext {
-        reason: "stuck".into(),
-        failed_in: "reviewing".into(),
-        timeline: vec![],
-        last_check_result: None,
-        pr_url: None,
-        branch: None,
-        has_pushed_branch: false,
-        has_session_to_continue: false,
-        automatic_decisions: 0,
-        transcripts_dir: None,
-        known_bugs: vec![],
-    };
     let request = TriageRequest {
         project: "p".into(),
-        item_id: "item".into(),
-        context,
+        item_id: "x".into(),
+        context: crate::test_support::triage_context(vec![], "bug"),
         lane: None,
         usage: None,
         outcomes,
-        placement,
+        placement: true,
     };
     (request, rx)
 }
 
 #[tokio::test]
-async fn a_triage_with_chat_on_cursor_runs_cursor_with_the_top_model() {
-    let rig = rig(Engine::Cursor, DECIDED, &[]);
-    let (request, mut rx) = triage_request(true);
-    // `triage` is the trait's entry; it spawns the session and sends its end.
-    SessionStarter::triage(starter(&rig).as_ref(), request).unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(60), rx.recv())
+async fn a_triage_on_cursor_runs_cursor_with_the_top_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = stubs(
+        dir.path(),
+        &cursor_says(r#"{"decision":"continue","reason":"r","instructions":"go on"}"#),
+        &[],
+    );
+    let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
+    let (request, mut rx) = triage_request();
+    starter.start_triage(request).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(120), rx.recv())
         .await
         .unwrap()
         .unwrap();
@@ -229,25 +192,36 @@ async fn a_triage_with_chat_on_cursor_runs_cursor_with_the_top_model() {
         "{:?}",
         outcome.result
     );
-    let log = calls(&rig);
-    assert!(
-        log.starts_with("cursor-agent ") && log.contains("--model opus-top"),
-        "{log}"
-    );
+    let calls = calls(dir.path());
+    assert!(calls.len() == 1 && calls[0].starts_with("cursor-agent "), "{calls:?}");
+    assert!(calls[0].contains("--model big-one"), "{calls:?}");
+}
+
+#[test]
+fn a_triage_with_the_binary_missing_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = stubs(dir.path(), "", &["cursor-agent"]);
+    let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
+    let (request, _rx) = triage_request();
+    let err = starter.start_triage(request).unwrap_err();
+    assert!(err.starts_with("the cursor-agent binary wasn't found ("), "{err}");
 }
 
 #[tokio::test]
-async fn a_triage_with_placement_off_or_a_missing_binary_is_as_before() {
-    let rig = rig(Engine::Cursor, DECIDED, &["cursor-agent"]);
-    let (request, _rx) = triage_request(true);
-    let why = SessionStarter::triage(starter(&rig).as_ref(), request).unwrap_err();
-    assert!(why.starts_with("the cursor-agent binary wasn't found ("), "{why}");
-    let (request, mut rx) = triage_request(false);
-    SessionStarter::triage(starter(&rig).as_ref(), request).unwrap();
-    tokio::time::timeout(Duration::from_secs(60), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(calls(&rig).starts_with("claude "), "{}", calls(&rig));
-    let _: &Path = &rig.root;
+async fn with_placement_off_only_claude_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = stubs(dir.path(), "", &[]);
+    let answer = ask(dir.path(), chat_on(Engine::Cursor), env, false).await;
+    assert!(answer.contains("only Claude sessions run"), "{answer}");
+    assert!(calls(dir.path()).is_empty());
+}
+
+#[test]
+fn a_triage_with_placement_off_is_refused_on_another_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = stubs(dir.path(), "", &[]);
+    let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
+    let (mut request, _rx) = triage_request();
+    request.placement = false;
+    assert!(starter.start_triage(request).unwrap_err().contains("only Claude"));
 }

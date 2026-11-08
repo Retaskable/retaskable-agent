@@ -345,6 +345,25 @@ impl From<&ProjectConfig> for ProjectView {
 }
 
 impl AgentView {
+    /// A view with no projects, for tests that only need something to hand a host.
+    #[cfg(test)]
+    pub(crate) fn blank() -> Self {
+        Self {
+            machine: "pc".into(),
+            tags: vec![],
+            projects: vec![],
+            version: "1".into(),
+            lanes: 1,
+            chore_lane: None,
+            lane_sizes: Default::default(),
+            paused: Default::default(),
+            item_commands: Default::default(),
+            work: Default::default(),
+            restart: Default::default(),
+            settings: Default::default(),
+        }
+    }
+
     /// The hubs to connect to: each project's by its id, or the agent's own ("") before the first project.
     pub(crate) fn keys(&self) -> Vec<String> {
         if self.projects.is_empty() {

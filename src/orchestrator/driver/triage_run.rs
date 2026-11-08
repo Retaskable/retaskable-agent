@@ -38,7 +38,7 @@ pub struct TriageRequest {
     pub usage: Option<Value>,
     /// Where the session reports how it ended.
     pub outcomes: OutcomeSender,
-    /// The `engine-placement` flag: Off keeps the triager on Claude only.
+    /// The `engine-placement` release flag: Off, only Claude runs it.
     pub placement: bool,
 }
 
@@ -54,7 +54,7 @@ pub struct SecondLookRequest {
     pub triager_reason: String,
     pub triager_suggest: TriageButton,
     pub triager_instructions: String,
-    /// The `engine-placement` flag: Off keeps the second look on Claude.
+    /// The `engine-placement` release flag: Off, the second look runs on Claude.
     pub placement: bool,
 }
 
@@ -169,6 +169,7 @@ impl ProjectLoop {
         }
         // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
         self.triage_flag = self.flags.on("triage-session").await;
+        self.placement_flag = self.flags.on("engine-placement").await;
         if !self.triage_flag
             || self.project.triage != OnOff::On
             || shared.stopping
@@ -230,7 +231,7 @@ impl ProjectLoop {
                 lane,
                 usage: self.store.usage(),
                 outcomes: self.outcomes.clone(),
-                placement: self.flags.last("engine-placement"),
+                placement: self.placement_flag,
             };
             match starter.triage(request) {
                 Ok(()) => *room -= 1,
@@ -315,7 +316,7 @@ impl ProjectLoop {
             triager_reason: held.reason.clone(),
             triager_suggest: held.suggest,
             triager_instructions: held.instructions.clone(),
-            placement: self.flags.last("engine-placement"),
+            placement: self.placement_flag,
         };
         self.events.add_in(
             &self.id,

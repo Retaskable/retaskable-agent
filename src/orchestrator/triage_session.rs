@@ -1,7 +1,7 @@
 //! The real triager session for `claim` mode (docs/specs/agent/06.9-triage-claude-looks-at-needs-you-first.md): one
-//! read-only Claude session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
+//! read-only session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
 //! base checkout (or the repo itself before that checkout exists). Its end is a [`SessionResult::Triage`] on the outcome
-//! channel. They run on the triager's chosen engine with `engine-placement` On, else on Claude.
+//! channel. It runs on the engine chosen for the triager (`engines::place`).
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -36,15 +36,19 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
 }
 
 impl ClaudeStarter {
-    /// Where the triager runs: its chosen engine with `engine-placement` On, else Claude as before. An engine
-    /// whose binary isn't there refuses the start.
+    /// Where the triager (and its second look) runs: the engine chosen for the role and its binary. With
+    /// `engine-placement` Off (`placement`), the engine chosen is not used: only Claude runs, as before.
     fn place_triager(&self, project: &ProjectConfig, placement: bool) -> Result<Placement, String> {
-        let engine = if placement {
-            engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None)
-        } else {
-            Engine::Claude
-        };
-        place(engine, Role::Triager, &self.env, &self.cursor_models)
+        let chosen = engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None);
+        if !placement && chosen != Engine::Claude {
+            return Err("only Claude sessions run in the Rust agent yet".into());
+        }
+        place(
+            if placement { chosen } else { Engine::Claude },
+            Role::Triager,
+            &self.env,
+            &self.cursor_models,
+        )
     }
 
     /// A new session's id, where its transcript goes, and the running count it's now part of.
@@ -239,7 +243,3 @@ impl ClaudeStarter {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "chat_engine_tests.rs"]
-mod chat_engine_tests;

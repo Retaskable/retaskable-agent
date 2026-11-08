@@ -1,6 +1,6 @@
 //! The real [`AskHost`]: reads the store for the assistant's prompt (`asks_list`, `facts_get`, the items and the
-//! drafts) and the agent's run state, runs the assistant session through the engine's CLI in the project's base checkout
-//! (on the assistant's chosen engine with `engine-placement` On, else Claude), carries out its actions with `ask::perform` and hands back the answer
+//! drafts) and the agent's run state, runs the assistant session through `claude -p` in the project's base checkout
+//! (on the engine chosen for the assistant), carries out its actions with `ask::perform` and hands back the answer
 //! and each action's result for the loop to send with `ask_report`. The session's process tree registers with
 //! `process_tree`, so a restart or Quit cuts it.
 use std::path::PathBuf;
@@ -166,15 +166,19 @@ impl AskHost for ClaudeAsks {
                 actions: vec![],
             };
             let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
-            // With `engine-placement` Off, only Claude answers, as before.
-            let chosen = if placement {
-                engine_for(&choice, project.engines.as_ref(), Role::Assistant, None)
-            } else {
-                Engine::Claude
+            // The local model places as Claude Code with no local target, like `place` says.
+            let chosen = match engine_for(&choice, project.engines.as_ref(), Role::Assistant, None) {
+                Engine::Local => Engine::Claude,
+                other => other,
             };
+            if !placement && chosen != Engine::Claude {
+                return Ok(reply(
+                    "Sorry, I couldn't answer that: only Claude sessions run in the Rust agent yet.".into(),
+                ));
+            }
             let placed = match place(chosen, Role::Assistant, &env, &cursor_models) {
                 Ok(placed) => placed,
-                Err(e) => return Ok(sorry(anyhow::Error::msg(e))),
+                Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
             };
             let repo_path = PathBuf::from(&project.repo_path);
             let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);

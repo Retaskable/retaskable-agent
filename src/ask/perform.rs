@@ -93,4 +93,4 @@ async fn run(action: &Action, cx: &Perform<'_>) -> (&'static str, Result<Option<
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;
