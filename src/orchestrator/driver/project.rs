@@ -23,7 +23,7 @@ use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
+use crate::orchestrator::live::{HeldItem, HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
@@ -533,7 +533,25 @@ impl ProjectLoop {
             Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
             Some(Action::NeedsHuman { .. }) => unreachable!("the plan lists no needs_human"),
         };
+        let held_items: Vec<HeldItem> = items
+            .iter()
+            .filter(|i| self.leases.contains_key(&i.id))
+            .map(|i| HeldItem {
+                id: i.id.clone(),
+                title: i.title.clone(),
+                state: serde_json::to_value(i.status)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                lane: held.iter().find(|h| h.item_id == i.id).map(|h| h.lane),
+                branch: branch_name(i, self.attempt_of(&i.id)),
+                pr_url: i.pr_url.clone(),
+                attempt: self.attempt_of(&i.id),
+                chore: i.kind.as_deref() == Some("chore") || i.id.starts_with("chore-"),
+            })
+            .collect();
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
+        self.live.set_items(&self.id, held_items);
         let mut payload = payload;
         if let Some(ci) = self.live.snapshot().ci {
             payload.extra.insert("ci".into(), ci.tick_json());

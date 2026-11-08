@@ -440,6 +440,10 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some((items, milestones)) = self.items_block(project) {
+            state["items"] = items;
+            state["milestones"] = milestones;
+        }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;
         }
@@ -459,6 +463,40 @@ impl AgentView {
             state["smoke"] = smoke;
         }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `items` and `milestones` (09.2): with `snapshot-reporting` On, the items this agent holds a
+    /// lease on, and the Chores milestone when one is a chore.
+    fn items_block(&self, project: &str) -> Option<(Value, Value)> {
+        if !self.settings.snapshot_reporting_on() {
+            return None;
+        }
+        let held = self
+            .loop_state(project)
+            .and_then(|s| s.projects.get(project).map(|p| p.items.clone()))
+            .unwrap_or_default();
+        let items: Vec<Value> = held
+            .iter()
+            .map(|i| {
+                let mut item = json!({
+                    "id": i.id, "title": i.title, "state": i.state, "branch": i.branch,
+                    "attempt": i.attempt, "chore": i.chore,
+                });
+                if let Some(lane) = i.lane {
+                    item["lane"] = json!(lane);
+                }
+                if let Some(pr) = &i.pr_url {
+                    item["prUrl"] = json!(pr);
+                }
+                item
+            })
+            .collect();
+        let milestones = if held.iter().any(|i| i.chore) {
+            json!([{ "id": "chores", "title": "Chores" }])
+        } else {
+            json!([])
+        };
+        Some((json!(items), milestones))
     }
 
     /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with `snapshot-reporting` On and a
