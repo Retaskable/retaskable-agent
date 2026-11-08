@@ -232,8 +232,17 @@ pub(super) fn piece_item(piece: &RunPiece) -> Item {
         id: piece_id(piece).to_string(),
         title: piece.title.clone(),
         status: ItemStatus::Building,
+        size: piece.other.get("size").and_then(Value::as_str).map(str::to_string),
         ..Item::default()
     }
+}
+
+/// Whether the piece has earlier failed attempts; one that ended `limited` counts none (pieces.md section 3.2).
+fn is_retry(piece: &RunPiece) -> bool {
+    piece
+        .attempts
+        .iter()
+        .any(|a| a.get("outcome").and_then(Value::as_str) != Some("limited"))
 }
 
 /// A chore holds its kind's store lock through the run (section 6.7): another holder leaves the chore to them
@@ -390,7 +399,7 @@ async fn session(
         job.wants_local,
     )
     .await;
-    let model = model_for(chore.as_ref(), tier, &item).to_string();
+    let model = model_for(chore.as_ref(), tier, &item, is_retry(&job.piece)).to_string();
     let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
         &Session {

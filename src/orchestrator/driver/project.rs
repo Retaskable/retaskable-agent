@@ -270,6 +270,9 @@ pub struct ProjectLoop {
     pub(super) pace_readings: Vec<Value>,
     /// Whether the saved usage has been given to the pacer once.
     pub(super) pace_checked: bool,
+    /// `autoConcurrency.enabled`, set by the machine before it settles a session: with the `auto-concurrency` and
+    /// `auto-concurrency-week` flags it also keeps the week reading (`settle.rs`).
+    pub(super) auto_enabled: bool,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
     /// Claude implementer starts made in this scheduling pass, which haven't taken a model slot yet.
@@ -388,6 +391,7 @@ impl ProjectLoop {
             week_checked: false,
             pace_readings: Vec::new(),
             pace_checked: false,
+            auto_enabled: false,
             silenced: BTreeMap::new(),
             claude_starts: 0,
             own_failures: store.own_failures(),

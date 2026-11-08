@@ -980,5 +980,8 @@ async fn a_playtest_fix_never_takes_the_local_slot() {
     assert!(local.try_take().is_some());
 }
 
+#[path = "piece_runs_model_tests.rs"]
+mod model_tests;
+
 #[path = "piece_runs_limit_tests.rs"]
 mod limit;
