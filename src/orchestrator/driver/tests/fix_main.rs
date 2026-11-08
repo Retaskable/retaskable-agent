@@ -13,6 +13,7 @@ pub(super) struct Script {
     pub(super) items: Vec<Value>,
     pub(super) lock: Option<Value>,
     pub(super) list_fails: bool,
+    pub(super) lock_fails: bool,
 }
 
 pub(super) type Store_ = Arc<Mutex<Script>>;
@@ -40,6 +41,9 @@ pub(super) async fn store() -> (String, Store_) {
                     match body["op"].as_str().unwrap() {
                         "list" if s.list_fails => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
                         "list" => ok(Value::Array(s.items.clone())),
+                        "lock_take" if s.lock_fails => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
+                        }
                         "lock_take" => ok(s.lock.clone().unwrap_or(json!({ "held": true, "token": "L1" }))),
                         _ => ok(Value::Null),
                     }

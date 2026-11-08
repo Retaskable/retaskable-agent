@@ -1,5 +1,5 @@
 //! The main sync (`main_sync.rs`) against a fake store, real git repos and a fake `gh`.
-use super::fix_main::{Idle, Store_, store};
+use super::fix_main::{store, Idle, Store_};
 use super::*;
 use crate::test_support::{git, repo_with_origin, run as run_git, write_executable};
 use std::path::{Path, PathBuf};
@@ -190,6 +190,31 @@ async fn a_store_error_adds_nothing() {
     settle(&mut f).await;
     assert!(adds(&f).is_empty());
     assert!(f.script.lock().unwrap().args("lock_take").is_empty());
+}
+
+#[tokio::test]
+async fn a_lock_take_error_adds_nothing_and_records_no_lock() {
+    let mut f = fixture(false).await;
+    f.script.lock().unwrap().lock_fails = true;
+    settle(&mut f).await;
+    assert!(adds(&f).is_empty());
+    assert!(!f.script.lock().unwrap().args("lock_take").is_empty());
+    assert_eq!(remote_branches(&f), "");
+    assert_eq!(f.rig.machine.projects[0].run_loop.runs().locks().count(), 0);
+}
+
+#[tokio::test]
+async fn a_skipped_sync_main_item_for_mains_head_adds_nothing() {
+    let f = fixture(false).await;
+    let sha = crate::lanes::head_sha(&f.repo).unwrap();
+    f.script.lock().unwrap().items = vec![json!({
+        "id": format!("chore-sync-main-{}", &sha[..7]), "title": "t", "status": "skipped", "rank": 1, "kind": "sync_main"
+    })];
+    let mut f = f;
+    settle(&mut f).await;
+    assert!(f.script.lock().unwrap().args("lock_take").is_empty());
+    assert!(adds(&f).is_empty());
+    assert_eq!(remote_branches(&f), "");
 }
 
 #[tokio::test]

@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
+use crate::backlog::runs::{short_sha, LockTake};
 use crate::backlog::ItemStatus;
-use crate::backlog::runs::{LockTake, short_sha};
 use crate::config::SyncMain;
 use crate::git_bin::command;
-use crate::main_sync::{Attempt, attempt, behind_count, item_title, pr_body, pr_title, push, sync_due};
+use crate::main_sync::{attempt, behind_count, item_title, pr_body, pr_title, push, sync_due, Attempt};
 use crate::merge_update::run as git;
-use crate::runs::chore::{ChoreKind, chore_lock_name};
+use crate::runs::chore::{chore_lock_name, ChoreKind};
 
 /// How often a project looks at whether main moved.
 const LOOK_EVERY: Duration = Duration::from_secs(60);
@@ -39,6 +39,8 @@ struct Running {
 pub(super) struct State {
     running: Option<Running>,
     looked: Option<Instant>,
+    /// The main commit a sync was last made (or found) for: nothing starts again until main moves.
+    handled: Option<String>,
     gh: PathBuf,
 }
 
@@ -47,6 +49,7 @@ impl Default for State {
         Self {
             running: None,
             looked: None,
+            handled: None,
             gh: PathBuf::from("gh"),
         }
     }
@@ -114,6 +117,9 @@ impl ProjectLoop {
             ))
         })
         .await??;
+        if self.run_loop.main_sync.handled.as_deref() == Some(sha.as_str()) {
+            return Ok(());
+        }
         let items = match self.client.list(repo, token).await {
             Ok(items) => items,
             Err(e) => {
@@ -121,6 +127,15 @@ impl ProjectLoop {
                 return Ok(());
             }
         };
+        let id = format!("chore-sync-main-{}", short_sha(&sha));
+        if items
+            .iter()
+            .any(|i| i.kind.as_deref() == Some("sync_main") && i.id == id)
+        {
+            // Made for this commit already, whatever became of it (even skipped): wait for main to move.
+            self.run_loop.main_sync.handled = Some(sha);
+            return Ok(());
+        }
         let open = items.iter().any(|i| {
             i.kind.as_deref() == Some("sync_main")
                 && !matches!(
@@ -179,7 +194,11 @@ impl ProjectLoop {
         }
         self.run_loop.runs().locks().remove(lock);
         match added {
-            Ok(()) if done.is_ok() => self.live.set_sync_main(&self.id, None),
+            Err(e) if e.code() == Some("conflict") => self.run_loop.main_sync.handled = Some(sha.into()),
+            Ok(()) if done.is_ok() => {
+                self.run_loop.main_sync.handled = Some(sha.into());
+                self.live.set_sync_main(&self.id, None)
+            }
             Ok(()) => {}
             Err(e) => {
                 self.store_error("add", &e);
