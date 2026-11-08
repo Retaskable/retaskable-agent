@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::Shared;
 use super::project::{ProjectLoop, SessionStarter};
-use super::start_gate::{StartGate, local_at_limit};
+use super::start_gate::StartGate;
 use crate::backlog::{ClaimNextAgent, ClaimNextAnswer};
 use crate::item_lifecycle::ItemState;
 use crate::lane_pool::LanePool;
@@ -34,11 +34,10 @@ impl ProjectLoop {
             return None;
         }
         // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
-        // At the cutoff with `local-limit-fallback`, Claude's work goes to the local model: one item queues for its slot.
         if gate.is_none()
             && self.flags.on("weekly-cutoff").await
             && shared.engine_limits.week_cut_off(std::time::Instant::now())
-            && !(local_at_limit(shared) && shared.local.waiting() == 0)
+            && !Self::limit_fallback(shared)
         {
             return None;
         }
@@ -46,7 +45,7 @@ impl ProjectLoop {
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
-            let model_full = self.model_full(starter, caps_on);
+            let model_full = self.model_full(starter, caps_on) || self.local_queue_full(shared);
             let asks = self
                 .decide_gated(pool, shared, gate.as_ref(), model_full)
                 .contains(&Action::AskForWork);
