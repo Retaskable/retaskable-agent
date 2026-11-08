@@ -404,6 +404,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
             retaskable_agent::tiers::set_flags(placement.clone());
             placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
+            placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
             let roster = orchestrator::plan_run::Roster {
                 data_dir: dir.to_path_buf(),
                 projects: cfg.projects.clone(),
