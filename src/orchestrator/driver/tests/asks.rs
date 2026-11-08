@@ -395,3 +395,35 @@ async fn an_ask_report_the_store_refuses_is_logged_as_a_store_error_for_the_ask(
     assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
     assert_eq!(logged[0]["item"], "k1");
 }
+
+/// `local-limit-fallback`: Claude at its usage limit holds an ask only when the flag is Off, the model is down or
+/// Claude is signed out; else the ask starts (on the local model), with the start rules On or Off.
+#[tokio::test]
+async fn at_the_limit_an_ask_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for rules in [false, true] {
+        for (fallback, model, signed_out, starts) in [
+            (true, LocalModel::up(), false, true),
+            (false, LocalModel::up(), false, false),
+            (true, LocalModel::off(), false, false),
+            (true, LocalModel::up(), true, false),
+        ] {
+            crate::tiers::set_local_ladder_for_test(true);
+            crate::tiers::set_local_limit_fallback_for_test(fallback);
+            let (mut rig, host, _asked) = rig_with_host().await;
+            let mut on = vec!["ask-claude", "watchdog-anomaly-rules"];
+            on.extend(rules.then_some("engine-start-rules"));
+            rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+            rig.machine.local = model;
+            rig.machine.claude_signed_out_until =
+                signed_out.then(|| std::time::Instant::now() + Duration::from_secs(60));
+            rig.machine
+                .engine_limits
+                .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(3600));
+            push(&rig, ask("k1", "hello"));
+            quiet_passes(&mut rig).await;
+            let case = (rules, fallback, signed_out);
+            assert_eq!(host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
+        }
+    }
+}
