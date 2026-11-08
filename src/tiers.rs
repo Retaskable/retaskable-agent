@@ -295,7 +295,7 @@ fn band_from_pct_left(pct_left: f64, models: &ModelsConfig) -> Band {
 
 /// A usage fraction, or a whole-number percentage above 1 (`frac` in the TypeScript agent's
 /// `parseRateLimit`) — Claude Code sends either shape for the same field.
-fn frac(value: f64) -> f64 {
+pub(crate) fn frac(value: f64) -> f64 {
     if value > 1.0 { value / 100.0 } else { value }
 }
 
