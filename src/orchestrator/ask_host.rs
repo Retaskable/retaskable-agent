@@ -192,7 +192,7 @@ impl AskHost for ClaudeAsks {
                 Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
             };
             let repo_path = PathBuf::from(&project.repo_path);
-            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
+            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, false);
             let spec = match session_spec(&Session {
                 template: TEMPLATE,
                 input: AssistantInput {

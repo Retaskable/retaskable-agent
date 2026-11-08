@@ -56,6 +56,7 @@ fn request_for(project: &str, piece: Value, other: Value) -> (RunRequest, Starte
         piece: serde_json::from_value(piece).unwrap(),
         other: other.as_object().cloned().unwrap_or_default(),
         lane: None,
+        engine: None,
         ends,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };

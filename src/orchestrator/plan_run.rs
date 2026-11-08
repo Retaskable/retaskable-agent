@@ -18,7 +18,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of, place,
-    run_session_tracked,
+    run_session_tracked, start_engine,
 };
 use crate::env::Env;
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
@@ -270,10 +270,13 @@ impl Roster {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        if !self.flags.last("engine-placement") && !self.on_claude(role, Some(&project)) {
+        let engine = start_engine(
+            request.engine,
+            engine_for(&self.choice, project.engines.as_ref(), role, None),
+        );
+        if !self.flags.last("engine-placement") && (!self.on_claude(role, Some(&project)) || engine != Engine::Claude) {
             return Err("Claude alone starts sessions while engine-placement is off".into());
         }
-        let engine = engine_for(&self.choice, project.engines.as_ref(), role, None);
         let placed = place(engine, role, &self.env, &self.cursor_models)?;
         let guard = slot
             .take()

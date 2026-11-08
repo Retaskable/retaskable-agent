@@ -52,6 +52,7 @@ fn request(piece: Value) -> (RunRequest, Started) {
         piece: serde_json::from_value(piece).unwrap(),
         other: Default::default(),
         lane: None,
+        engine: None,
         ends,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
@@ -201,6 +202,34 @@ async fn the_planner_role_on_another_engine_runs_that_engines_binary() {
         end_of(&mut s.ends).await;
         assert_ran_on(&root, program);
     }
+}
+
+#[tokio::test]
+async fn a_plan_told_to_start_on_claude_while_the_planner_is_cursor_runs_on_claude() {
+    let mut choice = EngineChoiceConfig::default();
+    choice.roles.planner = Some(Engine::Cursor);
+    let mut r = rig(&answer(GOOD), "", choice);
+    let root = r.root.clone();
+    on_every_engine(&mut r.starter.roster, &root);
+    let (mut req, mut s) = request(brief());
+    req.engine = Some(EngineId::Claude);
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Planned);
+    let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
+    assert!(
+        args.contains("--permission-mode") && !args.contains("gpt-top"),
+        "{args}"
+    );
+}
+
+#[tokio::test]
+async fn with_placement_off_a_plan_told_to_start_on_cursor_is_given_back() {
+    let mut r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
+    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
+    let (mut req, _s) = request(brief());
+    req.engine = Some(EngineId::Cursor);
+    assert!(r.starter.start(req).unwrap_err().contains("Claude alone"));
+    assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
 }
 
 #[tokio::test]

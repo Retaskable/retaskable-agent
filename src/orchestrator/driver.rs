@@ -55,7 +55,9 @@ use project::Launch;
 pub use project::{
     Abandon, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
 };
-pub use runs::{BEAT_EVERY, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id};
+pub use runs::{
+    BEAT_EVERY, FallOver, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id,
+};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 pub use triage_run::{LookFailure, SecondLookEnd, SecondLookRequest, TriageEnd, TriageRequest};
 

@@ -506,13 +506,14 @@ impl ProjectLoop {
         // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
         let cursor_flag = self.flags.on("cursor-limit-retry").await;
         // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
+        let fall_over = self.flags.on("engine-fall-over").await;
         let carry_on = match self.records.get(&item) {
             Some(record)
                 if cursor_flag
                     && matches!(result, SessionResult::Limited { .. })
                     && record.impl_session_engine != EngineId::Pi =>
             {
-                takeover_in(&self.project, pool, shared, record.impl_session_engine)
+                takeover_in(&self.project, pool, shared, record.impl_session_engine, fall_over)
                     .map(|to| (record.impl_session_engine, to))
             }
             _ => None,
