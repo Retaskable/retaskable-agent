@@ -15,6 +15,7 @@ use anyhow::Result;
 
 use super::agent::{Frame, Opener, Quit, SystemOpener, TrayAgent, TrayView};
 use crate::terminal_menu::console::ConsoleCapture;
+use crate::terminal_menu::keys::KeyDecoder;
 use crate::terminal_menu::{Cursor, Key, Outcome, QUIT_HINT, backlog_notice, handle_key, render_screen};
 
 const ENTER: &str = "\x1b[?1049h\x1b[?25l";
@@ -45,45 +46,6 @@ impl Opener for TuiOpener {
     fn notify(&self, _: &str) {}
 }
 
-/// The bytes the terminal sent, as keys. An unknown escape sequence is skipped.
-pub fn parse_keys(bytes: &[u8]) -> Vec<Key> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut out = vec![];
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        out.push(match c {
-            '\x1b' => match chars.peek() {
-                Some('[') | Some('O') => {
-                    chars.next();
-                    let mut seq = String::new();
-                    while let Some(&d) = chars.peek() {
-                        chars.next();
-                        seq.push(d);
-                        if d.is_ascii_alphabetic() || d == '~' {
-                            break;
-                        }
-                    }
-                    match seq.as_str() {
-                        "A" => Key::Up,
-                        "B" => Key::Down,
-                        "C" => Key::Right,
-                        "D" => Key::Left,
-                        "H" | "1~" | "7~" => Key::Home,
-                        "F" | "4~" | "8~" => Key::End,
-                        _ => continue,
-                    }
-                }
-                _ => Key::Esc,
-            },
-            '\r' | '\n' => Key::Enter,
-            '\x03' => Key::CtrlC,
-            '\x7f' | '\x08' => Key::Backspace,
-            c => Key::Char(c),
-        });
-    }
-    out
-}
-
 struct Screen {
     frame: Option<Frame>,
     cursor: Cursor,
@@ -100,6 +62,8 @@ pub struct TerminalMenu {
     agent: OnceLock<Weak<TrayAgent>>,
     screen: Mutex<Screen>,
     restored: AtomicBool,
+    /// The console's version as last drawn.
+    seen: Mutex<u64>,
 }
 
 impl TerminalMenu {
@@ -123,6 +87,7 @@ impl TerminalMenu {
                 size,
             }),
             restored: AtomicBool::new(false),
+            seen: Mutex::new(0),
         }))
     }
 
@@ -157,13 +122,15 @@ impl TerminalMenu {
         self.term.write(&out);
     }
 
-    /// Draws again when the terminal's size has changed.
+    /// Draws again when the terminal's size has changed or the console has a new line.
     pub fn repaint_if_resized(&self) {
         if self.restored.load(Ordering::SeqCst) {
             return;
         }
         let mut s = self.screen.lock().unwrap();
-        if self.term.size() != s.size {
+        let version = *self.log.subscribe().borrow();
+        let changed = std::mem::replace(&mut *self.seen.lock().unwrap(), version) != version;
+        if self.term.size() != s.size || changed {
             self.paint(&mut s, false);
         }
     }
@@ -216,17 +183,29 @@ impl TerminalMenu {
         }
     }
 
-    /// Reads the keys on stdin and watches the size, on threads of their own. Not for tests.
+    /// Reads the keys on stdin and watches the size and the console, on threads of their own. Not for tests.
     pub fn spawn_input(self: &Arc<Self>) {
-        let menu = self.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             let mut buf = [0u8; 64];
             let mut stdin = io::stdin().lock();
             while let Ok(n) = stdin.read(&mut buf) {
-                if n == 0 {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
                     break;
                 }
-                for key in parse_keys(&buf[..n]) {
+            }
+        });
+        let menu = self.clone();
+        std::thread::spawn(move || {
+            let mut decoder = KeyDecoder::new();
+            loop {
+                // A lone ESC is Esc once nothing more follows it.
+                let keys = match rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(bytes) => decoder.feed(&bytes),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => decoder.flush(),
+                    Err(_) => break,
+                };
+                for key in keys {
                     menu.key(key);
                 }
             }

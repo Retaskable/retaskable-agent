@@ -27,10 +27,22 @@ mod stub {
         path
     }
 
+    /// `probe`, run again while a parallel test's fork still holds the stub open for writing (it then looks missing).
+    async fn probe_settled(docker: std::path::PathBuf, want: &str) -> DockerState {
+        for _ in 0..50 {
+            let s = probe(&docker, false).await;
+            if s.as_str() == want {
+                return s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        probe(&docker, false).await
+    }
+
     #[tokio::test]
     async fn answering_is_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let s = probe(stub(&dir, "echo Client; exit 0"), false).await;
+        let s = probe_settled(stub(&dir, "echo Client; exit 0"), "ok").await;
         assert_eq!(s, DockerState::Ok);
         assert_eq!(s.reason(), None);
     }
@@ -39,7 +51,7 @@ mod stub {
     async fn a_daemon_error_is_stopped_with_the_reason() {
         let dir = tempfile::tempdir().unwrap();
         let p = stub(&dir, "echo 'Cannot connect to the Docker daemon' >&2; exit 1");
-        let s = probe(p, false).await;
+        let s = probe_settled(p, "stopped").await;
         assert_eq!(s.as_str(), "stopped");
         assert_eq!(s.reason(), Some("Docker isn't running: this computer won't run CI"));
     }

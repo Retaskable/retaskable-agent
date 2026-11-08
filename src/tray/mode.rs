@@ -18,7 +18,7 @@ pub enum TrayMode {
 }
 
 /// Why the agent runs without a tray from the start, when it does (the first three reasons; a missing helper is not one).
-fn no_tray_from_start(args: &[String], env: &Env, os: OsKind) -> Option<String> {
+pub(crate) fn no_tray_from_start(args: &[String], env: &Env, os: OsKind) -> Option<String> {
     if args.iter().any(|a| a == "--no-tray") {
         return Some("--no-tray".into());
     }
@@ -29,7 +29,7 @@ fn no_tray_from_start(args: &[String], env: &Env, os: OsKind) -> Option<String> 
         return Some("RETASKABLE_NO_TRAY is set".into());
     }
     if os == OsKind::Linux && env.get("DISPLAY").is_none() && env.get("WAYLAND_DISPLAY").is_none() {
-        return Some("this Linux has no DISPLAY or WAYLAND_DISPLAY".into());
+        return Some("no DISPLAY or WAYLAND_DISPLAY".into());
     }
     None
 }
@@ -41,7 +41,7 @@ pub fn tray_mode(args: &[String], env: &Env, os: OsKind, helper: Option<PathBuf>
     }
     match helper {
         Some(path) => TrayMode::Tray(path),
-        None => TrayMode::Headless("there is no tray helper for this computer".into()),
+        None => TrayMode::Headless("no tray helper for this computer".into()),
     }
 }
 

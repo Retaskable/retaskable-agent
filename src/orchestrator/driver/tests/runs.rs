@@ -712,3 +712,110 @@ async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     let c = rig.live.snapshot().projects[&id].chores.unwrap();
     assert_eq!((c.today, c.limit), (2, 3));
 }
+
+/// A pass with `engine-start-rules` On, Claude signed out for a minute and `limited` engines at their limit.
+async fn start_rules_pass(
+    rig: &mut Rig,
+    starter: &dyn RunStarter,
+    limited: &[crate::engines::EngineId],
+    claude_signed_out: bool,
+) {
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement", "engine-start-rules"]));
+    let now = Instant::now();
+    let limits = crate::orchestrator::fresh_start::EngineLimits::default();
+    for e in limited {
+        limits.hit(*e, now + Duration::from_secs(600));
+    }
+    let mut out = claude_signed_out.then(|| now + Duration::from_secs(600));
+    let m = &mut rig.machine;
+    let mut limits = limits;
+    let shared = Shared {
+        links: &m.links,
+        claim_paused_until: &mut None,
+        claude_signed_out_until: &mut out,
+        engine_limits: &mut limits,
+        stopping: false,
+    };
+    m.projects[0].run_pass(&mut m.pool, starter, &shared, now).await;
+}
+
+fn both_engines(rig: &mut Rig, choice: Value) {
+    *rig.machine.links.checks.lock().unwrap() = Some(checks_with(Some(true), true));
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+}
+
+#[tokio::test]
+async fn with_claude_limited_run_take_leaves_out_claude_and_uses_name_cursor() {
+    use crate::engines::EngineId::Claude;
+    let (mut rig, script) = setup(1).await;
+    both_engines(
+        &mut rig,
+        json!({ "roles": { "implementer": "cursor" }, "default": "claude" }),
+    );
+    rig.machine.links.engine_choice =
+        serde_json::from_value(json!({ "default": "claude", "lanes": ["cursor"] })).unwrap();
+    start_rules_pass(
+        &mut rig,
+        &FakeRuns::new(&[RunKind::Build, RunKind::Watch]),
+        &[Claude],
+        false,
+    )
+    .await;
+    let takes = script.lock().unwrap().args("run_take");
+    assert_eq!(takes[0]["agent"]["engines"], json!(["cursor", "pi", "codex"]));
+    assert_eq!(takes[0]["agent"]["uses"]["build"], "cursor");
+    assert_eq!(
+        takes[0]["agent"]["uses"]["plan"], "cursor",
+        "Claude's planner falls over to Cursor"
+    );
+    assert_eq!(takes[0]["kinds"], json!(["build", "watch"]));
+}
+
+#[tokio::test]
+async fn with_cursor_limited_run_take_leaves_out_cursor() {
+    use crate::engines::EngineId::Cursor;
+    let (mut rig, script) = setup(1).await;
+    both_engines(&mut rig, json!({ "default": "claude" }));
+    start_rules_pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), &[Cursor], false).await;
+    let takes = script.lock().unwrap().args("run_take");
+    assert_eq!(takes[0]["agent"]["engines"], json!(["claude", "pi", "codex"]));
+}
+
+#[tokio::test]
+async fn with_every_engine_out_no_run_take_is_sent() {
+    use crate::engines::EngineId::{Claude, Codex, Cursor, Pi};
+    let (mut rig, script) = setup(1).await;
+    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["cursor"] }));
+    start_rules_pass(
+        &mut rig,
+        &FakeRuns::new(&[RunKind::Build]),
+        &[Claude, Cursor, Pi, Codex],
+        false,
+    )
+    .await;
+    assert!(script.lock().unwrap().args("run_take").is_empty());
+}
+
+#[tokio::test]
+async fn a_build_takes_a_cursor_lane_when_claude_is_signed_out_and_claude_lanes_first_otherwise() {
+    let lane = |rig: &Rig, s: &FakeRuns| {
+        let want = crate::lanes::lane_path(std::path::Path::new(&rig.machine.projects[0].project.worktrees_dir), 1);
+        let got = s.started.lock().unwrap()[0].lane.clone().unwrap();
+        got == want
+    };
+    let (mut rig, script) = setup(2).await;
+    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["claude", "cursor"] }));
+    assert!(rig.machine.pool.claim_run("other", "x").is_some(), "lane 1 is busy");
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    start_rules_pass(&mut rig, &starter, &[], true).await;
+    assert_eq!(starter.started(), vec!["b1"], "the Cursor lane takes it");
+    assert!(!lane(&rig, &starter));
+
+    let (mut rig, script) = setup(2).await;
+    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["claude", "cursor"] }));
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    start_rules_pass(&mut rig, &starter, &[], false).await;
+    assert!(lane(&rig, &starter), "Claude's lane first");
+}
