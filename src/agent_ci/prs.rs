@@ -11,12 +11,27 @@ use super::priority::low_priority_tokio;
 /// The label that says a pull request is ready when `ciWhenReady` is on (agent.md section 5).
 pub const READY_LABEL: &str = "ci-ready";
 
-/// One check to run: a pull request at a head merged with a main.
+/// One check to run: a pull request at a head merged with a main, or (`pr` 0) a push to main alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CheckKey {
     pub pr: u64,
     pub head: String,
     pub main: String,
+}
+
+impl CheckKey {
+    /// The push to main's check: main's sha is the key (agent-ci.md section 3.2's last paragraph).
+    pub fn push(main: &str) -> Self {
+        Self {
+            pr: 0,
+            head: main.into(),
+            main: main.into(),
+        }
+    }
+
+    pub fn is_push(&self) -> bool {
+        self.pr == 0
+    }
 }
 
 #[derive(Deserialize)]
