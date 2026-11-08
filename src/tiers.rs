@@ -81,7 +81,8 @@ pub fn scout_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, 
 /// `rateLimitType` says. With `weekly`, a reading labeled `"seven_day"` whose `status` is `rejected` counts too:
 /// it is what turned the session away, and its reset is the week's. Anything else — an older build's lone
 /// non-rejected `seven_day` event, say — would otherwise overwrite a usable 5-hour reading with one this agent
-/// can't read a tier from, each time Claude Code happens to report it.
+/// can't read a tier from, each time Claude Code happens to report it. A weekly reading dropped here is still
+/// saved, as `state.weekUsage` (`carries_week`), so a restart keeps the weekly cutoff.
 pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
     if usage.get("unifiedWindows").and_then(|w| w.get("five_hour")).is_some() {
         return true;
@@ -91,6 +92,13 @@ pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
         Some(rate_limit_type) => rate_limit_type == "five_hour",
         None => true,
     }
+}
+
+/// Whether a reading carries the weekly window (`unifiedWindows.seven_day`, or `rateLimitType: "seven_day"`): the
+/// ones saved as `state.weekUsage`, whether or not `is_usage_reading` keeps them as `state.usage`.
+pub fn carries_week(usage: &Value) -> bool {
+    usage.get("unifiedWindows").and_then(|w| w.get("seven_day")).is_some()
+        || usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day")
 }
 
 /// Whether the `weekly-limit-reading` or `weekly-cutoff` flag was On at its last answer; Off until the flags

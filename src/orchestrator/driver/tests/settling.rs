@@ -943,3 +943,60 @@ async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_lone_weekly_reading_is_saved_as_the_week_usage_and_not_as_the_usage() {
+    let week =
+        json!({"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.5, "resetsAt": 4_000_000_000u64});
+    for (flag, saved) in [("weekly-cutoff", true), ("other", false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[flag]));
+        rig.go_live();
+        at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+        rig.machine.outcome_sender().send(SessionOutcome {
+            project: "p0".into(),
+            item_id: "a".into(),
+            lane: 1,
+            result: SessionResult::NeedsHuman("x".into()),
+            usage: Some(week.clone()),
+            context_tokens: None,
+            notes: vec![],
+            session_id: None,
+        });
+        rig.machine.poll().await;
+        assert_eq!(rig.lp(0).store.week_usage(), saved.then(|| week.clone()));
+        assert_eq!(rig.lp(0).store.usage(), None);
+    }
+}
+
+#[tokio::test]
+async fn a_saved_weekly_reading_limits_claude_on_a_started_loop_only_while_ahead_and_with_the_flag_on() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // (flag, utilization, reset offset, limited)
+    let cases: [(&str, f64, i64, bool); 4] = [
+        ("weekly-cutoff", 0.96, 86_400, true),
+        ("weekly-cutoff", 0.96, -60, false),
+        ("weekly-cutoff", 0.94, 86_400, false),
+        ("other", 0.96, 86_400, false),
+    ];
+    for (flag, u, offset, limited) in cases {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[flag]));
+        let at_ = (now as i64 + offset) as u64;
+        rig.lp(0)
+            .store
+            .set_week_usage(json!({"rateLimitType": "seven_day", "utilization": u, "resetsAt": at_}));
+        rig.go_live();
+        rig.machine.poll().await;
+        let id = crate::engines::EngineId::Claude;
+        assert_eq!(
+            rig.machine.engine_limits.is_limited(id, std::time::Instant::now()),
+            limited
+        );
+    }
+}

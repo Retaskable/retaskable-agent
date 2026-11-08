@@ -392,13 +392,22 @@ impl ProjectLoop {
         if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
-        if let Some(usage) = outcome
+        let week = outcome
             .usage
             .clone()
-            .filter(|u| crate::tiers::is_usage_reading(u, weekly))
-        {
-            crate::tiers::note_usage(&usage);
-            self.store.set_usage(usage);
+            .filter(|u| weekly && crate::tiers::carries_week(u));
+        let five_hour = outcome
+            .usage
+            .clone()
+            .filter(|u| crate::tiers::is_usage_reading(u, weekly));
+        if week.is_some() || five_hour.is_some() {
+            if let Some(usage) = week {
+                self.store.set_week_usage(usage);
+            }
+            if let Some(usage) = five_hour {
+                crate::tiers::note_usage(&usage);
+                self.store.set_usage(usage);
+            }
             if let Err(e) = self.store.save() {
                 tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
             }
