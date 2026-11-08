@@ -10,6 +10,7 @@ use crate::orchestrator::session::tests::{fake_gh, fake_name, project_in};
 const COMMIT: &str = "echo 'fn a() {}' > small.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm small";
 
 struct Rig {
+    fall: Option<crate::orchestrator::driver::FallOver>,
     _dir: tempfile::TempDir,
     root: PathBuf,
     starter: Arc<PieceStarter>,
@@ -58,6 +59,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         local: crate::local_model::LocalModel::off(),
     });
     Rig {
+        fall: None,
         _dir: dir,
         root,
         starter,
@@ -940,3 +942,6 @@ async fn with_the_sync_flag_off_a_sync_piece_runs_like_any_other() {
     let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
     assert!(!prompt.contains("main sync"), "{prompt}");
 }
+
+#[path = "piece_runs_limit_tests.rs"]
+mod limit;

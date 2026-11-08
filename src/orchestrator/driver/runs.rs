@@ -108,9 +108,15 @@ pub struct FallOver {
 impl RunContext {
     /// `chosen`, or the engine that takes over while it is out. A pi choice never falls over.
     pub fn engine_now(&self, chosen: Engine) -> Engine {
+        self.engine_now_out(chosen, &BTreeSet::new())
+    }
+
+    /// [`Self::engine_now`] with `more` engines out as well (ones that hit their limit since the context was made).
+    pub fn engine_now_out(&self, chosen: Engine, more: &BTreeSet<EngineId>) -> Engine {
         let Some(f) = &self.fall else { return chosen };
         let program = program_of(chosen);
-        match engine_now(program, &f.used, &f.out) {
+        let out: BTreeSet<EngineId> = f.out.union(more).copied().collect();
+        match engine_now(program, &f.used, &out) {
             now if now == program => chosen,
             now => start_engine(Some(now), chosen),
         }
