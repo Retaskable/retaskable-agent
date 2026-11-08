@@ -1,5 +1,5 @@
 //! The main sync (`main_sync.rs`) against a fake store, real git repos and a fake `gh`.
-use super::fix_main::{store, Idle, Store_};
+use super::fix_main::{Idle, Store_, store};
 use super::*;
 use crate::test_support::{git, repo_with_origin, run as run_git, write_executable};
 use std::path::{Path, PathBuf};
