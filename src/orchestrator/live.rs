@@ -38,6 +38,8 @@ pub struct ProjectLive {
     pub drafting: Option<String>,
     /// What the idle baseline last found on the base branch (fix main), reported with the computer's state.
     pub fix_main: Option<String>,
+    /// Why the last main sync didn't start, when it didn't.
+    pub sync_main: Option<String>,
     /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
     pub chores: Option<crate::backlog::runs::ChoreCount>,
     /// The last vet run's counts by verdict name; `None` before a run.
@@ -92,6 +94,7 @@ impl LiveHandle {
             store_error: None,
             drafting: entry.drafting.take(),
             fix_main: entry.fix_main.take(),
+            sync_main: entry.sync_main.take(),
             chores: entry.chores,
             vet: entry.vet.take(),
         };
@@ -105,6 +108,11 @@ impl LiveHandle {
     /// Says what the idle baseline found, or nothing.
     pub fn set_fix_main(&self, project: &str, note: Option<String>) {
         self.lock().projects.entry(project.to_string()).or_default().fix_main = note;
+    }
+
+    /// Says why the main sync didn't start, or nothing.
+    pub fn set_sync_main(&self, project: &str, note: Option<String>) {
+        self.lock().projects.entry(project.to_string()).or_default().sync_main = note;
     }
 
     /// Says what the last vet run found, or nothing.
