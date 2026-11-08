@@ -75,12 +75,21 @@ static MACHINE_WRITE: Mutex<()> = Mutex::new(());
 /// session is scoped, or the `engine-limit-records` flag is Off.
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
     let _ = LIMITS.try_with(|limits| {
+        if engine == EngineId::Claude
+            && limits.week_cutoff_on()
+            && let Some(usage) = &result.usage
+        {
+            limits.cut_off_for_week(usage);
+        }
         if !limits.records_any_role() {
             return;
         }
         if result.limit_hit {
-            let wait = crate::engines::engine::resets_in(result.usage.as_ref(), crate::tiers::weekly_reading_on())
-                .unwrap_or(LIMIT_PAUSE);
+            let wait = crate::engines::engine::resets_in(
+                result.usage.as_ref(),
+                crate::tiers::weekly_reading_on() || limits.week_cutoff_on(),
+            )
+            .unwrap_or(LIMIT_PAUSE);
             limits.hit(engine, Instant::now() + wait);
         }
         let _ = MACHINE_DIR.try_with(|dir| {
@@ -354,6 +363,30 @@ mod tests {
             !s.limits()
                 .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(620))
         );
+    }
+
+    #[tokio::test]
+    async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86_400;
+        let usage = |u: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": at}}});
+        for (on, u, engine, limited) in [
+            (true, 0.96, EngineId::Claude, true),
+            (true, 0.90, EngineId::Claude, false),
+            (true, 0.96, EngineId::Cursor, false),
+            (false, 0.96, EngineId::Claude, false),
+        ] {
+            let s = Sessions::default();
+            s.limits().set_week_cutoff(on);
+            end_in_scope(&s, engine, ended(false, Some(usage(u)))).await;
+            let t = Instant::now();
+            let day = std::time::Duration::from_secs(80_000);
+            assert_eq!(s.limits().is_limited(EngineId::Claude, t + day), limited);
+            assert!(!s.limits().is_limited(EngineId::Claude, t + 2 * day));
+        }
     }
 
     #[tokio::test]

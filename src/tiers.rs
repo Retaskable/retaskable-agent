@@ -93,9 +93,11 @@ pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
     }
 }
 
-/// Whether the `weekly-limit-reading` flag was On at its last answer; Off until the flags client is handed over.
+/// Whether the `weekly-limit-reading` or `weekly-cutoff` flag was On at its last answer; Off until the flags
+/// client is handed over.
 pub fn weekly_reading_on() -> bool {
-    FLAG.get().is_some_and(|f| f.last("weekly-limit-reading"))
+    FLAG.get()
+        .is_some_and(|f| f.last("weekly-limit-reading") || f.last("weekly-cutoff"))
 }
 
 /// Whether a window's `utilization` is full, read like `frac` (a whole number over 1 is a percentage).
