@@ -64,6 +64,8 @@ pub struct Input<'a> {
     pub lease_idle_minutes: u32,
     pub idle_lanes_minutes: u32,
     pub no_progress_minutes: u32,
+    /// The `watchdog-anomaly-rules` release flag: the rules behind it (`sync_failing`) run only when On.
+    pub anomaly_rules: bool,
 }
 
 /// Every rule's findings this minute.
@@ -74,7 +76,9 @@ pub fn check(input: &Input) -> Vec<Found> {
     idle_lanes(input, &mut found);
     repeat_error(input, &mut found);
     no_progress(input, &mut found);
-    sync_failing(input, &mut found);
+    if input.anomaly_rules {
+        sync_failing(input, &mut found);
+    }
     found
 }
 
