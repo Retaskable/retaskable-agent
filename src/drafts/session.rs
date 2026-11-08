@@ -9,7 +9,7 @@ use super::model::{DrafterResult, DrafterStatus, Question, drafter_result_schema
 use super::prompt::build_prompt;
 use crate::config::{Engine, ProjectBudget};
 use crate::decisions::{Decision, decisions_text};
-use crate::engines::engine::{EngineId, LocalTarget};
+use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 use crate::implementer::session::new_session_id;
 use crate::tiers::mid_tier;
@@ -32,6 +32,8 @@ pub struct Session<'a> {
     /// The draft's worktree.
     pub cwd: &'a Path,
     pub local: Option<LocalTarget>,
+    /// On Cursor, the `top` model from `engines::place`.
+    pub cursor: Option<CursorOptions>,
 }
 
 pub enum Start<'a> {
@@ -79,7 +81,11 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
         start: session_start,
         readonly: false,
         shell: true,
-        cursor: None,
+        cursor: if s.engine == Engine::Cursor {
+            s.cursor.clone()
+        } else {
+            None
+        },
         local: if s.engine == Engine::Local {
             s.local.clone()
         } else {
@@ -94,8 +100,13 @@ pub fn parse_result(r: SessionResult, budget_usd: f64) -> Result<DrafterResult> 
     if !r.ok {
         return Err(anyhow!(describe_failure(&r, budget_usd)));
     }
+    let session_id = r.session_id;
     r.structured
-        .and_then(|v: Value| serde_json::from_value(v).ok())
+        .and_then(|v: Value| serde_json::from_value::<DrafterResult>(v).ok())
+        .map(|d| DrafterResult {
+            session_id: Some(session_id),
+            ..d
+        })
         .ok_or_else(|| anyhow!("the drafter finished but didn't answer with the result Retaskable asked for"))
 }
 
@@ -185,6 +196,7 @@ mod tests {
             budget,
             cwd,
             local: None,
+            cursor: None,
         }
     }
 

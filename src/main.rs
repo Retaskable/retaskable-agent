@@ -360,6 +360,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        cursor_models: config::cursor_models(cfg, env),
         checks: latest_checks.clone(),
         bugs: bugs.clone(),
         bug_version: bug_version.clone(),
@@ -404,6 +405,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::engine_choice(cfg, env),
                 env.clone(),
                 cfg.machine.models,
+                config::cursor_models(cfg, env),
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
         trial: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
@@ -413,6 +415,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     config::engine_choice(cfg, env),
                     env.clone(),
                     cfg.machine.models,
+                    config::cursor_models(cfg, env),
                 ) as Arc<dyn orchestrator::trial_host::TrialHost>,
                 latest_checks.clone(),
             )

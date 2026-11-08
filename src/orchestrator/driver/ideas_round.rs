@@ -17,15 +17,15 @@ use crate::backlog::asks::Audience;
 use crate::backlog::runs::LockTake;
 use crate::config::Engine;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
-    EngineId, EphemeralSessionConfig, Role, SessionResult, SessionSpec, engine_for, engine_of, run_session,
+    EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
+    run_session,
 };
 use crate::ideas::{
     IDEAS_LOCK, IDEAS_MAX_WAITS_DEFAULT, Ideas, QUEUE, Writer, gather_live, live_titles, profiles_for,
     queue_from_store, round_context, run_round,
 };
-use crate::orchestrator::session::{exists, quiet_timeout};
+use crate::orchestrator::session::quiet_timeout;
 
 const TEMPLATE: &str = include_str!("../../../prompts/ideas.md");
 
@@ -40,6 +40,10 @@ pub(super) struct Job {
     /// `ideasQueue` and `ideasMaxWaits` from the project's config, when it sets them.
     pub queue: Option<usize>,
     pub max_waits: Option<u32>,
+    /// The `engine-placement` flag: Off, only Claude runs the round and any other engine skips it.
+    pub placement: bool,
+    /// Where the writer runs, set by [`run`]; `None` is Claude with no Cursor options.
+    pub placed: Option<Placement>,
 }
 
 impl std::ops::Deref for Job {
@@ -81,20 +85,22 @@ fn failed(error: String) -> Outcome {
     }
 }
 
-/// [`run_with`] on the real engine. Only Claude runs a writer session yet.
-pub(super) async fn run(job: Job, ask: Ask) -> Outcome {
+/// [`run_with`] on the writer's chosen engine (engines/03 sections 3.1 and 3.4: Cursor runs on the `scout` model).
+pub(super) async fn run(mut job: Job, ask: Ask) -> Outcome {
     let engine = engine_for(&job.engine_choice, job.project.engines.as_ref(), Role::Writer, None);
-    if engine != Engine::Claude {
-        return Outcome::Skipped("only Claude runs an ideas session yet".into());
+    if engine != Engine::Claude && !job.placement {
+        return Outcome::Skipped(format!("{engine} runs no ideas session yet"));
     }
-    let bin = match resolve_claude_on_path(&job.env) {
-        Ok(bin) if exists(&bin, &job.env) => bin,
-        Ok(_) => return Outcome::Skipped("the claude binary wasn't found".into()),
-        Err(e) => return Outcome::Skipped(format!("{e:#}")),
+    let placed = match place(engine, Role::Writer, &job.env, &job.cursor_models) {
+        Ok(placed) => placed,
+        Err(why) => return Outcome::Skipped(why),
     };
+    let bin = placed.bin.clone();
+    let program = placed.engine;
+    job.placed = Some(placed);
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
     run_with(job, ask, |spec| async move {
-        let engine = engine_of(Some(EngineId::Claude))?;
+        let engine = engine_of(Some(program))?;
         run_session(engine.as_ref(), &bin, &spec, "ideas", None, quiet).await
     })
     .await
@@ -230,8 +236,8 @@ where
             budget_usd: job.project.budget.scout_usd,
             model: "sonnet".to_string(),
             local: None,
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            engine: Some(job.placed.as_ref().map_or(EngineId::Claude, |p| p.engine)),
+            cursor: job.placed.as_ref().and_then(|p| p.cursor.clone()),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },
@@ -289,15 +295,17 @@ impl ProjectLoop {
             project: self.project.clone(),
             env: links.env.clone(),
             engine_choice: links.engine_choice.clone(),
+            cursor_models: links.cursor_models.clone(),
             machine: links.machine.clone(),
             backlog_url: links.backlog_url.clone(),
             keychain: links.keychain.clone(),
             locks: (self.mode == OrchestratorMode::Runs).then(|| self.run_loop.runs().locks()),
         };
         let items: Vec<_> = self.items.values().cloned().collect();
+        let placement = self.flags.on("engine-placement").await;
         let running = self.ideas_round_running.clone();
         tokio::spawn(async move {
-            command_round(base, &items, fresh).await;
+            command_round(base, &items, fresh, placement).await;
             running.store(false, Ordering::SeqCst);
         });
     }
@@ -305,7 +313,7 @@ impl ProjectLoop {
 
 /// Reads what the prompt shows (what went live, the store's audiences) and runs the round; a read that fails
 /// leaves that part out, and the round's outcome is logged by [`run_with`].
-async fn command_round(base: PlaytestJob, items: &[Item], fresh: bool) {
+async fn command_round(base: PlaytestJob, items: &[Item], fresh: bool, placement: bool) {
     let (Some(repo), Ok(Some(token))) = (base.repo, base.keychain.get(&base.backlog_url)) else {
         tracing::info!("{}: ideas round skipped: not linked to the shared backlog", base.id);
         return;
@@ -330,6 +338,8 @@ async fn command_round(base: PlaytestJob, items: &[Item], fresh: bool) {
         audiences,
         queue: None,
         max_waits: None,
+        placement,
+        placed: None,
     };
     run(
         job,

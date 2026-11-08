@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, EphemeralSessionConfig, Role, engine_for, engine_of, run_session};
@@ -34,6 +34,7 @@ pub(super) struct Job {
     pub project: ProjectConfig,
     pub env: Env,
     pub engine_choice: EngineChoiceConfig,
+    pub cursor_models: CursorModels,
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
@@ -348,6 +349,7 @@ mod tests {
             project,
             env,
             engine_choice: EngineChoiceConfig::default(),
+            cursor_models: CursorModels::default(),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
