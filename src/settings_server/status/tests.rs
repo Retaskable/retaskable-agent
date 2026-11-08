@@ -337,3 +337,30 @@ fn the_fix_main_note_is_reported_with_the_computers_state() {
         Some("Fixing main found nothing to fix at abc1234. It tries again when main moves.")
     );
 }
+
+fn vet_of(counts: &[(&str, usize)]) -> Option<String> {
+    let p = ProjectLive {
+        vet: Some(counts.iter().map(|(k, n)| (k.to_string(), *n)).collect()),
+        ..Default::default()
+    };
+    status_with(&live(OrchestratorMode::Runs, &[("a", p)]))
+        .orchestrator
+        .projects[0]
+        .vet
+        .clone()
+}
+
+#[test]
+fn the_vet_line_names_each_verdict_leaves_out_zeros_and_is_absent_before_a_run() {
+    assert_eq!(
+        vet_of(&[("promising", 2), ("duplicate", 1), ("not_promising", 9)]).as_deref(),
+        Some("12 suggestions: 2 promising, 1 duplicate, 9 not promising")
+    );
+    assert_eq!(
+        vet_of(&[("promising", 0), ("duplicate", 2), ("spam", 3)]).as_deref(),
+        Some("5 suggestions: 2 duplicates, 3 spam")
+    );
+    assert_eq!(vet_of(&[("spam", 1)]).as_deref(), Some("1 suggestion: 1 spam"));
+    let none = status_with(&live(OrchestratorMode::Runs, &[("a", ProjectLive::default())]));
+    assert_eq!(none.orchestrator.projects[0].vet, None);
+}

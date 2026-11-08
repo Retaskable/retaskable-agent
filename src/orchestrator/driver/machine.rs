@@ -12,7 +12,7 @@ use tokio::time::MissedTickBehavior;
 
 use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunRequest, RunStarter, SessionStarter, Step, deprecations,
-    ideas_daily, playtest_round,
+    ideas_daily, playtest_round, vet_daily,
 };
 use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
@@ -386,6 +386,53 @@ impl Machine {
         for (running, daily) in jobs {
             tokio::spawn(async move {
                 deprecations::run(daily).await;
+                running.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+
+    /// Starts the daily vet pass for every live (or `runs`-mode) project that ticked this minute and isn't paused,
+    /// unless one is still running (`vet_daily::run` checks the flag, the setting, the link and `jobs_due`).
+    pub async fn vet_rounds(&mut self, steps: &[Step]) {
+        for lp in &mut self.projects {
+            let record = {
+                let mut st = lp.vet_daily.lock().unwrap();
+                if !std::mem::take(&mut st.dirty) {
+                    continue;
+                }
+                st.record()
+            };
+            if let Some(record) = record {
+                lp.store.set_vet(&record);
+                if let Err(e) = lp.store.save() {
+                    tracing::warn!("{}: saving the vet record failed: {e:#}", lp.id);
+                }
+                lp.live.set_vet(&lp.id, Some(record.counts));
+            }
+        }
+        let paused = self.paused();
+        let jobs: Vec<_> = (self.projects.iter().enumerate())
+            .filter(|(i, lp)| {
+                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
+                    && !paused[*i]
+                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
+            })
+            .map(|(_, lp)| lp)
+            .filter(|lp| !lp.vet_running.swap(true, Ordering::SeqCst))
+            .map(|lp| {
+                (
+                    lp.vet_running.clone(),
+                    vet_daily::Daily {
+                        base: self.round_job(lp),
+                        flags: lp.flags.clone(),
+                        state: lp.vet_daily.clone(),
+                    },
+                )
+            })
+            .collect();
+        for (running, daily) in jobs {
+            tokio::spawn(async move {
+                vet_daily::run(daily).await;
                 running.store(false, Ordering::SeqCst);
             });
         }
@@ -874,6 +921,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             machine.playtest_rounds(&steps).await;
             machine.ideas_rounds(&steps).await;
             machine.deprecation_checks(&steps).await;
+            machine.vet_rounds(&steps).await;
         } else {
             machine.poll().await;
         }
