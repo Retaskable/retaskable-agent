@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_that_fails_on_main_too_does_not_block() {
+    fn checks_summary_notes_a_preexisting_failure_as_failing_on_main() {
         let mut test = CheckRun {
             name: "test".to_string(),
             command: "exit 1".to_string(),
@@ -398,25 +398,11 @@ mod tests {
             changed_files: vec![],
             backlog_changed: false,
         };
+        assert_eq!(checks_summary(std::slice::from_ref(&test)), "✗ test (fails on main)");
         assert_eq!(result(&test).outcome(), CheckOutcome::Passed);
         test.preexisting = false;
+        assert_eq!(checks_summary(std::slice::from_ref(&test)), "✗ test");
         assert_eq!(result(&test).outcome(), CheckOutcome::Failed);
-    }
-
-    #[test]
-    fn checks_summary_notes_a_preexisting_failure_as_failing_on_main() {
-        let mut test = CheckRun {
-            name: "test".to_string(),
-            command: "exit 1".to_string(),
-            blocking: true,
-            exit_code: 1,
-            timed_out: false,
-            output_tail: String::new(),
-            preexisting: true,
-        };
-        assert_eq!(checks_summary(std::slice::from_ref(&test)), "✗ test (fails on main)");
-        test.preexisting = false;
-        assert_eq!(checks_summary(&[test]), "✗ test");
     }
 
     #[test]
