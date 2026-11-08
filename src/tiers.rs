@@ -103,6 +103,11 @@ pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
     let _ = FLAG.set(flags);
 }
 
+/// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.
+pub fn model_caps_on() -> bool {
+    FLAG.get().is_some_and(|f| f.last("model-concurrency-caps"))
+}
+
 /// Whether sessions run with no dollar cap right now: the flag is On and the computer is on a subscription.
 pub fn machine_on_subscription(now_epoch: i64) -> bool {
     FLAG.get().is_some_and(|f| f.last("subscription-zero-budget")) && signal_on(now_epoch)

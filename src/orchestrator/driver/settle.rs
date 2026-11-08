@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::resume::takeover_in;
 use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
 use crate::engines::EngineId;
 use crate::engines::signed_out_text;
@@ -506,7 +507,41 @@ impl ProjectLoop {
         }
         // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
         let cursor_flag = self.flags.on("cursor-limit-retry").await;
-        if let Some(record) = self.records.get_mut(&item) {
+        // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
+        let carry_on = match self.records.get(&item) {
+            Some(record)
+                if cursor_flag
+                    && matches!(result, SessionResult::Limited { .. })
+                    && record.impl_session_engine != EngineId::Pi =>
+            {
+                takeover_in(&self.project, pool, shared, record.impl_session_engine)
+                    .map(|to| (record.impl_session_engine, to))
+            }
+            _ => None,
+        };
+        if let Some((from, to)) = carry_on
+            && let Some(record) = self.records.get_mut(&item)
+        {
+            record.cursor_limit_hits = 0;
+            self.silenced.remove(&item);
+            self.to_resume.push(item.clone());
+            result = SessionResult::Silenced(String::new(), "killed_for_silence");
+            self.events.add_in(
+                &self.id,
+                Event::ItemState(event::ItemState {
+                    item: Some(item.clone()),
+                    from: Some("implementing".into()),
+                    to: Some("implementing".into()),
+                    note: Some(format!(
+                        "Hit {}'s usage limit; carrying on now with {}",
+                        engine_name(from),
+                        engine_name(to)
+                    )),
+                    lane: Some(outcome.lane),
+                    ..Default::default()
+                }),
+            );
+        } else if let Some(record) = self.records.get_mut(&item) {
             let cursor_hit = matches!(result, SessionResult::Limited { .. })
                 && cursor_flag
                 && record.impl_session_engine == EngineId::Cursor;
@@ -658,6 +693,16 @@ impl ProjectLoop {
 }
 
 /// The states [`SessionStarter::advance`] is asked to step: the TS step table, less `implementing`.
+/// An engine's name as a history line gives it: "Claude", "Cursor".
+fn engine_name(engine: EngineId) -> String {
+    let name = engine.to_string();
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or(name)
+}
+
 fn has_own_step(state: ItemState) -> bool {
     has_step(state) && state != ItemState::Implementing
 }
