@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use super::driver::OrchestratorMode;
 
+pub mod sessions;
+
 /// A lane a project's loop holds, and what holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldLane {
@@ -55,15 +57,23 @@ pub struct LiveState {
 
 /// Shared between the loops (writers) and the status handler (reader).
 #[derive(Debug, Clone, Default)]
-pub struct LiveHandle(Arc<Mutex<LiveState>>);
+pub struct LiveHandle(Arc<Mutex<LiveState>>, sessions::Sessions);
 
 impl LiveHandle {
     pub fn new(mode: OrchestratorMode) -> Self {
-        Self(Arc::new(Mutex::new(LiveState {
-            mode,
-            run_kinds: Vec::new(),
-            projects: BTreeMap::new(),
-        })))
+        Self(
+            Arc::new(Mutex::new(LiveState {
+                mode,
+                run_kinds: Vec::new(),
+                projects: BTreeMap::new(),
+            })),
+            sessions::Sessions::default(),
+        )
+    }
+
+    /// The sessions running now; the loop registers them and the status handler reads them.
+    pub fn sessions(&self) -> &sessions::Sessions {
+        &self.1
     }
 
     /// Says which kinds of run `runs` mode can take.
