@@ -189,6 +189,7 @@ impl Saver<'_> {
     /// Sets the project's `engines.allow`, keeping the rest of its `engines`.
     pub(crate) fn save_cursor_allow(&self, update: &CursorAllowUpdate) -> Result<(), SaveError> {
         let (index, entries) = self.validate_cursor_allow(update)?;
+        let mut found = false;
         config::save_machine_settings(self.dir, |obj| {
             let Some(project) = obj
                 .get_mut("projects")
@@ -198,12 +199,18 @@ impl Saver<'_> {
             else {
                 return;
             };
+            found = true;
             let engines = project.entry("engines").or_insert_with(|| json!({}));
             if !engines.is_object() {
                 *engines = json!({});
             }
             engines["allow"] = json!(entries);
         })?;
+        if !found {
+            return Err(SaveError::Invalid(
+                "That project isn't in a projects list this agent can save to.".to_string(),
+            ));
+        }
         Ok(())
     }
 
