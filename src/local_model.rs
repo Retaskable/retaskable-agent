@@ -25,10 +25,14 @@ pub async fn check_up(http: &reqwest::Client, base_url: &str) -> bool {
 
 /// The computer's local model, shared by everything that may one day run a session on it: the config, whether
 /// the last check found it up, and its one slot (section 7.2's "One local session at a time"). Clones share all of it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LocalModel {
     config: Arc<LocalModelConfig>,
     up: Arc<AtomicBool>,
+    /// Whether a check has answered yet: `down()` stays false until one has.
+    checked: Arc<AtomicBool>,
+    /// Bumped when `down()` changes, so the connector can send a new snapshot.
+    changes: Arc<tokio::sync::watch::Sender<u64>>,
     slot: Arc<Semaphore>,
 }
 
@@ -47,6 +51,8 @@ impl LocalModel {
         Self {
             config: Arc::new(config),
             up: Arc::new(AtomicBool::new(false)),
+            checked: Arc::new(AtomicBool::new(false)),
+            changes: Arc::new(tokio::sync::watch::channel(0).0),
             slot: Arc::new(Semaphore::new(1)),
         }
     }
@@ -77,6 +83,20 @@ impl LocalModel {
         self.config.enabled && self.up.load(Ordering::SeqCst)
     }
 
+    /// True while it's turned on, a check has answered and the last one failed, and the `local-tier-ladder` flag
+    /// is On: what the snapshot reports as `usage.localDown`.
+    pub fn down(&self) -> bool {
+        self.config.enabled
+            && self.checked.load(Ordering::SeqCst)
+            && !self.up.load(Ordering::SeqCst)
+            && crate::tiers::local_ladder_on()
+    }
+
+    /// Changes whenever `down()` does (as `watch` sees it), for a new snapshot.
+    pub fn subscribe_down(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
     /// Where a local session runs.
     pub fn target(&self) -> LocalTarget {
         LocalTarget {
@@ -88,6 +108,18 @@ impl LocalModel {
     /// The slot if it's free right now, else `None` at once (scouts and chores, which never wait for it).
     pub fn try_take(&self) -> Option<LocalSlot> {
         self.slot.clone().try_acquire_owned().ok().map(LocalSlot)
+    }
+
+    #[cfg(test)]
+    pub fn mark_up_for_test(&self) {
+        self.up.store(true, Ordering::SeqCst);
+        self.checked.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub fn mark_down_for_test(&self) {
+        self.up.store(false, Ordering::SeqCst);
+        self.checked.store(true, Ordering::SeqCst);
     }
 
     /// Waits for the slot (the fallback, which runs on the local model instead of waiting for the limit).
@@ -143,7 +175,17 @@ impl LocalModel {
     /// One check, written to the up flag. Returns whether it changed.
     async fn check(&self, http: &reqwest::Client) -> bool {
         let up = check_up(http, &self.config.base_url).await;
+        self.checked.store(true, Ordering::SeqCst);
         self.up.swap(up, Ordering::SeqCst) != up
+    }
+
+    /// Signals `subscribe_down` if `down()` is no longer `was`; gives the current value.
+    fn signal_down(&self, was: bool) -> bool {
+        let now = self.down();
+        if now != was {
+            self.changes.send_modify(|n| *n += 1);
+        }
+        now
     }
 }
 
@@ -155,8 +197,10 @@ pub async fn watch(local: LocalModel) -> ! {
         .build()
         .expect("building the local model HTTP client");
     let mut first = true;
+    let mut was_down = false;
     loop {
         let changed = local.check(&http).await;
+        was_down = local.signal_down(was_down);
         if changed || first {
             if local.up.load(Ordering::SeqCst) {
                 tracing::info!("Local model: up at {}", local.config.base_url);
@@ -166,6 +210,18 @@ pub async fn watch(local: LocalModel) -> ! {
             first = false;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+impl Default for LocalModel {
+    fn default() -> Self {
+        Self::off()
+    }
+}
+
+impl PartialEq for LocalModel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.up, &other.up)
     }
 }
 
@@ -223,6 +279,27 @@ mod tests {
             base_url,
             model: "m".into(),
         })
+    }
+
+    #[test]
+    fn down_signals_only_when_its_value_changes() {
+        crate::tiers::set_local_ladder_for_test(true);
+        let local = LocalModel::new(LocalModelConfig {
+            enabled: true,
+            base_url: "http://localhost:1".into(),
+            model: "m".into(),
+        });
+        let mut rx = local.subscribe_down();
+        assert!(!local.down(), "not before the first check answers");
+        local.mark_down_for_test();
+        assert!(local.signal_down(false));
+        assert!(rx.has_changed().unwrap());
+        rx.mark_unchanged();
+        assert!(local.signal_down(true));
+        assert!(!rx.has_changed().unwrap(), "unchanged");
+        local.mark_up_for_test();
+        assert!(!local.signal_down(true));
+        assert!(rx.has_changed().unwrap());
     }
 
     #[tokio::test]

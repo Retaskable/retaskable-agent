@@ -407,6 +407,8 @@ async fn session(
     paused.mark_unchanged();
     let mut restart = view.restart.subscribe();
     restart.mark_unchanged();
+    let mut local_down = view.local.subscribe_down();
+    local_down.mark_unchanged();
     let mut settings_saved = view.settings.subscribe();
     settings_saved.mark_unchanged();
     let mut trial_saved = crate::store::subscribe_trial_changes();
@@ -435,6 +437,7 @@ async fn session(
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = trial_saved.changed() => {
                 let now = view.trial_json(project, &cloud.dir);
