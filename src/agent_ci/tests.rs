@@ -357,8 +357,10 @@ mod stubbed {
                 .count(),
             0
         );
-        // Finished: the same key doesn't run again.
-        assert!(go(&mut r, vec![key(7, "h7")]).await.is_empty());
+        // A key no longer listed (this one isn't) is forgotten at the next poll.
+        let env = Env::from_map(Default::default());
+        r.ci.poll(&r.cfg, &env).await;
+        assert!(r.ci.seen.is_empty());
     }
 
     #[tokio::test]
@@ -439,5 +441,23 @@ mod stubbed {
             "{}",
             calls(&r)
         );
+    }
+
+    #[tokio::test]
+    async fn a_shrink_while_a_check_runs_does_not_leave_extra_permits() {
+        let mut r = pr_rig("sleep 0.4");
+        let env = Env::from_map(Default::default());
+        let tasks = go(&mut r, vec![key(7, "h7")]).await;
+        // Docker "down" for one poll while the check holds the only permit.
+        r.cfg.machine.ci_slots = 0;
+        r.ci.poll(&r.cfg, &env).await;
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(r.ci.slot().available_permits(), 0);
+        r.cfg.machine.ci_slots = 1;
+        r.ci.poll(&r.cfg, &env).await;
+        assert_eq!(r.ci.slot().available_permits(), 1);
+        assert_eq!(r.live.snapshot().ci.unwrap().running, 0);
     }
 }

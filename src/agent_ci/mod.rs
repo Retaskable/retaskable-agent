@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -88,6 +89,8 @@ pub struct CiLoop {
     in_image: bool,
     slot: Arc<Semaphore>,
     permits: u32,
+    /// Permits a shrink couldn't take back because checks held them: each is forgotten as it returns.
+    owed: Arc<AtomicU32>,
     /// The reason last written to `agent.log` for each project, so a standing reason is said once.
     logged: HashMap<String, String>,
     /// Checks started (running or finished) by this loop, so none runs twice.
@@ -102,6 +105,7 @@ impl CiLoop {
             in_image,
             slot: Arc::new(Semaphore::new(0)),
             permits: 0,
+            owed: Arc::new(AtomicU32::new(0)),
             logged: HashMap::new(),
             seen: HashSet::new(),
         }
@@ -114,9 +118,17 @@ impl CiLoop {
 
     fn resize(&mut self, want: u32) {
         if want > self.permits {
-            self.slot.add_permits((want - self.permits) as usize);
+            let mut add = want - self.permits;
+            // A shrink still waiting on held permits is undone first.
+            let taken = (self.owed)
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |o| Some(o - o.min(add)))
+                .map_or(0, |before| before.min(add));
+            add -= taken;
+            self.slot.add_permits(add as usize);
         } else {
-            self.slot.forget_permits((self.permits - want) as usize);
+            let diff = self.permits - want;
+            let forgotten = self.slot.forget_permits(diff as usize) as u32;
+            self.owed.fetch_add(diff - forgotten, Ordering::SeqCst);
         }
         self.permits = want;
     }
@@ -152,10 +164,17 @@ impl CiLoop {
                 }
             }
         }
-        let running = self.permits - self.slot.available_permits() as u32;
+        // Forget keys no longer listed, unless still running.
+        let running = self.live.snapshot().ci.map(|c| c.checks).unwrap_or_default();
+        self.seen.retain(|(id, k)| {
+            keys.get(id).is_some_and(|l| l.contains(k))
+                || running
+                    .iter()
+                    .any(|r| r.project == *id && r.pr == k.pr && k.head.starts_with(&r.sha))
+        });
         self.live.update_ci(|ci| {
             ci.slots = slots;
-            ci.running = running;
+            ci.running = ci.checks.len() as u32;
             ci.docker = docker;
             ci.docker_reason = reason;
             ci.reasons = reasons;
@@ -190,6 +209,7 @@ impl CiLoop {
                     return tasks;
                 };
                 self.seen.insert((id.clone(), key.clone()));
+                let owed = self.owed.clone();
                 let job = check::Job {
                     programs: self.programs.clone(),
                     data_dir: data_dir.to_path_buf(),
@@ -202,7 +222,11 @@ impl CiLoop {
                 };
                 tasks.push(tokio::spawn(async move {
                     check::run(job).await;
-                    drop(permit);
+                    // A shrink while this ran: this permit is one it owed, so it doesn't return.
+                    let owing = owed.try_update(Ordering::SeqCst, Ordering::SeqCst, |o| o.checked_sub(1));
+                    if owing.is_ok() {
+                        permit.forget();
+                    }
                 }));
             }
         }
