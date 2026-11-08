@@ -52,6 +52,8 @@ pub struct AgentView {
     pub restart: Arc<crate::restart::RestartState>,
     /// The computer's settings for `hello`, and the signal that sends it again after a save.
     pub settings: HelloSettings,
+    /// The computer's local model, for the snapshot's `usage.localDown`.
+    pub local: crate::local_model::LocalModel,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -361,6 +363,7 @@ impl AgentView {
             work: Default::default(),
             restart: Default::default(),
             settings: Default::default(),
+            local: Default::default(),
         }
     }
 
@@ -425,6 +428,9 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if self.local.down() {
+            state["usage"]["localDown"] = json!(true);
+        }
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
         }
@@ -527,7 +533,34 @@ mod tests {
             work: Default::default(),
             restart: Default::default(),
             settings: Default::default(),
+            local: Default::default(),
         }
+    }
+
+    #[test]
+    fn snapshot_says_local_down_only_while_the_model_is_on_and_down_and_the_flag_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_down = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("localDown").cloned();
+        let on = |up: bool, ladder: bool| {
+            let local = crate::local_model::LocalModel::new(crate::config::LocalModelConfig {
+                enabled: true,
+                base_url: "http://localhost:1".into(),
+                model: "m".into(),
+            });
+            crate::tiers::set_local_ladder_for_test(ladder);
+            if up {
+                local.mark_up_for_test();
+            } else {
+                local.mark_down_for_test();
+            }
+            let mut v = view(vec![]);
+            v.local = local;
+            v
+        };
+        assert_eq!(local_down(&on(false, true)), Some(json!(true)));
+        assert_eq!(local_down(&on(true, true)), None, "up");
+        assert_eq!(local_down(&on(false, false)), None, "flag Off");
+        assert_eq!(local_down(&view(vec![])), None, "model off");
     }
 
     #[test]

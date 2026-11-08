@@ -315,7 +315,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env, dir, default_port));
+    let view = Arc::new(agent_view(
+        cfg,
+        tag_list.clone(),
+        version,
+        env,
+        dir,
+        default_port,
+        &local,
+    ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);

@@ -111,6 +111,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         work: Default::default(),
         restart: Default::default(),
         settings: Default::default(),
+        local: Default::default(),
     })
 }
 

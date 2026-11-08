@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use retaskable_agent::env::Env;
-use retaskable_agent::{config, hello_settings, lane_pool, link, view};
+use retaskable_agent::{config, hello_settings, lane_pool, link, local_model, view};
 
 /// What the cloud sees of this computer.
 pub fn agent_view(
@@ -13,6 +13,7 @@ pub fn agent_view(
     env: &Env,
     dir: &Path,
     default_port: u16,
+    local: &local_model::LocalModel,
 ) -> view::AgentView {
     view::AgentView {
         machine: link::machine_name(env),
@@ -21,6 +22,7 @@ pub fn agent_view(
         version: version.to_string(),
         lanes: config::lanes(cfg, env),
         chore_lane: cfg.machine.chore_lane,
+        local: local.clone(),
         lane_sizes: lane_pool::LaneSizes::default(),
         paused: view::PauseState::default(),
         item_commands: Default::default(),
