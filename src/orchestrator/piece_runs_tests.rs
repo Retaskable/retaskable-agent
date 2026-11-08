@@ -544,3 +544,22 @@ async fn a_limit_ends_limited_naming_the_pieces_engine() {
         end.outcome
     );
 }
+
+#[tokio::test]
+async fn a_chore_that_asks_questions_ends_failed_and_its_change_is_closed() {
+    let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
+    let mut r = rig(&[COMMIT], &answer("needs_clarification", q));
+    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
+    std::fs::write(r.root.join("gh_list"), r#"[{"number":7,"url":"https://x/pull/7"}]"#).unwrap();
+    let mut p = piece();
+    p["chore"] = json!({ "kind": "tidy" });
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    let RunOutcome::Failed(why) = &end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("Which?"), "{why}");
+    let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap_or_default();
+    assert!(log.contains("pr close 7 --comment"), "{log}");
+}
