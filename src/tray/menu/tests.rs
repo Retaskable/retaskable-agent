@@ -1,4 +1,5 @@
 use super::*;
+use crate::tray::state::tests::input;
 use crate::tray::state::{BacklogWait, Exit};
 
 fn cloud(name: &str, link: LinkState) -> CloudInput {
@@ -18,22 +19,6 @@ fn cloud(name: &str, link: LinkState) -> CloudInput {
 fn waiting() -> LinkState {
     LinkState::Waiting {
         code: Some("WXYZ-2345".into()),
-    }
-}
-
-fn input(clouds: Vec<CloudInput>) -> TrayInput {
-    TrayInput {
-        clouds,
-        all_paused: false,
-        sessions: 0,
-        has_project: true,
-        exit: Exit::None,
-        backlog: None,
-        is_release: false,
-        start_at_login: false,
-        windows: false,
-        machine: "pc".into(),
-        tags: vec![],
     }
 }
 
