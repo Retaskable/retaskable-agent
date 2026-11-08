@@ -8,6 +8,7 @@ use crate::config::ProjectConfig;
 
 #[cfg(test)]
 mod tests;
+pub mod run;
 
 /// An audit under this score fails.
 const FAIL_BELOW: f64 = 0.9;
