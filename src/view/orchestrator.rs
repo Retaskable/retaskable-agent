@@ -1,9 +1,9 @@
 //! The snapshot's `orchestrator` block (cloud.md section 5.2): what the project's loop is doing.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::{AgentView, NO_WORK_YET};
 use crate::telemetry::debounce::OpenAnomaly;
-use crate::telemetry::events::{MAX_TEXT, iso_utc_millis, scrub};
+use crate::telemetry::events::{iso_utc_millis, scrub, MAX_TEXT};
 
 /// The most open anomalies one snapshot carries; the rest are counted in `anomaliesMore`.
 const MAX_ANOMALIES: usize = 20;
@@ -99,6 +99,44 @@ impl AgentView {
             })
             .collect();
         Some((Value::Array(sent), more))
+    }
+
+    /// With `snapshot-reporting` On, the items the project's loop holds (`items`) and, when one is a chore, the Chores
+    /// milestone; `None` when the flag is Off.
+    pub(crate) fn held_items_block(&self, project: &str) -> Option<(Value, Value)> {
+        if !self.settings.snapshot_reporting_on() {
+            return None;
+        }
+        let state = self.live.snapshot();
+        let held: Vec<_> = state
+            .projects
+            .get(project)
+            .into_iter()
+            .flat_map(|p| p.items.iter())
+            .collect();
+        let items = held
+            .iter()
+            .map(|i| {
+                let mut out =
+                    json!({ "id": i.id, "title": i.title, "state": i.state, "attempt": i.attempt, "chore": i.chore });
+                if let Some(lane) = i.lane {
+                    out["lane"] = json!(lane);
+                }
+                if let Some(branch) = &i.branch {
+                    out["branch"] = json!(branch);
+                }
+                if let Some(pr) = &i.pr_url {
+                    out["prUrl"] = json!(pr);
+                }
+                out
+            })
+            .collect();
+        let milestones = if held.iter().any(|i| i.chore) {
+            json!([{ "id": "chores", "title": "Chores" }])
+        } else {
+            json!([])
+        };
+        Some((milestones, Value::Array(items)))
     }
 
     /// The project's loop as of its last pass, when the flag is On and the loop runs.

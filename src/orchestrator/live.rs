@@ -20,6 +20,20 @@ pub struct HeldLane {
     pub title: Option<String>,
 }
 
+/// An item this computer holds a lease on, as the snapshot's `items` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldItem {
+    pub id: String,
+    pub title: String,
+    /// The run's state, snake case (`implementing`, `awaiting_merge`, ...).
+    pub state: String,
+    pub lane: Option<u32>,
+    pub branch: Option<String>,
+    pub pr_url: Option<String>,
+    pub attempt: u32,
+    pub chore: bool,
+}
+
 /// The backlog could not be reached (or answered something unreadable) on the last pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreFailure {
@@ -55,6 +69,8 @@ pub struct ProjectLive {
     pub limit_until: Option<std::time::Instant>,
     /// The watchdog's open anomalies as of its last minute, oldest first.
     pub anomalies: Vec<crate::telemetry::debounce::OpenAnomaly>,
+    /// The items the loop holds a lease on, as of its last pass.
+    pub items: Vec<HeldItem>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -71,13 +87,13 @@ pub struct LiveState {
 }
 
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
-type Reported = (u32, BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>)>);
+type Reported = (u32, BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldItem>)>);
 
 fn reported(state: &LiveState) -> Reported {
     let projects = state
         .projects
         .iter()
-        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone(), p.anomalies.clone())))
+        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone(), p.anomalies.clone(), p.items.clone())))
         .collect();
     (state.concurrency, projects)
 }
@@ -161,6 +177,11 @@ impl LiveHandle {
         });
     }
 
+    /// The items the project's loop holds a lease on, as of its last pass.
+    pub fn set_items(&self, project: &str, items: Vec<HeldItem>) {
+        self.edit(|s| s.projects.entry(project.to_string()).or_default().items = items);
+    }
+
     /// The watchdog's open anomalies for the project, as of this minute's check.
     pub fn set_anomalies(&self, project: &str, anomalies: Vec<OpenAnomaly>) {
         self.edit(|s| s.projects.entry(project.to_string()).or_default().anomalies = anomalies);
@@ -200,6 +221,7 @@ impl LiveHandle {
                 limit_resets_at: entry.limit_resets_at.take(),
                 limit_until: entry.limit_until.take(),
                 anomalies: std::mem::take(&mut entry.anomalies),
+                items: std::mem::take(&mut entry.items),
             };
         });
     }
