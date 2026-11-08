@@ -164,13 +164,17 @@ impl CiLoop {
                 }
             }
         }
-        // Forget keys no longer listed, unless still running.
+        // Forget keys no longer listed, unless still running. Only for a project whose list was read this poll:
+        // otherwise a finished key would run again when the list comes back.
         let running = self.live.snapshot().ci.map(|c| c.checks).unwrap_or_default();
-        self.seen.retain(|(id, k)| {
-            keys.get(id).is_some_and(|l| l.contains(k))
-                || running
-                    .iter()
-                    .any(|r| r.project == *id && r.pr == k.pr && k.head.starts_with(&r.sha))
+        self.seen.retain(|(id, k)| match keys.get(id) {
+            Some(l) if docker == "ok" => {
+                l.contains(k)
+                    || running
+                        .iter()
+                        .any(|r| r.project == *id && r.pr == k.pr && k.head.starts_with(&r.sha))
+            }
+            _ => true,
         });
         self.live.update_ci(|ci| {
             ci.slots = slots;

@@ -460,4 +460,33 @@ mod stubbed {
         assert_eq!(r.ci.slot().available_permits(), 1);
         assert_eq!(r.live.snapshot().ci.unwrap().running, 0);
     }
+
+    #[tokio::test]
+    async fn a_finished_check_does_not_rerun_after_a_poll_that_could_not_read_the_list() {
+        let mut r = pr_rig("exit 0");
+        let env = Env::from_map(Default::default());
+        let data = r._dir.path().join("data");
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        for t in r.ci.start(&r.cfg, &env, &data, keys).await {
+            t.await.unwrap();
+        }
+        let count = |r: &Rig| {
+            (
+                calls(r).matches("state=pending").count(),
+                calls(r).matches("docker run").count(),
+            )
+        };
+        assert_eq!(count(&r), (1, 1));
+        // Still listed: not run again.
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
+        // A poll that can't read the list (ciSlots 0), then a healthy one with the same key listed.
+        r.cfg.machine.ci_slots = 0;
+        r.ci.poll(&r.cfg, &env).await;
+        r.cfg.machine.ci_slots = 1;
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        assert_eq!(keys["p"].len(), 1);
+        assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
+        assert_eq!(count(&r), (1, 1));
+    }
 }
