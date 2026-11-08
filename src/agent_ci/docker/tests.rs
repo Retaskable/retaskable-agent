@@ -53,13 +53,25 @@ mod stub {
         assert!(s.reason().unwrap().contains("allowed"));
     }
 
+    /// `probe_image`, run again while a parallel test's fork still holds the stub open for writing.
+    async fn probe_image_settled(docker: &std::path::Path) -> DockerState {
+        for _ in 0..50 {
+            let s = probe_image(docker, "img").await;
+            if !s.reason().is_some_and(|r| r.contains("Text file busy")) {
+                return s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        probe_image(docker, "img").await
+    }
+
     #[tokio::test]
     async fn the_image_probe_runs_the_image_and_reports_a_failed_pull() {
         let dir = tempfile::tempdir().unwrap();
         let ok = stub(&dir, r#"[ "$1 $2 $3 $4" = "run --rm img true" ]"#);
-        assert_eq!(probe_image(&ok, "img").await, DockerState::Ok);
+        assert_eq!(probe_image_settled(&ok).await, DockerState::Ok);
         let bad = stub(&dir, "echo 'pull access denied' >&2; exit 1");
-        let s = probe_image(&bad, "img").await;
+        let s = probe_image_settled(&bad).await;
         assert_eq!(s.as_str(), "stopped");
         assert!(s.reason().unwrap().contains("pull access denied"));
     }

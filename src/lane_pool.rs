@@ -191,10 +191,16 @@ impl LanePool {
     /// `claimLane`: the lane `want` should take next. A chore asks for the chore lane; a roadmap item takes its last
     /// lane or any other, and the chore lane only when nothing else is free and no playtest fix waits for it.
     pub fn claim_lane(&self, want: &Want) -> Option<u32> {
+        self.claim_lane_where(want, |_| true)
+    }
+
+    /// `claim_lane`, leaving out lanes `may` refuses (those whose own engine can't start now), the chore-lane
+    /// fallback included.
+    pub fn claim_lane_where(&self, want: &Want, may: impl Fn(u32) -> bool) -> Option<u32> {
         let me = Some((want.project.as_str(), want.item.as_str()));
-        self.free_lane(want.chore, want.last_lane, me, |_| true).or_else(|| {
+        self.free_lane(want.chore, want.last_lane, me, &may).or_else(|| {
             (!want.chore && !want.fix_queued)
-                .then(|| self.free_lane(true, None, me, |_| true))
+                .then(|| self.free_lane(true, None, me, &may))
                 .flatten()
         })
     }
@@ -236,7 +242,12 @@ impl LanePool {
 
     /// Picks `want`'s lane and takes it, in one step. Once the merge turn's item has its lane, it no longer waits.
     pub fn claim(&mut self, want: &Want) -> Option<u32> {
-        let k = self.claim_lane(want)?;
+        self.claim_where(want, |_| true)
+    }
+
+    /// `claim`, only in a lane `may` accepts.
+    pub fn claim_where(&mut self, want: &Want, may: impl Fn(u32) -> bool) -> Option<u32> {
+        let k = self.claim_lane_where(want, may)?;
         self.held.insert(
             k,
             Holder::Item {
