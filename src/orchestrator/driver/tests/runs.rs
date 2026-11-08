@@ -720,7 +720,19 @@ async fn start_rules_pass(
     limited: &[crate::engines::EngineId],
     claude_signed_out: bool,
 ) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement", "engine-start-rules"]));
+    start_pass_with(rig, starter, limited, claude_signed_out, &[]).await;
+}
+
+/// `start_rules_pass`, with the release flags `more` On as well.
+async fn start_pass_with(
+    rig: &mut Rig,
+    starter: &dyn RunStarter,
+    limited: &[crate::engines::EngineId],
+    claude_signed_out: bool,
+    more: &[&str],
+) {
+    let on = [&["engine-placement", "engine-start-rules"], more].concat();
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
     let now = Instant::now();
     let limits = crate::orchestrator::fresh_start::EngineLimits::default();
     for e in limited {
@@ -779,6 +791,43 @@ async fn with_cursor_limited_run_take_leaves_out_cursor() {
     start_rules_pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), &[Cursor], false).await;
     let takes = script.lock().unwrap().args("run_take");
     assert_eq!(takes[0]["agent"]["engines"], json!(["claude", "pi", "codex"]));
+}
+
+/// A Cursor implementer whose Cursor is at its limit, on a computer whose planner runs Claude; one build is handed out.
+async fn cursor_limited_build(more: &[&str]) -> FakeRuns {
+    let (mut rig, script) = setup(1).await;
+    both_engines(
+        &mut rig,
+        json!({ "default": "cursor", "roles": { "planner": "claude" } }),
+    );
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    start_pass_with(&mut rig, &starter, &[crate::engines::EngineId::Cursor], false, more).await;
+    starter
+}
+
+#[tokio::test]
+async fn with_engine_fall_over_a_build_started_while_cursor_is_limited_is_placed_on_claude() {
+    use crate::engines::EngineId::Claude;
+    let starter = cursor_limited_build(&["engine-fall-over"]).await;
+    let started = starter.started.lock().unwrap();
+    assert_eq!(started[0].engine, Some(Claude));
+    assert!(
+        started[0]
+            .context
+            .fall
+            .as_ref()
+            .unwrap()
+            .out
+            .contains(&crate::engines::EngineId::Cursor)
+    );
+}
+
+#[tokio::test]
+async fn without_engine_fall_over_a_build_is_placed_as_chosen() {
+    let starter = cursor_limited_build(&[]).await;
+    let started = starter.started.lock().unwrap();
+    assert_eq!((started[0].engine, started[0].context.fall.is_none()), (None, true));
 }
 
 #[tokio::test]

@@ -68,7 +68,8 @@ fn behind_head(cwd: &Path, sha: &str) -> bool {
 /// started with.
 fn placement(job: &Job, role: Role) -> Result<Placement> {
     let engine = if job.placed {
-        engine_for(&job.choice, job.project.engines.as_ref(), role, None)
+        job.context
+            .engine_now(engine_for(&job.choice, job.project.engines.as_ref(), role, None))
     } else {
         crate::config::Engine::Claude
     };

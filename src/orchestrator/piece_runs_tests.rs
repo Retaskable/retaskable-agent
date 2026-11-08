@@ -87,6 +87,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         piece: serde_json::from_value(piece).unwrap(),
         other: Default::default(),
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
+        engine: None,
         ends,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
@@ -634,6 +635,51 @@ async fn a_piece_naming_claude_runs_on_claude_even_when_the_role_is_cursor() {
     let (req, mut s) = request(&r, RunKind::Build, p);
     r.starter.start(req).unwrap();
     assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+}
+
+#[tokio::test]
+async fn a_build_told_to_start_on_claude_while_the_role_is_cursor_runs_on_claude() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    role_is_cursor(&mut r);
+    placing(&mut r);
+    let (mut req, mut s) = request(&r, RunKind::Build, piece());
+    req.engine = Some(crate::engines::EngineId::Claude);
+    // The review roles get the same out set, so they follow.
+    req.context.fall = Some(crate::orchestrator::driver::FallOver {
+        out: [crate::engines::EngineId::Cursor].into(),
+        used: vec![crate::engines::EngineId::Cursor, crate::engines::EngineId::Claude],
+    });
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(r.root.join("prompt1.txt").exists(), "the session ran on Claude");
+}
+
+#[tokio::test]
+async fn a_pieces_own_engine_that_is_out_goes_to_the_one_that_takes_over() {
+    use crate::engines::EngineId::{Claude, Cursor};
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    placing(&mut r);
+    let mut p = piece();
+    p["engine"] = json!("cursor");
+    let (mut req, mut s) = request(&r, RunKind::Build, p);
+    req.context.fall = Some(crate::orchestrator::driver::FallOver {
+        out: [Cursor].into(),
+        used: vec![Cursor, Claude],
+    });
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(r.root.join("prompt1.txt").exists(), "the session ran on Claude");
+}
+
+#[tokio::test]
+async fn a_build_with_no_engine_told_places_it_as_chosen() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    role_is_cursor(&mut r);
+    with_flag(&mut r);
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    assert!(matches!(end_of(&mut s.ends).await.outcome, RunOutcome::Failed(_)));
+    assert!(!r.root.join("prompt1.txt").exists());
 }
 
 #[tokio::test]
