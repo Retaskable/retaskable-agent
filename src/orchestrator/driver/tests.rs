@@ -844,6 +844,10 @@ async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
         Some(usage),
         "a session that needs a person may still have reported the reading section 7.1 needs most"
     );
+    assert!(
+        crate::tiers::signal_on(1_700_000_000),
+        "saving a five-hour reading turns the machine-wide subscription signal on"
+    );
 }
 
 #[tokio::test]

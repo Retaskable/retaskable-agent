@@ -363,6 +363,7 @@ impl ProjectLoop {
             record.impl_session_id = Some(id);
         }
         if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
+            crate::tiers::note_usage(&usage);
             self.store.set_usage(usage);
             if let Err(e) = self.store.save() {
                 tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
