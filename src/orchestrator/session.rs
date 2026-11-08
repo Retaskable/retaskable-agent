@@ -25,6 +25,7 @@ use crate::backlog::Item;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::model_slots::ModelSlots;
 use crate::engines::{
     CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
 };
@@ -89,7 +90,22 @@ impl ClaudeStarter {
     }
 }
 
+/// Whether a fresh Claude implementer may start: the model [`implementer_tier`] gives for `usage` isn't capped and full.
+/// The item isn't known before it's claimed, so the tier's model is used (a reopened item keeps `opus`).
+pub fn model_has_room(slots: Option<&ModelSlots>, usage: Option<&Value>, now: i64, models: &ModelsConfig) -> bool {
+    slots.is_none_or(|s| s.has_room(implementer_tier(usage, now, models)))
+}
+
 impl SessionStarter for ClaudeStarter {
+    fn implementer_may_start(&self, usage: Option<&Value>) -> bool {
+        model_has_room(
+            crate::engines::model_slots::global(),
+            usage,
+            crate::telemetry::now_ms() / 1000,
+            &self.models,
+        )
+    }
+
     fn start(&self, request: StartRequest) -> Result<(), String> {
         let project = self
             .projects
