@@ -309,7 +309,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         dir.to_path_buf(),
         view.restart.clone(),
     );
-    let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
+    let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
+    let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
     // session runner exists) or runs (short runs on pieces). Read and logged once, here.
@@ -559,6 +560,7 @@ fn link_clouds(
     dir: &Path,
     version: &str,
     env: &Env,
+    links: &link::pending::Links,
 ) -> Vec<connector::Connector> {
     let connectors: Vec<_> = cloud_urls
         .iter()
@@ -588,6 +590,7 @@ fn link_clouds(
     // it isn't tried again this run (a failed or expired code waits for the next start).
     if cloud_urls.iter().any(|url| matches!(keychain.get(url), Ok(Some(_)))) {
         tokio::spawn(auto_link_backlog(
+            links.clone(),
             keychain.clone(),
             http.clone(),
             env.clone(),
@@ -720,6 +723,7 @@ async fn link_command(
             // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
             // approval comes right after this one, opened by the agent itself.
             auto_link_backlog(
+                link::pending::Links::new(keychain.clone(), reqwest::Client::new(), env, version),
                 keychain.clone(),
                 reqwest::Client::new(),
                 env.clone(),
@@ -787,14 +791,25 @@ async fn run_link_in_terminal(
 /// installers/04-every-agent-on-the-shared-backlog-shared.md: starts the shared backlog's device flow by
 /// itself, printing and opening its `/link` page the moment a code is ready. Logs the outcome instead of
 /// failing the caller — a failed or expired code waits for the next start, or `retaskable link backlog`.
-async fn auto_link_backlog(keychain: Arc<dyn link::TokenStore>, http: reqwest::Client, env: Env, version: String) {
+async fn auto_link_backlog(
+    links: link::pending::Links,
+    keychain: Arc<dyn link::TokenStore>,
+    http: reqwest::Client,
+    env: Env,
+    version: String,
+) {
     let shown = |code: &link::DeviceCode| {
         println!("Approve the shared backlog: {}", code.verification_uri_complete);
+        links.set_backlog(Some(link::pending::BacklogWaiting::approve(
+            &code.verification_uri_complete,
+        )));
         if let Err(e) = link::open_url(&code.verification_uri_complete) {
             tracing::warn!("couldn't open the shared backlog's link page: {e:#}");
         }
     };
-    match backlog::auto_link(keychain, http, &env, &version, shown).await {
+    let result = backlog::auto_link(keychain, http, &env, &version, shown).await;
+    links.set_backlog(None);
+    match result {
         Ok(Some(id)) => tracing::info!("Linked to the shared backlog as agent {id}."),
         Ok(None) => {}
         Err(e) => tracing::warn!("Couldn't link to the shared backlog: {e:#}"),
