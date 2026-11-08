@@ -5,21 +5,18 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
-use tracing_subscriber::fmt::MakeWriter;
 
 use super::agent::{Frame, Opener, Quit, SystemOpener, TrayAgent, TrayView};
+use crate::terminal_menu::console::ConsoleCapture;
 use crate::terminal_menu::{Cursor, Key, Outcome, QUIT_HINT, backlog_notice, handle_key, render_screen};
 
-/// How many console lines are kept and printed again when the menu closes.
-pub const KEPT: usize = 2000;
 const ENTER: &str = "\x1b[?1049h\x1b[?25l";
 const LEAVE: &str = "\x1b[?25h\x1b[?1049l";
 const BELL: &str = "\x07";
@@ -31,99 +28,6 @@ pub trait Term: Send + Sync {
     /// Columns and rows.
     fn size(&self) -> (usize, usize);
     fn write(&self, s: &str);
-}
-
-#[derive(Default)]
-struct LogState {
-    capturing: bool,
-    lines: VecDeque<String>,
-}
-
-/// The console's lines while the menu is up.
-#[derive(Default)]
-pub struct Log(Mutex<LogState>);
-
-static CONSOLE: LazyLock<Arc<Log>> = LazyLock::new(Default::default);
-
-impl Log {
-    /// The agent's own: what [`ConsoleWriter`] writes to.
-    pub fn console() -> Arc<Log> {
-        CONSOLE.clone()
-    }
-
-    fn start(&self) {
-        self.0.lock().unwrap().capturing = true;
-    }
-
-    /// Keeps `text`'s lines and returns true while capturing; false means the caller prints it.
-    pub fn push(&self, text: &str) -> bool {
-        let mut s = self.0.lock().unwrap();
-        if !s.capturing {
-            return false;
-        }
-        for line in strip_ansi(text).lines() {
-            if s.lines.len() == KEPT {
-                s.lines.pop_front();
-            }
-            s.lines.push_back(line.to_string());
-        }
-        true
-    }
-
-    fn tail(&self, n: usize) -> Vec<String> {
-        let s = self.0.lock().unwrap();
-        s.lines.iter().skip(s.lines.len().saturating_sub(n)).cloned().collect()
-    }
-
-    /// Stops capturing and returns everything kept.
-    fn finish(&self) -> Vec<String> {
-        let mut s = self.0.lock().unwrap();
-        s.capturing = false;
-        s.lines.drain(..).collect()
-    }
-}
-
-pub(crate) fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            for d in chars.by_ref() {
-                if d.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// The tracing subscriber's writer: stdout as ever, or the log pane while the terminal menu is up.
-#[derive(Clone, Copy)]
-pub struct ConsoleWriter;
-
-pub struct ConsoleOut;
-
-impl Write for ConsoleOut {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if CONSOLE.push(&String::from_utf8_lossy(buf)) {
-            Ok(buf.len())
-        } else {
-            io::stdout().write(buf)
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        io::stdout().flush()
-    }
-}
-
-impl<'a> MakeWriter<'a> for ConsoleWriter {
-    type Writer = ConsoleOut;
-    fn make_writer(&'a self) -> ConsoleOut {
-        ConsoleOut
-    }
 }
 
 /// The OS's opener, saying the address in the log first, for a machine with no browser. A desktop notification
@@ -191,7 +95,7 @@ struct Screen {
 
 pub struct TerminalMenu {
     term: Arc<dyn Term>,
-    log: Arc<Log>,
+    log: Arc<ConsoleCapture>,
     quit: Arc<dyn Quit>,
     agent: OnceLock<Weak<TrayAgent>>,
     screen: Mutex<Screen>,
@@ -201,7 +105,7 @@ pub struct TerminalMenu {
 impl TerminalMenu {
     /// Puts the terminal in raw mode on the alternate screen and starts keeping the console's output. An error
     /// means the terminal is as it was and the agent carries on with the plain console.
-    pub fn start(term: Arc<dyn Term>, log: Arc<Log>, quit: Arc<dyn Quit>) -> io::Result<Arc<Self>> {
+    pub fn start(term: Arc<dyn Term>, log: Arc<ConsoleCapture>, quit: Arc<dyn Quit>) -> io::Result<Arc<Self>> {
         term.enter()?;
         log.start();
         term.write(ENTER);
@@ -305,9 +209,10 @@ impl TerminalMenu {
         }
         self.term.write(LEAVE);
         self.term.leave();
-        let lines = self.log.finish();
-        if !lines.is_empty() {
-            self.term.write(&format!("{}\n", lines.join("\n")));
+        let mut printed = Vec::new();
+        let _ = self.log.finish(&mut printed);
+        if !printed.is_empty() {
+            self.term.write(&String::from_utf8_lossy(&printed));
         }
     }
 

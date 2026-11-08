@@ -150,7 +150,9 @@ async fn main() -> Result<()> {
                 Err(e) => {
                     tracing_subscriber::fmt()
                         .with_env_filter(filter())
-                        .with_writer(tray::tui::ConsoleWriter)
+                        .with_writer(retaskable_agent::terminal_menu::console::ConsoleWriter(
+                            retaskable_agent::terminal_menu::console::ConsoleCapture::console(),
+                        ))
                         .init();
                     tracing::warn!("couldn't open {}: {e}", logs_dir.join("retaskable.log").display());
                 }

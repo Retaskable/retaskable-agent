@@ -5,7 +5,6 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::tray::tui::strip_ansi;
 use tokio::sync::watch;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -57,6 +56,12 @@ impl ConsoleCapture {
 
     pub fn lines(&self) -> Vec<String> {
         self.state.lock().unwrap().lines.iter().cloned().collect()
+    }
+
+    /// The last `n` lines, for the pane.
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let s = self.state.lock().unwrap();
+        s.lines.iter().skip(s.lines.len().saturating_sub(n)).cloned().collect()
     }
 
     /// Stops capturing and writes every captured line to `out`, once.
@@ -113,6 +118,23 @@ impl ConsoleCapture {
 /// Like `println!`, for the agent's own console lines: they go to the log pane while the menu is up.
 pub fn say(line: &str) {
     ConsoleCapture::console().say_to(line, &mut io::stdout());
+}
+
+pub(crate) fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The tracing subscriber's writer: stdout as ever, or the buffer while capturing.
