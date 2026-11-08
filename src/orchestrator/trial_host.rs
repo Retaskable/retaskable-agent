@@ -15,7 +15,7 @@ use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::engine::CursorOptions;
-use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session};
+use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
 use crate::tiers::{implementer_model, implementer_tier};
@@ -37,6 +37,8 @@ pub struct TrialJob {
     pub usage: Option<Value>,
     /// The `engine-placement` flag: Off, only a Claude trial runs.
     pub placement: bool,
+    /// With `engine-start-rules` On, the engine to start on when it isn't the implementer's chosen one.
+    pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -108,7 +110,10 @@ impl TrialHost for ClaudeTrial {
         );
         Box::pin(async move {
             let project = &job.project;
-            let chosen = engine_for(&choice, project.engines.as_ref(), Role::Implementer, None);
+            let chosen = start_engine(
+                job.engine,
+                engine_for(&choice, project.engines.as_ref(), Role::Implementer, None),
+            );
             if chosen != Engine::Claude && !job.placement {
                 return dropped(format!("{chosen} sessions don't run yet"));
             }

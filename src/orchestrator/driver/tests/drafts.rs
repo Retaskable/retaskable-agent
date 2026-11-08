@@ -12,6 +12,7 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 struct Host {
     answers: Mutex<Vec<Value>>,
     jobs: Mutex<Vec<(String, bool, String)>>,
+    engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
     published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
@@ -26,6 +27,7 @@ impl DraftHost for Host {
             .lock()
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
+        self.engines.lock().unwrap().push(job.engine);
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);
         async move {
@@ -449,4 +451,77 @@ async fn nothing_is_posted_while_the_ask_claude_flag_is_off() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(posts(&asked).is_empty());
+}
+
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// Cursor is at its limit.
+fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
+    let mut on = vec!["engine-start-rules"];
+    on.extend(flags);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+    rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
+    if cursor_out {
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Cursor, out_for(600));
+    }
+}
+
+fn charts() -> Value {
+    json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "changeBody": "Adds charts.",
+        "itemIds": ["charts-1"], "summary": "Charts", "pieces": [{"title": "Charts", "kind": "feature"}],
+        "breakdown": {"build": [{"id": "charts-1", "line": "Draw them", "size": "M"}], "people": []}})
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_a_draft_on_cursor_starts() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"drafter": "cursor"}}),
+        true,
+        false,
+    );
+    reports(&mut rig, &asked, 2).await;
+    assert_eq!(*host.engines.lock().unwrap(), vec![None]);
+}
+
+#[tokio::test]
+async fn a_draft_on_claude_with_claude_out_starts_on_cursor_used_here() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"planner": "cursor"}}),
+        true,
+        false,
+    );
+    reports(&mut rig, &asked, 2).await;
+    assert_eq!(
+        *host.engines.lock().unwrap(),
+        vec![Some(crate::engines::EngineId::Cursor)]
+    );
+}
+
+#[tokio::test]
+async fn a_draft_waits_when_no_engine_may_start() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
+    start_rules(
+        &mut rig,
+        &["ask-claude"],
+        json!({"roles": {"planner": "cursor"}}),
+        true,
+        true,
+    );
+    for _ in 0..3 {
+        rig.machine.pass().await;
+    }
+    assert_eq!(claims(&asked), 0);
+    assert!(host.jobs.lock().unwrap().is_empty());
 }

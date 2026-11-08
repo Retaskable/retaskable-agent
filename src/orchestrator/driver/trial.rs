@@ -13,6 +13,8 @@ use tokio::task::JoinHandle;
 use super::Shared;
 use super::machine::SetupChecksHandle;
 use super::project::{ProjectLoop, signed_out};
+use super::start_gate::StartGate;
+use crate::engines::Role;
 use crate::implementer::session::new_session_id;
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::trial_host::{TrialEnd, TrialHost, TrialJob};
@@ -97,9 +99,18 @@ impl ProjectLoop {
         if record.state == TrialState::Running {
             return self.trial_dropped("the agent restarted while the trial plan was running".into());
         }
-        if paused || *slots == 0 || shared.stopping || signed_out(shared) || !self.flags.on(FLAG).await {
+        if paused || *slots == 0 || shared.stopping || !self.flags.on(FLAG).await {
             return;
         }
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        let engine = match &gate {
+            Some(gate) => match gate.role_start(self, shared, Role::Implementer) {
+                Some(engine) => engine,
+                None => return,
+            },
+            None if signed_out(shared) => return,
+            None => None,
+        };
         let checks = checks.lock().unwrap().clone();
         match should_start(&record, &self.project, checks.as_ref(), self.backlog_items) {
             Decision::Wait => {}
@@ -123,6 +134,7 @@ impl ProjectLoop {
                     session_id: new_session_id(),
                     usage: self.store.usage(),
                     placement: self.flags.on("engine-placement").await,
+                    engine,
                     sessions: self.live.sessions().clone(),
                 });
                 self.trial = Some(RunningTrial {

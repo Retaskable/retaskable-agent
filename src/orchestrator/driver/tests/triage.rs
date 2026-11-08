@@ -719,3 +719,50 @@ async fn with_own_failure_handling_off_the_redirect_keeps_the_plain_start_over_n
     rig.machine.pass().await;
     assert!(has_note(&mut rig, "Claude chose Start over"));
 }
+
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// Cursor is at its limit.
+fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
+    let mut on = vec!["engine-start-rules"];
+    on.extend(flags);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+    rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
+    if cursor_out {
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Cursor, out_for(600));
+    }
+}
+
+/// "a" stopped, the start rules On with `choice`, and the triager given three passes.
+async fn triaged_with(choice: Value, claude_out: bool, cursor_out: bool) -> Vec<Option<crate::engines::EngineId>> {
+    let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
+    start_rules(&mut rig, &["triage-session"], choice, claude_out, cursor_out);
+    for _ in 0..4 {
+        rig.machine.pass().await;
+    }
+    fake.triage.asked.lock().unwrap().iter().map(|r| r.engine).collect()
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_a_triager_on_cursor_starts() {
+    let engines = triaged_with(json!({"roles": {"chat": "cursor"}}), true, false).await;
+    assert_eq!(engines, vec![None]);
+}
+
+#[tokio::test]
+async fn a_triager_on_claude_with_claude_out_starts_on_cursor_used_here() {
+    let engines = triaged_with(json!({"roles": {"planner": "cursor"}}), true, false).await;
+    assert_eq!(engines, vec![Some(crate::engines::EngineId::Cursor)]);
+}
+
+#[tokio::test]
+async fn a_triager_waits_when_no_engine_may_start() {
+    let engines = triaged_with(json!({"roles": {"planner": "cursor"}}), true, true).await;
+    assert!(engines.is_empty());
+}

@@ -15,12 +15,14 @@ use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::project::signed_out;
+use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
 use crate::config::ProjectConfig;
 use crate::drafts::DrafterStatus;
 use crate::drafts::land::{deletes_head, pr_number, workflow};
+use crate::engines::{EngineId, Role};
 use crate::view::DraftCommand;
 
 /// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
@@ -69,6 +71,8 @@ struct Ctx {
     host: Arc<dyn DraftHost>,
     wait: Duration,
     placement: bool,
+    /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
+    engine: Option<EngineId>,
     sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
@@ -159,6 +163,7 @@ impl Ctx {
             follow_up: rebase_request(reason),
             usage: None,
             placement: self.placement,
+            engine: self.engine,
             sessions: self.sessions.clone(),
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
@@ -311,7 +316,13 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
 impl ProjectLoop {
     /// Takes in this project's queued presses and starts each; tells the store the headers of the drafts that merged
     /// since the last pass, paused or not.
-    pub(super) async fn land_drafts(&mut self, host: &Arc<dyn DraftHost>, shared: &Shared<'_>, wait: Duration) {
+    pub(super) async fn land_drafts(
+        &mut self,
+        host: &Arc<dyn DraftHost>,
+        shared: &Shared<'_>,
+        wait: Duration,
+        lanes: u32,
+    ) {
         let mut merged = false;
         for task in std::mem::take(&mut self.landing.tasks) {
             if !task.is_finished() {
@@ -332,9 +343,18 @@ impl ProjectLoop {
             self.report(shared.links).await;
         }
         let presses = shared.links.item_commands.take_drafts(&self.id);
-        if presses.is_empty() || shared.stopping || signed_out(shared) {
+        if presses.is_empty() || shared.stopping {
             return;
         }
+        let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
+        let engine = match &gate {
+            Some(gate) => match gate.role_start(self, shared, Role::Drafter) {
+                Some(engine) => engine,
+                None => return,
+            },
+            None if signed_out(shared) => return,
+            None => None,
+        };
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
@@ -365,6 +385,7 @@ impl ProjectLoop {
                 host: host.clone(),
                 wait,
                 placement,
+                engine,
                 sessions: self.live.sessions().clone(),
             };
             let task = if matches!(press, DraftCommand::Discard { .. }) {

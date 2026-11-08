@@ -94,6 +94,7 @@ async fn ask_listed(
     );
     let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let job = AskJob {
+        engine: None,
         project: project_in(root, &repo),
         ask: AskCommand {
             project: "p".into(),
@@ -178,6 +179,7 @@ fn triage_request() -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<Sess
 fn triage_request_listed(sessions: Sessions) -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let request = TriageRequest {
+        engine: None,
         project: "p".into(),
         item_id: "x".into(),
         context: crate::test_support::triage_context(vec![], "bug"),
