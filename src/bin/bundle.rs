@@ -118,6 +118,14 @@ fn run() -> Result<(), String> {
     let text = serde_json::to_string_pretty(&build_json).map_err(|e| format!("writing build.json: {e}"))?;
     std::fs::write(&build_json_path, text + "\n").map_err(|e| format!("writing {}: {e}", build_json_path.display()))?;
 
+    let build = release::Build {
+        os: target.clone(),
+        environment,
+        version: version.clone(),
+        commit: commit.clone(),
+    };
+    retaskable_agent::package::write_icons(&out, &build).map_err(|e| format!("{e:#}"))?;
+
     if !native {
         println!(
             "Built {target} {version} ({commit}) at {} (cross-built: no --version or start check, since this machine can't run it)",

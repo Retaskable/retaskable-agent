@@ -2,6 +2,7 @@
 //! authorization grant (RFC 8628), like `gh auth login`. The refresh token goes in the credential store
 //! (`credentials`), one per URL, and is swapped for short-lived access tokens (`DeviceTokens`).
 mod credentials;
+pub mod pending;
 #[cfg(test)]
 mod tests;
 
