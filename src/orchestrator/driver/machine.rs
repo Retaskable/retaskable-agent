@@ -605,7 +605,9 @@ impl Machine {
                 && self.live(&self.projects[i])
             {
                 self.projects[i].backlog_items = items.len();
-                self.projects[i].readopt(items, &mut self.pool);
+                let give_back = self.projects[i].flags.on("cursor-give-back").await;
+                let machine = self.links.machine.clone();
+                self.projects[i].readopt(items, &mut self.pool, give_back.then_some(machine.as_str()));
             }
         }
         if self.starter.is_some() {
