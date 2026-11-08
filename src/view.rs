@@ -789,6 +789,37 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_reporting_reports_todays_spend_and_the_daily_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{ "version": 2, "budget": { "dailyUsd": 20 } }"#,
+        )
+        .unwrap();
+        let mut machine = crate::store::MachineStore::load(dir.path()).unwrap();
+        machine.add_spend("a", 1.25).unwrap();
+        for on in [true, false] {
+            let mut v = reporting_view(on);
+            v.settings = HelloSettings::new(
+                dir.path().to_path_buf(),
+                crate::env::Env::empty(),
+                4700,
+                Arc::new(crate::flags::Flags::fixed(if on {
+                    &[SNAPSHOT_REPORTING_FLAG]
+                } else {
+                    &[]
+                })),
+            );
+            let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+            assert_eq!(o.get("spendTodayUsd").is_some(), on);
+            assert_eq!(o.get("dailyUsd").is_some(), on);
+            if on {
+                assert_eq!((&o["spendTodayUsd"], &o["dailyUsd"]), (&json!(1.25), &json!(20.0)));
+            }
+        }
+    }
+
+    #[test]
     fn snapshot_reporting_off_leaves_the_orchestrator_block_as_it_was() {
         let v = reporting_view(false);
         v.live.register("a");

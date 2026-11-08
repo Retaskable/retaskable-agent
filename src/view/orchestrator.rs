@@ -18,6 +18,11 @@ impl AgentView {
                 }
             }
         };
+        if !project.is_empty() && self.settings.snapshot_reporting_on() {
+            let (spent, daily) = self.settings.spend_today(project);
+            block["spendTodayUsd"] = json!(spent);
+            block["dailyUsd"] = json!(daily);
+        }
         if let Some(restart) = self.restart.report() {
             block["restart"] = restart;
         }
