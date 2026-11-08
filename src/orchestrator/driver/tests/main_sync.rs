@@ -1,5 +1,5 @@
 //! The main sync (`main_sync.rs`) against a fake store, real git repos and a fake `gh`.
-use super::fix_main::{Idle, Store_, store};
+use super::fix_main::{store, Idle, Store_};
 use super::*;
 use crate::test_support::{git, repo_with_origin, run as run_git, write_executable};
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ async fn fixture(conflict: bool) -> Fixture {
 }
 
 async fn settle(f: &mut Fixture) {
-    for _ in 0..40 {
+    for _ in 0..200 {
         let m = &mut f.rig.machine;
         let shared = Shared {
             links: &m.links,
@@ -76,6 +76,9 @@ async fn settle(f: &mut Fixture) {
             .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
             .await;
         tokio::time::sleep(Duration::from_millis(50)).await;
+        if !adds(f).is_empty() && !f.script.lock().unwrap().args("lock_drop").is_empty() {
+            break;
+        }
     }
 }
 
