@@ -405,6 +405,10 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             retaskable_agent::tiers::set_flags(placement.clone());
             placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
             placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
+            placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
+            retaskable_agent::engines::model_slots::set_global(
+                retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
+            );
             let roster = orchestrator::plan_run::Roster {
                 data_dir: dir.to_path_buf(),
                 projects: cfg.projects.clone(),

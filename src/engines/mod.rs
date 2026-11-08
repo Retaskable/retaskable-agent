@@ -11,6 +11,7 @@ pub mod codex;
 pub mod cursor;
 pub mod engine;
 mod json_result;
+pub mod model_slots;
 pub mod pi;
 pub mod place;
 pub mod resolve;
