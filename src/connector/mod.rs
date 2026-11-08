@@ -55,6 +55,8 @@ pub struct Timing {
     pub backoff: Duration,
     /// A connection that lasted this long was a good one: the next reconnect starts from the first wait again.
     pub stable: Duration,
+    /// How long a change in the loop's live state waits for others before the snapshot is sent again.
+    pub live_coalesce: Duration,
 }
 
 impl Default for Timing {
@@ -62,6 +64,7 @@ impl Default for Timing {
         Self {
             idle: Duration::from_secs(60),
             connect: Duration::from_secs(30),
+            live_coalesce: Duration::from_secs(3),
             backoff: Duration::from_secs(1),
             stable: Duration::from_secs(30),
         }
@@ -411,6 +414,10 @@ async fn session(
     local_down.mark_unchanged();
     let mut settings_saved = view.settings.subscribe();
     settings_saved.mark_unchanged();
+    let mut live = view.live.subscribe();
+    live.mark_unchanged();
+    // When a change in the loop's state is due to be sent: later changes in the wait go in the same snapshot.
+    let mut live_due: Option<tokio::time::Instant> = None;
     let mut trial_saved = crate::store::subscribe_trial_changes();
     trial_saved.mark_unchanged();
     let mut trial_sent = view.trial_json(project, &cloud.dir);
@@ -438,6 +445,18 @@ async fn session(
             Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = live.changed(), if live_due.is_none() => {
+                // With `snapshot-reporting` Off the snapshot doesn't carry the loop's state: nothing to resend.
+                if view.settings.snapshot_reporting_on() {
+                    live_due = Some(tokio::time::Instant::now() + t.live_coalesce);
+                }
+                None
+            },
+            () = tokio::time::sleep_until(live_due.unwrap_or_else(tokio::time::Instant::now)), if live_due.is_some() => {
+                live_due = None;
+                live.mark_unchanged();
+                Some(view.snapshot(project, &cloud.dir))
+            },
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = trial_saved.changed() => {
                 let now = view.trial_json(project, &cloud.dir);

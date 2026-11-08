@@ -83,6 +83,23 @@ async fn ahead_of_pace_lowers_the_starts_down_to_min_and_stops_nothing() {
 }
 
 #[tokio::test]
+async fn a_lone_weekly_reading_slows_the_number_by_one_with_the_week_flag() {
+    for on in [true, false] {
+        let (mut rig, fake) = rig_with(true, AutoConcurrency::default()).await;
+        let flags: &[&str] = if on {
+            &["auto-concurrency", "auto-concurrency-week"]
+        } else {
+            &["auto-concurrency"]
+        };
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
+        let week = json!({"rateLimitType": "seven_day", "utilization": 0.8, "resetsAt": T + 3600 * 84});
+        rig.lp(0).pace_readings.push(week);
+        step(&mut rig, &fake, 0, 0.10, RESET, 0).await;
+        assert_eq!(rig.machine.effective_concurrency(), if on { 2 } else { 3 }, "{on}");
+    }
+}
+
+#[tokio::test]
 async fn a_new_window_sets_the_number_back_to_concurrency_at_once() {
     let (mut rig, fake) = rig_with(true, AutoConcurrency::default()).await;
     step(&mut rig, &fake, 0, 0.10, RESET, 0).await;
