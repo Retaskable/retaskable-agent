@@ -234,7 +234,7 @@ impl SessionStarter for ClaudeStarter {
 }
 
 /// Whether the resolved binary is there: a path by itself, a bare name somewhere on `PATH`.
-pub(super) fn exists(bin: &Path, env: &Env) -> bool {
+pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
     if bin.components().count() > 1 {
         return bin.is_file();
     }
