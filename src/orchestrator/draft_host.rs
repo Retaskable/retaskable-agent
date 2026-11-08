@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, parse_result, session_spec};
@@ -117,7 +117,7 @@ impl DraftHost for ClaudeDrafts {
                 lane: None,
             };
             let engine = engine_of(spec.engine)?;
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let quiet = watch_for(project, placed.engine);
             let title = draft.titles.first().map(String::as_str);
             let listed = job
                 .sessions

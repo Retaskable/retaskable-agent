@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
@@ -403,7 +403,7 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
             processes.add(&token, tree);
         }
     });
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, job.engine);
     let ran = job
         .sessions
         .track(job.info.clone(), async {

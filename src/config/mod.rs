@@ -28,8 +28,8 @@ pub(crate) use machine::{
     valid_local_url, valid_model_name,
 };
 pub use project::{
-    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, LighthouseConfig, OnOff, Plans, Playtests,
-    ProjectBudget, ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
+    CheckConfig, CodeGates, DEFAULT_CURSOR_MAX_MINUTES, DeployConfig, DeployTarget, GalleryConfig, LighthouseConfig,
+    OnOff, Plans, Playtests, ProjectBudget, ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.

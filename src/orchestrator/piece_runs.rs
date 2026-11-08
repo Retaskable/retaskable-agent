@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::baseline_wait::BaselineStage;
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
 use super::piece_review::{ReviewState, Reviewed, review as review_change};
-use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, quiet_timeout};
+use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, watch_for};
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
@@ -414,7 +414,7 @@ async fn session(
         lane: None,
     };
     let engine = engine_of(Some(job.engine))?;
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, job.engine);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
     let info = job.session_info(

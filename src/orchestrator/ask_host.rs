@@ -10,7 +10,7 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 
 use super::driver::{AskHost, AskJob, AskReply, AskStore};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 use crate::ask::perform::{Perform, perform};
 use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, StateItem, StateSummary};
 use crate::ask::session::{Session, parse_result, session_spec};
@@ -220,7 +220,7 @@ impl AskHost for ClaudeAsks {
                 Ok(engine) => engine,
                 Err(e) => return Ok(sorry(e)),
             };
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let quiet = watch_for(&project, placed.engine);
             let follower = follow(sink.path.clone(), engine_of(spec.engine)?, events);
             let listed = sessions.register_spec(&project_id, &ask.ask_id, None, Role::Assistant, &spec);
             let r = listed

@@ -17,7 +17,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::link::TokenStore;
-use crate::orchestrator::session::quiet_timeout;
+use crate::orchestrator::session::watch_for;
 use crate::playtest_groups::{LastGrouped, Planner, PlaytestEntry, TRYOUT_GROUPS_LOCK, plan, should_group, signature};
 use crate::runs::RunLocks;
 use crate::telemetry::now_ms;
@@ -155,7 +155,7 @@ pub(super) async fn run(job: Job) {
             shell: false,
         },
     };
-    let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
+    let quiet = watch_for(&job.project, placed.engine);
     let (sessions, id) = (job.sessions.clone(), job.id.clone());
     let planned = plan(&planner, &entries, |spec| async move {
         let engine = engine_of(Some(placed.engine))?;

@@ -234,7 +234,7 @@ fn default_max_spec_chars() -> u32 {
     40_000
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectBudget {
     #[serde(default)]
@@ -251,6 +251,30 @@ pub struct ProjectBudget {
     pub ask_usd: f64,
     #[serde(default)]
     pub release_notes_usd: f64,
+    /// Minutes a Cursor session may run before it's killed (it has no dollar cap); 0 means the default.
+    #[serde(default = "default_cursor_max_minutes")]
+    pub cursor_max_minutes: u32,
+}
+
+pub const DEFAULT_CURSOR_MAX_MINUTES: u32 = 60;
+
+fn default_cursor_max_minutes() -> u32 {
+    DEFAULT_CURSOR_MAX_MINUTES
+}
+
+impl Default for ProjectBudget {
+    fn default() -> Self {
+        Self {
+            planner_usd: 0.0,
+            implementer_usd: 0.0,
+            scout_usd: 0.0,
+            reviewer_usd: 0.0,
+            drafter_usd: 0.0,
+            ask_usd: 0.0,
+            release_notes_usd: 0.0,
+            cursor_max_minutes: DEFAULT_CURSOR_MAX_MINUTES,
+        }
+    }
 }
 
 /// Where the project deploys from (environments.md section 4.1). Missing: none.
@@ -519,6 +543,10 @@ mod tests {
     fn ci_tuning_defaults_to_ten_and_one_hundred_twenty_minutes_and_can_be_set() {
         let t = TuningConfig::default();
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+        let p: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.budget.cursor_max_minutes, 60);
+        let p: ProjectConfig = serde_json::from_str(r#"{"budget":{"cursorMaxMinutes":15}}"#).unwrap();
+        assert_eq!(p.budget.cursor_max_minutes, 15);
         let t: TuningConfig = serde_json::from_str(r#"{"ciGraceMinutes":3,"ciMaxMinutes":30}"#).unwrap();
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
         let t: TuningConfig = serde_json::from_str("{}").unwrap();

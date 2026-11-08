@@ -20,9 +20,11 @@ use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, Star
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
+use crate::config::DEFAULT_CURSOR_MAX_MINUTES;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::runner::Watch;
 use crate::engines::{
     CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
 };
@@ -307,6 +309,19 @@ pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
     (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
 }
 
+/// The timers for a session of `project` on `engine`: the watchdog, and for Cursor alone that
+/// project's own `budget.cursorMaxMinutes` (0 meaning the default of 60).
+pub(super) fn watch_for(project: &ProjectConfig, engine: EngineId) -> Watch {
+    let minutes = match project.budget.cursor_max_minutes {
+        0 => DEFAULT_CURSOR_MAX_MINUTES,
+        m => m,
+    };
+    Watch {
+        quiet: quiet_timeout(project.tuning.session_quiet_minutes),
+        longest: (engine == EngineId::Cursor).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60)),
+    }
+}
+
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
 const INTERRUPTED: &str = "You were interrupted. Continue from where you left off, then return the result.";
 
@@ -392,7 +407,7 @@ async fn attempt(
         model: model_name(placed.engine, &model, cursor.as_ref()),
     };
     let branch = branch_name(item, *attempt_no);
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, placed.engine);
     let mut spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,
