@@ -91,6 +91,38 @@ pub(super) fn roster(
         choice,
         env,
         models: Default::default(),
+        cursor_models: Default::default(),
+        flags: Arc::new(crate::flags::Flags::fixed(&["engine-placement"])),
     };
     (dir, root, roster)
+}
+
+/// Points every engine's binary variable at the fake `claude` stub, and Cursor's `top` model at `gpt-top`, so a
+/// session on any engine runs the stub; then the stub's `args.txt` says which engine ran.
+pub(super) fn on_every_engine(roster: &mut crate::orchestrator::plan_run::Roster, root: &Path) {
+    let bin = root.join(fake_name()).to_string_lossy().into_owned();
+    roster.env = Env::new(move |k| {
+        [
+            "RETASKABLE_CLAUDE",
+            "RETASKABLE_CURSOR",
+            "RETASKABLE_PI",
+            "RETASKABLE_CODEX",
+        ]
+        .contains(&k)
+        .then(|| bin.clone())
+    });
+    roster.cursor_models.top = Some("gpt-top".into());
+}
+
+/// The arguments the fake binary was last run with, for the engine `program` (`cursor`, `codex` or `pi`).
+pub(super) fn assert_ran_on(root: &Path, program: &str) {
+    let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
+    match program {
+        "cursor" => assert!(args.contains("gpt-top"), "{args}"),
+        "codex" => assert!(args.contains("exec"), "{args}"),
+        _ => assert!(
+            !args.contains("--permission-mode") && !args.contains("gpt-top"),
+            "{args}"
+        ),
+    }
 }

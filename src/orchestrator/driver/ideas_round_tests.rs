@@ -64,6 +64,7 @@ fn job(base: &str) -> Job {
             env: Env::new(|_| None),
             engine_choice: EngineChoiceConfig::default(),
             cursor_models: Default::default(),
+            flags: Arc::new(crate::flags::Flags::fixed(&[])),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),

@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
-use super::session::{exists, quiet_timeout};
+use super::session::quiet_timeout;
 use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
+use crate::engines::engine::CursorOptions;
 use crate::engines::{
-    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of,
+    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of, place,
     run_session_tracked,
 };
 use crate::env::Env;
@@ -216,13 +216,18 @@ pub struct Roster {
     pub choice: EngineChoiceConfig,
     pub env: Env,
     pub models: ModelsConfig,
+    pub cursor_models: CursorModels,
+    /// `engine-placement`: Off, only a role on Claude offers a run, as before.
+    pub flags: Arc<crate::flags::Flags>,
 }
 
 /// What a plan or look session runs with.
 pub(super) struct Job {
     pub data_dir: PathBuf,
     pub project: ProjectConfig,
+    pub engine: EngineId,
     pub bin: PathBuf,
+    pub cursor: Option<CursorOptions>,
     pub model: String,
 }
 
@@ -232,14 +237,16 @@ impl Roster {
         engine_for(&self.choice, engines, role, None) == Engine::Claude
     }
 
-    /// `kind`, unless the role runs on another engine (only Claude sessions run in the Rust agent yet; the role's
-    /// engine is the machine's choice unless a project overrides it) or `slot` is held.
+    /// `kind` when `slot` is free. With `engine-placement` On the role's engine (the machine's choice unless a
+    /// project overrides it) is placed by `begin`; Off, the role must be on Claude for the machine and every project.
     pub(super) fn kinds(&self, role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
-        let claude = self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p)));
-        if claude && !slot.busy() { vec![kind] } else { Vec::new() }
+        let any = self.flags.last("engine-placement")
+            || (self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p))));
+        if any && !slot.busy() { vec![kind] } else { Vec::new() }
     }
 
-    /// Takes `slot` and sets up the session of `request` for `role` on `model`; `Err` gives the run back.
+    /// Takes `slot` and sets up the session of `request` for `role` on `model` (Claude's; Cursor's comes from the
+    /// `top` name); `Err` gives the run back, naming a binary that isn't there.
     pub(super) fn begin(
         &self,
         role: Role,
@@ -247,14 +254,26 @@ impl Roster {
         slot: &Slot,
         model: String,
     ) -> Result<(Job, SlotGuard), String> {
-        let (project, bin) = claude_project(&self.projects, request, &self.env, |p| self.on_claude(role, Some(p)))?;
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id_or_derived() == request.project)
+            .ok_or_else(|| format!("no project {} is configured", request.project))?
+            .clone();
+        if !self.flags.last("engine-placement") && !self.on_claude(role, Some(&project)) {
+            return Err("only Claude sessions run in the Rust agent yet".into());
+        }
+        let engine = engine_for(&self.choice, project.engines.as_ref(), role, None);
+        let placed = place(engine, role, &self.env, &self.cursor_models)?;
         let guard = slot
             .take()
             .ok_or("a plan or look run is already running on this computer")?;
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
-            bin,
+            engine: placed.engine,
+            bin: placed.bin,
+            cursor: placed.cursor,
             model,
         };
         Ok((job, guard))
@@ -297,29 +316,6 @@ impl Cut {
     pub(super) fn is_cut(&self) -> bool {
         self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
     }
-}
-
-/// The project of `request`, and the `claude` binary, for a starter whose role runs on Claude (`on_claude`); `Err`
-/// gives the run back.
-pub(super) fn claude_project(
-    projects: &[ProjectConfig],
-    request: &RunRequest,
-    env: &Env,
-    on_claude: impl Fn(&ProjectConfig) -> bool,
-) -> Result<(ProjectConfig, PathBuf), String> {
-    let project = projects
-        .iter()
-        .find(|p| p.id_or_derived() == request.project)
-        .ok_or_else(|| format!("no project {} is configured", request.project))?
-        .clone();
-    if !on_claude(&project) {
-        return Err("only Claude sessions run in the Rust agent yet".into());
-    }
-    let bin = resolve_claude_on_path(env).map_err(|e| format!("{e:#}"))?;
-    if !exists(&bin, env) {
-        return Err(format!("the claude binary wasn't found ({})", bin.display()));
-    }
-    Ok((project, bin))
 }
 
 /// Runs `work` as the run's task, holding `guard` until it ends. The inner task is joined, so even a panic in it
@@ -371,8 +367,8 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
         budget_usd: project.budget.planner_usd,
         model: job.model.clone(),
         local: None,
-        engine: Some(EngineId::Claude),
-        cursor: None,
+        engine: Some(job.engine),
+        cursor: job.cursor.clone(),
         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         shell: true,
     }
@@ -392,7 +388,7 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
     });
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let ran = async {
-        let engine = engine_of(Some(EngineId::Claude))?;
+        let engine = engine_of(Some(job.engine))?;
         run_session_tracked(engine.as_ref(), &job.bin, &spec, "plan", Some(&sink), quiet, Some(tx)).await
     }
     .await;

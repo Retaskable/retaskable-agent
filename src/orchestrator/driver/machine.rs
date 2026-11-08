@@ -83,7 +83,7 @@ pub struct Links {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
-    /// The Cursor model name per tier, for a Cursor session placed here (an ideas round).
+    /// The Cursor model names a playtest grouping round's planner session uses on Cursor.
     pub cursor_models: CursorModels,
     /// The latest setup checks, for the engines `run_take` says this computer has. None have run yet: none are sent.
     pub checks: SetupChecksHandle,
@@ -316,6 +316,7 @@ impl Machine {
             env: self.links.env.clone(),
             engine_choice: self.links.engine_choice.clone(),
             cursor_models: self.links.cursor_models.clone(),
+            flags: lp.flags.clone(),
             machine: self.links.machine.clone(),
             backlog_url: self.links.backlog_url.clone(),
             keychain: self.links.keychain.clone(),

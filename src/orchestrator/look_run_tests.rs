@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::super::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
+use super::super::fake_session_tests::{
+    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster,
+};
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
 use crate::connector::bug_link::BugLink;
@@ -180,15 +182,35 @@ async fn a_session_that_fails_ends_failed() {
 }
 
 #[tokio::test]
-async fn another_engine_or_a_missing_binary_gives_the_run_back() {
+async fn the_triager_role_on_another_engine_runs_that_engines_binary() {
+    for (engine, program) in [(Engine::Cursor, "cursor"), (Engine::Codex, "codex"), (Engine::Pi, "pi")] {
+        let other = EngineChoiceConfig {
+            default: Some(engine),
+            ..Default::default()
+        };
+        let mut r = rig(&answer(AGAIN), "", other);
+        let root = r.root.clone();
+        on_every_engine(&mut r.starter.roster, &root);
+        assert_eq!(r.starter.kinds(), vec![RunKind::Look]);
+        let (req, mut s) = request(brief());
+        r.starter.start(req).unwrap();
+        // The stub answers in Claude's format, so only where the session ran is judged, not how it ended.
+        end_of(&mut s.ends).await;
+        assert_ran_on(&root, program);
+    }
+}
+
+#[tokio::test]
+async fn a_missing_binary_gives_the_run_back() {
     let other = EngineChoiceConfig {
         default: Some(Engine::Codex),
         ..Default::default()
     };
-    let r = rig(&answer(AGAIN), "", other);
-    assert!(r.starter.kinds().is_empty());
+    let mut r = rig(&answer(AGAIN), "", other);
+    let gone = r.root.join("nothing-here").to_string_lossy().into_owned();
+    r.starter.roster.env = Env::new(move |k| (k == "RETASKABLE_CODEX").then(|| gone.clone()));
     let (req, _s) = request(brief());
-    assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
+    assert!(r.starter.start(req).unwrap_err().contains("codex binary wasn't found"));
 
     let mut r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
     let gone = r.root.join("nothing-here").to_string_lossy().into_owned();

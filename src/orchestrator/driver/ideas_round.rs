@@ -296,6 +296,7 @@ impl ProjectLoop {
             env: links.env.clone(),
             engine_choice: links.engine_choice.clone(),
             cursor_models: links.cursor_models.clone(),
+            flags: self.flags.clone(),
             machine: links.machine.clone(),
             backlog_url: links.backlog_url.clone(),
             keychain: links.keychain.clone(),

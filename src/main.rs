@@ -367,12 +367,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             // One plan or look at a time on this computer: both runners hold this slot.
             let plan_or_look = orchestrator::slot::Slot::default();
+            // One `engine-placement` answer for the plan and look roster and the piece starter, kept fresh in the
+            // background so a role on another engine is offered a run before any run has asked.
+            let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
+            placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
             let roster = orchestrator::plan_run::Roster {
                 data_dir: dir.to_path_buf(),
                 projects: cfg.projects.clone(),
                 choice: config::engine_choice(cfg, env),
                 env: env.clone(),
                 models: cfg.machine.models,
+                cursor_models: config::cursor_models(cfg, env),
+                flags: placement.clone(),
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
@@ -392,7 +398,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     env: env.clone(),
                     max_turns: cfg.machine.max_turns,
                     models: cfg.machine.models,
-                    flags: Arc::new(retaskable_agent::flags::Flags::from_env()),
+                    flags: placement,
                     machine: link::machine_name(env),
                 }) as Arc<dyn orchestrator::driver::RunStarter>,
             ]
