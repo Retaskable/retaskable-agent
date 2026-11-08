@@ -75,6 +75,12 @@ static MACHINE_WRITE: Mutex<()> = Mutex::new(());
 /// session is scoped, or the `engine-limit-records` flag is Off.
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
     let _ = LIMITS.try_with(|limits| {
+        if engine == EngineId::Claude
+            && limits.week_cutoff()
+            && let Some(usage) = &result.usage
+        {
+            limits.hit_week_cutoff(usage);
+        }
         if !limits.records_any_role() {
             return;
         }
@@ -457,5 +463,31 @@ mod tests {
         end_in_scope(&s, EngineId::Codex, with_tokens(false, 1, 1)).await;
         let text = std::fs::read_to_string(dir.path().join("machine.json")).unwrap();
         assert!(text.contains("network") && text.contains("codexTokens"));
+    }
+
+    #[tokio::test]
+    async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let usage =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.96, "resetsAt": now + 86_400}}});
+        let s = Sessions::default();
+        end_in_scope(&s, EngineId::Claude, ended(false, Some(usage.clone()))).await;
+        assert!(!s.limits().is_limited(EngineId::Claude, Instant::now()), "flag Off");
+        s.limits().set_week_cutoff(true);
+        end_in_scope(&s, EngineId::Cursor, ended(false, Some(usage.clone()))).await;
+        assert!(!s.limits().is_limited(EngineId::Cursor, Instant::now()));
+        end_in_scope(&s, EngineId::Claude, ended(false, Some(usage))).await;
+        let now = Instant::now();
+        assert!(
+            s.limits()
+                .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(86_000))
+        );
+        assert!(
+            !s.limits()
+                .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(86_500))
+        );
     }
 }

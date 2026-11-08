@@ -892,7 +892,13 @@ impl ProjectLoop {
             return None;
         }
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
+        if Self::claim_held_by_sign_out(shared, gate.as_ref())
+            || (gate.is_none()
+                && self.flags.on("weekly-cutoff").await
+                && shared
+                    .engine_limits
+                    .is_limited(crate::engines::EngineId::Claude, std::time::Instant::now()))
+        {
             return None;
         }
         let mut last = None;

@@ -38,6 +38,9 @@ pub struct EngineLimits {
     /// The `engine-limit-records` flag: when On, any session that ends at its engine's limit records it
     /// ([`crate::orchestrator::live::sessions::record_session_end`]), whatever its role.
     any_role: Arc<AtomicBool>,
+    /// The `weekly-cutoff` flag: when On, a Claude session that ends with a usage reading at the weekly cutoff
+    /// limits Claude until the week's reset, whatever its role.
+    week_cutoff: Arc<AtomicBool>,
 }
 
 impl EngineLimits {
@@ -57,6 +60,34 @@ impl EngineLimits {
     /// Turns recording from every role's sessions on or off (the `engine-limit-records` flag).
     pub fn record_any_role(&self, on: bool) {
         self.any_role.store(on, Ordering::Relaxed);
+    }
+
+    /// Turns the weekly cutoff on or off (the `weekly-cutoff` flag).
+    pub fn set_week_cutoff(&self, on: bool) {
+        self.week_cutoff.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the weekly cutoff is on.
+    pub fn week_cutoff(&self) -> bool {
+        self.week_cutoff.load(Ordering::Relaxed)
+    }
+
+    /// Marks Claude limited until the week's reset when `usage` is at the weekly cutoff
+    /// ([`crate::tiers::week_cutoff_until`]); true when it was.
+    pub fn hit_week_cutoff(&self, usage: &serde_json::Value) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let Some(resets_at) =
+            crate::tiers::week_cutoff_until(Some(usage), now, &crate::config::ModelsConfig::default())
+        else {
+            return false;
+        };
+        self.hit(
+            EngineId::Claude,
+            Instant::now() + Duration::from_secs((resets_at - now) as u64),
+        );
+        true
     }
 
     /// Whether sessions of every role record their engine's limit.

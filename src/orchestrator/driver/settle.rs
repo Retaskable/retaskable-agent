@@ -139,19 +139,12 @@ impl ProjectLoop {
         usage: &Value,
         limits: &mut crate::orchestrator::fresh_start::EngineLimits,
     ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        if let Some(resets_at) =
-            crate::tiers::week_cutoff_until(Some(usage), now, &crate::config::ModelsConfig::default())
-        {
+        if limits.hit_week_cutoff(usage) {
             tracing::info!(
                 "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
                 id,
                 crate::config::ModelsConfig::default().week_cutoff_pct
             );
-            let wait = Duration::from_secs((resets_at - now) as u64);
-            limits.hit(crate::engines::EngineId::Claude, Instant::now() + wait);
         }
     }
 
@@ -391,7 +384,9 @@ impl ProjectLoop {
             record.impl_session_id = Some(id);
         }
         let weekly = self.flags.on("weekly-limit-reading").await;
-        if weekly && let Some(usage) = &outcome.usage {
+        if self.flags.on("weekly-cutoff").await
+            && let Some(usage) = &outcome.usage
+        {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
         if let Some(usage) = outcome
