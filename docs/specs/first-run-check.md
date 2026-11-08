@@ -79,7 +79,7 @@ The page of steps (`/start`, nine steps since setup-steps), its badges, its "Che
 - `agent/src/connector.test.ts` (built): no `checks` before the first run, and `hello` again with them once they change.
 - `agent/src/commands.test.ts` (built): `setup_check` answers the checks, before Setup too; a view-only agent refuses it.
 - `agent/src/simpleFlow.test.ts` (built): a trial draft never approves itself; one open at a time, a second answering the first's id, a new one once it's closed.
-- Rust (this agent): `src/setup_check.rs` (section 3.1's checks minus `node` and the terminal lines; `resolve_cursor` lives in `src/engines/resolve.rs`). `src/connector/` sends no `checks` in its hello, since the hub's schema asks for a `node` check this agent doesn't have. The `setup_check` command and the trial plan (3.3) aren't built yet — they land with the cloud link, command handling and an implementer session, not with a drafts module.
+- Rust (this agent): `src/setup_check.rs` (section 3.1's checks minus `node` and the terminal lines; `resolve_cursor` lives in `src/engines/resolve.rs`). `src/connector/` sends no `checks` in its hello, since the hub's schema asks for a `node` check this agent doesn't have. The trial plan (3.3) is built (`src/trial_plan.rs`, `orchestrator/driver/trial.rs`, `orchestrator/trial_host.rs`, below); the `setup_check` command isn't (item `setup-check-command`).
 
 ## 5. Acceptance
 
