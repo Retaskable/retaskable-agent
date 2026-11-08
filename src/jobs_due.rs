@@ -76,6 +76,56 @@ impl DueAsker {
     }
 }
 
+/// Asks only for the project's day (`askDay`): `jobs_due` naming no job. Quiet periods as [`DueAsker`]'s: `DUE_MS`
+/// after an answer, `UNREACHABLE_MS` after a failure, which is logged and gives no day (fail closed).
+pub struct DayAsker {
+    client: Arc<Client>,
+    repo_id: u64,
+    token: Option<String>,
+    now: Box<dyn Fn() -> u64 + Send + Sync>,
+    state: Mutex<State>,
+}
+
+impl DayAsker {
+    pub fn new(
+        client: Arc<Client>,
+        repo_id: u64,
+        token: Option<String>,
+        now: impl Fn() -> u64 + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            client,
+            repo_id,
+            token,
+            now: Box::new(now),
+            state: Mutex::new(State::default()),
+        }
+    }
+
+    /// The project's day, or `None` (asked too recently, an ask still pending, or the store couldn't answer).
+    pub async fn ask(&self) -> Option<String> {
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.pending || (self.now)() < st.quiet_until {
+                return None;
+            }
+            st.pending = true;
+        }
+        let answer = self.client.jobs_due(self.repo_id, self.token.as_deref(), &[]).await;
+        let (day, wait) = match answer {
+            Ok(a) => (Some(a.day), DUE_MS),
+            Err(e) => {
+                tracing::warn!("couldn't ask the store for the project's day: {e}");
+                (None, UNREACHABLE_MS)
+            }
+        };
+        let mut st = self.state.lock().unwrap();
+        st.pending = false;
+        st.quiet_until = (self.now)() + wait;
+        day
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +147,15 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0]["op"], "jobs_due");
         assert_eq!(seen[0]["args"], json!({ "jobs": ["ideas"] }));
+    }
+
+    #[tokio::test]
+    async fn the_day_ask_names_no_job() {
+        let (base, seen) = store(200, json!({ "value": { "day": "2026-11-03", "due": [] } })).await;
+        let a = DayAsker::new(Arc::new(Client::new(base)), 7, Some("t".into()), || 0);
+        assert_eq!(a.ask().await.as_deref(), Some("2026-11-03"));
+        assert_eq!(seen.lock().unwrap()[0]["args"], json!({ "jobs": [] }));
+        assert_eq!(a.ask().await, None, "quiet after an answer");
     }
 
     #[tokio::test]
