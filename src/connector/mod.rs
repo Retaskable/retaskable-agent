@@ -420,7 +420,10 @@ async fn session(
     let mut live_due: Option<tokio::time::Instant> = None;
     let mut trial_saved = crate::store::subscribe_trial_changes();
     trial_saved.mark_unchanged();
-    let mut trial_sent = view.trial_json(project, &cloud.dir);
+    let mut trial_sent = (
+        view.trial_json(project, &cloud.dir),
+        view.smoke_json(project, &cloud.dir),
+    );
     let mut gallery_status = galleries::subscribe_status_changes();
     gallery_status.mark_unchanged();
     let mut pending = HashMap::new();
@@ -459,7 +462,7 @@ async fn session(
             },
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = trial_saved.changed() => {
-                let now = view.trial_json(project, &cloud.dir);
+                let now = (view.trial_json(project, &cloud.dir), view.smoke_json(project, &cloud.dir));
                 if now != trial_sent {
                     trial_sent = now;
                     Some(view.snapshot(project, &cloud.dir))

@@ -24,7 +24,7 @@ pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
 pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
 use crate::paths;
-use crate::store::Store;
+use crate::store::{SmokeStatus, Store};
 use crate::text::truncate;
 use crate::trial_plan::TrialState;
 
@@ -455,7 +455,23 @@ impl AgentView {
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
         }
+        if let Some(smoke) = self.smoke_json(project, data_dir) {
+            state["smoke"] = smoke;
+        }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `smoke` (agent/09.2): the project's `State.smoke`, with `snapshot-reporting` On. `tail` only
+    /// goes up for a failure or timeout; none when the project has no smoke.
+    pub fn smoke_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
+        if !self.settings.snapshot_reporting_on() || !self.projects.iter().any(|p| p.id == project) {
+            return None;
+        }
+        let mut smoke = Store::load(&paths::project_dir(data_dir, project)).ok()?.smoke()?;
+        if !matches!(smoke.status, SmokeStatus::Failed | SmokeStatus::Timeout) {
+            smoke.tail = None;
+        }
+        serde_json::to_value(smoke).ok()
     }
 
     /// The snapshot's `trial` (first-run-check.md section 3.3, "Reporting it"): the project's trial
@@ -817,6 +833,38 @@ mod tests {
         assert_eq!(u["tier"], "opus");
         assert!(u["resetsAt"].is_string() && u["weekResetsAt"].is_string());
         assert_eq!(usage(false), json!({}), "flag Off");
+    }
+
+    #[test]
+    fn snapshot_reports_the_smoke_line_with_a_tail_only_for_a_failure_or_timeout() {
+        use crate::store::SmokeState;
+        let dir = tempfile::tempdir().unwrap();
+        let smoke = |dir: &Path| reporting_view(true).snapshot("a", dir)["state"].get("smoke").cloned();
+        assert_eq!(smoke(dir.path()), None, "no smoke");
+        let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
+        let mut put = |status, tail: Option<&str>| {
+            let s = SmokeState {
+                sha: "abc".into(),
+                status,
+                at: "2026-11-08T00:00:00.000Z".into(),
+                url: Some("https://staging.example.com".into()),
+                tail: tail.map(String::from),
+            };
+            store.save_smoke(&s).unwrap();
+        };
+        put(SmokeStatus::Passed, Some("noise"));
+        assert_eq!(
+            smoke(dir.path()),
+            Some(
+                json!({ "sha": "abc", "status": "passed", "at": "2026-11-08T00:00:00.000Z", "url": "https://staging.example.com" })
+            )
+        );
+        put(SmokeStatus::Failed, Some("boom"));
+        assert_eq!(smoke(dir.path()).unwrap()["tail"], "boom");
+        let off = reporting_view(false).snapshot("a", dir.path())["state"]
+            .get("smoke")
+            .cloned();
+        assert_eq!(off, None, "flag Off");
     }
 
     #[test]
