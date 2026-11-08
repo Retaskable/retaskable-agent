@@ -216,6 +216,11 @@ pub fn lane_path(worktrees_dir: &Path, lane: u32) -> PathBuf {
     worktrees_dir.join(format!("lane-{lane}"))
 }
 
+/// The `k` of a `lane-<k>` folder.
+pub fn lane_number(dir: &Path) -> Option<u32> {
+    dir.file_name()?.to_str()?.strip_prefix("lane-")?.parse().ok()
+}
+
 fn ensure_worktree(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Result<()> {
     if !is_worktree(dir) {
         if dir.exists() {

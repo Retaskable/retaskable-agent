@@ -117,9 +117,11 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
         }
     });
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let (sessions, info) = (job.sessions.clone(), job.info.clone());
     let decided = decide(&looker, &brief, |spec| async move {
         let engine = engine_of(Some(job.engine))?;
-        run_session_tracked(engine.as_ref(), &job.bin, &spec, "look", Some(&sink), quiet, Some(tx)).await
+        let run = run_session_tracked(engine.as_ref(), &job.bin, &spec, "look", Some(&sink), quiet, Some(tx));
+        sessions.track(info, run).await
     })
     .await;
     match decided.result {

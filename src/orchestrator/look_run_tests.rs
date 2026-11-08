@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::super::fake_session_tests::{
-    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster,
+    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster, rows_once_running,
 };
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
@@ -88,6 +88,25 @@ async fn until_free(r: &Rig) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn a_look_is_listed_while_it_runs_and_not_after() {
+    let r = rig(&answer(AGAIN), "sleep 1", EngineChoiceConfig::default());
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    let rows = rows_once_running(&r.starter.roster.sessions).await;
+    assert_eq!(rows.len(), 1);
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "pc1", Role::Triager)
+    );
+    assert_eq!((info.title.as_deref(), info.lane), (Some("Show the thing"), None));
+    assert_eq!(info.engine, crate::engines::EngineId::Claude);
+    assert!(!info.model.is_empty());
+    end_of(&mut s.ends).await;
+    assert!(r.starter.roster.sessions.snapshot().is_empty());
 }
 
 #[tokio::test]

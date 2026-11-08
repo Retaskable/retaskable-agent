@@ -116,6 +116,24 @@ fn origin_has(rig: &Rig, branch: &str) -> bool {
 const BRANCH: &str = "retaskable/pc1-show-the-thing";
 
 #[tokio::test]
+async fn a_build_run_is_listed_on_its_lane_while_it_runs_and_not_after() {
+    let r = rig(&[&format!("sleep 1; {COMMIT}")], &answer("pr_opened", ""));
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let rows = crate::orchestrator::fake_session_tests::rows_once_running(&r.starter.sessions).await;
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "pc1", Role::Implementer)
+    );
+    assert_eq!((info.title.as_deref(), info.lane), (Some("Show the thing"), Some(1)));
+    assert_eq!(info.engine, EngineId::Claude);
+    assert!(!info.model.is_empty());
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(r.starter.sessions.snapshot().is_empty());
+}
+
+#[tokio::test]
 async fn a_build_run_opens_the_change_and_ends_pr_opened() {
     let r = rig(&[COMMIT], &answer("pr_opened", ""));
     let (req, mut s) = request(&r, RunKind::Build, piece());

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use crate::engines::choose::Role;
-use crate::engines::engine::EngineId;
+use crate::engines::engine::{CursorOptions, EngineId};
 
 /// What a person registers a session as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,17 @@ pub struct SessionInfo {
     pub lane: Option<u32>,
     pub engine: EngineId,
     pub model: String,
+}
+
+/// The model a session runs on: `model` (a Claude tier), or on Cursor its own model name ("auto" when none).
+pub fn model_name(engine: EngineId, model: &str, cursor: Option<&CursorOptions>) -> String {
+    if engine != EngineId::Cursor {
+        return model.to_string();
+    }
+    cursor
+        .and_then(|c| c.model.clone())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "auto".to_string())
 }
 
 /// One running session, as of the snapshot.
@@ -67,6 +78,12 @@ impl Sessions {
             id,
             stamp,
         }
+    }
+
+    /// Lists `info` while `fut` runs, and updates its quiet time as the session prints; the row goes when
+    /// `fut` ends, fails or is dropped.
+    pub async fn track<F: Future>(&self, info: SessionInfo, fut: F) -> F::Output {
+        self.register(info).scope(fut).await
     }
 
     /// Lists a session named for what `spec` runs, with no lane (an ask, a draft, a scout, a triage or a round); it goes when the guard drops.

@@ -380,6 +380,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 models: cfg.machine.models,
                 cursor_models: config::cursor_models(cfg, env),
                 flags: placement.clone(),
+                sessions: live.sessions().clone(),
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
@@ -449,6 +450,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 cfg.machine.models,
                 cfg.machine.max_resume_context_tokens,
                 config::cursor_models(cfg, env),
+                live.sessions().clone(),
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,

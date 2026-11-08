@@ -16,6 +16,7 @@ use crate::engines::{
     EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
 };
 use crate::implementer::new_session_id;
+use crate::orchestrator::live::sessions::{SessionInfo, model_name};
 use crate::tiers::{implementer_tier, mid_tier, top_tier};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
@@ -33,6 +34,19 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
         .chain([lanes::base_checkout_path(&worktrees)])
         .find(|d| d.is_dir())
         .unwrap_or_else(|| PathBuf::from(&project.repo_path))
+}
+
+/// The row a triager session (or its second look) lists itself as.
+fn triager_info(project: &str, item: &str, lane: Option<u32>, placed: &Placement, model: &str) -> SessionInfo {
+    SessionInfo {
+        project: project.to_string(),
+        item_id: item.to_string(),
+        title: None,
+        role: Role::Triager,
+        lane,
+        engine: placed.engine,
+        model: model_name(placed.engine, model, placed.cursor.as_ref()),
+    }
 }
 
 impl ClaudeStarter {
@@ -95,7 +109,7 @@ impl ClaudeStarter {
         ))
         .to_string();
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let listed_as = (project_id.clone(), item_id.clone());
+        let info = triager_info(&project_id, &item_id, lane, &placed, &model);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -121,17 +135,9 @@ impl ClaudeStarter {
                 let mut cut = (false, false);
                 let seen = &mut cut;
                 let decided = decide(&triager, &context, |spec| async move {
-                    let listed = sessions.register_spec(&listed_as.0, &listed_as.1, None, Role::Triager, &spec);
-                    let r = listed
-                        .scope(run_session(
-                            engine?.as_ref(),
-                            &placed.bin,
-                            &spec,
-                            &session_id,
-                            Some(&sink),
-                            quiet,
-                        ))
-                        .await?;
+                    let engine = engine?;
+                    let run = run_session(engine.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet);
+                    let r = sessions.track(info, run).await?;
                     *seen = (r.subtype == "error_max_budget_usd", r.limit_hit);
                     Ok(r)
                 })
@@ -208,7 +214,7 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let listed_as = (project_id.clone(), item_id.clone());
+        let info = triager_info(&project_id, &item_id, lane, &placed, top_tier());
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -237,17 +243,9 @@ impl ClaudeStarter {
                 };
                 let engine = engine_of(Some(placed.engine));
                 let checked = check(&second, &ctx, |spec| async move {
-                    let listed = sessions.register_spec(&listed_as.0, &listed_as.1, None, Role::Triager, &spec);
-                    listed
-                        .scope(run_session(
-                            engine?.as_ref(),
-                            &placed.bin,
-                            &spec,
-                            &session_id,
-                            Some(&sink),
-                            quiet,
-                        ))
-                        .await
+                    let engine = engine?;
+                    let run = run_session(engine.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet);
+                    sessions.track(info, run).await
                 })
                 .await;
                 checked.result.map(|r| (r.agree, r.reason, r.instructions))

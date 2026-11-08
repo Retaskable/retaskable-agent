@@ -21,6 +21,7 @@ use crate::engines::{
     run_session_tracked,
 };
 use crate::env::Env;
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::process_tree::ProcessTree;
 use crate::prompt::render_prompt;
 use crate::runs::winding_down;
@@ -219,6 +220,8 @@ pub struct Roster {
     pub cursor_models: CursorModels,
     /// `engine-placement`: Off, only a role on Claude offers a run, as before.
     pub flags: Arc<crate::flags::Flags>,
+    /// The sessions running now: a plan or look lists itself while it runs.
+    pub sessions: Sessions,
 }
 
 /// What a plan or look session runs with.
@@ -229,6 +232,9 @@ pub(super) struct Job {
     pub bin: PathBuf,
     pub cursor: Option<CursorOptions>,
     pub model: String,
+    pub sessions: Sessions,
+    /// The row the session lists itself as.
+    pub info: SessionInfo,
 }
 
 impl Roster {
@@ -268,7 +274,18 @@ impl Roster {
         let guard = slot
             .take()
             .ok_or("a plan or look run is already running on this computer")?;
+        let info = SessionInfo {
+            project: request.project.clone(),
+            item_id: piece_id(&request.piece).to_string(),
+            title: Some(request.piece.title.clone()),
+            role,
+            lane: None,
+            engine: placed.engine,
+            model: model_name(placed.engine, &model, placed.cursor.as_ref()),
+        };
         let job = Job {
+            sessions: self.sessions.clone(),
+            info,
             data_dir: self.data_dir.clone(),
             project,
             engine: placed.engine,
@@ -387,11 +404,13 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
         }
     });
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
-    let ran = async {
-        let engine = engine_of(Some(job.engine))?;
-        run_session_tracked(engine.as_ref(), &job.bin, &spec, "plan", Some(&sink), quiet, Some(tx)).await
-    }
-    .await;
+    let ran = job
+        .sessions
+        .track(job.info.clone(), async {
+            let engine = engine_of(Some(job.engine))?;
+            run_session_tracked(engine.as_ref(), &job.bin, &spec, "plan", Some(&sink), quiet, Some(tx)).await
+        })
+        .await;
     if request.stop.stopped() || cut.is_cut() {
         return None;
     }

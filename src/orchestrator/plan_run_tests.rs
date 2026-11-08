@@ -6,7 +6,7 @@ use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
 use crate::orchestrator::driver::{RunEndSender, RunProcesses};
 use crate::orchestrator::fake_session_tests::{
-    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster,
+    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster, rows_once_running,
 };
 use crate::orchestrator::look_run::LookRuns;
 
@@ -91,6 +91,36 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn a_plan_is_listed_while_it_runs_and_not_after() {
+    let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    let rows = rows_once_running(&r.starter.roster.sessions).await;
+    assert_eq!(rows.len(), 1);
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "it1", Role::Planner)
+    );
+    assert_eq!((info.title.as_deref(), info.lane), (Some("Add the widget"), None));
+    assert_eq!(
+        (info.engine, info.model.as_str()),
+        (EngineId::Claude, tiers::chore_tier())
+    );
+    end_of(&mut s.ends).await;
+    assert!(r.starter.roster.sessions.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn a_plan_that_fails_to_start_leaves_no_row() {
+    let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
+    let (mut req, _s) = request(brief());
+    req.project = "nope".into();
+    assert!(r.starter.start(req).is_err());
+    assert!(r.starter.roster.sessions.snapshot().is_empty());
 }
 
 #[tokio::test]
