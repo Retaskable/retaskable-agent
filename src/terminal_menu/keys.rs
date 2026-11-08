@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn a_bad_csi_byte_keeps_the_keys_after_it() {
         assert_eq!(keys(b"\x1b[\x03"), vec![Key::CtrlC]);
-        assert_eq!(keys(b"\x1b[\x01q"), vec![Key::Char('q')]);
+        assert_eq!(keys(b"\x1b[1\x03\r"), vec![Key::CtrlC, Key::Enter]);
     }
 
     #[test]
