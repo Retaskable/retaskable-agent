@@ -438,3 +438,15 @@ fn cursor_models_env_an_invalid_name_falls_through_to_the_file() {
     let pair = Env::from_pairs([("RETASKABLE_CURSOR_MODELS", "top=--force")]);
     assert_eq!(cursor_models(&cfg, &pair).top, Some("sonnet".to_string()));
 }
+
+#[test]
+fn week_cutoff_pct_defaults_to_95_and_parses_from_machine_config() {
+    let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
+    assert_eq!(read(serde_json::json!({})).models.week_cutoff_pct, 95);
+    assert_eq!(
+        read(serde_json::json!({ "models": { "weekCutoffPct": 80 } }))
+            .models
+            .week_cutoff_pct,
+        80
+    );
+}
