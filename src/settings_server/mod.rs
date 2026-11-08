@@ -27,7 +27,7 @@ use crate::tags;
 
 mod auth;
 mod first_run;
-mod save;
+pub(crate) mod save;
 mod status;
 use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
 use save::{SettingsUpdate, engine_choice_json, save_error_response};
@@ -282,7 +282,11 @@ async fn post_settings(
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
-    match settings.apply(&update) {
+    let saves = save::Saves {
+        dir: &settings.dir,
+        env: &settings.env,
+    };
+    match saves.apply(&update) {
         Ok(()) => Json(json!({ "saved": true })).into_response(),
         Err(e) => save_error_response(e),
     }

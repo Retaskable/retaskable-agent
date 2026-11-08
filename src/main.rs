@@ -681,12 +681,36 @@ async fn link_command(
                 version.to_string(),
             )
             .await;
+            ask_setup_questions(cfg, dir, env, build).await;
             0
         }
         Err(e) => {
             eprintln!("{e}");
             1
         }
+    }
+}
+
+/// agent-settings.md section 5: after linking, with someone at a terminal, asks the computer-only
+/// settings. Behind the `machine-settings` flag (Off keeps today's behaviour: nothing is asked).
+async fn ask_setup_questions(cfg: &config::ConfigFile, dir: &Path, env: &Env, build: Option<&release::Build>) {
+    use std::io::IsTerminal;
+    if !retaskable_agent::flags::Flags::from_env().on("machine-settings").await {
+        return;
+    }
+    let default_port = release::default_port(build);
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut out = std::io::stdout();
+    let mut echo = retaskable_agent::setup_questions::terminal_echo;
+    let mut setup = retaskable_agent::setup_questions::Setup {
+        terminal: stdin.is_terminal(),
+        input: &mut input,
+        out: &mut out,
+        set_echo: &mut echo,
+    };
+    if let Err(e) = setup.run(dir, cfg, env, default_port) {
+        eprintln!("Couldn't save the settings: {e:#}");
     }
 }
 
