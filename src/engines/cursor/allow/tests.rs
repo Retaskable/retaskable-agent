@@ -66,11 +66,17 @@ fn refusals_have_their_reasons() {
             Some(format!("{w} writes outside the workspace"))
         );
     }
-    assert_eq!(allow_entry_problem("Shell(RM)").as_deref(), Some("rm is always denied"));
+    assert_eq!(allow_entry_problem("Shell(RM)").as_deref(), Some("RM is always denied"));
     assert_eq!(
         allow_entry_problem("Shell(/bin/rm)").as_deref(),
-        Some("rm is always denied")
+        Some("/bin/rm is always denied")
     );
+    for e in ["Shell()", "Read()", "Write()"] {
+        assert_eq!(
+            allow_entry_problem(e),
+            Some(format!("{e} isn't Shell(…), Read(…) or Write(…)"))
+        );
+    }
     assert_eq!(
         allow_entry_problem("make").as_deref(),
         Some("make isn't Shell(…), Read(…) or Write(…)")
@@ -90,4 +96,11 @@ fn entries_split_on_commas_and_lines() {
         split_allow_entries("Shell(make), Read(a)\n\n Write(b) ,"),
         ["Shell(make)", "Read(a)", "Write(b)"]
     );
+}
+
+#[test]
+fn quoted_runs_stay_one_word() {
+    assert_eq!(command_program(r#"FOO="a b" cargo test"#).as_deref(), Some("cargo"));
+    assert_eq!(command_program(r#""./my tool" build"#).as_deref(), Some("./my tool"));
+    assert_eq!(command_program("1A=x make").as_deref(), Some("make"));
 }

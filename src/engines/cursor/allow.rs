@@ -2,12 +2,16 @@
 //! types (docs/specs/engines/06-permissions-the-allowlist.md sections 6.4 and 6.5):
 //! `commandProgram`, `commandShells`, `allowEntryProblem` in `shared/cursorAllow.ts`.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 use crate::config::{CheckConfig, GalleryConfig};
 
 use super::allowlist::{DENY, outside_write};
 
 /// Shells and launchers: allowing one would allow every command.
-const LAUNCHERS: [&str; 11] = [
+const LAUNCHERS: [&str; 12] = [
     "sh",
     "bash",
     "zsh",
@@ -19,6 +23,7 @@ const LAUNCHERS: [&str; 11] = [
     "pwsh",
     "env",
     "xargs",
+    "rtk",
 ];
 
 /// A program's base name, without `.exe`, lower case; split on both `/` and `\` on any host.
@@ -38,16 +43,19 @@ fn is_launcher(program: &str) -> bool {
     LAUNCHERS.contains(&base_name(program).as_str())
 }
 
-/// The first word of `cmd` that isn't a `NAME=value` assignment, quotes stripped.
+/// The first word of `cmd` that isn't a `NAME=value` assignment, with its outer quotes stripped.
+/// A quoted run stays part of one word, so `FOO="a b" cargo test` gives `cargo`.
 pub(super) fn command_program(cmd: &str) -> Option<String> {
-    cmd.split_whitespace()
-        .find(|w| {
-            !w.split_once('=').is_some_and(|(n, _)| {
-                n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
+    static WORD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?:[^\s"']+|"[^"]*"|'[^']*')+"#).expect("word pattern"));
+    static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w+=").expect("assignment pattern"));
+    WORD.find_iter(cmd)
+        .map(|m| m.as_str())
+        .find(|w| !ASSIGNMENT.is_match(w))
+        .map(|w| {
+            let w = w.strip_prefix(['"', '\'']).unwrap_or(w);
+            w.strip_suffix(['"', '\'']).unwrap_or(w).to_string()
         })
-        .map(|w| w.replace(['"', '\''], ""))
         .filter(|w| !w.is_empty())
 }
 
@@ -77,19 +85,25 @@ pub(super) fn allow_entry_problem(entry: &str) -> Option<String> {
     if entry.starts_with("Shell(*") {
         return Some("Shell(*) would allow every command".to_string());
     }
-    if let Some(program) = entry.strip_prefix("Shell(").and_then(|r| r.strip_suffix(')')) {
+    let inner = |kind: &str| {
+        entry
+            .strip_prefix(kind)
+            .and_then(|r| r.strip_suffix(')'))
+            .filter(|r| !r.is_empty())
+    };
+    if let Some(program) = inner("Shell(") {
         if is_launcher(program) {
             return Some(format!("{entry} would allow every command"));
         }
         if is_denied(program) {
-            return Some(format!("{} is always denied", base_name(program)));
+            return Some(format!("{program} is always denied"));
         }
         return None;
     }
-    if entry.starts_with("Write(") && entry.ends_with(')') {
+    if inner("Write(").is_some() {
         return outside_write(entry).then(|| format!("{entry} writes outside the workspace"));
     }
-    if entry.starts_with("Read(") && entry.ends_with(')') {
+    if inner("Read(").is_some() {
         return None;
     }
     Some(format!("{entry} isn't Shell(…), Read(…) or Write(…)"))
