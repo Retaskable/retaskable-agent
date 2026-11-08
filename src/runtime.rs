@@ -196,7 +196,7 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
 
 /// The setup checks, plus the Docker line (agent-ci.md section 3.6) only with the `agent-ci` flag On.
 async fn checks_with_docker(env: &Env, flags: &crate::flags::Flags) -> setup_check::SetupChecks {
-    let mut checks = setup_check::run_setup_checks(env).await;
+    let mut checks = setup_check::run_setup_checks(env, flags.on("engine-setup-probes").await).await;
     if flags.on(crate::hello_settings::CI_FLAG).await {
         let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
         let image = image.as_deref().map(str::trim).filter(|i| !i.is_empty());
