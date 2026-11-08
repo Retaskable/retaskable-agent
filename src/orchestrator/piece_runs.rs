@@ -387,15 +387,17 @@ async fn session(
     let now = crate::telemetry::now_ms() / 1000;
     // With `chore-rotation` Off, a chore piece is run like any other.
     let chore = chore_for(job).await;
-    // Held until the session ends. Only a Claude session behind the `local-tier-ladder` flag may use the model.
+    // Held until the session ends. Only a Claude session may use the model: the free-slot grab for a chore is behind
+    // `local-chores-scouts`, the fallback rows behind `local-tier-ladder`.
     // Never on a resume (a gate round's fix): an Anthropic session isn't resumed against the local server.
-    let ladder =
-        job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && crate::tiers::local_ladder_on();
+    let flags = (crate::tiers::local_chores_scouts_on(), crate::tiers::local_ladder_on());
+    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && (flags.0 || flags.1);
     let (tier, local_run) = tier_for(
         chore.as_ref(),
         now,
         &job.models,
-        ladder.then_some(&job.local),
+        may.then_some(&job.local),
+        flags,
         job.wants_local,
         !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
     )

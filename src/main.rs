@@ -427,6 +427,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             placement.keep_fresh("weekly-cutoff", std::time::Duration::from_secs(30));
             placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
             placement.keep_fresh("local-tier-ladder", std::time::Duration::from_secs(30));
+            placement.keep_fresh("local-chores-scouts", std::time::Duration::from_secs(30));
             placement.keep_fresh("local-one-slot", std::time::Duration::from_secs(30));
             placement.keep_fresh("local-limit-fallback", std::time::Duration::from_secs(30));
             placement.keep_fresh("implementer-step-up", std::time::Duration::from_secs(30));
