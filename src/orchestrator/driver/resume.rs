@@ -39,6 +39,7 @@ impl ProjectLoop {
             return;
         }
         let fall_over = self.flags.on("engine-fall-over").await;
+        let fallback = Self::limit_fallback(shared);
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
             if let Some(RunRecord {
@@ -50,9 +51,17 @@ impl ProjectLoop {
             }) = record
             {
                 let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
-                let takeover = self.takeover(pool, shared, impl_session_engine, fall_over);
+                // Section 7.1: a session that started on the local model stays local, and Claude's limit doesn't hold it
+                // (`local-limit-fallback`). It waits for the slot in its own start; no other engine takes it over.
+                let local = fallback
+                    && impl_session_engine == EngineId::Claude
+                    && !self.fresh_launched.contains(&id)
+                    && starter.started_local(&self.id, &id, &session);
+                let takeover = (!local)
+                    .then(|| self.takeover(pool, shared, impl_session_engine, fall_over))
+                    .flatten();
                 let reason = fresh_for_engine(impl_session_engine, lane_now, takeover);
-                if let Some(gate) = &gate {
+                if let Some(gate) = gate.as_ref().filter(|_| !local) {
                     // The engine its session runs on now: the takeover's, or the one it started on.
                     let on = if self.fresh_launched.contains(&id) {
                         gate.engine_now(self, shared, lane)

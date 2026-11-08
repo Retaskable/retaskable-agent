@@ -32,6 +32,10 @@ impl SessionStarter for Fake {
         crate::orchestrator::session::model_has_room(self.slots.lock().unwrap().as_ref(), usage, now, &models, pending)
     }
 
+    fn started_local(&self, _project: &str, _item_id: &str, _session: &str) -> bool {
+        self.started_local.load(Ordering::SeqCst)
+    }
+
     fn active(&self) -> u32 {
         self.active.load(Ordering::SeqCst)
     }

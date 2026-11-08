@@ -507,6 +507,8 @@ struct Fake {
     /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
     games: Mutex<Vec<Game>>,
     triage: triage::Triager,
+    /// Says every resumed session started on the local model.
+    started_local: AtomicBool,
     /// The model slots `implementer_may_start` is asked against; none is no cap.
     slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
 }
