@@ -102,6 +102,33 @@ pub struct Connector {
     cloud: Arc<Cloud>,
 }
 
+/// A cloud's link state and `forget`, shareable while the [`Connector`] itself is stopped by its owner.
+#[derive(Clone)]
+pub struct CloudHandle {
+    tokens: Arc<DeviceTokens>,
+    cloud: Arc<Cloud>,
+}
+
+impl CloudHandle {
+    pub fn connected(&self) -> CloudLink {
+        if self.tokens.unlinked_on_site() {
+            CloudLink::UnlinkedOnTheWebsite
+        } else if !self.tokens.linked() {
+            CloudLink::NotLinked // also right after a forget, before its sockets have closed
+        } else if self.cloud.open.load(Ordering::SeqCst) > 0 {
+            CloudLink::Connected
+        } else {
+            CloudLink::Offline
+        }
+    }
+
+    pub fn forget(&self) -> anyhow::Result<()> {
+        let deleted = self.tokens.forget();
+        self.cloud.forgotten.send_modify(|n| *n += 1);
+        deleted
+    }
+}
+
 /// What every connection to one cloud shares.
 struct Cloud {
     /// For the log: "cloud (staging)".
@@ -184,24 +211,22 @@ impl Connector {
 
     /// This cloud's link state, as the tray shows it (connector.ts `connected`).
     pub fn connected(&self) -> CloudLink {
-        if self.tokens.unlinked_on_site() {
-            CloudLink::UnlinkedOnTheWebsite
-        } else if !self.tokens.linked() {
-            CloudLink::NotLinked // also right after a forget, before its sockets have closed
-        } else if self.cloud.open.load(Ordering::SeqCst) > 0 {
-            CloudLink::Connected
-        } else {
-            CloudLink::Offline
-        }
+        self.handle().connected()
     }
 
     /// Deletes this cloud's refresh token, closes its connections and drops a token refresh under way without
     /// storing what it gets. The connections go on waiting, unlinked, so a later link reconnects them (connector.ts
     /// `forget`). Other clouds' connectors are untouched.
     pub fn forget(&self) -> anyhow::Result<()> {
-        let deleted = self.tokens.forget();
-        self.cloud.forgotten.send_modify(|n| *n += 1);
-        deleted
+        self.handle().forget()
+    }
+
+    /// What the tray holds of this connector: its link state and `forget`, while [`Connector::stop`] stays here.
+    pub fn handle(&self) -> CloudHandle {
+        CloudHandle {
+            tokens: self.tokens.clone(),
+            cloud: self.cloud.clone(),
+        }
     }
 
     /// Stops every connection, once a token refresh under way has landed (up to `wait`): stopping in the middle of
