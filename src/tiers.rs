@@ -626,6 +626,7 @@ mod tests {
             branch: None,
             kind: None,
             milestone: None,
+            draft_id: None,
             reopened: reopened.then(|| crate::backlog::Reopened {
                 notes: Some("n".into()),
                 at: Some("2026-10-29T00:00:00Z".into()),

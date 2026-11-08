@@ -961,6 +961,7 @@ mod cursor_limit;
 mod deprecations;
 mod drafts;
 mod fix_main;
+mod follow;
 mod idea_accept;
 mod ideas;
 mod ideas_daily;

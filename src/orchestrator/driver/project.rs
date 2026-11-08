@@ -295,6 +295,8 @@ pub struct ProjectLoop {
     pub(super) running: Running,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
+    /// What the chat was told about approved drafts that is still waiting on staging.
+    pub(super) follow: super::follow::Follow,
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
@@ -394,6 +396,7 @@ impl ProjectLoop {
             repo: None,
             running: Running::default(),
             seen: report::Seen::default(),
+            follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
             ideas_round_running: Arc::new(AtomicBool::new(false)),
             vet_daily: Arc::new(std::sync::Mutex::new(super::vet_daily::State::from_record(vet))),
