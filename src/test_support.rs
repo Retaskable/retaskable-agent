@@ -49,6 +49,38 @@ pub(crate) fn triage_context(timeline: Vec<String>, bug_title: &str) -> TriageCo
 /// Once a spawn has succeeded nothing has the file open for writing and nothing will again, so
 /// this runs the file once, retrying while it's busy, and tests can then spawn it freely. The fake
 /// programs tests write are all harmless to run with no arguments.
+/// Stub binaries for the four engines in `root`, each logging `<program> <args>` to `calls.txt`, running `step(program)`
+/// and then printing `root/<program>.out` (which `out(program)` writes). Programs in `missing` get no stub. Gives each
+/// program's environment variable and path.
+#[cfg(unix)]
+pub(crate) fn engine_stubs(
+    root: &Path,
+    missing: &[&str],
+    step: impl Fn(&str) -> String,
+    out: impl Fn(&str) -> String,
+) -> Vec<(&'static str, String)> {
+    let mut vars = Vec::new();
+    for (var, program) in [
+        ("RETASKABLE_CLAUDE", "claude"),
+        ("RETASKABLE_CURSOR", "cursor-agent"),
+        ("RETASKABLE_PI", "pi"),
+        ("RETASKABLE_CODEX", "codex"),
+    ] {
+        let bin = root.join(format!("{program}.sh"));
+        if !missing.contains(&program) {
+            let script = format!(
+                "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\n{step}\ncat '{r}/{program}.out'\n",
+                r = root.display(),
+                step = step(program)
+            );
+            std::fs::write(root.join(format!("{program}.out")), out(program)).unwrap();
+            write_executable(&bin, &script);
+        }
+        vars.push((var, bin.to_string_lossy().into_owned()));
+    }
+    vars
+}
+
 pub(crate) fn write_executable(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
     #[cfg(unix)]

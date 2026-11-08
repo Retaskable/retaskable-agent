@@ -18,7 +18,7 @@ use crate::orchestrator::driver::{
 use crate::orchestrator::session::ClaudeStarter;
 use crate::orchestrator::session::tests::project_in;
 use crate::triage::TriageContext;
-use crate::view::{AgentView, AskCommand};
+use crate::view::AskCommand;
 
 const ANSWER: &str = r#"{"answer":"Step 5 is waiting.","actions":[]}"#;
 const DECIDED: &str = r#"{"decision":"skip","reason":"Not needed."}"#;
@@ -61,24 +61,7 @@ fn rig(engine: Engine, out: &str, missing: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
-    let mut vars = Vec::new();
-    for (var, program) in [
-        ("RETASKABLE_CLAUDE", "claude"),
-        ("RETASKABLE_CURSOR", "cursor-agent"),
-        ("RETASKABLE_PI", "pi"),
-        ("RETASKABLE_CODEX", "codex"),
-    ] {
-        let bin = root.join(format!("{program}.sh"));
-        if !missing.contains(&program) {
-            let script = format!(
-                "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\ncat '{r}/{program}.out'\n",
-                r = root.display()
-            );
-            std::fs::write(root.join(format!("{program}.out")), stream(program, out)).unwrap();
-            crate::test_support::write_executable(&bin, &script);
-        }
-        vars.push((var, bin.to_string_lossy().into_owned()));
-    }
+    let vars = crate::test_support::engine_stubs(&root, missing, |_| String::new(), |p| stream(p, out));
     let mut choice = EngineChoiceConfig::default();
     choice.roles.chat = Some(engine);
     Rig {
@@ -122,20 +105,7 @@ async fn answer(rig: &Rig, placement: bool) -> String {
         ModelsConfig::default(),
         rig.models.clone(),
         0.0,
-        Arc::new(AgentView {
-            machine: "pc".into(),
-            tags: vec![],
-            projects: vec![],
-            version: "9.9.9".into(),
-            lanes: 2,
-            chore_lane: None,
-            lane_sizes: Default::default(),
-            paused: Default::default(),
-            item_commands: Default::default(),
-            work: Default::default(),
-            restart: Default::default(),
-            settings: Default::default(),
-        }),
+        Arc::new(crate::ask::perform::tests::view("p", rig.root.clone(), "")),
     );
     let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let job = AskJob {

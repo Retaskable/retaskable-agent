@@ -24,25 +24,12 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
-    std::fs::write(root.join("out.jsonl"), FINISHED).unwrap();
-    let mut vars = Vec::new();
-    for (var, program) in [
-        ("RETASKABLE_CLAUDE", "claude"),
-        ("RETASKABLE_CURSOR", "cursor-agent"),
-        ("RETASKABLE_PI", "pi"),
-        ("RETASKABLE_CODEX", "codex"),
-    ] {
-        let bin = root.join(format!("{program}.sh"));
-        if !missing.contains(&program) {
-            let step = if program == "claude" { claude_step } else { "" };
-            let script = format!(
-                "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\n{step}\ncat '{r}/out.jsonl'\n",
-                r = root.display()
-            );
-            crate::test_support::write_executable(&bin, &script);
-        }
-        vars.push((var, bin.to_string_lossy().into_owned()));
-    }
+    let mut vars = crate::test_support::engine_stubs(
+        &root,
+        missing,
+        |p| if p == "claude" { claude_step } else { "" }.to_string(),
+        |_| FINISHED.to_string(),
+    );
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
     vars.push(("RETASKABLE_GH", gh.to_string_lossy().into_owned()));
