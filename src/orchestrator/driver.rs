@@ -29,6 +29,7 @@ mod land;
 mod lane_play;
 mod main_sync;
 pub use lane_play::LanePlay;
+mod claim;
 mod ideas_daily;
 mod ideas_round;
 mod machine;
