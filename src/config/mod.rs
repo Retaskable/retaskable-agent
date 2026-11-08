@@ -21,11 +21,11 @@ use serde_json::{Map, Value, json};
 pub use concurrency::{AutoConcurrency, ModelConcurrency};
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
-    ModelsConfig, RoleEngines, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
+    ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
 };
 pub(crate) use machine::{
-    lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
-    valid_model_name,
+    ci_slots_in_range, lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name,
+    valid_local_url, valid_model_name,
 };
 pub use project::{
     CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, LighthouseConfig, OnOff, Plans, Playtests,

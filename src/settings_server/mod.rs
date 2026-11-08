@@ -71,6 +71,8 @@ pub struct SettingsServer {
     env: Env,
     /// Card flag `settings-page`, read once at startup: Off keeps the Host check loopback-only.
     settings_page_flag: std::sync::atomic::AtomicBool,
+    /// Card flag `agent-ci`, read once at startup: Off hides the CI slots field and refuses a change to it.
+    agent_ci_flag: std::sync::atomic::AtomicBool,
     /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
     own_addresses: Box<dyn Fn() -> Vec<std::net::IpAddr> + Send + Sync>,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
@@ -106,6 +108,7 @@ impl SettingsServer {
             env_network_access,
             env,
             settings_page_flag: std::sync::atomic::AtomicBool::new(false),
+            agent_ci_flag: std::sync::atomic::AtomicBool::new(false),
             own_addresses: Box::new(|| {
                 if_addrs::get_if_addrs()
                     .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
@@ -123,6 +126,11 @@ impl SettingsServer {
     /// Gives the card flag `settings-page`'s answer (read once at start).
     pub fn set_settings_page_flag(&self, on: bool) {
         self.settings_page_flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Gives the card flag `agent-ci`'s answer (read once at start).
+    pub fn set_agent_ci_flag(&self, on: bool) {
+        self.agent_ci_flag.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn saver(&self) -> save::Saver<'_> {
@@ -154,7 +162,7 @@ impl SettingsServer {
             .env_network_access
             .clone()
             .unwrap_or_else(|| machine.network().unwrap_or_default());
-        Ok(json!({
+        let mut settings = json!({
             "port": port,
             // agent-settings.md section 4.1: whether the saved port or network access differs
             // from what the agent runs on.
@@ -183,7 +191,11 @@ impl SettingsServer {
                 "hasPassword": net.password_hash.is_some(),
             },
             "envVars": env_vars_json(env),
-        }))
+        });
+        if self.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            settings["ciSlots"] = json!(config::ci_slots(&cfg, env));
+        }
+        Ok(settings)
     }
 
     /// `GET /api/link`'s view of each of retaskable.com's three environments, and a custom
@@ -308,6 +320,9 @@ async fn post_settings(
         names.sort();
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
+    }
+    if update.ci_slots.is_some() && !settings.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return bad_request("Not a setting this agent can save yet: ciSlots.");
     }
     match settings.saver().apply(&update) {
         Ok(()) => {
