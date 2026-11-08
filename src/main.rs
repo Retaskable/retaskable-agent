@@ -465,6 +465,9 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         move |code| exit(code),
         keychain.clone(),
     ));
+    // Card flag `settings-page`: Off keeps the Host check loopback-only. The flag client's `PROJECT_ID`
+    // and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
+    settings.set_settings_page_flag(retaskable_agent::flags::Flags::from_env().on("settings-page").await);
     settings.set_saved_signal(view.settings.clone());
     settings.set_status_source(StatusSource {
         view: (*view).clone(),
