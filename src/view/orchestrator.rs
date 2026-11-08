@@ -2,6 +2,34 @@
 use serde_json::{Value, json};
 
 use super::{AgentView, NO_WORK_YET};
+use crate::telemetry::debounce::OpenAnomaly;
+use crate::telemetry::events::{MAX_TEXT, iso_utc_millis, scrub};
+
+/// The most open anomalies one snapshot carries; the rest are counted in `anomaliesMore`.
+const MAX_ANOMALIES: usize = 20;
+/// The longest an anomaly's `details` is written out.
+const MAX_DETAILS: usize = 1024;
+
+/// `details` as is when it writes out within [`MAX_DETAILS`]; otherwise only its first keys that fit
+/// (scrubbed like the log's text, since it also reaches the site).
+fn cut_details(details: &Value) -> Value {
+    let details = crate::telemetry::events::clean(details, 0);
+    if details.to_string().len() <= MAX_DETAILS {
+        return details;
+    }
+    let Value::Object(map) = details else {
+        return json!({});
+    };
+    let mut kept = serde_json::Map::new();
+    for (k, v) in map {
+        kept.insert(k.clone(), v);
+        if Value::Object(kept.clone()).to_string().len() > MAX_DETAILS {
+            kept.remove(&k);
+            break;
+        }
+    }
+    Value::Object(kept)
+}
 
 impl AgentView {
     /// The `orchestrator` block for `project` ("" before Setup). With `snapshot-reporting` Off, or for a project
@@ -23,10 +51,54 @@ impl AgentView {
             block["spendTodayUsd"] = json!(spent);
             block["dailyUsd"] = json!(daily);
         }
+        if let Some(anomalies) = self.anomalies_block() {
+            block["anomalies"] = anomalies.0;
+            if anomalies.1 > 0 {
+                block["anomaliesMore"] = json!(anomalies.1);
+            }
+        }
         if let Some(restart) = self.restart.report() {
             block["restart"] = restart;
         }
         block
+    }
+
+    /// With `snapshot-reporting` On, every project's open anomalies (oldest first, at most [`MAX_ANOMALIES`]) and
+    /// how many more there are; `None` when there are none.
+    fn anomalies_block(&self) -> Option<(Value, usize)> {
+        if !self.settings.snapshot_reporting_on() {
+            return None;
+        }
+        let state = self.live.snapshot();
+        let mut all: Vec<(&str, &OpenAnomaly)> = state
+            .projects
+            .iter()
+            .flat_map(|(id, p)| p.anomalies.iter().map(move |a| (id.as_str(), a)))
+            .collect();
+        if all.is_empty() {
+            return None;
+        }
+        all.sort_by(|a, b| a.1.since_ms.cmp(&b.1.since_ms).then_with(|| a.1.id.cmp(&b.1.id)));
+        let more = all.len().saturating_sub(MAX_ANOMALIES);
+        let sent: Vec<Value> = all
+            .into_iter()
+            .take(MAX_ANOMALIES)
+            .map(|(project, a)| {
+                let mut out = json!({
+                    "id": a.id,
+                    "kind": a.rule,
+                    "since": iso_utc_millis(a.since_ms),
+                    "text": scrub(&a.text, MAX_TEXT),
+                    "details": cut_details(&a.details),
+                    "project": project,
+                });
+                if let Some(item) = &a.item {
+                    out["item"] = json!(item);
+                }
+                out
+            })
+            .collect();
+        Some((Value::Array(sent), more))
     }
 
     /// The project's loop as of its last pass, when the flag is On and the loop runs.

@@ -11,7 +11,7 @@ use crate::telemetry::events::EventLog;
 use crate::telemetry::watchdog::Found;
 
 /// A started anomaly: the fields of its `start` event, and `since` (epoch ms of the first check that saw it).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAnomaly {
     pub id: String,
     pub rule: &'static str,

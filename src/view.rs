@@ -13,7 +13,9 @@ use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
+mod cursor;
 mod orchestrator;
+mod usage;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
 pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
@@ -438,8 +440,14 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some(window) = self.usage_block(project, data_dir) {
+            state["usage"] = window;
+        }
         if self.local.down() {
             state["usage"]["localDown"] = json!(true);
+        }
+        if let Some(cursor) = self.cursor_usage() {
+            state["usage"]["cursor"] = cursor;
         }
         if let Some((allowed, reason)) = self.item_commands.auto() {
             state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
@@ -820,6 +828,29 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600;
+        store.set_usage(json!({"utilization": 0.25, "status": "allowed", "resetsAt": soon}));
+        store.set_week_usage(json!({"rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": soon}));
+        store.save().unwrap();
+        let usage = |on| reporting_view(on).snapshot("a", dir.path())["state"]["usage"].clone();
+        let u = usage(true);
+        assert_eq!(
+            (&u["leftPct"], &u["status"], &u["weekUsedPct"]),
+            (&json!(75.0), &json!("allowed"), &json!(40.0))
+        );
+        assert_eq!(u["tier"], "opus");
+        assert!(u["resetsAt"].is_string() && u["weekResetsAt"].is_string());
+        assert_eq!(usage(false), json!({}), "flag Off");
+    }
+
+    #[test]
     fn snapshot_reporting_off_leaves_the_orchestrator_block_as_it_was() {
         let v = reporting_view(false);
         v.live.register("a");
@@ -829,6 +860,111 @@ mod tests {
             orch,
             json!({ "status": "paused", "machine": "pc", "pausedReason": NO_WORK_YET })
         );
+    }
+
+    fn open(id: &str, since_ms: i64, text: &str, details: Value) -> crate::telemetry::debounce::OpenAnomaly {
+        crate::telemetry::debounce::OpenAnomaly {
+            id: id.into(),
+            rule: "lease_idle",
+            item: Some("R-1".into()),
+            text: text.into(),
+            details,
+            since_ms,
+        }
+    }
+
+    #[test]
+    fn snapshot_sends_open_anomalies_oldest_first_with_their_project_and_drops_ended_ones() {
+        let v = reporting_view(true);
+        let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        v.live.register("a");
+        assert!(orch(&v).get("anomalies").is_none(), "none open: the key is left out");
+        let mut rx = v.live.subscribe();
+        rx.mark_unchanged();
+        v.live
+            .set_anomalies("a", vec![open("x", 5_000, "stuck", json!({ "n": 1 }))]);
+        assert!(rx.has_changed().unwrap(), "a change in the list signals the connector");
+        assert_eq!(
+            orch(&v)["anomalies"],
+            json!([{ "id": "x", "kind": "lease_idle", "item": "R-1", "since": "1970-01-01T00:00:05.000Z",
+                     "text": "stuck", "details": { "n": 1 }, "project": "a" }])
+        );
+        v.live.set_anomalies("a", vec![]);
+        assert!(orch(&v).get("anomalies").is_none(), "gone the minute it ends");
+    }
+
+    #[test]
+    fn snapshot_caps_anomalies_at_twenty_and_cleans_their_text_and_details() {
+        let v = reporting_view(true);
+        v.live.register("a");
+        let many = (0..25).map(|i| open(&format!("id{i:02}"), i, "t", json!({}))).collect();
+        v.live.set_anomalies("a", many);
+        let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        assert_eq!(o["anomalies"].as_array().unwrap().len(), 20);
+        assert_eq!(o["anomalies"][0]["id"], "id00");
+        assert_eq!(o["anomaliesMore"], 5);
+
+        let big: serde_json::Map<String, Value> =
+            (0..40).map(|i| (format!("k{i:02}"), json!("x".repeat(100)))).collect();
+        v.live.set_anomalies(
+            "a",
+            vec![open(
+                "s",
+                0,
+                &format!("password=hunter2 {}", "y".repeat(400)),
+                Value::Object(big),
+            )],
+        );
+        let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        let text = o["anomalies"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("hunter2") && text.chars().count() <= 300, "{text}");
+        let details = &o["anomalies"][0]["details"];
+        assert!(details.to_string().len() <= 1024 && details["k00"].is_string());
+        assert!(o.get("anomaliesMore").is_none());
+    }
+
+    #[test]
+    fn snapshot_reporting_off_sends_no_anomalies() {
+        let v = reporting_view(false);
+        v.live.register("a");
+        v.live.set_anomalies("a", vec![open("x", 0, "stuck", json!({}))]);
+        assert!(
+            v.snapshot("a", Path::new("."))["state"]["orchestrator"]
+                .get("anomalies")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |on: bool| {
+            let mut v = reporting_view(on);
+            v.settings = HelloSettings::new(
+                dir.path().to_path_buf(),
+                crate::env::Env::empty(),
+                4700,
+                Arc::new(crate::flags::Flags::fixed(if on {
+                    &[SNAPSHOT_REPORTING_FLAG]
+                } else {
+                    &[]
+                })),
+            );
+            v
+        };
+        let cursor = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("cursor").cloned();
+        assert_eq!(cursor(&mk(true)), None, "no tokens yet");
+        let mut m = crate::store::MachineStore::load(dir.path()).unwrap();
+        m.add_cursor_tokens(30, 4).unwrap();
+        m.add_cursor_tokens(1, 2).unwrap();
+        m.stamp_cursor_limit_at().unwrap();
+        let got = cursor(&mk(true)).unwrap();
+        assert_eq!(
+            (&got["todayTokens"], &got["weekInputTokens"], &got["weekOutputTokens"]),
+            (&json!(37), &json!(31), &json!(6))
+        );
+        assert!(got["limitHitAt"].is_string());
+        assert_eq!(cursor(&mk(false)), None, "flag Off");
     }
 
     #[test]
