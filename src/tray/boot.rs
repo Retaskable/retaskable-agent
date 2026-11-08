@@ -134,20 +134,6 @@ fn ui(args: &[String], env: &Env, has_helper: bool, interactive: bool, flag: boo
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_menu_needs_its_flag_and_a_terminal() {
-        let args = vec!["--tui".to_string()];
-        let env = Env::from_map(Default::default());
-        assert_eq!(ui(&args, &env, true, true, true), UiMode::TerminalMenu);
-        assert_eq!(ui(&args, &env, true, true, false), UiMode::Console);
-        assert_eq!(ui(&args, &env, true, false, true), UiMode::Console);
-    }
-}
-
 /// The running tray or terminal menu, or `None` when the agent runs with the plain console (the console says why).
 pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
     let os = current_os();
@@ -213,5 +199,19 @@ pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
             tracing::warn!("Tray: running headless, {e}.");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_needs_its_flag_and_a_terminal() {
+        let args = vec!["--tui".to_string()];
+        let env = Env::from_map(Default::default());
+        assert_eq!(ui(&args, &env, true, true, true), UiMode::TerminalMenu);
+        assert_eq!(ui(&args, &env, true, true, false), UiMode::Console);
+        assert_eq!(ui(&args, &env, true, false, true), UiMode::Console);
     }
 }
