@@ -19,7 +19,6 @@ use super::engine::{Engine, EngineId, EngineReader, SessionEvent, SessionSpec, S
 use super::json_result::fenced_json_instructions;
 
 #[allow(dead_code)] // nothing calls it until the next piece derives a session's allow list
-#[allow(dead_code)] // called by the next piece (section 6.5 slice 1 wiring)
 mod allow;
 mod allowlist;
 mod reader;
