@@ -299,3 +299,24 @@ async fn a_restart_resumes_when_its_engine_is_limited_but_nothing_else_can_take_
     assert_eq!(started.len(), 1);
     assert!(started[0].resume);
 }
+
+#[tokio::test]
+async fn with_the_engine_start_rules_on_an_item_taking_back_its_lane_is_not_held_by_its_engine_being_out() {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
+    rig.machine
+        .engine_limits
+        .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
+    let fake_after = rig.go_live();
+    rig.machine.pass().await;
+    drop(fake);
+    let started = fake_after.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(started[0].resume);
+}
