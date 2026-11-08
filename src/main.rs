@@ -311,7 +311,11 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     );
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
-    let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
+    let latest_checks = runtime::spawn_setup_checks(
+        is_release,
+        env.clone(),
+        Arc::new(retaskable_agent::flags::Flags::from_env()),
+    );
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
     // session runner exists) or runs (short runs on pieces). Read and logged once, here.
     // Where the TS agent may be listening: its default for this build, the shared default and the
