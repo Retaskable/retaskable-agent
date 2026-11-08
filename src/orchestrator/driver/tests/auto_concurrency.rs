@@ -215,3 +215,77 @@ async fn with_the_flag_off_nothing_is_read_or_written() {
     step(&mut rig, &fake, 300, 0.50, RESET, 3).await;
     assert!(!dir.path().join("machine.json").exists());
 }
+
+/// A weekly reading, 90% used with half the week left: well ahead of the week.
+fn week_ahead() -> Value {
+    json!({"rateLimitType": "seven_day", "status": "allowed", "unifiedWindows": {"seven_day": {"utilization": 0.9, "resetsAt": T + 302_400}}})
+}
+
+#[tokio::test]
+async fn the_week_is_saved_for_auto_concurrency_alone_and_paces_after_a_restart() {
+    for (flags, saved) in [
+        (&["auto-concurrency", "auto-concurrency-week"][..], true),
+        (&["auto-concurrency"][..], false),
+    ] {
+        let (mut rig, _fake) = rig_with(true, AutoConcurrency::default()).await;
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
+        at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+        rig.machine.outcome_sender().send(SessionOutcome {
+            project: "p0".into(),
+            item_id: "a".into(),
+            lane: 1,
+            result: SessionResult::NeedsHuman("x".into()),
+            usage: Some(week_ahead()),
+            context_tokens: None,
+            notes: vec![],
+            session_id: None,
+        });
+        rig.machine.poll().await;
+        assert_eq!(rig.lp(0).store.week_usage(), saved.then(week_ahead));
+        assert_eq!(rig.lp(0).store.usage(), None);
+        if !saved {
+            continue;
+        }
+        // A restart: a fresh pacer and a project that hasn't been looked at yet.
+        rig.machine.auto = crate::orchestrator::driver::auto::Auto::new(AutoConcurrency::default());
+        rig.lp(0).pace_readings.clear();
+        rig.lp(0).pace_checked = false;
+        rig.machine.poll().await;
+        let (_, reason) = rig.machine.links.item_commands.auto().expect("a pace was reported");
+        assert_eq!(reason, crate::pace::PaceReason::AheadOnWeek.to_string());
+        let id = EngineId::Claude;
+        assert!(!rig.machine.engine_limits.week_cut_off(std::time::Instant::now()));
+        assert!(!rig.machine.engine_limits.is_limited(id, std::time::Instant::now()));
+    }
+}
+
+#[tokio::test]
+async fn with_auto_concurrency_off_or_its_week_flag_off_no_week_is_saved() {
+    for (enabled, flags) in [
+        (false, &["auto-concurrency", "auto-concurrency-week"][..]),
+        (true, &["auto-concurrency-week"][..]),
+    ] {
+        let (mut rig, _fake) = rig_with(
+            true,
+            AutoConcurrency {
+                enabled,
+                ..Default::default()
+            },
+        )
+        .await;
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
+        at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+        rig.machine.outcome_sender().send(SessionOutcome {
+            project: "p0".into(),
+            item_id: "a".into(),
+            lane: 1,
+            result: SessionResult::NeedsHuman("x".into()),
+            usage: Some(week_ahead()),
+            context_tokens: None,
+            notes: vec![],
+            session_id: None,
+        });
+        rig.machine.poll().await;
+        assert_eq!(rig.lp(0).store.week_usage(), None);
+    }
+}
