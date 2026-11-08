@@ -137,3 +137,65 @@ fn the_target_is_none_when_off_and_a_note_without_a_staging_url() {
         })
     );
 }
+
+const NOW: i64 = 100 * DAY_MS;
+
+fn known(status: &str, days_ago: i64) -> Known {
+    let d = DraftState {
+        status: status.into(),
+        last_entry_ms: NOW - days_ago * DAY_MS,
+    };
+    Known::from([("k".to_string(), Some(d))])
+}
+
+#[test]
+fn a_key_is_quiet_while_its_draft_is_open_or_merged() {
+    assert!(is_new_finding("other", &known("open", 1), NOW));
+    assert!(!is_new_finding("k", &known("open", 90), NOW));
+    assert!(!is_new_finding("k", &known("merged", 90), NOW));
+}
+
+#[test]
+fn a_discarded_draft_is_quiet_for_30_days() {
+    assert!(!is_new_finding("k", &known("discarded", 29), NOW));
+    assert!(is_new_finding("k", &known("discarded", 31), NOW));
+}
+
+#[test]
+fn a_failed_or_missing_draft_makes_the_finding_new() {
+    assert!(is_new_finding("k", &known("failed", 1), NOW));
+    assert!(is_new_finding("k", &Known::from([("k".to_string(), None)]), NOW));
+}
+
+fn two_summaries() -> Vec<Summary> {
+    let s = summarize(&report(), "/", "mobile", 90, false);
+    vec![s.clone(), s]
+}
+
+#[test]
+fn duplicates_are_kept_once_and_known_keys_dropped() {
+    let sums = two_summaries();
+    let all = new_findings(&sums, &Known::new(), NOW);
+    assert_eq!(all.len(), sums[0].findings.len());
+    let key = sums[0].findings[0].key.clone();
+    let mut k = known("open", 1);
+    k.insert(key.clone(), k["k"].clone());
+    assert!(new_findings(&sums, &k, NOW).iter().all(|(_, f)| f.key != key));
+}
+
+#[test]
+fn the_request_names_each_finding_with_scores_and_items_and_is_tagged() {
+    let sums = two_summaries();
+    let new = new_findings(&sums, &Known::new(), NOW);
+    let d = lighthouse_request(&sums, &new, "- docs/specs/a.md").unwrap();
+    assert!(d.request.starts_with("[Lighthouse]"));
+    assert!(is_lighthouse_request(&d.request));
+    assert!(d.request.contains("docs/specs/a.md"));
+    assert!(d.request.contains("accessibility"));
+    for (_, f) in &new {
+        assert!(d.request.contains(&f.key), "{}", f.key);
+        assert!(f.items.iter().all(|i| d.request.contains(i.as_str())));
+    }
+    let note = d.intake.unwrap()["note"].as_str().unwrap().to_string();
+    assert!(note.contains(&new[0].1.key));
+}
