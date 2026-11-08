@@ -89,6 +89,8 @@ fn fetch_into(dir: &Path, repo: &Path, main_branch: &str, mode: Mode) -> Result<
             "clone",
             "--quiet",
             "--no-checkout",
+            // Never share object files with the host repo: the container mounts this directory.
+            "--no-hardlinks",
             "-c",
             "core.autocrlf=false",
             &repo_str,
@@ -121,7 +123,12 @@ fn fetch_into(dir: &Path, repo: &Path, main_branch: &str, mode: Mode) -> Result<
             ],
         );
         if let Err(e) = merged {
-            return Err(Failure::Conflict(e.to_string()));
+            // Only a real conflict is the pull request's fault; anything else is the host's.
+            return if git(dir, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
+                Err(Failure::Other(e))
+            } else {
+                Err(Failure::Conflict(e.to_string()))
+            };
         }
     }
     let commit = git(dir, &["rev-parse", "HEAD"])?;
@@ -328,5 +335,50 @@ mod tests {
         let (_c, _) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
         sweep(&data, "p");
         assert_eq!(std::fs::read_dir(crate::paths::ci_dir(&data, "p")).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn objects_are_copied_not_hardlinked() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        sh(&repo, &["gc", "--quiet"]);
+        let data = root.path().join("data");
+        let (dir, _) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
+        let pack_dir = dir.join(".git").join("objects").join("pack");
+        let mut packs = 0;
+        for e in std::fs::read_dir(pack_dir).unwrap().flatten() {
+            assert_eq!(e.metadata().unwrap().nlink(), 1, "{}", e.path().display());
+            packs += 1;
+        }
+        assert!(packs > 0);
+    }
+
+    fn all_text(dir: &Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "objects") {
+                    all_text(&path, out);
+                }
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push_str(&text);
+            }
+        }
+    }
+
+    #[test]
+    fn a_token_in_origins_url_never_lands_in_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        let bare = root.path().join("origin.git");
+        let url = format!("file://user:FAKETOKEN123@localhost{}", bare.display());
+        sh(&repo, &["remote", "set-url", "origin", &url]);
+        let data = root.path().join("data");
+        let (dir, _) = ready(fetch_pr(&data, &repo, "refs/heads/feature").unwrap());
+        let mut text = String::new();
+        all_text(&dir.join(".git"), &mut text);
+        assert!(!text.contains("FAKETOKEN123"));
     }
 }
