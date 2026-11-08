@@ -1,7 +1,7 @@
 //! What `hello` says about this computer's settings (agent-settings.md sections 2.1 and 3.2): the owner's settings, the
 //! computer-only values the settings page shows, and each environment variable's name with whether it is set, never
 //! its value. Also the signal that sends every project's hello again after the settings page saves.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
@@ -94,6 +94,11 @@ impl HelloSettings {
     /// Makes every open connection send a fresh hello.
     pub fn fire(&self) {
         self.saved.send_modify(|n| *n += 1);
+    }
+
+    /// The directory holding `config.json`, when something says where it is.
+    pub fn dir(&self) -> Option<&Path> {
+        self.source.as_ref().map(|s| s.dir.as_path())
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {

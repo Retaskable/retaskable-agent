@@ -12,6 +12,9 @@ use tokio::sync::watch;
 use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::hello_settings::HelloSettings;
+
+/// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
+pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
 use crate::paths;
 use crate::store::Store;
@@ -363,7 +366,7 @@ impl AgentView {
             "agentVersion": truncate(&self.version, 50),
             "os": platform(),
             "machine": truncate(&self.machine, 200),
-            "capabilities": [],
+            "capabilities": [AGENT_SETTINGS_CAPABILITY],
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags,
@@ -573,7 +576,7 @@ mod tests {
         assert!(s["engines"]["roles"].is_object() && s["cursorModels"].is_object() && s["tags"].is_array());
         assert_eq!(s["envVars"]["RETASKABLE_POLL_SEC"], true);
         assert_eq!(s["envVars"]["RETASKABLE_LANES"], false);
-        assert_eq!(hello["capabilities"], json!([]));
+        assert_eq!(hello["capabilities"], json!(["agent_settings"]));
         // Off, the hello has no settings at all.
         v.settings = HelloSettings::new(
             dir.path().to_path_buf(),
