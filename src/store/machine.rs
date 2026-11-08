@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 
 use crate::fs_util::write_json_atomic;
 use crate::network::NetworkAccess;
+use crate::pace::PacerState;
 use crate::tags::TagOverrides;
 
 const MACHINE_FILE: &str = "machine.json";
@@ -127,6 +128,18 @@ impl MachineStore {
         self.save()
     }
 
+    /// The pacer's saved state (`autoConcurrency`); a missing value or one that doesn't fit is `None`.
+    pub fn auto_concurrency(&self) -> Option<PacerState> {
+        serde_json::from_value(self.data.get("autoConcurrency")?.clone()).ok()
+    }
+
+    /// Saves the pacer's state and writes the file (keeping other keys as they are).
+    pub fn set_auto_concurrency(&mut self, state: &PacerState) -> Result<()> {
+        self.data
+            .insert("autoConcurrency".to_string(), serde_json::to_value(state)?);
+        self.save()
+    }
+
     /// Whether the settings page has already been opened by itself on a first run.
     pub fn settings_opened(&self) -> bool {
         self.data
@@ -211,6 +224,42 @@ mod tests {
         let store = MachineStore::load(dir.path()).unwrap();
         assert!(store.tags().is_none());
         assert!(!dir.path().join(MACHINE_FILE).exists());
+    }
+
+    fn pacer_state() -> PacerState {
+        PacerState {
+            allowed: 2,
+            reason: "On pace".into(),
+            resets_at: 99,
+            last_step: 50,
+            samples: vec![(40, 0.25, 99)],
+        }
+    }
+
+    #[test]
+    fn the_pacer_state_round_trips_and_other_keys_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MACHINE_FILE),
+            r#"{"usage":{"pct":10},"tags":{"added":["a"]}}"#,
+        )
+        .unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert!(store.auto_concurrency().is_none());
+        store.set_auto_concurrency(&pacer_state()).unwrap();
+        let store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.auto_concurrency(), Some(pacer_state()));
+        assert_eq!(store.tags().unwrap().added, vec!["a"]);
+        assert!(read(dir.path()).contains(r#""usage":{"pct":10}"#));
+    }
+
+    #[test]
+    fn a_bad_pacer_state_loads_as_none() {
+        for bad in ["5", r#"{"allowed":"x"}"#, "[]", "null"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(MACHINE_FILE), format!(r#"{{"autoConcurrency":{bad}}}"#)).unwrap();
+            assert!(MachineStore::load(dir.path()).unwrap().auto_concurrency().is_none());
+        }
     }
 
     #[test]
