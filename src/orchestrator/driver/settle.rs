@@ -523,7 +523,7 @@ impl ProjectLoop {
             record.cursor_limit_hits = 0;
             self.silenced.remove(&item);
             self.to_resume.push(item.clone());
-            result = SessionResult::Silenced(String::new());
+            result = SessionResult::Silenced(String::new(), "killed_for_silence");
             self.events.add_in(
                 &self.id,
                 Event::ItemState(event::ItemState {
@@ -549,7 +549,7 @@ impl ProjectLoop {
                 record.cursor_limit_hits += 1;
                 self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
                 if let SessionResult::Limited { why, .. } = result {
-                    result = SessionResult::Silenced(why);
+                    result = SessionResult::Silenced(why, "killed_for_silence");
                 }
                 self.events.add_in(
                     &self.id,
