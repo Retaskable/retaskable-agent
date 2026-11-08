@@ -245,11 +245,6 @@ impl Roster {
         if any && !slot.busy() { vec![kind] } else { Vec::new() }
     }
 
-    /// Keeps the `engine-placement` answer fresh for the next start.
-    pub(super) async fn refresh_flag(&self) {
-        self.flags.on("engine-placement").await;
-    }
-
     /// Takes `slot` and sets up the session of `request` for `role` on `model` (Claude's; Cursor's comes from the
     /// `top` name); `Err` gives the run back, naming a binary that isn't there.
     pub(super) fn begin(
@@ -308,13 +303,7 @@ impl RunStarter for PlanRuns {
             .roster
             .begin(Role::Planner, &request, &self.slot, tiers::chore_tier().to_string())?;
         let cut = Cut::default();
-        let roster = self.roster.clone();
-        let (req, seen) = (request.clone(), cut.clone());
-        let work = async move {
-            roster.refresh_flag().await;
-            plan(job, req, seen).await
-        };
-        spawn_run(guard, request, cut, work);
+        spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
     }
 }

@@ -3,7 +3,7 @@
 //! last answer. No key (`RETASKABLE_FLAG_KEY` unset) means no request and every flag Off.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// This project's numeric id: the owner fills it in from Settings → Project settings → Release flags.
@@ -66,6 +66,18 @@ impl Flags {
     /// Whether `name` was On at the last answer, without asking again: Off until there has been one.
     pub fn last(&self, name: &str) -> bool {
         self.state.lock().unwrap().flags.get(name) == Some(&true)
+    }
+
+    /// Asks for `name` now and then every `every`, in the background, so `last(name)` has a real answer without
+    /// anything having to run first (the request itself waits for the ttl).
+    pub fn keep_fresh(self: &Arc<Self>, name: &'static str, every: Duration) {
+        let flags = self.clone();
+        tokio::spawn(async move {
+            loop {
+                flags.on(name).await;
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     async fn refresh_if_stale(&self) {
@@ -154,6 +166,21 @@ mod tests {
         ok.store(false, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(flags.on("ask-claude").await);
+    }
+
+    #[tokio::test]
+    async fn keep_fresh_gives_last_an_answer_before_anything_asks() {
+        let base = serve(Arc::new(AtomicBool::new(true))).await;
+        let flags = Arc::new(Flags::new(&base, "7", "k"));
+        assert!(!flags.last("ask-claude"));
+        flags.keep_fresh("ask-claude", Duration::from_millis(10));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !flags.last("ask-claude") {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

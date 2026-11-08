@@ -68,12 +68,8 @@ impl RunStarter for LookRuns {
         .to_string();
         let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, model)?;
         let cut = Cut::default();
-        let (roster, req, seen, bugs) = (self.roster.clone(), request.clone(), cut.clone(), self.bugs.clone());
-        let work = async move {
-            roster.refresh_flag().await;
-            Some(look(job, req, seen, bugs).await)
-        };
-        spawn_run(guard, request, cut, work);
+        let work = look(job, request.clone(), cut.clone(), self.bugs.clone());
+        spawn_run(guard, request, cut, async move { Some(work.await) });
         Ok(())
     }
 }
