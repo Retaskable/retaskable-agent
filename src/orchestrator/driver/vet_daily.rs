@@ -19,7 +19,7 @@ use crate::engines::{
 use crate::flags::Flags;
 use crate::ideas::Ideas;
 use crate::orchestrator::session::quiet_timeout;
-use crate::vet::{Judged, PastVerdict, Vetter, plan, take_batch};
+use crate::vet::{Judged, PastVerdict, VetRecord, Vetter, plan, take_batch};
 
 /// The job's name in the store's `jobs_due`.
 const JOB: &str = "vet";
@@ -31,7 +31,7 @@ const TEMPLATE: &str = include_str!("../../../prompts/vet-suggestions.md");
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Last {
     pub day: String,
-    pub counts: BTreeMap<&'static str, usize>,
+    pub counts: BTreeMap<String, usize>,
 }
 
 #[derive(Default)]
@@ -40,6 +40,8 @@ pub(super) struct State {
     pub(crate) last: Option<Last>,
     /// The last [`PAST_KEPT`] verdicts given, oldest first.
     pub(crate) recent: Vec<PastVerdict>,
+    /// A run changed `last`/`recent` since they were last written to the state file.
+    pub(super) dirty: bool,
 }
 
 impl AsMut<super::ideas_daily::Due> for State {
@@ -49,6 +51,29 @@ impl AsMut<super::ideas_daily::Due> for State {
 }
 
 impl State {
+    /// The memory a saved record restores (a restart keeps the history).
+    pub(super) fn from_record(record: Option<VetRecord>) -> Self {
+        let mut st = Self::default();
+        if let Some(r) = record {
+            let over = r.recent.len().saturating_sub(PAST_KEPT);
+            st.recent = r.recent[over..].to_vec();
+            st.last = Some(Last {
+                day: r.day,
+                counts: r.counts,
+            });
+        }
+        st
+    }
+
+    /// What to write to the state file, once a run has been made.
+    pub(super) fn record(&self) -> Option<VetRecord> {
+        self.last.as_ref().map(|l| VetRecord {
+            day: l.day.clone(),
+            counts: l.counts.clone(),
+            recent: self.recent.clone(),
+        })
+    }
+
     /// Lets the next minute ask the store again at once (tests).
     #[cfg(test)]
     pub(super) fn forget_asker(&mut self) {
@@ -207,7 +232,7 @@ async fn pass<F, Fut>(
     let mut st = state.lock().unwrap();
     let mut counts = BTreeMap::new();
     for j in &verdicts {
-        *counts.entry(name(j.verdict)).or_insert(0) += 1;
+        *counts.entry(name(j.verdict).to_string()).or_insert(0) += 1;
         st.recent.push(PastVerdict {
             verdict: j.verdict,
             reason: j.reason.clone(),
@@ -219,6 +244,7 @@ async fn pass<F, Fut>(
         day: day.to_string(),
         counts,
     });
+    st.dirty = true;
 }
 
 async fn send(base: &PlaytestJob, repo: u64, token: &str, j: &Judged) {

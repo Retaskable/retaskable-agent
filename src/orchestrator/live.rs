@@ -40,6 +40,8 @@ pub struct ProjectLive {
     pub fix_main: Option<String>,
     /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
     pub chores: Option<crate::backlog::runs::ChoreCount>,
+    /// The last vet run's counts by verdict name; `None` before a run.
+    pub vet: Option<BTreeMap<String, usize>>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -91,6 +93,7 @@ impl LiveHandle {
             drafting: entry.drafting.take(),
             fix_main: entry.fix_main.take(),
             chores: entry.chores,
+            vet: entry.vet.take(),
         };
     }
 
@@ -102,6 +105,11 @@ impl LiveHandle {
     /// Says what the idle baseline found, or nothing.
     pub fn set_fix_main(&self, project: &str, note: Option<String>) {
         self.lock().projects.entry(project.to_string()).or_default().fix_main = note;
+    }
+
+    /// Says what the last vet run found, or nothing.
+    pub fn set_vet(&self, project: &str, counts: Option<BTreeMap<String, usize>>) {
+        self.lock().projects.entry(project.to_string()).or_default().vet = counts;
     }
 
     /// The store's last chore count for the project.

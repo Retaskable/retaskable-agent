@@ -394,6 +394,22 @@ impl Machine {
     /// Starts the daily vet pass for every live (or `runs`-mode) project that ticked this minute and isn't paused,
     /// unless one is still running (`vet_daily::run` checks the flag, the setting, the link and `jobs_due`).
     pub async fn vet_rounds(&mut self, steps: &[Step]) {
+        for lp in &mut self.projects {
+            let record = {
+                let mut st = lp.vet_daily.lock().unwrap();
+                if !std::mem::take(&mut st.dirty) {
+                    continue;
+                }
+                st.record()
+            };
+            if let Some(record) = record {
+                lp.store.set_vet(&record);
+                if let Err(e) = lp.store.save() {
+                    tracing::warn!("{}: saving the vet record failed: {e:#}", lp.id);
+                }
+                lp.live.set_vet(&lp.id, Some(record.counts));
+            }
+        }
         let paused = self.paused();
         let jobs: Vec<_> = (self.projects.iter().enumerate())
             .filter(|(i, lp)| {

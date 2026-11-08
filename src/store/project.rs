@@ -14,6 +14,7 @@ use super::SmokeState;
 use crate::engines::EngineId;
 use crate::fs_util::write_json_atomic;
 use crate::trial_plan::TrialRecord;
+use crate::vet::VetRecord;
 
 const STATE_FILE: &str = "state.json";
 
@@ -267,6 +268,18 @@ impl Store {
         self.data.insert("ownFailures".to_string(), serde_json::json!(failures));
     }
 
+    /// `state.vet`: the daily vet pass's last run and recent verdicts; none before a run or when unreadable.
+    pub fn vet(&self) -> Option<VetRecord> {
+        self.data
+            .get("vet")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Replaces `state.vet`. Doesn't save on its own; call `save` after.
+    pub fn set_vet(&mut self, record: &VetRecord) {
+        self.data.insert("vet".to_string(), serde_json::json!(record));
+    }
+
     /// `state.trialPlan`; not started when missing or unreadable.
     pub fn trial(&self) -> TrialRecord {
         self.data
@@ -329,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn the_trial_reads_as_not_started_until_set_and_survives_a_reload_beside_other_keys() {
+    fn the_trial_reads_as_not_started_until_set_beside_other_keys() {
         use crate::trial_plan::TrialState;
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Store::load(dir.path()).unwrap().trial(), TrialRecord::default());
@@ -341,6 +354,30 @@ mod tests {
         assert_eq!(again.trial(), TrialRecord::opened("https://x/pr/1"));
         assert!(read(dir.path()).contains(r#""other":{"a":1}"#));
         assert!(read(dir.path()).contains("\"trialPlan\""));
+    }
+
+    #[test]
+    fn the_vet_record_round_trips_beside_other_keys() {
+        use crate::vet::{PastVerdict, VetRecord};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(STATE_FILE), r#"{"other":1}"#).unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.vet(), None);
+        let record = VetRecord {
+            day: "2026-11-03".into(),
+            counts: [("spam".to_string(), 35)].into(),
+            recent: (0..35)
+                .map(|i| PastVerdict {
+                    verdict: crate::backlog::suggestions::Verdict::Spam,
+                    reason: format!("r{i}"),
+                })
+                .collect(),
+        };
+        store.set_vet(&record);
+        store.save().unwrap();
+        let again = Store::load(dir.path()).unwrap().vet().unwrap();
+        assert_eq!(again, record);
+        assert!(read(dir.path()).contains(r#""other":1"#));
     }
 
     #[test]

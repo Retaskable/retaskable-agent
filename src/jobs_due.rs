@@ -223,17 +223,16 @@ mod tests {
         let buf = Buf::default();
         let sub = tracing_subscriber::fmt().with_writer(buf.clone()).finish();
         let _g = tracing::subscriber::set_default(sub);
-        let a = asker("http://127.0.0.1:1".to_string(), Arc::default());
-        // Other tests run in parallel and can cache this callsite as disabled; retry until it logs.
-        let mut log = String::new();
-        for _ in 0..20 {
+        // Other tests running in parallel may have cached this callsite as disabled while no
+        // subscriber was set, so rebuild the cache and ask again until the line shows up.
+        for _ in 0..50 {
             tracing::callsite::rebuild_interest_cache();
-            a.ask().await;
-            log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-            if log.contains("whether ideas is due") {
+            asker("http://127.0.0.1:1".to_string(), Arc::default()).ask().await;
+            if !buf.0.lock().unwrap().is_empty() {
                 break;
             }
         }
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         assert!(log.contains("whether ideas is due"), "{log}");
     }
 }
