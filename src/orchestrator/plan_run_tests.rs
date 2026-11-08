@@ -223,6 +223,16 @@ async fn a_plan_told_to_start_on_claude_while_the_planner_is_cursor_runs_on_clau
 }
 
 #[tokio::test]
+async fn with_placement_off_a_plan_told_to_start_on_cursor_is_given_back() {
+    let mut r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
+    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
+    let (mut req, _s) = request(brief());
+    req.engine = Some(EngineId::Cursor);
+    assert!(r.starter.start(req).unwrap_err().contains("Claude alone"));
+    assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
+}
+
+#[tokio::test]
 async fn a_missing_binary_of_the_chosen_engine_gives_the_run_back_naming_it() {
     let mut choice = EngineChoiceConfig::default();
     choice.roles.planner = Some(Engine::Cursor);

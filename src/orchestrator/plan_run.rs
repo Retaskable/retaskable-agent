@@ -270,13 +270,13 @@ impl Roster {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        if !self.flags.last("engine-placement") && !self.on_claude(role, Some(&project)) {
-            return Err("Claude alone starts sessions while engine-placement is off".into());
-        }
         let engine = start_engine(
             request.engine,
             engine_for(&self.choice, project.engines.as_ref(), role, None),
         );
+        if !self.flags.last("engine-placement") && (!self.on_claude(role, Some(&project)) || engine != Engine::Claude) {
+            return Err("Claude alone starts sessions while engine-placement is off".into());
+        }
         let placed = place(engine, role, &self.env, &self.cursor_models)?;
         let guard = slot
             .take()
