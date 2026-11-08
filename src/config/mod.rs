@@ -62,7 +62,7 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
 /// from an empty version 2 file rather than an empty object: an empty object has no `"version"`
 /// key, so `parse` would read it back as a version 1 single project with an empty `repoPath`,
 /// conjuring a phantom project out of the first setting anyone saves. Used by the settings page's
-/// save paths, which change only the machine's own settings.
+/// save paths, which change the machine's own settings and a project's `engines.allow`.
 pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
     save_with(dir, RETIRE_PROJECT_LANES.load(Ordering::Relaxed), patch)
 }

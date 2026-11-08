@@ -766,3 +766,35 @@ async fn a_triager_waits_when_no_engine_may_start() {
     let engines = triaged_with(json!({"roles": {"planner": "cursor"}}), true, true).await;
     assert!(engines.is_empty());
 }
+
+/// `local-limit-fallback`: Claude at its usage limit holds a triager only without the flag, the model, or sign-in.
+#[tokio::test]
+async fn at_the_limit_a_triager_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for rules in [false, true] {
+        for (fallback, model, signed_out, starts) in [
+            (true, LocalModel::up(), false, true),
+            (false, LocalModel::up(), false, false),
+            (true, LocalModel::off(), false, false),
+            (true, LocalModel::up(), true, false),
+        ] {
+            crate::tiers::set_local_ladder_for_test(true);
+            crate::tiers::set_local_limit_fallback_for_test(fallback);
+            let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
+            start_rules(&mut rig, &["triage-session"], json!({}), signed_out, false);
+            if !rules {
+                let on = ["triage-session", "engine-placement"];
+                rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+            }
+            rig.machine.local = model;
+            rig.machine
+                .engine_limits
+                .hit(crate::engines::EngineId::Claude, out_for(600));
+            for _ in 0..4 {
+                rig.machine.pass().await;
+            }
+            let case = (rules, fallback, signed_out);
+            assert_eq!(fake.triage.asked.lock().unwrap().len(), usize::from(starts), "{case:?}");
+        }
+    }
+}

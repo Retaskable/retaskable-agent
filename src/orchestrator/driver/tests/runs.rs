@@ -107,6 +107,7 @@ async fn pass(rig: &mut Rig, starter: &dyn RunStarter, now: Instant) {
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
@@ -278,6 +279,7 @@ async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
@@ -357,6 +359,7 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
@@ -743,6 +746,7 @@ async fn start_pass_with(
     let mut limits = limits;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut out,
         engine_limits: &mut limits,
@@ -867,4 +871,38 @@ async fn a_build_takes_a_cursor_lane_when_claude_is_signed_out_and_claude_lanes_
     let starter = FakeRuns::new(&[RunKind::Build]);
     start_rules_pass(&mut rig, &starter, &[], false).await;
     assert!(lane(&rig, &starter), "Claude's lane first");
+}
+
+/// `local-limit-fallback`: Claude at its usage limit holds a plan or build only without the flag, the model, or
+/// sign-in; with it they are asked for like any run (they start on the local model).
+#[tokio::test]
+async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it() {
+    use crate::engines::EngineId::Claude;
+    use crate::local_model::LocalModel;
+    for (fallback, model, signed_out, asks) in [
+        (true, LocalModel::up(), false, true),
+        (false, LocalModel::up(), false, false),
+        (true, LocalModel::off(), false, false),
+        (true, LocalModel::up(), true, false),
+    ] {
+        crate::tiers::set_local_ladder_for_test(true);
+        crate::tiers::set_local_limit_fallback_for_test(fallback);
+        let (mut rig, script) = setup(1).await;
+        both_engines(&mut rig, json!({ "default": "claude" }));
+        rig.machine.local = model;
+        let starter = FakeRuns::new(&[RunKind::Build, RunKind::Plan]);
+        start_rules_pass(&mut rig, &starter, &[Claude], signed_out).await;
+        let takes = script.lock().unwrap().args("run_take");
+        let case = (fallback, signed_out);
+        assert_eq!(takes.is_empty(), !asks, "{case:?}");
+        if asks {
+            assert_eq!(takes[0]["kinds"], json!(["build", "plan"]));
+            assert!(
+                takes[0]["agent"]["engines"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("claude"))
+            );
+        }
+    }
 }

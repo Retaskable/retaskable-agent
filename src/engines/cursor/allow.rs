@@ -62,7 +62,7 @@ pub(super) fn command_program(cmd: &str) -> Option<String> {
 
 /// `Shell(<program>)` for each check's then each gallery's command, once each, without denied
 /// programs, shells or launchers.
-pub(super) fn command_shells(checks: &[CheckConfig], galleries: &[GalleryConfig]) -> Vec<String> {
+pub(crate) fn command_shells(checks: &[CheckConfig], galleries: &[GalleryConfig]) -> Vec<String> {
     let commands = checks
         .iter()
         .map(|c| &c.command)
@@ -170,14 +170,22 @@ pub fn with_project(project: &ProjectConfig, base: CursorOptions) -> CursorOptio
     }
 }
 
-/// The typed entries, split on commas and new lines, trimmed, empties dropped.
-#[allow(dead_code)] // the settings page uses it in the next piece
 pub(super) fn split_allow_entries(text: &str) -> Vec<String> {
+pub(crate) fn split_allow_entries(text: &str) -> Vec<String> {
     text.split([',', '\n'])
         .map(str::trim)
         .filter(|e| !e.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// Why typed `engines.allow` text can't be saved: "Cursor can't be allowed this: <reason>" for
+/// the first entry `allow_entry_problem` refuses, or none when every entry is fine.
+pub(crate) fn engines_allow_error(entries: &[String]) -> Option<String> {
+    entries
+        .iter()
+        .find_map(|e| allow_entry_problem(e))
+        .map(|reason| format!("Cursor can't be allowed this: {reason}"))
 }
 
 #[cfg(test)]

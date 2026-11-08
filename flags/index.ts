@@ -33,3 +33,6 @@ export const cursorAllowDerive = (): boolean => flags.on("cursor-allow-derive");
 
 /** The `watchdog-anomaly-rules` flag: the watchdog's newer rules (restart_wait, and idle_lanes while a restart is pending). Off until there is an answer. */
 export const watchdogAnomalyRules = (): boolean => flags.on("watchdog-anomaly-rules");
+
+/** The `engine-setup-probes` flag: probe pi and Codex at setup and say why each failed. Off until there is an answer. */
+export const engineSetupProbes = (): boolean => flags.on("engine-setup-probes");

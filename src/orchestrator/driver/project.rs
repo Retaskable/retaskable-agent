@@ -573,8 +573,9 @@ impl ProjectLoop {
             return Some("Claude signed out");
         }
         let Some(gate) = gate else {
-            let week =
-                self.flags.on("weekly-cutoff").await && shared.engine_limits.week_cut_off(std::time::Instant::now());
+            let week = self.flags.on("weekly-cutoff").await
+                && shared.engine_limits.week_cut_off(std::time::Instant::now())
+                && !Self::limit_fallback(shared);
             return week.then_some("weekly limit");
         };
         let lanes = pool.rules().lanes;

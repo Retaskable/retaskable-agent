@@ -24,6 +24,8 @@ mod allowlist;
 mod reader;
 mod result;
 
+pub(crate) use allow::{command_shells, engines_allow_error, split_allow_entries};
+pub(crate) use allowlist::allowlist_in_force;
 use reader::CursorReader;
 
 /// `cursorArgs(spec)`: print mode, `stream-json` out, trusted (never asked to approve), the

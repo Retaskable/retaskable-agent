@@ -10,6 +10,7 @@ use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
+use super::panic::panic_message;
 use super::run_starters::RunStarters;
 use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
@@ -102,6 +103,8 @@ pub struct Shared<'a> {
     pub claude_signed_out_until: &'a mut Option<Instant>,
     /// Which engines are at their usage limit on this computer ([`Machine::engine_limits`]).
     pub engine_limits: &'a mut EngineLimits,
+    /// The local model, for the limit fallback ([`StartGate`]).
+    pub local: &'a crate::local_model::LocalModel,
     /// [`process_tree::stopping`] as of this pass's start: a restart or Quit cutting every
     /// session, so no project claims or starts new work either
     /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
@@ -202,6 +205,7 @@ macro_rules! shared {
     ($m:ident, $stopping:expr) => {
         Shared {
             links: &$m.links,
+            local: &$m.local,
             claim_paused_until: &mut $m.claim_paused_until,
             claude_signed_out_until: &mut $m.claude_signed_out_until,
             engine_limits: &mut $m.engine_limits,
@@ -537,6 +541,7 @@ impl Machine {
             }
             let shared = Shared {
                 links: &self.links,
+                local: &self.local,
                 claim_paused_until: &mut claim_paused_until,
                 claude_signed_out_until: &mut signed_out_until,
                 engine_limits: &mut limits,
@@ -739,6 +744,7 @@ impl Machine {
             if live {
                 let shared = Shared {
                     links: &self.links,
+                    local: &self.local,
                     claim_paused_until: &mut self.claim_paused_until,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
@@ -821,13 +827,6 @@ impl Machine {
         self.auto.work_waiting = slots == 0 && starter.is_some() && self.work_waits(&live, paused);
         scheduled
     }
-}
-
-/// What a caught panic said.
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
-    (panic.downcast_ref::<&str>().map(ToString::to_string))
-        .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_default()
 }
 
 /// What `spawn_all` starts the orchestrator from.
