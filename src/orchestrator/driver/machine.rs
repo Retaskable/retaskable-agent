@@ -541,6 +541,11 @@ impl Machine {
 
     pub fn add(&mut self, mut project: ProjectLoop) {
         project.outcomes = self.outcome_sender.clone();
+        if project.flags.last("weekly-limit-reading")
+            && let Some(usage) = project.store.usage()
+        {
+            ProjectLoop::cut_off_for_week(&project.id, &usage, &mut self.engine_limits);
+        }
         self.projects.push(project);
     }
 

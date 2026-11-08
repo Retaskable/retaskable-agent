@@ -200,6 +200,23 @@ fn frac(value: f64) -> f64 {
     if value > 1.0 { value / 100.0 } else { value }
 }
 
+/// At this percent of the weekly limit used (`weekCutoffPct`), nothing new starts until the week resets.
+pub const WEEK_CUTOFF_PCT: f64 = 95.0;
+
+/// The week's `resetsAt` when `usage` shows the weekly limit used at or past `WEEK_CUTOFF_PCT` and that reset is
+/// still ahead of `now_epoch`: `unifiedWindows.seven_day`, or a lone reading whose own `rateLimitType` is
+/// `seven_day`. `None` with no weekly percentage, no reset time, or a reset already passed.
+pub fn week_cut_off_until(usage: &Value, now_epoch: i64) -> Option<i64> {
+    let window = match usage.get("unifiedWindows").and_then(|w| w.get("seven_day")) {
+        Some(w) => w,
+        None if usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day") => usage,
+        None => return None,
+    };
+    let used = frac(window.get("utilization")?.as_f64()?) * 100.0;
+    let resets_at = window.get("resetsAt").and_then(Value::as_i64)?;
+    (used >= WEEK_CUTOFF_PCT && resets_at > now_epoch).then_some(resets_at)
+}
+
 /// The percentage of a 5-hour window still left, from its `utilization` (see `frac`).
 fn pct_left(utilization: f64) -> f64 {
     (1.0 - frac(utilization)).max(0.0) * 100.0
@@ -212,6 +229,25 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_700_000_000;
+
+    #[test]
+    fn week_cut_off_reads_the_weekly_percentage_and_reset() {
+        let week = |u: Value, r: i64| json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": r}}});
+        assert_eq!(week_cut_off_until(&week(json!(0.95), NOW + 5), NOW), Some(NOW + 5));
+        assert_eq!(week_cut_off_until(&week(json!(0.99), NOW + 5), NOW), Some(NOW + 5));
+        assert_eq!(week_cut_off_until(&week(json!(0.94), NOW + 5), NOW), None);
+        assert_eq!(week_cut_off_until(&week(json!(95), NOW + 5), NOW), Some(NOW + 5));
+        assert_eq!(week_cut_off_until(&week(json!(94), NOW + 5), NOW), None);
+        assert_eq!(week_cut_off_until(&week(json!(0.99), NOW - 1), NOW), None);
+        let no_reset = json!({"unifiedWindows": {"seven_day": {"utilization": 0.99}}});
+        assert_eq!(week_cut_off_until(&no_reset, NOW), None);
+        let lone = json!({"rateLimitType": "seven_day", "utilization": 0.96, "resetsAt": NOW + 9});
+        assert_eq!(week_cut_off_until(&lone, NOW), Some(NOW + 9));
+        let other = json!({"rateLimitType": "five_hour", "utilization": 0.99, "resetsAt": NOW + 9});
+        assert_eq!(week_cut_off_until(&other, NOW), None);
+        assert_eq!(week_cut_off_until(&json!({"status": "allowed"}), NOW), None);
+    }
+
     fn models() -> ModelsConfig {
         ModelsConfig::default()
     }

@@ -788,3 +788,42 @@ async fn a_non_rejected_weekly_reading_does_not_overwrite_the_usage_reading() {
     let week = json!({"status": "allowed", "rateLimitType": "seven_day", "resetsAt": 4_000_000_000u64});
     assert_eq!(settle_usage(true, week).await, Some(json!({"status": "allowed"})));
 }
+
+#[tokio::test]
+async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let reading = |u: f64| {
+        json!({"unifiedWindows": {
+            "five_hour": {"utilization": 0.1, "resetsAt": now + 3600},
+            "seven_day": {"utilization": u, "resetsAt": now + 86_400}}})
+    };
+    for (u, limited) in [(0.96, true), (0.94, false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+        rig.go_live();
+        at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+        rig.machine.outcome_sender().send(SessionOutcome {
+            project: "p0".into(),
+            item_id: "a".into(),
+            lane: 1,
+            result: SessionResult::NeedsHuman("x".into()),
+            usage: Some(reading(u)),
+            context_tokens: None,
+            notes: vec![],
+            session_id: None,
+        });
+        rig.machine.poll().await;
+        let t = std::time::Instant::now();
+        let id = crate::engines::EngineId::Claude;
+        assert_eq!(rig.machine.engine_limits.is_limited(id, t), limited);
+        assert!(
+            !rig.machine
+                .engine_limits
+                .is_limited(id, t + Duration::from_secs(86_402))
+        );
+    }
+}

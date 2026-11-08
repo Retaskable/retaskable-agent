@@ -127,6 +127,27 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
+    /// At the weekly cutoff (`tiers::week_cut_off_until`) Claude counts limited on this computer until the week's
+    /// reset, so nothing new starts while running sessions finish.
+    pub(super) fn cut_off_for_week(
+        id: &str,
+        usage: &Value,
+        limits: &mut crate::orchestrator::fresh_start::EngineLimits,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        if let Some(resets_at) = crate::tiers::week_cut_off_until(usage, now) {
+            tracing::info!(
+                "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
+                id,
+                crate::tiers::WEEK_CUTOFF_PCT
+            );
+            let wait = Duration::from_secs((resets_at - now) as u64);
+            limits.hit(crate::engines::EngineId::Claude, Instant::now() + wait);
+        }
+    }
+
     /// Gives an item's lane and lease back: its run is dropped, the lane freed (`lane_freed`), and the lease
     /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
     /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
@@ -363,6 +384,9 @@ impl ProjectLoop {
             record.impl_session_id = Some(id);
         }
         let weekly = self.flags.on("weekly-limit-reading").await;
+        if weekly && let Some(usage) = &outcome.usage {
+            Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
+        }
         if let Some(usage) = outcome
             .usage
             .clone()
