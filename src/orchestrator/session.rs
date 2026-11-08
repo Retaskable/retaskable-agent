@@ -31,8 +31,8 @@ use crate::engines::{
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
 use crate::implementer::{
-    ImplementerResult, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
-    run_implementer, session_spec,
+    CursorTimeKilled, ImplementerResult, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, code_gates,
+    new_session_id, run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
@@ -946,7 +946,11 @@ fn session_result_for_answer(
             usage,
         ),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
-            SessionResult::Silenced(format!("went quiet and was killed: {e:#}")),
+            SessionResult::Silenced(format!("went quiet and was killed: {e:#}"), "killed_for_silence"),
+            usage,
+        ),
+        Err(e) if e.downcast_ref::<CursorTimeKilled>().is_some() => (
+            SessionResult::Silenced(format!("ran past its time limit and was killed: {e:#}"), "cursor_time"),
             usage,
         ),
         Err(e) => (

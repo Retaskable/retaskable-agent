@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use crate::backlog::runs::RunOutcome;
 use crate::decisions::{Decision, split_asked};
 use crate::implementer::publish::Published;
-use crate::implementer::{ImplementerResult, Interrupted, LimitHit, MaxTurns, Question, SilenceKilled};
+use crate::implementer::{
+    CursorTimeKilled, ImplementerResult, Interrupted, LimitHit, MaxTurns, Question, SilenceKilled,
+};
 
 /// A pushed branch and the change opened for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +77,9 @@ pub fn end_from_answer(
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return (RunOutcome::Interrupted, json!({})),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => {
             return failed(format!("went quiet and was killed: {e:#}"));
+        }
+        Err(e) if e.downcast_ref::<CursorTimeKilled>().is_some() => {
+            return failed(format!("ran past its time limit and was killed: {e:#}"));
         }
         Err(e) if e.downcast_ref::<MaxTurns>().is_some() => return failed(format!("ran out of turns: {e:#}")),
         Err(e) => return failed(format!("The session ended without answering: {e:#}")),

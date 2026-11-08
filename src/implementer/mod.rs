@@ -40,7 +40,8 @@ pub use prompt::{
     piece_decision_list,
 };
 pub use session::{
-    Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, new_session_id, run_implementer, session_spec,
+    CursorTimeKilled, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, new_session_id, run_implementer,
+    session_spec,
 };
 pub use start_files::{
     MAX_CHANGED_COMMITS, MAX_FILES, SpecChanges, StartFiles, build, item_spec_files, named_code_paths, render,
