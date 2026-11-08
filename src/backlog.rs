@@ -125,6 +125,9 @@ pub struct Item {
     /// The spec draft that added the item (`draft-…`), when one did.
     #[serde(default)]
     pub draft_id: Option<String>,
+    /// The item's size (`S`, `M`, `L`, `XL`) when the store sends one; `L` and `XL` keep `opus` (`implementer_model`).
+    #[serde(default)]
+    pub size: Option<String>,
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,
