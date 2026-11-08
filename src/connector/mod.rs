@@ -16,6 +16,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -81,6 +82,19 @@ fn random() -> f64 {
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// What the tray shows of one cloud (tray/04-the-tray-agent.md section 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudLink {
+    /// No refresh token.
+    NotLinked,
+    /// A refresh token, but no connection open: connecting, or the cloud can't be reached.
+    Offline,
+    /// At least one project's connection is open.
+    Connected,
+    /// The cloud answered `invalid_grant` (the token is deleted), until the next link or forget.
+    UnlinkedOnTheWebsite,
+}
+
 /// One cloud's link: one access token shared by every project's connection, and those connections.
 pub struct Connector {
     tokens: Arc<DeviceTokens>,
@@ -102,6 +116,10 @@ struct Cloud {
     url: String,
     /// Each project's connection's bug-report consent and sender (bug_link.rs).
     bugs: HashMap<String, Arc<BugLink>>,
+    /// How many project connections are open now.
+    open: AtomicUsize,
+    /// Counts forgets: an open connection closes when it changes.
+    forgotten: watch::Sender<u64>,
 }
 
 impl Connector {
@@ -133,6 +151,8 @@ impl Connector {
                 .into_iter()
                 .map(|k| (k, Arc::new(BugLink::new(timing.connect))))
                 .collect(),
+            open: AtomicUsize::new(0),
+            forgotten: watch::channel(0).0,
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -160,6 +180,28 @@ impl Connector {
     /// and sending a `bug_report`. Off and unsent while that connection isn't up.
     pub fn bug_link(&self, project: &str) -> Option<Arc<BugLink>> {
         self.cloud.bugs.get(project).cloned()
+    }
+
+    /// This cloud's link state, as the tray shows it (connector.ts `connected`).
+    pub fn connected(&self) -> CloudLink {
+        if self.tokens.unlinked_on_site() {
+            CloudLink::UnlinkedOnTheWebsite
+        } else if !self.tokens.linked() {
+            CloudLink::NotLinked // also right after a forget, before its sockets have closed
+        } else if self.cloud.open.load(Ordering::SeqCst) > 0 {
+            CloudLink::Connected
+        } else {
+            CloudLink::Offline
+        }
+    }
+
+    /// Deletes this cloud's refresh token, closes its connections and drops a token refresh under way without
+    /// storing what it gets. The connections go on waiting, unlinked, so a later link reconnects them (connector.ts
+    /// `forget`). Other clouds' connectors are untouched.
+    pub fn forget(&self) -> anyhow::Result<()> {
+        let deleted = self.tokens.forget();
+        self.cloud.forgotten.send_modify(|n| *n += 1);
+        deleted
     }
 
     /// Stops every connection, once a token refresh under way has landed (up to `wait`): stopping in the middle of
@@ -206,10 +248,12 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
         wait
     };
     let mut stale: Option<String> = None;
+    let mut forgotten = cloud.forgotten.subscribe();
     // One project's commands, so a replay is caught across reconnects (commands.ts's `Commands` is one per
     // project's connection too).
     let mut seen = Seen::default();
     loop {
+        forgotten.mark_unchanged(); // a forget from here on closes this try's connection
         // A token that never comes (a refresh hanging on the network) is a failed try, not a link that stops.
         let answer = tokio::time::timeout(t.connect, cloud.tokens.access_token(stale.as_deref()))
             .await
@@ -227,7 +271,7 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
                             let _ = opened.send(true); // the other projects may connect now
                         }
                         let since = Instant::now();
-                        let (code, reason) = connected(ws, &cloud, &project, &log, &mut seen).await;
+                        let (code, reason) = connected(ws, &cloud, &project, &log, &mut seen, &mut forgotten).await;
                         if since.elapsed() >= t.stable {
                             attempt = 0;
                         }
@@ -286,14 +330,27 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 
 /// Runs an open connection: hello and a snapshot, then answers what the hub sends, and says it's alive in a quiet
 /// minute (sync-health.md section 3.1). The close code and reason when it closes.
-async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(String), seen: &mut Seen) -> (u16, String) {
+async fn connected(
+    ws: Socket,
+    cloud: &Cloud,
+    project: &str,
+    log: &impl Fn(String),
+    seen: &mut Seen,
+    forgotten: &mut watch::Receiver<u64>,
+) -> (u16, String) {
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let bugs = cloud.bugs.get(project);
     if let Some(bugs) = bugs {
         bugs.opened(out_tx.clone());
     }
     cloud.view.item_commands.set_out(project, Some(out_tx));
-    let closed = session(ws, cloud, project, log, seen, out_rx).await;
+    cloud.open.fetch_add(1, Ordering::SeqCst);
+    // A forget drops the socket, which closes it.
+    let closed = tokio::select! {
+        closed = session(ws, cloud, project, log, seen, out_rx) => closed,
+        _ = forgotten.changed() => (1000, "forgotten".to_string()),
+    };
+    cloud.open.fetch_sub(1, Ordering::SeqCst);
     cloud.view.item_commands.set_out(project, None);
     if let Some(bugs) = bugs {
         bugs.closed();
