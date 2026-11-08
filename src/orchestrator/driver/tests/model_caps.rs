@@ -122,3 +122,19 @@ async fn starts_made_in_one_pass_count_against_the_cap() {
     rig.machine.pass().await;
     assert_eq!(claims(&asked), 2, "without a cap both lanes ask");
 }
+
+#[tokio::test]
+async fn starts_made_for_one_project_count_against_the_cap_for_the_next() {
+    // The slots are shared by the computer, so project B sees project A's start made this pass.
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base, &base]);
+    for i in 0..2 {
+        rig.lp(i).flags = Arc::new(crate::flags::Flags::fixed(&["model-concurrency-caps"]));
+    }
+    let fake = rig.go_live();
+    *fake.slots.lock().unwrap() = Some(caps(Some(1)));
+    rig.machine.pass().await;
+    let claims = ops(&asked).iter().filter(|o| *o == "claim_next").count();
+    assert_eq!(claims, 1, "{:?}", ops(&asked));
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
