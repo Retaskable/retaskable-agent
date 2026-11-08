@@ -36,7 +36,7 @@ pub use status::StatusSource;
 const MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// agent-settings.md section 3.2: the environment variables the settings page greys out.
-const AGENT_ENV_VARS: [&str; 8] = [
+pub(crate) const AGENT_ENV_VARS: [&str; 8] = [
     "RETASKABLE_PORT",
     "RETASKABLE_POLL_SEC",
     "RETASKABLE_TAGS",
@@ -102,6 +102,13 @@ impl SettingsServer {
             keychain,
             state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
+        }
+    }
+
+    fn saver(&self) -> save::Saver<'_> {
+        save::Saver {
+            dir: &self.dir,
+            env: &self.env,
         }
     }
 
@@ -282,11 +289,7 @@ async fn post_settings(
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
-    let saves = save::Saves {
-        dir: &settings.dir,
-        env: &settings.env,
-    };
-    match saves.apply(&update) {
+    match settings.saver().apply(&update) {
         Ok(()) => Json(json!({ "saved": true })).into_response(),
         Err(e) => save_error_response(e),
     }

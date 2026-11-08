@@ -10,7 +10,7 @@ use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
     api, backlog, config, connector, lane_pool, link, local_model, network, orchestrator, release, runtime,
-    setup_check, spec_split, store, tags, telemetry, view,
+    setup_check, setup_questions, spec_split, store, tags, telemetry, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -672,6 +672,14 @@ async fn link_command(
     match run_link_in_terminal(&keychain, &url, link::CLOUD_TARGET, env, version).await {
         Ok(id) => {
             println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
+            // agent-settings.md section 5: the computer-only settings, asked only at a terminal.
+            // Behind the `machine-settings` flag (Off: nothing is asked, as before). The flag client's
+            // `PROJECT_ID` (src/flags.rs) and `RETASKABLE_FLAG_KEY` are placeholders the owner fills
+            // in from Settings -> Project settings -> Release flags.
+            let flag_on = retaskable_agent::flags::Flags::from_env().on("machine-settings").await;
+            if let Err(e) = ask_setup_questions(dir, env, release::default_port(build), flag_on) {
+                eprintln!("Couldn't ask or save the settings: {e:#}");
+            }
             // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
             // approval comes right after this one, opened by the agent itself.
             auto_link_backlog(
@@ -681,7 +689,6 @@ async fn link_command(
                 version.to_string(),
             )
             .await;
-            ask_setup_questions(cfg, dir, env, build).await;
             0
         }
         Err(e) => {
@@ -691,27 +698,21 @@ async fn link_command(
     }
 }
 
-/// agent-settings.md section 5: after linking, with someone at a terminal, asks the computer-only
-/// settings. Behind the `machine-settings` flag (Off keeps today's behaviour: nothing is asked).
-async fn ask_setup_questions(cfg: &config::ConfigFile, dir: &Path, env: &Env, build: Option<&release::Build>) {
+/// Asks the computer-only settings on the real terminal (`setup_questions`).
+fn ask_setup_questions(dir: &Path, env: &Env, default_port: u16, flag_on: bool) -> Result<()> {
     use std::io::IsTerminal;
-    if !retaskable_agent::flags::Flags::from_env().on("machine-settings").await {
-        return;
-    }
-    let default_port = release::default_port(build);
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let mut out = std::io::stdout();
-    let mut echo = retaskable_agent::setup_questions::terminal_echo;
-    let mut setup = retaskable_agent::setup_questions::Setup {
-        terminal: stdin.is_terminal(),
+    let mut secret = setup_questions::read_secret;
+    let is_terminal = stdin.is_terminal();
+    let mut term = setup_questions::Terminal {
+        is_terminal,
         input: &mut input,
         out: &mut out,
-        set_echo: &mut echo,
+        secret: &mut secret,
     };
-    if let Err(e) = setup.run(dir, cfg, env, default_port) {
-        eprintln!("Couldn't save the settings: {e:#}");
-    }
+    setup_questions::run(dir, env, default_port, flag_on, &mut term)
 }
 
 /// Runs one device-flow link against `target` at `url` in the terminal, storing the refresh token.

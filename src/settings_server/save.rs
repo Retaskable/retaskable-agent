@@ -1,6 +1,7 @@
 //! The settings page's saves: each setting's validation and write, and the check of a whole
 //! body before any of it is written (agent-settings.md sections 3.1 and 3.2).
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use axum::response::Response;
@@ -14,19 +15,19 @@ use crate::network::{self, NetworkAccess};
 use crate::password;
 use crate::store::MachineStore;
 use crate::tags;
-use std::path::Path;
 
-/// The directory and environment a save needs: the settings page's, or setup's (`setup_questions`).
-pub(crate) struct Saves<'a> {
+/// What a save needs: the agent's directory and environment. The settings page and `retaskable
+/// link`'s setup questions (`setup_questions.rs`) both save through it.
+pub(crate) struct Saver<'a> {
     pub(crate) dir: &'a Path,
     pub(crate) env: &'a Env,
 }
 
-impl Saves<'_> {
+impl Saver<'_> {
     /// Saves a typed tag list as changes to the found tags (added, removed), the same as setup
     /// will (agent-settings.md section 3.1).
     pub(crate) fn save_tags(&self, typed: &[String]) -> Result<()> {
-        let env = self.env;
+        let env = &self.env;
         let found = tags::found_tags(&tags::machine_facts(env));
         let cleaned = tags::clean_tags(Value::Array(typed.iter().cloned().map(Value::String).collect()));
         let added = cleaned.iter().filter(|t| !found.contains(t)).cloned().collect();
@@ -305,9 +306,18 @@ impl From<anyhow::Error> for SaveError {
     }
 }
 
+impl From<SaveError> for anyhow::Error {
+    fn from(e: SaveError) -> Self {
+        match e {
+            SaveError::Invalid(message) => anyhow::anyhow!(message),
+            SaveError::Io(e) => e,
+        }
+    }
+}
+
 /// `engineChoice` as both `GET /api/settings` returns it and `config.json` stores it: the same
 /// shape either way, so a save can write back exactly what a read would show.
-pub(crate) fn engine_choice_json(cfg: &config::EngineChoiceConfig) -> Value {
+pub(super) fn engine_choice_json(cfg: &config::EngineChoiceConfig) -> Value {
     json!({
         "default": cfg.default.map(|e| e.to_string()),
         "roles": {
@@ -341,7 +351,7 @@ pub(crate) fn save_error_response(e: SaveError) -> Response {
     }
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LocalUpdate {
     pub(crate) enabled: bool,
@@ -363,7 +373,7 @@ pub(crate) struct EngineChoiceUpdate {
 /// or empty to follow the default engine (`parse_role_engine`).
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub(crate) struct RoleEngineUpdate {
+pub(super) struct RoleEngineUpdate {
     planner: String,
     implementer: String,
     review: String,
@@ -382,9 +392,9 @@ pub(crate) struct CursorModelsUpdate {
 
 /// A `CursorModelsUpdate`'s names, validated and emptied to `None` (section 3.1: "empty is auto").
 pub(crate) struct CleanedCursorModels {
-    pub(crate) top: Option<String>,
-    pub(crate) implementer: Option<String>,
-    pub(crate) scout: Option<String>,
+    top: Option<String>,
+    implementer: Option<String>,
+    scout: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -398,15 +408,15 @@ pub(crate) struct NetworkUpdate {
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct SettingsUpdate {
-    pub(crate) tags: Option<Vec<String>>,
-    pub(crate) port: Option<u16>,
-    pub(crate) poll_interval_sec: Option<u32>,
-    pub(crate) local: Option<LocalUpdate>,
-    pub(crate) engine_choice: Option<EngineChoiceUpdate>,
-    pub(crate) cursor_models: Option<CursorModelsUpdate>,
-    pub(crate) network: Option<NetworkUpdate>,
+    pub(super) tags: Option<Vec<String>>,
+    pub(super) port: Option<u16>,
+    pub(super) poll_interval_sec: Option<u32>,
+    pub(super) local: Option<LocalUpdate>,
+    pub(super) engine_choice: Option<EngineChoiceUpdate>,
+    pub(super) cursor_models: Option<CursorModelsUpdate>,
+    pub(super) network: Option<NetworkUpdate>,
     #[serde(flatten)]
-    pub(crate) unsupported: HashMap<String, Value>,
+    pub(super) unsupported: HashMap<String, Value>,
 }
 
 #[cfg(test)]
