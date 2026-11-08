@@ -507,21 +507,7 @@ fn a_budget_is_dropped_only_on_a_subscription() {
 async fn run_session_dispatches_through_the_engine_it_is_given() {
     let dir = tempfile::tempdir().unwrap();
     let (bin, engine) = success_session(dir.path());
-    let spec = SessionSpec {
-        engine: None,
-        model: "sonnet".to_string(),
-        prompt: "hi".to_string(),
-        schema: json!({"type": "object"}),
-        cwd: dir.path().to_path_buf(),
-        max_turns: None,
-        budget_usd: 0.0,
-        start: SessionStart::Ephemeral,
-        readonly: false,
-        shell: true,
-        cursor: None,
-        local: None,
-        sandbox: false,
-    };
+    let spec = crate::engines::engine::test_spec(dir.path(), "hi");
     let result = run_session(&engine, &bin, &spec, "known", None, Watch::default())
         .await
         .unwrap();
