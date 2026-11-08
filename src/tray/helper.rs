@@ -12,6 +12,9 @@ use crate::env::Env;
 use crate::release::{Build, bundle_dir};
 use crate::tags::OsKind;
 
+mod client;
+pub use client::{Frame, TrayEvent, TrayHelper, TrayView};
+
 #[cfg(test)]
 mod tests;
 
