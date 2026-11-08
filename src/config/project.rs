@@ -280,6 +280,44 @@ pub struct PhoneConfig {
     pub item_id: Option<String>,
 }
 
+/// The daily Lighthouse chore's setting (daily-lighthouse.md section 2): off by default. The agent only reads it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LighthouseConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_lighthouse_pages")]
+    pub pages: Vec<String>,
+    /// The hour of the day (project time zone) the chore becomes due.
+    #[serde(default = "default_lighthouse_hour")]
+    pub hour: u32,
+    #[serde(default = "default_lighthouse_min_score")]
+    pub min_score: u32,
+}
+
+fn default_lighthouse_pages() -> Vec<String> {
+    vec!["/".to_string()]
+}
+
+fn default_lighthouse_hour() -> u32 {
+    6
+}
+
+fn default_lighthouse_min_score() -> u32 {
+    90
+}
+
+impl Default for LighthouseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pages: default_lighthouse_pages(),
+            hour: default_lighthouse_hour(),
+            min_score: default_lighthouse_min_score(),
+        }
+    }
+}
+
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,6 +384,8 @@ pub struct ProjectConfig {
     pub engines: Option<Value>,
     #[serde(default)]
     pub tuning: TuningConfig,
+    #[serde(default)]
+    pub lighthouse: LighthouseConfig,
 }
 
 impl ProjectConfig {
@@ -418,6 +458,32 @@ fn kebab_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lighthouse_is_off_by_default_and_reads_its_fields() {
+        let p: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            p.lighthouse,
+            LighthouseConfig {
+                enabled: false,
+                pages: vec!["/".into()],
+                hour: 6,
+                min_score: 90
+            }
+        );
+        let p: ProjectConfig =
+            serde_json::from_str(r#"{"lighthouse":{"enabled":true,"pages":["/a","/b"],"hour":3,"minScore":80}}"#)
+                .unwrap();
+        assert_eq!(
+            p.lighthouse,
+            LighthouseConfig {
+                enabled: true,
+                pages: vec!["/a".into(), "/b".into()],
+                hour: 3,
+                min_score: 80
+            }
+        );
+    }
 
     #[test]
     fn ci_tuning_defaults_to_ten_and_one_hundred_twenty_minutes_and_can_be_set() {
@@ -552,6 +618,7 @@ mod tests {
             phone: None,
             engines: None,
             tuning: TuningConfig::default(),
+            lighthouse: LighthouseConfig::default(),
         }
     }
 }
