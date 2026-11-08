@@ -244,6 +244,61 @@ fn repeat_error_ignores_errors_outside_the_window() {
     assert!(check(&input).is_empty());
 }
 
+fn store_error(op: &str) -> Event {
+    Event::StoreError(event::StoreError {
+        op: Some(op.into()),
+        ..Default::default()
+    })
+}
+
+/// Runs `check` over store errors `(at_ms, op)` at `now_ms`, returning the sync_failing finding if any.
+fn sync_finding(errors: &[(i64, &str)], now_ms: i64) -> Option<Found> {
+    let events: Vec<Event> = errors.iter().map(|(_, op)| store_error(op)).collect();
+    let recent: Vec<RecentEvent> = errors
+        .iter()
+        .zip(&events)
+        .map(|((at_ms, _), event)| RecentEvent { at_ms: *at_ms, event })
+        .collect();
+    let (runs, leases, records) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+    let (running, pool, actions) = (Running::default(), pool(2), Vec::new());
+    let input = Input {
+        now_ms,
+        ..make_input(&runs, &leases, &records, &running, &pool, &actions, &recent)
+    };
+    check(&input).into_iter().find(|f| f.rule == "sync_failing")
+}
+
+#[test]
+fn sync_failing_needs_three_matching_failures() {
+    let two = [(0, "details_put"), (0, "draft_save")];
+    assert!(sync_finding(&two, 0).is_none());
+
+    let three = [(0, "details_put"), (0, "draft_save"), (0, "ask_post")];
+    let f = sync_finding(&three, 0).expect("fires");
+    assert_eq!(f.item, None);
+    assert_eq!(f.threshold_minutes, 0);
+    assert_eq!(f.details["count"], 3);
+    assert_eq!(f.details["ops"], json!(["ask_post", "details_put", "draft_save"]));
+}
+
+#[test]
+fn sync_failing_ignores_other_ops() {
+    let errors = [(0, "list"), (0, "report"), (0, "claim_next"), (0, "settings_put")];
+    assert!(sync_finding(&errors, 0).is_none());
+}
+
+#[test]
+fn sync_failing_counts_only_the_window_and_ends_when_it_empties() {
+    let min = 60_000;
+    let spread = [(0, "details_a"), (6 * min, "draft_b"), (11 * min, "settings_c")];
+    assert!(sync_finding(&spread, 11 * min).is_none());
+
+    let close = [(2 * min, "details_a"), (6 * min, "draft_b"), (11 * min, "settings_c")];
+    assert!(sync_finding(&close, 11 * min).is_some());
+    // Later, the first has aged out of the window: the anomaly ends.
+    assert!(sync_finding(&close, 13 * min).is_none());
+}
+
 #[test]
 fn no_progress_fires_for_checking_with_a_lane_and_nothing_running() {
     let mut runs = BTreeMap::new();

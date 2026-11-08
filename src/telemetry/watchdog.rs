@@ -25,6 +25,9 @@ pub const LANE_MISMATCH_MINUTES: u32 = 2;
 /// `REPEAT_ERRORS` in `REPEAT_WINDOW_MS`.
 pub const REPEAT_ERRORS: usize = 3;
 pub const REPEAT_WINDOW_MINUTES: i64 = 30;
+/// `SYNC_FAILURES` in `SYNC_WINDOW_MS`.
+pub const SYNC_FAILURES: usize = 3;
+pub const SYNC_WINDOW_MINUTES: i64 = 10;
 
 /// One rule's finding this minute: an anomaly it sees right now, named so the same condition keeps the
 /// same id tick to tick. `threshold_minutes` is how long it must hold, continuously, before it is reported
@@ -71,6 +74,7 @@ pub fn check(input: &Input) -> Vec<Found> {
     idle_lanes(input, &mut found);
     repeat_error(input, &mut found);
     no_progress(input, &mut found);
+    sync_failing(input, &mut found);
     found
 }
 
@@ -199,6 +203,35 @@ fn repeat_error(input: &Input, out: &mut Vec<Found>) {
             item: None,
             text: "a gh or glab call ran with an undefined argument".to_string(),
             details: Value::Null,
+            threshold_minutes: 0,
+        });
+    }
+}
+
+/// 3 or more failed writes of details, drafts, settings or chat to the store (`store_error` events whose
+/// `op` starts `details_`, `draft_`, `settings_` or `ask_`) in the last 10 minutes. Project-wide.
+fn sync_failing(input: &Input, out: &mut Vec<Found>) {
+    let since = input.now_ms - SYNC_WINDOW_MINUTES * 60_000;
+    let mut ops = BTreeSet::new();
+    let mut count = 0;
+    for e in input.recent.iter().filter(|e| e.at_ms >= since) {
+        if let Event::StoreError(err) = e.event
+            && let Some(op) = err.op.as_deref()
+            && ["details_", "draft_", "settings_", "ask_"]
+                .iter()
+                .any(|p| op.starts_with(p))
+        {
+            count += 1;
+            ops.insert(op);
+        }
+    }
+    if count >= SYNC_FAILURES {
+        out.push(Found {
+            id: "sync_failing".to_string(),
+            rule: "sync_failing",
+            item: None,
+            text: format!("{count} writes to the store failed in {SYNC_WINDOW_MINUTES} min"),
+            details: json!({ "count": count, "ops": ops }),
             threshold_minutes: 0,
         });
     }
