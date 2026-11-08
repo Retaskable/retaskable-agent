@@ -47,7 +47,7 @@ pub struct Item {
 }
 
 impl Item {
-    fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
+    pub(crate) fn new(id: impl Into<String>, text: impl Into<String>) -> Self {
         Item {
             id: id.into(),
             text: text.into(),
