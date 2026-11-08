@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use super::piece_runs::{Job, piece_item, tree_sender};
 use super::session::quiet_timeout;
 use crate::backlog::runs::RunOutcome;
-use crate::engines::{EngineId, EphemeralSessionConfig, SessionResult, SessionSpec, engine_of, run_session_tracked};
+use crate::engines::{
+    EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
+    run_session_tracked,
+};
 use crate::implementer::publish::run as run_command;
 use crate::implementer::{Interrupted, Playtest};
 use crate::review_context::{ReviewContext, piece_slice_description};
@@ -60,19 +63,23 @@ fn behind_head(cwd: &Path, sha: &str) -> bool {
     crate::lanes::git_output_in_worktree(cwd, &["merge-base", "--is-ancestor", sha, "HEAD"]).is_ok()
 }
 
-async fn run_session(job: &Job, spec: SessionSpec) -> Result<SessionResult> {
-    let engine = engine_of(Some(EngineId::Claude))?;
+/// Where a review role runs: its `review` group's engine with `engine-placement` On, else the Claude the run
+/// started with.
+fn placement(job: &Job, role: Role) -> Result<Placement> {
+    let engine = if job.placed {
+        engine_for(&job.choice, job.project.engines.as_ref(), role, None)
+    } else {
+        crate::config::Engine::Claude
+    };
+    place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
+}
+
+async fn run_session(job: &Job, bins: &[&Placement], spec: SessionSpec) -> Result<SessionResult> {
+    let program = spec.engine.unwrap_or(EngineId::Claude);
+    let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
+    let engine = engine_of(Some(program))?;
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
-    let result = run_session_tracked(
-        engine.as_ref(),
-        &job.bin,
-        &spec,
-        "",
-        None,
-        quiet,
-        Some(tree_sender(job)),
-    )
-    .await?;
+    let result = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job))).await?;
     // A cut session (a stop) isn't a failed review: the run ends `interrupted`.
     if result.subtype == "interrupted" {
         return Err(Interrupted("the review session was cut".into()).into());
@@ -80,14 +87,20 @@ async fn run_session(job: &Job, spec: SessionSpec) -> Result<SessionResult> {
     Ok(result)
 }
 
-fn session_config<'a>(job: &Job, cwd: &'a Path, model: &str, budget_usd: f64) -> EphemeralSessionConfig<'a> {
+fn session_config<'a>(
+    job: &Job,
+    cwd: &'a Path,
+    model: &str,
+    budget_usd: f64,
+    placed: &Placement,
+) -> EphemeralSessionConfig<'a> {
     EphemeralSessionConfig {
         cwd,
         budget_usd,
         model: model.to_string(),
         local: None,
-        engine: Some(EngineId::Claude),
-        cursor: None,
+        engine: Some(placed.engine),
+        cursor: placed.cursor.clone(),
         sandbox: crate::engines::claude::sandbox_enabled(job.project.sandbox, cfg!(windows)),
         shell: true,
     }
@@ -144,6 +157,7 @@ pub(super) async fn review(
         ),
         None => (format!("origin/{}...HEAD", project.base_branch), String::new()),
     };
+    let (scout_at, reviewer_at) = (placement(job, Role::Scout)?, placement(job, Role::Reviewer)?);
     let info = parse_scout_info(SCOUT_INFO)?;
     let input = StageInput {
         base_branch: &project.base_branch,
@@ -160,17 +174,18 @@ pub(super) async fn review(
         },
         scouts: Scouts {
             template: SCOUT_TEMPLATE,
-            session: session_config(job, cwd, SONNET, project.budget.scout_usd),
+            session: session_config(job, cwd, SONNET, project.budget.scout_usd, &scout_at),
         },
         scout_info: &info,
         reviewer: Reviewer {
             template: REVIEWER_TEMPLATE,
-            session: session_config(job, cwd, OPUS, project.budget.reviewer_usd),
+            session: session_config(job, cwd, OPUS, project.budget.reviewer_usd, &reviewer_at),
         },
         playtest,
         manual_approvals: "(none)",
     };
-    let review = review_lane(cwd, &input, |spec| run_session(job, spec)).await;
+    let bins = [&scout_at, &reviewer_at];
+    let review = review_lane(cwd, &input, |spec| run_session(job, &bins, spec)).await;
     let review = match review {
         Ok(r) => r,
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => {

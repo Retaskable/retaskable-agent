@@ -14,16 +14,15 @@ use serde_json::{Value, json};
 use super::baseline_wait::BaselineStage;
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
 use super::piece_review::{ReviewState, Reviewed, review as review_change};
-use super::session::{
-    Attempt, ChecksStage, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout,
-};
+use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, quiet_timeout};
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
+use crate::engines::engine::CursorOptions;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
+use crate::engines::{Placement, place};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::runs::chore::{Chore, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
@@ -38,6 +37,8 @@ pub struct PieceStarter {
     pub data_dir: PathBuf,
     pub projects: Vec<ProjectConfig>,
     pub choice: EngineChoiceConfig,
+    /// This computer's Cursor model per tier (engines/03 section 3.4).
+    pub cursor_models: CursorModels,
     pub env: Env,
     pub max_turns: u32,
     pub models: ModelsConfig,
@@ -88,19 +89,32 @@ impl RunStarter for PieceStarter {
                 None,
             )),
         };
+        // With `engine-placement` Off, only Claude runs; any other engine is refused as before.
+        let placed = self.flags.last("engine-placement");
         let engine = match chosen {
-            Ok(Engine::Claude) => EngineId::Claude,
+            Ok(Engine::Claude) => Engine::Claude,
+            Ok(other) if placed => other,
             Ok(other) => return self.cannot_run(request, other.to_string()),
             Err(name) => return self.cannot_run(request, name),
         };
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let placement = place(engine, Role::Implementer, &self.env, &self.cursor_models)?;
+        self.run(request, project, lane, placement, placed)
+    }
+}
+
+impl PieceStarter {
+    fn run(
+        &self,
+        request: RunRequest,
+        project: ProjectConfig,
+        lane: PathBuf,
+        placement: Placement,
+        placed: bool,
+    ) -> Result<(), String> {
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
-            bin,
+            bin: placement.bin,
             gh: self
                 .env
                 .get("RETASKABLE_GH")
@@ -110,7 +124,12 @@ impl RunStarter for PieceStarter {
             lane,
             token: request.token.clone(),
             kind: request.kind,
-            engine,
+            engine: placement.engine,
+            cursor: placement.cursor,
+            choice: self.choice.clone(),
+            cursor_models: self.cursor_models.clone(),
+            placed,
+            env: self.env.clone(),
             piece: request.piece,
             processes: request.processes,
             flags: self.flags.clone(),
@@ -122,6 +141,8 @@ impl RunStarter for PieceStarter {
         let token = request.token;
         // The inner task is joined, so even a panic in it ends in exactly one end.
         tokio::spawn(async move {
+            // Keeps the flag's answer fresh for the next run's start.
+            job.flags.on("engine-placement").await;
             let (outcome, result) = match tokio::spawn(run_locked(job)).await {
                 Ok(end) => end,
                 Err(e) => (RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({})),
@@ -143,6 +164,12 @@ pub(super) struct Job {
     pub(super) token: String,
     pub(super) kind: RunKind,
     pub(super) engine: EngineId,
+    pub(super) cursor: Option<CursorOptions>,
+    pub(super) choice: EngineChoiceConfig,
+    pub(super) cursor_models: CursorModels,
+    /// `engine-placement` was On when the run started.
+    pub(super) placed: bool,
+    pub(super) env: Env,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
     pub(super) flags: std::sync::Arc<crate::flags::Flags>,
@@ -331,7 +358,7 @@ async fn session(
             budget_usd: project.budget.implementer_usd,
             max_turns: Some(job.max_turns),
             engine: Some(job.engine),
-            cursor: None,
+            cursor: job.cursor.clone(),
             local: None,
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },

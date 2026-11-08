@@ -48,6 +48,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         data_dir: root.join("data"),
         projects: vec![project],
         choice: EngineChoiceConfig::default(),
+        cursor_models: Default::default(),
         env,
         max_turns: 50,
         models: ModelsConfig::default(),
@@ -462,6 +463,83 @@ async fn cutting_a_review_session_ends_the_run_interrupted() {
     tree.kill_and_wait(crate::process_tree::KILL_LIMIT);
     assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
     assert!(comment(&r).is_empty());
+}
+
+fn placing(r: &mut Rig) {
+    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
+}
+
+/// Makes `RETASKABLE_<var>` a stub that appends its arguments to `<name>.log` and prints nothing.
+fn stub(r: &mut Rig, var: &str, name: &str) {
+    let path = r
+        .root
+        .join(format!("stub-{name}{}", if cfg!(windows) { ".cmd" } else { "" }));
+    crate::test_support::write_executable(
+        &path,
+        &format!(
+            "#!/bin/sh\ncat > /dev/null\necho \"$@\" >> '{}'\n",
+            r.root.join(format!("{name}.log")).display()
+        ),
+    );
+    let (var, path) = (var.to_string(), path.to_string_lossy().into_owned());
+    let starter = Arc::get_mut(&mut r.starter).unwrap();
+    let old = starter.env.clone();
+    starter.env = Env::new(move |k| if k == var { Some(path.clone()) } else { old.get(k) });
+}
+
+#[tokio::test]
+async fn a_piece_on_cursor_codex_or_pi_runs_that_binary() {
+    for (engine, var) in [
+        ("cursor", "RETASKABLE_CURSOR"),
+        ("codex", "RETASKABLE_CODEX"),
+        ("pi", "RETASKABLE_PI"),
+    ] {
+        let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+        placing(&mut r);
+        stub(&mut r, var, engine);
+        let mut p = piece();
+        p["engine"] = json!(engine);
+        let (req, mut s) = request(&r, RunKind::Build, p);
+        r.starter.start(req).unwrap();
+        let end = end_of(&mut s.ends).await;
+        assert!(r.root.join(format!("{engine}.log")).exists(), "{engine} didn't run");
+        assert!(!r.root.join("prompt1.txt").exists());
+        assert_ne!(end.outcome, RunOutcome::Interrupted, "{engine}");
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_engine_is_still_refused_with_placement_on() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    placing(&mut r);
+    let mut p = piece();
+    p["engine"] = json!("steam");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
+}
+
+#[tokio::test]
+async fn a_review_on_cursor_runs_scouts_on_the_scout_model_and_the_reviewer_on_top() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    placing(&mut r);
+    stub(&mut r, "RETASKABLE_CURSOR", "cursor");
+    {
+        let starter = Arc::get_mut(&mut r.starter).unwrap();
+        starter.choice = serde_json::from_value(json!({ "roles": { "review": "cursor" } })).unwrap();
+        starter.cursor_models = serde_json::from_value(json!({ "top": "gpt-top", "scout": "gpt-scout" })).unwrap();
+        starter.projects[0].review.min_scout_diff_lines = 0;
+    }
+    let mut p = piece();
+    p["engine"] = json!("claude");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    end_of(&mut s.ends).await;
+    // The implementer stayed on Claude.
+    assert!(r.root.join("prompt1.txt").exists());
+    let log = std::fs::read_to_string(r.root.join("cursor.log")).unwrap();
+    assert!(log.contains("--model gpt-scout"), "{log}");
+    assert!(log.contains("--model gpt-top"), "{log}");
 }
 
 fn with_flag(r: &mut Rig) {
