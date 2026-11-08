@@ -35,6 +35,22 @@ fn ideas() -> StoreIdeas {
     }
 }
 
+fn scout_session(cwd: &Path) -> EphemeralSessionConfig<'_> {
+    let mut session = EphemeralSessionConfig {
+        cwd,
+        budget_usd: 0.0,
+        model: String::new(),
+        local: None,
+        engine: None,
+        cursor: None,
+        sandbox: false,
+        shell: false,
+    };
+    session.budget_usd = 0.5;
+    session.model = "haiku".to_string();
+    session
+}
+
 fn vetter<'a>(template: &'a str, ideas: &'a StoreIdeas, past: &'a [PastVerdict], cwd: &'a Path) -> Vetter<'a> {
     Vetter {
         template,
@@ -42,16 +58,7 @@ fn vetter<'a>(template: &'a str, ideas: &'a StoreIdeas, past: &'a [PastVerdict],
         specs_index: "SPECS INDEX HERE",
         ideas,
         past,
-        session: EphemeralSessionConfig {
-            cwd,
-            budget_usd: 0.5,
-            model: "haiku".to_string(),
-            local: None,
-            engine: None,
-            cursor: None,
-            sandbox: false,
-            shell: false,
-        },
+        session: scout_session(cwd),
     }
 }
 
