@@ -19,6 +19,9 @@ pub struct Placement {
     pub bin: PathBuf,
     /// Only on Cursor: the role's model name.
     pub cursor: Option<CursorOptions>,
+    /// The engine was set to `local`: the session takes the local model while it's available (and the
+    /// `local-tier-ladder` flag is On), else runs on the role's tier.
+    pub local: bool,
 }
 
 /// `cursorModelFor(cfg, role)` (section 3.4): `top` for the planner, reviewer, drafter and
@@ -37,9 +40,9 @@ pub fn cursor_model_for(models: &CursorModels, role: Role) -> String {
         .to_string()
 }
 
-/// Resolves `engine`'s binary and checks it exists. `local` places as Claude Code with no
-/// `LocalTarget`: the local model's routing (pinnedModel, fallback, the local slot, agent/07.2)
-/// isn't built in this crate, so a local choice falls back to the role's tier (section 3.1).
+/// Resolves `engine`'s binary and checks it exists. `local` places as Claude Code with `local` set: the
+/// caller then gives the session the `LocalTarget` and the local slot while the local model is available
+/// (agent/07.2), and otherwise runs it on the role's tier (section 3.1). The other engines never take the slot.
 pub fn place(engine: Engine, role: Role, env: &Env, cursor_models: &CursorModels) -> Result<Placement, String> {
     let program = program_of(engine);
     let (name, bin) = match program {
@@ -59,6 +62,7 @@ pub fn place(engine: Engine, role: Role, env: &Env, cursor_models: &CursorModels
         engine: program,
         bin,
         cursor,
+        local: engine == Engine::Local,
     })
 }
 
@@ -157,6 +161,16 @@ mod tests {
         let p = place(Engine::Local, Role::Implementer, &env, &CursorModels::default()).unwrap();
         assert_eq!(p.engine, EngineId::Claude);
         assert!(p.cursor.is_none());
+        assert!(p.local);
+    }
+
+    #[test]
+    fn only_local_wants_the_local_model() {
+        let (_dir, env) = stubbed(&["claude", "cursor-agent", "pi", "codex"]);
+        for engine in [Engine::Claude, Engine::Cursor, Engine::Pi, Engine::Codex] {
+            let p = place(engine, Role::Implementer, &env, &CursorModels::default()).unwrap();
+            assert!(!p.local, "{engine:?}");
+        }
     }
 
     #[test]

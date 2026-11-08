@@ -4,17 +4,21 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::*;
 use crate::{backlog::ItemStatus, local_model::LocalModel, orchestrator::driver::OutcomeSender};
 
-const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
+pub(super) const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
 
-struct Rig {
+pub(super) struct Rig {
     _dir: tempfile::TempDir,
-    root: PathBuf,
-    starter: Arc<ClaudeStarter>,
-    args: PathBuf,
+    pub(super) root: PathBuf,
+    pub(super) starter: Arc<ClaudeStarter>,
+    pub(super) args: PathBuf,
 }
 
 /// A project over a real repo, whose `claude` prints `lines` (or, with `None`, exits 3 at once).
-fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
+pub(super) fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
+    rig_with(lines, choice, claude, LocalModel::off())
+}
+
+pub(super) fn rig_with(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool, local: LocalModel) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
@@ -43,7 +47,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         150_000,
         Default::default(),
         Default::default(),
-        LocalModel::off(),
+        local,
     );
     Rig {
         _dir: dir,
@@ -149,7 +153,7 @@ fn queued_item() -> Item {
     }
 }
 
-fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
+pub(super) fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let request = StartRequest {
         project: "p".into(),
@@ -671,47 +675,6 @@ async fn a_session_with_questions_sends_questions() {
             all_already_answered: false
         })
     );
-}
-
-#[tokio::test]
-async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    let (mut request, mut rx) = request();
-    request.usage = None;
-    rig.starter.start(request).unwrap();
-    rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
-    let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-    assert_eq!(model, Some("sonnet"), "{args}");
-}
-
-#[tokio::test]
-async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    let (mut request, mut rx) = request();
-    request.usage = None;
-    request.item.reopened = Some(crate::backlog::Reopened {
-        notes: Some("The list is empty".into()),
-        at: Some("2026-10-29T00:00:00Z".into()),
-        by: None,
-    });
-    rig.starter.start(request).unwrap();
-    rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
-    let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-    assert_eq!(model, Some("opus"), "{args}");
-}
-
-#[tokio::test]
-async fn a_usage_reading_below_opus_above_pct_starts_the_implementer_on_sonnet() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    let (mut request, mut rx) = request();
-    request.usage = Some(serde_json::json!({"status": "allowed_warning", "resetsAt": i64::MAX}));
-    rig.starter.start(request).unwrap();
-    rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
-    let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-    assert_eq!(model, Some("sonnet"), "{args}");
 }
 
 /// A starter like `rig`'s, but whose only project's repo path is missing, so preparing its lane fails.

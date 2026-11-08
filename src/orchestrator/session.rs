@@ -27,7 +27,8 @@ use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::model_slots::ModelSlots;
 use crate::engines::{
-    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, place, program_of,
+    run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
@@ -39,7 +40,7 @@ use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
-use crate::tiers::{implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, implementer_model, implementer_tier};
 use crate::{lanes, paths};
 pub(super) use gates::{ChecksStage, FreshRules, GateRounds, Gated, Step, gate_rounds};
 
@@ -138,6 +139,15 @@ impl SessionStarter for ClaudeStarter {
             &self.env,
             &self.cursor_models,
         )?;
+        // The implementer's engine is set to `local` (it is Claude Code): it takes the local model while it's up.
+        let wants_local = !request.resume
+            && request.engine == EngineId::Claude
+            && engine_for(
+                &self.choice,
+                project.engines.as_ref(),
+                Role::Implementer,
+                Some(request.lane),
+            ) == Engine::Local;
         let StartRequest {
             project: project_id,
             item_id,
@@ -158,6 +168,7 @@ impl SessionStarter for ClaudeStarter {
         } = request;
         let job = Job {
             local: self.local.clone(),
+            wants_local,
             data_dir: self.data_dir.clone(),
             project,
             project_id: project_id.clone(),
@@ -299,8 +310,9 @@ pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
 }
 
 struct Job {
-    #[allow(dead_code)] // read by the tier ladder's later pieces
     local: crate::local_model::LocalModel,
+    /// The implementer's engine is set to `local` (`Placement::local`).
+    wants_local: bool,
     data_dir: PathBuf,
     project: ProjectConfig,
     project_id: String,
@@ -416,7 +428,22 @@ async fn attempt(
         ..c
     });
     let now = crate::telemetry::now_ms() / 1000;
-    let tier = implementer_tier(usage.as_ref(), now, models, false);
+    // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
+    // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
+    // Never on a resume: an Anthropic session isn't resumed against the local server (section 7.2), so it goes on `sonnet`.
+    let ladder =
+        placed.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && crate::tiers::local_ladder_on();
+    let up = ladder && job.local.available();
+    let tier = if up && job.wants_local {
+        LOCAL
+    } else {
+        implementer_tier(usage.as_ref(), now, models, up)
+    };
+    let local_run = if tier == LOCAL {
+        Some(job.local.run().await)
+    } else {
+        None
+    };
     let model = implementer_model(tier, item).to_string();
     let info = SessionInfo {
         project: project_id.clone(),
@@ -425,7 +452,11 @@ async fn attempt(
         role: Role::Implementer,
         lane: Some(*lane),
         engine: placed.engine,
-        model: model_name(placed.engine, &model, cursor.as_ref()),
+        model: if local_run.is_some() {
+            LOCAL.to_string()
+        } else {
+            model_name(placed.engine, &model, cursor.as_ref())
+        },
     };
     let branch = branch_name(item, *attempt_no);
     let quiet = watch_for(project, placed.engine);
@@ -448,7 +479,7 @@ async fn attempt(
             max_turns: Some(*max_turns),
             engine: Some(placed.engine),
             cursor,
-            local: None,
+            local: local_run.as_ref().map(|r| r.target.clone()),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,
@@ -812,6 +843,10 @@ mod gates;
 #[cfg(test)]
 #[path = "session_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "session_local_tests.rs"]
+mod local_tests;
 
 #[cfg(test)]
 #[path = "session_engine_tests.rs"]

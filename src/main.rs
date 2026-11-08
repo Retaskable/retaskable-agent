@@ -9,9 +9,12 @@ use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, hello_settings, lane_pool, link, local_model, network, orchestrator, release,
-    runtime, setup_check, setup_questions, spec_split, store, tags, telemetry, tray, view,
+    api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
+    setup_questions, spec_split, store, tags, telemetry, tray, view,
 };
+
+mod agent_view;
+use agent_view::agent_view;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -413,6 +416,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
             placement.keep_fresh("weekly-cutoff", std::time::Duration::from_secs(30));
             placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
+            placement.keep_fresh("local-tier-ladder", std::time::Duration::from_secs(30));
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );
@@ -472,6 +476,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     env.clone(),
                     cfg.machine.models,
                     config::cursor_models(cfg, env),
+                    local.clone(),
                 ) as Arc<dyn orchestrator::trial_host::TrialHost>,
                 latest_checks.clone(),
             )
@@ -640,36 +645,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     .await
     .ok();
     Ok(())
-}
-
-/// What the cloud sees of this computer.
-fn agent_view(
-    cfg: &config::ConfigFile,
-    tags: Vec<String>,
-    version: &str,
-    env: &Env,
-    dir: &Path,
-    default_port: u16,
-) -> view::AgentView {
-    view::AgentView {
-        machine: link::machine_name(env),
-        tags,
-        projects: cfg.projects.iter().map(view::ProjectView::from).collect(),
-        version: version.to_string(),
-        lanes: config::lanes(cfg, env),
-        chore_lane: cfg.machine.chore_lane,
-        lane_sizes: lane_pool::LaneSizes::default(),
-        paused: view::PauseState::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-        settings: hello_settings::HelloSettings::new(
-            dir.to_path_buf(),
-            env.clone(),
-            default_port,
-            Arc::new(retaskable_agent::flags::Flags::from_env()),
-        ),
-    }
 }
 
 /// cloud.md section 5 / environments.md section 3.4: starts one outbound link to each cloud,

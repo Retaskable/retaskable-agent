@@ -18,7 +18,7 @@ use crate::engines::engine::CursorOptions;
 use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
-use crate::tiers::{implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, implementer_model, implementer_tier};
 use crate::trial_plan::{TRIAL_ID, TRIAL_TEXT};
 use crate::{lanes, paths};
 
@@ -63,6 +63,7 @@ pub struct ClaudeTrial {
     env: Env,
     models: ModelsConfig,
     cursor_models: CursorModels,
+    local: crate::local_model::LocalModel,
 }
 
 impl ClaudeTrial {
@@ -72,6 +73,7 @@ impl ClaudeTrial {
         env: Env,
         models: ModelsConfig,
         cursor_models: CursorModels,
+        local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
         Arc::new(Self {
             choice,
@@ -79,6 +81,7 @@ impl ClaudeTrial {
             env,
             models,
             cursor_models,
+            local,
         })
     }
 }
@@ -101,12 +104,13 @@ fn trial_item() -> Item {
 
 impl TrialHost for ClaudeTrial {
     fn run(&self, job: TrialJob) -> BoxFuture<'static, Result<TrialEnd>> {
-        let (choice, data_dir, env, models, cursor_models) = (
+        let (choice, data_dir, env, models, cursor_models, local) = (
             self.choice.clone(),
             self.data_dir.clone(),
             self.env.clone(),
             self.models,
             self.cursor_models.clone(),
+            self.local.clone(),
         );
         Box::pin(async move {
             let project = &job.project;
@@ -132,7 +136,17 @@ impl TrialHost for ClaudeTrial {
                 tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base)).await??;
             let item = trial_item();
             let now = crate::telemetry::now_ms() / 1000;
-            let model = implementer_model(implementer_tier(job.usage.as_ref(), now, &models, false), &item).to_string();
+            // Like an implementer: the local model only for a Claude session behind the `local-tier-ladder` flag,
+            // with its slot held until the session ends.
+            let ladder = placed.engine == crate::engines::EngineId::Claude && crate::tiers::local_ladder_on();
+            let up = ladder && local.available();
+            let tier = if up && placed.local {
+                LOCAL
+            } else {
+                implementer_tier(job.usage.as_ref(), now, &models, up)
+            };
+            let local_run = if tier == LOCAL { Some(local.run().await) } else { None };
+            let model = implementer_model(tier, &item).to_string();
             let mut spec = session_spec(
                 &Session {
                     template: TEMPLATE,
@@ -155,7 +169,7 @@ impl TrialHost for ClaudeTrial {
                         cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
                         ..c
                     }),
-                    local: None,
+                    local: local_run.as_ref().map(|r| r.target.clone()),
                     sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                 },
                 Start::Fresh,

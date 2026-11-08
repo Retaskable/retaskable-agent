@@ -154,6 +154,26 @@ pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
     let _ = FLAG.set(flags);
 }
 
+/// Whether the `local-tier-ladder` flag was On at its last answer; Off until the flags client is handed over.
+pub fn local_ladder_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = LADDER_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("local-tier-ladder"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static LADDER_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-tier-ladder` flag on or off for the calling test's thread (each test runs on its own).
+#[cfg(test)]
+pub fn set_local_ladder_for_test(on: bool) {
+    LADDER_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
 /// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.
 pub fn model_caps_on() -> bool {
     FLAG.get().is_some_and(|f| f.last("model-concurrency-caps"))
