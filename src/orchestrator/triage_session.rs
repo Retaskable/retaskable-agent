@@ -16,6 +16,7 @@ use crate::engines::{
     EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
 };
 use crate::implementer::new_session_id;
+use crate::orchestrator::live::sessions::{SessionInfo, model_name};
 use crate::tiers::{implementer_tier, mid_tier, top_tier};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
@@ -94,6 +95,16 @@ impl ClaudeStarter {
         ))
         .to_string();
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
+        let sessions = self.sessions.clone();
+        let info = SessionInfo {
+            project: project_id.clone(),
+            item_id: item_id.clone(),
+            title: None,
+            role: Role::Triager,
+            lane,
+            engine: placed.engine,
+            model: model_name(placed.engine, &model, placed.cursor.as_ref()),
+        };
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -119,7 +130,9 @@ impl ClaudeStarter {
                 let mut cut = (false, false);
                 let seen = &mut cut;
                 let decided = decide(&triager, &context, |spec| async move {
-                    let r = run_session(engine?.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet).await?;
+                    let engine = engine?;
+                    let run = run_session(engine.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet);
+                    let r = sessions.track(info, run).await?;
                     *seen = (r.subtype == "error_max_budget_usd", r.limit_hit);
                     Ok(r)
                 })
@@ -195,6 +208,16 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
+        let sessions = self.sessions.clone();
+        let info = SessionInfo {
+            project: project_id.clone(),
+            item_id: item_id.clone(),
+            title: None,
+            role: Role::Triager,
+            lane,
+            engine: placed.engine,
+            model: model_name(placed.engine, top_tier(), placed.cursor.as_ref()),
+        };
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
@@ -223,7 +246,9 @@ impl ClaudeStarter {
                 };
                 let engine = engine_of(Some(placed.engine));
                 let checked = check(&second, &ctx, |spec| async move {
-                    run_session(engine?.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet).await
+                    let engine = engine?;
+                    let run = run_session(engine.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet);
+                    sessions.track(info, run).await
                 })
                 .await;
                 checked.result.map(|r| (r.agree, r.reason, r.instructions))

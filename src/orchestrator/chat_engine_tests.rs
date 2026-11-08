@@ -154,6 +154,7 @@ fn starter(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> (Arc
         ModelsConfig::default(),
         150_000,
         models(),
+        Default::default(),
     );
     (starter, repo)
 }

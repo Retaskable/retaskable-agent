@@ -44,6 +44,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         ModelsConfig::default(),
         150_000,
         Default::default(),
+        Default::default(),
     );
     Rig {
         _dir: dir,
@@ -190,6 +191,49 @@ fn answer(status: &str, questions: &str) -> String {
     format!(
         r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"status":"{status}","summary":"s","questions":{questions}}},"session_id":"s"}}"#
     )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_implementer_is_listed_on_its_lane_while_it_runs_and_not_after() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let script = format!(
+        "#!/bin/sh\nsleep 1\ncat > /dev/null\ncat '{}'\n",
+        rig.root.join("out.jsonl").display()
+    );
+    crate::test_support::write_executable(&rig.root.join(fake_name()), &script);
+    let (request, mut rx) = request();
+    rig.starter.start(request).unwrap();
+    let rows = crate::orchestrator::fake_session_tests::rows_once_running(&rig.starter.sessions).await;
+    assert_eq!(rows.len(), 1);
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "implementer-session", Role::Implementer)
+    );
+    assert_eq!(
+        (info.title.as_deref(), info.lane, info.engine),
+        (Some("Have a session write the code"), Some(1), EngineId::Claude)
+    );
+    assert!(!info.model.is_empty());
+    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rig.starter.sessions.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn a_session_that_cannot_start_leaves_no_row() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let starter = starter_with_unpreparable_lane(&rig);
+    let (request, mut rx) = request();
+    starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(starter.sessions.snapshot().is_empty());
 }
 
 #[tokio::test]
@@ -671,6 +715,7 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         50,
         ModelsConfig::default(),
         150_000,
+        Default::default(),
         Default::default(),
     )
 }

@@ -93,6 +93,7 @@ pub(super) fn roster(
         models: Default::default(),
         cursor_models: Default::default(),
         flags: Arc::new(crate::flags::Flags::fixed(&["engine-placement"])),
+        sessions: Default::default(),
     };
     (dir, root, roster)
 }
@@ -125,4 +126,21 @@ pub(super) fn assert_ran_on(root: &Path, program: &str) {
             "{args}"
         ),
     }
+}
+
+/// The rows once a session has started (the fake `claude` sleeps first, so it is still running).
+pub(super) async fn rows_once_running(
+    sessions: &crate::orchestrator::live::sessions::Sessions,
+) -> Vec<crate::orchestrator::live::sessions::SessionRow> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let rows = sessions.snapshot();
+            if !rows.is_empty() {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a session row")
 }

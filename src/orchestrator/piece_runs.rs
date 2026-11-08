@@ -25,6 +25,7 @@ use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, e
 use crate::engines::{Placement, place};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::runs::chore::{Chore, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
 use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::{lanes, paths};
@@ -45,6 +46,8 @@ pub struct PieceStarter {
     pub flags: std::sync::Arc<crate::flags::Flags>,
     /// This computer, for a chore lock's note.
     pub machine: String,
+    /// The sessions running now: a run's sessions list themselves while they run.
+    pub sessions: Sessions,
 }
 
 impl PieceStarter {
@@ -136,6 +139,7 @@ impl PieceStarter {
             context: request.context,
             machine: self.machine.clone(),
             lock: None,
+            sessions: self.sessions.clone(),
         };
         let ends = request.ends;
         let token = request.token;
@@ -177,6 +181,22 @@ pub(super) struct Job {
     pub(super) machine: String,
     /// The token of the chore lock the run holds, checked before it pushes.
     pub(super) lock: Option<String>,
+    pub(super) sessions: Sessions,
+}
+
+impl Job {
+    /// The row one of the run's sessions lists itself as.
+    pub(super) fn session_info(&self, role: Role, engine: EngineId, model: String) -> SessionInfo {
+        SessionInfo {
+            project: self.project.id_or_derived(),
+            item_id: piece_id(&self.piece).to_string(),
+            title: Some(self.piece.title.clone()),
+            role,
+            lane: crate::lanes::lane_number(&self.lane),
+            engine,
+            model,
+        }
+    }
 }
 
 /// A sender for a session's process tree: it goes to the run as soon as the session starts, so a stop can cut it.
@@ -386,21 +406,31 @@ async fn session(
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
-    let (answer, usage) = run_implementer(spec, |spec| async move {
-        let r = run_session_tracked(
-            engine.as_ref(),
-            &job.bin,
-            &spec,
-            &id,
-            Some(&sink),
-            quiet,
-            Some(tree_sender(job)),
+    let info = job.session_info(
+        Role::Implementer,
+        job.engine,
+        model_name(job.engine, &spec.model, job.cursor.as_ref()),
+    );
+    let (answer, usage) = job
+        .sessions
+        .track(
+            info,
+            run_implementer(spec, |spec| async move {
+                let r = run_session_tracked(
+                    engine.as_ref(),
+                    &job.bin,
+                    &spec,
+                    &id,
+                    Some(&sink),
+                    quiet,
+                    Some(tree_sender(job)),
+                )
+                .await?;
+                *ctx = r.context_tokens;
+                Ok(r)
+            }),
         )
-        .await?;
-        *ctx = r.context_tokens;
-        Ok(r)
-    })
-    .await;
+        .await;
     Ok(Attempt {
         answer,
         usage,

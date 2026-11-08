@@ -34,6 +34,7 @@ use crate::implementer::{
 };
 use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
 use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
@@ -54,6 +55,8 @@ pub struct ClaudeStarter {
     pub(super) cursor_models: CursorModels,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     pub(super) running: Arc<AtomicU32>,
+    /// The sessions running now: each one lists itself while it runs.
+    pub(super) sessions: Sessions,
 }
 
 impl ClaudeStarter {
@@ -67,6 +70,7 @@ impl ClaudeStarter {
         models: ModelsConfig,
         max_resume_context_tokens: u32,
         cursor_models: CursorModels,
+        sessions: Sessions,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -78,6 +82,7 @@ impl ClaudeStarter {
             max_resume_context_tokens,
             cursor_models,
             running: Arc::new(AtomicU32::new(0)),
+            sessions,
         })
     }
 }
@@ -144,6 +149,7 @@ impl SessionStarter for ClaudeStarter {
             items,
             attempt,
             notes,
+            sessions: self.sessions.clone(),
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -293,6 +299,7 @@ struct Job {
     /// Start over's attempt (the branch's `-r<attempt>`), and its notes for a fresh session's first prompt.
     attempt: u32,
     notes: Option<String>,
+    sessions: Sessions,
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
@@ -364,6 +371,7 @@ async fn attempt(
         items,
         notes,
         attempt: attempt_no,
+        sessions,
         ..
     } = job;
     let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
@@ -374,6 +382,15 @@ async fn attempt(
     let now = crate::telemetry::now_ms() / 1000;
     let tier = implementer_tier(usage.as_ref(), now, models);
     let model = implementer_model(tier, item).to_string();
+    let info = SessionInfo {
+        project: project_id.clone(),
+        item_id: item.id.clone(),
+        title: Some(item.title.clone()),
+        role: Role::Implementer,
+        lane: Some(*lane),
+        engine: placed.engine,
+        model: model_name(placed.engine, &model, cursor.as_ref()),
+    };
     let branch = branch_name(item, *attempt_no);
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let mut spec = session_spec(
@@ -411,12 +428,16 @@ async fn attempt(
     let (runner, bin, id, sink) = (runner.as_ref(), &placed.bin, session_id, &sink);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
-    let (answer, usage) = run_implementer(spec, |spec| async move {
-        let r = run_session(runner, bin, &spec, id, Some(sink), quiet).await?;
-        *ctx = r.context_tokens;
-        Ok(r)
-    })
-    .await;
+    let (answer, usage) = sessions
+        .track(
+            info,
+            run_implementer(spec, |spec| async move {
+                let r = run_session(runner, bin, &spec, id, Some(sink), quiet).await?;
+                *ctx = r.context_tokens;
+                Ok(r)
+            }),
+        )
+        .await;
     Ok(Attempt {
         answer,
         usage,

@@ -18,6 +18,7 @@ use crate::engines::{
 };
 use crate::implementer::publish::run as run_command;
 use crate::implementer::{Interrupted, Playtest};
+use crate::orchestrator::live::sessions::model_name;
 use crate::review_context::{ReviewContext, piece_slice_description};
 use crate::review_run::{StageInput, review_lane};
 use crate::reviewer::{Reviewer, ReviewerResult};
@@ -79,7 +80,15 @@ async fn run_session(job: &Job, bins: &[&Placement], spec: SessionSpec) -> Resul
     let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
     let engine = engine_of(Some(program))?;
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
-    let result = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job))).await?;
+    // The reviewer runs on the top tier; any other session of the review is a scout.
+    let role = if spec.model == OPUS {
+        Role::Reviewer
+    } else {
+        Role::Scout
+    };
+    let info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
+    let run = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job)));
+    let result = job.sessions.track(info, run).await?;
     // A cut session (a stop) isn't a failed review: the run ends `interrupted`.
     if result.subtype == "interrupted" {
         return Err(Interrupted("the review session was cut".into()).into());
