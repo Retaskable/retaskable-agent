@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use super::driver::OrchestratorMode;
 
+pub mod sessions;
+
 /// A lane a project's loop holds, and what holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldLane {
@@ -38,6 +40,8 @@ pub struct ProjectLive {
     pub drafting: Option<String>,
     /// What the idle baseline last found on the base branch (fix main), reported with the computer's state.
     pub fix_main: Option<String>,
+    /// Why the last main sync didn't start, when it didn't.
+    pub sync_main: Option<String>,
     /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
     pub chores: Option<crate::backlog::runs::ChoreCount>,
     /// The last vet run's counts by verdict name; `None` before a run.
@@ -55,15 +59,23 @@ pub struct LiveState {
 
 /// Shared between the loops (writers) and the status handler (reader).
 #[derive(Debug, Clone, Default)]
-pub struct LiveHandle(Arc<Mutex<LiveState>>);
+pub struct LiveHandle(Arc<Mutex<LiveState>>, sessions::Sessions);
 
 impl LiveHandle {
     pub fn new(mode: OrchestratorMode) -> Self {
-        Self(Arc::new(Mutex::new(LiveState {
-            mode,
-            run_kinds: Vec::new(),
-            projects: BTreeMap::new(),
-        })))
+        Self(
+            Arc::new(Mutex::new(LiveState {
+                mode,
+                run_kinds: Vec::new(),
+                projects: BTreeMap::new(),
+            })),
+            sessions::Sessions::default(),
+        )
+    }
+
+    /// The sessions running now; the loop registers them and the status handler reads them.
+    pub fn sessions(&self) -> &sessions::Sessions {
+        &self.1
     }
 
     /// Says which kinds of run `runs` mode can take.
@@ -92,6 +104,7 @@ impl LiveHandle {
             store_error: None,
             drafting: entry.drafting.take(),
             fix_main: entry.fix_main.take(),
+            sync_main: entry.sync_main.take(),
             chores: entry.chores,
             vet: entry.vet.take(),
         };
@@ -105,6 +118,11 @@ impl LiveHandle {
     /// Says what the idle baseline found, or nothing.
     pub fn set_fix_main(&self, project: &str, note: Option<String>) {
         self.lock().projects.entry(project.to_string()).or_default().fix_main = note;
+    }
+
+    /// Says why the main sync didn't start, or nothing.
+    pub fn set_sync_main(&self, project: &str, note: Option<String>) {
+        self.lock().projects.entry(project.to_string()).or_default().sync_main = note;
     }
 
     /// Says what the last vet run found, or nothing.

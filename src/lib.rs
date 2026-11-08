@@ -39,6 +39,7 @@ pub mod looks;
 pub mod main_sync;
 pub mod merge_update;
 pub mod network;
+pub mod notify;
 pub mod orchestrator;
 pub mod package;
 pub mod password;

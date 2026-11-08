@@ -333,6 +333,41 @@ impl Client {
             .map(|_| ())
     }
 
+    /// `add { via: "chore", items: [sync_main] }`: queues a main sync of `sync_sha` (main's head) into the base.
+    /// `branch` and `pr_url` are set when the merge was clean; `conflicts` are the files that clash when it wasn't.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_sync_main(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        title: &str,
+        sync_sha: &str,
+        branch: Option<&str>,
+        pr_url: Option<&str>,
+        conflicts: &[String],
+    ) -> Result<(), BacklogError> {
+        let mut item = json!({
+            "id": id,
+            "title": title,
+            "kind": "sync_main",
+            "milestone": "Chores",
+            "syncSha": sync_sha,
+        });
+        if let Some(branch) = branch {
+            item["branch"] = json!(branch);
+        }
+        if let Some(url) = pr_url {
+            item["prUrl"] = json!(url);
+        }
+        if !conflicts.is_empty() {
+            item["remaining"] = json!(format!("Conflicting files:\n- {}", conflicts.join("\n- ")));
+        }
+        self.send(repo_id, token, "add", json!({ "via": "chore", "items": [item] }))
+            .await
+            .map(|_| ())
+    }
+
     /// `add { via: "deprecation", items: [removal item] }` (deprecate-feature.md section 3.1). An id already taken is
     /// a `conflict`.
     pub async fn add_removal(&self, repo_id: u64, token: Option<&str>, item: Value) -> Result<(), BacklogError> {

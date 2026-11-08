@@ -75,6 +75,11 @@ pub fn publish(
     push.current_dir(dir)
         .args(["push", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]);
     run(push, None, &format!("git push of {branch}"))?;
+    open_or_create(gh, dir, branch, base, title, body)
+}
+
+/// The open PR for `branch`, or a new one against `base` with `title` and `body`.
+pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &str, body: &str) -> Result<Published> {
     if let Some(pr) = open_change(gh, dir, branch)? {
         return Ok(Published {
             url: pr.url,
