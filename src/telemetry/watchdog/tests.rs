@@ -362,3 +362,87 @@ fn a_restart_wait_finding_writes_one_anomaly_start_event() {
         assert_eq!(starts, 1);
     });
 }
+
+fn step(start: bool, item: &str, key: Option<&str>) -> Event {
+    let (item, step, key) = (
+        Some(item.to_string()),
+        Some("review".to_string()),
+        key.map(String::from),
+    );
+    if start {
+        Event::StepStart(event::StepStart {
+            item,
+            step,
+            key,
+            ..Default::default()
+        })
+    } else {
+        Event::StepEnd(event::StepEnd {
+            item,
+            step,
+            key,
+            ..Default::default()
+        })
+    }
+}
+
+/// The `duplicate_step` findings for events `(at_ms, event)` seen at `now_ms`.
+fn duplicates(events: &[(i64, Event)], now_ms: i64) -> Vec<Found> {
+    let recent: Vec<RecentEvent> = events
+        .iter()
+        .map(|(at_ms, event)| RecentEvent { at_ms: *at_ms, event })
+        .collect();
+    with_recent(&recent, now_ms)
+}
+
+fn with_recent(recent: &[RecentEvent], now_ms: i64) -> Vec<Found> {
+    let (runs, leases, records, running, pool) = (
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Running::default(),
+        pool(0),
+    );
+    let actions = Vec::new();
+    let input = Input {
+        now_ms,
+        ..make_input(&runs, &leases, &records, &running, &pool, &actions, recent)
+    };
+    check(&input)
+}
+
+#[test]
+fn duplicate_step_fires_for_two_starts_with_no_end_and_is_gone_after_30_minutes() {
+    let events = [
+        (0, step(true, "R-12", Some("slice 1 round 1"))),
+        (60_000, step(true, "R-12", Some("slice 1 round 1"))),
+    ];
+    let found = duplicates(&events, 120_000);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, "duplicate_step:R-12:review:slice 1 round 1");
+    assert_eq!(found[0].item.as_deref(), Some("R-12"));
+    assert_eq!(found[0].threshold_minutes, 0);
+    assert_eq!(
+        duplicates(&events, 60_000 + DUPLICATE_SHOWN_MINUTES * 60_000 - 1).len(),
+        1
+    );
+    assert!(duplicates(&events, 60_000 + DUPLICATE_SHOWN_MINUTES * 60_000).is_empty());
+}
+
+#[test]
+fn duplicate_step_ignores_start_end_start_different_keys_and_keyless_starts() {
+    let k = Some("round 1");
+    assert!(
+        duplicates(
+            &[
+                (0, step(true, "R-1", k)),
+                (1, step(false, "R-1", k)),
+                (2, step(true, "R-1", k))
+            ],
+            3
+        )
+        .is_empty()
+    );
+    assert!(duplicates(&[(0, step(true, "R-1", k)), (1, step(true, "R-1", Some("round 2")))], 3).is_empty());
+    assert!(duplicates(&[(0, step(true, "R-1", None)), (1, step(true, "R-1", None))], 3).is_empty());
+}

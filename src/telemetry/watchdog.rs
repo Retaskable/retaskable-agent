@@ -24,6 +24,8 @@ pub const NO_PROGRESS_MINUTES: u32 = 20;
 pub const LANE_MISMATCH_MINUTES: u32 = 2;
 /// `RESTART_WAIT_MS`: a restart pending this long is an anomaly.
 pub const RESTART_WAIT_MS: i64 = 15 * 60_000;
+/// `DUPLICATE_SHOWN_MS`: a duplicate step start is shown this long after its second start.
+pub const DUPLICATE_SHOWN_MINUTES: i64 = 30;
 /// `REPEAT_ERRORS` in `REPEAT_WINDOW_MS`.
 pub const REPEAT_ERRORS: usize = 3;
 pub const REPEAT_WINDOW_MINUTES: i64 = 30;
@@ -106,6 +108,7 @@ pub fn check(input: &Input) -> Vec<Found> {
     repeat_error(input, &mut found);
     no_progress(input, &mut found);
     restart_wait(input, &mut found);
+    duplicate_step(input, &mut found);
     found
 }
 
@@ -295,6 +298,53 @@ fn restart_wait(input: &Input, out: &mut Vec<Found>) {
         details: json!({ "waitingOn": restart.waiting_on }),
         threshold_minutes: 0,
     });
+}
+
+/// A `step_start` with a `key` for an item and step that already has one open (no `step_end` with that key
+/// in between). Shown at once, for `DUPLICATE_SHOWN_MINUTES` after the latest repeated start. A start with
+/// no key never counts.
+fn duplicate_step(input: &Input, out: &mut Vec<Found>) {
+    let mut open: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+    let mut duplicated: BTreeMap<(&str, &str, &str), i64> = BTreeMap::new();
+    for e in input.recent {
+        match e.event {
+            Event::StepStart(s) => {
+                let Some(key) = s.key.as_deref().filter(|k| !k.is_empty()) else {
+                    continue;
+                };
+                let id = (
+                    s.item.as_deref().unwrap_or_default(),
+                    s.step.as_deref().unwrap_or_default(),
+                    key,
+                );
+                if !open.insert(id) {
+                    duplicated.insert(id, e.at_ms);
+                }
+            }
+            Event::StepEnd(s) => {
+                let key = s.key.as_deref().unwrap_or_default();
+                open.remove(&(
+                    s.item.as_deref().unwrap_or_default(),
+                    s.step.as_deref().unwrap_or_default(),
+                    key,
+                ));
+            }
+            _ => {}
+        }
+    }
+    for ((item, step, key), at_ms) in duplicated {
+        if input.now_ms - at_ms >= DUPLICATE_SHOWN_MINUTES * 60_000 {
+            continue;
+        }
+        out.push(Found {
+            id: format!("duplicate_step:{item}:{step}:{key}"),
+            rule: "duplicate_step",
+            item: Some(item.to_string()),
+            text: format!("{item} started {step} {key} twice"),
+            details: json!({ "step": step, "key": key }),
+            threshold_minutes: 0,
+        });
+    }
 }
 
 /// Strips digits (ids, hashes, PR numbers) so the same error at different counts or ids still groups
