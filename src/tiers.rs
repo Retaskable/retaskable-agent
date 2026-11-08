@@ -194,6 +194,26 @@ pub fn set_local_ladder_for_test(on: bool) {
     LADDER_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
+/// Whether the `tier-kept-on-resume` flag was On at its last answer; Off until the flags client is handed over.
+pub fn tier_kept_on_resume_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = KEPT_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("tier-kept-on-resume"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static KEPT_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `tier-kept-on-resume` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_tier_kept_for_test(on: bool) {
+    KEPT_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
 /// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
 /// environment maps onto the local model (section 7.2).
 pub fn claude_model(tier: &'static str) -> &'static str {

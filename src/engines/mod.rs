@@ -27,4 +27,4 @@ pub use engine::{
 };
 pub use place::{Placement, cursor_model_for, place};
 pub use runner::{CouldNotStart, TranscriptSink, Watch, engine_of, run_session, run_session_tracked};
-pub use transcripts::{StartedOn, Transcript, read_transcripts, started_on};
+pub use transcripts::{StartedOn, Transcript, read_transcripts, started_in, started_on};

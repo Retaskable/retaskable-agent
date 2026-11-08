@@ -586,6 +586,25 @@ async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_st
     assert!(transcripts[0].events.iter().any(|e| e.text == "Finished: done"));
 }
 
+#[test]
+fn a_claude_session_against_the_local_model_records_local_in_its_header_behind_tier_kept_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spec = base_spec(dir.path());
+    spec.local = Some(crate::engines::engine::LocalTarget {
+        base_url: "http://x".into(),
+        model: "m".into(),
+    });
+    let model = |spec: &SessionSpec| {
+        serde_json::from_str::<serde_json::Value>(&meta_line(spec, None)).unwrap()["model"].clone()
+    };
+    crate::tiers::set_tier_kept_for_test(false);
+    assert_eq!(model(&spec), "sonnet");
+    crate::tiers::set_tier_kept_for_test(true);
+    assert_eq!(model(&spec), "local");
+    spec.local = None;
+    assert_eq!(model(&spec), "sonnet");
+}
+
 /// How long `n` sessions on `model`/`engine` take under `slots`, each a 300ms command that prints one result.
 #[cfg(unix)]
 async fn timed(n: usize, model: &str, engine: EngineId) -> Duration {

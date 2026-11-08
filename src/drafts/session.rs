@@ -77,6 +77,9 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     let tier = drafter_tier(s.request, s.tier);
     let local_tier = s.engine == Engine::Claude && tier == LOCAL;
     let (engine, model) = match s.engine {
+        // Behind `tier-kept-on-resume` a local drafter is a `local` spec, as the implementer's is: only then does
+        // the engine point it at the local target (it reads `local` with `spec.local`), and its header says so.
+        Engine::Claude if local_tier && crate::tiers::tier_kept_on_resume_on() => (Some(EngineId::Claude), LOCAL),
         Engine::Claude => (Some(EngineId::Claude), claude_model(tier)),
         Engine::Cursor => (Some(EngineId::Cursor), tier),
         Engine::Pi => (Some(EngineId::Pi), tier),
@@ -252,6 +255,21 @@ mod tests {
         cursor.tier = "sonnet";
         cursor.engine = Engine::Cursor;
         assert_eq!(session_spec(&cursor, Start::Fresh).unwrap().local, None);
+    }
+
+    #[test]
+    fn behind_tier_kept_on_resume_a_local_drafter_is_a_local_spec() {
+        crate::tiers::set_tier_kept_for_test(true);
+        let budget = ProjectBudget::default();
+        let mut local = s(&budget, Path::new("wt"));
+        local.tier = "local";
+        local.local = Some(LocalTarget {
+            base_url: "http://x".into(),
+            model: "m".into(),
+        });
+        assert_eq!(session_spec(&local, Start::Fresh).unwrap().model, "local");
+        local.tier = "sonnet";
+        assert_eq!(session_spec(&local, Start::Fresh).unwrap().model, "sonnet");
     }
 
     #[test]

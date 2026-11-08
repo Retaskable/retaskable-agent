@@ -98,10 +98,28 @@ impl DraftHost for ClaudeDrafts {
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
             let titles = titles_text(&draft.titles, &themes);
             let up = local.ladder_for(chosen == Engine::Claude);
-            let tier = drafter_tier(
-                draft.request.as_deref().unwrap_or(""),
-                implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up),
-            );
+            let now = crate::telemetry::now_ms() / 1000;
+            let id = project.id_or_derived();
+            // Behind `tier-kept-on-resume` a revision stays on the backend its drafter started on (the model on
+            // the first line of the `drafter.jsonl` the new session is about to overwrite): local while the model
+            // is up, else its Anthropic tier; an Anthropic one, or one with no readable header, never goes local.
+            let tier = if job.resume && chosen == Engine::Claude && crate::tiers::tier_kept_on_resume_on() {
+                let was_local = crate::engines::started_in(&data_dir, &id, &draft.id, "drafter.jsonl")
+                    .is_some_and(|s| s.model == crate::tiers::LOCAL);
+                if was_local && up {
+                    crate::tiers::LOCAL
+                } else {
+                    drafter_tier(
+                        draft.request.as_deref().unwrap_or(""),
+                        implementer_tier(job.usage.as_ref(), now, &models, false),
+                    )
+                }
+            } else {
+                drafter_tier(
+                    draft.request.as_deref().unwrap_or(""),
+                    implementer_tier(job.usage.as_ref(), now, &models, up),
+                )
+            };
             // Held until the session ends.
             let claimed = local.claim(tier).await;
             let spec = session_spec(
@@ -270,6 +288,89 @@ mod tests {
             revision.contains("--model gpt-5 ") && revision.contains("--resume chat-1"),
             "{revision}"
         );
+    }
+
+    /// Runs a resumed Claude drafter whose earlier `drafter.jsonl` header (if any) says `header`, with the local
+    /// model `up` or not and the usage `used` of the 5-hour window; returns the args the stub `claude` got.
+    async fn resumed_drafter_args(header: Option<&str>, up: bool, used: f64, kept: bool) -> String {
+        crate::tiers::set_local_ladder_for_test(true);
+        crate::tiers::set_tier_kept_for_test(kept);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let repo = crate::test_support::repo_with_origin(&root);
+        let env = crate::test_support::stub_engines(
+            &root,
+            DONE,
+            &format!("echo \"base=$ANTHROPIC_BASE_URL\" >> '{}/calls.txt'", root.display()),
+            &[],
+        );
+        let local = crate::local_model::LocalModel::up();
+        if !up {
+            local.mark_down_for_test();
+        }
+        let project = project_in(&root, &repo);
+        if let Some(model) = header {
+            let path = paths::run_dir(&root.join("data"), &project.id_or_derived(), "d1").join("drafter.jsonl");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                format!("{{\"type\":\"retaskable_meta\",\"model\":\"{model}\",\"engine\":\"claude\"}}\n"),
+            )
+            .unwrap();
+        }
+        let host = ClaudeDrafts::new(
+            root.join("data"),
+            Default::default(),
+            env,
+            ModelsConfig::default(),
+            Default::default(),
+            local,
+        );
+        let now = crate::telemetry::now_ms() / 1000;
+        let _ = host
+            .run(DraftJob {
+                engine: None,
+                project,
+                draft: serde_json::from_value(serde_json::json!({ "id": "d1", "request": "Add charts" })).unwrap(),
+                dir: root.clone(),
+                branch: "retaskable/spec-d1".into(),
+                session_id: "chat-1".into(),
+                resume: true,
+                follow_up: "Revise it.".into(),
+                usage: Some(
+                    serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": now + 600}}}),
+                ),
+                placement: true,
+                sessions: Default::default(),
+            })
+            .await;
+        std::fs::read_to_string(root.join("calls.txt")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_resumed_drafter_stays_on_the_backend_it_started_on() {
+        // 98% used: the ladder gives `local` to a fresh drafter; 40% used would not, yet a local header stays local.
+        let local_run = resumed_drafter_args(Some("local"), true, 0.98, true).await;
+        assert!(
+            local_run.contains("--model sonnet") && local_run.contains("base=http://127.0.0.1:11436"),
+            "{local_run}"
+        );
+        for (header, used) in [
+            (Some("local"), 0.4),
+            (Some("sonnet"), 0.98),
+            (Some("opus"), 0.98),
+            (None, 0.98),
+        ] {
+            let args = resumed_drafter_args(header, true, used, true).await;
+            let local = args.contains("base=http://127.0.0.1:11436");
+            assert_eq!(local, header == Some("local"), "{header:?} {used}: {args}");
+        }
+        // Local down: a local header resumes on its Anthropic tier.
+        let down = resumed_drafter_args(Some("local"), false, 0.98, true).await;
+        assert!(down.contains("--model sonnet") && !down.contains("base=http"), "{down}");
+        // Flag Off: the ladder alone decides, so even an Anthropic header resumes local at the low rows.
+        let off = resumed_drafter_args(Some("sonnet"), true, 0.98, false).await;
+        assert!(off.contains("base=http://127.0.0.1:11436"), "{off}");
     }
 
     #[tokio::test]

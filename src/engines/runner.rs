@@ -50,9 +50,12 @@ pub struct TranscriptSink {
 /// The transcript's own header line, following `transcripts.rs`'s `started_on`/`read_transcripts`:
 /// the engine and model this session started on, its lane when it has one, and when it started.
 fn meta_line(spec: &SessionSpec, lane: Option<u32>) -> String {
+    // A Claude session on the local model records `local`, whatever `--model` it was started with, so a resume can
+    // tell it from an Anthropic one (`transcripts::started_on`).
+    let local = spec.local.is_some() && crate::tiers::tier_kept_on_resume_on();
     let mut meta = json!({
         "type": "retaskable_meta",
-        "model": spec.model,
+        "model": if local { crate::tiers::LOCAL } else { spec.model.as_str() },
         "engine": spec.engine.unwrap_or(EngineId::Claude).to_string(),
         "at": now_ms(),
     });

@@ -42,7 +42,12 @@ fn engine_for(engine_id: EngineId) -> Box<dyn Engine> {
 /// `startedOn(project, itemId, sessionId)`: only the transcript's first 1024 bytes are read, since
 /// that's always enough to hold the one meta line at its top.
 pub fn started_on(data_dir: &Path, project: &str, item_id: &str, session_id: &str) -> Option<StartedOn> {
-    let file = run_dir(data_dir, project, item_id).join(format!("{session_id}.jsonl"));
+    started_in(data_dir, project, item_id, &format!("{session_id}.jsonl"))
+}
+
+/// [`started_on`] for a transcript by its file name (a draft's is always `drafter.jsonl`).
+pub fn started_in(data_dir: &Path, project: &str, item_id: &str, file_name: &str) -> Option<StartedOn> {
+    let file = run_dir(data_dir, project, item_id).join(file_name);
     let mut handle = std::fs::File::open(file).ok()?;
     let mut buf = [0u8; 1024];
     let n = handle.read(&mut buf).ok()?;
