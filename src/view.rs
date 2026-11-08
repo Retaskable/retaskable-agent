@@ -14,8 +14,6 @@ use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
 mod cursor;
-#[cfg(test)]
-mod held_tests;
 mod orchestrator;
 mod usage;
 
