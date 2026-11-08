@@ -10,7 +10,7 @@ use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
     api, backlog, config, connector, lane_pool, link, local_model, network, orchestrator, release, runtime,
-    setup_check, spec_split, store, tags, telemetry, view,
+    setup_check, setup_questions, spec_split, store, tags, telemetry, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -666,6 +666,10 @@ async fn link_command(
     match run_link_in_terminal(&keychain, &url, link::CLOUD_TARGET, env, version).await {
         Ok(id) => {
             println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
+            // agent-settings.md section 5: the computer-only settings, asked only at a terminal.
+            if let Err(e) = ask_setup_questions(dir, env, release::default_port(build)) {
+                eprintln!("Couldn't ask or save the settings: {e:#}");
+            }
             // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
             // approval comes right after this one, opened by the agent itself.
             auto_link_backlog(
@@ -682,6 +686,23 @@ async fn link_command(
             1
         }
     }
+}
+
+/// Asks the computer-only settings on the real terminal (`setup_questions`).
+fn ask_setup_questions(dir: &Path, env: &Env, default_port: u16) -> Result<()> {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut out = std::io::stdout();
+    let mut secret = setup_questions::read_secret;
+    let is_terminal = stdin.is_terminal();
+    let mut term = setup_questions::Terminal {
+        is_terminal,
+        input: &mut input,
+        out: &mut out,
+        secret: &mut secret,
+    };
+    setup_questions::run(dir, env, default_port, &mut term)
 }
 
 /// Runs one device-flow link against `target` at `url` in the terminal, storing the refresh token.
