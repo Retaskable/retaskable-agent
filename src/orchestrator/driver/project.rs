@@ -862,20 +862,36 @@ impl ProjectLoop {
         let blocked_from_starting = gate.is_none() && signed_out(shared) || shared.stopping;
         let model_full = self.model_full(starter).await;
         let mut started = 0;
-        for action in actions.iter().filter(|a| **a != Action::AskForWork) {
-            if let Action::StartImplementer { lane, .. } = action
-                && (blocked_from_starting
-                    || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane))
-                    || model_full && self.runs_claude(shared, gate.as_ref(), *lane))
-            {
-                continue;
+        let mut todo = actions.to_vec();
+        // Starts the model cap held off a Claude lane are placed again on the lanes it leaves (a Cursor lane).
+        for round in 0..2 {
+            let mut capped = 0;
+            for action in todo.iter().filter(|a| **a != Action::AskForWork) {
+                if let Action::StartImplementer { lane, .. } = action {
+                    if blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)) {
+                        continue;
+                    }
+                    if model_full && self.runs_claude(shared, gate.as_ref(), *lane) {
+                        capped += 1;
+                        continue;
+                    }
+                }
+                if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
+                    continue;
+                }
+                if let Action::StartImplementer { item_id, lane } = action {
+                    started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
+                }
             }
-            if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
-                continue;
+            if round == 1 || capped == 0 {
+                break;
             }
-            if let Action::StartImplementer { item_id, lane } = action {
-                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
-            }
+            todo = self
+                .decide_gated(pool, shared, gate.as_ref(), true)
+                .into_iter()
+                .filter(|a| matches!(a, Action::StartImplementer { .. }))
+                .take(capped)
+                .collect();
         }
         started
     }
@@ -912,7 +928,7 @@ impl ProjectLoop {
             if *slots == 0 || !asks {
                 break;
             }
-            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared).await else {
+            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared, model_full).await else {
                 break;
             };
             last = Some(answer);
@@ -930,6 +946,7 @@ impl ProjectLoop {
         slots: &mut u32,
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
+        model_full: bool,
     ) -> Option<(String, bool)> {
         // Asked before every claim, so a TS agent started since is noticed at once.
         if let Some(guard) = self.guard.clone()
@@ -971,7 +988,7 @@ impl ProjectLoop {
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.take_lease(&item, token, ItemState::Queued);
                 let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-                let actions = self.decide_gated(pool, shared, gate.as_ref(), false);
+                let actions = self.decide_gated(pool, shared, gate.as_ref(), model_full);
                 *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
                 let kept = self.runs.contains_key(&item.id);

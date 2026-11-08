@@ -84,3 +84,15 @@ async fn a_cursor_lane_is_never_held_by_the_cap() {
     rig.machine.pass().await;
     assert!(claimed(&asked), "{:?}", ops(&asked));
 }
+
+#[tokio::test]
+async fn with_a_claude_and_a_cursor_lane_the_claimed_item_starts_on_the_cursor_lane() {
+    let s = caps(Some(1));
+    let _held = s.acquire("opus").await;
+    let (mut rig, fake, asked) = capped(s, true, None, json!({ "lanes": ["claude", "cursor"] })).await;
+    rig.machine.pass().await;
+    assert!(claimed(&asked), "{:?}", ops(&asked));
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].lane, 2);
+}
