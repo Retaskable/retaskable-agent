@@ -147,7 +147,7 @@ pub fn on_subscription(usage: Option<&Value>, now_epoch: i64) -> bool {
 }
 
 /// The `resetsAt` of a five-hour reading: its `unifiedWindows.five_hour`'s, else the top-level one.
-pub(crate) fn five_hour_resets_at(usage: &Value) -> Option<i64> {
+fn five_hour_resets_at(usage: &Value) -> Option<i64> {
     if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
         return window.get("resetsAt").and_then(Value::as_i64);
     }

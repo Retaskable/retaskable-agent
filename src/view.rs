@@ -62,8 +62,6 @@ pub struct AgentView {
     pub local: crate::local_model::LocalModel,
     /// What the orchestrator loops are doing, for the snapshot's orchestrator block.
     pub live: crate::orchestrator::live::LiveHandle,
-    /// The computer's `models` config, for the snapshot's usage tiers.
-    pub models: crate::config::ModelsConfig,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -386,7 +384,6 @@ impl AgentView {
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
-            models: Default::default(),
         }
     }
 
@@ -442,16 +439,14 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some(window) = self.usage_block(project, data_dir) {
+            state["usage"] = window;
+        }
         if self.local.down() {
             state["usage"]["localDown"] = json!(true);
         }
         if let Some((allowed, reason)) = self.item_commands.auto() {
             state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
-        }
-        if let Some(Value::Object(extra)) = self.usage_json(project, data_dir)
-            && let Some(usage) = state["usage"].as_object_mut()
-        {
-            usage.extend(extra);
         }
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
@@ -557,7 +552,6 @@ mod tests {
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
-            models: Default::default(),
         }
     }
 
@@ -758,18 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_usage_windows_come_only_with_the_flag_on() {
-        let dir = tempfile::tempdir().unwrap();
-        let usage = |on| reporting_view(on).snapshot("a", dir.path())["state"]["usage"].clone();
-        assert_eq!(usage(false), json!({}));
-        let on = usage(true);
-        assert_eq!(on["status"], "unknown");
-        assert_eq!(on["leftPct"], Value::Null);
-        assert_eq!(on["tier"], "opus");
-        assert_eq!(on["localUp"], Value::Null);
-    }
-
-    #[test]
     fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
         let v = reporting_view(true);
         let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
@@ -808,6 +790,29 @@ mod tests {
             v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
             "setup"
         );
+    }
+
+    #[test]
+    fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
+        let soon = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600;
+        store.set_usage(json!({"utilization": 0.25, "status": "allowed", "resetsAt": soon}));
+        store.set_week_usage(json!({"rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": soon}));
+        store.save().unwrap();
+        let usage = |on| reporting_view(on).snapshot("a", dir.path())["state"]["usage"].clone();
+        let u = usage(true);
+        assert_eq!(
+            (&u["leftPct"], &u["status"], &u["weekUsedPct"]),
+            (&json!(75.0), &json!("allowed"), &json!(40.0))
+        );
+        assert_eq!(u["tier"], "opus");
+        assert!(u["resetsAt"].is_string() && u["weekResetsAt"].is_string());
+        assert_eq!(usage(false), json!({}), "flag Off");
     }
 
     #[test]

@@ -238,14 +238,6 @@ pub fn now_iso8601() -> String {
     iso8601_in(std::time::Duration::ZERO)
 }
 
-/// `epoch` seconds since 1970, as ISO 8601 (UTC).
-pub fn iso8601_at(epoch: i64) -> String {
-    time::OffsetDateTime::from_unix_timestamp(epoch)
-        .ok()
-        .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok())
-        .unwrap_or_default()
-}
-
 /// `after` from now, as ISO 8601 (UTC).
 pub fn iso8601_in(after: std::time::Duration) -> String {
     (time::OffsetDateTime::now_utc() + after)

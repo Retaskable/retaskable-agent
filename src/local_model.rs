@@ -111,7 +111,7 @@ impl LocalModel {
         })
     }
 
-    /// Whether the local model is turned on.
+    /// Whether it's turned on in the config.
     pub fn enabled(&self) -> bool {
         self.config.enabled
     }
