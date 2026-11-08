@@ -586,6 +586,27 @@ async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_st
     assert!(transcripts[0].events.iter().any(|e| e.text == "Finished: done"));
 }
 
+#[test]
+fn a_claude_session_on_the_local_model_records_local_in_its_header_and_started_on_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut local = base_spec(dir.path());
+    local.local = Some(crate::engines::engine::LocalTarget {
+        base_url: "http://127.0.0.1:11436".into(),
+        model: "tiel-coder-35b".into(),
+    });
+    let sink = TranscriptSink {
+        path: crate::paths::run_dir(dir.path(), "proj", "A1").join("drafter.jsonl"),
+        lane: None,
+    };
+    open_sink(&sink, &local).unwrap();
+    let started = crate::engines::transcripts::started_on(dir.path(), "proj", "A1", "drafter").unwrap();
+    assert_eq!((started.engine, started.model.as_str()), (EngineId::Claude, "local"));
+    // Without a local target the header keeps the spec's model.
+    open_sink(&sink, &base_spec(dir.path())).unwrap();
+    let started = crate::engines::transcripts::started_on(dir.path(), "proj", "A1", "drafter").unwrap();
+    assert_eq!(started.model, "sonnet");
+}
+
 /// How long `n` sessions on `model`/`engine` take under `slots`, each a 300ms command that prints one result.
 #[cfg(unix)]
 async fn timed(n: usize, model: &str, engine: EngineId) -> Duration {
