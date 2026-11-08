@@ -1,6 +1,6 @@
 # Retaskable — Spec
 
-Status: v0.5, trimmed for the agent: this is a copy of Retaskable.com's agent spec with what belongs to the store, the hub and the app cut out. See [TRIMMED.md](TRIMMED.md) for each cut and [README.md](README.md) for the other specs in this folder.
+Status: v0.5, trimmed for the agent: this is a copy of Retaskable.com's agent spec with what belongs to the store, the hub and the app cut out. 2026-11-08: section 6.10 as built, with proposals marked **[Proposal]**. See [TRIMMED.md](TRIMMED.md) for each cut and [README.md](README.md) for the other specs in this folder.
 
 Theme: Orchestration
 
