@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, lane_pool, link, local_model, network, orchestrator, release, runtime,
-    setup_check, setup_questions, spec_split, store, tags, telemetry, view,
+    api, backlog, config, connector, hello_settings, lane_pool, link, local_model, network, orchestrator, release,
+    runtime, setup_check, setup_questions, spec_split, store, tags, telemetry, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -172,6 +172,13 @@ async fn main() -> Result<()> {
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
+    // Card flag `machine-settings`: Off keeps today's behaviour (the keys ignored, silently, and left in the file).
+    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await {
+        config::set_retiring_project_lanes(true);
+        if let Some(note) = config::retired_keys_note(&dir) {
+            tracing::info!("{note}");
+        }
+    }
     // agent-settings.md section 3.1: which program runs each kind of work (engines.md section
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
     // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
@@ -289,7 +296,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env));
+    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env, dir, default_port));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
@@ -457,6 +464,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         move |code| exit(code),
         keychain.clone(),
     ));
+    settings.set_saved_signal(view.settings.clone());
     settings.set_status_source(StatusSource {
         view: (*view).clone(),
         started: std::time::Instant::now(),
@@ -494,7 +502,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
 }
 
 /// What the cloud sees of this computer.
-fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &Env) -> view::AgentView {
+fn agent_view(
+    cfg: &config::ConfigFile,
+    tags: Vec<String>,
+    version: &str,
+    env: &Env,
+    dir: &Path,
+    default_port: u16,
+) -> view::AgentView {
     view::AgentView {
         machine: link::machine_name(env),
         tags,
@@ -507,6 +522,12 @@ fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
+        settings: hello_settings::HelloSettings::new(
+            dir.to_path_buf(),
+            env.clone(),
+            default_port,
+            Arc::new(retaskable_agent::flags::Flags::from_env()),
+        ),
     }
 }
 

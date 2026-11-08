@@ -25,6 +25,7 @@ fn view() -> AgentView {
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
+        settings: Default::default(),
     }
 }
 

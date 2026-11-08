@@ -13,6 +13,7 @@ mod project;
 
 use crate::env::Env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -63,6 +64,18 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
 /// conjuring a phantom project out of the first setting anyone saves. Used by the settings page's
 /// save paths, which change only the machine's own settings.
 pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
+    save_with(dir, RETIRE_PROJECT_LANES.load(Ordering::Relaxed), patch)
+}
+
+/// Whether saves drop the projects' retired `lanes` keys: the `machine-settings` flag's answer, set once at
+/// startup (Off, today's behaviour, until then).
+static RETIRE_PROJECT_LANES: AtomicBool = AtomicBool::new(false);
+
+pub fn set_retiring_project_lanes(on: bool) {
+    RETIRE_PROJECT_LANES.store(on, Ordering::Relaxed);
+}
+
+fn save_with(dir: &Path, retire: bool, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
     let file = dir.join("config.json");
     let mut obj = match std::fs::read_to_string(&file) {
         Ok(text) => match serde_json::from_str(&text)? {
@@ -77,8 +90,53 @@ pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Val
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
+    if retire {
+        retire_project_lanes(&mut obj);
+    }
     patch(&mut obj);
     crate::fs_util::write_json_atomic(&file, &Value::Object(obj), false)
+}
+
+/// agent-settings.md section 3.1 (`retiredKeysNote`): the note logged once on startup when a project still has its
+/// own `lanes` or `migrated.lanes`, which are ignored, or `None` when none does.
+pub fn retired_keys_note(dir: &Path) -> Option<String> {
+    let Value::Object(obj) = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).ok()?).ok()? else {
+        return None;
+    };
+    obj.get("projects")?.as_array()?.iter().any(has_project_lanes).then(|| {
+        "A project's `lanes` and `migrated.lanes` are no longer used: the computer has one number of lanes, now \
+             kept at the top of config.json. They are dropped the next time settings are saved."
+            .to_string()
+    })
+}
+
+/// Keeps the computer's lanes (the largest the projects had, when the file has none of its own) and drops each
+/// project's `lanes` and `migrated.lanes`.
+fn retire_project_lanes(obj: &mut Map<String, Value>) {
+    let Some(Value::Array(projects)) = obj.get("projects") else {
+        return;
+    };
+    if obj.get("version").and_then(Value::as_u64) != Some(2) {
+        return;
+    }
+    if !obj.contains_key("lanes") {
+        let n = fallback_lanes(projects);
+        if projects.iter().any(has_project_lanes) {
+            obj.insert("lanes".to_string(), json!(n));
+        }
+    }
+    if let Some(Value::Array(projects)) = obj.get_mut("projects") {
+        for p in projects.iter_mut().filter_map(Value::as_object_mut) {
+            p.remove("lanes");
+            if let Some(Value::Object(m)) = p.get_mut("migrated") {
+                m.remove("lanes");
+            }
+        }
+    }
+}
+
+fn has_project_lanes(p: &Value) -> bool {
+    p.get("lanes").is_some() || p.get("migrated").and_then(|m| m.get("lanes")).is_some()
 }
 
 /// A version 2 file as it is; a version 1 one (no `"version"` key) as one project, its id made when it has none
@@ -243,6 +301,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load(dir.path()).unwrap().machine.lanes, 5);
+    }
+
+    #[test]
+    fn project_lanes_are_noted_and_dropped_by_the_next_save_keeping_the_computers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"version": 2, "projects": [
+                { "id": "a", "repoPath": "C:/code/a", "lanes": 3 },
+                { "id": "b", "repoPath": "C:/code/b", "migrated": { "lanes": 5, "port": 1 } }
+            ]}"#,
+        )
+        .unwrap();
+        let note = retired_keys_note(dir.path()).unwrap();
+        assert!(note.contains("lanes") && note.contains("migrated.lanes"));
+        save_with(dir.path(), true, |_| {}).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(raw["lanes"], 5);
+        assert!(raw["projects"][0].get("lanes").is_none());
+        assert!(raw["projects"][1]["migrated"].get("lanes").is_none());
+        assert_eq!(raw["projects"][1]["migrated"]["port"], 1);
+        assert_eq!(load(dir.path()).unwrap().machine.lanes, 5);
+        assert!(retired_keys_note(dir.path()).is_none());
+    }
+
+    #[test]
+    fn with_the_flag_off_a_save_leaves_the_project_lanes_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = r#"{"version": 2, "projects": [{ "id": "a", "repoPath": "C:/code/a", "lanes": 3 }]}"#;
+        std::fs::write(dir.path().join("config.json"), text).unwrap();
+        save_with(dir.path(), false, |_| {}).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(raw, serde_json::from_str::<Value>(text).unwrap());
+    }
+
+    #[test]
+    fn a_file_without_project_lanes_gets_no_note_and_its_save_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = r#"{"version": 2, "projects": [{ "id": "a", "repoPath": "C:/code/a" }]}"#;
+        std::fs::write(dir.path().join("config.json"), text).unwrap();
+        assert!(retired_keys_note(dir.path()).is_none());
+        save_with(dir.path(), true, |_| {}).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(raw, serde_json::from_str::<Value>(text).unwrap());
     }
 
     #[test]
