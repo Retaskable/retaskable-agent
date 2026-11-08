@@ -18,6 +18,8 @@ use serde_json::Value;
 use super::engine::{Engine, EngineId, EngineReader, SessionEvent, SessionSpec, SessionStart};
 use super::json_result::fenced_json_instructions;
 
+#[allow(dead_code)] // nothing calls it until the next piece derives a session's allow list
+mod allow;
 mod allowlist;
 mod reader;
 mod result;
