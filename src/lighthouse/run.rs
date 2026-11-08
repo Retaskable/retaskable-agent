@@ -1,22 +1,20 @@
 //! Running Lighthouse for one page and preset, and keeping its reports until they are uploaded
 //! (docs/specs/daily-lighthouse.md sections 2 "Lighthouse and Chrome" and 3 "Plain code runs it";
-//! Retaskable.com's `agent/src/lighthouse.ts`: `runLighthouse`, `reportFile`, `pruneReports`).
-//! The command is the orchestrator's own, outside any session, run like a check.
+//! `runLighthouse`, `reportFile`, `pruneReports` in `agent/src/lighthouse.ts`). An orchestrator
+//! command, outside any session, like the checks.
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{Days, NaiveDate};
+use chrono::NaiveDate;
 
 use crate::proc;
 
-/// How long one run is given.
+/// Each run's time limit.
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-/// Pinned major of Lighthouse.
+/// Reports older than this many days are pruned.
+pub const KEEP_DAYS: i64 = 14;
+/// The pinned Lighthouse major.
 const LIGHTHOUSE: &str = "lighthouse@12";
-/// Reports of days older than this many days are removed.
-const KEEP_DAYS: u64 = 14;
-/// How much of a failed run's output is kept in its message.
-const TAIL_LINES: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
@@ -33,24 +31,24 @@ impl Preset {
     }
 }
 
-/// How one run ended.
 #[derive(Debug, Clone, PartialEq)]
-pub enum LighthouseRun {
+pub enum LighthouseOutcome {
     /// The JSON report was written here.
     Ok(PathBuf),
     /// Lighthouse found no Chrome on this computer.
     ChromeMissing,
+    /// Timed out, exited with an error, or wrote no report; the text says why.
     Failed(String),
 }
 
-/// The arguments after `npx` for one run.
-pub fn lighthouse_args(url: &str, preset: Preset, out: &Path) -> Vec<String> {
+/// The arguments after `npx`.
+pub fn lighthouse_args(url: &str, preset: Preset, output: &Path) -> Vec<String> {
     let mut args = vec![
         "--yes".to_string(),
         LIGHTHOUSE.to_string(),
         url.to_string(),
         "--output=json".to_string(),
-        format!("--output-path={}", out.display()),
+        format!("--output-path={}", output.display()),
         "--chrome-flags=--headless=new".to_string(),
         "--quiet".to_string(),
     ];
@@ -60,73 +58,81 @@ pub fn lighthouse_args(url: &str, preset: Preset, out: &Path) -> Vec<String> {
     args
 }
 
-/// `program` and `args` as one command line for the shell: double quotes on Windows (`cmd`), single quotes elsewhere.
-fn command_line(program: &str, args: &[String], windows: bool) -> String {
-    let quote = |a: &str| {
-        if windows {
-            format!("\"{}\"", a.replace('"', "\"\""))
-        } else {
-            format!("'{}'", a.replace('\'', "'\\''"))
-        }
-    };
-    let mut line = program.to_string();
-    for a in args {
-        line.push(' ');
-        line.push_str(&quote(a));
-    }
-    line
+/// One shell command line: every word quoted for `cmd` (Windows) or `sh`.
+pub fn command_line(program: &str, args: &[String], windows: bool) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .map(|w| quote(w, windows))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Lighthouse's own words when it can't find Chrome.
+fn quote(word: &str, windows: bool) -> String {
+    if windows {
+        format!("\"{}\"", word.replace('"', "\\\""))
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+/// Lighthouse's own words for no Chrome (chrome-launcher's).
 fn chrome_missing(output: &str) -> bool {
-    let o = output.to_lowercase();
-    o.contains("no chrome installations found") || o.contains("unable to find chrome")
+    let lower = output.to_lowercase();
+    lower.contains("no chrome installations found") || lower.contains("unable to find chrome")
 }
 
-/// Runs Lighthouse on `url` and writes its JSON to `out`. `CHROME_PATH`, when set, is passed through as the
-/// environment.
-pub fn run_lighthouse(url: &str, preset: Preset, out: &Path) -> LighthouseRun {
-    run_with("npx", url, preset, out, RUN_TIMEOUT)
+/// Runs Lighthouse on `url` with `preset`, writing its JSON report to `output`. `CHROME_PATH` is
+/// passed through from the environment when set.
+pub fn run_lighthouse(url: &str, preset: Preset, output: &Path) -> LighthouseOutcome {
+    run_with("npx", url, preset, output, RUN_TIMEOUT)
 }
 
-fn run_with(program: &str, url: &str, preset: Preset, out: &Path, timeout: Duration) -> LighthouseRun {
-    let dir = out.parent().unwrap_or(Path::new("."));
+fn run_with(program: &str, url: &str, preset: Preset, output: &Path, timeout: Duration) -> LighthouseOutcome {
+    let dir = output.parent().unwrap_or_else(|| Path::new("."));
     if let Err(e) = std::fs::create_dir_all(dir) {
-        return LighthouseRun::Failed(format!("creating {}: {e}", dir.display()));
+        return LighthouseOutcome::Failed(format!("creating {}: {e}", dir.display()));
     }
-    let line = command_line(program, &lighthouse_args(url, preset, out), cfg!(windows));
-    match proc::run_command_with_timeout(&line, dir, timeout) {
-        Err(e) => LighthouseRun::Failed(format!("{e:#}")),
-        Ok((_, _, true)) => LighthouseRun::Failed(format!("timed out after {}s", timeout.as_secs())),
-        Ok((code, output, false)) => {
-            if chrome_missing(&output) {
-                LighthouseRun::ChromeMissing
-            } else if code == 0 && out.is_file() {
-                LighthouseRun::Ok(out.to_path_buf())
+    let command = command_line(program, &lighthouse_args(url, preset, output), cfg!(windows));
+    match proc::run_command_with_timeout(&command, dir, timeout) {
+        Err(e) => LighthouseOutcome::Failed(format!("{e:#}")),
+        Ok((_, _, true)) => LighthouseOutcome::Failed(format!("timed out after {} seconds", timeout.as_secs())),
+        Ok((code, text, false)) => {
+            if chrome_missing(&text) {
+                LighthouseOutcome::ChromeMissing
+            } else if code == 0 && output.is_file() {
+                LighthouseOutcome::Ok(output.to_path_buf())
             } else {
-                LighthouseRun::Failed(format!("exit {code}: {}", proc::tail_lines(&output, TAIL_LINES)))
+                LighthouseOutcome::Failed(format!("exit {code}: {}", proc::tail_lines(&text, 5)))
             }
         }
     }
 }
 
-/// Where one page and preset's report is kept for `day` (`yyyy-mm-dd`).
+/// Where one page and preset's report is kept for `day` (`yyyy-mm-dd`):
+/// `<project_dir>/lighthouse/<day>/<page>-<preset>.json`.
 pub fn report_file(project_dir: &Path, day: &str, page: &str, preset: Preset) -> PathBuf {
     let slug: String = page
         .trim_matches('/')
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let slug = if slug.is_empty() { "home" } else { &slug };
+    let slug = if slug.is_empty() { "home" } else { slug.as_str() };
     project_dir
         .join("lighthouse")
         .join(day)
         .join(format!("{slug}-{}.json", preset.name()))
 }
 
-/// Removes day folders older than 14 days before `today`. Anything that isn't a dated folder stays.
-pub fn prune_reports(project_dir: &Path, today: NaiveDate) {
-    let Some(cutoff) = today.checked_sub_days(Days::new(KEEP_DAYS)) else {
+/// Removes the day folders under `<project_dir>/lighthouse` that are more than [`KEEP_DAYS`] days
+/// before `today` (`yyyy-mm-dd`). Folders that aren't dates are left alone.
+pub fn prune_reports(project_dir: &Path, today: &str) {
+    let Ok(today) = NaiveDate::parse_from_str(today, "%Y-%m-%d") else {
         return;
     };
     let Ok(entries) = std::fs::read_dir(project_dir.join("lighthouse")) else {
@@ -137,7 +143,7 @@ pub fn prune_reports(project_dir: &Path, today: NaiveDate) {
             .file_name()
             .to_str()
             .and_then(|n| NaiveDate::parse_from_str(n, "%Y-%m-%d").ok())
-            .is_some_and(|d| d < cutoff);
+            .is_some_and(|d| (today - d).num_days() > KEEP_DAYS);
         if old && entry.path().is_dir() {
             let _ = std::fs::remove_dir_all(entry.path());
         }
@@ -170,86 +176,104 @@ mod tests {
     }
 
     #[test]
-    fn quoting_per_platform() {
-        let args = vec!["a b".to_string(), "it's".to_string()];
-        assert_eq!(command_line("npx", &args, true), "npx \"a b\" \"it's\"");
-        assert_eq!(command_line("npx", &args, false), "npx 'a b' 'it'\\''s'");
-    }
-
-    #[test]
-    fn report_paths_per_day_page_and_preset() {
-        let p = Path::new("proj");
-        let root = report_file(p, "2026-11-08", "/", Preset::Mobile);
-        assert_eq!(root, p.join("lighthouse").join("2026-11-08").join("home-mobile.json"));
-        let deep = report_file(p, "2026-11-08", "/a/b.html", Preset::Desktop);
-        assert_eq!(
-            deep,
-            p.join("lighthouse").join("2026-11-08").join("a_b_html-desktop.json")
-        );
-    }
-
-    #[test]
-    fn prune_removes_only_old_day_folders() {
-        let t = tempfile::tempdir().unwrap();
-        let base = t.path().join("lighthouse");
-        for d in ["2026-10-24", "2026-10-25", "2026-11-08", "notes"] {
-            std::fs::create_dir_all(base.join(d)).unwrap();
-        }
-        prune_reports(t.path(), NaiveDate::from_ymd_opt(2026, 11, 8).unwrap());
-        assert!(!base.join("2026-10-24").exists());
-        assert!(base.join("2026-10-25").exists());
-        assert!(base.join("2026-11-08").exists());
-        assert!(base.join("notes").exists());
+    fn command_line_quotes_per_shell() {
+        let args = vec!["a b".to_string(), "--x=\"y\"".to_string()];
+        assert_eq!(command_line("npx", &args, true), r#""npx" "a b" "--x=\"y\"""#);
+        assert_eq!(command_line("npx", &["it's".to_string()], false), r"'npx' 'it'\''s'");
     }
 
     #[cfg(unix)]
-    mod fake {
-        use super::*;
+    fn fake(dir: &Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-npx");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
 
-        /// A script standing in for `npx`: `body` runs with `$out` set to the `--output-path` value.
-        fn fake(dir: &Path, body: &str) -> String {
-            let script = dir.join("fake.sh");
-            let text = format!(
-                "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --output-path=*) out=\"${{a#--output-path=}}\";; esac; done\n{body}\n"
-            );
-            std::fs::write(&script, text).unwrap();
-            format!("sh {}", script.display())
-        }
+    #[cfg(unix)]
+    #[test]
+    fn a_report_written_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = fake(
+            tmp.path(),
+            r#"for a in "$@"; do case "$a" in --output-path=*) echo '{}' > "${a#--output-path=}";; esac; done"#,
+        );
+        let out = report_file(tmp.path(), "2026-11-08", "/", Preset::Mobile);
+        let got = run_with(
+            &program,
+            "https://s.example/",
+            Preset::Mobile,
+            &out,
+            Duration::from_secs(20),
+        );
+        assert_eq!(got, LighthouseOutcome::Ok(out.clone()));
+        assert!(out.is_file());
+    }
 
-        #[test]
-        fn a_written_report_is_ok() {
-            let t = tempfile::tempdir().unwrap();
-            let program = fake(t.path(), "echo '{}' > \"$out\"");
-            let out = t.path().join("r").join("m.json");
-            let run = run_with(&program, "https://s/", Preset::Mobile, &out, Duration::from_secs(20));
-            assert_eq!(run, LighthouseRun::Ok(out));
-        }
+    #[cfg(unix)]
+    #[test]
+    fn no_chrome_is_its_own_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let program = fake(
+            tmp.path(),
+            "echo 'Runtime error encountered: No Chrome installations found.' >&2; exit 1",
+        );
+        let out = report_file(tmp.path(), "2026-11-08", "/", Preset::Desktop);
+        let got = run_with(
+            &program,
+            "https://s.example/",
+            Preset::Desktop,
+            &out,
+            Duration::from_secs(20),
+        );
+        assert_eq!(got, LighthouseOutcome::ChromeMissing);
+    }
 
-        #[test]
-        fn no_chrome_is_its_own_outcome() {
-            let t = tempfile::tempdir().unwrap();
-            let program = fake(t.path(), "echo 'No Chrome installations found.' >&2; exit 1");
-            let out = t.path().join("m.json");
-            let run = run_with(&program, "https://s/", Preset::Mobile, &out, Duration::from_secs(20));
-            assert_eq!(run, LighthouseRun::ChromeMissing);
-        }
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_or_a_timeout_is_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = report_file(tmp.path(), "2026-11-08", "/", Preset::Mobile);
+        let program = fake(tmp.path(), "echo boom; exit 3");
+        let LighthouseOutcome::Failed(why) = run_with(&program, "u", Preset::Mobile, &out, Duration::from_secs(20))
+        else {
+            panic!("expected Failed");
+        };
+        assert!(why.contains("exit 3") && why.contains("boom"), "{why}");
+        let program = fake(tmp.path(), "sleep 30");
+        let started = std::time::Instant::now();
+        let got = run_with(&program, "u", Preset::Mobile, &out, Duration::from_secs(1));
+        assert!(
+            matches!(&got, LighthouseOutcome::Failed(w) if w.contains("timed out")),
+            "{got:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
 
-        #[test]
-        fn other_failures_and_timeouts_are_failed() {
-            let t = tempfile::tempdir().unwrap();
-            let out = t.path().join("m.json");
-            let bad = fake(t.path(), "echo boom; exit 3");
-            match run_with(&bad, "https://s/", Preset::Mobile, &out, Duration::from_secs(20)) {
-                LighthouseRun::Failed(m) => assert!(m.contains("exit 3") && m.contains("boom"), "{m}"),
-                other => panic!("{other:?}"),
-            }
-            let slow = fake(t.path(), "sleep 30");
-            let started = std::time::Instant::now();
-            match run_with(&slow, "https://s/", Preset::Mobile, &out, Duration::from_secs(1)) {
-                LighthouseRun::Failed(m) => assert!(m.contains("timed out"), "{m}"),
-                other => panic!("{other:?}"),
-            }
-            assert!(started.elapsed() < Duration::from_secs(20));
+    #[test]
+    fn report_paths_are_per_day_page_and_preset() {
+        let base = Path::new("p");
+        let f = |page, preset| report_file(base, "2026-11-08", page, preset);
+        let expect = |name: &str| ["p", "lighthouse", "2026-11-08", name].iter().collect::<PathBuf>();
+        assert_eq!(f("/", Preset::Mobile), expect("home-mobile.json"));
+        assert_eq!(f("/", Preset::Desktop), expect("home-desktop.json"));
+        assert_eq!(f("/docs/intro", Preset::Mobile), expect("docs_intro-mobile.json"));
+    }
+
+    #[test]
+    fn pruning_removes_only_old_day_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lighthouse");
+        for d in ["2026-10-01", "2026-10-24", "2026-10-25", "2026-11-08", "notes"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
         }
+        prune_reports(tmp.path(), "2026-11-08");
+        let mut left: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["2026-10-25", "2026-11-08", "notes"]);
     }
 }
