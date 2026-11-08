@@ -6,10 +6,8 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::config::{Engine, ProjectConfig};
-use crate::engines::Role;
+use crate::config::ProjectConfig;
 use crate::env::Env;
-use crate::orchestrator::plan_run::Roster;
 use crate::orchestrator::session::tests::{fake_name, project_in};
 use crate::process_tree::ProcessTree;
 
@@ -62,34 +60,6 @@ pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path) {
     );
 }
 
-/// `roster` placed on `engine` for `role` with `engine-placement` On: every engine's binary is the fake, and the
-/// Cursor `top` model is `gpt-5`.
-pub(super) fn placed_on(roster: &mut Roster, root: &Path, engine: Engine, role: Role) {
-    let bin = root.join(fake_name()).to_string_lossy().into_owned();
-    roster.env = Env::new(move |k| {
-        matches!(
-            k,
-            "RETASKABLE_CLAUDE" | "RETASKABLE_CURSOR" | "RETASKABLE_CODEX" | "RETASKABLE_PI"
-        )
-        .then(|| bin.clone())
-    });
-    roster.flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
-    roster.cursor_models.top = Some("gpt-5".into());
-    match role {
-        Role::Planner => roster.choice.roles.planner = Some(engine),
-        _ => roster.choice.roles.chat = Some(engine),
-    }
-}
-
-/// The fake ran as `engine`: no dollar budget, and Cursor got the `top` model.
-pub(super) fn assert_ran_as(root: &Path, engine: Engine) {
-    let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
-    assert!(!args.contains("--max-budget-usd"), "{engine:?}: {args}");
-    if engine == Engine::Cursor {
-        assert!(args.contains("--model gpt-5"), "{args}");
-    }
-}
-
 /// Takes the session's registered tree and cuts it, as a stop would.
 pub(super) async fn cut_registered_tree(trees: &mut UnboundedReceiver<(String, Arc<ProcessTree>)>) {
     let (token, tree) = tokio::time::timeout(Duration::from_secs(30), trees.recv())
@@ -122,7 +92,37 @@ pub(super) fn roster(
         env,
         models: Default::default(),
         cursor_models: Default::default(),
-        flags: std::sync::Arc::new(crate::flags::Flags::fixed(&[])),
+        flags: Arc::new(crate::flags::Flags::fixed(&["engine-placement"])),
     };
     (dir, root, roster)
+}
+
+/// Points every engine's binary variable at the fake `claude` stub, and Cursor's `top` model at `gpt-top`, so a
+/// session on any engine runs the stub; then the stub's `args.txt` says which engine ran.
+pub(super) fn on_every_engine(roster: &mut crate::orchestrator::plan_run::Roster, root: &Path) {
+    let bin = root.join(fake_name()).to_string_lossy().into_owned();
+    roster.env = Env::new(move |k| {
+        [
+            "RETASKABLE_CLAUDE",
+            "RETASKABLE_CURSOR",
+            "RETASKABLE_PI",
+            "RETASKABLE_CODEX",
+        ]
+        .contains(&k)
+        .then(|| bin.clone())
+    });
+    roster.cursor_models.top = Some("gpt-top".into());
+}
+
+/// The arguments the fake binary was last run with, for the engine `program` (`cursor`, `codex` or `pi`).
+pub(super) fn assert_ran_on(root: &Path, program: &str) {
+    let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
+    match program {
+        "cursor" => assert!(args.contains("gpt-top"), "{args}"),
+        "codex" => assert!(args.contains("exec"), "{args}"),
+        _ => assert!(
+            !args.contains("--permission-mode") && !args.contains("gpt-top"),
+            "{args}"
+        ),
+    }
 }

@@ -16,7 +16,7 @@ use super::{
 };
 use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
-use crate::config::{EngineChoiceConfig, Playtests, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -83,8 +83,8 @@ pub struct Links {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
-    /// The Cursor model names, for a playtest grouping round placed on Cursor.
-    pub cursor_models: crate::config::CursorModels,
+    /// The Cursor model names a playtest grouping round's planner session uses on Cursor.
+    pub cursor_models: CursorModels,
     /// The latest setup checks, for the engines `run_take` says this computer has. None have run yet: none are sent.
     pub checks: SetupChecksHandle,
     /// Each project's hub link, for reporting Retaskable's own bugs (06.9 bullet 19). A project without one reports none.
@@ -741,7 +741,7 @@ pub struct SpawnArgs<'a> {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
-    pub cursor_models: crate::config::CursorModels,
+    pub cursor_models: CursorModels,
     pub checks: SetupChecksHandle,
     pub bugs: std::collections::HashMap<String, Arc<crate::connector::bug_link::BugLink>>,
     pub bug_version: String,

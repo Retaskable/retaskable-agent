@@ -34,7 +34,7 @@ pub(super) struct Job {
     pub env: Env,
     pub engine_choice: EngineChoiceConfig,
     pub cursor_models: CursorModels,
-    /// The `engine-placement` release flag: Off, only Claude runs the planner session.
+    /// `engine-placement`: Off, only a planner on Claude runs the round.
     pub flags: Arc<crate::flags::Flags>,
     pub machine: String,
     pub backlog_url: String,
@@ -46,8 +46,7 @@ pub(super) struct Job {
 
 /// Runs one round for `job`'s project: nothing if there's no repo id yet, no backlog link, the
 /// store can't be reached, fewer than [`crate::playtest_groups::MIN_TO_GROUP`] are waiting, or
-/// another computer holds the lock. A `Role::Planner` on anything but Claude, or a Claude binary
-/// that can't be found, also skips the round rather than failing it loudly: the next minute's pass
+/// another computer holds the lock. A planner engine whose binary can't be found also skips the round rather than failing it loudly: the next minute's pass
 /// tries again.
 pub(super) async fn run(job: Job) {
     let Some(repo) = job.repo else {
@@ -344,28 +343,12 @@ mod tests {
             env,
             engine_choice: EngineChoiceConfig::default(),
             cursor_models: Default::default(),
-            flags: Arc::new(crate::flags::Flags::fixed(&[])),
+            flags: Arc::new(crate::flags::Flags::fixed(&["engine-placement"])),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
             locks: None,
         }
-    }
-
-    fn fake_dir() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join(fake_name());
-        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
-        (dir, bin)
-    }
-
-    fn four_waiting() -> Value {
-        json!([
-            tryout("k1", false),
-            tryout("k2", false),
-            tryout("k3", false),
-            tryout("k4", false),
-        ])
     }
 
     fn ops(seen: &Arc<Mutex<Vec<(String, Value)>>>) -> Vec<String> {
@@ -376,16 +359,25 @@ mod tests {
     async fn too_few_waiting_skips_the_round_without_touching_the_lock() {
         let waiting = json!([tryout("k1", false), tryout("k2", false), tryout("k3", false)]);
         let (base, seen) = store(waiting, None).await;
-        let (dir, bin) = fake_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
         run(job(&base, &bin, dir.path())).await;
         assert_eq!(ops(&seen), vec!["tryouts_list"]);
     }
 
     #[tokio::test]
     async fn a_due_round_locks_plans_sends_the_grouping_and_releases_the_lock() {
-        let waiting = four_waiting();
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false),
+        ]);
         let (base, seen) = store(waiting, None).await;
-        let (dir, bin) = fake_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
         run(job(&base, &bin, dir.path())).await;
         assert_eq!(
             ops(&seen),
@@ -399,38 +391,62 @@ mod tests {
         assert_eq!(recorded[3].1["take"], false);
     }
 
-    #[tokio::test]
-    async fn a_round_already_locked_by_another_machine_is_skipped() {
-        let waiting = four_waiting();
-        let (base, seen) = store(waiting, Some("other-pc")).await;
-        let (dir, bin) = fake_dir();
-        run(job(&base, &bin, dir.path())).await;
-        assert_eq!(ops(&seen), vec!["tryouts_list", "chore_lock"]);
-    }
-
-    /// Four waiting entries, a Codex planner, and `codex` pointing at `codex_bin`: the ops the store saw.
-    async fn codex_round(flag_on: bool, codex_bin: &str) -> Vec<String> {
-        let waiting = four_waiting();
+    /// A round whose planner is on Cursor, with a stub `cursor-agent` that records its arguments in `args.txt`.
+    #[cfg(unix)]
+    async fn cursor_round(placement: bool) -> (Vec<String>, Option<String>) {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false)
+        ]);
         let (base, seen) = store(waiting, None).await;
-        let (dir, bin) = fake_dir();
-        let mut job = job(&base, &bin, dir.path());
-        let codex = codex_bin.replace("{bin}", &bin.to_string_lossy());
-        job.env = Env::new(move |k| (k == "RETASKABLE_CODEX").then(|| codex.clone()));
-        job.engine_choice.roles.planner = Some(Engine::Codex);
-        job.flags = Arc::new(crate::flags::Flags::fixed(if flag_on {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("cursor.sh");
+        let script = format!(
+            "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"$@\" > '{}'\n",
+            dir.path().join("args.txt").display()
+        );
+        crate::test_support::write_executable(&bin, &script);
+        let mut j = job(&base, &bin, dir.path());
+        let path = bin.to_string_lossy().into_owned();
+        j.env = Env::new(move |k| (k == "RETASKABLE_CURSOR").then(|| path.clone()));
+        j.engine_choice.roles.planner = Some(Engine::Cursor);
+        j.cursor_models.top = Some("gpt-top".into());
+        j.flags = Arc::new(crate::flags::Flags::fixed(if placement {
             &["engine-placement"]
         } else {
             &[]
         }));
-        run(job).await;
-        ops(&seen)
+        run(j).await;
+        (ops(&seen), std::fs::read_to_string(dir.path().join("args.txt")).ok())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_planner_on_cursor_runs_cursor_with_the_top_model_only_with_the_flag_on() {
+        let (ops, args) = cursor_round(true).await;
+        assert!(ops.contains(&"chore_lock".to_string()), "{ops:?}");
+        assert!(args.unwrap().contains("gpt-top"));
+        let (ops, args) = cursor_round(false).await;
+        assert_eq!(ops, vec!["tryouts_list"]);
+        assert!(args.is_none(), "{args:?}");
     }
 
     #[tokio::test]
-    async fn a_codex_planner_runs_only_with_placement_on_and_its_binary_there() {
-        assert_eq!(codex_round(false, "{bin}").await, vec!["tryouts_list"]);
-        assert_eq!(codex_round(true, "/no/such/codex").await, vec!["tryouts_list"]);
-        assert_eq!(codex_round(true, "{bin}").await[..2], ["tryouts_list", "chore_lock"]);
+    async fn a_round_already_locked_by_another_machine_is_skipped() {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false),
+        ]);
+        let (base, seen) = store(waiting, Some("other-pc")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        run(job(&base, &bin, dir.path())).await;
+        assert_eq!(ops(&seen), vec!["tryouts_list", "chore_lock"]);
     }
 
     #[tokio::test]
@@ -443,7 +459,9 @@ mod tests {
             tryout("k5", true),
         ]);
         let (base, seen) = store(waiting, None).await;
-        let (dir, bin) = fake_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
         run(job(&base, &bin, dir.path())).await;
         let recorded = seen.lock().unwrap();
         let groups_args = recorded.iter().find(|(op, _)| op == "tryout_groups").unwrap().1.clone();
@@ -466,7 +484,9 @@ mod tests {
             tryout("k4", false)
         ]);
         let (base, seen) = store(waiting, None).await;
-        let (dir, bin) = fake_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
         let (job, locks) = runs_job(&base, &bin, dir.path());
         run(job).await;
         assert_eq!(
@@ -488,7 +508,9 @@ mod tests {
             tryout("k4", false)
         ]);
         let (base, seen) = store(waiting, Some("other-pc")).await;
-        let (dir, bin) = fake_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
         let (job, locks) = runs_job(&base, &bin, dir.path());
         run(job).await;
         assert_eq!(ops(&seen), vec!["tryouts_list", "lock_take"]);

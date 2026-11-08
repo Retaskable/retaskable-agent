@@ -16,13 +16,11 @@ use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::engine::CursorOptions;
-use crate::engines::place::place;
 use crate::engines::{
-    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of,
+    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of, place,
     run_session_tracked,
 };
 use crate::env::Env;
-use crate::flags::Flags;
 use crate::process_tree::ProcessTree;
 use crate::prompt::render_prompt;
 use crate::runs::winding_down;
@@ -219,8 +217,8 @@ pub struct Roster {
     pub env: Env,
     pub models: ModelsConfig,
     pub cursor_models: CursorModels,
-    /// The `engine-placement` release flag: Off, only Claude runs a plan or look.
-    pub flags: Arc<Flags>,
+    /// `engine-placement`: Off, only a role on Claude offers a run, as before.
+    pub flags: Arc<crate::flags::Flags>,
 }
 
 /// What a plan or look session runs with.
@@ -229,27 +227,31 @@ pub(super) struct Job {
     pub project: ProjectConfig,
     pub engine: EngineId,
     pub bin: PathBuf,
-    /// Only on Cursor: the role's model.
     pub cursor: Option<CursorOptions>,
     pub model: String,
 }
 
 impl Roster {
-    /// `kind`, unless `slot` is held. With `engine-placement` Off the role must still run on Claude (the machine's
-    /// choice and every project's); On, any engine places.
+    fn on_claude(&self, role: Role, project: Option<&ProjectConfig>) -> bool {
+        let engines = project.and_then(|p| p.engines.as_ref());
+        engine_for(&self.choice, engines, role, None) == Engine::Claude
+    }
+
+    /// `kind` when `slot` is free. With `engine-placement` On the role's engine (the machine's choice unless a
+    /// project overrides it) is placed by `begin`; Off, the role must be on Claude for the machine and every project.
     pub(super) fn kinds(&self, role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
-        let free = !slot.busy();
-        let ok = self.flags.last("engine-placement") || self.all_claude(role);
-        if free && ok { vec![kind] } else { Vec::new() }
+        let any = self.flags.last("engine-placement")
+            || (self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p))));
+        if any && !slot.busy() { vec![kind] } else { Vec::new() }
     }
 
-    fn all_claude(&self, role: Role) -> bool {
-        let on_claude = |engines| engine_for(&self.choice, engines, role, None) == Engine::Claude;
-        on_claude(None) && self.projects.iter().all(|p| on_claude(p.engines.as_ref()))
+    /// Keeps the `engine-placement` answer fresh for the next start.
+    pub(super) async fn refresh_flag(&self) {
+        self.flags.on("engine-placement").await;
     }
 
-    /// Takes `slot` and sets up the session of `request` for `role` on `model`, placed on the project's engine for
-    /// the role; `Err` gives the run back.
+    /// Takes `slot` and sets up the session of `request` for `role` on `model` (Claude's; Cursor's comes from the
+    /// `top` name); `Err` gives the run back, naming a binary that isn't there.
     pub(super) fn begin(
         &self,
         role: Role,
@@ -263,10 +265,10 @@ impl Roster {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let engine = engine_for(&self.choice, project.engines.as_ref(), role, None);
-        if engine != Engine::Claude && !self.flags.last("engine-placement") {
+        if !self.flags.last("engine-placement") && !self.on_claude(role, Some(&project)) {
             return Err("only Claude sessions run in the Rust agent yet".into());
         }
+        let engine = engine_for(&self.choice, project.engines.as_ref(), role, None);
         let placed = place(engine, role, &self.env, &self.cursor_models)?;
         let guard = slot
             .take()
@@ -306,7 +308,13 @@ impl RunStarter for PlanRuns {
             .roster
             .begin(Role::Planner, &request, &self.slot, tiers::chore_tier().to_string())?;
         let cut = Cut::default();
-        spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
+        let roster = self.roster.clone();
+        let (req, seen) = (request.clone(), cut.clone());
+        let work = async move {
+            roster.refresh_flag().await;
+            plan(job, req, seen).await
+        };
+        spawn_run(guard, request, cut, work);
         Ok(())
     }
 }
