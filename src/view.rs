@@ -440,6 +440,16 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if self.settings.snapshot_reporting_on() {
+            let held = self
+                .loop_state(project)
+                .and_then(|s| s.projects.get(project).map(|p| p.items.clone()))
+                .unwrap_or_default();
+            if held.iter().any(|i| i.chore) {
+                state["milestones"] = json!([{ "id": "chores", "title": "Chores" }]);
+            }
+            state["items"] = held.iter().map(held_item_json).collect();
+        }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;
         }
@@ -538,6 +548,21 @@ impl AgentView {
             })
             .collect()
     }
+}
+
+/// A held item as the shared `Item` type has it, with the fields this agent knows.
+fn held_item_json(i: &crate::orchestrator::live::HeldItem) -> Value {
+    let mut item = json!({ "id": i.id, "title": i.title, "state": i.state, "attempt": i.attempt, "chore": i.chore });
+    if let Some(lane) = i.lane {
+        item["lane"] = json!(lane);
+    }
+    if let Some(branch) = &i.branch {
+        item["branch"] = json!(branch);
+    }
+    if let Some(pr) = &i.pr_url {
+        item["prUrl"] = json!(pr);
+    }
+    item
 }
 
 /// The chore lane's note in the lanes list (pageView.ts).
