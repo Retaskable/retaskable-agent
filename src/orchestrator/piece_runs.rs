@@ -388,8 +388,8 @@ async fn session(
     // With `chore-rotation` Off, a chore piece is run like any other.
     let chore = chore_for(job).await;
     // Held until the session ends. Only a Claude session behind the `local-tier-ladder` or `local-chores-scouts`
-    // flag may use the model (`tier_for` says which flag allows what).
-    // Never on a resume (a gate round's fix): an Anthropic session isn't resumed against the local server.
+    // flag may use the model (`tier_for` says which for what). Never on a resume (a gate round's fix): an
+    // Anthropic session isn't resumed against the local server.
     let ladder = job.engine == EngineId::Claude
         && !matches!(start, Start::Resume { .. })
         && (crate::tiers::local_ladder_on() || crate::tiers::local_chores_scouts_on());
