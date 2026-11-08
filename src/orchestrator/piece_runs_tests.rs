@@ -789,3 +789,60 @@ async fn a_roadmap_piece_and_a_playtest_fix_send_no_lock_take() {
         assert!(ops(&log).is_empty(), "{:?}", ops(&log));
     }
 }
+
+fn sync_rig(r: &mut Rig, flags: &[&str]) {
+    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(flags));
+}
+
+fn sync_piece() -> Value {
+    let mut p = piece();
+    p["chore"] = json!({ "kind": "sync_main" });
+    p["syncSha"] = json!("0123456789abcdef");
+    p["remaining"] = json!("- src/a.rs");
+    p
+}
+
+async fn sync_run(r: &Rig) -> RunEnd {
+    let (url, _log) = lock_store("free").await;
+    let (mut req, mut s) = request(r, RunKind::Build, sync_piece());
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    end_of(&mut s.ends).await
+}
+
+#[tokio::test]
+async fn a_main_sync_runs_on_its_own_branch_and_ends_pr_opened_without_a_review() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
+    let end = sync_run(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    assert!(origin_has(&r, "retaskable/sync-main-0123456"));
+    assert!(!origin_has(&r, BRANCH));
+    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
+    assert!(
+        prompt.contains("main sync") && prompt.contains("- src/a.rs"),
+        "{prompt}"
+    );
+    assert!(!r.root.join("reviewer1.txt").exists(), "no reviewer");
+    assert!(!r.root.join("count_r").exists());
+}
+
+#[tokio::test]
+async fn a_main_sync_that_asks_questions_ends_questions() {
+    let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
+    let mut r = rig(&[COMMIT], &answer("needs_clarification", q));
+    sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
+    assert_eq!(sync_run(&r).await.outcome, RunOutcome::Questions);
+}
+
+#[tokio::test]
+async fn with_the_sync_flag_off_a_sync_piece_runs_like_any_other() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    sync_rig(&mut r, &["chore-rotation"]);
+    let end = sync_run(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    assert!(origin_has(&r, BRANCH));
+    assert!(r.root.join("reviewer1.txt").exists(), "reviewed as before");
+    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
+    assert!(!prompt.contains("main sync"), "{prompt}");
+}

@@ -25,12 +25,13 @@ use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, e
 use crate::engines::{Placement, place};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
-use crate::runs::chore::{Chore, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
+use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
 use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
 const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
+const SYNC_TEMPLATE: &str = include_str!("../../prompts/sync-main.md");
 
 /// Runs `build` and `fix` runs of the projects it was built with.
 pub struct PieceStarter {
@@ -256,7 +257,10 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         (_, Some(b)) => (b.to_string(), format!("origin/{b}")),
         (RunKind::Fix, None) => return failed("A fix run needs the piece's pushed branch, and the piece has none."),
         _ => (
-            piece_branch_name(piece_id(&job.piece), &job.piece.title),
+            match sync_of(&job).await.filter(|c| !c.sync_sha.is_empty()) {
+                Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
+                None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
+            },
             format!("origin/{}", job.project.base_branch),
         ),
     };
@@ -321,6 +325,13 @@ async fn chore_for(job: &Job) -> Option<Chore> {
     } else {
         None
     }
+}
+
+/// The piece's chore when it is a main sync and `chore-main-sync` is On (with `chore-rotation`); Off, a sync
+/// runs like any other piece.
+async fn sync_of(job: &Job) -> Option<Chore> {
+    let chore = chore_for(job).await.filter(|c| c.kind == ChoreKind::SyncMain)?;
+    job.flags.on("chore-main-sync").await.then_some(chore)
 }
 
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
@@ -415,10 +426,13 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let where_to_start = start_files::render(
         &start_files::build(crate::git_bin::program(), cwd, &base_ref, &piece_item(&job.piece)).await,
     );
-    let chore = chore_for(job).await.filter(Chore::has_prompt);
+    let sync = sync_of(job).await.is_some();
+    let chore = chore_for(job)
+        .await
+        .filter(|c| c.has_prompt() && (sync || c.kind != ChoreKind::SyncMain));
     let start = match &chore {
         Some(chore) => Start::Chore {
-            template: CHORE_TEMPLATE,
+            template: if sync { SYNC_TEMPLATE } else { CHORE_TEMPLATE },
             kind: job.kind,
             piece: &job.piece,
             chore,
@@ -537,6 +551,14 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .map(|s| crate::checks::checks_summary(&s.checks))
             .unwrap_or_default();
+        // A main sync skips the scouts and the review: its checks are the evidence.
+        if sync {
+            if let Some(stage) = stage {
+                result["checks_summary"] = json!(checks);
+                result["diff_stat"] = json!(stage.diff_stat);
+            }
+            return Ok((outcome, result));
+        }
         match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
             Reviewed::Approved => {
                 if let Some(stage) = stage {
