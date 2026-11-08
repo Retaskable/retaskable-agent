@@ -30,7 +30,7 @@ The Rust agent's own repo already carries the project side of it: `.agent-ci/ima
 ### 3.1 Discovery and the slot
 
 - **Discovery.** For each linked project whose repo is on GitHub (`gh`) or GitLab (`glab`), the loop looks in the repo's `origin/<baseBranch>` for `.agent-ci/image` and `.agent-ci/checks.sh`. Both present: the project has agent CI. One missing: it doesn't, and the loop says why once in `agent.log` and on the Now tab. It reads them from main, not from a pull request, so a pull request can't change what runs its own CI.
-- **The slot.** `src/agent_ci/` holds the loop (`mod.rs`), the claims (`claim.rs`), the container run (`container.rs`) and the code host side (`host.rs`). It is its own tokio task beside the orchestrator loop, with `ciSlots` permits. A permit is held from the claim to the last status posted. Lanes, sessions and `concurrency` neither take nor wait for one.
+- **The slot.** `src/agent_ci/` holds the loop (`mod.rs`), the claims (`claim.rs`), the container run (`container.rs`) and the fetch step (`host.rs`) and the code host side, statuses and the failure comment (`report.rs`). It is its own tokio task beside the orchestrator loop, with `ciSlots` permits. A permit is held from the claim to the last status posted. Lanes, sessions and `concurrency` neither take nor wait for one.
 - **Low priority.** The loop's children (`git`, `docker`) start at below-normal priority, as the agent's own sessions do (agent.md section 4), and the container gets `--cpu-shares 128` so it yields to the computer's own apps and to the agent's sessions.
 - **What is checked.** Each poll (every `pollIntervalSec`) lists the project's open pull requests that are ready (`ci-ready` label when `ciWhenReady` is on, as in agent.md section 5; otherwise every non-draft one) and, per pull request, the head sha and current main's sha. The commit to check is the pull request's head merged with main. The key of a check is the pair (head sha, main sha); a new main sha makes it a new check. A pull request that conflicts with main fails the check with that as its reason, without a container.
 - **A person's merge.** While an agent pull request that is up to date with main is queued or being checked, a person's pull request waits: the loop leaves its merge-hold status pending (the TypeScript runner's) until the agent's is checked, then releases it.
@@ -75,7 +75,7 @@ What the computer reports:
 ## 4. Slices
 
 1. **Slot, discovery and settings.** `ciSlots` in `config/machine.rs` and its environment variable; `src/agent_ci/mod.rs`'s loop with discovery; the Docker check (first-run line, `ci.docker`); the Now tab and tick fields. No container run.
-2. **One check.** Fetch, run and report for one claimed pull request: `host.rs` and `container.rs`, the statuses and the failure comment (sections 3.2, 3.3 and 3.5).
+2. **One check.** Fetch, run and report for one claimed pull request: `host.rs`, `container.rs` and `report.rs`, the statuses and the failure comment (sections 3.2, 3.3 and 3.5).
 3. **Claims across computers.** `claim.rs`: pending claims, refresh, stale takeover, `ci` events (section 3.4).
 4. **Merging and the hold.** `automerge` squash-merge and the person's-merge hold (section 3.3), the push-to-main run.
 
