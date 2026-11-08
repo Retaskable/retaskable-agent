@@ -198,6 +198,35 @@ impl ProjectLoop {
         }
     }
 
+    /// Gives a Cursor-limited item with nothing pushed back to the shared backlog at once (engines/03 section
+    /// 3.2, behind `cursor-give-back`): the run and its record are dropped, the lane freed and the lease moved to
+    /// `unreleased` with the note and released. The computer's limit, not an own failure: no claim pause and no
+    /// `error` event (Cursor's own stamp in `engine_limits` already keeps Cursor lanes from claiming).
+    async fn give_back(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
+        let why = format!(
+            "Given back: Cursor's usage limit was hit on {} before anything was pushed",
+            shared.links.machine
+        );
+        self.runs.remove(item_id);
+        self.items.remove(item_id);
+        self.free_lane(pool, item_id, "queued", &why);
+        if let Some(token) = self.leases.remove(item_id) {
+            let note = crate::text::truncate(&why, MAX_NOTE_CHARS);
+            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.save_leases();
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(item_id.to_string()),
+                    change: Some("released".into()),
+                    state: Some("queued".into()),
+                    ..Default::default()
+                }),
+            );
+            self.flush_owed(shared.links).await;
+        }
+    }
+
     /// Lets go of the lease while the item waits for `waits_for` (the TS `park`): the lane is freed, the run
     /// kept, and the lease moved to `unparked` (saved first) and parked at once. The store keeps the item as
     /// this computer's, so no other computer is handed it.
@@ -514,6 +543,8 @@ impl ProjectLoop {
         }
         // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
         let cursor_flag = self.flags.on("cursor-limit-retry").await;
+        let give_back_flag = self.flags.on("cursor-give-back").await;
+        let mut give_back = false;
         // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
         let fall_over = self.flags.on("engine-fall-over").await;
         let carry_on = match self.records.get(&item) {
@@ -555,6 +586,11 @@ impl ProjectLoop {
                 && record.impl_session_engine == EngineId::Cursor;
             if !cursor_hit {
                 record.cursor_limit_hits = 0;
+            } else if give_back_flag
+                && self.mode == super::OrchestratorMode::Claim
+                && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none()
+            {
+                give_back = true;
             } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
                 record.cursor_limit_hits += 1;
                 self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
@@ -576,6 +612,10 @@ impl ProjectLoop {
                 record.cursor_limit_hits = 0;
                 result = SessionResult::NeedsHuman("Cursor's usage limit was hit 3 times in a row".into());
             }
+        }
+        if give_back {
+            self.give_back(pool, &item, shared).await;
+            return;
         }
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
