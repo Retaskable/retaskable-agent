@@ -4,6 +4,7 @@ use super::machine::Machine;
 use crate::config::AutoConcurrency;
 use crate::orchestrator::round_robin::{Candidate, plan};
 use crate::pace::Pacer;
+use crate::store::MachineStore;
 
 /// The pacer, its settings and the number it last gave.
 pub(super) struct Auto {
@@ -15,6 +16,12 @@ pub(super) struct Auto {
     pub(super) on: bool,
     /// Whether the last pass ended with no slot left while a live, unpaused project still had work to start.
     pub(super) work_waiting: bool,
+    /// Where `machine.json` is; `None` keeps nothing across a restart.
+    pub(super) dir: Option<std::path::PathBuf>,
+    /// Whether the saved state was looked at this run.
+    restored: bool,
+    /// The number and window last written.
+    saved: Option<(u32, i64)>,
 }
 
 impl Auto {
@@ -25,6 +32,9 @@ impl Auto {
             allowed: None,
             on: false,
             work_waiting: false,
+            dir: None,
+            restored: false,
+            saved: None,
         }
     }
 }
@@ -64,6 +74,9 @@ impl Machine {
         }
         self.auto.on = on;
         let now = self.now_secs();
+        if on {
+            self.restore_pace(now);
+        }
         for (lp, &ready) in self.projects.iter_mut().zip(ready) {
             let mut readings = std::mem::take(&mut lp.pace_readings);
             if ready && !lp.pace_checked {
@@ -83,6 +96,7 @@ impl Machine {
             .pacer
             .pace(now, from, self.concurrency, self.auto.work_waiting, &self.auto.cfg);
         self.auto.allowed = Some(pace.allowed);
+        self.save_pace(pace.allowed, pace.reason.to_string());
         if pace.allowed != from {
             tracing::info!(
                 event = "auto_concurrency",
@@ -92,6 +106,37 @@ impl Machine {
                 pace.allowed,
                 pace.reason
             );
+        }
+    }
+
+    /// Once, with the flag On: takes the saved number and clock back when its window hasn't reset.
+    fn restore_pace(&mut self, now: i64) {
+        if std::mem::replace(&mut self.auto.restored, true) {
+            return;
+        }
+        let Some(dir) = &self.auto.dir else { return };
+        let Some(saved) = MachineStore::load(dir).ok().and_then(|s| s.auto_concurrency()) else {
+            return;
+        };
+        if self.auto.pacer.restore(now, &saved) {
+            self.auto.allowed = Some(saved.allowed.clamp(self.auto.cfg.min, self.auto.cfg.max));
+            self.auto.saved = Some((saved.allowed, saved.resets_at));
+        }
+    }
+
+    /// Writes the pacer's state when the number or the window changed.
+    fn save_pace(&mut self, allowed: u32, reason: String) {
+        let Some(dir) = &self.auto.dir else { return };
+        let Some(state) = self.auto.pacer.state(allowed, reason) else {
+            return;
+        };
+        if self.auto.saved == Some((allowed, state.resets_at)) {
+            return;
+        }
+        let saved = MachineStore::load(dir).and_then(|mut s| s.set_auto_concurrency(&state));
+        match saved {
+            Ok(()) => self.auto.saved = Some((allowed, state.resets_at)),
+            Err(e) => tracing::warn!("auto concurrency: couldn't save the pacer: {e:#}"),
         }
     }
 

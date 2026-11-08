@@ -479,6 +479,7 @@ impl ProjectLoop {
         &mut self,
         items: Vec<Item>,
         paused: bool,
+        cant_start: Option<&'static str>,
         actions: Vec<Action>,
         pool: &LanePool,
         live: Option<Option<String>>,
@@ -544,14 +545,42 @@ impl ProjectLoop {
             );
         }
         let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
-        self.check_watchdog(paused, &actions, pool, anomaly_rules);
+        let cant_start = cant_start.filter(|_| anomaly_rules);
+        self.check_watchdog(paused, cant_start, &actions, pool, anomaly_rules);
         Step::Ticked { would }
+    }
+
+    /// Why no new work can start on this computer right now, for the watchdog, by the same rules `claim` uses:
+    /// a claim pause; with the start rules Off, Claude signed out or the weekly cutoff; with them On, no lane
+    /// whose engine (after fall-over) may start.
+    pub(super) async fn start_blocked(&mut self, shared: &Shared<'_>, pool: &LanePool) -> Option<&'static str> {
+        if shared.claim_paused_until.is_some_and(|u| std::time::Instant::now() < u) {
+            return Some("claim paused");
+        }
+        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
+        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
+            return Some("Claude signed out");
+        }
+        let Some(gate) = gate else {
+            let week =
+                self.flags.on("weekly-cutoff").await && shared.engine_limits.week_cut_off(std::time::Instant::now());
+            return week.then_some("weekly limit");
+        };
+        let lanes = pool.rules().lanes;
+        (lanes > 0 && !(1..=lanes).any(|k| gate.lane_may_start(self, shared, k))).then_some("usage limit")
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool, anomaly_rules: bool) {
+    fn check_watchdog(
+        &mut self,
+        paused: bool,
+        cant_start: Option<&str>,
+        actions: &[Action],
+        pool: &LanePool,
+        anomaly_rules: bool,
+    ) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -566,6 +595,7 @@ impl ProjectLoop {
         let found = watchdog::check(&watchdog::Input {
             project: &self.id,
             paused,
+            cant_start,
             runs: &self.runs,
             leases: &self.leases,
             records: &self.records,
