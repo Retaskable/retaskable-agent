@@ -11,7 +11,7 @@ use super::driver::{DraftHost, DraftJob};
 use super::session::quiet_timeout;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::drafts::land;
-use crate::drafts::session::{Session, Start, parse_result, session_spec};
+use crate::drafts::session::{Session, Start, is_lighthouse, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session};
 use crate::env::Env;
@@ -94,6 +94,7 @@ impl DraftHost for ClaudeDrafts {
                     base_branch: &project.base_branch,
                     engine: chosen,
                     tier,
+                    chore: job.lighthouse && draft.request.as_deref().is_some_and(is_lighthouse),
                     budget: &project.budget,
                     cwd: &job.dir,
                     local: None,
@@ -214,6 +215,7 @@ mod tests {
             follow_up: "Revise it.".into(),
             usage: None,
             placement,
+            lighthouse: false,
         };
         assert!(host.run(job("fresh-id", false, false)).await.is_err());
         let first = host.run(job("fresh-id", false, true)).await.unwrap();

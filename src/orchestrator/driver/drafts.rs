@@ -43,6 +43,8 @@ pub struct DraftJob {
     pub usage: Option<Value>,
     /// The `engine-placement` flag: Off, only a Claude drafter runs.
     pub placement: bool,
+    /// The `chore-lighthouse` flag: On, a `[Lighthouse]` draft runs on the chore tier.
+    pub lighthouse: bool,
 }
 
 /// The parts of a draft that touch the machine: git, the code host and the engine. Faked in tests.
@@ -298,6 +300,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         resume,
         usage: ctx.usage.clone(),
         placement: ctx.flags.on("engine-placement").await,
+        lighthouse: ctx.flags.on("chore-lighthouse").await,
     };
     let result = match ctx.host.run(job).await {
         Ok(result) => result,

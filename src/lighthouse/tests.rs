@@ -137,3 +137,80 @@ fn the_target_is_none_when_off_and_a_note_without_a_staging_url() {
         })
     );
 }
+
+fn draft(status: &str, ago_days: i64) -> Option<DraftState> {
+    let now = 100 * 86_400_000;
+    Some(DraftState {
+        status: status.into(),
+        last_entry_ms: now - ago_days * 86_400_000,
+    })
+}
+
+const NOW: i64 = 100 * 86_400_000;
+
+fn known(d: Option<DraftState>) -> Known {
+    Known::from([("/ mobile a".to_string(), d)])
+}
+
+#[test]
+fn a_key_is_quiet_while_its_draft_is_open_merged_or_recently_discarded() {
+    assert!(!is_new_finding("/ mobile a", &known(draft("open", 90)), NOW));
+    assert!(!is_new_finding("/ mobile a", &known(draft("merged", 90)), NOW));
+    assert!(!is_new_finding("/ mobile a", &known(draft("discarded", 29)), NOW));
+    assert!(is_new_finding("/ mobile a", &known(draft("discarded", 31)), NOW));
+    assert!(is_new_finding("/ mobile a", &known(draft("failed", 1)), NOW));
+    assert!(is_new_finding("/ mobile a", &known(None), NOW));
+    assert!(is_new_finding("/ mobile b", &known(draft("open", 1)), NOW));
+}
+
+fn summary(keys: &[&str]) -> Summary {
+    Summary {
+        page: "/".into(),
+        preset: "mobile".into(),
+        scores: Scores {
+            performance: Some(62),
+            ..Scores::default()
+        },
+        findings: keys
+            .iter()
+            .map(|k| Finding {
+                key: format!("/ mobile {k}"),
+                title: format!("Title of {k}"),
+                display_value: "900 KiB".into(),
+                items: vec![format!("https://staging.example.com/{k}.js")],
+            })
+            .collect(),
+        ..Summary::default()
+    }
+}
+
+#[test]
+fn new_findings_keep_each_key_once_and_only_if_new() {
+    let s = [summary(&["a", "b"]), summary(&["b", "c"])];
+    let k = known(draft("open", 1));
+    let keys: Vec<&str> = new_findings(&s, &k, NOW).iter().map(|(_, f)| f.key.as_str()).collect();
+    assert_eq!(keys, ["/ mobile b", "/ mobile c"]);
+}
+
+#[test]
+fn the_request_names_each_finding_with_scores_and_items_and_carries_the_tag_and_keys() {
+    let s = [summary(&["a", "b"])];
+    let new = new_findings(&s, &Known::new(), NOW);
+    let d = lighthouse_request("https://staging.example.com", &s, &new, "- a.md: Alpha")
+        .unwrap()
+        .unwrap();
+    assert!(d.request.starts_with("[Lighthouse]"));
+    for want in [
+        "/ mobile a",
+        "Title of b",
+        "900 KiB",
+        "https://staging.example.com/b.js",
+        "performance 62",
+        "- a.md: Alpha",
+    ] {
+        assert!(d.request.contains(want), "{want}");
+    }
+    let note = d.intake.unwrap()["note"].as_str().unwrap().to_string();
+    assert!(note.contains("/ mobile a") && note.contains("/ mobile b"));
+    assert!(lighthouse_request("u", &s, &[], "").unwrap().is_none());
+}

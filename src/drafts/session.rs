@@ -12,7 +12,7 @@ use crate::decisions::{Decision, decisions_text};
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 use crate::implementer::session::new_session_id;
-use crate::tiers::mid_tier;
+use crate::tiers::{chore_tier, mid_tier};
 
 /// What a drafter session runs with.
 pub struct Session<'a> {
@@ -28,6 +28,8 @@ pub struct Session<'a> {
     /// The implementer's tier from the usage reading (`tiers::implementer_tier`); the drafter runs
     /// on [`mid_tier`] of it, so never Opus.
     pub tier: &'static str,
+    /// A `[Lighthouse]` draft (flag On): runs on [`chore_tier`] whatever the usage reading says.
+    pub chore: bool,
     pub budget: &'a ProjectBudget,
     /// The draft's worktree.
     pub cwd: &'a Path,
@@ -47,6 +49,11 @@ pub enum Start<'a> {
     },
 }
 
+/// Whether a draft's request is a `[Lighthouse]` write-up (daily-lighthouse.md section 3).
+pub fn is_lighthouse(request: &str) -> bool {
+    request.starts_with(crate::lighthouse::TAG)
+}
+
 /// The drafter's `SessionSpec`: it writes (no code checks, no read-only), in the draft's worktree.
 pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     let (session_start, prompt) = match start {
@@ -63,11 +70,12 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             format!("{follow_up}{}", decisions_text(decisions)),
         ),
     };
+    let tier = if s.chore { chore_tier() } else { s.tier };
     let (engine, model) = match s.engine {
-        Engine::Claude => (Some(EngineId::Claude), mid_tier(s.tier)),
-        Engine::Cursor => (Some(EngineId::Cursor), mid_tier(s.tier)),
-        Engine::Pi => (Some(EngineId::Pi), mid_tier(s.tier)),
-        Engine::Codex => (Some(EngineId::Codex), mid_tier(s.tier)),
+        Engine::Claude => (Some(EngineId::Claude), mid_tier(tier)),
+        Engine::Cursor => (Some(EngineId::Cursor), mid_tier(tier)),
+        Engine::Pi => (Some(EngineId::Pi), mid_tier(tier)),
+        Engine::Codex => (Some(EngineId::Codex), mid_tier(tier)),
         Engine::Local => (None, "local"),
     };
     Ok(SessionSpec {
@@ -193,6 +201,7 @@ mod tests {
             base_branch: "main",
             engine: Engine::Claude,
             tier: "opus",
+            chore: false,
             budget,
             cwd,
             local: None,
@@ -289,5 +298,37 @@ mod tests {
         assert_eq!(qs.len(), 2);
         assert_eq!(qs[0].header, "Odd");
         assert_eq!(qs[0].options, ["Fix", "Tweak", "Feature"]);
+    }
+}
+
+#[cfg(test)]
+mod lighthouse_tests {
+    use super::*;
+
+    #[test]
+    fn a_lighthouse_draft_uses_the_chore_tier_and_an_ordinary_one_is_unchanged() {
+        let budget = ProjectBudget::default();
+        let cwd = Path::new("wt");
+        let model = |request: &str, chore: bool| {
+            let mut s = Session {
+                template: "{{request}}{{titles}}{{branch}}{{baseBranch}}",
+                request,
+                titles: "",
+                branch: "b",
+                base_branch: "main",
+                engine: Engine::Claude,
+                tier: "haiku",
+                chore,
+                budget: &budget,
+                cwd,
+                local: None,
+                cursor: None,
+            };
+            s.chore = chore && is_lighthouse(request);
+            session_spec(&s, Start::Fresh).unwrap().model
+        };
+        assert_eq!(model("[Lighthouse] x", true), "sonnet");
+        assert_eq!(model("Add dark mode", true), "haiku");
+        assert_eq!(model("[Lighthouse] x", false), "haiku");
     }
 }
