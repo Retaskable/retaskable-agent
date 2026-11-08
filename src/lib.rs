@@ -42,6 +42,7 @@ pub mod merge_update;
 pub mod network;
 pub mod notify;
 pub mod orchestrator;
+pub mod pace;
 pub mod package;
 pub mod password;
 pub mod paths;
