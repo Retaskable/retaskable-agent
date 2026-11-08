@@ -741,9 +741,13 @@ mod tests {
     }
 
     fn reporting_view(on: bool) -> AgentView {
+        reporting_view_in(on, PathBuf::new())
+    }
+
+    fn reporting_view_in(on: bool, dir: PathBuf) -> AgentView {
         let mut v = view(vec![project("a", "o/a")]);
         v.settings = HelloSettings::new(
-            PathBuf::new(),
+            dir,
             crate::env::Env::empty(),
             4700,
             Arc::new(crate::flags::Flags::fixed(if on {
@@ -765,7 +769,7 @@ mod tests {
         v.live.set_concurrency(3);
         assert_eq!(
             orch(&v),
-            json!({ "status": "running", "machine": "pc", "concurrency": 3 })
+            json!({ "status": "running", "machine": "pc", "concurrency": 3, "spendTodayUsd": 0.0, "dailyUsd": 0.0 })
         );
         v.live.set_limit(
             "a",
@@ -794,6 +798,27 @@ mod tests {
             v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
             "setup"
         );
+    }
+
+    #[test]
+    fn snapshot_reporting_reports_todays_spend_and_the_daily_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{ "version": 2, "budget": { "dailyUsd": 20 } }"#,
+        )
+        .unwrap();
+        let mut machine = crate::store::MachineStore::load(dir.path()).unwrap();
+        machine.add_spend("a", 1.25).unwrap();
+        for on in [true, false] {
+            let v = reporting_view_in(on, dir.path().to_path_buf());
+            let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+            assert_eq!(o.get("spendTodayUsd").is_some(), on);
+            assert_eq!(o.get("dailyUsd").is_some(), on);
+            if on {
+                assert_eq!((&o["spendTodayUsd"], &o["dailyUsd"]), (&json!(1.25), &json!(20.0)));
+            }
+        }
     }
 
     #[test]
@@ -907,20 +932,7 @@ mod tests {
     #[test]
     fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
         let dir = tempfile::tempdir().unwrap();
-        let mk = |on: bool| {
-            let mut v = reporting_view(on);
-            v.settings = HelloSettings::new(
-                dir.path().to_path_buf(),
-                crate::env::Env::empty(),
-                4700,
-                Arc::new(crate::flags::Flags::fixed(if on {
-                    &[SNAPSHOT_REPORTING_FLAG]
-                } else {
-                    &[]
-                })),
-            );
-            v
-        };
+        let mk = |on: bool| reporting_view_in(on, dir.path().to_path_buf());
         let cursor = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("cursor").cloned();
         assert_eq!(cursor(&mk(true)), None, "no tokens yet");
         let mut m = crate::store::MachineStore::load(dir.path()).unwrap();
