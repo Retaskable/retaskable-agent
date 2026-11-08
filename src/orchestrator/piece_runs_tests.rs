@@ -579,7 +579,7 @@ async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
     r.starter.start(req).unwrap();
     let rows = loop {
         let rows = r.starter.sessions.rows_when_running().await;
-        if rows.iter().any(|row| row.info.role == crate::engines::Role::Scout) {
+        if !rows.is_empty() && rows.iter().all(|row| row.info.role == crate::engines::Role::Scout) {
             break rows;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
