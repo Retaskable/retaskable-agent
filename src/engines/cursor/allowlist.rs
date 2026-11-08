@@ -24,7 +24,7 @@ const READ: [&str; 7] = [
     "Shell(find)",
 ];
 const WRITE: [&str; 1] = ["Write(**)"];
-const DENY: [&str; 9] = [
+pub(super) const DENY: [&str; 9] = [
     "Write(.git/**)",
     "Write(.cursor/**)",
     "Write(.retaskable/**)",
@@ -57,7 +57,7 @@ fn allow_strings(file: &Value) -> Vec<&str> {
 }
 
 /// A grant to write somewhere that isn't the workspace (`outsideWrite` in `shared/cursorAllow.ts`).
-fn outside_write(entry: &str) -> bool {
+pub(super) fn outside_write(entry: &str) -> bool {
     static WRITE_ENTRY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Write\((.+)\)$").unwrap());
     static ABS_PATH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(/|\\|~|[A-Za-z]:)").unwrap());
     let Some(caps) = WRITE_ENTRY.captures(entry.trim()) else {
