@@ -284,6 +284,19 @@ fn normalize_strips_runs_of_digits() {
     assert_eq!(normalize("lease on R-12 moved on"), "lease on R-# moved on");
 }
 
+/// Runs `body` against an input with no runs, leases, records, actions or events and a pool of `lanes`.
+fn with_empty_input(lanes: u32, body: impl FnOnce(Input)) {
+    let (runs, leases, records, running, pool) = (
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Running::default(),
+        pool(lanes),
+    );
+    let (actions, recent) = (Vec::new(), Vec::new());
+    body(make_input(&runs, &leases, &records, &running, &pool, &actions, &recent));
+}
+
 fn restart_view(at_ms: i64, waiting_on: &[&str]) -> RestartView {
     RestartView {
         at_ms,
@@ -293,80 +306,59 @@ fn restart_view(at_ms: i64, waiting_on: &[&str]) -> RestartView {
 
 #[test]
 fn restart_wait_is_quiet_without_a_restart_or_under_15_minutes_then_fires_and_ends() {
-    let (runs, leases, records, running, pool) = (
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        Running::default(),
-        pool(0),
-    );
-    let (actions, recent) = (Vec::new(), Vec::new());
-    let mut input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
-    input.now_ms = 100 * 60_000;
-    assert!(check(&input).is_empty());
+    with_empty_input(0, |mut input| {
+        input.now_ms = 100 * 60_000;
+        assert!(check(&input).is_empty());
 
-    input.restart = Some(restart_view(input.now_ms - RESTART_WAIT_MS + 1, &["a merge"]));
-    assert!(check(&input).is_empty());
+        input.restart = Some(restart_view(input.now_ms - RESTART_WAIT_MS + 1, &["a merge"]));
+        assert!(check(&input).is_empty());
 
-    input.restart = Some(restart_view(input.now_ms - RESTART_WAIT_MS, &["a merge", "a promote"]));
-    let found = check(&input);
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].id, "restart_wait");
-    assert_eq!(found[0].item, None);
-    assert_eq!(found[0].threshold_minutes, 0);
-    assert!(found[0].text.contains("a merge, a promote"), "{}", found[0].text);
+        input.restart = Some(restart_view(input.now_ms - RESTART_WAIT_MS, &["a merge", "a promote"]));
+        let found = check(&input);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "restart_wait");
+        assert_eq!(found[0].item, None);
+        assert_eq!(found[0].threshold_minutes, 0);
+        assert!(found[0].text.contains("a merge, a promote"), "{}", found[0].text);
 
-    input.restart = None;
-    assert!(check(&input).is_empty());
+        input.restart = None;
+        assert!(check(&input).is_empty());
+    });
 }
 
 #[test]
 fn idle_lanes_fires_while_a_restart_is_pending_even_with_no_ready_work() {
-    let (runs, leases, records, running, pool) = (
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        Running::default(),
-        pool(2),
-    );
-    let (actions, recent) = (Vec::new(), Vec::new());
-    let mut input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
-    input.now_ms = 60_000;
-    input.restart = Some(restart_view(0, &["a merge"]));
-    let found = check(&input);
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].id, "idle_lanes");
-    assert!(found[0].text.contains("restart") && found[0].text.contains("a merge"));
+    with_empty_input(2, |mut input| {
+        input.now_ms = 60_000;
+        input.restart = Some(restart_view(0, &["a merge"]));
+        let found = check(&input);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "idle_lanes");
+        assert!(found[0].text.contains("restart") && found[0].text.contains("a merge"));
 
-    input.paused = true;
-    assert!(check(&input).is_empty());
+        input.paused = true;
+        assert!(check(&input).is_empty());
+    });
 }
 
 #[test]
 fn a_restart_wait_finding_writes_one_anomaly_start_event() {
     use crate::telemetry::debounce::Telemetry;
     use crate::telemetry::events::EventLog;
-    let (runs, leases, records, running, pool) = (
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        Running::default(),
-        pool(0),
-    );
-    let (actions, recent) = (Vec::new(), Vec::new());
-    let mut input = make_input(&runs, &leases, &records, &running, &pool, &actions, &recent);
-    input.now_ms = RESTART_WAIT_MS;
-    input.restart = Some(restart_view(0, &["a merge"]));
-    let mut telemetry = Telemetry::new();
-    let mut log = EventLog::new();
-    telemetry.minute(PROJECT, check(&input), input.now_ms, &mut log);
-    let starts = log
-        .recent()
-        .iter()
-        .filter_map(|e| match e.event() {
-            Some(Event::Anomaly(a)) if a.phase.as_deref() == Some("start") => Some(a),
-            _ => None,
-        })
-        .count();
-    assert_eq!(starts, 1);
+    with_empty_input(0, |mut input| {
+        input.now_ms = RESTART_WAIT_MS;
+        input.restart = Some(restart_view(0, &["a merge"]));
+        let mut telemetry = Telemetry::new();
+        let mut log = EventLog::new();
+        telemetry.minute(PROJECT, check(&input), input.now_ms, &mut log);
+        let starts = log
+            .recent()
+            .iter()
+            .filter_map(|e| match e.event() {
+                Some(Event::Anomaly(a)) if a.phase.as_deref() == Some("start") => Some(a),
+                _ => None,
+            })
+            .count();
+        assert_eq!(starts, 1);
+    });
 }
