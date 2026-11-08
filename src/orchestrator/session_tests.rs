@@ -4,7 +4,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
 use crate::backlog::ItemStatus;
-use crate::config::RoleEngines;
 use crate::orchestrator::driver::OutcomeSender;
 
 const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
@@ -44,6 +43,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         50,
         ModelsConfig::default(),
         150_000,
+        Default::default(),
     );
     Rig {
         _dir: dir,
@@ -668,6 +668,7 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         50,
         ModelsConfig::default(),
         150_000,
+        Default::default(),
     )
 }
 
@@ -690,24 +691,6 @@ async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_qu
     starter.start(request).unwrap();
     let got = rx.recv().await.unwrap();
     assert!(matches!(got.result, SessionResult::NeedsHuman(_)), "{got:?}");
-}
-
-#[tokio::test]
-async fn another_engine_refuses_to_start() {
-    let choice = EngineChoiceConfig {
-        roles: RoleEngines {
-            implementer: Some(Engine::Cursor),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let rig = rig(Some(FINISHED), choice, true);
-    let (request, mut rx) = request();
-    assert_eq!(
-        rig.starter.start(request),
-        Err("only Claude sessions run in the Rust agent yet".to_string())
-    );
-    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]

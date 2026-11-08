@@ -789,7 +789,7 @@ impl ProjectLoop {
                         item: Some(item_id.to_string()),
                         lane: Some(lane),
                         role: Some("implementer".into()),
-                        engine: Some("claude".into()),
+                        engine: Some(engine.to_string()),
                         ..Default::default()
                     }),
                 );
