@@ -629,11 +629,21 @@ async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
     let (mut rig, fake, _) = silenced(true).await;
     rig.machine.pass().await;
     for _ in 0..2 {
-        resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet".into(), "killed_for_silence")).await;
+        resume_now(
+            &mut rig,
+            &fake,
+            SessionResult::Silenced("went quiet".into(), "killed_for_silence"),
+        )
+        .await;
         rig.machine.pass().await;
         assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     }
-    resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet again".into(), "killed_for_silence")).await;
+    resume_now(
+        &mut rig,
+        &fake,
+        SessionResult::Silenced("went quiet again".into(), "killed_for_silence"),
+    )
+    .await;
     rig.machine.pass().await;
     assert_eq!(fake.started.lock().unwrap().len(), 4, "three resumes");
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
