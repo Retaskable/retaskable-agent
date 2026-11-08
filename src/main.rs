@@ -9,9 +9,11 @@ use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, hello_settings, lane_pool, link, local_model, network, orchestrator, release,
-    runtime, setup_check, setup_questions, spec_split, store, tags, telemetry, tray, view,
+    api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
+    setup_questions, spec_split, store, tags, telemetry, tray, view,
 };
+
+mod main_view;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -312,7 +314,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env, dir, default_port, &local));
+    let view = Arc::new(main_view::agent_view(
+        cfg,
+        tag_list.clone(),
+        version,
+        env,
+        dir,
+        default_port,
+        &local,
+    ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
@@ -640,38 +650,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     .await
     .ok();
     Ok(())
-}
-
-/// What the cloud sees of this computer.
-fn agent_view(
-    cfg: &config::ConfigFile,
-    tags: Vec<String>,
-    version: &str,
-    env: &Env,
-    dir: &Path,
-    default_port: u16,
-    local: &local_model::LocalModel,
-) -> view::AgentView {
-    view::AgentView {
-        machine: link::machine_name(env),
-        tags,
-        projects: cfg.projects.iter().map(view::ProjectView::from).collect(),
-        version: version.to_string(),
-        lanes: config::lanes(cfg, env),
-        chore_lane: cfg.machine.chore_lane,
-        lane_sizes: lane_pool::LaneSizes::default(),
-        paused: view::PauseState::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-        settings: hello_settings::HelloSettings::new(
-            dir.to_path_buf(),
-            env.clone(),
-            default_port,
-            Arc::new(retaskable_agent::flags::Flags::from_env()),
-        ),
-        local: local.clone(),
-    }
 }
 
 /// cloud.md section 5 / environments.md section 3.4: starts one outbound link to each cloud,
