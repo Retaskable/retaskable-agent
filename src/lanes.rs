@@ -144,6 +144,13 @@ pub fn head_sha(dir: &Path) -> Result<String> {
     Ok(git_output_in_worktree(dir, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
+/// The commit `reference` (e.g. `origin/main`) points at, seen from `dir`.
+pub fn ref_sha(dir: &Path, reference: &str) -> Result<String> {
+    Ok(git_output_in_worktree(dir, &["rev-parse", reference])?
+        .trim()
+        .to_string())
+}
+
 /// `<worktrees_dir>/smoke`: the post-merge staging smoke's own checkout
 /// (docs/specs/agent/06.3-review.md, "Run it in its own worktree"), reused between runs so its
 /// `node_modules` stays warm, the same way the base checkout is.

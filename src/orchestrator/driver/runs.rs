@@ -14,13 +14,15 @@ use super::project::ProjectLoop;
 use super::{Links, Shared};
 use crate::backlog::Client;
 use crate::backlog::runs::{
-    Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
+    ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
 };
+use crate::config::OnOff;
 use crate::config::ProjectConfig;
 use crate::engines::{Role, engine_for};
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
+use crate::runs::chore::{ChoreKind, chore_of};
 use crate::runs::{NoLane, RunLocks, RunStop, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
@@ -329,6 +331,7 @@ impl ProjectLoop {
             tags: shared.links.tags.clone(),
             engines: engines_here(shared.links),
             uses: uses_here(shared.links, self.project.engines.as_ref()),
+            chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
@@ -344,6 +347,11 @@ impl ProjectLoop {
                 (json!({ "waitingFor": waiting }), false)
             }
             Ok(RunTakeAnswer::Run(run)) => {
+                if let Some(count) = ChoreCount::read(&run.other)
+                    && self.flags.on("chore-rotation").await
+                {
+                    self.live.set_chores(&self.id, count);
+                }
                 let answer = json!(run.piece.title);
                 let more = self.begin(repo, token, pool, starter, *run, now).await;
                 (answer, more)
@@ -359,6 +367,10 @@ impl ProjectLoop {
         more
     }
 
+    fn chores_off(&self) -> bool {
+        self.project.chores == OnOff::Off
+    }
+
     /// Starts a run the store handed out. False when it didn't start, and the store has it back as `interrupted`.
     async fn begin(
         &mut self,
@@ -370,6 +382,26 @@ impl ProjectLoop {
         now: Instant,
     ) -> bool {
         let piece_id = piece_id(&run.piece).to_string();
+        // An older store may hand out a rotation chore though chores are off: given back before any lane work.
+        let stray = self.chores_off()
+            && chore_of(&run.piece).is_some_and(|c| {
+                matches!(
+                    c.kind,
+                    ChoreKind::Tidy | ChoreKind::Tests | ChoreKind::Bugs | ChoreKind::Specs
+                )
+            })
+            && self.flags.on("chore-rotation").await;
+        if stray {
+            let ended = self
+                .client
+                .run_done(repo, token, &run.token, &RunOutcome::Interrupted, json!({}))
+                .await;
+            if let Err(RunDoneError::Other(e)) = &ended {
+                self.store_error("run_done", e);
+            }
+            // The lane is still free, so the next ask may find other work.
+            return true;
+        }
         if let Err(NoLane) = self.run_loop.runs.start(pool, &run.token, run.kind, &piece_id, now) {
             // Not queued: the run never held anything here, so its end is sent now, once.
             let ended = self

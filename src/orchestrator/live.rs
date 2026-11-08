@@ -38,6 +38,8 @@ pub struct ProjectLive {
     pub drafting: Option<String>,
     /// What the idle baseline last found on the base branch (fix main), reported with the computer's state.
     pub fix_main: Option<String>,
+    /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
+    pub chores: Option<crate::backlog::runs::ChoreCount>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -88,6 +90,7 @@ impl LiveHandle {
             store_error: None,
             drafting: entry.drafting.take(),
             fix_main: entry.fix_main.take(),
+            chores: entry.chores,
         };
     }
 
@@ -99,6 +102,11 @@ impl LiveHandle {
     /// Says what the idle baseline found, or nothing.
     pub fn set_fix_main(&self, project: &str, note: Option<String>) {
         self.lock().projects.entry(project.to_string()).or_default().fix_main = note;
+    }
+
+    /// The store's last chore count for the project.
+    pub fn set_chores(&self, project: &str, chores: crate::backlog::runs::ChoreCount) {
+        self.lock().projects.entry(project.to_string()).or_default().chores = Some(chores);
     }
 
     /// A pass that was skipped for a store error. The tick fields stay as the last good pass left them.

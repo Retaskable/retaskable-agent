@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use super::baseline_wait::BaselineStage;
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
 use super::piece_review::{ReviewState, Reviewed, review as review_change};
 use super::session::{
@@ -383,11 +384,22 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let stage_one = Mutex::new(None);
     let (processes, token) = (job.processes.clone(), job.token.clone());
     let on_tree = std::sync::Arc::new(move |tree| processes.add(&token, tree));
+    let project_id = job.project.id_or_derived();
+    let (repo_path, worktrees_dir) = (
+        PathBuf::from(&job.project.repo_path),
+        PathBuf::from(&job.project.worktrees_dir),
+    );
     let stage = ChecksStage {
         checks: &job.project.checks,
         backlog_path: &job.project.backlog_path,
         on_tree,
         result: &stage_one,
+        baseline: job.flags.on("chore-rotation").await.then(|| BaselineStage {
+            project: &project_id,
+            repo_path: &repo_path,
+            worktrees_dir: &worktrees_dir,
+            checks: &job.project.checks,
+        }),
     };
     let rounds = GateRounds {
         cwd,
