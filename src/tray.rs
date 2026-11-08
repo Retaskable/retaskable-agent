@@ -7,3 +7,5 @@ pub mod menu;
 pub mod mode;
 pub mod run;
 pub mod state;
+pub mod term;
+pub mod tui;

@@ -4,17 +4,22 @@ use super::*;
 use crate::view::PauseState;
 
 #[derive(Default)]
-struct FakeView {
+pub(crate) struct FakeView {
     frames: Mutex<Vec<Frame>>,
     closed: AtomicBool,
+    /// A real view to pass everything on to.
+    pub(crate) forward: std::sync::OnceLock<Arc<dyn TrayView>>,
 }
 impl TrayView for FakeView {
     fn draw(&self, frame: &Frame) -> Result<()> {
         self.frames.lock().unwrap().push(frame.clone());
-        Ok(())
+        self.forward.get().map_or(Ok(()), |v| v.draw(frame))
     }
     fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        if let Some(v) = self.forward.get() {
+            v.close();
+        }
     }
 }
 
@@ -41,9 +46,9 @@ impl CloudConn for FakeConn {
     }
 }
 
-struct FakeLinks {
+pub(crate) struct FakeLinks {
     started: Mutex<Vec<String>>,
-    backlog: Mutex<Option<BacklogWaiting>>,
+    pub(crate) backlog: Mutex<Option<BacklogWaiting>>,
     tx: tokio::sync::watch::Sender<u64>,
 }
 impl LinkRegistry for FakeLinks {
@@ -86,8 +91,8 @@ impl Opener for FakeOpener {
 }
 
 #[derive(Default)]
-struct FakeQuit {
-    now: AtomicUsize,
+pub(crate) struct FakeQuit {
+    pub(crate) now: AtomicUsize,
     codes: Mutex<Vec<i32>>,
 }
 impl Quit for FakeQuit {
@@ -120,22 +125,22 @@ impl SettingsLink for FakeSettings {
     }
 }
 
-struct Rig {
-    agent: Arc<TrayAgent>,
-    view: Arc<FakeView>,
+pub(crate) struct Rig {
+    pub(crate) agent: Arc<TrayAgent>,
+    pub(crate) view: Arc<FakeView>,
     prod: Arc<FakeConn>,
     local: Arc<FakeConn>,
-    links: Arc<FakeLinks>,
+    pub(crate) links: Arc<FakeLinks>,
     opener: Arc<FakeOpener>,
-    quit: Arc<FakeQuit>,
+    pub(crate) quit: Arc<FakeQuit>,
     login: Arc<FakeLogin>,
     sessions: Arc<AtomicUsize>,
-    agent_view: Arc<AgentView>,
+    pub(crate) agent_view: Arc<AgentView>,
     restart: Arc<RestartState>,
     backlog_links: Arc<AtomicUsize>,
 }
 
-fn rig(release: bool) -> Rig {
+pub(crate) fn rig(release: bool) -> Rig {
     let projects = ["a", "b"]
         .iter()
         .map(|id| crate::test_support::project_view(id))

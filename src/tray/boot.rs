@@ -1,14 +1,17 @@
 //! Starts the tray from `main` (tray/04-the-tray-agent.md sections 4.4 and 4.6 "Without a tray"): decides, spawns
 //! the helper with the icons and runs the [`TrayAgent`](super::agent::TrayAgent). Whatever stops it from starting,
 //! or stops it later, is said in the console and the agent carries on headless.
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::agent::{CloudSlot, SystemOpener, TrayDeps};
+use super::agent::{CloudSlot, Opener, Quit, SystemOpener, TrayAgent, TrayDeps};
 use super::helper::helper_path;
 use super::icons::{TrayState, load_tray_icon};
-use super::mode::{TrayMode, tray_mode};
-use super::run::{Icons, TrayHandle, encode_icon, start};
+use super::mode::{TrayMode, tray_mode, use_tui};
+use super::run::{Icons, encode_icon, start};
+use super::term::StdTerm;
+use super::tui::{Log, TerminalMenu, TuiOpener};
 use crate::connector::CloudHandle;
 use crate::env::Env;
 use crate::link::pending::Links;
@@ -92,19 +95,63 @@ fn login(_: Option<&Build>, _: Option<&Path>, _: &Env) -> LoginParts {
     (None, None)
 }
 
-/// The running tray, or `None` when the agent runs headless (the console says why).
-pub async fn boot(b: Boot<'_>) -> Option<TrayHandle> {
-    let os = current_os();
-    let exe = b.exe.unwrap_or(Path::new(""));
-    let helper = helper_path(b.build, exe, b.env, os);
-    let bin = match tray_mode(b.args, b.env, os, helper) {
-        TrayMode::Tray(bin) => bin,
-        TrayMode::Headless(why) => {
-            tracing::info!("Tray: running headless, {why}.");
+/// Ends the running tray or terminal menu: the helper is told to exit and its input closed, or the terminal is
+/// put back. May be called again; blocks briefly.
+pub type Shutdown = Arc<dyn Fn() + Send + Sync>;
+
+/// The terminal menu in place of the tray; `None` (the plain console) when the terminal can't be taken over.
+fn start_tui(deps: TrayDeps, quit: Arc<dyn Quit>) -> Option<Shutdown> {
+    let menu = match TerminalMenu::start(Arc::new(StdTerm::default()), Log::console(), quit) {
+        Ok(menu) => menu,
+        Err(e) => {
+            tracing::warn!("Tray: running with the plain console, the terminal menu couldn't start: {e}.");
             return None;
         }
     };
+    let agent = TrayAgent::new(deps, menu.clone());
+    menu.attach(&agent);
+    agent.refresh();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    tokio::spawn(agent.run(stopped));
+    menu.restore_on_panic();
+    menu.spawn_input();
+    let stop = std::sync::Mutex::new(Some(stop));
+    Some(Arc::new(move || {
+        if let Some(stop) = stop.lock().unwrap().take() {
+            let _ = stop.send(());
+        }
+        menu.restore();
+    }))
+}
+
+/// The running tray or terminal menu, or `None` when the agent runs with the plain console (the console says why).
+pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
+    let os = current_os();
+    let exe = b.exe.unwrap_or(Path::new(""));
+    let terminals = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let tui = use_tui(b.args, b.env, os, terminals);
+    let bin = if tui {
+        None
+    } else {
+        let helper = helper_path(b.build, exe, b.env, os);
+        match tray_mode(b.args, b.env, os, helper) {
+            TrayMode::Tray(bin) => Some(bin),
+            TrayMode::Headless(why) => {
+                tracing::info!("Tray: running headless, {why}.");
+                return None;
+            }
+        }
+    };
     let (login, log_file) = login(b.build, b.exe, b.env);
+    let quit: Arc<dyn Quit> = Arc::new(TrayQuit {
+        now: b.quit_now,
+        exit: b.exit,
+    });
+    let opener: Arc<dyn Opener> = if tui {
+        Arc::new(TuiOpener)
+    } else {
+        Arc::new(SystemOpener)
+    };
     let deps = TrayDeps {
         view: b.view,
         clouds: b
@@ -119,19 +166,19 @@ pub async fn boot(b: Boot<'_>) -> Option<TrayHandle> {
         links: Arc::new(b.links),
         sessions: b.sessions,
         restart: b.restart,
-        opener: Arc::new(SystemOpener),
-        quit: Arc::new(TrayQuit {
-            now: b.quit_now,
-            exit: b.exit,
-        }),
+        opener,
+        quit: quit.clone(),
         settings: b.settings,
         login,
         log_file,
         windows: cfg!(windows),
         link_backlog: b.link_backlog,
     };
+    let Some(bin) = bin else {
+        return start_tui(deps, quit);
+    };
     match start(&bin, deps, icons(b.build, exe, os), b.on_stopped).await {
-        Ok(handle) => Some(handle),
+        Ok(handle) => Some(Arc::new(move || handle.shutdown())),
         Err(e) => {
             tracing::warn!("Tray: running headless, {e}.");
             None
