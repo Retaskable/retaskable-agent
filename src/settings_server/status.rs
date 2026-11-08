@@ -142,6 +142,8 @@ pub struct OrchestratorProject {
     pub decision: Option<String>,
     /// "Chores today: 2 of 3", once the store has answered a count.
     pub chores: Option<String>,
+    /// What the idle baseline last found on the base branch, when it matters.
+    pub fix_main: Option<String>,
 }
 
 fn orchestrator_note(live: &LiveState) -> String {
@@ -331,6 +333,7 @@ pub fn build(
                     paused: p.paused,
                     last_tick: p.last_tick.clone(),
                     decision: p.decision.clone(),
+                    fix_main: p.fix_main.clone(),
                     chores: p.chores.map(|c| format!("Chores today: {} of {}", c.today, c.limit)),
                 })
                 .collect(),

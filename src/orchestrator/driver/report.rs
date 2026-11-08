@@ -359,7 +359,7 @@ async fn spec_files(repo_path: &Path, at: &str) -> Option<Vec<(String, String)>>
 }
 
 /// A git call in the project's repo, off the async threads: its trimmed output, or `None` when it failed.
-async fn git(repo_path: &Path, args: &[&str]) -> Option<String> {
+pub(super) async fn git(repo_path: &Path, args: &[&str]) -> Option<String> {
     Some(git_out(repo_path, args).await?.trim().to_string())
 }
 

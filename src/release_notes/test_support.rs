@@ -32,6 +32,8 @@ pub(crate) fn item(
         kind: None,
         milestone: milestone.map(ToString::to_string),
         reopened: None,
+        red_sha: None,
+        no_fix_sha: None,
     }
 }
 

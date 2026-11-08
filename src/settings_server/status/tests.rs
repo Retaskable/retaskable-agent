@@ -324,3 +324,16 @@ fn the_chore_count_shows_only_once_the_store_has_answered_one() {
         Some("Chores today: 2 of 3")
     );
 }
+
+#[test]
+fn the_fix_main_note_is_reported_with_the_computers_state() {
+    let found = ProjectLive {
+        fix_main: Some("Fixing main found nothing to fix at abc1234. It tries again when main moves.".into()),
+        ..Default::default()
+    };
+    let s = status_with(&live(OrchestratorMode::Runs, &[("a", found)]));
+    assert_eq!(
+        s.orchestrator.projects[0].fix_main.as_deref(),
+        Some("Fixing main found nothing to fix at abc1234. It tries again when main moves.")
+    );
+}

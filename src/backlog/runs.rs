@@ -310,10 +310,38 @@ impl Client {
             .map(|_| ())
     }
 
+    /// `add { via: "chore", items: [fix_main] }`: queues a fix main chore for the base commit `red_sha`, with the
+    /// failing checks as its `report`.
+    pub async fn add_fix_main(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        red_sha: &str,
+        report: &str,
+    ) -> Result<(), BacklogError> {
+        let item = json!({
+            "id": id,
+            "title": format!("Fix main at {}", short_sha(red_sha)),
+            "kind": "fix_main",
+            "milestone": "Chores",
+            "redSha": red_sha,
+            "remaining": report,
+        });
+        self.send(repo_id, token, "add", json!({ "via": "chore", "items": [item] }))
+            .await
+            .map(|_| ())
+    }
+
     /// `runs_drop`: ends every run and lock this agent had as `interrupted`.
     pub async fn runs_drop(&self, repo_id: u64, token: Option<&str>) -> Result<(), BacklogError> {
         self.send(repo_id, token, "runs_drop", json!({})).await.map(|_| ())
     }
+}
+
+/// A commit's first 7 characters.
+pub fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 #[cfg(test)]

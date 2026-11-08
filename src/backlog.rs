@@ -123,6 +123,12 @@ pub struct Item {
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,
+    /// On a `fix_main` item: the base commit it was queued for.
+    #[serde(default)]
+    pub red_sha: Option<String>,
+    /// On a `fix_main` item that ended without a merge: the commit fixing found nothing to fix.
+    #[serde(default)]
+    pub no_fix_sha: Option<String>,
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the
