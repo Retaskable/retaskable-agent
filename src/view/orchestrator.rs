@@ -102,7 +102,7 @@ impl AgentView {
     }
 
     /// The project's loop as of its last pass, when the flag is On and the loop runs.
-    fn loop_state(&self, project: &str) -> Option<crate::orchestrator::live::LiveState> {
+    pub(super) fn loop_state(&self, project: &str) -> Option<crate::orchestrator::live::LiveState> {
         if !self.settings.snapshot_reporting_on() {
             return None;
         }

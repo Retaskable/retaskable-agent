@@ -434,7 +434,11 @@ fn ideas_generate(cmd: &Command, project: &str, view: &AgentView) -> Value {
 /// `play { lane }` / `stop { lane }`.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
-    answer(cmd, play_lane(view, project, cmd.name == "play", lane))
+    let result = play_lane(view, project, cmd.name == "play", lane);
+    if lane == Some(0) && result.is_ok() {
+        view.live.bump();
+    }
+    answer(cmd, result)
 }
 
 /// `play` (or `stop`) of a lane: lane 0 is Play main ([`crate::play`], which waits up to `play::STOP_LIMIT` to stop).

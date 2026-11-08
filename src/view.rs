@@ -435,7 +435,7 @@ impl AgentView {
                 "items": [],
                 "sessions": [],
                 "lanes": self.lanes_list(project),
-                "mainPlaying": false,
+                "mainPlaying": self.settings.snapshot_reporting_on() && crate::play::running(project),
                 "galleries": self.galleries_list(project, data_dir),
                 "drafts": [],
                 "asks": [],
@@ -513,9 +513,24 @@ impl AgentView {
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.
     fn lanes_list(&self, project: &str) -> Vec<Value> {
-        (1..=self.lanes)
+        // With `snapshot-reporting` On a lane shows the item it holds, and a lane held past `lanes` (lowered since)
+        // stays listed until it finishes (pageView.ts).
+        let held = self
+            .loop_state(project)
+            .and_then(|s| s.projects.get(project).map(|p| p.held.clone()))
+            .unwrap_or_default();
+        let top = held.iter().map(|h| h.lane).max().unwrap_or(0).max(self.lanes);
+        (1..=top)
+            .filter(|k| *k <= self.lanes || held.iter().any(|h| h.lane == *k))
             .map(|k| {
                 let mut lane = json!({ "k": k, "diskGb": self.lane_sizes.gb(project, k), "playing": false });
+                if let Some(h) = held.iter().find(|h| h.lane == k) {
+                    lane["itemId"] = json!(h.item_id);
+                    lane["playing"] = json!(h.playing);
+                    if let Some(branch) = &h.branch {
+                        lane["branch"] = json!(branch);
+                    }
+                }
                 if Some(k) == self.chore_lane {
                     lane["note"] = json!(CHORE_LANE_NOTE);
                 }
@@ -774,6 +789,72 @@ mod tests {
             })),
         );
         v
+    }
+
+    fn lanes_of(v: &AgentView) -> Value {
+        v.snapshot("a", Path::new("."))["state"]["lanes"].clone()
+    }
+
+    #[test]
+    fn snapshot_reporting_shows_each_lanes_item_branch_and_game() {
+        use crate::orchestrator::live::HeldLane;
+        let held = |lane, playing| HeldLane {
+            lane,
+            item_id: format!("i{lane}"),
+            title: None,
+            branch: Some(format!("retaskable/i{lane}-s1")),
+            playing,
+        };
+        let v = reporting_view(true);
+        v.live.register("a");
+        v.live.ticked(
+            "a",
+            false,
+            "t".into(),
+            vec![held(1, false), held(2, true), held(5, false)],
+            "d".into(),
+        );
+        let lanes = lanes_of(&v);
+        let lanes = lanes.as_array().unwrap();
+        // The view has 3 lanes; lane 5 is held past that and still listed.
+        assert_eq!(
+            lanes.iter().map(|l| l["k"].as_u64().unwrap()).collect::<Vec<_>>(),
+            [1, 2, 3, 5]
+        );
+        assert_eq!(
+            (&lanes[0]["itemId"], &lanes[0]["branch"], &lanes[0]["playing"]),
+            (&json!("i1"), &json!("retaskable/i1-s1"), &json!(false))
+        );
+        assert_eq!(lanes[1]["playing"], true);
+        assert!(lanes[2].get("itemId").is_none() && lanes[2]["playing"] == false);
+        assert_eq!(lanes[3]["itemId"], "i5");
+        // Flag Off: as before.
+        let off = reporting_view(false);
+        off.live.register("a");
+        off.live.ticked("a", false, "t".into(), vec![held(1, true)], "d".into());
+        assert_eq!(lanes_of(&off)[0], json!({ "k": 1, "diskGb": 0.0, "playing": false }));
+    }
+
+    #[test]
+    fn main_playing_is_true_while_play_main_runs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = project("a", "o/a");
+        p.repo_path = crate::test_support::repo_with_origin(root.path());
+        p.worktrees_dir = root.path().join("worktrees");
+        p.play_command = if cfg!(windows) {
+            "ping -n 60 127.0.0.1 >nul"
+        } else {
+            "sleep 60"
+        }
+        .into();
+        let v = reporting_view(true);
+        let main_playing = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["mainPlaying"].clone();
+        assert_eq!(main_playing(&v), false);
+        crate::play::start("a", &p).unwrap();
+        assert_eq!(main_playing(&v), true);
+        assert_eq!(main_playing(&reporting_view(false)), false);
+        crate::play::stop("a").unwrap();
+        assert_eq!(main_playing(&v), false);
     }
 
     #[test]

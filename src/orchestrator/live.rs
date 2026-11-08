@@ -18,6 +18,10 @@ pub struct HeldLane {
     pub item_id: String,
     /// The item's title, when the last read of the backlog had it.
     pub title: Option<String>,
+    /// The branch the item's slice is on, when it is known.
+    pub branch: Option<String>,
+    /// Whether a game runs in the lane (Play).
+    pub playing: bool,
 }
 
 /// The backlog could not be reached (or answered something unreadable) on the last pass.
@@ -71,13 +75,21 @@ pub struct LiveState {
 }
 
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
-type Reported = (u32, BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>)>);
+type Reported = (
+    u32,
+    BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldLane>)>,
+);
 
 fn reported(state: &LiveState) -> Reported {
     let projects = state
         .projects
         .iter()
-        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone(), p.anomalies.clone())))
+        .map(|(id, p)| {
+            (
+                id.clone(),
+                (p.paused, p.limit_resets_at.clone(), p.anomalies.clone(), p.held.clone()),
+            )
+        })
         .collect();
     (state.concurrency, projects)
 }
@@ -142,6 +154,11 @@ impl LiveHandle {
         if reported(&state) != before {
             self.2.send_modify(|n| *n += 1);
         }
+    }
+
+    /// Signals [`subscribe`](Self::subscribe) so the snapshot is resent (Play main started or stopped).
+    pub fn bump(&self) {
+        self.2.send_modify(|n| *n += 1);
     }
 
     /// The shared pool's effective concurrency, as of the last pass.
@@ -263,6 +280,8 @@ mod tests {
             lane,
             item_id: item.to_string(),
             title: None,
+            branch: None,
+            playing: false,
         }]
     }
 
@@ -325,8 +344,12 @@ mod tests {
         assert!(changed(&mut rx), "a loop appearing");
         live.register("p");
         live.ticked("p", false, "t1".into(), vec![], "d".into());
-        live.ticked("p", false, "t2".into(), held(1, "a"), "e".into());
+        live.ticked("p", false, "t2".into(), vec![], "e".into());
         assert!(!changed(&mut rx), "ticks that change nothing reported");
+        live.ticked("p", false, "t2".into(), held(1, "a"), "e".into());
+        assert!(changed(&mut rx), "a held lane");
+        live.ticked("p", false, "t2".into(), held(1, "a"), "e".into());
+        assert!(!changed(&mut rx), "the same lanes again");
         live.ticked("p", true, "t3".into(), vec![], "d".into());
         assert!(changed(&mut rx), "paused");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(60);

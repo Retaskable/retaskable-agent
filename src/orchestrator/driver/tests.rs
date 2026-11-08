@@ -403,6 +403,11 @@ async fn held_lanes_show_in_live_state_under_the_project_that_holds_them() {
         lane,
         item_id: item.into(),
         title: title.map(Into::into),
+        branch: Some(format!(
+            "retaskable/{item}-{}-s1",
+            title.map_or(String::new(), |t| t.to_lowercase())
+        )),
+        playing: false,
     };
     assert_eq!(projects["p0"].held, vec![lane(1, "a", Some("A"))]);
     assert_eq!(projects["p1"].held, vec![lane(3, "b", None)]);
