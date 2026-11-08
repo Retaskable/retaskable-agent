@@ -576,7 +576,7 @@ fn a_watchdog_kill_is_silenced_not_failed_or_needs_human() {
         "ended with killed_for_silence: no output".into(),
     )));
     assert!(
-        matches!(session_result_for_answer(killed, None).0, SessionResult::Silenced(_)),
+        matches!(session_result_for_answer(killed, None).0, SessionResult::Silenced(..)),
         "a session the watchdog killed is resumed, not requeued or sent to a person"
     );
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
@@ -607,7 +607,7 @@ fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     )));
     assert!(matches!(
         session_result_for_answer(killed, None).0,
-        SessionResult::Silenced(_)
+        SessionResult::Silenced(..)
     ));
 
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
@@ -615,6 +615,18 @@ fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
         session_result_for_answer(crashed, None).0,
         SessionResult::NeedsHuman(_)
     ));
+}
+
+#[test]
+fn a_cursor_time_kill_is_silenced_with_its_own_subtype() {
+    let killed = Err(anyhow::Error::new(crate::implementer::CursorTimeKilled(
+        "ended with cursor_time".into(),
+    )));
+    let SessionResult::Silenced(why, subtype) = session_result_for_answer(killed, None).0 else {
+        panic!("a Cursor time kill is resumed like a watchdog kill");
+    };
+    assert!(why.starts_with("ran past its time limit and was killed"), "{why}");
+    assert_eq!(subtype, "cursor_time");
 }
 
 #[test]

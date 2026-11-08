@@ -69,7 +69,9 @@ pub enum SessionResult {
     /// `own-failure-handling` flag the run stays `implementing` with its lane and lease, nothing is posted to
     /// the store, and the loop resumes the session by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row
     /// goes to `needs_human`. With the flag Off it is a [`Failed`](Self::Failed).
-    Silenced(String),
+    /// The text says why; the second is the `session_end` subtype (`killed_for_silence`, or `cursor_time` for
+    /// the Cursor time limit, which is handled the same way).
+    Silenced(String, &'static str),
     /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
     /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
@@ -424,7 +426,7 @@ impl ProjectLoop {
                 ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
                 subtype: match outcome.result {
                     SessionResult::Interrupted => Some("interrupted".into()),
-                    SessionResult::Silenced(_) => Some("killed_for_silence".into()),
+                    SessionResult::Silenced(_, subtype) => Some(subtype.into()),
                     _ => None,
                 },
                 ..Default::default()
@@ -479,7 +481,7 @@ impl ProjectLoop {
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the own-failure count failed: {e:#}", self.id);
         }
-        if let SessionResult::Silenced(why) = result {
+        if let SessionResult::Silenced(why, subtype) = result {
             let record = self.records.get_mut(&item);
             result = match record {
                 // Off: today's behaviour, the item goes back to the queue.
@@ -488,7 +490,7 @@ impl ProjectLoop {
                     record.silence_kills += 1;
                     self.silenced
                         .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
-                    SessionResult::Silenced(why)
+                    SessionResult::Silenced(why, subtype)
                 }
                 record => {
                     if let Some(record) = record {
@@ -568,7 +570,7 @@ impl ProjectLoop {
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Silenced(_) | SessionResult::NotStarted(_) => self.save_leases(),
+            SessionResult::Silenced(..) | SessionResult::NotStarted(_) => self.save_leases(),
             SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
