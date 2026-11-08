@@ -93,8 +93,8 @@ For a computer with no screen, each can be set by a variable, read through `envV
 
 ### 4.2 Signing in on this computer
 
-- The tray's **Settings…** (and the terminal menu's) opens `http://127.0.0.1:<port>/settings#<token>`: a random token, made for that click, good once within 5 minutes. A token in the fragment never reaches a server log or a `Referer`.
-- The page takes it out of the address and posts it to `/api/settings/session`, which answers with a session cookie (`HttpOnly`, `SameSite=Strict`, 8 hours) and a CSRF token. A tray token is taken only from the computer itself (a loopback address).
+- `SettingsServer::settings_link()` makes the address the tray's **Settings…** (and the terminal menu's) opens, and the first run below opens, `http://127.0.0.1:<port>/settings#<token>`: a random token, made for that click, good once within 5 minutes. A token in the fragment never reaches a server log or a `Referer`.
+- The page takes it out of the address and posts it to `/api/settings/session`, which answers with a session cookie (`HttpOnly`, `SameSite=Strict`, 8 hours) and a CSRF token. A tray token is taken only from the computer itself (a loopback address); one from another address is refused and not used up.
 
 ### 4.3 What every request must have
 
@@ -108,7 +108,7 @@ For a computer with no screen, each can be set by a variable, read through `envV
 
 Off by default. When it was on with a password as the agent started (or `RETASKABLE_NETWORK_PASSWORD` is set), the port listens on every address (`0.0.0.0`) instead of `127.0.0.1`, and the console says the page is open on the network. Turned off while running, other computers are refused at once; the binding changes at the restart. The page is plain `http` on the local network: a password typed there crosses it unencrypted, as on any router's own page, so it's a password for this page only. The port binds `127.0.0.1` unless the person at the computer turns this on, and never takes a command either way.
 
-A release build opens the page once by itself, on its first run with no config file yet (`settingsOpened` in machine.json).
+A release build opens the page once by itself, on its first run with no config file yet (`settingsOpened` in machine.json, set when it opens, even if no browser could be started). A checkout build never opens it.
 
 ### 4.5 The Now tab and `GET /api/settings/status`
 

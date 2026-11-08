@@ -109,6 +109,20 @@ impl MachineStore {
         self.save()
     }
 
+    /// Whether the settings page has already been opened by itself on a first run.
+    pub fn settings_opened(&self) -> bool {
+        self.data
+            .get("settingsOpened")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Remembers the settings page was opened on a first run, and writes the file.
+    pub fn set_settings_opened(&mut self) -> Result<()> {
+        self.data.insert("settingsOpened".to_string(), Value::Bool(true));
+        self.save()
+    }
+
     /// Test helper: change a key other than tags/network without going through their setters.
     #[cfg(test)]
     fn set_raw(&mut self, key: &str, value: Value) {

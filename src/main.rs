@@ -463,6 +463,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         checks: latest_checks,
         live,
     });
+    // agent-settings.md section 4.4, behind the `machine-settings` flag (Off keeps today's behaviour).
+    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await
+        && let Err(e) = settings.open_on_first_run(is_release, link::open_url)
+    {
+        tracing::warn!("first-run settings page: {e:#}");
+    }
     axum::serve(
         listener,
         api::router(version.to_string(), settings).into_make_service_with_connect_info::<SocketAddr>(),

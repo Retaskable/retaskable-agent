@@ -562,3 +562,39 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
     );
     assert_eq!(body["engines"].as_array().unwrap().len(), 5);
 }
+
+#[tokio::test]
+async fn settings_link_makes_a_new_token_that_signs_in_once_from_loopback() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(Mutex::new(1_700_000_000u64));
+    let clock = now.clone();
+    let settings = Arc::new(SettingsServer::new(
+        dir.path().to_path_buf(),
+        4700,
+        4700,
+        false,
+        Env::empty(),
+        move || *clock.lock().unwrap(),
+        |_: i32| {},
+        test_keychain(dir.path()),
+    ));
+    let token_of = |link: String| {
+        let (url, token) = link.split_once('#').unwrap();
+        assert_eq!(url, "http://127.0.0.1:4700/settings");
+        token.to_string()
+    };
+    let (a, b) = (token_of(settings.settings_link()), token_of(settings.settings_link()));
+    assert_ne!(a, b);
+
+    let other: std::net::IpAddr = "192.168.1.5".parse().unwrap();
+    let local: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    assert!(!settings.verify_token(&a, other));
+    assert!(settings.verify_token(&a, local));
+    assert!(!settings.verify_token(&a, local));
+
+    *now.lock().unwrap() += 300;
+    assert!(!settings.verify_token(&b, local));
+    let c = token_of(settings.settings_link());
+    *now.lock().unwrap() += 299;
+    assert!(settings.verify_token(&c, local));
+}
