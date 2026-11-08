@@ -110,6 +110,7 @@ async fn pass(rig: &mut Rig, starter: &dyn RunStarter, now: Instant) {
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
+        local: &crate::local_model::LocalModel::off(),
         stopping: false,
     };
     m.projects[0].run_pass(&mut m.pool, starter, &shared, now).await;
@@ -281,6 +282,7 @@ async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
+        local: &crate::local_model::LocalModel::off(),
         stopping: false,
     };
     let started = m.projects[0]
@@ -360,6 +362,7 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
+        local: &crate::local_model::LocalModel::off(),
         stopping: true,
     };
     m.projects[0]
@@ -746,6 +749,7 @@ async fn start_pass_with(
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut out,
         engine_limits: &mut limits,
+        local: &crate::local_model::LocalModel::off(),
         stopping: false,
     };
     m.projects[0].run_pass(&mut m.pool, starter, &shared, now).await;

@@ -33,11 +33,15 @@ impl ProjectLoop {
         if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
             return None;
         }
-        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
-        if gate.is_none()
-            && self.flags.on("weekly-cutoff").await
-            && shared.engine_limits.week_cut_off(std::time::Instant::now())
-        {
+        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim, unless
+        // the local model stands in for Claude (`local-limit-fallback`), which takes one claim at a time.
+        let cut_off = shared.engine_limits.week_cut_off(std::time::Instant::now());
+        let held = gate.is_none() && cut_off && self.flags.on("weekly-cutoff").await;
+        let on_local = match &gate {
+            Some(g) => g.fallback,
+            None => held && super::start_gate::local_fallback(shared),
+        };
+        if held && (!on_local || shared.local.waiting() > 0) {
             return None;
         }
         let caps_on = self.flags.on("model-concurrency-caps").await;
@@ -55,7 +59,8 @@ impl ProjectLoop {
                 break;
             };
             last = Some(answer);
-            if !more {
+            // The one local slot: no second item is claimed onto it before the first is waiting there.
+            if !more || on_local {
                 break;
             }
         }
