@@ -353,6 +353,8 @@ impl ProjectLoop {
         max_resume_context_tokens: u32,
     ) -> Self {
         live.register(&id);
+        let vet = store.vet();
+        live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
         Self {
             run_loop: super::RunLoop::new(&id),
             id,
@@ -382,7 +384,7 @@ impl ProjectLoop {
             seen: report::Seen::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
             ideas_round_running: Arc::new(AtomicBool::new(false)),
-            vet_daily: Default::default(),
+            vet_daily: Arc::new(std::sync::Mutex::new(super::vet_daily::State::from_record(vet))),
             vet_running: Arc::new(AtomicBool::new(false)),
             ideas_daily: Default::default(),
             deprecations_running: Default::default(),
