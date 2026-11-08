@@ -16,6 +16,7 @@ use crate::telemetry::events::now_ms;
 use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState};
 
 mod live;
+mod smoke;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {

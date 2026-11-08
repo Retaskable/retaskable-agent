@@ -5,5 +5,5 @@ mod project;
 mod smoke_state;
 
 pub use machine::MachineStore;
-pub use project::{RunRecord, Store, subscribe_trial_changes};
+pub use project::{RunRecord, Store, subscribe_smoke_changes, subscribe_trial_changes};
 pub use smoke_state::{SmokeState, SmokeStatus};
