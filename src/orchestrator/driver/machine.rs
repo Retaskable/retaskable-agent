@@ -680,6 +680,9 @@ impl Machine {
                     lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
                         .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    if stopping {
+                        lp.cut_steps();
+                    }
                     lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
                     if !paused {
                         let room = concurrency.saturating_sub(starter.active());

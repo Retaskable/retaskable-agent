@@ -297,6 +297,8 @@ pub struct ProjectLoop {
     pub(super) repo: Option<u64>,
     /// The steps running for this project's items.
     pub(super) running: Running,
+    /// The steps in `running`, by item, for their `step_end`.
+    pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
     /// What the chat was told about approved drafts that is still waiting on staging.
@@ -403,6 +405,7 @@ impl ProjectLoop {
             live,
             repo: None,
             running: Running::default(),
+            open_steps: Default::default(),
             seen: report::Seen::default(),
             follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
@@ -540,14 +543,15 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
-        self.check_watchdog(paused, &actions, pool).await;
+        let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
+        self.check_watchdog(paused, &actions, pool, anomaly_rules);
         Step::Ticked { would }
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    async fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool) {
+    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool, anomaly_rules: bool) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -559,8 +563,6 @@ impl ProjectLoop {
             })
             .collect();
         let now_ms = now_ms();
-        // Behind the `watchdog-anomaly-rules` release flag: Off is the five rules of today.
-        let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
         let found = watchdog::check(&watchdog::Input {
             project: &self.id,
             paused,
@@ -572,6 +574,7 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            anomaly_rules,
             // Behind `watchdog-anomaly-rules`: Off, no restart reaches the rules.
             restart: anomaly_rules
                 .then(|| watchdog::RestartView::of(crate::restart::state()))
@@ -579,7 +582,6 @@ impl ProjectLoop {
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
             idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
             no_progress_minutes: self.project.tuning.no_progress_minutes,
-            anomaly_rules,
         });
         self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
     }
