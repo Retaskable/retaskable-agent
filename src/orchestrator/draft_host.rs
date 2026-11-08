@@ -13,6 +13,7 @@ use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, Proj
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
+use crate::engines::cursor::with_project;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
@@ -137,7 +138,7 @@ impl DraftHost for ClaudeDrafts {
                     budget: &project.budget,
                     cwd: &job.dir,
                     local: claimed.as_ref().map(|(_, target)| target.clone()),
-                    cursor: placed.cursor.clone(),
+                    cursor: placed.cursor.clone().map(|c| with_project(project, c)),
                 },
                 if job.resume {
                     Start::Resume {

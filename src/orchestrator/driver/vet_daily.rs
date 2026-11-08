@@ -13,6 +13,7 @@ use anyhow::Result;
 use super::playtest_round::Job as PlaytestJob;
 use crate::backlog::suggestions::{Verdict, VerdictSend, VerdictSent};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, SessionResult, SessionSpec, engine_for, engine_of, place, run_session,
 };
@@ -216,7 +217,10 @@ async fn pass<F, Fut>(
             model: "haiku".to_string(),
             local: None,
             engine: Some(placed.as_ref().map_or(EngineId::Claude, |p| p.engine)),
-            cursor: placed.as_ref().and_then(|p| p.cursor.clone()),
+            cursor: placed
+                .as_ref()
+                .and_then(|p| p.cursor.clone())
+                .map(|c| with_project(&base.project, c)),
             sandbox: sandbox_enabled(base.project.sandbox, cfg!(windows)),
             shell: false,
         },

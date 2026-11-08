@@ -20,6 +20,7 @@ use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
     EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked, start_engine,
@@ -120,6 +121,7 @@ impl PieceStarter {
         placement: Placement,
         placed: bool,
     ) -> Result<(), String> {
+        let cursor = placement.cursor.map(|c| with_project(&project, c));
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
@@ -134,7 +136,7 @@ impl PieceStarter {
             token: request.token.clone(),
             kind: request.kind,
             engine: placement.engine,
-            cursor: placement.cursor,
+            cursor,
             choice: self.choice.clone(),
             cursor_models: self.cursor_models.clone(),
             placed,

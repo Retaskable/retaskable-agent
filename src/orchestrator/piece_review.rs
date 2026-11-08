@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use super::piece_runs::{Job, piece_item, tree_sender};
 use super::session::watch_for;
 use crate::backlog::runs::RunOutcome;
+use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
     program_of, run_session_tracked, start_engine,
@@ -181,7 +182,7 @@ fn session_config<'a>(
         model: model.to_string(),
         local: (model == LOCAL).then(|| job.local.target()),
         engine: Some(placed.engine),
-        cursor: placed.cursor.clone(),
+        cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
         sandbox: crate::engines::claude::sandbox_enabled(job.project.sandbox, cfg!(windows)),
         shell: true,
     }

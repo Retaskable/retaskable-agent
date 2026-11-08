@@ -104,3 +104,95 @@ fn quoted_runs_stay_one_word() {
     assert_eq!(command_program(r#""./my tool" build"#).as_deref(), Some("./my tool"));
     assert_eq!(command_program("1A=x make").as_deref(), Some("make"));
 }
+
+// with_project: the session's options from the project's config, as the lane's written .cursor/cli.json shows them
+
+fn project(repo: &std::path::Path, remote: Option<&str>, engines: serde_json::Value) -> ProjectConfig {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+    };
+    git(&["init"]);
+    if let Some(url) = remote {
+        git(&["remote", "add", "origin", url]);
+    }
+    serde_json::from_value(serde_json::json!({
+        "repoPath": repo,
+        "checks": [{"command": "npm run typecheck"}, {"command": "CI=1 cargo test"}],
+        "galleries": [{"command": "bash scripts/shots.sh"}],
+        "engines": engines,
+    }))
+    .unwrap()
+}
+
+/// The `permissions.allow` of the `.cursor/cli.json` a session on `project` gets in a fresh lane.
+fn written(project: &ProjectConfig, readonly: bool) -> Vec<String> {
+    use crate::engines::engine::Engine;
+    let lane = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .arg("init")
+        .current_dir(lane.path())
+        .output()
+        .unwrap();
+    let mut spec = super::super::base_spec(lane.path());
+    spec.readonly = readonly;
+    spec.cursor = Some(with_project(project, CursorOptions::default()));
+    super::super::CursorEngine.prepare(&spec).unwrap();
+    let file: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(lane.path().join(".cursor/cli.json")).unwrap()).unwrap();
+    file["permissions"]["allow"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_writing_lane_gets_the_derived_programs_and_a_read_only_one_does_not() {
+    let repo = tempfile::tempdir().unwrap();
+    let p = project(repo.path(), Some("https://github.com/o/r.git"), serde_json::Value::Null);
+    let w = written(&p, false);
+    for want in ["Shell(npm)", "Shell(cargo)", "Shell(gh)"] {
+        assert!(w.iter().any(|e| e == want), "{want}");
+    }
+    assert!(!w.iter().any(|e| e == "Shell(bash)"));
+    let r = written(&p, true);
+    assert!(r.iter().any(|e| e == "Shell(gh)"));
+    assert!(!r.iter().any(|e| e == "Shell(npm)" || e == "Shell(cargo)"));
+}
+
+#[test]
+fn the_host_picks_gh_glab_or_neither() {
+    let repo = tempfile::tempdir().unwrap();
+    let w = written(
+        &project(repo.path(), Some("git@gitlab.com:o/r.git"), serde_json::Value::Null),
+        false,
+    );
+    assert!(w.iter().any(|e| e == "Shell(glab)") && !w.iter().any(|e| e == "Shell(gh)"));
+    let repo = tempfile::tempdir().unwrap();
+    let w = written(&project(repo.path(), None, serde_json::Value::Null), false);
+    assert!(!w.iter().any(|e| e == "Shell(glab)" || e == "Shell(gh)"));
+}
+
+#[test]
+fn a_bad_typed_entry_is_left_out_and_a_good_one_written_once() {
+    let repo = tempfile::tempdir().unwrap();
+    let engines = serde_json::json!({"allow": ["Shell(*)", "Shell(make)", "Shell(make)", "Shell(npm)", 7]});
+    let w = written(&project(repo.path(), None, engines), false);
+    assert!(!w.iter().any(|e| e == "Shell(*)"));
+    assert_eq!(w.iter().filter(|e| *e == "Shell(make)").count(), 1);
+    assert_eq!(w.iter().filter(|e| *e == "Shell(npm)").count(), 1);
+}
+
+#[test]
+fn a_config_change_between_sessions_shows_in_the_second() {
+    let repo = tempfile::tempdir().unwrap();
+    let mut p = project(repo.path(), None, serde_json::Value::Null);
+    assert!(!written(&p, false).iter().any(|e| e == "Shell(make)"));
+    p.engines = Some(serde_json::json!({"allow": ["Shell(make)"]}));
+    assert!(written(&p, false).iter().any(|e| e == "Shell(make)"));
+}
