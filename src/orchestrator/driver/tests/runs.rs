@@ -620,17 +620,40 @@ fn checks_with(claude_signed_in: Option<bool>, cursor: bool) -> crate::setup_che
     }
 }
 
+/// Like `agent_with`, with `engine-placement` On.
+async fn placed_agent_with(checks: Option<crate::setup_check::SetupChecks>) -> Value {
+    let (mut rig, script) = setup(1).await;
+    *rig.machine.links.checks.lock().unwrap() = checks;
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
+    pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), Instant::now()).await;
+    let takes = script.lock().unwrap().args("run_take");
+    takes[0]["agent"].clone()
+}
+
 #[tokio::test]
-async fn run_take_sends_claude_only_when_installed_and_signed_in() {
+async fn run_take_sends_claude_only_with_placement_off() {
     let signed_in = agent_with(Some(checks_with(Some(true), true)), Default::default()).await;
-    assert_eq!(
-        signed_in["engines"],
-        json!(["claude"]),
-        "only Claude runs sessions here yet"
-    );
+    assert_eq!(signed_in["engines"], json!(["claude"]));
     let signed_out = agent_with(Some(checks_with(Some(false), true)), Default::default()).await;
     assert_eq!(signed_out["engines"], json!([]));
     let none_yet = agent_with(None, Default::default()).await;
+    assert_eq!(none_yet["engines"], json!([]));
+}
+
+#[tokio::test]
+async fn run_take_sends_every_passing_engine_with_placement_on() {
+    let all = placed_agent_with(Some(checks_with(Some(true), true))).await;
+    assert_eq!(all["engines"], json!(["claude", "cursor", "pi", "codex"]));
+    let no_cursor = placed_agent_with(Some(checks_with(Some(true), false))).await;
+    assert_eq!(no_cursor["engines"], json!(["claude", "pi", "codex"]));
+    let mut failing = checks_with(Some(true), true);
+    failing.codex = Some(check(Some(false)));
+    failing.pi = None;
+    let some = placed_agent_with(Some(failing)).await;
+    assert_eq!(some["engines"], json!(["claude", "cursor"]));
+    let signed_out = placed_agent_with(Some(checks_with(Some(false), true))).await;
+    assert_eq!(signed_out["engines"], json!(["cursor", "pi", "codex"]));
+    let none_yet = placed_agent_with(None).await;
     assert_eq!(none_yet["engines"], json!([]));
 }
 

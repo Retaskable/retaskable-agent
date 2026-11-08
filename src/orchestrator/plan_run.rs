@@ -261,7 +261,7 @@ impl Roster {
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
         if !self.flags.last("engine-placement") && !self.on_claude(role, Some(&project)) {
-            return Err("only Claude sessions run in the Rust agent yet".into());
+            return Err("Claude alone starts sessions while engine-placement is off".into());
         }
         let engine = engine_for(&self.choice, project.engines.as_ref(), role, None);
         let placed = place(engine, role, &self.env, &self.cursor_models)?;

@@ -218,5 +218,5 @@ async fn with_the_flag_off_only_a_role_on_claude_runs() {
     r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
     assert!(r.starter.kinds().is_empty());
     let (req, _s) = request(brief());
-    assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
+    assert!(r.starter.start(req).unwrap_err().contains("Claude alone"));
 }
