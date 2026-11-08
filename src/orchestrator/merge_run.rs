@@ -14,8 +14,10 @@ use super::watch_run::{Trees, change_ref};
 use crate::backlog::runs::{LockTake, RunKind, RunOutcome};
 use crate::ci_watch::gh_out;
 use crate::drafts::land::workflow;
-use crate::merge_update::{Behind, Update, behind, conflict_instruction, update_from_base};
+use crate::flags::Flags;
+use crate::merge_update::{Behind, Update, behind, conflict_instruction, sync_conflict_instruction, update_from_base};
 use crate::process_tree::{ProcessTree, with_hook};
+use crate::runs::chore::{ChoreKind, chore_of};
 use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
 
 /// How often a lock another computer holds is asked for again (and a PR GitHub hasn't worked out is read again).
@@ -31,11 +33,20 @@ pub struct MergeRuns {
     ask_every: Duration,
     /// How long the lock is asked for; `None` is the `merge` ceiling less its margin.
     wait: Option<Duration>,
+    /// The release flags (`chore-rotation` and `chore-main-sync` make a main sync merge with a merge commit).
+    flags: Arc<Flags>,
 }
 
 impl MergeRuns {
-    pub fn new(machine: String) -> Arc<Self> {
-        Self::with(PathBuf::from("gh"), crate::git_bin::command, machine, ASK_EVERY, None)
+    pub fn new(machine: String, flags: Arc<Flags>) -> Arc<Self> {
+        Self::with(
+            PathBuf::from("gh"),
+            crate::git_bin::command,
+            machine,
+            ASK_EVERY,
+            None,
+            flags,
+        )
     }
 
     pub fn with(
@@ -44,6 +55,7 @@ impl MergeRuns {
         machine: String,
         ask_every: Duration,
         wait: Option<Duration>,
+        flags: Arc<Flags>,
     ) -> Arc<Self> {
         Arc::new(Self {
             gh,
@@ -51,6 +63,7 @@ impl MergeRuns {
             machine,
             ask_every,
             wait,
+            flags,
         })
     }
 }
@@ -71,8 +84,12 @@ impl RunStarter for MergeRuns {
                 .unwrap_or_else(|| ceiling(RunKind::Merge).saturating_sub(CEILING_MARGIN)),
             trees: Trees::default(),
             request,
+            sync: false,
         };
+        let flags = self.flags.clone();
         tokio::spawn(async move {
+            let mut job = job;
+            job.sync = is_sync(&job.request, &flags).await;
             let token = job.request.token.clone();
             let ends = job.request.ends.clone();
             if let Some((outcome, result)) = job.run().await {
@@ -91,6 +108,14 @@ struct Job {
     wait: Duration,
     trees: Trees,
     request: RunRequest,
+    /// A main sync (`sync_main` chore, both flags On): merged with a merge commit, never rebased.
+    sync: bool,
+}
+
+async fn is_sync(request: &RunRequest, flags: &Flags) -> bool {
+    chore_of(&request.piece).is_some_and(|c| c.kind == ChoreKind::SyncMain)
+        && flags.on("chore-rotation").await
+        && flags.on("chore-main-sync").await
 }
 
 fn failed(why: impl Into<String>) -> Outcome {
@@ -136,12 +161,26 @@ fn wants_update(stderr: &str) -> bool {
     e.contains("not up to date") || e.contains("out of date") || e.contains("behind")
 }
 
+/// A `gh pr merge --merge` refusal because the repo doesn't allow merge commits.
+fn refuses_merge_commits(stderr: &str) -> bool {
+    let e = stderr.to_lowercase();
+    e.contains("merge commit") && (e.contains("not allowed") || e.contains("disabled") || e.contains("not enabled"))
+}
+
 impl Job {
+    fn conflict_text(&self, base: &str, files: &[String]) -> String {
+        if self.sync {
+            sync_conflict_instruction(base, files)
+        } else {
+            conflict_instruction(base, files)
+        }
+    }
+
     /// How the run ended; `None` when a stop cut one of its processes (the loop has already ended it).
     async fn run(&self) -> Outcome {
         let ctx = &self.request.context;
         let flow = workflow(&ctx.config);
-        if !flow.we_merge || flow.method_flag != "--squash" {
+        if !flow.we_merge || (!self.sync && flow.method_flag != "--squash") {
             return failed("This project's workflow isn't one where Retaskable squash-merges into the base.");
         }
         let Some(pr) = self.request.piece.change.as_ref().and_then(change_ref) else {
@@ -270,7 +309,7 @@ impl Job {
             Ok(Update::Updated { head }) => Some((RunOutcome::Updated, json!({ "head": head }))),
             Ok(Update::Conflict { files }) => Some((
                 RunOutcome::Conflict,
-                json!({ "instruction": conflict_instruction(&base, &files), "files": files }),
+                json!({ "instruction": self.conflict_text(&base, &files), "files": files }),
             )),
             Err(e) => failed(format!("Bringing the change up to date failed: {e:#}")),
         }
@@ -283,7 +322,8 @@ impl Job {
         if !self.request.context.locks.held(lock) {
             return self.lost();
         }
-        let args = ["pr", "merge", pr, "--squash", "--delete-branch"];
+        let method = if self.sync { "--merge" } else { "--squash" };
+        let args = ["pr", "merge", pr, method, "--delete-branch"];
         let (_, err, ok) = match self.gh(&args).await {
             Ok(out) => out,
             Err(why) => return failed(why),
@@ -293,6 +333,14 @@ impl Job {
         }
         if ok {
             self.merged(pr).await
+        } else if self.sync && refuses_merge_commits(&err) {
+            Some((
+                RunOutcome::Questions,
+                json!({ "questions": [{
+                    "question": "Allow merge commits in the repo's settings, or sync by hand",
+                    "options": ["Merge commits are allowed now", "I'll sync by hand"],
+                }] }),
+            ))
         } else if wants_update(&err) {
             self.update(lock, branch, piece).await
         } else {
