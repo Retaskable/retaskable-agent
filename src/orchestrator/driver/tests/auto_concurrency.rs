@@ -141,6 +141,22 @@ async fn a_cursor_sessions_reading_does_not_reach_the_pacer() {
     }
 }
 
+#[tokio::test]
+async fn the_snapshot_gets_the_paced_number_and_reason_only_with_the_flag_on() {
+    for on in [true, false] {
+        let (mut rig, fake) = rig_with(on, max_of(4)).await;
+        step(&mut rig, &fake, 0, 0.10, RESET, 0).await;
+        let got = rig.machine.links.item_commands.auto();
+        if on {
+            let (allowed, reason) = got.expect("a pace was reported");
+            assert_eq!(allowed, rig.machine.effective_concurrency());
+            assert!(!reason.is_empty());
+        } else {
+            assert_eq!(got, None);
+        }
+    }
+}
+
 /// Restarts the machine: the same pacer settings and `dir`, nothing else carried.
 fn restart(rig: &mut Rig, dir: &std::path::Path) {
     rig.machine.auto = crate::orchestrator::driver::auto::Auto::new(AutoConcurrency::default());
