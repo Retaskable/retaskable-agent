@@ -7,6 +7,7 @@ pub mod app_menu;
 pub mod ask;
 pub mod backlog;
 pub mod base_hold;
+pub mod baseline;
 pub mod checks;
 pub mod ci_coverage;
 pub mod ci_watch;
