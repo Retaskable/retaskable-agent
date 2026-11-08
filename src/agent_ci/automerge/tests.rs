@@ -111,7 +111,7 @@ async fn a_green_automerge_pull_request_is_squash_merged_under_the_lock_and_the_
     let log = r.log.lock().unwrap().clone();
     assert_eq!(log, ["take merge-main PR #7 on pc", "drop L1"]);
     assert!(
-        gh_calls(&r).contains("pr merge 7 --squash --delete-branch --repo o/p"),
+        gh_calls(&r).contains("pr merge 7 --squash --delete-branch --match-head-commit h7 --repo o/p"),
         "{}",
         gh_calls(&r)
     );
@@ -155,4 +155,23 @@ async fn a_pull_request_without_the_label_or_with_a_new_head_takes_no_lock_and_i
         assert!(r.log.lock().unwrap().is_empty());
         assert!(!gh_calls(&r).contains("pr merge"));
     }
+}
+
+#[tokio::test]
+async fn a_head_pushed_while_the_lock_was_waited_for_is_not_merged() {
+    let r = rig(LABELLED, CHECKED_MAIN, 0);
+    // The first read of the pull request is the checked head; every later one is a new head.
+    let moved = r#"{"state":"OPEN","headRefOid":"h8","labels":[{"name":"automerge"}]}"#;
+    script(
+        r.dir.path(),
+        "gh",
+        &format!(
+            "echo \"$*\" >> {log}\nif [ \"$2\" = view ]; then\n if [ -e {seen} ]; then echo '{moved}'; else touch {seen}; echo '{LABELLED}'; fi\nfi",
+            log = r.dir.path().join("gh.log").display(),
+            seen = r.dir.path().join("seen").display(),
+        ),
+    );
+    assert_eq!(land(&r).await, Ended::NotAsked);
+    assert!(!gh_calls(&r).contains("pr merge"));
+    assert_eq!(r.log.lock().unwrap().last().unwrap(), "drop L1");
 }

@@ -160,20 +160,24 @@ async fn gh(target: &Target<'_>, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Whether the pull request still asks for the merge: open, labelled `automerge`, and at the head that was checked.
+async fn asked(t: &Target<'_>, pr: &str) -> Result<bool, String> {
+    let view = gh(t, &["pr", "view", pr, "--json", "state,headRefOid,labels"]).await?;
+    let view: View = serde_json::from_str(&view).map_err(|e| format!("unreadable pull request: {e}"))?;
+    Ok(
+        view.state == "OPEN"
+            && view.head_ref_oid == t.key.head
+            && view.labels.iter().any(|l| l.name == AUTOMERGE_LABEL),
+    )
+}
+
 /// Merges the pull request of a green check, if it asks for it and main hasn't moved. Call only after success.
 pub async fn run(am: &Automerge, t: &Target<'_>) -> Ended {
     let pr = t.key.pr.to_string();
-    let view = match gh(t, &["pr", "view", &pr, "--json", "state,headRefOid,labels"]).await {
-        Ok(v) => v,
+    match asked(t, &pr).await {
+        Ok(true) => {}
+        Ok(false) => return Ended::NotAsked,
         Err(e) => return Ended::Failed(e),
-    };
-    let view: View = match serde_json::from_str(&view) {
-        Ok(v) => v,
-        Err(e) => return Ended::Failed(format!("unreadable pull request: {e}")),
-    };
-    if view.state != "OPEN" || view.head_ref_oid != t.key.head || !view.labels.iter().any(|l| l.name == AUTOMERGE_LABEL)
-    {
-        return Ended::NotAsked;
     }
     let name = format!("merge-{}", t.base);
     let note = format!("PR #{} on {}", t.key.pr, t.computer);
@@ -202,8 +206,14 @@ async fn take(am: &Automerge, t: &Target<'_>, name: &str, note: &str) -> Result<
     }
 }
 
-/// Under the lock: main is read again, and the squash merge goes only if it is the main the check saw.
+/// Under the lock (which may have been waited for a long time): the pull request is read again, main is read
+/// again, and the squash merge goes only for the head and the main the check saw.
 async fn merge_if_still_main(t: &Target<'_>, pr: &str) -> Ended {
+    match asked(t, pr).await {
+        Ok(true) => {}
+        Ok(false) => return Ended::NotAsked,
+        Err(e) => return Ended::Failed(e),
+    }
     if let Err(e) = discovery::git(t.git, t.repo_dir, &["fetch", "origin", t.base]).await {
         return Ended::Failed(e);
     }
@@ -212,7 +222,20 @@ async fn merge_if_still_main(t: &Target<'_>, pr: &str) -> Ended {
         Ok(_) => return Ended::MainMoved,
         Err(e) => return Ended::Failed(e),
     }
-    match gh(t, &["pr", "merge", pr, "--squash", "--delete-branch"]).await {
+    match gh(
+        t,
+        &[
+            "pr",
+            "merge",
+            pr,
+            "--squash",
+            "--delete-branch",
+            "--match-head-commit",
+            &t.key.head,
+        ],
+    )
+    .await
+    {
         Ok(_) => Ended::Merged,
         Err(e) => Ended::Failed(e),
     }
