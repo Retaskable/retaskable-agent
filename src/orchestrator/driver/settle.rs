@@ -364,7 +364,12 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
+        let weekly = self.flags.on("weekly-limit-reading").await;
+        if let Some(usage) = outcome
+            .usage
+            .clone()
+            .filter(|u| crate::tiers::is_usage_reading(u, weekly))
+        {
             crate::tiers::note_usage(&usage);
             self.store.set_usage(usage);
             if let Err(e) = self.store.save() {

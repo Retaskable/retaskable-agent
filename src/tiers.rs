@@ -33,25 +33,33 @@ pub fn implementer_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsCo
     }
 }
 
-/// Whether a `rate_limit_info` reading is (or carries) the 5-hour window `implementer_tier` reads,
-/// rather than some other window a build sent alone (`parseRateLimit` in the TypeScript agent):
-/// most builds report one window per event with no `rateLimitType` at all, a build that labels its
-/// window keeps only `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts,
-/// whatever its own `rateLimitType` says. Anything else — an older build's lone `seven_day` event,
-/// say — would otherwise overwrite a usable 5-hour reading with one this agent can't read a tier
-/// from, each time Claude Code happens to report it.
-///
-/// Not yet: the weekly limit itself (a `rateLimitType: "seven_day"` rejection, which the TypeScript
-/// agent keeps instead of dropping) isn't read for anything here, so such a reading is dropped
-/// rather than kept for its own sake.
-pub fn is_five_hour_reading(usage: &Value) -> bool {
+/// Whether a `rate_limit_info` reading is one to keep as the usage reading (`parseRateLimit` in the TypeScript
+/// agent): the 5-hour window `implementer_tier` reads, or, with `weekly` (the `weekly-limit-reading` flag), a
+/// weekly rejection. Most builds report one window per event with no `rateLimitType` at all, a build that labels
+/// its window keeps `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts, whatever its own
+/// `rateLimitType` says. With `weekly`, a reading labeled `"seven_day"` whose `status` is `rejected` counts too:
+/// it is what turned the session away, and its reset is the week's. Anything else — an older build's lone
+/// non-rejected `seven_day` event, say — would otherwise overwrite a usable 5-hour reading with one this agent
+/// can't read a tier from, each time Claude Code happens to report it.
+pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
     if usage.get("unifiedWindows").and_then(|w| w.get("five_hour")).is_some() {
         return true;
     }
     match usage.get("rateLimitType").and_then(Value::as_str) {
+        Some("seven_day") => weekly && usage["status"] == "rejected",
         Some(rate_limit_type) => rate_limit_type == "five_hour",
         None => true,
     }
+}
+
+/// Whether the `weekly-limit-reading` flag was On at its last answer; Off until the flags client is handed over.
+pub fn weekly_reading_on() -> bool {
+    FLAG.get().is_some_and(|f| f.last("weekly-limit-reading"))
+}
+
+/// Whether a window's `utilization` is full, read like `frac` (a whole number over 1 is a percentage).
+pub fn utilization_full(utilization: f64) -> bool {
+    frac(utilization) >= 1.0
 }
 
 /// A five-hour reading counts as "on a subscription" for this long after its window's reset
@@ -144,7 +152,7 @@ pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
 /// its own `resetsAt`, missing or at or before `now`, makes it a full window (`opus`) on its own —
 /// the same as a missing `resetsAt` already does for `top_level_pct_left` and `fresh_status` below.
 /// The top-level `status` is never consulted once this window exists, since it can belong to a
-/// later, unrelated reading (`is_five_hour_reading`, settled in `src/orchestrator/driver/settle.rs`).
+/// later, unrelated reading (`is_usage_reading`, settled in `src/orchestrator/driver/settle.rs`).
 fn tier_from_five_hour_window(window: &Value, now_epoch: i64, models: &ModelsConfig) -> &'static str {
     match window.get("resetsAt").and_then(Value::as_i64) {
         Some(resets_at) if resets_at > now_epoch => {}
@@ -315,21 +323,38 @@ mod tests {
 
     #[test]
     fn a_reading_with_no_rate_limit_type_is_a_five_hour_reading() {
-        assert!(is_five_hour_reading(&json!({"status": "allowed"})));
+        assert!(is_usage_reading(&json!({"status": "allowed"}), false));
     }
 
     #[test]
     fn a_reading_labeled_five_hour_is_a_five_hour_reading() {
-        assert!(is_five_hour_reading(
-            &json!({"status": "allowed", "rateLimitType": "five_hour"})
+        assert!(is_usage_reading(
+            &json!({"status": "allowed", "rateLimitType": "five_hour"}),
+            true
         ));
     }
 
     #[test]
     fn a_reading_labeled_something_else_with_no_unified_five_hour_window_is_not() {
-        assert!(!is_five_hour_reading(
-            &json!({"status": "rejected", "rateLimitType": "seven_day"})
+        assert!(!is_usage_reading(
+            &json!({"status": "allowed", "rateLimitType": "seven_day"}),
+            true
         ));
+        assert!(!is_usage_reading(
+            &json!({"status": "rejected", "rateLimitType": "seven_day"}),
+            false
+        ));
+        assert!(!is_usage_reading(
+            &json!({"status": "rejected", "rateLimitType": "overage"}),
+            true
+        ));
+    }
+
+    #[test]
+    fn a_lone_weekly_rejection_is_kept_with_the_flag_and_reads_as_sonnet() {
+        let usage = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": NOW + 100});
+        assert!(is_usage_reading(&usage, true));
+        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), SONNET);
     }
 
     #[test]
@@ -338,7 +363,7 @@ mod tests {
             "rateLimitType": "seven_day",
             "unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": NOW + 1}},
         });
-        assert!(is_five_hour_reading(&usage));
+        assert!(is_usage_reading(&usage, false));
     }
 
     fn item(reopened: bool) -> Item {

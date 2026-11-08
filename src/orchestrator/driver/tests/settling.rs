@@ -836,3 +836,43 @@ async fn a_claude_limit_or_the_flag_off_goes_to_a_person_as_before() {
         assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
     }
 }
+
+async fn settle_usage(flag_on: bool, usage: Value) -> Option<Value> {
+    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    if flag_on {
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
+    }
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    rig.lp(0).store.set_usage(json!({"status": "allowed"}));
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::NeedsHuman("the weekly limit".into()),
+        usage: Some(usage),
+        context_tokens: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.poll().await;
+    rig.lp(0).store.usage()
+}
+
+#[tokio::test]
+async fn a_weekly_rejection_is_saved_as_the_usage_reading_with_the_week_as_its_reset() {
+    let week = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": 4_000_000_000u64});
+    assert_eq!(settle_usage(true, week.clone()).await, Some(week.clone()));
+    // Claude counts limited until the week's reset, not a 30-minute pause.
+    let wait = crate::engines::engine::resets_in(Some(&week), true).unwrap();
+    assert!(wait > std::time::Duration::from_secs(24 * 3600));
+    // Off: today's behaviour, the lone weekly reading is dropped.
+    assert_eq!(settle_usage(false, week).await, Some(json!({"status": "allowed"})));
+}
+
+#[tokio::test]
+async fn a_non_rejected_weekly_reading_does_not_overwrite_the_usage_reading() {
+    let week = json!({"status": "allowed", "rateLimitType": "seven_day", "resetsAt": 4_000_000_000u64});
+    assert_eq!(settle_usage(true, week).await, Some(json!({"status": "allowed"})));
+}
