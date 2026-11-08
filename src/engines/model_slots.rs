@@ -25,6 +25,16 @@ impl ModelSlots {
         }
     }
 
+    /// Whether `model` has a slot free right now, without taking it. A model with no cap of its own always has room.
+    pub fn has_room(&self, model: &str) -> bool {
+        let sem = match model {
+            "opus" => &self.opus,
+            "sonnet" => &self.sonnet,
+            _ => &None,
+        };
+        sem.as_ref().is_none_or(|s| s.available_permits() > 0)
+    }
+
     /// Waits until `model` has room. A model with no cap of its own is never held.
     pub async fn acquire(&self, model: &str) -> ModelSlot {
         let sem = match model {
@@ -84,6 +94,17 @@ mod tests {
         for model in ["sonnet", "haiku", "local"] {
             assert!(!waits(&s, model).await, "{model}");
         }
+    }
+
+    #[tokio::test]
+    async fn has_room_follows_the_slots_without_taking_one() {
+        let s = slots(Some(1), None);
+        assert!(s.has_room("opus"));
+        let first = s.acquire("opus").await;
+        assert!(!s.has_room("opus"));
+        assert!(s.has_room("sonnet") && s.has_room("haiku"));
+        drop(first);
+        assert!(s.has_room("opus"));
     }
 
     #[tokio::test]

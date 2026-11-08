@@ -206,6 +206,11 @@ pub trait SessionStarter: Send + Sync {
     fn start(&self, request: StartRequest) -> Result<(), String>;
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
+    /// Whether a fresh Claude implementer start may begin now, given the project's `state.usage`: no when the model
+    /// it would run on has a cap and no slot free (07.1). Asked only while `model-concurrency-caps` is On.
+    fn implementer_may_start(&self, _usage: Option<&serde_json::Value>) -> bool {
+        true
+    }
     /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
     /// no PR. A slice that was merged is never touched. An `Err` stops the Start over, leaving the item as it is.
     fn abandon(&self, _old: Abandon) -> BoxFuture<'static, Result<(), String>> {
@@ -855,10 +860,13 @@ impl ProjectLoop {
     ) -> u32 {
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
         let blocked_from_starting = gate.is_none() && signed_out(shared) || shared.stopping;
+        let model_full = self.model_full(starter).await;
         let mut started = 0;
         for action in actions.iter().filter(|a| **a != Action::AskForWork) {
             if let Action::StartImplementer { lane, .. } = action
-                && (blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)))
+                && (blocked_from_starting
+                    || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane))
+                    || model_full && self.runs_claude(shared, gate.as_ref(), *lane))
             {
                 continue;
             }
@@ -894,11 +902,12 @@ impl ProjectLoop {
         if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
             return None;
         }
+        let model_full = self.model_full(starter).await;
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
             let asks = self
-                .decide_gated(pool, shared, gate.as_ref())
+                .decide_gated(pool, shared, gate.as_ref(), model_full)
                 .contains(&Action::AskForWork);
             if *slots == 0 || !asks {
                 break;
@@ -962,7 +971,7 @@ impl ProjectLoop {
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.take_lease(&item, token, ItemState::Queued);
                 let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-                let actions = self.decide_gated(pool, shared, gate.as_ref());
+                let actions = self.decide_gated(pool, shared, gate.as_ref(), false);
                 *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
                 let kept = self.runs.contains_key(&item.id);

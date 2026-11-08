@@ -505,6 +505,8 @@ struct Fake {
     /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
     games: Mutex<Vec<Game>>,
     triage: triage::Triager,
+    /// The model slots `implementer_may_start` is asked against; none is no cap.
+    slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
 }
 
 /// The directory, the command, the lane, and whether it has closed.
@@ -963,6 +965,7 @@ mod ideas;
 mod ideas_daily;
 mod lane_play;
 mod main_sync;
+mod model_caps;
 mod own_failures;
 mod playtests;
 mod reporting;
