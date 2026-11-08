@@ -132,8 +132,8 @@ pub fn model_for(
 
 /// The tier a piece's implementer runs on (see [`model_for`]) for the given usage reading, with the local run it
 /// holds when that tier is `local`. `local` is `None` when the session can't use the local model (the flag is Off or
-/// the session is on another engine than Claude). A chore other than a playtest fix takes the local slot only if
-/// it's free right now, else runs on the chore tier at once; a roadmap piece takes it as the fallback rows say, waiting
+/// the session is on another engine than Claude). A chore other than a playtest fix takes the local slot (with
+/// `local-chores-scouts` On) only if it's free right now, else runs on the chore tier at once; a roadmap piece takes it as the fallback rows say, waiting
 /// for it. `wants_local` (the engine is set to `local`) takes it for any piece, waiting for it.
 pub async fn tier_for(
     chore: Option<&Chore>,
@@ -142,13 +142,19 @@ pub async fn tier_for(
     local: Option<&LocalModel>,
     wants_local: bool,
 ) -> (&'static str, Option<LocalRun>) {
+    // The fallback rows (an engine set to `local`, the implementer's tier) are behind `local-tier-ladder`.
+    let ladder = crate::tiers::local_ladder_on();
+    let up = ladder && local.is_some_and(LocalModel::available);
     // An engine set to `local` waits for the slot, even for a chore.
-    let up = local.is_some_and(LocalModel::available);
     if up && wants_local {
         return (LOCAL, Some(local.expect("up means there is a local model").run().await));
     }
     if chore.is_some_and(|c| c.kind != ChoreKind::PlaytestFix) {
-        return match local.and_then(LocalModel::try_run) {
+        // The free-slot grab is behind `local-chores-scouts`.
+        let free = crate::tiers::local_chores_scouts_on()
+            .then(|| local.and_then(LocalModel::try_run))
+            .flatten();
+        return match free {
             Some(run) => (LOCAL, Some(run)),
             None => (chore_tier(), None),
         };
@@ -260,8 +266,14 @@ mod tests {
         }
     }
 
+    fn flags(ladder: bool, chores_scouts: bool) {
+        crate::tiers::set_local_ladder_for_test(ladder);
+        crate::tiers::set_local_chores_scouts_for_test(chores_scouts);
+    }
+
     #[tokio::test]
     async fn the_tier_is_the_chore_tier_except_for_a_playtest_fix_or_a_roadmap_piece() {
+        flags(true, true);
         let models = crate::config::ModelsConfig::default();
         let normal = implementer_tier(None, 0, &models, false);
         let (tidy, fix) = (a_chore(ChoreKind::Tidy), a_chore(ChoreKind::PlaytestFix));
@@ -274,6 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_chore_takes_a_free_local_slot_and_otherwise_runs_on_the_chore_tier_at_once() {
+        flags(false, true);
         let models = crate::config::ModelsConfig::default();
         let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
         let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
@@ -287,7 +300,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_the_new_flag_off_a_chore_never_takes_the_free_slot_even_on_the_ladder() {
+        let models = crate::config::ModelsConfig::default();
+        let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
+        for ladder in [true, false] {
+            flags(ladder, false);
+            let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
+            assert_eq!((tier, run.is_none()), (chore_tier(), true));
+        }
+        // The ladder Off: an engine set to `local` does not wait for the slot either.
+        flags(false, true);
+        let held = local.take().await;
+        let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), true).await;
+        assert_eq!((tier, run.is_none()), (chore_tier(), true));
+        drop(held);
+    }
+
+    #[tokio::test]
     async fn a_chore_on_an_engine_set_to_local_waits_for_the_busy_slot() {
+        flags(true, false);
         let models = crate::config::ModelsConfig::default();
         let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
         let held = local.take().await;
@@ -304,6 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_playtest_fix_never_takes_the_local_slot() {
+        flags(true, true);
         let models = crate::config::ModelsConfig::default();
         let (local, fix) = (LocalModel::up(), a_chore(ChoreKind::PlaytestFix));
         let (_, run) = tier_for(Some(&fix), 0, &models, Some(&local), false).await;
@@ -312,6 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_roadmap_piece_takes_the_slot_only_when_the_engine_is_local_and_it_is_up() {
+        flags(true, true);
         let models = crate::config::ModelsConfig::default();
         let local = LocalModel::up();
         // Above the fallback rows: no slot.
