@@ -549,7 +549,7 @@ async fn silenced(flag: bool) -> (Rig, Arc<Fake>, Asked) {
     fake.script
         .lock()
         .unwrap()
-        .push(SessionResult::Silenced("went quiet".into()));
+        .push(SessionResult::Silenced("went quiet".into(), "killed_for_silence"));
     rig.machine.pass().await;
     (rig, fake, asked)
 }
@@ -581,6 +581,38 @@ async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() 
 }
 
 #[tokio::test]
+async fn a_cursor_time_kill_is_settled_like_a_watchdog_kill() {
+    let (base, _asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["own-failure-handling"]));
+    let fake = rig.go_live();
+    let kill = || SessionResult::Silenced("ran past its time limit and was killed".into(), "cursor_time");
+    fake.script.lock().unwrap().push(kill());
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(rig.machine.claim_paused_until.is_none());
+    let events = rig.lp(0).events().recent();
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["subtype"], "cursor_time");
+    resume_now(&mut rig, &fake, kill()).await;
+    let started = fake.started.lock().unwrap().clone();
+    assert!(started[1].resume && started[1].session_id == started[0].session_id);
+    for _ in 0..2 {
+        rig.machine.pass().await;
+        resume_now(&mut rig, &fake, kill()).await;
+    }
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(
+        rig.lp(0).store.runs()["a"].needs_human_reason.as_deref(),
+        Some("ran past its time limit and was killed")
+    );
+}
+
+#[tokio::test]
 async fn a_watchdog_kill_is_resumed_by_id_only_after_the_delay() {
     let (mut rig, fake, _) = silenced(true).await;
     rig.machine.pass().await;
@@ -597,11 +629,11 @@ async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
     let (mut rig, fake, _) = silenced(true).await;
     rig.machine.pass().await;
     for _ in 0..2 {
-        resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet".into())).await;
+        resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet".into(), "killed_for_silence")).await;
         rig.machine.pass().await;
         assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     }
-    resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet again".into())).await;
+    resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet again".into(), "killed_for_silence")).await;
     rig.machine.pass().await;
     assert_eq!(fake.started.lock().unwrap().len(), 4, "three resumes");
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
@@ -635,6 +667,22 @@ async fn the_watchdog_kill_count_is_kept_across_a_reload() {
 #[tokio::test]
 async fn with_the_flag_off_a_watchdog_kill_gives_the_item_back_as_before() {
     let (mut rig, _fake, asked) = silenced(false).await;
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
+    assert!(rig.machine.claim_paused_until.is_some());
+}
+
+#[tokio::test]
+async fn with_the_flag_off_a_cursor_time_kill_gives_the_item_back_as_before() {
+    let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
+    let fake = rig.go_live();
+    fake.script
+        .lock()
+        .unwrap()
+        .push(SessionResult::Silenced("ran past its time limit".into(), "cursor_time"));
+    rig.machine.pass().await;
     rig.machine.pass().await;
     assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
     assert!(rig.machine.claim_paused_until.is_some());
