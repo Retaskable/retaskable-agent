@@ -154,6 +154,15 @@ pub fn conflict_instruction(base: &str, files: &[String]) -> String {
     )
 }
 
+/// What a main sync's implementer is told when the update conflicts: it is merged with a merge commit, so never rebased.
+pub fn sync_conflict_instruction(base: &str, files: &[String]) -> String {
+    let list = files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+    format!(
+        "Merge origin/{base} into your branch again (a merge, never a rebase: this sync lands with a merge commit), \
+         resolve the conflicts, commit and push. These files conflict:\n{list}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

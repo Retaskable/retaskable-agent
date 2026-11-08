@@ -382,7 +382,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
-                orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
+                orchestrator::merge_run::MergeRuns::new(link::machine_name(env), placement.clone())
                     as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::plan_run::PlanRuns::new(
                     roster.clone(),
