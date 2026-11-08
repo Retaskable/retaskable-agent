@@ -268,7 +268,7 @@ where
         let err = if r.limit_hit {
             anyhow::Error::new(LimitHit {
                 why,
-                resets_in: crate::engines::engine::resets_in(usage.as_ref()),
+                resets_in: crate::engines::engine::resets_in(usage.as_ref(), crate::tiers::weekly_reading_on()),
             })
         } else if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))
