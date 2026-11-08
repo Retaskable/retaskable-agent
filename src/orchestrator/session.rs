@@ -984,6 +984,10 @@ fn session_result_for_answer(
 pub(super) mod tests;
 
 #[cfg(test)]
+#[path = "session_local_tests.rs"]
+mod local_tests;
+
+#[cfg(test)]
 #[path = "session_engine_tests.rs"]
 mod engine_tests;
 
