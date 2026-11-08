@@ -66,7 +66,8 @@ impl DraftHost for Host {
 }
 
 /// A store whose `draft_claim_next` hands out `draft` once; every op is recorded.
-async fn store(draft: Value) -> (String, Asked) {
+/// The op `fail` is refused with a 500.
+async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
     let asked: Asked = Default::default();
     let (seen, handed) = (asked.clone(), Arc::new(AtomicBool::new(false)));
     let app = Router::new().route(
@@ -76,6 +77,12 @@ async fn store(draft: Value) -> (String, Asked) {
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                if op == fail {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "boom" })),
+                    );
+                }
                 let value = match op.as_str() {
                     "list" => json!([]),
                     "draft_take" => json!({ "token": "lease-t", "draft": {
@@ -87,7 +94,7 @@ async fn store(draft: Value) -> (String, Asked) {
                     }
                     _ => Value::Null,
                 };
-                Json(json!({ "value": value }))
+                (axum::http::StatusCode::OK, Json(json!({ "value": value })))
             }
         }),
     );
@@ -102,10 +109,14 @@ fn claimed() -> Value {
 }
 
 async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
-    let (base, asked) = store(draft).await;
+    rig_failing(draft, answers, "").await
+}
+
+async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (Rig, Arc<Host>, Asked) {
+    let (base, asked) = store_failing(draft, fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude"]));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude", "watchdog-anomaly-rules"]));
     let host = Arc::new(Host {
         answers: Mutex::new(answers),
         ..Default::default()
@@ -542,4 +553,25 @@ async fn a_draft_with_a_saved_session_waits_for_its_own_engine_instead_of_moving
     }
     assert!(host.jobs.lock().unwrap().is_empty());
     assert!(ops(&asked).contains(&"draft_release".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn a_draft_report_the_store_refuses_is_logged_as_a_store_error_for_the_draft() {
+    let (mut rig, _host, _asked) = rig_failing(
+        claimed(),
+        vec![json!({"status": "failed", "summary": "x"})],
+        "draft_report",
+    )
+    .await;
+    for _ in 0..40 {
+        rig.machine.pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let logged: Vec<Value> = (rig.lp(0).events().recent().iter())
+        .map(|e| e.to_value())
+        .filter(|v| v["kind"] == "store_error" && v["op"] == "draft_report")
+        .collect();
+    assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
+    assert_eq!(logged[0]["item"], "d1");
+    assert_eq!(logged[0]["code"], "boom");
 }

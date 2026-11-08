@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::project::signed_out;
 use super::start_gate::StartGate;
+use super::store_errors::WATCH;
 use super::{ProjectLoop, Shared};
 use crate::ask::follow_up;
 use crate::backlog::Client;
@@ -68,6 +69,7 @@ struct Ctx {
     repo: u64,
     token: String,
     lease: String,
+    failures: crate::backlog::failures::Failures,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     flags: Arc<crate::flags::Flags>,
@@ -83,6 +85,7 @@ impl Ctx {
         let sent = (self.client).draft_report(self.repo, Some(&self.token), id, &self.lease, &report);
         if let Err(e) = sent.await {
             tracing::warn!("a draft's report didn't reach the store: {e}");
+            self.failures.add("draft_report", id, &e);
         }
     }
 
@@ -105,6 +108,7 @@ impl Ctx {
             .await
         {
             tracing::warn!("couldn't let go of draft {id}: {e}");
+            self.failures.add("draft_release", id, &e);
         }
     }
 
@@ -387,6 +391,7 @@ impl ProjectLoop {
                 Ok(taken) => taken,
                 Err(e) => {
                     tracing::warn!("{}: couldn't take draft {id}: {e}", self.id);
+                    self.store_failure("draft_take", &id, &e).await;
                     continue;
                 }
             };
@@ -395,6 +400,7 @@ impl ProjectLoop {
                 repo,
                 token: token.clone(),
                 lease: taken.token.clone(),
+                failures: self.failures.when(self.flags.on(WATCH).await),
                 project: self.project.clone(),
                 host: host.clone(),
                 flags: self.flags.clone(),

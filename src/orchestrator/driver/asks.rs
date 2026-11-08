@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use super::Shared;
 use super::project::{ProjectLoop, signed_out};
 use super::start_gate::StartGate;
+use super::store_errors::WATCH;
 use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
 use crate::backlog::asks::AskReport;
@@ -37,6 +38,8 @@ pub struct AskStore {
     pub client: Arc<Client>,
     pub repo: u64,
     pub token: String,
+    /// Where a failed write is kept for the loop to log.
+    pub failures: crate::backlog::failures::Failures,
 }
 
 /// What an assistant session needs besides the store: the agent's own run state, for the prompt.
@@ -105,6 +108,7 @@ pub(super) struct RunningAsk {
 impl ProjectLoop {
     /// How many asks are running here now; finished ones are forgotten.
     pub(super) fn asking(&mut self) -> u32 {
+        self.drain_failures();
         self.asks.running.retain(|a| !a.task.is_finished());
         self.asks.running.len() as u32
     }
@@ -135,10 +139,12 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
+        let failures = self.failures.when(self.flags.on(WATCH).await);
         let store = || AskStore {
             client: self.client.clone(),
             repo,
             token: token.clone(),
+            failures: failures.clone(),
         };
         let engine = program_of(engine_for(
             &shared.links.engine_choice,
@@ -297,6 +303,7 @@ async fn send(store: &AskStore, id: &str, report: &AskReport) -> bool {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!("ask {id}: the report didn't reach the store: {e}");
+            store.failures.add("ask_report", id, &e);
             false
         }
     }

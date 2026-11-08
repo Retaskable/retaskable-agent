@@ -335,6 +335,8 @@ pub struct ProjectLoop {
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
+    /// Store failures of the draft and ask tasks, written to the event log by [`Self::drain_failures`].
+    pub(super) failures: crate::backlog::failures::Failures,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
@@ -420,6 +422,7 @@ impl ProjectLoop {
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
             draft: None,
+            failures: Default::default(),
             landing: Default::default(),
             triaging: Default::default(),
             bug_sends: Vec::new(),
@@ -540,14 +543,15 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
-        self.check_watchdog(paused, &actions, pool);
+        let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
+        self.check_watchdog(paused, &actions, pool, anomaly_rules);
         Step::Ticked { would }
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool) {
+    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool, anomaly_rules: bool) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -570,6 +574,11 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            anomaly_rules,
+            // Behind `watchdog-anomaly-rules`: Off, no restart reaches the rules.
+            restart: anomaly_rules
+                .then(|| watchdog::RestartView::of(crate::restart::state()))
+                .flatten(),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
             idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
             no_progress_minutes: self.project.tuning.no_progress_minutes,
