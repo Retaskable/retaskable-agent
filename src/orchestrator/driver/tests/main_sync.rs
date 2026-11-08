@@ -63,7 +63,7 @@ async fn fixture(conflict: bool) -> Fixture {
 }
 
 async fn settle(f: &mut Fixture) {
-    for _ in 0..200 {
+    for _ in 0..100 {
         let m = &mut f.rig.machine;
         let shared = Shared {
             links: &m.links,
