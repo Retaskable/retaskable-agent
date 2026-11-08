@@ -24,8 +24,8 @@ use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
+use crate::runs::chore::{chore_end, chore_of, model_for, tier_for};
 use crate::runs::{Pushed, end_from_answer, needs_push};
-use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
@@ -187,10 +187,30 @@ async fn run(job: Job) -> (RunOutcome, Value) {
             return (RunOutcome::Interrupted, json!({}));
         }
     };
-    match build(&job, &cwd, &branch).await {
+    let (outcome, result) = match build(&job, &cwd, &branch).await {
         Ok(end) => end,
         Err(e) => failed(format!("{e:#}")),
+    };
+    // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
+    let chore = if job.flags.on("chore-rotation").await {
+        chore_of(&job.piece)
+    } else {
+        None
+    };
+    let Some(chore) = chore else {
+        return (outcome, result);
+    };
+    let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
+    let outcome = chore_end(chore.kind, outcome, &result);
+    if let (true, RunOutcome::Failed(why)) = (waits, &outcome) {
+        let (gh, dir, branch, why) = (job.gh.clone(), cwd, branch, why.clone());
+        let comment = format!("Closed: a chore never waits on a person. {why}");
+        let closed = tokio::task::spawn_blocking(move || publish::close_change(&gh, &dir, &branch, &comment)).await;
+        if let Err(e) = closed.map_err(anyhow::Error::from).and_then(|r| r) {
+            tracing::warn!("{}: closing the chore's change: {e:#}", job.token);
+        }
     }
+    (outcome, result)
 }
 
 async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf> {
@@ -225,7 +245,14 @@ async fn session(
     let project = &job.project;
     let item = piece_item(&job.piece);
     let now = crate::telemetry::now_ms() / 1000;
-    let model = implementer_model(implementer_tier(None, now, &job.models), &item).to_string();
+    // With `chore-rotation` Off, a chore piece is run like any other.
+    let chore = if job.flags.on("chore-rotation").await {
+        chore_of(&job.piece)
+    } else {
+        None
+    };
+    let tier = tier_for(chore.as_ref(), now, &job.models);
+    let model = model_for(chore.as_ref(), tier, &item).to_string();
     let spec = session_spec(
         &Session {
             template: "",

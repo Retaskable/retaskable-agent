@@ -3,6 +3,7 @@
 //! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
 //! state.json.
 mod build_end;
+pub mod chore;
 mod locks;
 mod outside;
 mod wind;
