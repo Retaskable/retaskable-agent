@@ -1,6 +1,6 @@
 use super::*;
 use crate::tray::menu::tray_menu;
-use crate::tray::state::{BacklogWait, CloudInput, Exit, LinkState, TrayInput};
+use crate::tray::state::{BacklogWait, CloudInput, LinkState, TrayInput};
 
 fn cloud(name: &str, link: LinkState) -> CloudInput {
     let host = format!("{}.example", name.to_lowercase());
@@ -14,22 +14,12 @@ fn cloud(name: &str, link: LinkState) -> CloudInput {
 }
 
 fn input() -> TrayInput {
-    TrayInput {
-        clouds: vec![
-            cloud("Production", LinkState::Connected),
-            cloud("Staging", LinkState::NotLinked),
-        ],
-        all_paused: false,
-        sessions: 0,
-        has_project: true,
-        exit: Exit::None,
-        backlog: None,
-        is_release: false,
-        start_at_login: false,
-        windows: false,
-        machine: "pc4".into(),
-        tags: vec![],
-    }
+    let mut i = crate::tray::state::tests::input(vec![
+        cloud("Production", LinkState::Connected),
+        cloud("Staging", LinkState::NotLinked),
+    ]);
+    i.machine = "pc4".into();
+    i
 }
 
 fn menu() -> Menu {
