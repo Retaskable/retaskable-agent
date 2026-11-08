@@ -16,7 +16,7 @@ use super::{
 };
 use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
-use crate::config::{CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
+use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -180,6 +180,8 @@ pub struct Machine {
     pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
     pub(super) concurrency: u32,
+    /// Auto concurrency's pacer and the number it allows (`driver/auto.rs`).
+    pub(super) auto: super::auto::Auto,
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
     pub(super) outcome_sender: OutcomeSender,
@@ -188,6 +190,9 @@ pub struct Machine {
     /// tests, always: production always reads the real flag.
     #[cfg(test)]
     pub(super) stopping_override: Option<bool>,
+    /// A test's clock, in epoch seconds, for the pacer.
+    #[cfg(test)]
+    pub(super) clock: Option<i64>,
 }
 
 /// A [`Shared`] borrowing the machine's fields (not its projects), so a loop over `self.projects` can build one.
@@ -224,11 +229,23 @@ impl Machine {
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
+            auto: super::auto::Auto::new(AutoConcurrency {
+                enabled: false,
+                ..Default::default()
+            }),
             outcomes,
             outcome_sender: OutcomeSender(sender),
             #[cfg(test)]
             stopping_override: None,
+            #[cfg(test)]
+            clock: None,
         }
+    }
+
+    /// Paces sessions with auto concurrency (behind the `auto-concurrency` flag) when `cfg.enabled`.
+    pub fn with_auto(mut self, cfg: AutoConcurrency) -> Self {
+        self.auto = super::auto::Auto::new(cfg);
+        self
     }
 
     /// [`process_tree::stopping`], unless a test has overridden it.
@@ -647,30 +664,34 @@ impl Machine {
         let live: Vec<bool> = (self.projects.iter().zip(ready))
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
-        if let Some(starter) = starter.as_deref() {
+        if starter.is_some() {
             self.settle_outcomes().await;
+        }
+        self.pace_step(ready, &live).await;
+        let concurrency = self.effective_concurrency();
+        if let Some(starter) = starter.as_deref() {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     if !paused && !stopping {
-                        lp.release_silenced(self.concurrency.saturating_sub(starter.active()));
+                        lp.release_silenced(concurrency.saturating_sub(starter.active()));
                     }
                     lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
                         .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
                     if !paused {
-                        let room = self.concurrency.saturating_sub(starter.active());
+                        let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
                         lp.advance(&self.pool, starter);
-                        let mut room = self.concurrency.saturating_sub(starter.active());
+                        let mut room = concurrency.saturating_sub(starter.active());
                         lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
                             .await;
                     }
                 }
             }
         }
-        let mut slots = (self.concurrency).saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
+        let mut slots = concurrency.saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
         // Asks have a person waiting: they take their slots first, never wait for one, and count toward `concurrency`.
         if let (Some(host), Some(_)) = (self.asks.clone(), starter.as_ref()) {
             slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
@@ -747,7 +768,7 @@ impl Machine {
         let mut scheduled = Vec::new();
         // Claude implementer starts this pass, over every project: the model slots are shared by the computer.
         let mut claude_starts = 0;
-        for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live) {
+        for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live.iter().copied()) {
             let mut answer = None;
             lp.claude_starts = claude_starts;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
@@ -765,6 +786,7 @@ impl Machine {
             claude_starts = lp.claude_starts;
             scheduled.push((actions, answer));
         }
+        self.auto.work_waiting = slots == 0 && starter.is_some() && self.work_waits(&live, paused);
         scheduled
     }
 }
@@ -806,6 +828,8 @@ pub struct SpawnArgs<'a> {
     pub lane_count: u32,
     /// `concurrency`: how many sessions may run at once, across every project.
     pub concurrency: u32,
+    /// `autoConcurrency`.
+    pub auto_concurrency: AutoConcurrency,
     /// `pollIntervalSec`: how often the loop steps between the minute's passes.
     pub poll_every: Duration,
     pub backlog_url: &'a str,
@@ -883,6 +907,7 @@ pub fn spawn_all(args: SpawnArgs) {
         },
     );
     machine.engine_limits = limits;
+    machine = machine.with_auto(args.auto_concurrency);
     if args.live.snapshot().mode == OrchestratorMode::Runs {
         machine = machine.with_run_starters(args.run_starters);
         let kinds = machine.run_starters.kinds();
