@@ -80,7 +80,7 @@ mod tests {
     use std::time::Duration;
 
     fn limited(engine: EngineId, now: Instant) -> EngineLimits {
-        let mut l = EngineLimits::default();
+        let l = EngineLimits::default();
         l.hit(engine, now + Duration::from_secs(60));
         l
     }
