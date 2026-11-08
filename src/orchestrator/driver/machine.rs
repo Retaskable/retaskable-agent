@@ -746,6 +746,7 @@ impl Machine {
         let mut scheduled = Vec::new();
         for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live) {
             let mut answer = None;
+            lp.claude_starts = 0;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
                 slots = slots.saturating_sub(
                     lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))

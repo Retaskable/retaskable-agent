@@ -207,8 +207,8 @@ pub trait SessionStarter: Send + Sync {
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
     /// Whether a fresh Claude implementer start may begin now, given the project's `state.usage`: no when the model
-    /// it would run on has a cap and no slot free (07.1). Asked only while `model-concurrency-caps` is On.
-    fn implementer_may_start(&self, _usage: Option<&serde_json::Value>) -> bool {
+    /// it would run on has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet. Asked only while `model-concurrency-caps` is On.
+    fn implementer_may_start(&self, _usage: Option<&serde_json::Value>, _pending: u32) -> bool {
         true
     }
     /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
@@ -268,6 +268,8 @@ pub struct ProjectLoop {
     pub(super) week_checked: bool,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
+    /// Claude implementer starts made in this scheduling pass, which haven't taken a model slot yet.
+    pub(super) claude_starts: u32,
     /// Each item's own failures in a row (`state.ownFailures`): a session that wouldn't start, or a hand-back.
     pub(super) own_failures: BTreeMap<String, u32>,
     /// Items whose session was started as a `Launch::Fresh` and hasn't ended yet; one that couldn't start is
@@ -375,6 +377,7 @@ impl ProjectLoop {
             to_resume: Vec::new(),
             week_checked: false,
             silenced: BTreeMap::new(),
+            claude_starts: 0,
             own_failures: store.own_failures(),
             fresh_launched: Default::default(),
             items: BTreeMap::new(),
@@ -860,7 +863,7 @@ impl ProjectLoop {
     ) -> u32 {
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
         let blocked_from_starting = gate.is_none() && signed_out(shared) || shared.stopping;
-        let model_full = self.model_full(starter).await;
+        let caps_on = self.flags.on("model-concurrency-caps").await;
         let mut started = 0;
         let mut todo = actions.to_vec();
         // Starts the model cap held off a Claude lane are placed again on the lanes it leaves (a Cursor lane).
@@ -871,7 +874,7 @@ impl ProjectLoop {
                     if blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)) {
                         continue;
                     }
-                    if model_full && self.runs_claude(shared, gate.as_ref(), *lane) {
+                    if self.runs_claude(shared, gate.as_ref(), *lane) && self.model_full(starter, caps_on) {
                         capped += 1;
                         continue;
                     }
@@ -880,7 +883,10 @@ impl ProjectLoop {
                     continue;
                 }
                 if let Action::StartImplementer { item_id, lane } = action {
-                    started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
+                    let on_claude = self.runs_claude(shared, gate.as_ref(), *lane);
+                    let ok = self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await;
+                    started += u32::from(ok);
+                    self.claude_starts += u32::from(ok && on_claude);
                 }
             }
             if round == 1 || capped == 0 {

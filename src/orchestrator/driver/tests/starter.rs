@@ -26,10 +26,10 @@ impl SessionStarter for Fake {
         Ok(())
     }
 
-    fn implementer_may_start(&self, usage: Option<&Value>) -> bool {
+    fn implementer_may_start(&self, usage: Option<&Value>, pending: u32) -> bool {
         let now = crate::telemetry::now_ms() / 1000;
         let models = crate::config::ModelsConfig::default();
-        crate::orchestrator::session::model_has_room(self.slots.lock().unwrap().as_ref(), usage, now, &models)
+        crate::orchestrator::session::model_has_room(self.slots.lock().unwrap().as_ref(), usage, now, &models, pending)
     }
 
     fn active(&self) -> u32 {

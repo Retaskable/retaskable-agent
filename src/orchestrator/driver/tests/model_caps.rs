@@ -96,3 +96,29 @@ async fn with_a_claude_and_a_cursor_lane_the_claimed_item_starts_on_the_cursor_l
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].lane, 2);
 }
+
+#[tokio::test]
+async fn a_full_sonnet_cap_on_the_opus_tier_claims_nothing() {
+    // A first try runs on sonnet whatever the tier says (`implementer_model`), so it would wait on that slot.
+    let s = ModelSlots::new(ModelConcurrency {
+        opus: None,
+        sonnet: Some(1),
+    });
+    let _held = s.acquire("sonnet").await;
+    let (mut rig, fake, asked) = capped(s, true, None, json!({})).await;
+    rig.machine.pass().await;
+    assert!(!claimed(&asked), "{:?}", ops(&asked));
+    assert!(fake.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn starts_made_in_one_pass_count_against_the_cap() {
+    let claims = |asked: &Asked| ops(asked).iter().filter(|o| *o == "claim_next").count();
+    let (mut rig, fake, asked) = capped(caps(Some(1)), true, None, json!({})).await;
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+    assert_eq!(claims(&asked), 1, "two free lanes, one opus slot: no second claim");
+    let (mut rig, _fake, asked) = capped(caps(None), true, None, json!({})).await;
+    rig.machine.pass().await;
+    assert_eq!(claims(&asked), 2, "without a cap both lanes ask");
+}

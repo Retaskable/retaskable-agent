@@ -95,18 +95,28 @@ impl ClaudeStarter {
 }
 
 /// Whether a fresh Claude implementer may start: the model [`implementer_tier`] gives for `usage` isn't capped and full.
-/// The item isn't known before it's claimed, so the tier's model is used (a reopened item keeps `opus`).
-pub fn model_has_room(slots: Option<&ModelSlots>, usage: Option<&Value>, now: i64, models: &ModelsConfig) -> bool {
-    slots.is_none_or(|s| s.has_room(implementer_tier(usage, now, models)))
+/// The item isn't known before it's claimed: on the `opus` tier a reopened item keeps `opus` and a first try runs on
+/// `sonnet` (`implementer_model`), so both need room; any other tier checks its own model. `pending` is the starts
+/// already made that haven't taken their slot yet.
+pub fn model_has_room(
+    slots: Option<&ModelSlots>,
+    usage: Option<&Value>,
+    now: i64,
+    models: &ModelsConfig,
+    pending: u32,
+) -> bool {
+    let tier = implementer_tier(usage, now, models);
+    slots.is_none_or(|s| s.has_room_after(tier, pending) && (tier != "opus" || s.has_room_after("sonnet", pending)))
 }
 
 impl SessionStarter for ClaudeStarter {
-    fn implementer_may_start(&self, usage: Option<&Value>) -> bool {
+    fn implementer_may_start(&self, usage: Option<&Value>, pending: u32) -> bool {
         model_has_room(
             crate::engines::model_slots::global(),
             usage,
             crate::telemetry::now_ms() / 1000,
             &self.models,
+            pending,
         )
     }
 

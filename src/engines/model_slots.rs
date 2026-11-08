@@ -27,12 +27,17 @@ impl ModelSlots {
 
     /// Whether `model` has a slot free right now, without taking it. A model with no cap of its own always has room.
     pub fn has_room(&self, model: &str) -> bool {
+        self.has_room_after(model, 0)
+    }
+
+    /// Whether `model` would still have a slot free after `pending` more sessions took theirs.
+    pub fn has_room_after(&self, model: &str, pending: u32) -> bool {
         let sem = match model {
             "opus" => &self.opus,
             "sonnet" => &self.sonnet,
             _ => &None,
         };
-        sem.as_ref().is_none_or(|s| s.available_permits() > 0)
+        sem.as_ref().is_none_or(|s| s.available_permits() > pending as usize)
     }
 
     /// Waits until `model` has room. A model with no cap of its own is never held.

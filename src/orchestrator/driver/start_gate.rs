@@ -121,8 +121,8 @@ impl ProjectLoop {
 
     /// Whether `model-concurrency-caps` is On and the starter says the model a fresh implementer would run on has
     /// no slot free: Claude lanes then claim and start nothing new this pass.
-    pub(super) async fn model_full(&mut self, starter: &dyn super::project::SessionStarter) -> bool {
-        self.flags.on("model-concurrency-caps").await && !starter.implementer_may_start(self.store.usage().as_ref())
+    pub(super) fn model_full(&self, starter: &dyn super::project::SessionStarter, caps_on: bool) -> bool {
+        caps_on && !starter.implementer_may_start(self.store.usage().as_ref(), self.claude_starts)
     }
 
     /// Claude's sign-out holds every claim only while the start rules are Off.
