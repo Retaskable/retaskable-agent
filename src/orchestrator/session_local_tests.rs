@@ -112,3 +112,48 @@ async fn a_usage_reading_below_opus_above_pct_starts_the_implementer_on_sonnet()
     let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
     assert_eq!(model, Some("sonnet"), "{args}");
 }
+
+/// A rig whose implementer role is set to the `local` engine.
+fn local_engine_rig(local: &LocalModel) -> Rig {
+    let mut choice = EngineChoiceConfig::default();
+    choice.roles.implementer = Some(Engine::Local);
+    let rig = rig_with(Some(FINISHED), choice, true, local.clone());
+    recording_claude(&rig, 0);
+    rig
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_engine_set_to_local_starts_on_the_local_target_even_with_a_full_window() {
+    crate::tiers::set_local_ladder_for_test(true);
+    let local = LocalModel::up();
+    let rig = local_engine_rig(&local);
+    let (mut request, mut rx) = request();
+    request.usage = None;
+    rig.starter.start(request).unwrap();
+    rx.recv().await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(
+        args.contains("--model sonnet") && args.contains("BASE=http://127.0.0.1:11436"),
+        "{args}"
+    );
+    assert!(!args.contains("--max-budget-usd"), "{args}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_engine_set_to_local_with_local_down_runs_on_the_roles_tier() {
+    crate::tiers::set_local_ladder_for_test(true);
+    let rig = local_engine_rig(&LocalModel::off());
+    let (mut request, mut rx) = request();
+    request.usage = None;
+    request.item.reopened = Some(crate::backlog::Reopened {
+        notes: Some("x".into()),
+        at: Some("2026-10-29T00:00:00Z".into()),
+        by: None,
+    });
+    rig.starter.start(request).unwrap();
+    rx.recv().await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(args.contains("--model opus") && !args.contains("BASE=http"), "{args}");
+}

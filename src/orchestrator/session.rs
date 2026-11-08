@@ -27,7 +27,8 @@ use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::model_slots::ModelSlots;
 use crate::engines::{
-    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, place, program_of,
+    run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
@@ -138,6 +139,15 @@ impl SessionStarter for ClaudeStarter {
             &self.env,
             &self.cursor_models,
         )?;
+        // The implementer's engine is set to `local` (it is Claude Code): it takes the local model while it's up.
+        let wants_local = !request.resume
+            && request.engine == EngineId::Claude
+            && engine_for(
+                &self.choice,
+                project.engines.as_ref(),
+                Role::Implementer,
+                Some(request.lane),
+            ) == Engine::Local;
         let StartRequest {
             project: project_id,
             item_id,
@@ -158,6 +168,7 @@ impl SessionStarter for ClaudeStarter {
         } = request;
         let job = Job {
             local: self.local.clone(),
+            wants_local,
             data_dir: self.data_dir.clone(),
             project,
             project_id: project_id.clone(),
@@ -300,6 +311,8 @@ pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
 
 struct Job {
     local: crate::local_model::LocalModel,
+    /// The implementer's engine is set to `local` (`Placement::local`).
+    wants_local: bool,
     data_dir: PathBuf,
     project: ProjectConfig,
     project_id: String,
@@ -418,7 +431,12 @@ async fn attempt(
     // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
     // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
     let ladder = placed.engine == EngineId::Claude && crate::tiers::local_ladder_on();
-    let tier = implementer_tier(usage.as_ref(), now, models, ladder && job.local.available());
+    let up = ladder && job.local.available();
+    let tier = if up && job.wants_local {
+        LOCAL
+    } else {
+        implementer_tier(usage.as_ref(), now, models, up)
+    };
     let local_run = if tier == LOCAL {
         Some(job.local.run().await)
     } else {

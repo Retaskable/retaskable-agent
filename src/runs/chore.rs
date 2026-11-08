@@ -127,8 +127,8 @@ pub fn model_for(chore: Option<&Chore>, normal_tier: &'static str, item: &crate:
 /// The tier a piece's implementer runs on (see [`model_for`]) for the given usage reading, with the local run it
 /// holds when that tier is `local`. `local` is `None` when the session can't use the local model (the flag is Off or
 /// the session is on another engine than Claude). A chore other than a playtest fix takes the local slot only if
-/// it's free right now, else runs on the chore tier at once; a roadmap piece (or `wants_local`, an engine set to
-/// `local`) takes it as the fallback rows say, waiting for it.
+/// it's free right now, else runs on the chore tier at once; a roadmap piece takes it as the fallback rows say, waiting
+/// for it. `wants_local` (the engine is set to `local`) takes it for any piece, waiting for it.
 pub async fn tier_for(
     chore: Option<&Chore>,
     now: i64,
@@ -136,18 +136,18 @@ pub async fn tier_for(
     local: Option<&LocalModel>,
     wants_local: bool,
 ) -> (&'static str, Option<LocalRun>) {
+    // An engine set to `local` waits for the slot, even for a chore.
+    let up = local.is_some_and(LocalModel::available);
+    if up && wants_local {
+        return (LOCAL, Some(local.expect("up means there is a local model").run().await));
+    }
     if chore.is_some_and(|c| c.kind != ChoreKind::PlaytestFix) {
         return match local.and_then(LocalModel::try_run) {
             Some(run) => (LOCAL, Some(run)),
             None => (chore_tier(), None),
         };
     }
-    let up = local.is_some_and(LocalModel::available);
-    let tier = if up && wants_local {
-        LOCAL
-    } else {
-        implementer_tier(None, now, models, up)
-    };
+    let tier = implementer_tier(None, now, models, up);
     match local {
         Some(local) if tier == LOCAL => (tier, Some(local.run().await)),
         _ => (tier, None),
@@ -278,6 +278,22 @@ mod tests {
         let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
         assert_eq!((tier, run.is_none()), (chore_tier(), true));
         drop(run);
+    }
+
+    #[tokio::test]
+    async fn a_chore_on_an_engine_set_to_local_waits_for_the_busy_slot() {
+        let models = crate::config::ModelsConfig::default();
+        let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
+        let held = local.take().await;
+        let wait = tier_for(Some(&tidy), 0, &models, Some(&local), true);
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait)
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert_eq!(wait.await.0, LOCAL);
     }
 
     #[tokio::test]
