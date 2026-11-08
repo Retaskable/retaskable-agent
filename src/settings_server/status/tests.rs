@@ -189,7 +189,29 @@ fn live(mode: OrchestratorMode, projects: &[(&str, ProjectLive)]) -> LiveState {
         mode,
         run_kinds: Vec::new(),
         projects: projects.iter().map(|(id, p)| (id.to_string(), p.clone())).collect(),
+        ci: None,
     }
+}
+
+#[test]
+fn the_ci_header_carries_slots_running_docker_and_discovery_reasons_only_when_the_loop_runs() {
+    let mut l = LiveState::default();
+    assert!(serde_json::to_value(status_with(&l)).unwrap().get("ci").is_none());
+    l.ci = Some(crate::agent_ci::CiLive {
+        slots: 1,
+        docker: "stopped",
+        docker_reason: Some("Docker isn't running".into()),
+        reasons: [("a".to_string(), "No .agent-ci/image on origin/main".to_string())].into(),
+        ..Default::default()
+    });
+    let v = serde_json::to_value(status_with(&l)).unwrap();
+    assert_eq!(
+        v["ci"],
+        serde_json::json!({
+            "slots": 1, "running": 0, "docker": "stopped", "dockerReason": "Docker isn't running",
+            "discovery": [{ "project": "a", "reason": "No .agent-ci/image on origin/main" }]
+        })
+    );
 }
 
 fn status_with(live: &LiveState) -> ComputerStatus {

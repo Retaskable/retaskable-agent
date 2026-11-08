@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// `EngineId` in `shared/types.ts`: which AI tool a session runs on. Missing on a `SessionSpec`
 /// means `Claude`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EngineId {
     #[default]
@@ -244,6 +244,17 @@ pub struct SessionResult {
     /// A result's own token counts (`tokensOf` in `cursor.ts`): Cursor's stand-in for a cost,
     /// since it never reports one. `None` when the engine doesn't report tokens, or reported none.
     pub tokens: Option<Tokens>,
+}
+
+/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead.
+pub fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
+    let usage = usage.filter(|u| u["status"] == "rejected")?;
+    let at = usage["resetsAt"].as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    at.checked_sub(now).map(std::time::Duration::from_secs)
 }
 
 /// One result's token counts (`tokensOf` in `cursor.ts`). Cache tokens are left out — they're not

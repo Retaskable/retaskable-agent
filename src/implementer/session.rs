@@ -241,17 +241,6 @@ impl std::fmt::Display for LimitHit {
 
 impl std::error::Error for LimitHit {}
 
-/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead.
-fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
-    let usage = usage.filter(|u| u["status"] == "rejected")?;
-    let at = usage["resetsAt"].as_u64()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    at.checked_sub(now).map(std::time::Duration::from_secs)
-}
-
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer, alongside the latest usage reading the session's stream reported — set
 /// whenever the stream sent one, whether the session went on to succeed or fail, since that
@@ -279,7 +268,7 @@ where
         let err = if r.limit_hit {
             anyhow::Error::new(LimitHit {
                 why,
-                resets_in: resets_in(usage.as_ref()),
+                resets_in: crate::engines::engine::resets_in(usage.as_ref()),
             })
         } else if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))

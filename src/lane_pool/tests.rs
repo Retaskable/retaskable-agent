@@ -324,3 +324,24 @@ fn the_lane_limit_caps_runs() {
     assert_eq!(pool.claim_run("p", "a"), Some(1));
     assert_eq!(pool.claim_run("p", "b"), None);
 }
+
+#[test]
+fn claim_lane_where_skips_lanes_the_filter_refuses() {
+    let pool = LanePool::new(rules(3));
+    let w = want("p", "A");
+    assert_eq!(pool.claim_lane_where(&w, |k| k != 1), Some(2));
+    assert_eq!(pool.claim_lane_where(&w, |_| false), None);
+    assert_eq!(pool.claim_lane(&w), Some(1), "claim_lane is unfiltered");
+    let mut pool = LanePool::new(PoolRules {
+        chore_lane: Some(2),
+        ..rules(2)
+    });
+    assert_eq!(
+        pool.claim_lane_where(&w, |k| k == 2),
+        Some(2),
+        "the chore lane is the fallback"
+    );
+    assert_eq!(pool.claim_lane_where(&w, |_| false), None, "and it is filtered too");
+    assert_eq!(pool.claim_where(&w, |k| k != 1), Some(2));
+    assert_eq!(pool.claim_where(&w, |_| true), Some(1));
+}

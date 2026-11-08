@@ -2,6 +2,8 @@
 //! history gets for it, and the prompt the fresh session opens with (06.2-implementer.md "Fresh-start
 //! rules on resume" and "A session that's grown starts fresh").
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::engines::EngineId;
@@ -28,19 +30,39 @@ pub fn fresh_for_engine(
 /// 30-minute wait of section 3.3).
 pub const LIMIT_PAUSE: Duration = Duration::from_secs(30 * 60);
 
-/// Which engines are at their usage limit on this computer and until when. In memory only.
-#[derive(Debug, Default)]
-pub struct EngineLimits(HashMap<EngineId, Instant>);
+/// Which engines are at their usage limit on this computer and until when. In memory only. A cloneable handle:
+/// every clone shares the same record, so the driver and the sessions that end in their own tasks write to one.
+#[derive(Debug, Clone, Default)]
+pub struct EngineLimits {
+    until: Arc<Mutex<HashMap<EngineId, Instant>>>,
+    /// The `engine-limit-records` flag: when On, any session that ends at its engine's limit records it
+    /// ([`crate::orchestrator::live::sessions::record_session_end`]), whatever its role.
+    any_role: Arc<AtomicBool>,
+}
 
 impl EngineLimits {
     /// `engine` hit its limit; it counts as limited until `until`.
-    pub fn hit(&mut self, engine: EngineId, until: Instant) {
-        self.0.insert(engine, until);
+    pub fn hit(&self, engine: EngineId, until: Instant) {
+        self.until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(engine, until);
     }
 
     /// Whether `engine` is limited at `now`.
     pub fn is_limited(&self, engine: EngineId, now: Instant) -> bool {
-        self.0.get(&engine).is_some_and(|until| *until > now)
+        let map = self.until.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(&engine).is_some_and(|until| *until > now)
+    }
+
+    /// Turns recording from every role's sessions on or off (the `engine-limit-records` flag).
+    pub fn record_any_role(&self, on: bool) {
+        self.any_role.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether sessions of every role record their engine's limit.
+    pub fn records_any_role(&self) -> bool {
+        self.any_role.load(Ordering::Relaxed)
     }
 
     /// The first of `candidates` (the engines the implementer role may use here) that can take over from
@@ -171,7 +193,7 @@ mod tests {
     fn a_limited_engine_with_another_available_starts_fresh_on_it() {
         use EngineId::*;
         let now = Instant::now();
-        let mut limits = EngineLimits::default();
+        let limits = EngineLimits::default();
         limits.hit(Claude, now + Duration::from_secs(60));
         let takeover = limits.takeover(Claude, &[Claude, Cursor], now);
         assert_eq!(takeover, Some(Cursor));
@@ -188,7 +210,7 @@ mod tests {
     fn a_limited_engine_with_none_available_does_not_start_fresh() {
         use EngineId::*;
         let now = Instant::now();
-        let mut limits = EngineLimits::default();
+        let limits = EngineLimits::default();
         limits.hit(Claude, now + Duration::from_secs(60));
         assert_eq!(limits.takeover(Claude, &[Claude], now), None);
         limits.hit(Cursor, now + Duration::from_secs(60));
@@ -202,7 +224,7 @@ mod tests {
     fn a_limit_past_its_reset_time_no_longer_counts() {
         use EngineId::*;
         let now = Instant::now();
-        let mut limits = EngineLimits::default();
+        let limits = EngineLimits::default();
         limits.hit(Claude, now + Duration::from_secs(60));
         assert!(limits.is_limited(Claude, now));
         let later = now + Duration::from_secs(61);
