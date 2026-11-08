@@ -1,7 +1,7 @@
 //! The real triager session for `claim` mode (docs/specs/agent/06.9-triage-claude-looks-at-needs-you-first.md): one
-//! read-only Claude session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
+//! read-only session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
 //! base checkout (or the repo itself before that checkout exists). Its end is a [`SessionResult::Triage`] on the outcome
-//! channel. Claude only, like the implementer.
+//! channel. It runs on the engine chosen for the triager (`engines::place`).
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -9,11 +9,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::driver::{
     LookFailure, SecondLookEnd, SecondLookRequest, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
 };
-use super::session::{ClaudeStarter, exists, quiet_timeout};
-use crate::config::{Engine, ProjectConfig};
+use super::session::{ClaudeStarter, quiet_timeout};
+use crate::config::ProjectConfig;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::{
+    EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
+};
 use crate::implementer::new_session_id;
 use crate::tiers::{implementer_tier, mid_tier, top_tier};
 use crate::triage::schedule::MAX_TRIAGES;
@@ -35,6 +36,12 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
 }
 
 impl ClaudeStarter {
+    /// Where the triager (and its second look) runs: the engine chosen for the role and its binary.
+    fn place_triager(&self, project: &ProjectConfig) -> Result<Placement, String> {
+        let chosen = engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None);
+        place(chosen, Role::Triager, &self.env, &self.cursor_models)
+    }
+
     /// A new session's id, where its transcript goes, and the running count it's now part of.
     fn begin_session(&self, project: &str, item: &str, lane: Option<u32>) -> (String, TranscriptSink, Arc<AtomicU32>) {
         let session_id = new_session_id();
@@ -54,13 +61,7 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        if engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None) != Engine::Claude {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let placed = self.place_triager(&project)?;
         let TriageRequest {
             project: project_id,
             item_id,
@@ -94,19 +95,19 @@ impl ClaudeStarter {
                         budget_usd: project.budget.reviewer_usd,
                         model,
                         local: None,
-                        engine: Some(EngineId::Claude),
-                        cursor: None,
+                        engine: Some(placed.engine),
+                        cursor: placed.cursor.clone(),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                         shell: true,
                     },
                     max_automatic_decisions: MAX_TRIAGES,
                 };
-                let engine = engine_of(Some(EngineId::Claude));
+                let engine = engine_of(Some(placed.engine));
                 // (hit its budget, hit the usage limit), read off the session's own result.
                 let mut cut = (false, false);
                 let seen = &mut cut;
                 let decided = decide(&triager, &context, |spec| async move {
-                    let r = run_session(engine?.as_ref(), &bin, &spec, &session_id, Some(&sink), quiet).await?;
+                    let r = run_session(engine?.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet).await?;
                     *seen = (r.subtype == "error_max_budget_usd", r.limit_hit);
                     Ok(r)
                 })
@@ -164,10 +165,7 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let placed = self.place_triager(&project)?;
         let SecondLookRequest {
             project: project_id,
             item_id,
@@ -198,8 +196,8 @@ impl ClaudeStarter {
                         budget_usd: project.budget.reviewer_usd,
                         model: top_tier().to_string(),
                         local: None,
-                        engine: Some(EngineId::Claude),
-                        cursor: None,
+                        engine: Some(placed.engine),
+                        cursor: placed.cursor.clone(),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                         shell: true,
                     },
@@ -211,9 +209,9 @@ impl ClaudeStarter {
                     triager_suggest,
                     triager_instructions: &triager_instructions,
                 };
-                let engine = engine_of(Some(EngineId::Claude));
+                let engine = engine_of(Some(placed.engine));
                 let checked = check(&second, &ctx, |spec| async move {
-                    run_session(engine?.as_ref(), &bin, &spec, &session_id, Some(&sink), quiet).await
+                    run_session(engine?.as_ref(), &placed.bin, &spec, &session_id, Some(&sink), quiet).await
                 })
                 .await;
                 checked.result.map(|r| (r.agree, r.reason, r.instructions))

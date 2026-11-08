@@ -19,7 +19,7 @@ use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, Star
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::resolve::resolve_claude_on_path;
@@ -49,6 +49,8 @@ pub struct ClaudeStarter {
     pub(super) env: Env,
     max_turns: u32,
     pub(super) models: ModelsConfig,
+    /// The machine's Cursor model names (`cursor.models`).
+    pub(super) cursor_models: CursorModels,
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
@@ -56,6 +58,7 @@ pub struct ClaudeStarter {
 }
 
 impl ClaudeStarter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: PathBuf,
         projects: Vec<ProjectConfig>,
@@ -63,6 +66,7 @@ impl ClaudeStarter {
         env: Env,
         max_turns: u32,
         models: ModelsConfig,
+        cursor_models: CursorModels,
         max_resume_context_tokens: u32,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -72,6 +76,7 @@ impl ClaudeStarter {
             env,
             max_turns,
             models,
+            cursor_models,
             max_resume_context_tokens,
             running: Arc::new(AtomicU32::new(0)),
         })
