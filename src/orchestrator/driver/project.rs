@@ -798,7 +798,8 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
-        let takeover = self.takeover(pool, shared, engine);
+        let fall_over = self.flags.on("engine-fall-over").await;
+        let takeover = self.takeover(pool, shared, engine, fall_over);
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
