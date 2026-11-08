@@ -32,6 +32,7 @@ pub mod jobs_due;
 pub mod lane_pool;
 pub mod lanes;
 pub mod lighthouse;
+pub mod main_sync;
 pub mod link;
 pub mod local_model;
 pub mod looks;

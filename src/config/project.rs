@@ -33,6 +33,16 @@ pub enum OnOff {
     Off,
 }
 
+/// `syncMain`: `auto` (the default) keeps the base branch caught up with main through a `sync_main` chore; `off`
+/// never starts one (team-branch.md section 4).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncMain {
+    #[default]
+    Auto,
+    Off,
+}
+
 /// `plans`: `risky` (the default) lets a plan someone asked for go ahead on that yes unless the drafter marked it
 /// risky; `ask` waits for Approve on every plan (agent/06.5-spec-drafts.md).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -360,6 +370,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub chores: OnOff,
     #[serde(default)]
+    pub sync_main: SyncMain,
+    #[serde(default)]
     pub triage: OnOff,
     #[serde(default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
@@ -606,6 +618,7 @@ mod tests {
             playtests: Playtests::default(),
             plans: Plans::default(),
             chores: OnOff::default(),
+            sync_main: SyncMain::default(),
             triage: OnOff::default(),
             max_review_rounds: default_max_review_rounds(),
             max_conflict_rounds: default_max_conflict_rounds(),

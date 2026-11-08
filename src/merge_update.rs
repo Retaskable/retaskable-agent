@@ -56,7 +56,7 @@ pub fn worktree_path(worktrees_dir: &Path, piece: &str) -> PathBuf {
     worktrees_dir.join(format!("merge-{piece}"))
 }
 
-fn run(git: Git, dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run(git: Git, dir: &Path, args: &[&str]) -> Result<String> {
     let output = output_std(
         git(dir)
             .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])

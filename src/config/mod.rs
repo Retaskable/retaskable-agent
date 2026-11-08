@@ -29,7 +29,7 @@ pub(crate) use machine::{
 };
 pub use project::{
     CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, LighthouseConfig, OnOff, Plans, Playtests,
-    ProjectBudget, ProjectConfig, ProjectType, ReviewConfig, SandboxMode,
+    ProjectBudget, ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
@@ -262,6 +262,8 @@ mod tests {
         let cfg = load(dir.path()).unwrap();
         let p = &cfg.projects[0];
         assert_eq!(p.base_branch, "main");
+        assert_eq!(p.sync_main, SyncMain::Off);
+        assert_eq!(ProjectConfig::default().sync_main, SyncMain::Auto);
         assert_eq!(p.checks.len(), 1);
         assert_eq!(p.checks[0].command, "cargo test");
     }
@@ -401,6 +403,7 @@ mod tests {
                 "playCommand": "cargo run --release -- --play",
                 "playtests": "after_merge",
                 "chores": "on",
+                "syncMain": "off",
                 "triage": "on",
                 "maxSlicesPerItem": 10,
                 "models": { "opusAbovePct": 50, "sonnetAbovePct": 20, "pauseBelowPct": 5 },
