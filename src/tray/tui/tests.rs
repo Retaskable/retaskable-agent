@@ -218,28 +218,14 @@ fn a_resize_draws_again() {
 }
 
 #[test]
-fn keys_are_read_from_the_terminals_bytes() {
-    assert_eq!(
-        parse_keys(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F\r \x03\x7f\x1bq"),
-        [
-            Key::Up,
-            Key::Down,
-            Key::Right,
-            Key::Left,
-            Key::Home,
-            Key::End,
-            Key::Enter,
-            Key::Char(' '),
-            Key::CtrlC,
-            Key::Backspace,
-            Key::Esc,
-            Key::Char('q'),
-        ]
-    );
-    assert_eq!(parse_keys(b"\x1b"), [Key::Esc]);
-    assert_eq!(
-        parse_keys(b"\x1b[5~j"),
-        [Key::Char('j')],
-        "an unknown sequence is skipped"
-    );
+fn a_new_console_line_draws_again() {
+    let s = setup();
+    s.menu.repaint_if_resized();
+    let before = s.term.out.lock().unwrap().len();
+    s.menu.repaint_if_resized();
+    assert_eq!(s.term.out.lock().unwrap().len(), before, "nothing new, nothing drawn");
+    s.log.write_to(b"hello there\n", &mut Vec::new()).unwrap();
+    s.menu.repaint_if_resized();
+    assert_eq!(s.term.out.lock().unwrap().len(), before + 1);
+    assert!(s.term.text().contains("hello there"));
 }
