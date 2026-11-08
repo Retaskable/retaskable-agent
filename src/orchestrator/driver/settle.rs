@@ -132,26 +132,24 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
-    /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited on this computer until the week's
-    /// reset, so nothing new starts while running sessions finish.
+    /// Whether the weekly window is read: `weekly-limit-reading` or `weekly-cutoff` is On.
+    pub(super) async fn weekly_on(flags: &crate::flags::Flags) -> bool {
+        flags.on("weekly-limit-reading").await || flags.on("weekly-cutoff").await
+    }
+
+    /// At the weekly cutoff Claude counts limited on this computer until the week's reset
+    /// ([`EngineLimits::cut_off_for_week`](crate::orchestrator::fresh_start::EngineLimits::cut_off_for_week)).
     pub(super) fn cut_off_for_week(
         id: &str,
         usage: &Value,
         limits: &mut crate::orchestrator::fresh_start::EngineLimits,
     ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        if let Some(resets_at) =
-            crate::tiers::week_cutoff_until(Some(usage), now, &crate::config::ModelsConfig::default())
-        {
+        if limits.cut_off_for_week(usage) {
             tracing::info!(
                 "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
                 id,
                 crate::config::ModelsConfig::default().week_cutoff_pct
             );
-            let wait = Duration::from_secs((resets_at - now) as u64);
-            limits.hit(crate::engines::EngineId::Claude, Instant::now() + wait);
         }
     }
 
@@ -390,7 +388,7 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        let weekly = self.flags.on("weekly-limit-reading").await;
+        let weekly = ProjectLoop::weekly_on(&self.flags).await;
         if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
