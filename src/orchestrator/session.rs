@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
+pub use super::cursor_guard::keep_cursor_guard_fresh;
+pub(crate) use super::cursor_guard::watch_for;
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
@@ -24,8 +26,7 @@ use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, Proj
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{
-    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, Watch, engine_of, lane_engine, place, program_of,
-    run_session,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
@@ -306,37 +307,6 @@ struct Job {
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
 pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
     (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
-}
-
-/// The `cursor-time-guard` flag's answer, shared by every session start: Off until [`keep_cursor_guard_fresh`]
-/// has had one answer.
-static CURSOR_GUARD: std::sync::OnceLock<Arc<crate::flags::Flags>> = std::sync::OnceLock::new();
-
-fn cursor_guard() -> &'static Arc<crate::flags::Flags> {
-    CURSOR_GUARD.get_or_init(|| Arc::new(crate::flags::Flags::from_env()))
-}
-
-/// Starts asking for the `cursor-time-guard` flag in the background (call once, inside the runtime).
-pub fn keep_cursor_guard_fresh() {
-    cursor_guard().keep_fresh("cursor-time-guard", std::time::Duration::from_secs(30));
-}
-
-/// The watch for one session, from that session's own project and engine: the watchdog on every engine, and,
-/// with the `cursor-time-guard` flag On, the Cursor time limit (`budget.cursorMaxMinutes`, 0 meaning the 60
-/// default) on Cursor only.
-pub(crate) fn watch_for(project: &ProjectConfig, engine: EngineId) -> Watch {
-    watch_with(project, engine, cursor_guard().last("cursor-time-guard"))
-}
-
-fn watch_with(project: &ProjectConfig, engine: EngineId, guard: bool) -> Watch {
-    let minutes = match project.budget.cursor_max_minutes {
-        0 => 60,
-        m => m,
-    };
-    Watch {
-        quiet: quiet_timeout(project.tuning.session_quiet_minutes),
-        longest: (guard && engine == EngineId::Cursor).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60)),
-    }
 }
 
 /// The follow-up an interrupted implementer is resumed with (`INTERRUPTED` in `steps.ts`).
@@ -990,10 +960,6 @@ fn session_result_for_answer(
 #[cfg(test)]
 #[path = "session_tests.rs"]
 pub(super) mod tests;
-
-#[cfg(test)]
-#[path = "session_watch_tests.rs"]
-mod watch_tests;
 
 #[cfg(test)]
 #[path = "session_engine_tests.rs"]
