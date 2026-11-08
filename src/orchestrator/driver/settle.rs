@@ -41,6 +41,10 @@ const MAX_OWN_FAILURES: u32 = 3;
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
 
+/// The `needs_human` reason a Cursor implementer stops with after 3 limit hits in a row; the first fetch's
+/// give-back (`readopt`) matches it exactly.
+pub(super) const CURSOR_LIMIT_STOP: &str = "Cursor's usage limit was hit 3 times in a row";
+
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionResult {
@@ -618,7 +622,7 @@ impl ProjectLoop {
                 );
             } else {
                 record.cursor_limit_hits = 0;
-                result = SessionResult::NeedsHuman("Cursor's usage limit was hit 3 times in a row".into());
+                result = SessionResult::NeedsHuman(CURSOR_LIMIT_STOP.into());
             }
         }
         if give_back {

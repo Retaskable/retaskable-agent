@@ -615,8 +615,11 @@ impl ProjectLoop {
     /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
     /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
     /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
-    /// holds no lease and isn't here: the store hands it back when it is answered.
-    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool) {
+    /// holds no lease and isn't here: the store hands it back when it is answered. With `give_back_on` (the
+    /// `cursor-give-back` flag) and this computer's name, a needs_human item held only for Cursor's limit with
+    /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
+    /// give-back note, for `flush_owed` to send.
+    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, give_back_on: Option<&str>) {
         if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
             return;
         }
@@ -626,6 +629,22 @@ impl ProjectLoop {
                 tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
                 continue;
             };
+            if let Some(machine) = give_back_on
+                && item.pr_url.is_none()
+                && record.as_ref().is_some_and(|r| {
+                    r.state == "needs_human"
+                        && r.needs_human_reason.as_deref() == Some(super::settle::CURSOR_LIMIT_STOP)
+                })
+                && matches!(
+                    item.status,
+                    ItemStatus::Claimed | ItemStatus::Building | ItemStatus::NeedsPerson
+                )
+            {
+                tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
+                let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
+                self.unreleased.insert(id, (token, why));
+                continue;
+            }
             let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
             let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
                 Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
