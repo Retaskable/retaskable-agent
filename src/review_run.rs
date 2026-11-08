@@ -130,20 +130,18 @@ mod tests {
         }
     }
 
-    fn lane(lines: usize) -> (tempfile::TempDir, std::path::PathBuf) {
-        let root = tempfile::tempdir().unwrap();
-        let repo = repo_with_origin(root.path());
-        std::fs::write(repo.join("a.rs"), "x\n".repeat(lines)).unwrap();
-        run_git(git(&repo).args(["add", "a.rs"]));
-        run_git(git(&repo).args(["commit", "--quiet", "-m", "a"]));
-        (root, repo)
-    }
-
-    /// Runs the review with a fake runner that records every prompt and fails scouts when asked.
-    async fn go(lines: usize, scout_fails: bool) -> (Result<StageReview>, Vec<SessionSpec>) {
-        let (_root, repo) = lane(lines);
-        let info = parse_scout_info(INFO).unwrap();
-        let input = StageInput {
+    /// A review of `repo` whose scouts and reviewer run on the given models.
+    fn stage_input<'a>(
+        repo: &'a Path,
+        info: &'a HashMap<String, ScoutInfo>,
+        models: (&str, &str),
+        checks: &'a str,
+    ) -> StageInput<'a> {
+        let on = |model: &str| EphemeralSessionConfig {
+            model: model.into(),
+            ..session(repo)
+        };
+        StageInput {
             base_branch: "main",
             review: ReviewConfig {
                 max_scout_diff_lines: 1000,
@@ -157,20 +155,36 @@ mod tests {
                 slice_description: "Piece: build it",
                 range: "origin/main...HEAD",
                 scope: "",
-                checks: "✓ test",
+                checks,
             },
             scouts: Scouts {
                 template: SCOUT_T,
-                session: session(&repo),
+                session: on(models.0),
             },
-            scout_info: &info,
+            scout_info: info,
             reviewer: Reviewer {
                 template: REVIEW_T,
-                session: session(&repo),
+                session: on(models.1),
             },
             playtest: None,
             manual_approvals: "(none)",
-        };
+        }
+    }
+
+    fn lane(lines: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        std::fs::write(repo.join("a.rs"), "x\n".repeat(lines)).unwrap();
+        run_git(git(&repo).args(["add", "a.rs"]));
+        run_git(git(&repo).args(["commit", "--quiet", "-m", "a"]));
+        (root, repo)
+    }
+
+    /// Runs the review with a fake runner that records every prompt and fails scouts when asked.
+    async fn go(lines: usize, scout_fails: bool) -> (Result<StageReview>, Vec<SessionSpec>) {
+        let (_root, repo) = lane(lines);
+        let info = parse_scout_info(INFO).unwrap();
+        let input = stage_input(&repo, &info, ("m", "m"), "✓ test");
         let seen = Mutex::new(Vec::new());
         let r = review_lane(&repo, &input, |_, spec: SessionSpec| {
             seen.lock().unwrap().push(spec.clone());
@@ -255,39 +269,8 @@ mod tests {
     async fn the_role_is_reported_whatever_the_model() {
         let (_root, repo) = lane(50);
         let info = parse_scout_info(INFO).unwrap();
-        let on = |model: &str| EphemeralSessionConfig {
-            model: model.into(),
-            ..session(&repo)
-        };
-        let input = StageInput {
-            base_branch: "main",
-            review: ReviewConfig {
-                max_scout_diff_lines: 1000,
-                min_scout_diff_lines: 5,
-            },
-            common: ReviewContext {
-                item_id: "it",
-                title: "The piece",
-                slice: 1,
-                spec_refs: "(none)",
-                slice_description: "Piece: build it",
-                range: "origin/main...HEAD",
-                scope: "",
-                checks: "",
-            },
-            // The model detection this replaces would call the reviewer a scout and a scout the reviewer.
-            scouts: Scouts {
-                template: SCOUT_T,
-                session: on("opus"),
-            },
-            scout_info: &info,
-            reviewer: Reviewer {
-                template: REVIEW_T,
-                session: on("local"),
-            },
-            playtest: None,
-            manual_approvals: "(none)",
-        };
+        // The model detection this replaces would call the reviewer a scout and a scout the reviewer.
+        let input = stage_input(&repo, &info, ("opus", "local"), "");
         let seen = Mutex::new(Vec::new());
         review_lane(&repo, &input, |role, spec: SessionSpec| {
             seen.lock().unwrap().push((role, spec.model.clone()));
