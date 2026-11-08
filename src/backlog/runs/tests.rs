@@ -14,7 +14,29 @@ fn agent(tags: &[&str]) -> RunTakeAgent {
             fix: "cursor".into(),
             look: "claude".into(),
         },
+        chores: None,
     }
+}
+
+#[test]
+fn chores_off_is_sent_and_on_is_left_out() {
+    let mut a = agent(&[]);
+    assert!(serde_json::to_value(&a).unwrap().get("chores").is_none());
+    a.chores = Some(false);
+    assert_eq!(serde_json::to_value(&a).unwrap()["chores"], json!(false));
+}
+
+#[test]
+fn the_chore_count_is_read_and_a_bad_one_ignored() {
+    let read = |v: Value| ChoreCount::read(v.as_object().unwrap());
+    assert_eq!(
+        read(json!({ "chores": { "today": 2, "limit": 3 } })),
+        Some(ChoreCount { today: 2, limit: 3 })
+    );
+    assert_eq!(read(json!({})), None);
+    assert_eq!(read(json!({ "chores": "many" })), None);
+    assert_eq!(read(json!({ "chores": { "today": -1, "limit": 3 } })), None);
+    assert_eq!(read(json!({ "chores": { "today": 1 } })), None);
 }
 
 #[tokio::test]
