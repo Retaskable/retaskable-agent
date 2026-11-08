@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
+pub use super::cursor_guard::keep_cursor_guard_fresh;
+pub(crate) use super::cursor_guard::watch_for;
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
@@ -392,7 +394,7 @@ async fn attempt(
         model: model_name(placed.engine, &model, cursor.as_ref()),
     };
     let branch = branch_name(item, *attempt_no);
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, placed.engine);
     let mut spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,

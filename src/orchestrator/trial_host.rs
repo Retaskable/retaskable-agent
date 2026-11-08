@@ -10,7 +10,7 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-use super::session::quiet_timeout;
+use super::session::watch_for;
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -167,7 +167,7 @@ impl TrialHost for ClaudeTrial {
                 lane: None,
             };
             let engine = engine_of(Some(placed.engine))?;
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let quiet = watch_for(project, placed.engine);
             let id = job.session_id.clone();
             let sessions = job.sessions.clone();
             let project_id = project.id_or_derived();

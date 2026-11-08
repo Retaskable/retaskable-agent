@@ -18,7 +18,7 @@ use crate::engines::{
 };
 use crate::flags::Flags;
 use crate::ideas::Ideas;
-use crate::orchestrator::session::quiet_timeout;
+use crate::orchestrator::session::watch_for;
 use crate::vet::{Judged, PastVerdict, VetRecord, Vetter, plan, take_batch};
 
 /// The job's name in the store's `jobs_due`.
@@ -98,7 +98,6 @@ fn name(v: Verdict) -> &'static str {
 
 /// Runs today's pass when everything allows it and the store says it's due; does nothing otherwise (fail closed).
 pub(super) async fn run(daily: Daily) {
-    let quiet = quiet_timeout(daily.base.project.tuning.session_quiet_minutes);
     let engine = engine_for(
         &daily.base.engine_choice,
         daily.base.project.engines.as_ref(),
@@ -113,6 +112,7 @@ pub(super) async fn run(daily: Daily) {
         }
     };
     let (bin, program) = (placed.bin.clone(), placed.engine);
+    let quiet = watch_for(&daily.base.project, program);
     let (sessions, id) = (daily.base.sessions.clone(), daily.base.id.clone());
     run_with(daily, Some(placed), |spec| async move {
         let engine = engine_of(Some(program))?;

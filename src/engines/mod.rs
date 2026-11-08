@@ -25,5 +25,5 @@ pub use engine::{
     SessionStart, describe_failure, engine_id_from_str, ephemeral_readonly_spec, is_signed_out, signed_out_text,
 };
 pub use place::{Placement, cursor_model_for, place};
-pub use runner::{CouldNotStart, TranscriptSink, engine_of, run_session, run_session_tracked};
+pub use runner::{CouldNotStart, TranscriptSink, Watch, engine_of, run_session, run_session_tracked};
 pub use transcripts::{StartedOn, Transcript, read_transcripts, started_on};

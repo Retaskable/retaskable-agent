@@ -402,6 +402,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             // background so a role on another engine is offered a run before any run has asked.
             let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
             placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
+            orchestrator::session::keep_cursor_guard_fresh();
             retaskable_agent::tiers::set_flags(placement.clone());
             placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
             placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
