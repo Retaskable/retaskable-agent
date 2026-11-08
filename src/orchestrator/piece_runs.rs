@@ -463,7 +463,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     };
     let ids = &ids;
     let resume = |step: Step| {
-        let (Step::Fix(follow_up) | Step::FixFresh(follow_up)) = step else {
+        let (Step::Fix(follow_up) | Step::FixFresh(follow_up, _)) = step else {
             unreachable!("a piece run has no fresh-start rules")
         };
         let id = ids.lock().unwrap().clone();
