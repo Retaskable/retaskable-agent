@@ -3,6 +3,7 @@
 //! leave a stale row. A row holds names and times only: never a prompt or transcript text.
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -49,6 +50,8 @@ type Stamp = Arc<Mutex<Instant>>;
 #[derive(Debug, Default)]
 struct Inner {
     limits: EngineLimits,
+    /// The agent's `.retaskable` dir, where session ends add Cursor's and Codex's tokens (machine.json).
+    machine_dir: Option<Arc<PathBuf>>,
     next: u64,
     rows: BTreeMap<u64, (SessionInfo, Instant, Stamp)>,
 }
@@ -60,21 +63,60 @@ pub struct Sessions(Arc<Mutex<Inner>>);
 tokio::task_local! {
     static CURRENT: Stamp;
     static LIMITS: EngineLimits;
+    static MACHINE_DIR: Option<Arc<PathBuf>>;
 }
 
+/// One writer at a time: load, change and save machine.json under this lock so concurrent sessions don't lose counts.
+static MACHINE_WRITE: Mutex<()> = Mutex::new(());
+
 /// A session of `engine` ended with `result`: when it ended at the engine's limit, that engine is limited until
-/// the usage reading's reset, else for [`LIMIT_PAUSE`] (engines/03-choosing-the-engine.md section 3.5). A no-op
-/// when no session is scoped, or the `engine-limit-records` flag is Off.
+/// the usage reading's reset, else for [`LIMIT_PAUSE`] (engines/03-choosing-the-engine.md section 3.5). A Cursor
+/// or Codex session's tokens go to the day's total in machine.json, and Cursor's limit is stamped. A no-op when no
+/// session is scoped, or the `engine-limit-records` flag is Off.
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
-    if !result.limit_hit {
-        return;
-    }
     let _ = LIMITS.try_with(|limits| {
-        if limits.records_any_role() {
+        if !limits.records_any_role() {
+            return;
+        }
+        if result.limit_hit {
             let wait = crate::engines::engine::resets_in(result.usage.as_ref()).unwrap_or(LIMIT_PAUSE);
             limits.hit(engine, Instant::now() + wait);
         }
+        let _ = MACHINE_DIR.try_with(|dir| {
+            if let Some(dir) = dir {
+                record_machine(dir, engine, result);
+            }
+        });
     });
+}
+
+/// Adds the session's tokens (Cursor, Codex) and Cursor's limit stamp to machine.json; a failure is logged only.
+fn record_machine(dir: &std::path::Path, engine: EngineId, result: &SessionResult) {
+    let tokens = result
+        .tokens
+        .filter(|_| matches!(engine, EngineId::Cursor | EngineId::Codex));
+    let stamp = result.limit_hit && engine == EngineId::Cursor;
+    if tokens.is_none() && !stamp {
+        return;
+    }
+    let _lock = MACHINE_WRITE.lock().unwrap_or_else(PoisonError::into_inner);
+    let done = (|| -> anyhow::Result<()> {
+        let mut machine = crate::store::MachineStore::load(dir)?;
+        if let Some(t) = tokens {
+            if engine == EngineId::Cursor {
+                machine.add_cursor_tokens(t.input, t.output)?;
+            } else {
+                machine.add_codex_tokens(t.input, t.output)?;
+            }
+        }
+        if stamp {
+            machine.stamp_cursor_limit_at()?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = done {
+        tracing::warn!("couldn't record the session's tokens in machine.json: {e:#}");
+    }
 }
 
 /// Marks the current session (if one is scoped) as having just printed a line. A no-op otherwise.
@@ -83,6 +125,12 @@ pub fn touch() {
 }
 
 impl Sessions {
+    /// Sessions that end add Cursor's and Codex's tokens to machine.json in `dir`.
+    pub fn with_machine_dir(self, dir: PathBuf) -> Self {
+        self.lock().machine_dir = Some(Arc::new(dir));
+        self
+    }
+
     /// The engines' limits on this computer, shared with the driver.
     pub fn limits(&self) -> EngineLimits {
         self.lock().limits.clone()
@@ -172,7 +220,10 @@ impl SessionGuard {
     /// Runs `fut` with this row as the current session, so the runner's [`touch`] updates it.
     pub async fn scope<F: Future>(&self, fut: F) -> F::Output {
         let limits = self.sessions.limits();
-        LIMITS.scope(limits, CURRENT.scope(self.stamp.clone(), fut)).await
+        let dir = self.sessions.lock().machine_dir.clone();
+        LIMITS
+            .scope(limits, MACHINE_DIR.scope(dir, CURRENT.scope(self.stamp.clone(), fut)))
+            .await
     }
 }
 
@@ -318,5 +369,92 @@ mod tests {
     #[test]
     fn a_session_outside_any_scope_records_nothing_and_does_not_panic() {
         record_session_end(EngineId::Cursor, &ended(true, None));
+    }
+
+    fn with_tokens(limit_hit: bool, input: u64, output: u64) -> SessionResult {
+        SessionResult {
+            tokens: Some(crate::engines::engine::Tokens { input, output }),
+            ..ended(limit_hit, None)
+        }
+    }
+
+    fn machine_sessions(dir: &std::path::Path) -> Sessions {
+        let s = Sessions::default().with_machine_dir(dir.to_path_buf());
+        s.limits().record_any_role(true);
+        s
+    }
+
+    fn machine(dir: &std::path::Path) -> crate::store::MachineStore {
+        crate::store::MachineStore::load(dir).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cursor_tokens_add_up_and_a_limit_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = machine_sessions(dir.path());
+        end_in_scope(&s, EngineId::Cursor, with_tokens(false, 10, 3)).await;
+        assert_eq!(machine(dir.path()).cursor_today_tokens(), Some(13));
+        assert!(machine(dir.path()).cursor_limit_at().is_none());
+        end_in_scope(&s, EngineId::Cursor, with_tokens(true, 5, 2)).await;
+        let m = machine(dir.path());
+        assert_eq!(m.cursor_today_tokens(), Some(20));
+        assert!(m.cursor_limit_at().is_some());
+        assert!(m.codex_today_tokens().is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_tokens_go_to_codex_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = machine_sessions(dir.path());
+        end_in_scope(&s, EngineId::Codex, with_tokens(true, 7, 1)).await;
+        let m = machine(dir.path());
+        assert_eq!(m.codex_today_tokens(), Some(8));
+        assert!(m.cursor_today_tokens().is_none() && m.cursor_limit_at().is_none());
+    }
+
+    #[tokio::test]
+    async fn claude_pi_and_a_session_with_no_tokens_add_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = machine_sessions(dir.path());
+        end_in_scope(&s, EngineId::Claude, with_tokens(false, 9, 9)).await;
+        end_in_scope(&s, EngineId::Pi, with_tokens(false, 9, 9)).await;
+        end_in_scope(&s, EngineId::Cursor, ended(false, None)).await;
+        end_in_scope(&s, EngineId::Codex, ended(false, None)).await;
+        let m = machine(dir.path());
+        assert!(m.cursor_today_tokens().is_none() && m.codex_today_tokens().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_flag_off_adds_no_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Sessions::default().with_machine_dir(dir.path().to_path_buf());
+        end_in_scope(&s, EngineId::Cursor, with_tokens(false, 1, 1)).await;
+        assert!(machine(dir.path()).cursor_today_tokens().is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_ending_at_once_both_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = machine_sessions(dir.path());
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let s = s.clone();
+                tokio::spawn(async move { end_in_scope(&s, EngineId::Cursor, with_tokens(false, 1, 1)).await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(machine(dir.path()).cursor_today_tokens(), Some(16));
+    }
+
+    #[tokio::test]
+    async fn the_settings_pages_tags_survive_a_token_write() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("machine.json"), r#"{"network":{"enabled":false}}"#).unwrap();
+        let s = machine_sessions(dir.path());
+        end_in_scope(&s, EngineId::Codex, with_tokens(false, 1, 1)).await;
+        let text = std::fs::read_to_string(dir.path().join("machine.json")).unwrap();
+        assert!(text.contains("network") && text.contains("codexTokens"));
     }
 }

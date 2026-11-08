@@ -464,3 +464,47 @@ fn the_page_renders_lane_sessions_and_the_list_without_a_lane() {
         assert!(html.contains(needle), "{needle}");
     }
 }
+
+#[tokio::test]
+async fn the_token_lines_show_what_ended_sessions_added() {
+    use crate::engines::engine::{EngineId, SessionResult, Tokens};
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = crate::orchestrator::live::sessions::Sessions::default().with_machine_dir(dir.path().to_path_buf());
+    sessions.limits().record_any_role(true);
+    let result = |input, output| SessionResult {
+        ok: true,
+        subtype: String::new(),
+        structured: None,
+        error: None,
+        cost_usd: None,
+        session_id: String::new(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: Some(Tokens { input, output }),
+    };
+    for (engine, r) in [(EngineId::Cursor, result(10, 3)), (EngineId::Codex, result(4, 1))] {
+        let info = crate::orchestrator::live::sessions::SessionInfo {
+            project: "p".into(),
+            item_id: "i".into(),
+            title: None,
+            role: crate::engines::choose::Role::Implementer,
+            lane: None,
+            engine,
+            model: String::new(),
+        };
+        sessions
+            .track(info, async {
+                crate::orchestrator::live::sessions::record_session_end(engine, &r)
+            })
+            .await;
+    }
+    let machine = crate::store::MachineStore::load(dir.path()).unwrap();
+    let mut s = settled(EngineChoiceConfig::default(), 1);
+    s.codex_tokens = machine.codex_today_tokens();
+    s.cursor_tokens = machine.cursor_today_tokens();
+    let status = build(&s, &source(&["a"]), None, &LiveState::default());
+    assert_eq!(row(&status, "cursor").today_tokens, Some(13));
+    assert_eq!(row(&status, "codex").today_tokens, Some(5));
+}
