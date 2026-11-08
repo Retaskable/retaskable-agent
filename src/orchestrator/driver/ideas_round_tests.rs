@@ -69,6 +69,7 @@ fn job(base: &str) -> Job {
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
             locks: None,
+            sessions: Default::default(),
         },
         planner_dir: None,
         live: vec!["Dark mode".into()],

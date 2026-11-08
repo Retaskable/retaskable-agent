@@ -401,6 +401,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     models: cfg.machine.models,
                     flags: placement,
                     machine: link::machine_name(env),
+                    sessions: live.sessions().clone(),
                 }) as Arc<dyn orchestrator::driver::RunStarter>,
             ]
         } else {

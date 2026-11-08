@@ -105,6 +105,7 @@ impl AskHost for ClaudeAsks {
                 runs,
                 events,
                 placement,
+                sessions,
             } = job;
             let (client, repo, token) = (&store.client, store.repo, Some(store.token.as_str()));
             // Every read is the store's: one that fails leaves the ask waiting, nothing is answered without it.
@@ -217,15 +218,17 @@ impl AskHost for ClaudeAsks {
             };
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
             let follower = follow(sink.path.clone(), engine_of(spec.engine)?, events);
-            let r = run_session(
-                engine.as_ref(),
-                &placed.bin,
-                &spec,
-                &new_session_id(),
-                Some(&sink),
-                quiet,
-            )
-            .await;
+            let listed = sessions.register_spec(&project_id, &ask.ask_id, None, Role::Assistant, &spec);
+            let r = listed
+                .scope(run_session(
+                    engine.as_ref(),
+                    &placed.bin,
+                    &spec,
+                    &new_session_id(),
+                    Some(&sink),
+                    quiet,
+                ))
+                .await;
             follower.abort();
             let r = match r {
                 Ok(r) => r,

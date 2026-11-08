@@ -99,9 +99,13 @@ pub(super) async fn run(mut job: Job, ask: Ask) -> Outcome {
     let program = placed.engine;
     job.placed = Some(placed);
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
+    let (sessions, id) = (job.sessions.clone(), job.id.clone());
     run_with(job, ask, |spec| async move {
         let engine = engine_of(Some(program))?;
-        run_session(engine.as_ref(), &bin, &spec, "ideas", None, quiet).await
+        let listed = sessions.register_spec(&id, "ideas", None, Role::Writer, &spec);
+        listed
+            .scope(run_session(engine.as_ref(), &bin, &spec, "ideas", None, quiet))
+            .await
     })
     .await
 }
@@ -301,6 +305,7 @@ impl ProjectLoop {
             backlog_url: links.backlog_url.clone(),
             keychain: links.keychain.clone(),
             locks: (self.mode == OrchestratorMode::Runs).then(|| self.run_loop.runs().locks()),
+            sessions: self.live.sessions().clone(),
         };
         let items: Vec<_> = self.items.values().cloned().collect();
         let placement = self.flags.on("engine-placement").await;

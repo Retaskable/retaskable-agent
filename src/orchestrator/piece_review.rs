@@ -79,7 +79,18 @@ async fn run_session(job: &Job, bins: &[&Placement], spec: SessionSpec) -> Resul
     let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
     let engine = engine_of(Some(program))?;
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
-    let result = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job))).await?;
+    // A scout holds no lane; the final reviewer is the run's own (the two differ in model here).
+    let listed = (spec.model == SONNET).then(|| {
+        let item = piece_item(&job.piece);
+        let project = job.project.id_or_derived();
+        job.sessions
+            .register_spec(&project, &item.id, Some(&item.title), Role::Scout, &spec)
+    });
+    let running = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job)));
+    let result = match &listed {
+        Some(listed) => listed.scope(running).await?,
+        None => running.await?,
+    };
     // A cut session (a stop) isn't a failed review: the run ends `interrupted`.
     if result.subtype == "interrupted" {
         return Err(Interrupted("the review session was cut".into()).into());
