@@ -38,11 +38,7 @@ impl KeyDecoder {
     pub fn flush(&mut self) -> Vec<Key> {
         let lone = self.pending == [ESC];
         self.pending.clear();
-        if lone {
-            vec![Key::Esc]
-        } else {
-            Vec::new()
-        }
+        if lone { vec![Key::Esc] } else { Vec::new() }
     }
 
     /// Whether bytes are waiting for more (the caller should `flush` after its short wait).
@@ -73,10 +69,9 @@ fn parse_escape(b: &[u8]) -> Parsed {
         Some(b'[') => {
             // CSI: parameter bytes 0x30-0x3f, intermediates 0x20-0x2f, then a final byte 0x40-0x7e.
             let Some(end) = b[2..].iter().position(|c| (0x40..=0x7e).contains(c)) else {
-                return if b[2..].iter().all(|c| (0x20..=0x3f).contains(c)) {
-                    Parsed::Wait
-                } else {
-                    Parsed::Done(b.len(), None)
+                return match b[2..].iter().position(|c| !(0x20..=0x3f).contains(c)) {
+                    None => Parsed::Wait,
+                    Some(bad) => Parsed::Done(2 + bad, None),
                 };
             };
             let end = end + 2;
@@ -200,6 +195,12 @@ mod tests {
         assert!(keys(b"\x1b[3~").is_empty());
         assert!(keys(b"\x1bOZ").is_empty());
         assert_eq!(keys(b"\x1b[3~q"), vec![Key::Char('q')]);
+    }
+
+    #[test]
+    fn a_bad_csi_byte_keeps_the_keys_after_it() {
+        assert_eq!(keys(b"\x1b[\x03"), vec![Key::CtrlC]);
+        assert_eq!(keys(b"\x1b[\x01q"), vec![Key::Char('q')]);
     }
 
     #[test]
