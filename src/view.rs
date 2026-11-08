@@ -145,6 +145,8 @@ pub struct ItemCommands {
     /// The `(project, flag)` pairs On, set by the loop each pass.
     flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
+    /// The number auto concurrency last allowed and why; `None` while it is Off or has not stepped yet.
+    auto: Arc<std::sync::Mutex<Option<(u32, String)>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
 }
@@ -195,6 +197,15 @@ impl ItemCommands {
     pub fn flag_on(&self, project: &str, flag: &'static str) -> bool {
         let set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
         set.contains(&(project.to_string(), flag))
+    }
+
+    /// Set by the loop (`driver/auto.rs`) for the snapshot's `usage.autoConcurrency`.
+    pub fn set_auto(&self, auto: Option<(u32, String)>) {
+        *self.auto.lock().unwrap_or_else(|e| e.into_inner()) = auto;
+    }
+
+    pub fn auto(&self) -> Option<(u32, String)> {
+        self.auto.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn push_idea(&self, command: IdeaCommand) {
@@ -431,6 +442,9 @@ impl AgentView {
         if self.local.down() {
             state["usage"]["localDown"] = json!(true);
         }
+        if let Some((allowed, reason)) = self.item_commands.auto() {
+            state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
+        }
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
         }
@@ -535,6 +549,18 @@ mod tests {
             settings: Default::default(),
             local: Default::default(),
         }
+    }
+
+    #[test]
+    fn snapshot_reports_the_paced_number_and_reason_only_while_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = view(vec![]);
+        let usage = || v.snapshot("", dir.path())["state"]["usage"].clone();
+        assert_eq!(usage(), json!({}));
+        v.item_commands.set_auto(Some((2, "On pace".into())));
+        assert_eq!(usage(), json!({"autoConcurrency": {"allowed": 2, "reason": "On pace"}}));
+        v.item_commands.set_auto(None);
+        assert_eq!(usage(), json!({}));
     }
 
     #[test]

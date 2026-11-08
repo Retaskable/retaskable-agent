@@ -63,6 +63,9 @@ impl Machine {
             }
         }
         self.auto.on = on;
+        if !on {
+            self.links.item_commands.set_auto(None);
+        }
         let now = self.now_secs();
         for (lp, &ready) in self.projects.iter_mut().zip(ready) {
             let mut readings = std::mem::take(&mut lp.pace_readings);
@@ -83,6 +86,9 @@ impl Machine {
             .pacer
             .pace(now, from, self.concurrency, self.auto.work_waiting, &self.auto.cfg);
         self.auto.allowed = Some(pace.allowed);
+        self.links
+            .item_commands
+            .set_auto(Some((pace.allowed, pace.reason.to_string())));
         if pace.allowed != from {
             tracing::info!(
                 event = "auto_concurrency",
