@@ -25,10 +25,12 @@ pub async fn check_up(http: &reqwest::Client, base_url: &str) -> bool {
 
 /// The computer's local model, shared by everything that may one day run a session on it: the config, whether
 /// the last check found it up, and its one slot (section 7.2's "One local session at a time"). Clones share all of it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LocalModel {
     config: Arc<LocalModelConfig>,
     up: Arc<AtomicBool>,
+    /// Whether the `local-tier-ladder` flag is On; `watch` refreshes it every pass.
+    ladder: Arc<AtomicBool>,
     slot: Arc<Semaphore>,
 }
 
@@ -41,6 +43,7 @@ impl LocalModel {
         Self {
             config: Arc::new(config),
             up: Arc::new(AtomicBool::new(false)),
+            ladder: Arc::new(AtomicBool::new(false)),
             slot: Arc::new(Semaphore::new(1)),
         }
     }
@@ -59,6 +62,17 @@ impl LocalModel {
         self.config.enabled && self.up.load(Ordering::SeqCst)
     }
 
+    /// True while it's turned on and its last check failed, and the `local-tier-ladder` flag is On: what the
+    /// snapshot reports as `usage.localDown`.
+    pub fn down(&self) -> bool {
+        self.config.enabled && self.ladder.load(Ordering::SeqCst) && !self.up.load(Ordering::SeqCst)
+    }
+
+    /// Records whether the `local-tier-ladder` flag is On.
+    pub fn set_ladder(&self, on: bool) {
+        self.ladder.store(on, Ordering::SeqCst);
+    }
+
     /// Where a local session runs.
     pub fn target(&self) -> LocalTarget {
         LocalTarget {
@@ -70,6 +84,11 @@ impl LocalModel {
     /// The slot if it's free right now, else `None` at once (scouts and chores, which never wait for it).
     pub fn try_take(&self) -> Option<LocalSlot> {
         self.slot.clone().try_acquire_owned().ok().map(LocalSlot)
+    }
+
+    #[cfg(test)]
+    pub fn mark_up_for_test(&self) {
+        self.up.store(true, Ordering::SeqCst);
     }
 
     /// Waits for the slot (the fallback, which runs on the local model instead of waiting for the limit).
@@ -98,7 +117,9 @@ pub async fn watch(local: LocalModel) -> ! {
         .build()
         .expect("building the local model HTTP client");
     let mut first = true;
+    let flags = crate::flags::Flags::from_env();
     loop {
+        local.set_ladder(flags.on("local-tier-ladder").await);
         let changed = local.check(&http).await;
         if changed || first {
             if local.up.load(Ordering::SeqCst) {
@@ -109,6 +130,18 @@ pub async fn watch(local: LocalModel) -> ! {
             first = false;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+impl Default for LocalModel {
+    fn default() -> Self {
+        Self::off()
+    }
+}
+
+impl PartialEq for LocalModel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.up, &other.up)
     }
 }
 
