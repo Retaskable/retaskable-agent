@@ -77,6 +77,22 @@ fn placement(job: &Job, role: Role) -> Result<Placement> {
     place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
 }
 
+/// The models the scouts and the final reviewer start on: Sonnet and Opus with the ladder Off, else `scout_tier` and
+/// `top_tier`, each given whether the local model can run that role (`up`: scouts, reviewer).
+fn review_models(
+    ladder: bool,
+    usage: Option<&Value>,
+    now: i64,
+    models: &crate::config::ModelsConfig,
+    up: (bool, bool),
+) -> (&'static str, &'static str) {
+    if ladder {
+        (scout_tier(usage, now, models, up.0), top_tier(usage, now, models, up.1))
+    } else {
+        (SONNET, OPUS)
+    }
+}
+
 /// The local model's slot for a review session, if it runs there: a session already set to `local` waits for the
 /// slot; a scout whose tier isn't `local` takes it when it is free right now (and then runs `local`), else
 /// carries on at once. Cursor never takes it. The slot is held until the returned value is dropped.
@@ -203,16 +219,14 @@ pub(super) async fn review(
     let info = parse_scout_info(SCOUT_INFO)?;
     // With `local-tier-ladder` Off, scouts run on Sonnet and the reviewer on Opus.
     let ladder = job.flags.on("local-tier-ladder").await;
-    let (scout_model, top_model) = if ladder {
-        let now = crate::telemetry::now_ms() / 1000;
-        let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
-        (
-            scout_tier(usage, now, &job.models, up(&scout_at)),
-            top_tier(usage, now, &job.models, up(&reviewer_at)),
-        )
-    } else {
-        (SONNET, OPUS)
-    };
+    let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
+    let (scout_model, top_model) = review_models(
+        ladder,
+        usage,
+        crate::telemetry::now_ms() / 1000,
+        &job.models,
+        (up(&scout_at), up(&reviewer_at)),
+    );
     let input = StageInput {
         base_branch: &project.base_branch,
         review: project.review,
@@ -360,5 +374,21 @@ mod tests {
         assert_eq!((spec.model.as_str(), took), (OPUS, false));
         let (spec, took) = claim(&local, true, EngineId::Claude, Role::Reviewer, LOCAL).await;
         assert_eq!((spec.model.as_str(), took), (LOCAL, true));
+    }
+
+    fn reading(utilization: f64) -> Value {
+        json!({"unifiedWindows": {"five_hour": {"utilization": utilization, "resetsAt": 1_000_100}}})
+    }
+
+    #[test]
+    fn the_reviewer_is_local_only_below_the_pause_line_and_only_when_local_can_run_it() {
+        let m = crate::config::ModelsConfig::default();
+        let now = 1_000_000;
+        let (low, full) = (reading(0.99), reading(0.1));
+        assert_eq!(review_models(true, Some(&low), now, &m, (true, true)).1, LOCAL);
+        assert_eq!(review_models(true, Some(&low), now, &m, (true, false)).1, OPUS); // a Cursor reviewer
+        assert_eq!(review_models(true, Some(&low), now, &m, (false, false)), (SONNET, OPUS)); // local down
+        assert_eq!(review_models(true, Some(&full), now, &m, (true, true)), (SONNET, OPUS));
+        assert_eq!(review_models(false, Some(&low), now, &m, (true, true)), (SONNET, OPUS)); // flag Off
     }
 }

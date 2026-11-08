@@ -250,4 +250,59 @@ mod tests {
         assert!(!seen.is_empty());
         assert!(seen.iter().all(|s| s.readonly));
     }
+
+    #[tokio::test]
+    async fn the_role_is_reported_whatever_the_model() {
+        let (_root, repo) = lane(50);
+        let info = parse_scout_info(INFO).unwrap();
+        let on = |model: &str| EphemeralSessionConfig {
+            model: model.into(),
+            ..session(&repo)
+        };
+        let input = StageInput {
+            base_branch: "main",
+            review: ReviewConfig {
+                max_scout_diff_lines: 1000,
+                min_scout_diff_lines: 5,
+            },
+            common: ReviewContext {
+                item_id: "it",
+                title: "The piece",
+                slice: 1,
+                spec_refs: "(none)",
+                slice_description: "Piece: build it",
+                range: "origin/main...HEAD",
+                scope: "",
+                checks: "",
+            },
+            // The model detection this replaces would call the reviewer a scout and a scout the reviewer.
+            scouts: Scouts {
+                template: SCOUT_T,
+                session: on("opus"),
+            },
+            scout_info: &info,
+            reviewer: Reviewer {
+                template: REVIEW_T,
+                session: on("local"),
+            },
+            playtest: None,
+            manual_approvals: "(none)",
+        };
+        let seen = Mutex::new(Vec::new());
+        review_lane(&repo, &input, |role, spec: SessionSpec| {
+            seen.lock().unwrap().push((role, spec.model.clone()));
+            let out = if role == Role::Reviewer {
+                json!({"verdict": "approve", "summary": "ok"})
+            } else {
+                json!({"findings": [], "notes": ""})
+            };
+            async move { Ok(result(true, "success", Some(out), None)) }
+        })
+        .await
+        .unwrap();
+        let seen = seen.into_inner().unwrap();
+        let (last, scouts) = seen.split_last().unwrap();
+        assert_eq!(last, &(Role::Reviewer, "local".to_string()));
+        assert!(!scouts.is_empty() && scouts.iter().all(|s| s == &(Role::Scout, "opus".to_string())));
+    }
 }

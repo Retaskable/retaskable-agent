@@ -605,7 +605,18 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             }
             return Ok((outcome, result));
         }
-        match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review, a.usage.as_ref()).await? {
+        match review_change(
+            job,
+            cwd,
+            pushed,
+            &description,
+            playtest.as_ref(),
+            &checks,
+            &mut review,
+            a.usage.as_ref(),
+        )
+        .await?
+        {
             Reviewed::Approved => {
                 if let Some(stage) = stage {
                     result["checks_summary"] = json!(checks);
