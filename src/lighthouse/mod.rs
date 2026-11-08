@@ -216,3 +216,110 @@ pub fn summarize(report: &Value, page: &str, preset: &str, min_score: u32, stagi
     }
     out
 }
+
+/// The tag a Lighthouse write-up's request starts with.
+pub const TAG: &str = "[Lighthouse]";
+
+const TEMPLATE: &str = include_str!("../../prompts/lighthouse.md");
+
+/// A draft is a Lighthouse write-up when its request starts with [`TAG`]; the drafter runs it on the chore tier.
+pub fn is_lighthouse_request(request: &str) -> bool {
+    request.trim_start().starts_with(TAG)
+}
+
+/// Days a discarded draft keeps its findings quiet.
+const QUIET_DAYS: i64 = 30;
+const DAY_MS: i64 = 86_400_000;
+
+/// What the store says of the draft a known key went into.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftState {
+    /// `open`, `merged`, `discarded` or `failed` (anything else counts as open).
+    pub status: String,
+    /// The draft's last timeline entry, in the store's milliseconds.
+    pub last_entry_ms: i64,
+}
+
+/// Known keys, each with its draft's state (`None`: the draft is missing).
+pub type Known = std::collections::HashMap<String, Option<DraftState>>;
+
+/// `isNewFinding`: an unknown key is new; a known one is quiet while its draft is open or merged, or discarded under
+/// 30 days ago (from its last timeline entry, `now` in the store's time). A failed or missing draft's findings are new.
+pub fn is_new_finding(key: &str, known: &Known, now: i64) -> bool {
+    match known.get(key) {
+        None | Some(None) => true,
+        Some(Some(d)) => match d.status.as_str() {
+            "failed" => true,
+            "discarded" => now - d.last_entry_ms >= QUIET_DAYS * DAY_MS,
+            _ => false,
+        },
+    }
+}
+
+/// `newFindings`: each key once, only if new, with its page, preset and scores' summary kept alongside.
+pub fn new_findings<'a>(summaries: &'a [Summary], known: &Known, now: i64) -> Vec<(&'a Summary, &'a Finding)> {
+    let mut seen = std::collections::HashSet::new();
+    summaries
+        .iter()
+        .flat_map(|s| s.findings.iter().map(move |f| (s, f)))
+        .filter(|(_, f)| is_new_finding(&f.key, known, now) && seen.insert(f.key.as_str()))
+        .collect()
+}
+
+fn score(s: Option<u32>) -> String {
+    s.map_or("-".into(), |v| v.to_string())
+}
+
+/// `lighthouseRequest`: the `[Lighthouse]` draft for the day's new findings, noting the keys it covers.
+pub fn lighthouse_request(
+    summaries: &[Summary],
+    new: &[(&Summary, &Finding)],
+    specs_index: &str,
+) -> anyhow::Result<crate::backlog::asks::QueuedDraft> {
+    let pages: String = summaries
+        .iter()
+        .map(|s| {
+            let c = &s.scores;
+            format!(
+                "- {} ({}): performance {}, accessibility {}, best practices {}, SEO {}\n",
+                s.page,
+                s.preset,
+                score(c.performance),
+                score(c.accessibility),
+                score(c.best_practices),
+                score(c.seo)
+            )
+        })
+        .collect();
+    let findings: String = new
+        .iter()
+        .map(|(_, f)| {
+            let mut t = format!("- `{}`: {}", f.key, f.title);
+            if !f.display_value.is_empty() {
+                t.push_str(&format!(" ({})", f.display_value));
+            }
+            t.push('\n');
+            for i in &f.items {
+                t.push_str(&format!("  - {i}\n"));
+            }
+            t
+        })
+        .collect();
+    let prompt = crate::prompt::render_prompt(
+        TEMPLATE,
+        &[
+            ("pages", pages),
+            ("findings", findings),
+            ("specsIndex", specs_index.to_string()),
+        ],
+    )?;
+    let keys: Vec<&str> = new.iter().map(|(_, f)| f.key.as_str()).collect();
+    Ok(crate::backlog::asks::QueuedDraft {
+        request: format!("{TAG} {prompt}"),
+        titles: vec![format!("{TAG} Fix what Lighthouse found on staging")],
+        intake: Some(
+            serde_json::json!({ "note": format!("Lighthouse finding keys: {}", keys.join("; ")), "keys": keys }),
+        ),
+        ..Default::default()
+    })
+}

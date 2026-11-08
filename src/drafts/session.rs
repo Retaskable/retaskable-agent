@@ -12,7 +12,8 @@ use crate::decisions::{Decision, decisions_text};
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 use crate::implementer::session::new_session_id;
-use crate::tiers::mid_tier;
+use crate::lighthouse::is_lighthouse_request;
+use crate::tiers::{chore_tier, mid_tier};
 
 /// What a drafter session runs with.
 pub struct Session<'a> {
@@ -63,11 +64,17 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             format!("{follow_up}{}", decisions_text(decisions)),
         ),
     };
+    // A `[Lighthouse]` draft runs on the chore tier; others on the mid tier of the usage reading.
+    let tier = if is_lighthouse_request(s.request) {
+        chore_tier()
+    } else {
+        mid_tier(s.tier)
+    };
     let (engine, model) = match s.engine {
-        Engine::Claude => (Some(EngineId::Claude), mid_tier(s.tier)),
-        Engine::Cursor => (Some(EngineId::Cursor), mid_tier(s.tier)),
-        Engine::Pi => (Some(EngineId::Pi), mid_tier(s.tier)),
-        Engine::Codex => (Some(EngineId::Codex), mid_tier(s.tier)),
+        Engine::Claude => (Some(EngineId::Claude), tier),
+        Engine::Cursor => (Some(EngineId::Cursor), tier),
+        Engine::Pi => (Some(EngineId::Pi), tier),
+        Engine::Codex => (Some(EngineId::Codex), tier),
         Engine::Local => (None, "local"),
     };
     Ok(SessionSpec {
@@ -202,6 +209,19 @@ mod tests {
 
     fn result(v: serde_json::Value) -> DrafterResult {
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_lighthouse_draft_runs_on_the_chore_tier_and_others_on_the_usage_tier() {
+        let budget = ProjectBudget::default();
+        let cwd = Path::new("wt");
+        let mut ord = s(&budget, cwd);
+        ord.tier = "haiku";
+        assert_eq!(session_spec(&ord, Start::Fresh).unwrap().model, "haiku");
+        let mut lh = s(&budget, cwd);
+        lh.tier = "haiku";
+        lh.request = "[Lighthouse] fix it";
+        assert_eq!(session_spec(&lh, Start::Fresh).unwrap().model, "sonnet");
     }
 
     #[test]
