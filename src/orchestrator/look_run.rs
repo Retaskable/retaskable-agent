@@ -64,6 +64,7 @@ impl RunStarter for LookRuns {
             None,
             crate::telemetry::now_ms() / 1000,
             &self.roster.models,
+            false,
         ))
         .to_string();
         let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, model)?;

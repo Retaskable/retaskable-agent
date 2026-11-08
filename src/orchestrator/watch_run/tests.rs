@@ -84,6 +84,7 @@ pub(crate) fn lane_free_request(
         piece,
         other: Default::default(),
         lane: None,
+        engine: None,
         ends,
         project: "p".into(),
         processes,
@@ -95,6 +96,7 @@ pub(crate) fn lane_free_request(
             repo: 1,
             token: String::new(),
             locks: RunLocks::default(),
+            fall: None,
         },
     }
 }

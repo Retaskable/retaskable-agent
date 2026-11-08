@@ -27,20 +27,25 @@ async fn cursor_hit(flag: bool, engine: &str) -> (Rig, Arc<Fake>, Asked) {
 
 /// Like [`cursor_hit`] on lanes with these engines, `out` already limited when the session ends.
 async fn limit_hit(flag: bool, lanes: [&str; 2], out: Option<EngineId>) -> (Rig, Arc<Fake>, Asked) {
+    let choice = json!({ "default": lanes[0], "lanes": lanes });
+    let flags: &[&str] = if flag { &["cursor-limit-retry"] } else { &[] };
+    hit_with(flags, choice, out, false).await
+}
+
+/// "a" on a lane of `choice`, the flags as given, its first session ended at Cursor's limit.
+async fn hit_with(flags: &[&str], choice: Value, out: Option<EngineId>, signed_out: bool) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
-    rig.machine.links.engine_choice = serde_json::from_value(json!({ "default": lanes[0], "lanes": lanes })).unwrap();
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     if let Some(engine) = out {
         rig.machine.engine_limits.hit(engine, out_for(3600));
     }
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
-        &["cursor-limit-retry"]
-    } else {
-        &[]
-    }));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     let fake = rig.go_live();
     fake.script.lock().unwrap().push(cursor_limited());
     rig.machine.pass().await;
+    // Claude signs out after the session started, before its limit is read.
+    rig.machine.claude_signed_out_until = signed_out.then(|| out_for(600));
     rig.machine.pass().await;
     (rig, fake, asked)
 }
@@ -151,4 +156,66 @@ async fn a_claude_limit_or_the_flag_off_goes_to_a_person_as_before() {
         assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman, "{flag} {engine}");
         assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
     }
+}
+
+const FALL_OVER: &[&str] = &["cursor-limit-retry", "engine-fall-over"];
+
+#[tokio::test]
+async fn fall_over_on_carries_on_with_claude_used_only_by_another_role() {
+    let choice = json!({ "default": "cursor", "lanes": ["cursor", "cursor"], "roles": { "planner": "claude" } });
+    let (mut rig, fake, _) = hit_with(FALL_OVER, choice, None, false).await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
+    assert!(!rig.lp(0).silenced.contains_key("a"));
+    let line = "Hit Cursor's usage limit; carrying on now with Claude";
+    assert!(
+        rig.lp(0)
+            .events
+            .recent()
+            .iter()
+            .any(|e| format!("{e:?}").contains(line))
+    );
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!((started[1].engine, started[1].resume), (EngineId::Claude, false));
+}
+
+#[tokio::test]
+async fn fall_over_off_ignores_claude_used_only_by_another_role() {
+    let choice = json!({ "default": "cursor", "lanes": ["cursor", "cursor"], "roles": { "planner": "claude" } });
+    let (mut rig, _fake, _) = hit_with(&["cursor-limit-retry"], choice, None, false).await;
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1, "waits as before");
+    assert!(rig.lp(0).silenced.contains_key("a"));
+}
+
+#[tokio::test]
+async fn fall_over_on_waits_30_minutes_while_claude_is_signed_out() {
+    let (mut rig, _fake, _) = hit_with(
+        FALL_OVER,
+        json!({ "default": "cursor", "lanes": ["cursor", "claude"] }),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
+    assert!(rig.lp(0).silenced.contains_key("a"));
+}
+
+#[tokio::test]
+async fn fall_over_on_with_only_cursor_still_waits_and_goes_to_a_person_after_three() {
+    let (mut rig, fake, _) = hit_with(
+        FALL_OVER,
+        json!({ "default": "cursor", "lanes": ["cursor", "cursor"] }),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
+    assert!(rig.lp(0).silenced.contains_key("a"));
+    for _ in 0..3 {
+        wait_over(&mut rig, &fake, cursor_limited()).await;
+        rig.machine.pass().await;
+    }
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
 }

@@ -106,7 +106,7 @@ pub fn model_has_room(
     models: &ModelsConfig,
     pending: u32,
 ) -> bool {
-    let tier = implementer_tier(usage, now, models);
+    let tier = implementer_tier(usage, now, models, false);
     slots.is_none_or(|s| s.has_room_after(tier, pending) && (tier != "opus" || s.has_room_after("sonnet", pending)))
 }
 
@@ -416,7 +416,7 @@ async fn attempt(
         ..c
     });
     let now = crate::telemetry::now_ms() / 1000;
-    let tier = implementer_tier(usage.as_ref(), now, models);
+    let tier = implementer_tier(usage.as_ref(), now, models, false);
     let model = implementer_model(tier, item).to_string();
     let info = SessionInfo {
         project: project_id.clone(),

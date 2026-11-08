@@ -21,7 +21,9 @@ use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::engine::CursorOptions;
-use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
+use crate::engines::{
+    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked, start_engine,
+};
 use crate::engines::{Placement, place};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
@@ -86,13 +88,14 @@ impl RunStarter for PieceStarter {
             .clone();
         let lane = request.lane.clone().ok_or("the run has no lane")?;
         // The piece's own engine wins; an unknown name is an engine this agent can't run, not Claude.
+        // With `engine-fall-over` On, one that is out goes to the engine that takes over.
         let chosen = match request.piece.other.get("engine").and_then(Value::as_str) {
-            Some(name) => parse_engine(name).ok_or(name.to_string()),
-            None => Ok(engine_for(
-                &self.choice,
-                project.engines.as_ref(),
-                Role::Implementer,
-                None,
+            Some(name) => parse_engine(name)
+                .map(|e| request.context.engine_now(e))
+                .ok_or(name.to_string()),
+            None => Ok(start_engine(
+                request.engine,
+                engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None),
             )),
         };
         // With `engine-placement` Off, Claude alone runs; any other engine is refused as before.
