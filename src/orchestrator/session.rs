@@ -51,7 +51,7 @@ pub struct ClaudeStarter {
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
     /// The machine's Cursor model names, for placing a Cursor session.
-    cursor_models: CursorModels,
+    pub(super) cursor_models: CursorModels,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     pub(super) running: Arc<AtomicU32>,
 }
@@ -263,7 +263,7 @@ struct Job {
     project: ProjectConfig,
     project_id: String,
     env: Env,
-    cursor_models: CursorModels,
+    pub(super) cursor_models: CursorModels,
     /// The `gh` program (`RETASKABLE_GH`, or `gh` on PATH).
     gh: PathBuf,
     max_turns: u32,
@@ -941,3 +941,7 @@ pub(super) mod tests;
 #[cfg(test)]
 #[path = "session_engine_tests.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+#[path = "chat_engine_tests.rs"]
+mod chat_engine_tests;

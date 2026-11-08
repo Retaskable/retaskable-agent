@@ -422,6 +422,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::engine_choice(cfg, env),
                 env.clone(),
                 cfg.machine.models,
+                config::cursor_models(cfg, env),
                 cfg.machine.budget.daily_usd,
                 view.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>

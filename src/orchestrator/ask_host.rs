@@ -10,14 +10,14 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 
 use super::driver::{AskHost, AskJob, AskReply, AskStore};
-use super::session::{exists, quiet_timeout};
+use super::session::quiet_timeout;
 use crate::ask::perform::{Perform, perform};
 use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, StateItem, StateSummary};
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig};
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{Role, TranscriptSink, engine_for, engine_of, run_session};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig};
+use crate::engines::place::place;
+use crate::engines::{Role, SessionSpec, TranscriptSink, engine_for, engine_of, run_session};
 use crate::env::Env;
 use crate::implementer::Interrupted;
 use crate::implementer::session::new_session_id;
@@ -32,6 +32,7 @@ pub struct ClaudeAsks {
     choice: EngineChoiceConfig,
     env: Env,
     models: ModelsConfig,
+    cursor_models: CursorModels,
     /// The machine's `budget.dailyUsd`; 0 is no cap.
     daily_usd: f64,
     view: Arc<AgentView>,
@@ -43,6 +44,7 @@ impl ClaudeAsks {
         choice: EngineChoiceConfig,
         env: Env,
         models: ModelsConfig,
+        cursor_models: CursorModels,
         daily_usd: f64,
         view: Arc<AgentView>,
     ) -> Arc<Self> {
@@ -51,6 +53,7 @@ impl ClaudeAsks {
             choice,
             env,
             models,
+            cursor_models,
             daily_usd,
             view,
         })
@@ -84,11 +87,12 @@ impl AskHost for ClaudeAsks {
     }
 
     fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
-        let (data_dir, choice, env, models, daily_usd, view) = (
+        let (data_dir, choice, env, models, cursor_models, daily_usd, view) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
             self.models,
+            self.cursor_models.clone(),
             self.daily_usd,
             self.view.clone(),
         );
@@ -101,6 +105,7 @@ impl AskHost for ClaudeAsks {
                 lanes,
                 runs,
                 events,
+                placement,
             } = job;
             let (client, repo, token) = (&store.client, store.repo, Some(store.token.as_str()));
             // Every read is the store's: one that fails leaves the ask waiting, nothing is answered without it.
@@ -161,22 +166,18 @@ impl AskHost for ClaudeAsks {
                 answer,
                 actions: vec![],
             };
-            if engine_for(&choice, project.engines.as_ref(), Role::Assistant, None) != Engine::Claude {
+            let engine = engine_for(&choice, project.engines.as_ref(), Role::Assistant, None);
+            let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
+            if !placement && engine != Engine::Claude {
                 return Ok(reply(
                     "Sorry, I couldn't answer that: only Claude sessions run in the Rust agent yet.".into(),
                 ));
             }
-            let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
-            let bin = match resolve_claude_on_path(&env) {
-                Ok(bin) => bin,
-                Err(e) => return Ok(sorry(e)),
+            let placed = match place(engine, Role::Assistant, &env, &cursor_models) {
+                Ok(placed) => placed,
+                Err(e) => return Ok(sorry(anyhow::Error::msg(e))),
             };
-            if !exists(&bin, &env) {
-                return Ok(reply(format!(
-                    "Sorry, I couldn't answer that: the claude binary wasn't found ({}).",
-                    bin.display()
-                )));
-            }
+            let bin = placed.bin;
             let repo_path = PathBuf::from(&project.repo_path);
             let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
             let spec = match session_spec(&Session {
@@ -193,13 +194,16 @@ impl AskHost for ClaudeAsks {
                     reply_to: ask.reply_to.as_deref(),
                     question: &question,
                 },
-                engine: Engine::Claude,
+                engine,
                 tier,
                 budget: &project.budget,
                 cwd: &repo_path,
                 local: None,
             }) {
-                Ok(spec) => spec,
+                Ok(spec) => SessionSpec {
+                    cursor: placed.cursor,
+                    ..spec
+                },
                 Err(e) => return Ok(sorry(e)),
             };
             let project_id = project.id_or_derived();
