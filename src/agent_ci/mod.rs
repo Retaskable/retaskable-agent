@@ -3,6 +3,7 @@
 //! Each poll it checks Docker, then for each project looks for the project's CI files on its base branch and
 //! lists the pull requests to check. Checks are listed here, not run. `host.rs` is the fetch step; `report.rs`
 //! is the code host side: statuses and the failure comment.
+pub mod check;
 pub mod container;
 pub mod discovery;
 pub mod docker;
@@ -11,11 +12,11 @@ pub mod priority;
 pub mod prs;
 pub mod report;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -25,6 +26,7 @@ use crate::env::Env;
 use crate::item_lifecycle::ci_when_ready_active;
 use crate::orchestrator::live::LiveHandle;
 pub use prs::CheckKey;
+use tokio::task::JoinHandle;
 
 /// What the loop reports to the cloud tick and the Now tab's CI header.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +40,17 @@ pub struct CiLive {
     /// Each project without agent CI, and why.
     pub reasons: BTreeMap<String, String>,
     pub last_result: Option<Value>,
+    /// The checks running now, for the Now tab.
+    pub checks: Vec<RunningCheck>,
+}
+
+/// One running check: a pull request at a short sha, and when it began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningCheck {
+    pub project: String,
+    pub pr: u64,
+    pub sha: String,
+    pub started: Instant,
 }
 
 impl CiLive {
@@ -77,6 +90,8 @@ pub struct CiLoop {
     permits: u32,
     /// The reason last written to `agent.log` for each project, so a standing reason is said once.
     logged: HashMap<String, String>,
+    /// Checks started (running or finished) by this loop, so none runs twice.
+    seen: HashSet<(String, CheckKey)>,
 }
 
 impl CiLoop {
@@ -88,6 +103,7 @@ impl CiLoop {
             slot: Arc::new(Semaphore::new(0)),
             permits: 0,
             logged: HashMap::new(),
+            seen: HashSet::new(),
         }
     }
 
@@ -147,6 +163,59 @@ impl CiLoop {
         keys
     }
 
+    /// Starts each key not already seen that finds a free permit (held until its last status). A key with no
+    /// permit waits for the next poll.
+    pub async fn start(
+        &mut self,
+        cfg: &ConfigFile,
+        env: &Env,
+        data_dir: &Path,
+        keys: BTreeMap<String, Vec<CheckKey>>,
+    ) -> Vec<JoinHandle<()>> {
+        let computer = crate::link::machine_name(env);
+        let mut tasks = Vec::new();
+        for (id, list) in keys {
+            let Some(p) = cfg.projects.iter().find(|p| p.id_or_derived() == id) else {
+                continue;
+            };
+            let (git, repo) = (&*self.programs.git, Path::new(&p.repo_path));
+            let Ok(image) = discovery::discover(git, repo, &p.base_branch).await else {
+                continue;
+            };
+            for key in list {
+                if self.seen.contains(&(id.clone(), key.clone())) {
+                    continue;
+                }
+                let Ok(permit) = self.slot.clone().try_acquire_owned() else {
+                    return tasks;
+                };
+                self.seen.insert((id.clone(), key.clone()));
+                let job = check::Job {
+                    programs: self.programs.clone(),
+                    data_dir: data_dir.to_path_buf(),
+                    computer: computer.clone(),
+                    live: self.live.clone(),
+                    id: id.clone(),
+                    project: p.clone(),
+                    image: image.clone(),
+                    key,
+                };
+                tasks.push(tokio::spawn(async move {
+                    check::run(job).await;
+                    drop(permit);
+                }));
+            }
+        }
+        tasks
+    }
+
+    /// Recovery (agent.md section 7.4): leftover directories and containers from a cut check.
+    pub async fn recover(&self, cfg: &ConfigFile, data_dir: &Path) {
+        for p in cfg.projects.iter().filter(|p| !p.github_repo.is_empty()) {
+            check::recover(&self.programs.docker, data_dir, &p.id_or_derived()).await;
+        }
+    }
+
     /// Says a project's reason in `agent.log` unless it was the last thing said about it. Whether it did.
     fn say_once(&mut self, id: &str, why: &str) -> bool {
         if self.logged.get(id).is_some_and(|w| w == why) {
@@ -179,10 +248,14 @@ impl CiLoop {
 
 /// The loop, until the agent stops: each `pollIntervalSec`, on the config as saved now.
 pub async fn run(mut ci: CiLoop, dir: std::path::PathBuf, env: Env) {
+    if let Ok(cfg) = config::load(&dir) {
+        ci.recover(&cfg, &dir).await;
+    }
     loop {
         let wait = match config::load(&dir) {
             Ok(cfg) => {
-                ci.poll(&cfg, &env).await;
+                let keys = ci.poll(&cfg, &env).await;
+                ci.start(&cfg, &env, &dir, keys).await;
                 config::poll_interval_sec(&cfg, &env)
             }
             Err(e) => {

@@ -184,6 +184,17 @@ pub struct CiHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker_reason: Option<String>,
     pub discovery: Vec<CiReason>,
+    /// Each running check, apart from the lanes' sessions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CiCheckRow>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CiCheckRow {
+    pub project: String,
+    pub pr: u64,
+    pub sha: String,
+    pub seconds: u64,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -461,6 +472,14 @@ pub fn build(
                 .map(|(project, reason)| CiReason {
                     project: project.clone(),
                     reason: reason.clone(),
+                })
+                .collect(),
+            checks: (c.checks.iter())
+                .map(|r| CiCheckRow {
+                    project: r.project.clone(),
+                    pr: r.pr,
+                    sha: r.sha.clone(),
+                    seconds: r.started.elapsed().as_secs(),
                 })
                 .collect(),
         }),
