@@ -764,9 +764,17 @@ fn cursor_limited() -> SessionResult {
 
 /// "a" claimed on a Cursor lane with `cursor-limit-retry` as asked, its first session ended at Cursor's limit.
 async fn cursor_hit(flag: bool, engine: &str) -> (Rig, Arc<Fake>, Asked) {
+    limit_hit(flag, [engine, engine], None).await
+}
+
+/// Like [`cursor_hit`] on lanes with these engines, `out` already limited when the session ends.
+async fn limit_hit(flag: bool, lanes: [&str; 2], out: Option<EngineId>) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
-    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": [engine, engine] })).unwrap();
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "default": lanes[0], "lanes": lanes })).unwrap();
+    if let Some(engine) = out {
+        rig.machine.engine_limits.hit(engine, out_for(3600));
+    }
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
         &["cursor-limit-retry"]
     } else {
@@ -826,6 +834,56 @@ async fn an_answer_between_cursor_limits_resets_the_count_and_it_survives_a_relo
     wait_over(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
+}
+
+async fn carries_on(lanes: [&str; 2], from: EngineId, to: EngineId, line: &str) {
+    let (mut rig, fake, _) = limit_hit(true, lanes, None).await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
+    assert!(!rig.lp(0).silenced.contains_key("a"), "not held for 30 minutes");
+    let noted = rig
+        .lp(0)
+        .events
+        .recent()
+        .iter()
+        .any(|e| format!("{e:?}").contains(line));
+    assert!(noted, "history line {line:?}");
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 2);
+    assert_eq!(started[0].engine, from);
+    assert_eq!(started[1].engine, to);
+    assert!(!started[1].resume, "a fresh session on the branch");
+}
+
+#[tokio::test]
+async fn a_cursor_limit_with_claude_free_carries_on_with_claude_at_once() {
+    carries_on(
+        ["cursor", "claude"],
+        EngineId::Cursor,
+        EngineId::Claude,
+        "Hit Cursor's usage limit; carrying on now with Claude",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_claude_limit_with_cursor_free_carries_on_with_cursor_at_once() {
+    carries_on(
+        ["claude", "cursor"],
+        EngineId::Claude,
+        EngineId::Cursor,
+        "Hit Claude's usage limit; carrying on now with Cursor",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_cursor_limit_with_the_other_engine_limited_too_waits_30_minutes() {
+    let (mut rig, _fake, _) = limit_hit(true, ["cursor", "claude"], Some(EngineId::Claude)).await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
+    assert!(rig.lp(0).silenced.contains_key("a"));
 }
 
 #[tokio::test]
