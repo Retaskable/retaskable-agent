@@ -330,7 +330,7 @@ pub async fn run_setup_checks(env: &Env, probes: bool) -> SetupChecks {
 
 /// The Docker line (agent-ci.md section 3.6): `docker version` answers and, given the project's image, it runs.
 pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, image: Option<&str>) -> SetupCheck {
-    use crate::agent_ci::docker::{DockerState, probe, probe_image};
+    use crate::agent_ci::docker::{probe, probe_image, DockerState};
     let program = program.as_ref();
     let mut state = probe(program, in_image).await;
     if let (DockerState::Ok, Some(image)) = (&state, image) {
@@ -382,21 +382,33 @@ pub fn setup_check_line(check: &SetupCheck) -> String {
     }
 }
 
-/// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, Cursor only when shown, and Docker only with the `agent-ci` flag On.
+/// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, Cursor only when shown, pi and Codex only when
+/// found and `probes` (the `engine-setup-probes` flag) is On, and Docker only with the `agent-ci` flag On.
 /// `ghInstalled` is a separate check, not one of these lines.
-pub fn setup_check_lines(c: &SetupChecks) -> Vec<String> {
+pub fn setup_check_lines(c: &SetupChecks, probes: bool) -> Vec<String> {
     let mut shown = vec![&c.git, &c.gh, &c.claude, &c.claude_signed_in];
     if show_cursor(c) {
         shown.push(&c.cursor);
     }
-    shown.extend(c.docker.as_ref());
-    shown.into_iter().map(setup_check_line).collect()
+    let mut lines: Vec<String> = shown.into_iter().map(setup_check_line).collect();
+    if probes {
+        for (name, check) in [("pi", &c.pi), ("Codex", &c.codex)] {
+            let Some(check) = check else { continue };
+            lines.push(match check.ok {
+                // A pass names the engine before its version, as Cursor's does; the check keeps the raw version.
+                Some(true) => format!("✓ {name}: {}", check.detail),
+                _ => setup_check_line(check),
+            });
+        }
+    }
+    lines.extend(c.docker.as_ref().map(setup_check_line));
+    lines
 }
 
 /// `setupCheckReport`: "Setup check:" followed by each line, indented.
-pub fn setup_check_report(c: &SetupChecks) -> String {
+pub fn setup_check_report(c: &SetupChecks, probes: bool) -> String {
     let mut lines = vec!["Setup check:".to_string()];
-    lines.extend(setup_check_lines(c).into_iter().map(|l| format!("  {l}")));
+    lines.extend(setup_check_lines(c, probes).into_iter().map(|l| format!("  {l}")));
     lines.join("\n")
 }
 

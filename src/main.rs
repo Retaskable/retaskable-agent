@@ -46,14 +46,9 @@ async fn main() -> Result<()> {
     // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
     // checks and exit without starting the server.
     if std::env::args().nth(1).as_deref() == Some("check") {
-        let checks = setup_check::run_setup_checks(
-            env,
-            retaskable_agent::flags::Flags::from_env()
-                .on("engine-setup-probes")
-                .await,
-        )
-        .await;
-        println!("{}", setup_check::setup_check_report(&checks));
+        let probes = retaskable_agent::flags::Flags::from_env().on("engine-setup-probes").await;
+        let checks = setup_check::run_setup_checks(env, probes).await;
+        println!("{}", setup_check::setup_check_report(&checks, probes));
         std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
     }
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
