@@ -20,7 +20,30 @@ pub enum ChoreKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chore {
     pub kind: ChoreKind,
+    /// The recent chores of this kind, one line each: the title and how it ended.
+    pub recent: Vec<String>,
+    /// For `fix_main`: the failing checks or the staging smoke report.
+    pub report: String,
 }
+
+impl Chore {
+    /// Whether the chore has its own prompt: a playtest fix and a main sync keep the piece prompt.
+    pub fn has_prompt(&self) -> bool {
+        !matches!(self.kind, ChoreKind::PlaytestFix | ChoreKind::SyncMain)
+    }
+}
+
+/// A chore's prompt that couldn't be filled (our own template, not the work): the run ends `failed`, `outside`.
+#[derive(Debug)]
+pub struct Outside(pub String);
+
+impl std::fmt::Display for Outside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Outside {}
 
 /// The piece's chore, or `None` for a roadmap piece or an unknown kind.
 pub fn chore_of(piece: &RunPiece) -> Option<Chore> {
@@ -34,7 +57,33 @@ pub fn chore_of(piece: &RunPiece) -> Option<Chore> {
         "playtest_fix" => ChoreKind::PlaytestFix,
         _ => return None,
     };
-    Some(Chore { kind })
+    let chore = &piece.other["chore"];
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let recent = chore
+        .get("recent")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| match r.as_str() {
+            Some(s) => Some(s.trim().to_string()),
+            None => {
+                let (title, outcome) = (text(r, "title"), text(r, "outcome"));
+                (!title.is_empty()).then(|| {
+                    if outcome.is_empty() {
+                        title
+                    } else {
+                        format!("{title} ({outcome})")
+                    }
+                })
+            }
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    Some(Chore {
+        kind,
+        recent,
+        report: text(chore, "report"),
+    })
 }
 
 /// The store lock a chore of this kind holds through its run (section 6.7, pieces.md section 3.4); `None` for a
@@ -132,7 +181,20 @@ mod tests {
             ("playtest_fix", ChoreKind::PlaytestFix),
         ] {
             let p = piece(json!({ "chore": { "kind": name, "recent": ["x"] } }));
-            assert_eq!(chore_of(&p), Some(Chore { kind }));
+            assert_eq!(chore_of(&p).map(|c| c.kind), Some(kind));
+        }
+    }
+
+    #[test]
+    fn only_a_rotation_or_fix_main_chore_has_its_own_prompt() {
+        for (name, own) in [
+            ("tidy", true),
+            ("fix_main", true),
+            ("sync_main", false),
+            ("playtest_fix", false),
+        ] {
+            let p = piece(json!({ "chore": { "kind": name } }));
+            assert_eq!(chore_of(&p).unwrap().has_prompt(), own, "{name}");
         }
     }
 
@@ -147,10 +209,13 @@ mod tests {
     fn the_tier_is_the_chore_tier_except_for_a_playtest_fix_or_a_roadmap_piece() {
         let models = crate::config::ModelsConfig::default();
         let normal = implementer_tier(None, 0, &models);
-        let tidy = Chore { kind: ChoreKind::Tidy };
-        let fix = Chore {
-            kind: ChoreKind::PlaytestFix,
+        let chore = |kind| Chore {
+            kind,
+            recent: vec![],
+            report: String::new(),
         };
+        let tidy = chore(ChoreKind::Tidy);
+        let fix = chore(ChoreKind::PlaytestFix);
         assert_eq!(tier_for(Some(&tidy), 0, &models), chore_tier());
         assert_eq!(tier_for(Some(&fix), 0, &models), normal);
         assert_eq!(tier_for(None, 0, &models), normal);
