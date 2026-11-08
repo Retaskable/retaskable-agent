@@ -448,7 +448,7 @@ impl ProjectLoop {
 
     /// The pass's second half for a project whose items were read: records what its turns decided
     /// (`actions`, from `round_robin::plan`) against the computer's `pool`, and writes the `tick` event.
-    pub(super) fn record(
+    pub(super) async fn record(
         &mut self,
         items: Vec<Item>,
         paused: bool,
@@ -477,7 +477,13 @@ impl ProjectLoop {
                 _ => None,
             })
             .collect();
-        let payload = tick_payload(paused, pool);
+        // Behind the `live-sessions-reporting` release flag: Off keeps `sessions` at 0.
+        let sessions = if self.flags.on("live-sessions-reporting").await {
+            self.live.sessions().snapshot().len()
+        } else {
+            0
+        };
+        let payload = tick_payload(paused, pool, sessions);
         let would: Vec<String> = actions.iter().map(describe).collect();
         let decision = match actions.first() {
             None if paused => "paused: would do nothing".to_string(),

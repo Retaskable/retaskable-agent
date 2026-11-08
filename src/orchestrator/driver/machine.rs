@@ -618,7 +618,7 @@ impl Machine {
             (self.projects.iter_mut().zip(read_items).zip(paused)).zip(scheduled)
         {
             match items {
-                Some(items) => steps.push(lp.record(items, paused, actions, &self.pool, live)),
+                Some(items) => steps.push(lp.record(items, paused, actions, &self.pool, live).await),
                 None => steps.push(Step::Skipped),
             }
         }
