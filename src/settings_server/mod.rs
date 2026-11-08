@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config;
+use crate::hello_settings::{HelloSettings, env_vars_json};
 use crate::link::{self, TokenStore};
 use crate::network::{self, NetworkAccess};
 use crate::profile;
@@ -30,22 +31,11 @@ mod first_run;
 mod save;
 mod status;
 use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
-use save::{SettingsUpdate, engine_choice_json, save_error_response};
+pub(crate) use save::engine_choice_json;
+use save::{SettingsUpdate, save_error_response};
 pub use status::StatusSource;
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
-
-/// agent-settings.md section 3.2: the environment variables the settings page greys out.
-const AGENT_ENV_VARS: [&str; 8] = [
-    "RETASKABLE_PORT",
-    "RETASKABLE_POLL_SEC",
-    "RETASKABLE_TAGS",
-    "RETASKABLE_LOCAL_MODEL",
-    "RETASKABLE_LOCAL_URL",
-    "RETASKABLE_ENGINES",
-    "RETASKABLE_CURSOR_MODELS",
-    "RETASKABLE_NETWORK_PASSWORD",
-];
 
 static SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
 
@@ -75,6 +65,8 @@ pub struct SettingsServer {
     state: Mutex<InnerState>,
     /// The Now tab's live inputs (`status.rs`), given once at start.
     status: OnceLock<StatusSource>,
+    /// Fired after a save, so every project's connection sends a fresh hello (given once at start).
+    saved: OnceLock<HelloSettings>,
 }
 
 impl SettingsServer {
@@ -102,7 +94,13 @@ impl SettingsServer {
             keychain,
             state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
+            saved: OnceLock::new(),
         }
+    }
+
+    /// The signal a successful save fires.
+    pub fn set_saved_signal(&self, signal: HelloSettings) {
+        let _ = self.saved.set(signal);
     }
 
     fn current_settings(&self) -> Result<Value> {
@@ -150,12 +148,7 @@ impl SettingsServer {
                 "enabled": net.enabled,
                 "hasPassword": net.password_hash.is_some(),
             },
-            "envVars": Value::Object(
-                AGENT_ENV_VARS
-                    .iter()
-                    .map(|name| ((*name).to_string(), Value::Bool(env.get(name).is_some())))
-                    .collect(),
-            ),
+            "envVars": env_vars_json(env),
         }))
     }
 
@@ -283,7 +276,12 @@ async fn post_settings(
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
     match settings.apply(&update) {
-        Ok(()) => Json(json!({ "saved": true })).into_response(),
+        Ok(()) => {
+            if let Some(signal) = settings.saved.get() {
+                signal.fire();
+            }
+            Json(json!({ "saved": true })).into_response()
+        }
         Err(e) => save_error_response(e),
     }
 }

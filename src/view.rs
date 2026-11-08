@@ -11,6 +11,7 @@ use tokio::sync::watch;
 
 use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
+use crate::hello_settings::HelloSettings;
 use crate::lane_pool::LaneSizes;
 use crate::paths;
 use crate::store::Store;
@@ -46,6 +47,8 @@ pub struct AgentView {
     pub work: crate::work_signal::WorkSignals,
     /// A pending Restart, shared with the exit that runs it (`runtime::restart_handler`).
     pub restart: Arc<crate::restart::RestartState>,
+    /// The computer's settings for `hello`, and the signal that sends it again after a save.
+    pub settings: HelloSettings,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -350,12 +353,12 @@ impl AgentView {
 
     /// `hello` (cloud.md section 5.3): the agent's version, OS and machine, and the project's repo and backlog, or
     /// null until Setup is done.
-    pub fn hello(&self, project: &str) -> Value {
+    pub async fn hello(&self, project: &str) -> Value {
         let repo = self
             .projects
             .iter()
             .find(|p| p.id == project && !p.github_repo.is_empty());
-        json!({
+        let mut hello = json!({
             "type": "hello",
             "agentVersion": truncate(&self.version, 50),
             "os": platform(),
@@ -364,7 +367,11 @@ impl AgentView {
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags,
-        })
+        });
+        if let Some(settings) = self.settings.json().await {
+            hello["settings"] = settings;
+        }
+        hello
     }
 
     /// The project's snapshot (cloud.md section 5.2): every list the hub needs. Most are still
@@ -494,6 +501,7 @@ mod tests {
             item_commands: Default::default(),
             work: Default::default(),
             restart: Default::default(),
+            settings: Default::default(),
         }
     }
 
@@ -541,10 +549,47 @@ mod tests {
         assert_eq!(view(vec![project("a", "o/a"), project("b", "o/b")]).keys(), ["a", "b"]);
     }
 
-    #[test]
-    fn hello_names_the_project_or_null_before_setup_or_without_a_repo() {
+    #[tokio::test]
+    async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = crate::env::Env::from_pairs([("RETASKABLE_POLL_SEC", "30")]);
+        let mut v = view(vec![]);
+        v.settings = HelloSettings::new(
+            dir.path().to_path_buf(),
+            env,
+            4700,
+            Arc::new(crate::flags::Flags::fixed(&["machine-settings"])),
+        );
+        let hello = v.hello("").await;
+        let s = &hello["settings"];
+        assert_eq!(s["concurrency"], 1);
+        assert_eq!(s["autoConcurrency"]["enabled"], true);
+        assert_eq!(s["models"]["opusAbovePct"], 50);
+        assert_eq!(s["port"], 4700);
+        assert_eq!(s["lanes"], 2);
+        assert_eq!(s["pollIntervalSec"], 30);
+        assert_eq!(s["local"]["enabled"], false);
+        assert_eq!(s["networkAccess"], false);
+        assert!(s["engines"]["roles"].is_object() && s["cursorModels"].is_object() && s["tags"].is_array());
+        assert_eq!(s["envVars"]["RETASKABLE_POLL_SEC"], true);
+        assert_eq!(s["envVars"]["RETASKABLE_LANES"], false);
+        assert_eq!(hello["capabilities"], json!([]));
+        // Off, the hello has no settings at all.
+        v.settings = HelloSettings::new(
+            dir.path().to_path_buf(),
+            crate::env::Env::empty(),
+            4700,
+            Arc::new(crate::flags::Flags::fixed(&[])),
+        );
+        assert!(v.hello("").await.get("settings").is_none());
+        // The name is there, but the value 30 shows only as the computed pollIntervalSec, never as the variable's.
+        assert!(!s["envVars"].to_string().contains("30"));
+    }
+
+    #[tokio::test]
+    async fn hello_names_the_project_or_null_before_setup_or_without_a_repo() {
         let v = view(vec![project("a", "o/a"), project("b", "")]);
-        let hello = v.hello("a");
+        let hello = v.hello("a").await;
         assert_eq!(hello["type"], "hello");
         assert_eq!(hello["agentVersion"], "1.2.3");
         assert_eq!(hello["machine"], "pc");
@@ -555,11 +600,11 @@ mod tests {
             json!({ "githubRepo": "o/a", "backlogPath": "backlog" })
         );
         assert!(
-            v.hello("b")["project"].is_null(),
+            v.hello("b").await["project"].is_null(),
             "a project with no repo is not Setup-done"
         );
-        assert!(v.hello("")["project"].is_null());
-        assert!(v.hello("unknown")["project"].is_null());
+        assert!(v.hello("").await["project"].is_null());
+        assert!(v.hello("unknown").await["project"].is_null());
     }
 
     #[test]

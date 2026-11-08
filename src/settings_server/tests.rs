@@ -199,6 +199,7 @@ async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
     assert_eq!(body["tags"]["effective"], json!(["linux"]));
     assert_eq!(body["envVars"]["RETASKABLE_TAGS"], json!(true));
     assert_eq!(body["envVars"]["RETASKABLE_PORT"], json!(false));
+    assert_eq!(body["envVars"]["RETASKABLE_LANES"], json!(false));
 }
 
 #[tokio::test]
@@ -545,6 +546,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
             item_commands: Default::default(),
             work: Default::default(),
             restart: Default::default(),
+            settings: Default::default(),
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),
