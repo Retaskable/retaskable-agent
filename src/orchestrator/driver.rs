@@ -28,6 +28,7 @@ mod land;
 mod lane_play;
 pub use lane_play::LanePlay;
 mod ideas_daily;
+mod vet_daily;
 mod ideas_round;
 mod machine;
 mod playtest_round;

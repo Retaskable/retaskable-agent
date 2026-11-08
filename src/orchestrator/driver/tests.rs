@@ -943,6 +943,7 @@ mod fix_main;
 mod idea_accept;
 mod ideas;
 mod ideas_daily;
+mod vet_daily;
 mod lane_play;
 mod own_failures;
 mod playtests;
