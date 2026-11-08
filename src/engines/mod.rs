@@ -15,6 +15,7 @@ pub mod pi;
 pub mod place;
 pub mod resolve;
 pub mod runner;
+pub mod start_rules;
 pub mod summarize;
 pub mod transcripts;
 
