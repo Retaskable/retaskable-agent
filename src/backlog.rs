@@ -13,7 +13,6 @@
 //! for "nothing to do".
 pub mod asks;
 pub mod drafts;
-pub mod lighthouse;
 pub mod runs;
 
 use crate::env::Env;

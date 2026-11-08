@@ -92,6 +92,7 @@ fn run_with(program: &str, url: &str, preset: Preset, output: &Path, timeout: Du
     if let Err(e) = std::fs::create_dir_all(dir) {
         return LighthouseOutcome::Failed(format!("creating {}: {e}", dir.display()));
     }
+    let _ = std::fs::remove_file(output);
     let command = command_line(program, &lighthouse_args(url, preset, output), cfg!(windows));
     match proc::run_command_with_timeout(&command, dir, timeout) {
         Err(e) => LighthouseOutcome::Failed(format!("{e:#}")),
