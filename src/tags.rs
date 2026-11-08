@@ -143,9 +143,9 @@ pub fn found_tags(f: &MachineFacts) -> Vec<String> {
     tags
 }
 
-/// This computer's facts, looked up fresh (including an `nvidia-smi` run) on every call.
-pub fn machine_facts(env: &Env) -> MachineFacts {
-    let os = if cfg!(target_os = "windows") {
+/// The OS this build runs on.
+pub fn current_os() -> OsKind {
+    if cfg!(target_os = "windows") {
         OsKind::Windows
     } else if cfg!(target_os = "macos") {
         OsKind::Mac
@@ -153,7 +153,12 @@ pub fn machine_facts(env: &Env) -> MachineFacts {
         OsKind::Linux
     } else {
         OsKind::Other
-    };
+    }
+}
+
+/// This computer's facts, looked up fresh (including an `nvidia-smi` run) on every call.
+pub fn machine_facts(env: &Env) -> MachineFacts {
+    let os = current_os();
     let arch = std::env::consts::ARCH.to_string();
     let nvidia = nvidia_smi_lists_a_gpu();
     let dockerenv = Path::new("/.dockerenv").exists();

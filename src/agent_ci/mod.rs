@@ -2,8 +2,10 @@
 //! orchestrator loop, with `ciSlots` permits that lanes, sessions and `concurrency` never take or wait for.
 //! Each poll it checks Docker, then for each project looks for the project's CI files on its base branch and
 //! lists the pull requests to check. Checks are listed here, not run.
+pub mod container;
 pub mod discovery;
 pub mod docker;
+pub mod host;
 pub mod priority;
 pub mod prs;
 

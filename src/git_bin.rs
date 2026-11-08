@@ -74,23 +74,33 @@ pub fn program() -> &'static Path {
 pub fn command(dir: &Path) -> Command {
     let mut cmd = match &*LAUNCHER {
         GitLauncher::Plain => Command::new("git"),
-        GitLauncher::Real {
-            exe,
-            prepend_path,
-            msystem,
-        } => {
-            let mut cmd = Command::new(exe);
-            let rest = std::env::var("PATH").unwrap_or_default();
-            let dirs = prepend_path.iter().cloned().chain(std::env::split_paths(&rest));
-            if let Ok(new_path) = std::env::join_paths(dirs) {
-                cmd.env("PATH", new_path);
-            }
-            cmd.env("MSYSTEM", msystem);
-            cmd
-        }
+        GitLauncher::Real { exe, .. } => Command::new(exe),
     };
+    apply_launcher_env(&mut cmd);
     cmd.current_dir(dir);
     cmd
+}
+
+/// Like [`command`], but for a `base` that already starts [`program`] (e.g. wrapped in `nice`):
+/// sets the same PATH and `MSYSTEM` for Git for Windows' launcher, and the working directory.
+pub fn command_from(mut base: Command, dir: &Path) -> Command {
+    apply_launcher_env(&mut base);
+    base.current_dir(dir);
+    base
+}
+
+fn apply_launcher_env(cmd: &mut Command) {
+    if let GitLauncher::Real {
+        prepend_path, msystem, ..
+    } = &*LAUNCHER
+    {
+        let rest = std::env::var("PATH").unwrap_or_default();
+        let dirs = prepend_path.iter().cloned().chain(std::env::split_paths(&rest));
+        if let Ok(new_path) = std::env::join_paths(dirs) {
+            cmd.env("PATH", new_path);
+        }
+        cmd.env("MSYSTEM", msystem);
+    }
 }
 
 #[cfg(test)]

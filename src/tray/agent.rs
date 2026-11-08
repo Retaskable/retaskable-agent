@@ -3,7 +3,7 @@
 //! seconds and at once when a watched signal changes, and runs the action of the item as last shown when one is
 //! chosen. Everything it does to the world is behind a small trait, so tests use fakes.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 
 use super::menu::{Action, Menu, tray_menu};
 use super::state::{BacklogWait, CloudInput, Exit, IconState, LinkState, TrayInput, icon_state, tooltip};
-use crate::connector::{CloudLink, Connector};
+use crate::connector::{CloudHandle, CloudLink};
 use crate::link::pending::{BacklogWaiting, Links};
 use crate::restart::RestartState;
 use crate::settings_server::SettingsServer;
@@ -48,12 +48,12 @@ pub trait CloudConn: Send + Sync {
     fn forget(&self) -> Result<()>;
 }
 
-impl CloudConn for Connector {
+impl CloudConn for CloudHandle {
     fn connected(&self) -> CloudLink {
-        Connector::connected(self)
+        CloudHandle::connected(self)
     }
     fn forget(&self) -> Result<()> {
-        Connector::forget(self)
+        CloudHandle::forget(self)
     }
 }
 
@@ -271,10 +271,8 @@ impl TrayAgent {
         }
     }
 
-    /// Reads the agent again and draws it. Notifies once when the backlog starts waiting, and exits 0 when a
-    /// Quit when idle finds nothing running.
-    pub fn refresh(&self) {
-        let _guard = self.drawing.lock().unwrap();
+    /// The agent as it is now, and the frame it draws; the frame's items are what a click then runs.
+    fn read(&self) -> (TrayInput, Frame) {
         let input = self.input();
         let menu = tray_menu(&input);
         *self.actions.lock().unwrap() = menu
@@ -288,6 +286,20 @@ impl TrayAgent {
             tooltip: tooltip(&input),
             menu,
         };
+        (input, frame)
+    }
+
+    /// The first frame, for a view that has to show something before it is ready.
+    pub fn frame(&self) -> Frame {
+        let _guard = self.drawing.lock().unwrap();
+        self.read().1
+    }
+
+    /// Reads the agent again and draws it. Notifies once when the backlog starts waiting, and exits 0 when a
+    /// Quit when idle finds nothing running.
+    pub fn refresh(&self) {
+        let _guard = self.drawing.lock().unwrap();
+        let (input, frame) = self.read();
         if let Err(e) = self.view.draw(&frame) {
             tracing::warn!("tray: couldn't update the menu: {e:#}");
         }
@@ -342,6 +354,14 @@ impl TrayAgent {
             }
             self.refresh();
         }
+    }
+
+    /// A choice the view already resolved to its action (the helper tells which item, and checks it as last shown).
+    pub fn choose(&self, action: &Action) {
+        if let Err(e) = self.act(action) {
+            tracing::warn!("tray: {action:?} failed: {e:#}");
+        }
+        self.refresh();
     }
 
     fn open(&self, url: &str) -> Result<()> {
