@@ -15,6 +15,8 @@ use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
 use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState};
 
+mod live;
+
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {
     uri: String,
@@ -91,6 +93,7 @@ fn timing() -> Timing {
         connect: Duration::from_secs(5),
         backoff: Duration::from_millis(10),
         stable: Duration::from_secs(30),
+        live_coalesce: Duration::from_millis(100),
     }
 }
 
@@ -112,6 +115,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         restart: Default::default(),
         settings: Default::default(),
         local: Default::default(),
+        live: Default::default(),
     })
 }
 
