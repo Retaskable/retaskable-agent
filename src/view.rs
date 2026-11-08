@@ -804,6 +804,79 @@ mod tests {
         );
     }
 
+    fn open(id: &str, since_ms: i64, text: &str, details: Value) -> crate::telemetry::debounce::OpenAnomaly {
+        crate::telemetry::debounce::OpenAnomaly {
+            id: id.into(),
+            rule: "lease_idle",
+            item: Some("R-1".into()),
+            text: text.into(),
+            details,
+            since_ms,
+        }
+    }
+
+    #[test]
+    fn snapshot_sends_open_anomalies_oldest_first_with_their_project_and_drops_ended_ones() {
+        let v = reporting_view(true);
+        let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        v.live.register("a");
+        assert!(orch(&v).get("anomalies").is_none(), "none open: the key is left out");
+        let mut rx = v.live.subscribe();
+        rx.mark_unchanged();
+        v.live
+            .set_anomalies("a", vec![open("x", 5_000, "stuck", json!({ "n": 1 }))]);
+        assert!(rx.has_changed().unwrap(), "a change in the list signals the connector");
+        assert_eq!(
+            orch(&v)["anomalies"],
+            json!([{ "id": "x", "kind": "lease_idle", "item": "R-1", "since": "1970-01-01T00:00:05.000Z",
+                     "text": "stuck", "details": { "n": 1 }, "project": "a" }])
+        );
+        v.live.set_anomalies("a", vec![]);
+        assert!(orch(&v).get("anomalies").is_none(), "gone the minute it ends");
+    }
+
+    #[test]
+    fn snapshot_caps_anomalies_at_twenty_and_cleans_their_text_and_details() {
+        let v = reporting_view(true);
+        v.live.register("a");
+        let many = (0..25).map(|i| open(&format!("id{i:02}"), i, "t", json!({}))).collect();
+        v.live.set_anomalies("a", many);
+        let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        assert_eq!(o["anomalies"].as_array().unwrap().len(), 20);
+        assert_eq!(o["anomalies"][0]["id"], "id00");
+        assert_eq!(o["anomaliesMore"], 5);
+
+        let big: serde_json::Map<String, Value> =
+            (0..40).map(|i| (format!("k{i:02}"), json!("x".repeat(100)))).collect();
+        v.live.set_anomalies(
+            "a",
+            vec![open(
+                "s",
+                0,
+                &format!("password=hunter2 {}", "y".repeat(400)),
+                Value::Object(big),
+            )],
+        );
+        let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+        let text = o["anomalies"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("hunter2") && text.chars().count() <= 300, "{text}");
+        let details = &o["anomalies"][0]["details"];
+        assert!(details.to_string().len() <= 1024 && details["k00"].is_string());
+        assert!(o.get("anomaliesMore").is_none());
+    }
+
+    #[test]
+    fn snapshot_reporting_off_sends_no_anomalies() {
+        let v = reporting_view(false);
+        v.live.register("a");
+        v.live.set_anomalies("a", vec![open("x", 0, "stuck", json!({}))]);
+        assert!(
+            v.snapshot("a", Path::new("."))["state"]["orchestrator"]
+                .get("anomalies")
+                .is_none()
+        );
+    }
+
     #[test]
     fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
         let dir = tempfile::tempdir().unwrap();
