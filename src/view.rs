@@ -932,9 +932,7 @@ mod tests {
     #[test]
     fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
         let dir = tempfile::tempdir().unwrap();
-        let mk = |on: bool| {
-            reporting_view_in(on, dir.path().to_path_buf())
-        };
+        let mk = |on: bool| reporting_view_in(on, dir.path().to_path_buf());
         let cursor = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("cursor").cloned();
         assert_eq!(cursor(&mk(true)), None, "no tokens yet");
         let mut m = crate::store::MachineStore::load(dir.path()).unwrap();
