@@ -16,6 +16,8 @@ use crate::hello_settings::HelloSettings;
 mod cursor;
 mod orchestrator;
 mod usage;
+#[cfg(test)]
+mod held_tests;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
 pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
@@ -744,7 +746,7 @@ mod tests {
         assert_eq!(orch(&v)["pausedReason"], "Paused from the site");
     }
 
-    fn reporting_view(on: bool) -> AgentView {
+    pub(super) fn reporting_view(on: bool) -> AgentView {
         reporting_view_in(on, PathBuf::new())
     }
 
@@ -889,51 +891,6 @@ mod tests {
         );
         v.live.set_anomalies("a", vec![]);
         assert!(orch(&v).get("anomalies").is_none(), "gone the minute it ends");
-    }
-
-    fn held(id: &str, kind_chore: bool) -> crate::orchestrator::live::HeldItem {
-        crate::orchestrator::live::HeldItem {
-            id: id.into(),
-            title: "T".into(),
-            state: "implementing".into(),
-            lane: Some(2),
-            branch: None,
-            pr_url: None,
-            attempt: 0,
-            chore: kind_chore,
-        }
-    }
-
-    #[test]
-    fn snapshot_reports_held_items_and_the_chores_milestone() {
-        let v = reporting_view(true);
-        let st = |v: &AgentView| v.snapshot("a", Path::new("."))["state"].clone();
-        v.live.register("a");
-        assert_eq!((st(&v)["items"].clone(), st(&v)["milestones"].clone()), (json!([]), json!([])));
-        let mut rx = v.live.subscribe();
-        rx.mark_unchanged();
-        v.live.set_items("a", vec![held("R-1", false)]);
-        assert!(rx.has_changed().unwrap());
-        let s = st(&v);
-        assert_eq!(
-            s["items"],
-            json!([{ "id": "R-1", "title": "T", "state": "implementing", "lane": 2, "attempt": 0, "chore": false }])
-        );
-        assert_eq!(s["milestones"], json!([]));
-        v.live.set_items("a", vec![held("R-1", false), held("chore-x", true)]);
-        assert_eq!(st(&v)["milestones"], json!([{ "id": "chores", "title": "Chores" }]));
-        v.live.set_items("a", vec![]);
-        assert_eq!(st(&v)["items"], json!([]));
-        assert_eq!(st(&v)["milestones"], json!([]));
-    }
-
-    #[test]
-    fn snapshot_items_stay_empty_with_the_flag_off() {
-        let v = reporting_view(false);
-        v.live.register("a");
-        v.live.set_items("a", vec![held("chore-x", true)]);
-        let s = v.snapshot("a", Path::new("."))["state"].clone();
-        assert_eq!((s["items"].clone(), s["milestones"].clone()), (json!([]), json!([])));
     }
 
     #[test]

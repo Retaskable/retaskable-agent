@@ -24,6 +24,7 @@ mod deprecations;
 mod drafts;
 mod fix_main;
 mod follow;
+mod held_items;
 mod idea_accept;
 mod item_commands;
 mod land;
