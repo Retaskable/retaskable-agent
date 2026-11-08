@@ -19,7 +19,7 @@ pub struct Suggestion {
 }
 
 /// A verdict on a suggestion, as the store names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Promising,
