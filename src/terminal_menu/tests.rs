@@ -1,6 +1,6 @@
 use super::*;
 use crate::tray::menu::tray_menu;
-use crate::tray::state::{BacklogWait, CloudInput, LinkState, TrayInput};
+use crate::tray::state::{BacklogWait, CloudInput, LinkState, TrayInput, tooltip};
 
 fn cloud(name: &str, link: LinkState) -> CloudInput {
     let host = format!("{}.example", name.to_lowercase());
@@ -34,7 +34,7 @@ fn cursor(on: &str) -> Cursor {
 }
 
 fn screen(m: &Menu, c: &Cursor, w: usize, h: usize) -> Vec<String> {
-    render_screen(m, c, w, h, None, &[])
+    render_screen(m, c, w, h, &tooltip(&input()), None, &[])
 }
 
 fn plain(lines: &[String]) -> Vec<String> {
@@ -65,7 +65,32 @@ fn header_tooltip_rules_and_hidden_items() {
     let m = menu();
     let lines = plain(&screen(&m, &cursor("pause"), 80, 40));
     assert!(lines[0].starts_with("Retaskable"));
-    assert!(lines[1].contains("pc4"));
+    assert!(lines[1].contains("Production:"));
+    assert!(!lines[1].contains("waiting for you"));
+    assert!(lines.iter().skip(2).any(|l| l.contains("pc4")));
+    let raw = screen(&m, &cursor("pause"), 80, 40);
+    assert!(raw[1].starts_with("\x1b[2m"));
+    assert!(
+        raw.iter()
+            .skip(2)
+            .any(|l| l.starts_with("\x1b[2m") && l.contains("pc4"))
+    );
+    let mut waiting = input();
+    waiting.backlog = Some(BacklogWait {
+        host: "s".into(),
+        link_page: None,
+        unlinked: false,
+    });
+    let busy = plain(&render_screen(
+        &tray_menu(&waiting),
+        &cursor("pause"),
+        80,
+        40,
+        &tooltip(&waiting),
+        None,
+        &[],
+    ));
+    assert!(busy[1].contains("1 waiting for you"));
     assert!(lines.iter().any(|l| l.starts_with("───")));
     assert!(lines.iter().any(|l| l.contains("› Pause this computer")));
     assert!(lines.iter().any(|l| l.contains("Link to ▸")));
@@ -115,7 +140,7 @@ fn inline_list_is_a_submenu_and_backlog_is_highlighted() {
     assert!(find("Open on retaskable.com ▸").contains("▸"));
     let notice = backlog_notice(&m).unwrap();
     assert!(notice.starts_with("! Retaskable: approve the shared backlog: "));
-    let with = render_screen(&m, &cursor("pause"), 200, 40, Some(&notice), &[]);
+    let with = render_screen(&m, &cursor("pause"), 200, 40, "t", Some(&notice), &[]);
     assert!(with[2].starts_with("\x1b[1;33m! Retaskable"));
     assert_eq!(backlog_notice(&menu()), None);
 }
@@ -214,12 +239,12 @@ fn scrolls_to_keep_the_cursor_in_sight() {
 fn log_lines_fill_the_rest() {
     let m = menu();
     let log: Vec<String> = (1..=50).map(|n| format!("line {n}")).collect();
-    let out = plain(&render_screen(&m, &cursor("quit"), 80, 40, None, &log));
+    let out = plain(&render_screen(&m, &cursor("quit"), 80, 40, "", None, &log));
     assert_eq!(out.len(), 40);
     assert_eq!(out.last().unwrap(), "line 50");
     assert!(out.iter().any(|l| l == "line 49"));
     // No room under the menu: no log.
-    let short = plain(&render_screen(&m, &cursor("quit"), 80, 8, None, &log));
+    let short = plain(&render_screen(&m, &cursor("quit"), 80, 8, "", None, &log));
     assert!(!short.iter().any(|l| l.starts_with("line")));
 }
 

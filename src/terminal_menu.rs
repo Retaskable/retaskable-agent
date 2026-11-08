@@ -7,9 +7,8 @@ mod tests;
 
 use crate::tray::menu::{Item, Menu, SEPARATOR};
 
-/// The header's two lines are the menu's first two items.
+/// The header's status line is the menu's first item; the tooltip comes from the caller.
 const STATUS: &str = "status";
-const TOOLTIP: &str = "machine";
 /// Highlighted: the shared backlog's wait.
 const HIGHLIGHTED: [&str; 2] = ["requests", "request.backlog"];
 const BACKLOG: &str = "request.backlog";
@@ -71,10 +70,7 @@ fn level<'a>(menu: &'a Menu, path: &[String]) -> (Vec<&'a Item>, Vec<&'a Item>) 
         }
     }
     let top = open.is_empty();
-    let shown = list
-        .iter()
-        .filter(|i| !i.hidden && !(top && (i.id == STATUS || i.id == TOOLTIP)))
-        .collect();
+    let shown = list.iter().filter(|i| !i.hidden && !(top && i.id == STATUS)).collect();
     (open, shown)
 }
 
@@ -178,13 +174,14 @@ fn styled(text: &str, width: usize, code: Option<&str>) -> String {
     }
 }
 
-/// The screen: the header, the notice, the menu (or the open submenu) scrolled to keep the cursor in sight, then
+/// The screen: the header (the status line, then the tooltip's line), the notice, the menu (or the open submenu) scrolled to keep the cursor in sight, then
 /// the last of the console that fits. At most `height` lines, each cut to `width`.
 pub fn render_screen(
     menu: &Menu,
     cursor: &Cursor,
     width: usize,
     height: usize,
+    tooltip: &str,
     notice: Option<&str>,
     log_lines: &[String],
 ) -> Vec<String> {
@@ -197,8 +194,8 @@ pub fn render_screen(
             .map(|i| i.text.as_str())
     };
     let mut top = vec![styled(text_of(STATUS).unwrap_or_default(), width, Some(BOLD))];
-    if let Some(t) = text_of(TOOLTIP).filter(|t| !t.is_empty()) {
-        top.push(styled(t, width, Some(DIM)));
+    if !tooltip.is_empty() {
+        top.push(styled(tooltip, width, Some(DIM)));
     }
     if let Some(n) = notice {
         top.push(styled(n, width, Some(ALERT)));
