@@ -368,9 +368,9 @@ mod tests {
         // Local down: a local header resumes on its Anthropic tier.
         let down = resumed_drafter_args(Some("local"), false, 0.98, true).await;
         assert!(down.contains("--model sonnet") && !down.contains("base=http"), "{down}");
-        // Flag Off: the ladder alone decides, so even an Anthropic header resumes local at the low rows.
-        let off = resumed_drafter_args(Some("sonnet"), true, 0.98, false).await;
-        assert!(off.contains("base=http://127.0.0.1:11436"), "{off}");
+        // Flag Off: as before, the header isn't read and the drafter's spec stays a `sonnet` one (no local env).
+        let off = resumed_drafter_args(Some("local"), true, 0.4, false).await;
+        assert!(off.contains("--model sonnet") && !off.contains("base=http"), "{off}");
     }
 
     #[tokio::test]
