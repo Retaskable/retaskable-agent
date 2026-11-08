@@ -634,10 +634,10 @@ impl Machine {
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
             if *ready && !lp.week_checked {
                 lp.week_checked = true;
-                if ProjectLoop::weekly_on(&lp.flags).await
-                    && let Some(usage) = lp.store.usage()
-                {
-                    ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
+                if ProjectLoop::weekly_on(&lp.flags).await {
+                    for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
+                        ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
+                    }
                 }
             }
         }
