@@ -1,6 +1,7 @@
 //! The real implementer session starter for `claim` mode (`startItem`/`implement` in Retaskable.com's
 //! `agent/src/steps.ts`): prepares the lane, builds the prompt, runs `claude -p` and turns what it
-//! answered into the [`SessionOutcome`] the loop settles. Claude only; any other engine refuses.
+//! answered into the [`SessionOutcome`] the loop settles. The session runs on the engine the request names,
+//! placed by [`crate::engines::place`] (Claude Code, Cursor, pi or Codex).
 //! A fresh session's prompt ends with "Where to start" ([`crate::implementer::start_files`]), built in
 //! the prepared lane; a resume or a follow-up restart gets none.
 //! Left out: Claude's sandbox, and the decisions a person already gave
@@ -19,13 +20,11 @@ use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, Star
 use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{
-    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, program_of,
-    run_session,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_of, lane_engine, place, program_of, run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
@@ -51,11 +50,14 @@ pub struct ClaudeStarter {
     pub(super) models: ModelsConfig,
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
+    /// The machine's Cursor model names, for placing a Cursor session.
+    cursor_models: CursorModels,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     pub(super) running: Arc<AtomicU32>,
 }
 
 impl ClaudeStarter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: PathBuf,
         projects: Vec<ProjectConfig>,
@@ -64,6 +66,7 @@ impl ClaudeStarter {
         max_turns: u32,
         models: ModelsConfig,
         max_resume_context_tokens: u32,
+        cursor_models: CursorModels,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -73,6 +76,7 @@ impl ClaudeStarter {
             max_turns,
             models,
             max_resume_context_tokens,
+            cursor_models,
             running: Arc::new(AtomicU32::new(0)),
         })
     }
@@ -86,19 +90,16 @@ impl SessionStarter for ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let engine = engine_for(
-            &self.choice,
-            project.engines.as_ref(),
-            Role::Implementer,
-            Some(request.lane),
-        );
-        if engine != Engine::Claude {
+        if !request.placement && request.engine != EngineId::Claude {
             return Err("only Claude sessions run in the Rust agent yet".into());
         }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        // Fail before anything starts when the engine's binary isn't there: the claim goes back.
+        place(
+            config_engine(request.engine),
+            Role::Implementer,
+            &self.env,
+            &self.cursor_models,
+        )?;
         let StartRequest {
             project: project_id,
             item_id,
@@ -108,6 +109,7 @@ impl SessionStarter for ClaudeStarter {
             usage,
             session_id,
             engine: session_engine,
+            placement,
             resume,
             follow_up,
             items,
@@ -120,7 +122,8 @@ impl SessionStarter for ClaudeStarter {
             data_dir: self.data_dir.clone(),
             project,
             project_id: project_id.clone(),
-            bin,
+            env: self.env.clone(),
+            cursor_models: self.cursor_models.clone(),
             gh: self
                 .env
                 .get("RETASKABLE_GH")
@@ -133,6 +136,7 @@ impl SessionStarter for ClaudeStarter {
             max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             engine: session_engine,
+            placement,
             lane_engine: lane_engine(&self.choice, lane).map(program_of),
             takeover,
             resume,
@@ -233,6 +237,16 @@ impl SessionStarter for ClaudeStarter {
     }
 }
 
+/// The configured engine whose program is `id`.
+fn config_engine(id: EngineId) -> Engine {
+    match id {
+        EngineId::Claude => Engine::Claude,
+        EngineId::Cursor => Engine::Cursor,
+        EngineId::Pi => Engine::Pi,
+        EngineId::Codex => Engine::Codex,
+    }
+}
+
 /// Whether the resolved binary is there: a path by itself, a bare name somewhere on `PATH`.
 pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
     if bin.components().count() > 1 {
@@ -248,7 +262,8 @@ struct Job {
     data_dir: PathBuf,
     project: ProjectConfig,
     project_id: String,
-    bin: PathBuf,
+    env: Env,
+    cursor_models: CursorModels,
     /// The `gh` program (`RETASKABLE_GH`, or `gh` on PATH).
     gh: PathBuf,
     max_turns: u32,
@@ -262,6 +277,8 @@ struct Job {
     session_id: String,
     /// The engine the session runs on (`StartRequest::engine`).
     engine: EngineId,
+    /// The `engine-placement` flag: Off keeps a fresh start on `engine`.
+    placement: bool,
     /// The engine the lane now has of its own, if any: a send-back resumes only if it matches `engine`.
     lane_engine: Option<EngineId>,
     takeover: Option<EngineId>,
@@ -321,9 +338,11 @@ pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
 /// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at
 /// `<run folder>/<name>`, and returns its answer with the stream's usage reading and the session's last
 /// context size. A `fresh` start runs under the id the driver chose and saved, so a restart of it can
-/// resume it.
+/// resume it. It runs on `engine`, placed afresh: a fresh start can have moved to another engine than the job's.
+#[allow(clippy::too_many_arguments)]
 async fn attempt(
     job: &Job,
+    engine: EngineId,
     cwd: &Path,
     start: Start<'_>,
     session_id: &str,
@@ -335,7 +354,8 @@ async fn attempt(
         data_dir,
         project,
         project_id,
-        bin,
+        env,
+        cursor_models,
         max_turns,
         lane,
         item,
@@ -346,6 +366,11 @@ async fn attempt(
         attempt: attempt_no,
         ..
     } = job;
+    let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
+    let cursor = placed.cursor.map(|c| crate::engines::engine::CursorOptions {
+        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
+        ..c
+    });
     let now = crate::telemetry::now_ms() / 1000;
     let tier = implementer_tier(usage.as_ref(), now, models);
     let model = implementer_model(tier, item).to_string();
@@ -368,8 +393,8 @@ async fn attempt(
             model,
             budget_usd: project.budget.implementer_usd,
             max_turns: Some(*max_turns),
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            engine: Some(placed.engine),
+            cursor,
             local: None,
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
@@ -382,12 +407,12 @@ async fn attempt(
         path: paths::run_dir(data_dir, project_id, &item.id).join(name),
         lane: Some(*lane),
     };
-    let engine = engine_of(Some(EngineId::Claude))?;
-    let (engine, id, sink) = (engine.as_ref(), session_id, &sink);
+    let runner = engine_of(Some(placed.engine))?;
+    let (runner, bin, id, sink) = (runner.as_ref(), &placed.bin, session_id, &sink);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
     let (answer, usage) = run_implementer(spec, |spec| async move {
-        let r = run_session(engine, bin, &spec, id, Some(sink), quiet).await?;
+        let r = run_session(runner, bin, &spec, id, Some(sink), quiet).await?;
         *ctx = r.context_tokens;
         Ok(r)
     })
@@ -540,7 +565,8 @@ pub(super) enum Step {
     /// Send the findings back: resume the session.
     Fix(String),
     /// Send the findings to a fresh session, the old one having grown too large to resume.
-    FixFresh(String),
+    /// ...and the engine it runs on (`None` without fresh-start rules).
+    FixFresh(String, Option<EngineId>),
 }
 
 /// How [`gate_rounds`] ended.
@@ -627,7 +653,7 @@ where
                     current_engine = Some(takeover.or(f.lane_engine).unwrap_or(current_engine.unwrap_or(f.engine)));
                 }
 
-                next(Step::FixFresh(follow_up)).await?
+                next(Step::FixFresh(follow_up, current_engine)).await?
             }
             None => next(Step::Fix(follow_up)).await?,
         };
@@ -659,25 +685,30 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         checks: None,
     };
     // The session now answering, and whether it is a fresh one (so its id is reported).
-    let state = std::sync::Mutex::new((job.session_id.clone(), false));
+    let state = std::sync::Mutex::new((job.session_id.clone(), false, job.engine));
     let next = |step: Step| {
-        let current = state.lock().unwrap().0.clone();
+        let (current, _, mut engine) = state.lock().unwrap().clone();
         let (follow_up, fresh_prompt) = match &step {
             Step::OutOfTurns => (
                 picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP),
                 true,
             ),
-            Step::FixFresh(f) => (picking_up_prompt(false, &job.project.base_branch, f), true),
+            Step::FixFresh(f, to) => {
+                if job.placement {
+                    engine = to.unwrap_or(engine);
+                }
+                (picking_up_prompt(false, &job.project.base_branch, f), true)
+            }
             Step::Fix(f) => (f.clone(), false),
         };
         let id = if fresh_prompt { new_session_id() } else { current };
         if fresh_prompt {
-            *state.lock().unwrap() = (id.clone(), true);
+            *state.lock().unwrap() = (id.clone(), true, engine);
         }
         async move {
             if fresh_prompt {
                 let start = Start::Continuing { follow_up: &follow_up };
-                attempt(job, cwd, start, &id, true, format!("{id}.jsonl"), "").await
+                attempt(job, engine, cwd, start, &id, true, format!("{id}.jsonl"), "").await
             } else {
                 let start = Start::Resume {
                     session_id: id.clone(),
@@ -685,12 +716,12 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
                     decisions: &[],
                 };
                 let name = format!("{id}-resumed-{}.jsonl", now_ms());
-                attempt(job, cwd, start, &id, false, name, "").await
+                attempt(job, engine, cwd, start, &id, false, name, "").await
             }
         }
     };
     let gated = gate_rounds(&rounds, a, next).await?;
-    let (current, started_fresh) = state.into_inner().unwrap();
+    let (current, started_fresh, _) = state.into_inner().unwrap();
     let (a, mut notes) = match gated {
         Gated::Settled(a, notes) => (a, notes),
         Gated::GaveUp(a, notes, why) => {
@@ -761,7 +792,7 @@ async fn run(job: Job) -> Result<Ran> {
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
         };
-        let a = attempt(&job, &cwd, start, &job.session_id, true, name, "").await?;
+        let a = attempt(&job, job.engine, &cwd, start, &job.session_id, true, name, "").await?;
         return gated(&job, &cwd, a).await;
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
@@ -798,7 +829,17 @@ async fn run(job: Job) -> Result<Ran> {
             let base_ref = format!("origin/{}", job.project.base_branch);
             start_files::render(&start_files::build(crate::git_bin::program(), &cwd, &base_ref, &job.item).await)
         };
-        let a = attempt(&job, &cwd, start, &job.session_id, !resumed, name, &where_to_start).await?;
+        let a = attempt(
+            &job,
+            job.engine,
+            &cwd,
+            start,
+            &job.session_id,
+            !resumed,
+            name,
+            &where_to_start,
+        )
+        .await?;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
         // same id starts a fresh one, as `implement` in `steps.ts` does on "No conversation found".
         if resumed && matches!(&a.answer, Err(e) if format!("{e:#}").contains("No conversation found")) {
@@ -896,3 +937,7 @@ fn session_result_for_answer(
 #[cfg(test)]
 #[path = "session_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "session_engine_tests.rs"]
+mod engine_tests;
