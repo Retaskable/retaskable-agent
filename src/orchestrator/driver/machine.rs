@@ -36,7 +36,7 @@ pub const EVERY: Duration = Duration::from_secs(60);
 
 /// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
 /// project's backlog in the store.
-async fn repo_id(github_repo: &str) -> Option<u64> {
+pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
     let out = tokio::process::Command::new("gh")
         .args(["api", &format!("repos/{github_repo}"), "--jq", ".id"])
         .output()
