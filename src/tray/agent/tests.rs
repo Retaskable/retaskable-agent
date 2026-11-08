@@ -1,7 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 
 use super::*;
-use crate::view::{PauseState, ProjectView};
+use crate::view::PauseState;
 
 #[derive(Default)]
 struct FakeView {
@@ -138,16 +138,7 @@ struct Rig {
 fn rig(release: bool) -> Rig {
     let projects = ["a", "b"]
         .iter()
-        .map(|id| ProjectView {
-            id: id.to_string(),
-            github_repo: format!("o/{id}"),
-            backlog_path: "backlog".into(),
-            repo_path: PathBuf::new(),
-            worktrees_dir: PathBuf::new(),
-            base_branch: String::new(),
-            galleries: vec![],
-            play_command: String::new(),
-        })
+        .map(|id| crate::test_support::project_view(id))
         .collect();
     let mut v = AgentView::blank();
     v.projects = projects;

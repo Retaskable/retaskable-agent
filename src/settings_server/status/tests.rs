@@ -1,10 +1,8 @@
-use std::path::PathBuf;
-
 use super::*;
 use crate::config::{LaneEngine, RoleEngines};
 use crate::lane_pool::LaneSizes;
 use crate::orchestrator::live::{HeldLane, ProjectLive, StoreFailure};
-use crate::view::{PauseState, ProjectView};
+use crate::view::PauseState;
 
 fn check(ok: Option<bool>, detail: &str) -> SetupCheck {
     SetupCheck {
@@ -34,16 +32,7 @@ fn source(projects: &[&str]) -> StatusSource {
             tags: vec![],
             projects: projects
                 .iter()
-                .map(|id| ProjectView {
-                    id: id.to_string(),
-                    github_repo: format!("o/{id}"),
-                    backlog_path: "backlog".into(),
-                    repo_path: PathBuf::new(),
-                    worktrees_dir: PathBuf::new(),
-                    base_branch: String::new(),
-                    galleries: vec![],
-                    play_command: String::new(),
-                })
+                .map(|id| crate::test_support::project_view(id))
                 .collect(),
             version: "1.2.3".into(),
             lanes: 3,
