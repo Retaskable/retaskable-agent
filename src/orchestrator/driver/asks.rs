@@ -165,7 +165,7 @@ impl ProjectLoop {
                 None => (true, None),
             },
             None => (
-                paused || signed_out(shared) || shared.engine_limits.is_limited(engine, std::time::Instant::now()),
+                paused || signed_out(shared) || ProjectLoop::engine_limited(shared, engine),
                 None,
             ),
         };

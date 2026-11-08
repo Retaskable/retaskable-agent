@@ -248,3 +248,29 @@ async fn a_trial_waits_when_no_engine_may_start() {
     let t = trial_with(json!({"roles": {"planner": "cursor"}}), true, true).await;
     assert!(t.host.jobs.lock().unwrap().is_empty());
 }
+
+/// `local-limit-fallback`: Claude at its usage limit holds the trial only without the flag, the model, or sign-in.
+#[tokio::test]
+async fn at_the_limit_the_trial_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for (fallback, model, signed_out, starts) in [
+        (true, LocalModel::up(), false, true),
+        (false, LocalModel::up(), false, false),
+        (true, LocalModel::off(), false, false),
+        (true, LocalModel::up(), true, false),
+    ] {
+        crate::tiers::set_local_ladder_for_test(true);
+        crate::tiers::set_local_limit_fallback_for_test(fallback);
+        let mut t = empty(opened()).await;
+        t.host.hold.store(true, Ordering::SeqCst);
+        start_rules(&mut t.rig, &["trial-plan-draft"], json!({}), signed_out, false);
+        t.rig.machine.local = model;
+        t.rig
+            .machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Claude, out_for(600));
+        passes(&mut t, 3).await;
+        let case = (fallback, signed_out);
+        assert_eq!(t.host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
+    }
+}

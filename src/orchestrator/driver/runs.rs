@@ -417,7 +417,11 @@ impl ProjectLoop {
         if !self.flags.on("engine-start-rules").await {
             return None;
         }
-        let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+        let mut out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+        if Self::limit_fallback(shared) {
+            // Claude's usage limit holds nothing: its runs start on the local model.
+            out.remove(&EngineId::Claude);
+        }
         let used = engines_used_here(
             &shared.links.engine_choice,
             self.project.engines.as_ref(),
