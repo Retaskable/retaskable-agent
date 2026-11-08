@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::future::Future;
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::backlog::suggestions::{Suggestion, Verdict};
@@ -28,10 +28,19 @@ pub fn take_batch(all: &[Suggestion]) -> &[Suggestion] {
 }
 
 /// A verdict this project gave earlier, with its reason.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PastVerdict {
     pub verdict: Verdict,
     pub reason: String,
+}
+
+/// What the state file keeps under `vet` (06.7): the day of the last run, its counts by verdict name, and the
+/// last verdicts given (oldest first), so a restart keeps the history the prompt needs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VetRecord {
+    pub day: String,
+    pub counts: std::collections::BTreeMap<String, usize>,
+    pub recent: Vec<PastVerdict>,
 }
 
 /// A judged suggestion, cleaned.

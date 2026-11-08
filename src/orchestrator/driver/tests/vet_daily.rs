@@ -293,3 +293,40 @@ async fn the_same_day_isnt_run_twice() {
     assert_eq!(ops(&seen).iter().filter(|o| *o == "jobs_due").count(), 2);
     assert_eq!(sent_ids(&seen).len(), 3);
 }
+
+#[test]
+fn a_saved_vet_record_reloads_into_the_passes_memory_with_the_recent_list_capped() {
+    use crate::backlog::suggestions::Verdict;
+    use crate::vet::{PastVerdict, VetRecord};
+    let record = VetRecord {
+        day: "2026-11-03".into(),
+        counts: [("spam".to_string(), 35)].into(),
+        recent: (0..35)
+            .map(|i| PastVerdict {
+                verdict: Verdict::Spam,
+                reason: format!("r{i}"),
+            })
+            .collect(),
+    };
+    let st = super::super::vet_daily::State::from_record(Some(record));
+    assert_eq!(st.recent.len(), 30);
+    assert_eq!(st.recent[0].reason, "r5");
+    let last = st.last.unwrap();
+    assert_eq!((last.day.as_str(), last.counts.get("spam")), ("2026-11-03", Some(&35)));
+    assert!(super::super::vet_daily::State::from_record(None).last.is_none());
+}
+
+#[tokio::test]
+async fn a_run_is_written_to_the_state_file_and_shown_in_the_live_state() {
+    let (base, seen) = store(Knobs::default()).await;
+    let mut rig = live_rig(&base, true, true, &verdicts_json(&["a", "b"]));
+    minute(&mut rig).await;
+    settle().await;
+    assert!(!sent_ids(&seen).is_empty());
+    rig.machine.vet_rounds(&[]).await;
+    let saved = rig.machine.projects[0].store.vet().unwrap();
+    assert_eq!(saved.day, "2026-11-03");
+    assert_eq!(saved.recent.len(), 2);
+    let live = rig.machine.projects[0].live.snapshot();
+    assert_eq!(live.projects.values().next().unwrap().vet, Some(saved.counts));
+}

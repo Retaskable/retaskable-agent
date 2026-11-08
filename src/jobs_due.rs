@@ -223,8 +223,8 @@ mod tests {
         let buf = Buf::default();
         let sub = tracing_subscriber::fmt().with_writer(buf.clone()).finish();
         let _g = tracing::subscriber::set_default(sub);
-        // Other tests running at once may have cached this callsite as disabled while no subscriber was set
-        // (and can do so again after a rebuild), so ask again until the line shows.
+        // Other tests running in parallel may have cached this callsite as disabled while no
+        // subscriber was set, so rebuild the cache and ask again until the line shows up.
         for _ in 0..50 {
             tracing::callsite::rebuild_interest_cache();
             asker("http://127.0.0.1:1".to_string(), Arc::default()).ask().await;

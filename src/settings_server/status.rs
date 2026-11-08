@@ -146,6 +146,29 @@ pub struct OrchestratorProject {
     pub fix_main: Option<String>,
     /// Why the last main sync didn't start, when it didn't.
     pub sync_main: Option<String>,
+    /// The last vet run, "12 suggestions: 2 promising, 1 duplicate, 9 not promising"; absent before a run.
+    pub vet: Option<String>,
+}
+
+/// The vet pass's counts by verdict as one line; zero counts are left out.
+fn vet_line(counts: &std::collections::BTreeMap<String, usize>) -> String {
+    let n = |k: &str| counts.get(k).copied().unwrap_or(0);
+    let total: usize = counts.values().sum();
+    let parts: Vec<String> = [
+        ("promising", "promising", "promising"),
+        ("duplicate", "duplicate", "duplicates"),
+        ("not_promising", "not promising", "not promising"),
+        ("spam", "spam", "spam"),
+    ]
+    .iter()
+    .filter(|(k, ..)| n(k) > 0)
+    .map(|(k, one, many)| format!("{} {}", n(k), if n(k) == 1 { one } else { many }))
+    .collect();
+    format!(
+        "{total} suggestion{}: {}",
+        if total == 1 { "" } else { "s" },
+        parts.join(", ")
+    )
 }
 
 fn orchestrator_note(live: &LiveState) -> String {
@@ -337,6 +360,7 @@ pub fn build(
                     decision: p.decision.clone(),
                     fix_main: p.fix_main.clone(),
                     sync_main: p.sync_main.clone(),
+                    vet: p.vet.as_ref().map(vet_line),
                     chores: p.chores.map(|c| format!("Chores today: {} of {}", c.today, c.limit)),
                 })
                 .collect(),
