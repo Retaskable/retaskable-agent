@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 pub(super) const COOKIE_NAME: &str = "retaskable_settings_session";
 pub(super) const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
+/// How long a sign-in token from `settings_link` stays good.
+pub(super) const TOKEN_TTL_SECS: u64 = 5 * 60;
 const FAILURES_BEFORE_A_WAIT: u32 = 5;
 const FIRST_WAIT_SECS: u64 = 60;
 const MAX_WAIT_SECS: u64 = 60 * 60;
@@ -36,18 +38,36 @@ pub(super) struct FailureState {
 
 #[derive(Default)]
 pub(super) struct InnerState {
-    /// A tray-minted token, good once before it expires (section 4.2). Nothing in this agent
-    /// mints one yet — the tray's own "Settings…" link isn't ported — so this stays empty
-    /// outside tests until it is.
+    /// A token made by [`SettingsServer::settings_link`], good once before it expires (section 4.2).
     pub(super) tokens: HashMap<String, u64>,
     pub(super) sessions: HashMap<String, Session>,
     pub(super) failures: HashMap<IpAddr, FailureState>,
 }
 
 impl SettingsServer {
+    /// A new sign-in token, good once within [`TOKEN_TTL_SECS`] (section 4.2).
+    fn mint_token(&self) -> String {
+        let token = random_hex(32);
+        let expires_at = (self.now)() + TOKEN_TTL_SECS;
+        let mut state = self.state.lock().unwrap();
+        state.tokens.retain(|_, expires| *expires > (self.now)());
+        state.tokens.insert(token.clone(), expires_at);
+        token
+    }
+
+    /// The address that opens the settings page signed in: `http://127.0.0.1:<port>/settings#<token>`,
+    /// with a token made for this call (section 4.2). The fragment never reaches a log or a `Referer`.
+    pub fn settings_link(&self) -> String {
+        format!("http://127.0.0.1:{}/settings#{}", self.port, self.mint_token())
+    }
+
     /// A missing, wrong, used or old token is refused the same way (section 6): once checked,
-    /// right or wrong, it's gone.
-    pub(super) fn verify_token(&self, token: &str) -> bool {
+    /// right or wrong, it's gone. A token is taken only from this computer itself (section 4.2),
+    /// so one from another address is refused without being used up.
+    pub(super) fn verify_token(&self, token: &str, from: IpAddr) -> bool {
+        if !from.is_loopback() {
+            return false;
+        }
         let now = (self.now)();
         let mut state = self.state.lock().unwrap();
         matches!(state.tokens.remove(token), Some(expires_at) if expires_at > now)

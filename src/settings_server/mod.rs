@@ -26,6 +26,7 @@ use crate::store::MachineStore;
 use crate::tags;
 
 mod auth;
+mod first_run;
 mod save;
 mod status;
 use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
@@ -237,7 +238,7 @@ async fn post_session(
         return bad_request("No JSON body.");
     };
     let signed_in = match (&req.token, &req.password) {
-        (Some(token), _) => settings.verify_token(token),
+        (Some(token), _) => settings.verify_token(token, addr),
         (None, Some(password)) => settings.verify_password(password),
         (None, None) => false,
     };
