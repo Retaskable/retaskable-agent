@@ -976,6 +976,7 @@ mod restart;
 mod runs;
 mod settling;
 mod starter;
+mod step_events;
 mod triage;
 mod trial;
 mod vet_daily;

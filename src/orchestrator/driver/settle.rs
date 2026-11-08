@@ -705,7 +705,11 @@ impl ProjectLoop {
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means
     /// ([`moved`](Self::moved)). A step that panicked is an `error` event and leaves the run as it was.
     pub(super) async fn take_finished(&mut self, pool: &mut LanePool, links: &Links) {
+        // Keeps `watchdog-anomaly-rules` fresh for `step_started`, which can't wait on a request.
+        self.flags.on("watchdog-anomaly-rules").await;
         for (item, after) in self.running.finished() {
+            let outcome = after.map_or("panicked", |a| state_name(a.state));
+            self.step_ended(&item, after.is_some(), outcome);
             let Some(run) = self.runs.get_mut(&item) else { continue };
             let Some(after) = after else {
                 tracing::error!("{}: a step for {item} panicked", self.id);
@@ -732,11 +736,6 @@ impl ProjectLoop {
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {
-            let start = event::StepStart {
-                item: Some(item_id.clone()),
-                step: Some(state_name(run.state).into()),
-                ..Default::default()
-            };
             let request = StepRequest {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),
@@ -746,7 +745,7 @@ impl ProjectLoop {
             };
             // No step built for this state yet: the item waits where it is, and nothing is logged.
             let Some(step) = starter.advance(request) else { continue };
-            self.events.add_in(&self.id, Event::StepStart(start));
+            self.step_started(&item_id, &run);
             self.running.spawn(item_id, step);
         }
     }

@@ -297,6 +297,8 @@ pub struct ProjectLoop {
     pub(super) repo: Option<u64>,
     /// The steps running for this project's items.
     pub(super) running: Running,
+    /// The steps in `running`, by item, for their `step_end`.
+    pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
     /// What the chat was told about approved drafts that is still waiting on staging.
@@ -403,6 +405,7 @@ impl ProjectLoop {
             live,
             repo: None,
             running: Running::default(),
+            open_steps: Default::default(),
             seen: report::Seen::default(),
             follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
