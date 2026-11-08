@@ -201,3 +201,15 @@ async fn an_own_network_address_is_a_host_only_while_access_is_on_at_the_right_p
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn an_own_address_is_a_404_with_the_settings_page_flag_off_even_while_access_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = server(dir.path(), on());
+    settings.set_settings_page_flag(false);
+    let remote = app_from(settings, ip("192.168.1.50"));
+    assert_eq!(
+        status_of(&remote, "GET", "/settings", &format!("{OWN4}:4700")).await,
+        StatusCode::NOT_FOUND
+    );
+}

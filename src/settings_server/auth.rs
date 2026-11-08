@@ -179,7 +179,8 @@ impl SettingsServer {
 
     /// Its Host is this computer's own, at the port it answered on (section 4.3): no DNS
     /// rebinding. `127.0.0.1`, `localhost` and `[::1]` always; while network access is on, also
-    /// an IP literal that is one of this computer's own interface addresses. Never another name.
+    /// an IP literal that is one of this computer's own interface addresses, behind the
+    /// `settings-page` flag (Off: loopback only, as before). Never another name.
     pub(super) fn host_is_allowed(&self, host_header: &str) -> bool {
         let (host, port) = split_host_port(host_header);
         if let Some(port) = port
@@ -198,7 +199,9 @@ impl SettingsServer {
         let Ok(ip) = literal.parse::<IpAddr>() else {
             return false;
         };
-        self.network_on() && (self.own_addresses)().contains(&ip)
+        self.settings_page_flag.load(std::sync::atomic::Ordering::Relaxed)
+            && self.network_on()
+            && (self.own_addresses)().contains(&ip)
     }
 }
 
