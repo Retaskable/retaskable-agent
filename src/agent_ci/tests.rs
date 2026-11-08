@@ -246,4 +246,247 @@ mod stubbed {
         let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
         assert_eq!(keys["p"].iter().map(|k| k.pr).collect::<Vec<_>>(), [1]);
     }
+
+    /// A rig whose origin serves pull requests 7 and 8 (a clean change) and 9 (conflicting with main), with a `gh`
+    /// that logs its `api` calls and a `docker` that logs its calls and exits with `docker_body`'s status.
+    fn pr_rig(docker_body: &str) -> Rig {
+        let mut r = rig(
+            &["image", "checks.sh"],
+            &[],
+            false,
+            r#"[{"number":7,"isDraft":false,"labels":[],"headRefOid":"h7"},
+                {"number":8,"isDraft":false,"labels":[],"headRefOid":"h8"}]"#,
+        );
+        let root = r._dir.path().to_path_buf();
+        let (work, origin) = (root.join("work"), root.join("origin.git"));
+        std::fs::write(work.join("a"), "pr").unwrap();
+        run(&work, &["commit", "-qam", "pr change"]);
+        run(&work, &["push", "-q", "origin", "pr"]);
+        run(&work, &["checkout", "-q", "main"]);
+        std::fs::write(work.join("a"), "main").unwrap();
+        run(&work, &["commit", "-qam", "main change"]);
+        run(&work, &["push", "-q", "origin", "main"]);
+        // 7 and 8 are clean (a branch off the old main touching another file), 9 conflicts.
+        run(&work, &["checkout", "-qb", "clean", "HEAD~1"]);
+        std::fs::write(work.join("b"), "b").unwrap();
+        run(&work, &["add", "b"]);
+        run(&work, &["commit", "-qm", "clean"]);
+        run(&work, &["push", "-q", "origin", "clean"]);
+        run(&origin, &["update-ref", "refs/pull/7/head", "refs/heads/clean"]);
+        run(&origin, &["update-ref", "refs/pull/8/head", "refs/heads/clean"]);
+        run(&origin, &["update-ref", "refs/pull/9/head", "refs/heads/pr"]);
+        let bin = root.join("bin");
+        let log = root.join("calls.log");
+        script(
+            &bin,
+            "docker",
+            &format!(
+                "echo \"docker $*\" >> {l}\n[ \"$1\" = run ] || exit 0\n{docker_body}",
+                l = log.display()
+            ),
+        );
+        let json = r#"[{"number":7,"isDraft":false,"labels":[],"headRefOid":"h7"}]"#;
+        script(
+            &bin,
+            "gh",
+            &format!(
+                "if [ \"$1\" = api ]; then echo \"gh $*\" >> {l}; [ \"$3\" = GET ] && echo '[]'; exit 0; fi\ncat <<'EOF'\n{json}\nEOF",
+                l = log.display()
+            ),
+        );
+        r.ci.programs.docker = bin.join("docker").into();
+        r.ci.programs.gh = bin.join("gh").into();
+        r
+    }
+
+    fn key(pr: u64, head: &str) -> CheckKey {
+        CheckKey {
+            pr,
+            head: head.into(),
+            main: "m".repeat(40),
+        }
+    }
+
+    async fn go(r: &mut Rig, keys: Vec<CheckKey>) -> Vec<tokio::task::JoinHandle<()>> {
+        let env = Env::from_map(Default::default());
+        r.ci.poll(&r.cfg, &env).await;
+        let data = r._dir.path().join("data");
+        r.ci.start(&r.cfg, &env, &data, [("p".to_string(), keys)].into()).await
+    }
+
+    fn calls(r: &Rig) -> String {
+        std::fs::read_to_string(r._dir.path().join("calls.log")).unwrap_or_default()
+    }
+
+    fn events(r: &Rig) -> String {
+        let dir = r._dir.path().join("data/projects/p/events");
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_ready_pull_request_gets_pending_then_success_and_the_events() {
+        let mut r = pr_rig("exit 0");
+        for t in go(&mut r, vec![key(7, "h7")]).await {
+            t.await.unwrap();
+        }
+        let c = calls(&r);
+        let (pending, success) = (c.find("state=pending").unwrap(), c.find("state=success").unwrap());
+        assert!(
+            pending < success && !c.contains("state=failure") && !c.contains("/comments"),
+            "{c}"
+        );
+        assert!(
+            c.contains("docker run") && c.contains("--name retaskable-ci-o-p-h7"),
+            "{c}"
+        );
+        let ev = events(&r);
+        assert!(
+            ev.contains(r#""state":"started""#) && ev.contains(r#""state":"finished""#),
+            "{ev}"
+        );
+        assert!(ev.contains("PR #7") && ev.contains(r#""key":"h7-mmmmmmm""#), "{ev}");
+        let ci = r.live.snapshot().ci.unwrap();
+        assert!(ci.checks.is_empty() && ci.last_result.unwrap()["ok"] == true);
+        assert_eq!(
+            std::fs::read_dir(r._dir.path().join("data/projects/p/ci"))
+                .unwrap()
+                .count(),
+            0
+        );
+        // A key no longer listed (this one isn't) is forgotten at the next poll.
+        let env = Env::from_map(Default::default());
+        r.ci.poll(&r.cfg, &env).await;
+        assert!(r.ci.seen.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_check_posts_failure_and_one_comment() {
+        let mut r = pr_rig("echo boom; exit 1");
+        for t in go(&mut r, vec![key(7, "h7")]).await {
+            t.await.unwrap();
+        }
+        let c = calls(&r);
+        assert!(c.contains("state=failure") && !c.contains("state=success"), "{c}");
+        assert_eq!(c.matches("issues/7/comments").count(), 2, "{c}"); // the lookup and the one post
+        assert!(c.contains("body=agent CI failed on h7."), "{c}");
+        assert!(c.contains("boom"), "{c}");
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_pull_request_fails_without_a_container() {
+        let mut r = pr_rig("exit 0");
+        for t in go(&mut r, vec![key(9, "h9")]).await {
+            t.await.unwrap();
+        }
+        let c = calls(&r);
+        assert!(c.contains("state=failure") && c.contains("conflicts with main"), "{c}");
+        assert!(!c.contains("docker run"), "{c}");
+        assert!(c.contains("issues/9/comments"), "{c}");
+    }
+
+    #[tokio::test]
+    async fn one_slot_runs_two_pull_requests_one_after_the_other() {
+        let mut r = pr_rig("exit 0");
+        let log = r._dir.path().join("calls.log");
+        let body = format!("echo begin >> {l}; sleep 0.4; echo end >> {l}", l = log.display());
+        script(
+            &r._dir.path().join("bin"),
+            "docker",
+            &format!(
+                "echo \"docker $*\" >> {l}\n[ \"$1\" = run ] || exit 0\n{body}",
+                l = log.display()
+            ),
+        );
+        let keys = vec![key(7, "h7"), key(8, "h8")];
+        let first = go(&mut r, keys.clone()).await;
+        assert_eq!(first.len(), 1, "only one permit");
+        let c = r.live.snapshot().ci.unwrap();
+        assert_eq!(c.slots, 1);
+        // Still running: the Now tab lists it and the second key finds no permit.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let live = r.live.snapshot().ci.unwrap();
+        assert_eq!((live.running, live.checks.len(), live.checks[0].pr), (1, 1, 7));
+        assert!(go(&mut r, keys.clone()).await.is_empty());
+        for t in first {
+            t.await.unwrap();
+        }
+        let second = go(&mut r, keys).await;
+        assert_eq!(second.len(), 1);
+        for t in second {
+            t.await.unwrap();
+        }
+        let lines: Vec<_> = calls(&r)
+            .lines()
+            .filter(|l| *l == "begin" || *l == "end")
+            .map(String::from)
+            .collect();
+        assert_eq!(lines, ["begin", "end", "begin", "end"]);
+    }
+
+    #[tokio::test]
+    async fn recovery_removes_a_leftover_directory_and_its_container() {
+        let r = pr_rig("exit 0");
+        let root = r._dir.path().join("data/projects/p/ci");
+        std::fs::create_dir_all(root.join("check-1")).unwrap();
+        std::fs::write(root.join("check-1/f"), "x").unwrap();
+        std::fs::write(root.join("check-1.name"), "retaskable-ci-o-p-abc1234").unwrap();
+        r.ci.recover(&r.cfg, &r._dir.path().join("data")).await;
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert!(
+            calls(&r).contains("docker rm -f retaskable-ci-o-p-abc1234"),
+            "{}",
+            calls(&r)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shrink_while_a_check_runs_does_not_leave_extra_permits() {
+        let mut r = pr_rig("sleep 0.4");
+        let env = Env::from_map(Default::default());
+        let tasks = go(&mut r, vec![key(7, "h7")]).await;
+        // Docker "down" for one poll while the check holds the only permit.
+        r.cfg.machine.ci_slots = 0;
+        r.ci.poll(&r.cfg, &env).await;
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(r.ci.slot().available_permits(), 0);
+        r.cfg.machine.ci_slots = 1;
+        r.ci.poll(&r.cfg, &env).await;
+        assert_eq!(r.ci.slot().available_permits(), 1);
+        assert_eq!(r.live.snapshot().ci.unwrap().running, 0);
+    }
+
+    #[tokio::test]
+    async fn a_finished_check_does_not_rerun_after_a_poll_that_could_not_read_the_list() {
+        let mut r = pr_rig("exit 0");
+        let env = Env::from_map(Default::default());
+        let data = r._dir.path().join("data");
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        for t in r.ci.start(&r.cfg, &env, &data, keys).await {
+            t.await.unwrap();
+        }
+        let count = |r: &Rig| {
+            (
+                calls(r).matches("state=pending").count(),
+                calls(r).matches("docker run").count(),
+            )
+        };
+        assert_eq!(count(&r), (1, 1));
+        // Still listed: not run again.
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
+        // A poll that can't read the list (ciSlots 0), then a healthy one with the same key listed.
+        r.cfg.machine.ci_slots = 0;
+        r.ci.poll(&r.cfg, &env).await;
+        r.cfg.machine.ci_slots = 1;
+        let keys = r.ci.poll(&r.cfg, &env).await;
+        assert_eq!(keys["p"].len(), 1);
+        assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
+        assert_eq!(count(&r), (1, 1));
+    }
 }
