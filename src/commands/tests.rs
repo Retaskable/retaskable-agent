@@ -5,8 +5,6 @@ use crate::view::ProjectView;
 
 fn view() -> AgentView {
     AgentView {
-        machine: "pc".into(),
-        tags: vec![],
         projects: vec![ProjectView {
             id: "one".into(),
             github_repo: "o/one".into(),
@@ -18,14 +16,7 @@ fn view() -> AgentView {
             play_command: String::new(),
         }],
         version: "9.9.9".into(),
-        lanes: 1,
-        chore_lane: None,
-        lane_sizes: Default::default(),
-        paused: Default::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-        settings: Default::default(),
+        ..AgentView::blank()
     }
 }
 
