@@ -36,6 +36,7 @@ mod claim;
 mod ideas_daily;
 mod ideas_round;
 mod machine;
+mod panic;
 mod playtest_round;
 mod project;
 mod report;

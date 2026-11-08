@@ -107,6 +107,7 @@ async fn pass(rig: &mut Rig, starter: &dyn RunStarter, now: Instant) {
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
@@ -278,6 +279,7 @@ async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
@@ -357,6 +359,7 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
@@ -743,6 +746,7 @@ async fn start_pass_with(
     let mut limits = limits;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut out,
         engine_limits: &mut limits,

@@ -37,6 +37,7 @@ impl ProjectLoop {
         if gate.is_none()
             && self.flags.on("weekly-cutoff").await
             && shared.engine_limits.week_cut_off(std::time::Instant::now())
+            && !Self::limit_fallback(shared)
         {
             return None;
         }
@@ -44,7 +45,7 @@ impl ProjectLoop {
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
-            let model_full = self.model_full(starter, caps_on);
+            let model_full = self.model_full(starter, caps_on) || self.local_queue_full(shared);
             let asks = self
                 .decide_gated(pool, shared, gate.as_ref(), model_full)
                 .contains(&Action::AskForWork);

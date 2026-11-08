@@ -260,6 +260,7 @@ async fn beat(rig: &mut Rig) {
     let m = &mut rig.machine;
     let shared = Shared {
         links: &m.links,
+        local: &m.local,
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
