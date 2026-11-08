@@ -23,6 +23,24 @@ impl ProjectLoop {
         takeover_in(&self.project, pool, shared, started_on, any_engine)
     }
 
+    /// [`Self::takeover`], except for a session that stays on the local model.
+    pub(super) fn takeover_unless_local(
+        &self,
+        pool: &LanePool,
+        shared: &Shared<'_>,
+        (item_id, session, engine): (&str, &str, EngineId),
+        any_engine: bool,
+    ) -> Option<EngineId> {
+        let local = self.stays_local(shared, item_id, session, engine);
+        self.takeover(pool, shared, engine, any_engine).filter(|_| !local)
+    }
+
+    /// Keeps the data folder, where session transcripts are.
+    pub(super) fn with_data_dir(mut self, dir: &std::path::Path) -> Self {
+        self.data_dir = Some(dir.to_path_buf());
+        self
+    }
+
     /// Whether `session` of `item_id` is a Claude session that started on the local model while `local-limit-fallback`
     /// is in force with the model up: it resumes on the model whatever Claude's limit says (section 7.1).
     pub(super) fn stays_local(&self, shared: &Shared<'_>, item_id: &str, session: &str, engine: EngineId) -> bool {

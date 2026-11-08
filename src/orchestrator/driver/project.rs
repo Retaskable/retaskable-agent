@@ -458,7 +458,7 @@ impl ProjectLoop {
         let store = Store::load(&project_dir).with_context(|| format!("loading {}", project_dir.display()))?;
         let mut events = EventLog::new();
         events.open(&project_dir.join("events"));
-        let mut lp = Self::new(
+        Ok(Self::new(
             id,
             project.clone(),
             store,
@@ -467,9 +467,8 @@ impl ProjectLoop {
             live,
             max_resume_context_tokens,
         )
-        .with_guard(guard);
-        lp.data_dir = Some(dir.to_path_buf());
-        Ok(lp)
+        .with_guard(guard)
+        .with_data_dir(dir))
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
@@ -895,9 +894,7 @@ impl ProjectLoop {
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
         let fall_over = self.flags.on("engine-fall-over").await;
-        let takeover = self
-            .takeover(pool, shared, engine, fall_over)
-            .filter(|_| !(resume.is_some() && self.stays_local(shared, item_id, &session_id, engine)));
+        let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine), fall_over);
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
