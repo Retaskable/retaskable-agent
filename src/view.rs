@@ -741,9 +741,13 @@ mod tests {
     }
 
     fn reporting_view(on: bool) -> AgentView {
+        reporting_view_in(on, PathBuf::new())
+    }
+
+    fn reporting_view_in(on: bool, dir: PathBuf) -> AgentView {
         let mut v = view(vec![project("a", "o/a")]);
         v.settings = HelloSettings::new(
-            PathBuf::new(),
+            dir,
             crate::env::Env::empty(),
             4700,
             Arc::new(crate::flags::Flags::fixed(if on {
@@ -807,17 +811,7 @@ mod tests {
         let mut machine = crate::store::MachineStore::load(dir.path()).unwrap();
         machine.add_spend("a", 1.25).unwrap();
         for on in [true, false] {
-            let mut v = reporting_view(on);
-            v.settings = HelloSettings::new(
-                dir.path().to_path_buf(),
-                crate::env::Env::empty(),
-                4700,
-                Arc::new(crate::flags::Flags::fixed(if on {
-                    &[SNAPSHOT_REPORTING_FLAG]
-                } else {
-                    &[]
-                })),
-            );
+            let v = reporting_view_in(on, dir.path().to_path_buf());
             let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
             assert_eq!(o.get("spendTodayUsd").is_some(), on);
             assert_eq!(o.get("dailyUsd").is_some(), on);
@@ -939,17 +933,7 @@ mod tests {
     fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
         let dir = tempfile::tempdir().unwrap();
         let mk = |on: bool| {
-            let mut v = reporting_view(on);
-            v.settings = HelloSettings::new(
-                dir.path().to_path_buf(),
-                crate::env::Env::empty(),
-                4700,
-                Arc::new(crate::flags::Flags::fixed(if on {
-                    &[SNAPSHOT_REPORTING_FLAG]
-                } else {
-                    &[]
-                })),
-            );
+            let v = reporting_view_in(on, dir.path().to_path_buf());
             v
         };
         let cursor = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("cursor").cloned();
