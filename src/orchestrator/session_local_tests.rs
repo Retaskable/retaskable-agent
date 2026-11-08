@@ -253,12 +253,12 @@ fn allowed_usage() -> Option<Value> {
     Some(serde_json::json!({"status": "allowed", "resetsAt": i64::MAX}))
 }
 
+/// Starts a fresh session with Claude limited and `allowed` saved usage; returns the arguments `claude` got.
 #[cfg(unix)]
-#[tokio::test]
-async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_the_saved_reading_says() {
+async fn limited_start(flag: bool, local: LocalModel) -> String {
     crate::tiers::set_local_ladder_for_test(true);
-    crate::tiers::set_local_limit_fallback_for_test(true);
-    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, LocalModel::up());
+    crate::tiers::set_local_limit_fallback_for_test(flag);
+    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
     recording_claude(&rig, 0);
     rig.starter
         .sessions
@@ -268,7 +268,13 @@ async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_
     request.usage = allowed_usage();
     rig.starter.start(request).unwrap();
     rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
+    std::fs::read_to_string(&rig.args).unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_the_saved_reading_says() {
+    let args = limited_start(true, LocalModel::up()).await;
     assert!(
         args.contains("BASE=http://127.0.0.1:11436") && args.contains("--model sonnet"),
         "{args}"
@@ -279,19 +285,7 @@ async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_
 #[tokio::test]
 async fn with_the_limit_flag_off_or_local_down_a_limited_claude_starts_as_it_does_today() {
     for (flag, local) in [(false, LocalModel::up()), (true, LocalModel::off())] {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_local_limit_fallback_for_test(flag);
-        let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
-        recording_claude(&rig, 0);
-        rig.starter
-            .sessions
-            .limits()
-            .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
-        let (mut request, mut rx) = request();
-        request.usage = allowed_usage();
-        rig.starter.start(request).unwrap();
-        rx.recv().await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
+        let args = limited_start(flag, local).await;
         assert!(args.contains("--model sonnet") && !args.contains("BASE=http"), "{args}");
     }
 }
