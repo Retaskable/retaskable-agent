@@ -98,19 +98,20 @@ fn review_models(
 
 /// The local model's slot for a review session, if it runs there: a session already set to `local` waits for the
 /// slot; a scout whose tier isn't `local` takes it when it is free right now (and then runs `local`), else
-/// carries on at once. Cursor never takes it. The slot is held until the returned value is dropped.
+/// carries on at once (that grab is behind `local-chores-scouts`; the wait-for-slot branch behind the ladder).
+/// Cursor, pi and Codex never take it. The slot is held until the returned value is dropped.
 async fn claim_local(
     local: &LocalModel,
-    ladder: bool,
+    (ladder, grab): (bool, bool),
     program: EngineId,
     role: Role,
     spec: &mut SessionSpec,
 ) -> Option<LocalSlot> {
-    if !ladder || program != EngineId::Claude {
+    if program != EngineId::Claude {
         None
-    } else if spec.model == LOCAL {
+    } else if ladder && spec.model == LOCAL {
         Some(local.take().await)
-    } else if role == Role::Scout && local.available() {
+    } else if grab && spec.model != LOCAL && role == Role::Scout && local.available() {
         local.try_take().inspect(|_| {
             spec.model = LOCAL.to_string();
             spec.local = Some(local.target());
@@ -127,7 +128,7 @@ async fn run_session(
     job: &Job,
     bins: &[&Placement],
     hit: &Hit,
-    ladder: bool,
+    ladder: (bool, bool),
     role: Role,
     mut spec: SessionSpec,
 ) -> Result<SessionResult> {
@@ -240,6 +241,7 @@ pub(super) async fn review(
         let info = parse_scout_info(SCOUT_INFO)?;
         // With `local-tier-ladder` Off, scouts run on Sonnet and the reviewer on Opus.
         let ladder = job.flags.on("local-tier-ladder").await;
+        let grab = job.flags.on("local-chores-scouts").await;
         let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
         let (scout_model, top_model) = review_models(
             ladder,
@@ -276,7 +278,7 @@ pub(super) async fn review(
         let bins = [&scout_at, &reviewer_at];
         let hit = Hit::default();
         let review = review_lane(cwd, &input, |role, spec| {
-            run_session(job, &bins, &hit, ladder, role, spec)
+            run_session(job, &bins, &hit, (ladder, grab), role, spec)
         })
         .await;
         if let Err(e) = &review
@@ -372,7 +374,7 @@ mod tests {
 
     async fn claim(
         local: &LocalModel,
-        ladder: bool,
+        ladder: (bool, bool),
         program: EngineId,
         role: Role,
         model: &str,
@@ -388,14 +390,14 @@ mod tests {
         let local = up();
         let mut first = test_spec(Path::new("."), "p");
         first.model = SONNET.into();
-        let held = claim_local(&local, true, EngineId::Claude, Role::Scout, &mut first).await;
+        let held = claim_local(&local, (false, true), EngineId::Claude, Role::Scout, &mut first).await;
         assert!(held.is_some());
         assert_eq!(first.model, LOCAL);
         assert_eq!(first.local, Some(local.target()));
         // The first still holds the slot while the others start.
         let mut held = test_spec(Path::new("."), "p");
         held.model = SONNET.into();
-        let slot = claim_local(&local, true, EngineId::Claude, Role::Scout, &mut held).await;
+        let slot = claim_local(&local, (false, true), EngineId::Claude, Role::Scout, &mut held).await;
         assert!(slot.is_none());
         assert_eq!((held.model.as_str(), held.local), (SONNET, None));
     }
@@ -404,9 +406,10 @@ mod tests {
     async fn scouts_stay_on_sonnet_with_local_down_off_the_flag_or_on_cursor() {
         let off = LocalModel::off();
         for (local, ladder, program) in [
-            (&off, true, EngineId::Claude),
-            (&up(), false, EngineId::Claude),
-            (&up(), true, EngineId::Cursor),
+            (&off, (true, true), EngineId::Claude),
+            (&up(), (true, false), EngineId::Claude),
+            (&up(), (false, false), EngineId::Claude),
+            (&up(), (true, true), EngineId::Cursor),
         ] {
             let (spec, took) = claim(local, ladder, program, Role::Scout, SONNET).await;
             assert_eq!((spec.model.as_str(), spec.local, took), (SONNET, None, false));
@@ -414,11 +417,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scout_takes_the_free_slot_behind_the_new_flag_whatever_the_ladder_says() {
+        for ladder in [false, true] {
+            let (spec, took) = claim(&up(), (ladder, true), EngineId::Claude, Role::Scout, SONNET).await;
+            assert_eq!((spec.model.as_str(), took), (LOCAL, true));
+        }
+        // The wait-for-slot branch stays ladder-only.
+        let (spec, took) = claim(&up(), (false, true), EngineId::Claude, Role::Scout, LOCAL).await;
+        assert_eq!((spec.model.as_str(), took), (LOCAL, false));
+    }
+
+    #[tokio::test]
     async fn the_reviewer_never_takes_the_slot_unless_its_tier_is_local() {
         let local = up();
-        let (spec, took) = claim(&local, true, EngineId::Claude, Role::Reviewer, OPUS).await;
+        let (spec, took) = claim(&local, (true, true), EngineId::Claude, Role::Reviewer, OPUS).await;
         assert_eq!((spec.model.as_str(), took), (OPUS, false));
-        let (spec, took) = claim(&local, true, EngineId::Claude, Role::Reviewer, LOCAL).await;
+        let (spec, took) = claim(&local, (true, true), EngineId::Claude, Role::Reviewer, LOCAL).await;
         assert_eq!((spec.model.as_str(), took), (LOCAL, true));
     }
 

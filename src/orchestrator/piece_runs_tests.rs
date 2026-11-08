@@ -945,7 +945,12 @@ async fn with_the_sync_flag_off_a_sync_piece_runs_like_any_other() {
 
 /// The model a `kind` chore's session is listed with, on a rig whose local model is `local` and `chore-rotation` On.
 async fn model_of_chore(local: &crate::local_model::LocalModel, kind: &str) -> String {
-    crate::tiers::set_local_ladder_for_test(true);
+    model_of_chore_with(local, kind, false, true).await
+}
+
+async fn model_of_chore_with(local: &crate::local_model::LocalModel, kind: &str, ladder: bool, grab: bool) -> String {
+    crate::tiers::set_local_ladder_for_test(ladder);
+    crate::tiers::set_local_chores_scouts_for_test(grab);
     let (url, _log) = lock_store("free").await;
     let mut r = rig(&[&format!("sleep 1; {COMMIT}")], &answer("pr_opened", ""));
     chore_rig(&mut r);
@@ -971,6 +976,24 @@ async fn a_tidy_chore_with_the_local_slot_busy_runs_on_the_chore_tier_at_once() 
     let local = crate::local_model::LocalModel::up();
     let _held = local.take().await;
     assert_eq!(model_of_chore(&local, "tidy").await, "sonnet");
+}
+
+#[tokio::test]
+async fn a_chore_takes_the_free_slot_only_behind_local_chores_scouts() {
+    for (ladder, grab, local_run) in [
+        (false, true, true),
+        (true, true, true),
+        (true, false, false),
+        (false, false, false),
+    ] {
+        let local = crate::local_model::LocalModel::up();
+        let model = model_of_chore_with(&local, "tidy", ladder, grab).await;
+        assert_eq!(
+            model == "local",
+            local_run,
+            "ladder {ladder}, chores-scouts {grab}: {model}"
+        );
+    }
 }
 
 #[tokio::test]

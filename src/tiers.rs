@@ -230,6 +230,26 @@ pub fn set_local_one_slot_for_test(on: bool) {
     ONE_SLOT_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
+/// Whether the `local-chores-scouts` flag was On at its last answer; Off until the flags client is handed over.
+pub fn local_chores_scouts_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = CHORES_SCOUTS_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("local-chores-scouts"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHORES_SCOUTS_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-chores-scouts` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_local_chores_scouts_for_test(on: bool) {
+    CHORES_SCOUTS_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
 /// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.
 pub fn model_caps_on() -> bool {
     FLAG.get().is_some_and(|f| f.last("model-concurrency-caps"))
