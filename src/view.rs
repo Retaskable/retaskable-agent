@@ -757,7 +757,7 @@ mod tests {
         v.live.set_concurrency(3);
         assert_eq!(
             orch(&v),
-            json!({ "status": "running", "machine": "pc", "concurrency": 3 })
+            json!({ "status": "running", "machine": "pc", "concurrency": 3, "spendTodayUsd": 0.0, "dailyUsd": 0.0 })
         );
         v.live.set_limit(
             "a",
