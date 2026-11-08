@@ -28,7 +28,7 @@ use crate::tags;
 
 mod auth;
 mod first_run;
-mod save;
+pub(crate) mod save;
 mod status;
 use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
 pub(crate) use save::engine_choice_json;
@@ -36,6 +36,18 @@ use save::{SettingsUpdate, save_error_response};
 pub use status::StatusSource;
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// agent-settings.md section 3.2: the environment variables the settings page greys out.
+pub(crate) const AGENT_ENV_VARS: [&str; 8] = [
+    "RETASKABLE_PORT",
+    "RETASKABLE_POLL_SEC",
+    "RETASKABLE_TAGS",
+    "RETASKABLE_LOCAL_MODEL",
+    "RETASKABLE_LOCAL_URL",
+    "RETASKABLE_ENGINES",
+    "RETASKABLE_CURSOR_MODELS",
+    "RETASKABLE_NETWORK_PASSWORD",
+];
 
 static SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
 
@@ -95,6 +107,13 @@ impl SettingsServer {
             state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
             saved: OnceLock::new(),
+        }
+    }
+
+    fn saver(&self) -> save::Saver<'_> {
+        save::Saver {
+            dir: &self.dir,
+            env: &self.env,
         }
     }
 
@@ -275,7 +294,7 @@ async fn post_settings(
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
-    match settings.apply(&update) {
+    match settings.saver().apply(&update) {
         Ok(()) => {
             if let Some(signal) = settings.saved.get() {
                 signal.fire();
