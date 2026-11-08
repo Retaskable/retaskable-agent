@@ -13,7 +13,7 @@ use crate::config::GalleryConfig;
 use crate::lane_pool::LaneSizes;
 use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
-use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState, ProjectView};
+use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState};
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {
@@ -100,16 +100,7 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         tags: vec!["windows".into()],
         projects: projects
             .iter()
-            .map(|id| ProjectView {
-                id: id.to_string(),
-                github_repo: format!("o/{id}"),
-                backlog_path: "backlog".into(),
-                repo_path: PathBuf::new(),
-                worktrees_dir: PathBuf::new(),
-                base_branch: String::new(),
-                galleries: vec![],
-                play_command: String::new(),
-            })
+            .map(|id| crate::test_support::project_view(id))
             .collect(),
         version: "9.9.9".into(),
         lanes: 2,

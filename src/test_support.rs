@@ -369,3 +369,17 @@ pub(crate) fn stub_engines(root: &Path, out: &str, claude_step: &str, missing: &
     let vars = stub_engine_vars(root, out, claude_step, missing);
     crate::env::Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone()))
 }
+
+/// A `ProjectView` with only an id (and the repo derived from it), shared by the tests that need projects in an `AgentView`.
+pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
+    crate::view::ProjectView {
+        id: id.to_string(),
+        github_repo: format!("o/{id}"),
+        backlog_path: "backlog".into(),
+        repo_path: PathBuf::new(),
+        worktrees_dir: PathBuf::new(),
+        base_branch: String::new(),
+        galleries: vec![],
+        play_command: String::new(),
+    }
+}
