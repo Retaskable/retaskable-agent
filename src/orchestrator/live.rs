@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use super::driver::OrchestratorMode;
+use crate::telemetry::debounce::OpenAnomaly;
 
 pub mod sessions;
 
@@ -52,6 +53,8 @@ pub struct ProjectLive {
     pub limit_resets_at: Option<String>,
     /// The instant `limit_resets_at` was made from, so the same limit keeps the same string pass after pass.
     pub limit_until: Option<std::time::Instant>,
+    /// The watchdog's open anomalies as of its last minute, oldest first.
+    pub anomalies: Vec<crate::telemetry::debounce::OpenAnomaly>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -68,13 +71,13 @@ pub struct LiveState {
 }
 
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
-type Reported = (u32, BTreeMap<String, (bool, Option<String>)>);
+type Reported = (u32, BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>)>);
 
 fn reported(state: &LiveState) -> Reported {
     let projects = state
         .projects
         .iter()
-        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone())))
+        .map(|(id, p)| (id.clone(), (p.paused, p.limit_resets_at.clone(), p.anomalies.clone())))
         .collect();
     (state.concurrency, projects)
 }
@@ -158,6 +161,11 @@ impl LiveHandle {
         });
     }
 
+    /// The watchdog's open anomalies for the project, as of this minute's check.
+    pub fn set_anomalies(&self, project: &str, anomalies: Vec<OpenAnomaly>) {
+        self.edit(|s| s.projects.entry(project.to_string()).or_default().anomalies = anomalies);
+    }
+
     pub fn snapshot(&self) -> LiveState {
         self.lock().clone()
     }
@@ -191,6 +199,7 @@ impl LiveHandle {
                 vet: entry.vet.take(),
                 limit_resets_at: entry.limit_resets_at.take(),
                 limit_until: entry.limit_until.take(),
+                anomalies: std::mem::take(&mut entry.anomalies),
             };
         });
     }

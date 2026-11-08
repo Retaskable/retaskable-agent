@@ -618,6 +618,7 @@ impl ProjectLoop {
             no_progress_minutes: self.project.tuning.no_progress_minutes,
         });
         self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
+        self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
     }
 
     /// Writes the held and the unreleased leases to the state file.
