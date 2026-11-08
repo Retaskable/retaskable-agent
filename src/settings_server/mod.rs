@@ -199,11 +199,33 @@ impl SettingsServer {
                 "hasPassword": net.password_hash.is_some(),
             },
             "envVars": env_vars_json(env),
+            "cursorAllow": Self::cursor_allow_json(&cfg, env),
         });
         if self.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
             settings["ciSlots"] = json!(config::ci_slots(&cfg, env));
         }
         Ok(settings)
+    }
+
+    /// Each project's `engines.allow`, the programs derived from its checks and galleries, and the
+    /// allowlist file Cursor follows there (engines/06-permissions-the-allowlist.md section 6.4).
+    fn cursor_allow_json(cfg: &config::ConfigFile, env: &Env) -> Value {
+        let rows = cfg.projects.iter().map(|p| {
+            let (line, problem) = crate::engines::cursor::allowlist_in_force(std::path::Path::new(&p.repo_path), env);
+            let allow = p
+                .engines
+                .as_ref()
+                .and_then(|e| e.get("allow"))
+                .cloned()
+                .unwrap_or(json!([]));
+            json!({
+                "project": p.id_or_derived(),
+                "allow": allow,
+                "commandShells": crate::engines::cursor::command_shells(&p.checks, &p.galleries),
+                "inForce": { "line": line, "problem": problem },
+            })
+        });
+        Value::Array(rows.collect())
     }
 
     /// `GET /api/link`'s view of each of retaskable.com's three environments, and a custom

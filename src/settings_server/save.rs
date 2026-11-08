@@ -169,6 +169,44 @@ impl Saver<'_> {
         Ok(())
     }
 
+    /// engines/06-permissions-the-allowlist.md section 6.4: a project's typed `engines.allow` entries,
+    /// split on commas and new lines, each checked; none is saved when one is refused. Returns the
+    /// project's index in `projects[]` and the entries.
+    pub(crate) fn validate_cursor_allow(&self, update: &CursorAllowUpdate) -> Result<(usize, Vec<String>), SaveError> {
+        let entries = crate::engines::cursor::split_allow_entries(&update.allow);
+        if let Some(reason) = crate::engines::cursor::engines_allow_error(&entries) {
+            return Err(SaveError::Invalid(reason));
+        }
+        let cfg = config::load(self.dir)?;
+        let index = cfg
+            .projects
+            .iter()
+            .position(|p| p.id_or_derived() == update.project)
+            .ok_or_else(|| SaveError::Invalid("No such project.".to_string()))?;
+        Ok((index, entries))
+    }
+
+    /// Sets the project's `engines.allow`, keeping the rest of its `engines`.
+    pub(crate) fn save_cursor_allow(&self, update: &CursorAllowUpdate) -> Result<(), SaveError> {
+        let (index, entries) = self.validate_cursor_allow(update)?;
+        config::save_machine_settings(self.dir, |obj| {
+            let Some(project) = obj
+                .get_mut("projects")
+                .and_then(Value::as_array_mut)
+                .and_then(|a| a.get_mut(index))
+                .and_then(Value::as_object_mut)
+            else {
+                return;
+            };
+            let engines = project.entry("engines").or_insert_with(|| json!({}));
+            if !engines.is_object() {
+                *engines = json!({});
+            }
+            engines["allow"] = json!(entries);
+        })?;
+        Ok(())
+    }
+
     /// agent-settings.md section 3.1: "Cursor's models: one per tier ...; empty is auto."
     pub(crate) fn validate_cursor_models(&self, update: &CursorModelsUpdate) -> Result<CleanedCursorModels, SaveError> {
         self.env_gate("RETASKABLE_CURSOR_MODELS")?;
@@ -284,6 +322,9 @@ impl Saver<'_> {
         if let Some(network) = &update.network {
             self.validate_network(network)?;
         }
+        if let Some(allow) = &update.cursor_allow {
+            self.validate_cursor_allow(allow)?;
+        }
         Ok(())
     }
 
@@ -311,6 +352,9 @@ impl Saver<'_> {
         }
         if let Some(network) = &update.network {
             self.save_network(network)?;
+        }
+        if let Some(allow) = &update.cursor_allow {
+            self.save_cursor_allow(allow)?;
         }
         Ok(())
     }
@@ -420,6 +464,14 @@ pub(crate) struct CleanedCursorModels {
     scout: Option<String>,
 }
 
+/// `cursorAllow`: one project's (by id) typed `engines.allow` text.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CursorAllowUpdate {
+    pub(crate) project: String,
+    pub(crate) allow: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NetworkUpdate {
@@ -439,6 +491,7 @@ pub(crate) struct SettingsUpdate {
     pub(super) engine_choice: Option<EngineChoiceUpdate>,
     pub(super) cursor_models: Option<CursorModelsUpdate>,
     pub(super) network: Option<NetworkUpdate>,
+    pub(super) cursor_allow: Option<CursorAllowUpdate>,
     #[serde(flatten)]
     pub(super) unsupported: HashMap<String, Value>,
 }

@@ -462,3 +462,92 @@ async fn ci_slots_is_absent_and_refused_with_the_flag_off() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     assert_eq!(config::load(dir.path()).unwrap().machine.ci_slots, 1);
 }
+
+fn write_project_config(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("config.json"),
+        json!({"version": 2, "projects": [{
+            "id": "app", "repoPath": "/nowhere/app",
+            "checks": [{"name": "t", "command": "CI=1 cargo test"}],
+            "engines": {"default": "claude", "allow": ["Shell(make)"]},
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn saved_engines(dir: &std::path::Path) -> Value {
+    let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    serde_json::from_str::<Value>(&text).unwrap()["projects"][0]["engines"].clone()
+}
+
+#[tokio::test]
+async fn engines_allow_refuses_bad_entries_saving_nothing_and_saves_valid_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project_config(dir.path());
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    let before = saved_engines(dir.path());
+
+    for (typed, reason) in [
+        ("Shell(*)", "Shell(*) would allow every command"),
+        ("Shell(/bin/bash)", "Shell(/bin/bash) would allow every command"),
+        (
+            "Write(docs/../../etc)",
+            "Write(docs/../../etc) writes outside the workspace",
+        ),
+        ("Shell(RM)", "RM is always denied"),
+        ("Shell(make), Shell(*)", "Shell(*) would allow every command"),
+    ] {
+        let res = post_setting(
+            &app,
+            &cookie,
+            &csrf,
+            json!({"cursorAllow": {"project": "app", "allow": typed}}),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{typed}");
+        let body = json_body(res).await;
+        assert!(
+            body.to_string()
+                .contains(&format!("Cursor can't be allowed this: {reason}")),
+            "{typed}: {body}"
+        );
+        assert_eq!(saved_engines(dir.path()), before);
+    }
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({"cursorAllow": {"project": "app", "allow": "Shell(just), Write(src/**)\nRead(docs/**)"}}),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(
+        saved_engines(dir.path()),
+        json!({"default": "claude", "allow": ["Shell(just)", "Write(src/**)", "Read(docs/**)"]})
+    );
+}
+
+#[tokio::test]
+async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project_config(dir.path());
+    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({"engineChoice": {"default": "cursor", "roles": {"implementer": "cursor"}}}),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(saved_engines(dir.path())["allow"], json!(["Shell(make)"]));
+
+    let got = signed_in_settings(&settings).await;
+    let row = &got["cursorAllow"][0];
+    assert_eq!(row["project"], "app");
+    assert_eq!(row["allow"], json!(["Shell(make)"]));
+    assert_eq!(row["commandShells"], json!(["Shell(cargo)"]));
+    assert!(row["inForce"]["line"].as_str().unwrap().starts_with("Cursor "));
+}

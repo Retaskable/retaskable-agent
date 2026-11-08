@@ -11,6 +11,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::engines::engine::SessionSpec;
+use crate::env::Env;
 
 use super::cursor_claude_config_dir;
 
@@ -189,6 +190,33 @@ fn default_user_config() -> Option<PathBuf> {
         .ok()
         .or_else(|| std::env::var("USERPROFILE").ok())
         .map(|home| PathBuf::from(home).join(".cursor").join("cli-config.json"))
+}
+
+/// The one line the settings page shows for which allowlist Cursor follows, and whether it's a
+/// problem (`allowlistInForce`). Reads the repo's and the person's files fresh on each call.
+pub(crate) fn allowlist_in_force(repo: &Path, env: &Env) -> (String, bool) {
+    let user = env
+        .get("HOME")
+        .or_else(|| env.get("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".cursor").join("cli-config.json"));
+    let tracked = tracked_allowlist(repo);
+    let problem = user.and_then(|file| user_allowlist_problem(&file)).or_else(|| {
+        tracked
+            .then(|| repo_allowlist_problem(repo))
+            .flatten()
+            .map(|p| format!(".cursor/cli.json {p}"))
+    });
+    match (problem, tracked) {
+        (Some(problem), _) => (format!("Cursor sessions won't start: {problem}"), true),
+        (None, true) => (
+            "Cursor follows this repo's own .cursor/cli.json, so the extra entries above don't apply.".to_string(),
+            false,
+        ),
+        (None, false) => (
+            "Cursor follows the list Retaskable writes for each session.".to_string(),
+            false,
+        ),
+    }
 }
 
 /// Writes the role's allowlist into the lane and keeps it out of commits. A tracked
@@ -433,5 +461,74 @@ mod tests {
             short.to_string(),
             "a refusal rewrites nothing"
         );
+    }
+
+    fn track(dir: &Path, own: &Value) {
+        let cursor_dir = dir.join(".cursor");
+        std::fs::create_dir_all(&cursor_dir).unwrap();
+        std::fs::write(cursor_dir.join("cli.json"), own.to_string()).unwrap();
+        Command::new("git")
+            .args(["add", ".cursor/cli.json"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn allowlist_in_force_gives_one_of_three_lines_and_the_user_files_reason() {
+        let home = tempfile::tempdir().unwrap();
+        let env = Env::from_pairs([("HOME", home.path().display().to_string())]);
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        assert_eq!(
+            allowlist_in_force(repo.path(), &env),
+            (
+                "Cursor follows the list Retaskable writes for each session.".to_string(),
+                false
+            )
+        );
+
+        track(
+            repo.path(),
+            &json!({"permissions": {"allow": ["Read(**)"], "deny": DENY}}),
+        );
+        assert_eq!(
+            allowlist_in_force(repo.path(), &env),
+            (
+                "Cursor follows this repo's own .cursor/cli.json, so the extra entries above don't apply.".to_string(),
+                false
+            )
+        );
+
+        track(
+            repo.path(),
+            &json!({"permissions": {"allow": ["Shell(*)"], "deny": DENY}}),
+        );
+        assert_eq!(
+            allowlist_in_force(repo.path(), &env),
+            (
+                "Cursor sessions won't start: .cursor/cli.json it allows Shell(*)".to_string(),
+                true
+            )
+        );
+
+        track(
+            repo.path(),
+            &json!({"permissions": {"allow": ["Read(**)"], "deny": DENY}}),
+        );
+        let user = home.path().join(".cursor");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            user.join("cli-config.json"),
+            json!({"permissions": {"allow": ["Shell(*)"]}}).to_string(),
+        )
+        .unwrap();
+        let (line, problem) = allowlist_in_force(repo.path(), &env);
+        assert!(problem);
+        assert!(
+            line.starts_with("Cursor sessions won't start: ") && line.ends_with(" allows Shell(*)"),
+            "{line}"
+        );
+        assert!(line.contains("cli-config.json"));
     }
 }
