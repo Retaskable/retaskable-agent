@@ -51,7 +51,7 @@ pub struct AskJob {
     pub runs: BTreeMap<String, RunRecord>,
     /// Where the host sends the session's summarized events as they happen; the loop reports them as progress.
     pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
-    /// The `engine-placement` release flag: Off, only Claude answers.
+    /// The `engine-placement` release flag: Off, Claude alone answers.
     pub placement: bool,
 }
 

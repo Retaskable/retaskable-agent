@@ -83,7 +83,7 @@ pub(super) async fn run(job: Job) {
     let engine = engine_for(&job.engine_choice, job.project.engines.as_ref(), Role::Planner, None);
     if engine != Engine::Claude && !job.flags.on("engine-placement").await {
         tracing::info!(
-            "{}: playtest grouping round skipped: only Claude runs a planner session yet",
+            "{}: playtest grouping round skipped: a planner session runs on Claude alone without engine-placement",
             job.id
         );
         return;

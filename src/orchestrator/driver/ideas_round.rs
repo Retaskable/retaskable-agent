@@ -40,7 +40,7 @@ pub(super) struct Job {
     /// `ideasQueue` and `ideasMaxWaits` from the project's config, when it sets them.
     pub queue: Option<usize>,
     pub max_waits: Option<u32>,
-    /// The `engine-placement` flag: Off, only Claude runs the round and any other engine skips it.
+    /// The `engine-placement` flag: Off, Claude alone runs the round and any other engine skips it.
     pub placement: bool,
     /// Where the writer runs, set by [`run`]; `None` is Claude with no Cursor options.
     pub placed: Option<Placement>,

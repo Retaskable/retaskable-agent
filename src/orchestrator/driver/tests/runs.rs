@@ -206,11 +206,9 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
         .iter()
         .map(Entry::to_value)
         .collect::<Vec<_>>();
-    assert!(
-        claim
-            .iter()
-            .any(|e| e["kind"] == "claim" && e["answer"]["waitingFor"] == json!(["gpu"]))
-    );
+    assert!(claim
+        .iter()
+        .any(|e| e["kind"] == "claim" && e["answer"]["waitingFor"] == json!(["gpu"])));
 }
 
 #[tokio::test]
@@ -430,7 +428,7 @@ async fn a_worker_takes_a_lock_through_its_context_and_the_next_beat_sends_its_t
 /// fake `gh` that the store hands one `watch` run.
 #[cfg(unix)]
 async fn watch_rig(dir: &std::path::Path, poll: Duration) -> (Rig, Shared_, Arc<dyn RunStarter>) {
-    use crate::orchestrator::watch_run::{WatchRuns, tests as w};
+    use crate::orchestrator::watch_run::{tests as w, WatchRuns};
     let (mut rig, script) = setup(1).await;
     assert!(rig.machine.pool.claim_run("other", "x").is_some(), "the lane is busy");
     rig.machine.projects[0].project.repo_path = w::repo_with_ci(dir).display().to_string();
@@ -599,7 +597,19 @@ fn check(ok: Option<bool>) -> crate::setup_check::SetupCheck {
 
 /// What the first `run_take`'s `agent` says, with `checks` as the latest setup checks.
 async fn agent_with(checks: Option<crate::setup_check::SetupChecks>, choice: EngineChoiceConfig) -> Value {
+    agent_placed(checks, choice, false).await
+}
+
+/// `agent_with`, with the `engine-placement` flag `placement`.
+async fn agent_placed(
+    checks: Option<crate::setup_check::SetupChecks>,
+    choice: EngineChoiceConfig,
+    placement: bool,
+) -> Value {
     let (mut rig, script) = setup(1).await;
+    if placement {
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
+    }
     *rig.machine.links.checks.lock().unwrap() = checks;
     rig.machine.links.engine_choice = choice;
     pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), Instant::now()).await;
@@ -621,17 +631,25 @@ fn checks_with(claude_signed_in: Option<bool>, cursor: bool) -> crate::setup_che
 }
 
 #[tokio::test]
-async fn run_take_sends_claude_only_when_installed_and_signed_in() {
+async fn run_take_sends_claude_alone_with_placement_off() {
     let signed_in = agent_with(Some(checks_with(Some(true), true)), Default::default()).await;
-    assert_eq!(
-        signed_in["engines"],
-        json!(["claude"]),
-        "only Claude runs sessions here yet"
-    );
+    assert_eq!(signed_in["engines"], json!(["claude"]), "engine-placement is Off");
     let signed_out = agent_with(Some(checks_with(Some(false), true)), Default::default()).await;
     assert_eq!(signed_out["engines"], json!([]));
     let none_yet = agent_with(None, Default::default()).await;
     assert_eq!(none_yet["engines"], json!([]));
+}
+
+#[tokio::test]
+async fn run_take_sends_every_passing_engine_with_placement_on() {
+    let all = agent_placed(Some(checks_with(Some(true), true)), Default::default(), true).await;
+    assert_eq!(all["engines"], json!(["claude", "cursor", "pi", "codex"]));
+    let mut failing = checks_with(Some(true), false);
+    failing.codex = Some(check(Some(false)));
+    let some = agent_placed(Some(failing), Default::default(), true).await;
+    assert_eq!(some["engines"], json!(["claude", "pi"]));
+    let signed_out = agent_placed(Some(checks_with(Some(false), true)), Default::default(), true).await;
+    assert_eq!(signed_out["engines"], json!(["cursor", "pi", "codex"]));
 }
 
 #[tokio::test]
@@ -679,11 +697,9 @@ async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     assert_eq!(rig.live.snapshot().projects[&id].chores, None);
     pass(&mut rig, &starter, Instant::now()).await;
 
-    assert!(
-        script.lock().unwrap().args("run_take")[0]["agent"]
-            .get("chores")
-            .is_none()
-    );
+    assert!(script.lock().unwrap().args("run_take")[0]["agent"]
+        .get("chores")
+        .is_none());
     assert_eq!(starter.started(), vec!["tidy"]);
     let c = rig.live.snapshot().projects[&id].chores.unwrap();
     assert_eq!((c.today, c.limit), (2, 3));

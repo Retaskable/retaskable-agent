@@ -208,7 +208,7 @@ async fn another_engine_refuses_to_start_with_the_flag_off() {
     request.placement = false;
     assert_eq!(
         rig.starter.start(request),
-        Err("only Claude sessions run in the Rust agent yet".to_string())
+        Err("this engine is not enabled here".to_string())
     );
     assert!(rx.try_recv().is_err());
     assert!(calls(&rig).is_empty());

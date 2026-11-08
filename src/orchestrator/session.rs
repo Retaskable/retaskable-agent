@@ -91,7 +91,7 @@ impl SessionStarter for ClaudeStarter {
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
         if !request.placement && request.engine != EngineId::Claude {
-            return Err("only Claude sessions run in the Rust agent yet".into());
+            return Err("this engine is not enabled here".into());
         }
         // Fail before anything starts when the engine's binary isn't there: the claim goes back.
         place(
