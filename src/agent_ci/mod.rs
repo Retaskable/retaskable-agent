@@ -8,6 +8,7 @@ pub mod claim;
 pub mod container;
 pub mod discovery;
 pub mod docker;
+pub mod hold;
 pub mod host;
 pub mod priority;
 pub mod prs;
@@ -154,12 +155,13 @@ impl CiLoop {
             (state.as_str(), state.reason().map(str::to_string))
         };
         self.resize(if docker == "ok" { slots } else { 0 });
+        let computer = crate::link::machine_name(env);
         let mut keys = BTreeMap::new();
         let mut reasons = BTreeMap::new();
         for p in cfg.projects.iter().filter(|p| !p.github_repo.is_empty()) {
             let id = p.id_or_derived();
             let found = if docker == "ok" {
-                self.project(&id, p).await
+                self.project(&id, p, &computer).await
             } else {
                 Ok(Vec::new())
             };
@@ -272,7 +274,7 @@ impl CiLoop {
     }
 
     /// One project's checks, or why it has none. A project whose backlog can't be reached runs no CI (fail closed).
-    async fn project(&self, id: &str, p: &ProjectConfig) -> Result<Vec<CheckKey>, String> {
+    async fn project(&self, id: &str, p: &ProjectConfig, computer: &str) -> Result<Vec<CheckKey>, String> {
         let reached = self
             .live
             .snapshot()
@@ -287,7 +289,22 @@ impl CiLoop {
         discovery::discover(git, repo, base).await?;
         let main = discovery::git(git, repo, &["rev-parse", &format!("origin/{base}")]).await?;
         let list = prs::list(&self.programs.gh, repo, &p.github_repo, base).await?;
-        prs::ready(&list, main.trim(), ci_when_ready_active(p))
+        let ready = prs::ready(&list, main.trim(), ci_when_ready_active(p))?;
+        // The person's-merge hold (section 3.3). A host that can't be read holds no one.
+        let host = report::Host {
+            program: self.programs.gh.clone().into(),
+            kind: report::Kind::Github,
+            repo: p.github_repo.clone(),
+            dir: repo.to_path_buf(),
+        };
+        let (base, me): (String, String) = (base.to_string(), report::me(computer));
+        let numbers: std::collections::HashSet<u64> = ready.iter().map(|k| k.pr).collect();
+        match tokio::task::spawn_blocking(move || hold::apply(&host, &base, &list, &numbers, &me)).await {
+            Ok(Err(e)) => tracing::warn!("{id}: merge hold: {e:#}"),
+            Err(e) => tracing::warn!("{id}: merge hold: {e}"),
+            Ok(Ok(())) => {}
+        }
+        Ok(ready)
     }
 }
 
