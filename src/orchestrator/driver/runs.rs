@@ -449,8 +449,8 @@ impl ProjectLoop {
 }
 
 /// The engines this computer tells the store it has: the latest setup checks' (Claude when installed and signed
-/// in, Cursor, Pi and Codex when present and passing). With the `engine-placement` flag Off it is Claude alone, as
-/// before, since the starters only run Claude then. Empty until the checks have run.
+/// in, Cursor, Pi and Codex when present and passing). With `engine-placement` Off, Claude alone is reported, as
+/// every starter then refuses another engine. Empty until the checks have run.
 fn engines_here(links: &Links, placement: bool) -> Vec<String> {
     let guard = links.checks.lock().unwrap();
     let Some(c) = guard.as_ref() else { return Vec::new() };

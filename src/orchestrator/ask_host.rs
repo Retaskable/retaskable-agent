@@ -173,7 +173,7 @@ impl AskHost for ClaudeAsks {
             };
             if !placement && chosen != Engine::Claude {
                 return Ok(reply(
-                    "Sorry, I couldn't answer that: this engine is not enabled here.".into(),
+                    "Sorry, I couldn't answer that: Claude alone starts sessions while engine-placement is off.".into(),
                 ));
             }
             let placed = match place(chosen, Role::Assistant, &env, &cursor_models) {
