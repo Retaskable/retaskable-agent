@@ -143,6 +143,8 @@ pub struct StartRequest {
     pub session_id: String,
     /// The engine the session runs on: the one it started on when `resume`, else the lane's.
     pub engine: EngineId,
+    /// The `engine-placement` release flag: Off, only a Claude session starts, and a fresh start stays on Claude.
+    pub placement: bool,
     /// Whether to resume `session_id` (a restart cut it off) rather than start it.
     pub resume: bool,
     /// Where the session reports how it ended; the loop reads it on its next wake.
@@ -772,6 +774,7 @@ impl ProjectLoop {
             item,
             session_id,
             engine,
+            placement: self.flags.on("engine-placement").await,
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
             usage: self.store.usage(),

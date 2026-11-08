@@ -167,6 +167,7 @@ fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         attempt: 0,
         notes: None,
         takeover: None,
+        placement: true,
     };
     (request, rx)
 }

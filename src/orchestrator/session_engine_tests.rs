@@ -85,6 +85,8 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         kind: None,
         milestone: None,
         reopened: None,
+        no_fix_sha: None,
+        red_sha: None,
     };
     let request = StartRequest {
         project: "p".into(),
@@ -102,6 +104,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         attempt: 0,
         notes: None,
         takeover: None,
+        placement: true,
     };
     (request, rx)
 }
@@ -214,4 +217,36 @@ async fn a_missing_binary_hands_the_claim_back_without_starting() {
     let err = rig.starter.start(request).unwrap_err();
     assert!(err.contains("cursor-agent binary wasn't found"), "{err}");
     assert_eq!(rig.starter.active(), 0);
+}
+
+#[tokio::test]
+async fn another_engine_refuses_to_start_with_the_flag_off() {
+    let rig = rig(EngineChoiceConfig::default(), "", &[]);
+    let (mut request, mut rx) = request(EngineId::Cursor, false);
+    request.placement = false;
+    assert_eq!(
+        rig.starter.start(request),
+        Err("only Claude sessions run in the Rust agent yet".to_string())
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(calls(&rig).is_empty());
+}
+
+#[tokio::test]
+async fn a_fresh_start_stays_on_claude_with_the_flag_off() {
+    let choice = EngineChoiceConfig {
+        lanes: vec![LaneEngine::Cursor],
+        ..Default::default()
+    };
+    let rig = rig(choice, COMMIT_BIG, &[]);
+    let (mut request, mut rx) = request(EngineId::Claude, false);
+    request.placement = false;
+    rig.starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let calls = calls(&rig);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls.iter().all(|c| c.starts_with("claude ")), "{calls:?}");
 }

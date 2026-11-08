@@ -90,6 +90,9 @@ impl SessionStarter for ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
+        if !request.placement && request.engine != EngineId::Claude {
+            return Err("only Claude sessions run in the Rust agent yet".into());
+        }
         // Fail before anything starts when the engine's binary isn't there: the claim goes back.
         place(
             config_engine(request.engine),
@@ -106,6 +109,7 @@ impl SessionStarter for ClaudeStarter {
             usage,
             session_id,
             engine: session_engine,
+            placement,
             resume,
             follow_up,
             items,
@@ -132,6 +136,7 @@ impl SessionStarter for ClaudeStarter {
             max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             engine: session_engine,
+            placement,
             lane_engine: lane_engine(&self.choice, lane).map(program_of),
             takeover,
             resume,
@@ -272,6 +277,8 @@ struct Job {
     session_id: String,
     /// The engine the session runs on (`StartRequest::engine`).
     engine: EngineId,
+    /// The `engine-placement` flag: Off keeps a fresh start on `engine`.
+    placement: bool,
     /// The engine the lane now has of its own, if any: a send-back resumes only if it matches `engine`.
     lane_engine: Option<EngineId>,
     takeover: Option<EngineId>,
@@ -687,7 +694,9 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
                 true,
             ),
             Step::FixFresh(f, to) => {
-                engine = to.unwrap_or(engine);
+                if job.placement {
+                    engine = to.unwrap_or(engine);
+                }
                 (picking_up_prompt(false, &job.project.base_branch, f), true)
             }
             Step::Fix(f) => (f.clone(), false),
