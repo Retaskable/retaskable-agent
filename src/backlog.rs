@@ -125,6 +125,9 @@ pub struct Item {
     /// The spec draft that added the item (`draft-…`), when one did.
     #[serde(default)]
     pub draft_id: Option<String>,
+    /// The item's size (`S`, `M`, `L`, `XL`) when the store sends one; `L` and `XL` keep `opus` (`implementer_model`).
+    #[serde(default)]
+    pub size: Option<String>,
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,
@@ -134,9 +137,6 @@ pub struct Item {
     /// On a `fix_main` item that ended without a merge: the commit fixing found nothing to fix.
     #[serde(default)]
     pub no_fix_sha: Option<String>,
-    /// The item's size (`S`, `M`, `L`, `XL`), when the store sends one.
-    #[serde(default)]
-    pub size: Option<String>,
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the

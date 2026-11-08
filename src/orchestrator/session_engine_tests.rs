@@ -236,3 +236,23 @@ async fn a_fresh_start_stays_on_claude_with_the_flag_off() {
     assert!(calls.len() >= 2, "{calls:?}");
     assert!(calls.iter().all(|c| c.starts_with("claude ")), "{calls:?}");
 }
+
+#[tokio::test]
+async fn a_start_over_job_starts_claude_on_opus_with_the_step_up_flag_on() {
+    crate::tiers::set_step_up_for_test(true);
+    let rig = rig(EngineChoiceConfig::default(), "", &[]);
+    let (mut request, mut rx) = request(EngineId::Claude, false);
+    request.attempt = 1;
+    rig.starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let calls = calls(&rig);
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with("claude ") && c.contains("--model opus")),
+        "{calls:?}"
+    );
+}
