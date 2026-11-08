@@ -360,6 +360,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tags: tag_list,
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        cursor_models: config::cursor_models(cfg, env),
         checks: latest_checks.clone(),
         bugs: bugs.clone(),
         bug_version: bug_version.clone(),
@@ -372,6 +373,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 choice: config::engine_choice(cfg, env),
                 env: env.clone(),
                 models: cfg.machine.models,
+                cursor_models: config::cursor_models(cfg, env),
+                flags: Arc::new(retaskable_agent::flags::Flags::from_env()),
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,

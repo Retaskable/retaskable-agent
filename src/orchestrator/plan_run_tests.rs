@@ -5,7 +5,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
 use crate::orchestrator::driver::{RunEndSender, RunProcesses};
-use crate::orchestrator::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
+use crate::orchestrator::fake_session_tests::{
+    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster,
+};
 use crate::orchestrator::look_run::LookRuns;
 
 struct Rig {
@@ -152,10 +154,40 @@ async fn one_plan_at_a_time_and_none_for_another_engine() {
     .unwrap();
     assert!(s.ends.try_recv().is_err());
     assert!(!s.stop.stopped());
+}
 
-    let mut other = EngineChoiceConfig::default();
-    other.roles.planner = Some(Engine::Codex);
-    assert!(rig(&answer(GOOD), "", other).starter.kinds().is_empty());
+#[tokio::test]
+async fn the_planner_role_on_another_engine_runs_that_engines_binary() {
+    for (engine, program) in [(Engine::Cursor, "cursor"), (Engine::Codex, "codex"), (Engine::Pi, "pi")] {
+        let mut choice = EngineChoiceConfig::default();
+        choice.roles.planner = Some(engine);
+        let mut r = rig(&answer(GOOD), "", choice);
+        let root = r.root.clone();
+        on_every_engine(&mut r.starter.roster, &root);
+        assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
+        let (req, mut s) = request(brief());
+        r.starter.start(req).unwrap();
+        // The stub answers in Claude's format, so only where the session ran is judged, not how it ended.
+        end_of(&mut s.ends).await;
+        assert_ran_on(&root, program);
+    }
+}
+
+#[tokio::test]
+async fn a_missing_binary_of_the_chosen_engine_gives_the_run_back_naming_it() {
+    let mut choice = EngineChoiceConfig::default();
+    choice.roles.planner = Some(Engine::Cursor);
+    let mut r = rig(&answer(GOOD), "", choice);
+    let gone = r.root.join("nothing-here").to_string_lossy().into_owned();
+    r.starter.roster.env = Env::new(move |k| (k == "RETASKABLE_CURSOR").then(|| gone.clone()));
+    let (req, _s) = request(brief());
+    assert!(
+        r.starter
+            .start(req)
+            .unwrap_err()
+            .contains("cursor-agent binary wasn't found")
+    );
+    assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
 }
 
 #[tokio::test]
@@ -176,4 +208,15 @@ async fn a_plan_and_a_look_share_one_slot() {
     req.kind = RunKind::Look;
     assert!(look.start(req).unwrap_err().contains("already running"));
     cut_registered_tree(&mut s.trees).await;
+}
+
+#[tokio::test]
+async fn with_the_flag_off_only_a_role_on_claude_runs() {
+    let mut choice = EngineChoiceConfig::default();
+    choice.roles.planner = Some(Engine::Codex);
+    let mut r = rig(&answer(GOOD), "", choice);
+    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
+    assert!(r.starter.kinds().is_empty());
+    let (req, _s) = request(brief());
+    assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
 }
