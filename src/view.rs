@@ -547,9 +547,11 @@ mod tests {
                 base_url: "http://localhost:1".into(),
                 model: "m".into(),
             });
-            local.set_ladder(ladder);
+            crate::tiers::set_local_ladder_for_test(ladder);
             if up {
                 local.mark_up_for_test();
+            } else {
+                local.mark_down_for_test();
             }
             let mut v = view(vec![]);
             v.local = local;
