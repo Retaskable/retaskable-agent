@@ -24,11 +24,12 @@ use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
-use crate::runs::chore::{chore_end, chore_of, model_for, tier_for};
+use crate::runs::chore::{Chore, Outside, chore_end, chore_of, model_for, tier_for};
 use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
+const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
 
 /// Runs `build` and `fix` runs of the projects it was built with.
 pub struct PieceStarter {
@@ -189,6 +190,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     };
     let (outcome, result) = match build(&job, &cwd, &branch).await {
         Ok(end) => end,
+        Err(e) if e.is::<Outside>() => (RunOutcome::Failed(format!("{e:#}")), json!({ "outside": true })),
         Err(e) => failed(format!("{e:#}")),
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
@@ -233,6 +235,15 @@ async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf
     .context("preparing the lane")
 }
 
+/// The piece's chore, with `chore-rotation` On; Off, a chore piece is run like any other.
+async fn chore_for(job: &Job) -> Option<Chore> {
+    if job.flags.on("chore-rotation").await {
+        chore_of(&job.piece)
+    } else {
+        None
+    }
+}
+
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
 async fn session(
     job: &Job,
@@ -246,13 +257,10 @@ async fn session(
     let item = piece_item(&job.piece);
     let now = crate::telemetry::now_ms() / 1000;
     // With `chore-rotation` Off, a chore piece is run like any other.
-    let chore = if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    };
+    let chore = chore_for(job).await;
     let tier = tier_for(chore.as_ref(), now, &job.models);
     let model = model_for(chore.as_ref(), tier, &item).to_string();
+    let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
         &Session {
             template: "",
@@ -276,7 +284,15 @@ async fn session(
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,
-    )?;
+    )
+    // Our own template, not the work: the run ends `failed`, `outside`.
+    .map_err(|e| {
+        if own_prompt {
+            anyhow::Error::new(Outside(format!("{e:#}")))
+        } else {
+            e
+        }
+    })?;
     let id = match &spec.start {
         SessionStart::Fresh(id) | SessionStart::Resume(id) => id.clone(),
         SessionStart::Ephemeral => String::new(),
@@ -320,10 +336,19 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let where_to_start = start_files::render(
         &start_files::build(crate::git_bin::program(), cwd, &base_ref, &piece_item(&job.piece)).await,
     );
-    let start = Start::Piece {
-        template: PIECE_TEMPLATE,
-        kind: job.kind,
-        piece: &job.piece,
+    let chore = chore_for(job).await.filter(Chore::has_prompt);
+    let start = match &chore {
+        Some(chore) => Start::Chore {
+            template: CHORE_TEMPLATE,
+            kind: job.kind,
+            piece: &job.piece,
+            chore,
+        },
+        None => Start::Piece {
+            template: PIECE_TEMPLATE,
+            kind: job.kind,
+            piece: &job.piece,
+        },
     };
     let ids = Mutex::new(String::new());
     let first = session(job, cwd, branch, start, &where_to_start, &ids).await?;

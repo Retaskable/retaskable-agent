@@ -15,8 +15,9 @@ use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 
 use super::model::{ImplementerResult, implementer_result_schema};
-use super::prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt};
+use super::prompt::{PiecePrompt, Prompt, build_chore_prompt, build_piece_prompt, build_prompt};
 use crate::backlog::runs::{RunKind, RunPiece};
+use crate::runs::chore::Chore;
 
 /// What an implementer session runs with, besides how it starts ([`Start`]).
 pub struct Session<'a> {
@@ -58,6 +59,13 @@ pub enum Start<'a> {
         template: &'a str,
         kind: RunKind,
         piece: &'a RunPiece,
+    },
+    /// A brand new session on a chore piece (section 6.7): `template` is `prompts/chore.md`.
+    Chore {
+        template: &'a str,
+        kind: RunKind,
+        piece: &'a RunPiece,
+        chore: &'a Chore,
     },
     /// A fresh session that picks up where one just ran out of turns left off (06.2-implementer.md
     /// "at most maxTurns turns"): a new id ([`new_session_id`]), never `--resume` (a maxed-out
@@ -119,6 +127,29 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
         Start::Piece { template, kind, piece } => {
             let prompt = build_piece_prompt(
                 template,
+                &PiecePrompt {
+                    kind,
+                    piece,
+                    project_type: s.project_type,
+                    branch: s.branch,
+                    base_branch: s.base_branch,
+                    github_repo: s.github_repo,
+                    checks: s.checks,
+                    code_gates: s.code_gates,
+                    where_to_start: s.where_to_start,
+                },
+            )?;
+            (SessionStart::Fresh(new_session_id()), prompt)
+        }
+        Start::Chore {
+            template,
+            kind,
+            piece,
+            chore,
+        } => {
+            let prompt = build_chore_prompt(
+                template,
+                chore,
                 &PiecePrompt {
                     kind,
                     piece,
