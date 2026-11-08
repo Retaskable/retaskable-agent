@@ -95,3 +95,51 @@ fn a_zero_threshold_finding_starts_on_its_first_tick() {
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0].id.as_deref(), Some("repeat_error:R-1"));
 }
+
+#[test]
+fn open_anomalies_is_empty_below_the_threshold() {
+    let mut telemetry = Telemetry::new();
+    let mut log = EventLog::new();
+    telemetry.minute(PROJECT, vec![found("a", 5)], 0, &mut log);
+    telemetry.minute(PROJECT, vec![found("a", 5)], 4 * 60_000, &mut log);
+    assert!(telemetry.open_anomalies().is_empty());
+}
+
+#[test]
+fn open_anomalies_lists_a_started_one_with_its_first_check_time_and_drops_it_when_it_ends() {
+    let mut telemetry = Telemetry::new();
+    let mut log = EventLog::new();
+    telemetry.minute(PROJECT, vec![found("a", 5)], 1_000, &mut log);
+    telemetry.minute(PROJECT, vec![found("a", 5)], 1_000 + 5 * 60_000, &mut log);
+    let open = telemetry.open_anomalies();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].id, "a");
+    assert_eq!(open[0].rule, "idle_lanes");
+    assert_eq!(open[0].text, "a is stuck");
+    assert_eq!(open[0].since_ms, 1_000);
+    telemetry.minute(PROJECT, vec![], 1_000 + 6 * 60_000, &mut log);
+    assert!(telemetry.open_anomalies().is_empty());
+}
+
+#[test]
+fn open_anomalies_are_ordered_by_since_then_id() {
+    let mut telemetry = Telemetry::new();
+    let mut log = EventLog::new();
+    telemetry.minute(PROJECT, vec![found("c", 0)], 0, &mut log);
+    telemetry.minute(
+        PROJECT,
+        vec![found("c", 0), found("b", 0), found("a", 0)],
+        60_000,
+        &mut log,
+    );
+    let ids: Vec<_> = telemetry.open_anomalies().into_iter().map(|o| o.id).collect();
+    assert_eq!(ids, ["c", "a", "b"]);
+}
+
+#[test]
+fn a_zero_threshold_finding_is_listed_on_its_first_tick() {
+    let mut telemetry = Telemetry::new();
+    let mut log = EventLog::new();
+    telemetry.minute(PROJECT, vec![found("a", 0)], 7, &mut log);
+    assert_eq!(telemetry.open_anomalies()[0].since_ms, 7);
+}
