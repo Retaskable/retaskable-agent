@@ -63,7 +63,7 @@ async fn fixture(conflict: bool) -> Fixture {
 }
 
 async fn settle(f: &mut Fixture) {
-    for _ in 0..40 {
+    for _ in 0..100 {
         let m = &mut f.rig.machine;
         let shared = Shared {
             links: &m.links,
@@ -76,6 +76,9 @@ async fn settle(f: &mut Fixture) {
             .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
             .await;
         tokio::time::sleep(Duration::from_millis(50)).await;
+        if !adds(f).is_empty() && !f.script.lock().unwrap().args("lock_drop").is_empty() {
+            break;
+        }
     }
 }
 

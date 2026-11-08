@@ -83,6 +83,11 @@ impl LocalModel {
         self.config.enabled && self.up.load(Ordering::SeqCst)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_up(&self, up: bool) {
+        self.up.store(up, Ordering::SeqCst);
+    }
+
     /// True while it's turned on, a check has answered and the last one failed, and the `local-tier-ladder` flag
     /// is On: what the snapshot reports as `usage.localDown`.
     pub fn down(&self) -> bool {
