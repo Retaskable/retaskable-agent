@@ -1,5 +1,5 @@
 use super::*;
-use crate::implementer::Question;
+use crate::implementer::{CursorTimeKilled, Question};
 use anyhow::anyhow;
 use chrono::{TimeZone, Utc};
 use std::time::Duration;
@@ -138,6 +138,10 @@ fn session_errors() {
     assert_eq!(
         e(SilenceKilled("quiet".into()).into()).0,
         RunOutcome::Failed("went quiet and was killed: quiet".into())
+    );
+    assert_eq!(
+        e(CursorTimeKilled("slow".into()).into()).0,
+        RunOutcome::Failed("ran past its time limit and was killed: slow".into())
     );
     assert_eq!(
         e(MaxTurns("turns".into()).into()).0,

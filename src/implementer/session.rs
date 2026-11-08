@@ -193,6 +193,19 @@ impl std::fmt::Display for SilenceKilled {
 
 impl std::error::Error for SilenceKilled {}
 
+/// Marks a failed run's error as the Cursor time limit's kill (`cursor_time`, `budget.cursorMaxMinutes`,
+/// `engines::runner`): handled like a watchdog kill ([`SilenceKilled`]), resumed by id up to 3 times.
+#[derive(Debug)]
+pub struct CursorTimeKilled(pub String);
+
+impl std::fmt::Display for CursorTimeKilled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CursorTimeKilled {}
+
 /// Marks a failed run's error as a cut session's own kill (`interrupted`, `engines::runner`'s
 /// `spawn_and_read`, set when its `ProcessTree` reports `was_cut()`): something outside this
 /// session — a restart or Quit (07.4-stopping-and-restarting.md) — killed it before it answered,
@@ -272,6 +285,8 @@ where
             })
         } else if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))
+        } else if r.subtype == "cursor_time" {
+            anyhow::Error::new(CursorTimeKilled(why))
         } else if r.subtype == "error_max_turns" {
             anyhow::Error::new(MaxTurns(why))
         } else if r.subtype == "interrupted" {
@@ -484,6 +499,16 @@ mod tests {
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
         let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "error_during_execution", None)) }).await;
         let err = err.unwrap_err();
+        assert!(err.downcast_ref::<SilenceKilled>().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cursor_time_kill_is_tagged_as_cursor_time_killed() {
+        let it = item(&[], None);
+        let spec = session_spec(&session(&it, &[], Path::new("repo")), Start::Fresh).unwrap();
+        let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "cursor_time", None)) }).await;
+        let err = err.unwrap_err();
+        assert!(err.downcast_ref::<CursorTimeKilled>().is_some(), "got {err:#}");
         assert!(err.downcast_ref::<SilenceKilled>().is_none());
     }
 
