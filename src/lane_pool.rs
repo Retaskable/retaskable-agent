@@ -219,7 +219,12 @@ impl LanePool {
 
     /// Picks a lane for a run on `piece` and holds it for the run, remembering it as the piece's last lane.
     pub fn claim_run(&mut self, project: &str, piece: &str) -> Option<u32> {
-        let k = self.claim_lane(&self.run_want(project, piece))?;
+        self.claim_run_where(project, piece, |_| true)
+    }
+
+    /// `claim_run`, only in a lane `may` accepts.
+    pub fn claim_run_where(&mut self, project: &str, piece: &str, may: impl Fn(u32) -> bool) -> Option<u32> {
+        let k = self.claim_lane_where(&self.run_want(project, piece), may)?;
         let holder = Holder::Run {
             project: project.into(),
             piece: piece.into(),

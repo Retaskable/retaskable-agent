@@ -125,8 +125,21 @@ impl Runs {
         piece: &str,
         now: Instant,
     ) -> Result<(), NoLane> {
+        self.start_where(pool, token, kind, piece, now, |_| true)
+    }
+
+    /// `start`, taking only a lane `may` accepts.
+    pub fn start_where(
+        &mut self,
+        pool: &mut LanePool,
+        token: &str,
+        kind: RunKind,
+        piece: &str,
+        now: Instant,
+        may: impl Fn(u32) -> bool,
+    ) -> Result<(), NoLane> {
         let lane = if needs_lane(kind) {
-            Some(pool.claim_run(&self.project, piece).ok_or(NoLane)?)
+            Some(pool.claim_run_where(&self.project, piece, may).ok_or(NoLane)?)
         } else {
             None
         };

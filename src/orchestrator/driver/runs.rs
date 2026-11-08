@@ -2,6 +2,7 @@
 //! beat the live ones every minute, and end them. It is reached only through [`ProjectLoop::run_pass`]; the claim
 //! path in `project.rs` is separate. What runs and how they are kept live is `crate::runs`; the work of a run
 //! is the [`RunStarter`]'s.
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,9 +17,10 @@ use crate::backlog::Client;
 use crate::backlog::runs::{
     ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
 };
-use crate::config::OnOff;
 use crate::config::ProjectConfig;
-use crate::engines::{Role, engine_for};
+use crate::config::{EngineChoiceConfig, OnOff};
+use crate::engines::start_rules::{engine_now, engines_out, engines_used_here, lane_may_start};
+use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
@@ -303,11 +305,17 @@ impl ProjectLoop {
         shared: &Shared<'_>,
         now: Instant,
     ) -> bool {
-        let lane_free = pool.claim_lane(&pool.run_want(&self.id, "")).is_some();
+        let start = self.start_rules(pool, shared, now).await;
+        let want = pool.run_want(&self.id, "");
+        let lane_free = match &start {
+            Some(s) => pool.claim_lane_where(&want, |k| s.lane_may_start(k)),
+            None => pool.claim_lane(&want),
+        }
+        .is_some();
         let kinds: Vec<RunKind> = starter
             .kinds()
             .into_iter()
-            .filter(|k| lane_free || !needs_lane(*k))
+            .filter(|k| (lane_free || !needs_lane(*k)) && start.as_ref().is_none_or(|s| s.kind_may_start(*k)))
             .collect();
         if kinds.is_empty() {
             return false;
@@ -328,13 +336,14 @@ impl ProjectLoop {
         want: RunWant<'_>,
         now: Instant,
     ) -> bool {
+        let start = self.start_rules(pool, shared, now).await;
         let agent = RunTakeAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.clone(),
-            engines: engines_here(shared.links, self.flags.on("engine-placement").await),
-            uses: uses_here(shared.links, self.project.engines.as_ref()),
+            engines: engines_here(shared.links, self.flags.on("engine-placement").await, start.as_ref()),
+            uses: uses_here(shared.links, self.project.engines.as_ref(), start.as_ref()),
             chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
@@ -357,7 +366,7 @@ impl ProjectLoop {
                     self.live.set_chores(&self.id, count);
                 }
                 let answer = json!(run.piece.title);
-                let more = self.begin(repo, token, pool, starter, *run, now).await;
+                let more = self.begin(repo, token, pool, starter, *run, start.as_ref(), now).await;
                 (answer, more)
             }
         };
@@ -371,11 +380,32 @@ impl ProjectLoop {
         more
     }
 
+    /// With `engine-start-rules` On: which engines are out now and which this computer runs
+    /// (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5). `None` is today's behaviour.
+    async fn start_rules(&mut self, pool: &LanePool, shared: &Shared<'_>, now: Instant) -> Option<StartRules> {
+        if !self.flags.on("engine-start-rules").await {
+            return None;
+        }
+        let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+        let used = engines_used_here(
+            &shared.links.engine_choice,
+            self.project.engines.as_ref(),
+            pool.rules().lanes,
+        );
+        Some(StartRules {
+            out,
+            used,
+            choice: shared.links.engine_choice.clone(),
+            project_engines: self.project.engines.clone(),
+        })
+    }
+
     fn chores_off(&self) -> bool {
         self.project.chores == OnOff::Off
     }
 
     /// Starts a run the store handed out. False when it didn't start, and the store has it back as `interrupted`.
+    #[allow(clippy::too_many_arguments)]
     async fn begin(
         &mut self,
         repo: u64,
@@ -383,6 +413,7 @@ impl ProjectLoop {
         pool: &mut LanePool,
         starter: &dyn RunStarter,
         run: Run,
+        start: Option<&StartRules>,
         now: Instant,
     ) -> bool {
         let piece_id = piece_id(&run.piece).to_string();
@@ -406,7 +437,13 @@ impl ProjectLoop {
             // The lane is still free, so the next ask may find other work.
             return true;
         }
-        if let Err(NoLane) = self.run_loop.runs.start(pool, &run.token, run.kind, &piece_id, now) {
+        let started = self
+            .run_loop
+            .runs
+            .start_where(pool, &run.token, run.kind, &piece_id, now, |k| {
+                start.is_none_or(|s| s.lane_may_start(k))
+            });
+        if let Err(NoLane) = started {
             // Not queued: the run never held anything here, so its end is sent now, once.
             let ended = self
                 .client
@@ -452,10 +489,41 @@ impl ProjectLoop {
     }
 }
 
+/// The engines out now, the ones this computer uses and its choices, for `engine-start-rules`.
+struct StartRules {
+    out: BTreeSet<EngineId>,
+    used: Vec<EngineId>,
+    choice: EngineChoiceConfig,
+    project_engines: Option<Value>,
+}
+
+impl StartRules {
+    fn lane_may_start(&self, lane: u32) -> bool {
+        lane_may_start(&self.choice, self.project_engines.as_ref(), lane, &self.used, &self.out)
+    }
+
+    /// The engine a role starts on now: its chosen one, or the one that takes over while that is out.
+    fn engine_now(&self, role: Role) -> EngineId {
+        let chosen = program_of(engine_for(&self.choice, self.project_engines.as_ref(), role, None));
+        engine_now(chosen, &self.used, &self.out)
+    }
+
+    /// Whether a run of `kind` may be asked for: its role's engine, after `engine_now`, isn't out.
+    fn kind_may_start(&self, kind: RunKind) -> bool {
+        let role = match kind {
+            RunKind::Plan => Role::Planner,
+            RunKind::Build | RunKind::Fix => Role::Implementer,
+            RunKind::Look => Role::Triager,
+            RunKind::Watch | RunKind::Merge => return true,
+        };
+        !self.out.contains(&self.engine_now(role))
+    }
+}
+
 /// The engines this computer tells the store it has: the latest setup checks' (Claude when installed and signed
 /// in, Cursor, Pi and Codex when present and passing). With `engine-placement` Off, Claude alone is reported, as
 /// every starter then refuses another engine. Empty until the checks have run.
-fn engines_here(links: &Links, placement: bool) -> Vec<String> {
+fn engines_here(links: &Links, placement: bool, start: Option<&StartRules>) -> Vec<String> {
     let guard = links.checks.lock().unwrap();
     let Some(c) = guard.as_ref() else { return Vec::new() };
     let pass = |s: &Option<crate::setup_check::SetupCheck>| s.as_ref().is_some_and(|s| s.ok == Some(true));
@@ -469,14 +537,22 @@ fn engines_here(links: &Links, placement: bool) -> Vec<String> {
         ("codex", pass(&c.codex)),
     ];
     all.into_iter()
-        .filter(|(id, ok)| *ok && (placement || *id == "claude"))
+        .filter(|(id, ok)| {
+            *ok && (placement || *id == "claude") && start.is_none_or(|s| !s.out.iter().any(|e| e.to_string() == *id))
+        })
         .map(|(id, _)| id.to_string())
         .collect()
 }
 
-/// The engine each kind's role runs on here.
-fn uses_here(links: &Links, project_engines: Option<&Value>) -> RunTakeUses {
-    let on = |role| engine_for(&links.engine_choice, project_engines, role, None).to_string();
+/// The engine each kind's role runs on here; with `engine-start-rules` On, the one it would start on now.
+fn uses_here(links: &Links, project_engines: Option<&Value>, start: Option<&StartRules>) -> RunTakeUses {
+    let on = |role| {
+        let chosen = engine_for(&links.engine_choice, project_engines, role, None);
+        match start.map(|s| s.engine_now(role)) {
+            Some(now) if now != program_of(chosen) => now.to_string(),
+            _ => chosen.to_string(),
+        }
+    };
     RunTakeUses {
         plan: on(Role::Planner),
         build: on(Role::Implementer),
