@@ -12,6 +12,7 @@ mod project;
 
 use crate::env::Env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
@@ -61,6 +62,18 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
 /// conjuring a phantom project out of the first setting anyone saves. Used by the settings page's
 /// save paths, which change only the machine's own settings.
 pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
+    save_with(dir, RETIRE_PROJECT_LANES.load(Ordering::Relaxed), patch)
+}
+
+/// Whether saves drop the projects' retired `lanes` keys: the `machine-settings` flag's answer, set once at
+/// startup (Off, today's behaviour, until then).
+static RETIRE_PROJECT_LANES: AtomicBool = AtomicBool::new(false);
+
+pub fn set_retiring_project_lanes(on: bool) {
+    RETIRE_PROJECT_LANES.store(on, Ordering::Relaxed);
+}
+
+fn save_with(dir: &Path, retire: bool, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
     let file = dir.join("config.json");
     let mut obj = match std::fs::read_to_string(&file) {
         Ok(text) => match serde_json::from_str(&text)? {
@@ -75,7 +88,9 @@ pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Val
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
     };
-    retire_project_lanes(&mut obj);
+    if retire {
+        retire_project_lanes(&mut obj);
+    }
     patch(&mut obj);
     crate::fs_util::write_json_atomic(&file, &Value::Object(obj), false)
 }
@@ -299,7 +314,7 @@ mod tests {
         .unwrap();
         let note = retired_keys_note(dir.path()).unwrap();
         assert!(note.contains("lanes") && note.contains("migrated.lanes"));
-        save_machine_settings(dir.path(), |_| {}).unwrap();
+        save_with(dir.path(), true, |_| {}).unwrap();
         let raw: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
         assert_eq!(raw["lanes"], 5);
@@ -311,12 +326,23 @@ mod tests {
     }
 
     #[test]
+    fn with_the_flag_off_a_save_leaves_the_project_lanes_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = r#"{"version": 2, "projects": [{ "id": "a", "repoPath": "C:/code/a", "lanes": 3 }]}"#;
+        std::fs::write(dir.path().join("config.json"), text).unwrap();
+        save_with(dir.path(), false, |_| {}).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(raw, serde_json::from_str::<Value>(text).unwrap());
+    }
+
+    #[test]
     fn a_file_without_project_lanes_gets_no_note_and_its_save_is_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let text = r#"{"version": 2, "projects": [{ "id": "a", "repoPath": "C:/code/a" }]}"#;
         std::fs::write(dir.path().join("config.json"), text).unwrap();
         assert!(retired_keys_note(dir.path()).is_none());
-        save_machine_settings(dir.path(), |_| {}).unwrap();
+        save_with(dir.path(), true, |_| {}).unwrap();
         let raw: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
         assert_eq!(raw, serde_json::from_str::<Value>(text).unwrap());
