@@ -163,6 +163,9 @@ async fn main() -> Result<()> {
         None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
     }
     let cfg = config::load(&dir)?;
+    if let Some(note) = config::retired_keys_note(&dir) {
+        tracing::info!("{note}");
+    }
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
     // cloud in the terminal, then exit. A running agent picks the token up within a minute.
     if std::env::args().nth(1).as_deref() == Some("link") {
