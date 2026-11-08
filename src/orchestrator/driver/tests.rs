@@ -199,6 +199,24 @@ async fn the_tick_counts_every_registered_session_only_with_live_sessions_report
 }
 
 #[tokio::test]
+async fn the_tick_carries_the_ci_object_once_the_ci_loop_has_polled() {
+    let (base, _asked) = stub().await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.pass().await;
+    assert!(rig.lp(0).events().recent()[0].to_value().get("ci").is_none());
+    rig.live.update_ci(|c| {
+        c.slots = 1;
+        c.docker = "ok";
+    });
+    rig.machine.pass().await;
+    let tick = rig.lp(0).events().recent()[1].to_value();
+    assert_eq!(
+        tick["ci"],
+        serde_json::json!({ "slots": 1, "running": 0, "docker": "ok" })
+    );
+}
+
+#[tokio::test]
 async fn one_dry_tick_writes_a_tick_event_and_asks_the_store_only_to_list() {
     let (base, asked) = stub().await;
     let mut rig = rig(2, &[&base]);

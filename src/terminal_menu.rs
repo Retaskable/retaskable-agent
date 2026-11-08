@@ -3,6 +3,7 @@
 //! screen lines (plain ANSI), and `handle_key` turns a key into a new cursor and what to do. The cursor holds item
 //! ids, not positions, so it stays on the same item as the menu changes.
 pub mod console;
+pub mod keys;
 #[cfg(test)]
 mod tests;
 

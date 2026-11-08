@@ -485,6 +485,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
     });
+    // Card flag `agent-ci`: Off starts no CI loop (agent-ci.md section 3.1).
+    if retaskable_agent::flags::Flags::from_env().on("agent-ci").await {
+        let ci = retaskable_agent::agent_ci::CiLoop::new(
+            Default::default(),
+            live.clone(),
+            retaskable_agent::agent_ci::docker::in_agent_image(),
+        );
+        tokio::spawn(retaskable_agent::agent_ci::run(ci, dir.to_path_buf(), env.clone()));
+    }
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
