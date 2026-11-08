@@ -24,6 +24,8 @@ pub(super) struct State {
     task: Option<JoinHandle<Result<(String, Baseline)>>>,
     /// The base commit already dealt with: nothing more is done for it until the branch moves.
     handled: Option<String>,
+    /// A fix main is open or was just added for `handled`: its `noFixSha` is looked for on later passes.
+    awaiting: bool,
 }
 
 impl ProjectLoop {
@@ -64,6 +66,9 @@ impl ProjectLoop {
             return;
         };
         if self.run_loop.fix_main.handled.as_deref() == Some(head.as_str()) {
+            if self.run_loop.fix_main.awaiting {
+                self.look_for_no_fix(repo, token, &head).await;
+            }
             return;
         }
         let p = &self.project;
@@ -97,7 +102,7 @@ impl ProjectLoop {
         now: Instant,
     ) {
         let failing: Vec<&CheckRun> = runs.iter().filter(|r| !r.passed() && r.blocking).collect();
-        let short = short_sha(sha);
+        self.run_loop.fix_main.awaiting = false;
         if !failing.is_empty() {
             let items = match self.client.list(repo, token).await {
                 Ok(items) => items,
@@ -110,19 +115,44 @@ impl ProjectLoop {
                     ItemStatus::OnMain | ItemStatus::InProduction | ItemStatus::Skipped
                 )
             };
-            if fixes.iter().any(open) {
-                // Already on it.
-            } else if fixes.iter().any(|i| i.no_fix_sha.as_deref() == Some(sha)) {
-                let note = format!("Fixing main found nothing to fix at {short}. It tries again when main moves.");
-                self.live.set_fix_main(&self.id, Some(note));
+            if fixes.iter().any(|i| i.no_fix_sha.as_deref() == Some(sha)) {
+                self.note_no_fix(sha);
                 self.run_loop.fix_main.handled = Some(sha.into());
                 return;
+            } else if fixes.iter().any(open) {
+                self.run_loop.fix_main.awaiting = true; // already on it
             } else if !self.add_fix_main(repo, token, sha, &failing, machine, now).await {
                 return;
+            } else {
+                self.run_loop.fix_main.awaiting = true;
             }
         }
         self.live.set_fix_main(&self.id, None);
         self.run_loop.fix_main.handled = Some(sha.into());
+    }
+
+    fn note_no_fix(&mut self, sha: &str) {
+        let note = format!(
+            "Fixing main found nothing to fix at {}. It tries again when main moves.",
+            short_sha(sha)
+        );
+        self.live.set_fix_main(&self.id, Some(note));
+        self.run_loop.fix_main.awaiting = false;
+    }
+
+    /// The fix main for the handled commit may have ended finding nothing to fix: ask the store, without the baseline.
+    async fn look_for_no_fix(&mut self, repo: u64, token: Option<&str>, sha: &str) {
+        match self.client.list(repo, token).await {
+            Ok(items) => {
+                let found = items
+                    .iter()
+                    .any(|i| i.kind.as_deref() == Some("fix_main") && i.no_fix_sha.as_deref() == Some(sha));
+                if found {
+                    self.note_no_fix(sha);
+                }
+            }
+            Err(e) => self.store_error("list", &e),
+        }
     }
 
     /// Takes the `fix_main` lock and adds the chore. False when it didn't happen (a holder, or the store), to try

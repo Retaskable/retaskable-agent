@@ -227,3 +227,23 @@ async fn with_the_flag_off_nothing_is_checked() {
     settle(&mut f).await;
     assert!(f.script.lock().unwrap().args("list").is_empty());
 }
+
+#[tokio::test]
+async fn a_fix_that_finds_nothing_after_the_add_shows_the_note_without_a_second_add() {
+    let mut f = fixture(1).await;
+    settle(&mut f).await;
+    assert_eq!(adds(&f).len(), 1);
+    let id = f.rig.machine.projects[0].id.clone();
+    assert_eq!(f.rig.live.snapshot().projects[&id].fix_main, None);
+    let sha = crate::lanes::head_sha(&f.repo).unwrap();
+    f.script.lock().unwrap().items = vec![json!({
+        "id": "chore-fix-main", "title": "t", "status": "skipped", "rank": 1, "kind": "fix_main", "noFixSha": sha
+    })];
+    settle(&mut f).await;
+    let note = f.rig.live.snapshot().projects[&id].fix_main.clone().unwrap();
+    assert!(
+        note.contains(&format!("found nothing to fix at {}", &sha[..7])),
+        "{note}"
+    );
+    assert_eq!(adds(&f).len(), 1);
+}
