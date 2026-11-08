@@ -59,6 +59,11 @@ impl EngineLimits {
         map.get(&engine).is_some_and(|until| *until > now)
     }
 
+    /// Whether Claude is limited on this computer at `now`.
+    pub fn claude_at_limit(&self, now: Instant) -> bool {
+        self.is_limited(EngineId::Claude, now)
+    }
+
     /// When `engine`'s limit lifts, if it is limited at `now`.
     pub fn limited_until(&self, engine: EngineId, now: Instant) -> Option<Instant> {
         let map = self.until.lock().unwrap_or_else(PoisonError::into_inner);

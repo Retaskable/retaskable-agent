@@ -141,6 +141,7 @@ pub async fn tier_for(
     models: &crate::config::ModelsConfig,
     local: Option<&LocalModel>,
     wants_local: bool,
+    at_limit: bool,
 ) -> (&'static str, Option<LocalRun>) {
     // An engine set to `local` waits for the slot, even for a chore.
     let up = local.is_some_and(LocalModel::available);
@@ -153,7 +154,8 @@ pub async fn tier_for(
             None => (chore_tier(), None),
         };
     }
-    let tier = implementer_tier(None, now, models, up);
+    let floored = crate::tiers::limit_floor(None, at_limit, up);
+    let tier = implementer_tier(floored.as_ref(), now, models, up);
     match local {
         Some(local) if tier == LOCAL => (tier, Some(local.run().await)),
         _ => (tier, None),
@@ -266,9 +268,12 @@ mod tests {
         let normal = implementer_tier(None, 0, &models, false);
         let (tidy, fix) = (a_chore(ChoreKind::Tidy), a_chore(ChoreKind::PlaytestFix));
         for local in [None, Some(&LocalModel::off())] {
-            assert_eq!(tier_for(Some(&tidy), 0, &models, local, false).await.0, chore_tier());
-            assert_eq!(tier_for(Some(&fix), 0, &models, local, false).await.0, normal);
-            assert_eq!(tier_for(None, 0, &models, local, false).await.0, normal);
+            assert_eq!(
+                tier_for(Some(&tidy), 0, &models, local, false, false).await.0,
+                chore_tier()
+            );
+            assert_eq!(tier_for(Some(&fix), 0, &models, local, false, false).await.0, normal);
+            assert_eq!(tier_for(None, 0, &models, local, false, false).await.0, normal);
         }
     }
 
@@ -276,12 +281,12 @@ mod tests {
     async fn a_chore_takes_a_free_local_slot_and_otherwise_runs_on_the_chore_tier_at_once() {
         let models = crate::config::ModelsConfig::default();
         let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
-        let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
+        let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false, false).await;
         assert_eq!(tier, LOCAL);
         assert_eq!(model_for(Some(&tidy), tier, &Default::default(), true), LOCAL);
         assert!(run.is_some() && local.try_take().is_none(), "the chore holds the slot");
         // Busy: no waiting.
-        let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false).await;
+        let (tier, run) = tier_for(Some(&tidy), 0, &models, Some(&local), false, false).await;
         assert_eq!((tier, run.is_none()), (chore_tier(), true));
         drop(run);
     }
@@ -291,7 +296,7 @@ mod tests {
         let models = crate::config::ModelsConfig::default();
         let (local, tidy) = (LocalModel::up(), a_chore(ChoreKind::Tidy));
         let held = local.take().await;
-        let wait = tier_for(Some(&tidy), 0, &models, Some(&local), true);
+        let wait = tier_for(Some(&tidy), 0, &models, Some(&local), true, false);
         tokio::pin!(wait);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(100), &mut wait)
@@ -306,7 +311,7 @@ mod tests {
     async fn a_playtest_fix_never_takes_the_local_slot() {
         let models = crate::config::ModelsConfig::default();
         let (local, fix) = (LocalModel::up(), a_chore(ChoreKind::PlaytestFix));
-        let (_, run) = tier_for(Some(&fix), 0, &models, Some(&local), false).await;
+        let (_, run) = tier_for(Some(&fix), 0, &models, Some(&local), false, false).await;
         assert!(run.is_none() && local.try_take().is_some());
     }
 
@@ -315,19 +320,21 @@ mod tests {
         let models = crate::config::ModelsConfig::default();
         let local = LocalModel::up();
         // Above the fallback rows: no slot.
-        let (tier, run) = tier_for(None, 0, &models, Some(&local), false).await;
+        let (tier, run) = tier_for(None, 0, &models, Some(&local), false, false).await;
         assert_ne!(tier, LOCAL);
         assert!(run.is_none());
-        let (tier, run) = tier_for(None, 0, &models, Some(&local), true).await;
+        let (tier, run) = tier_for(None, 0, &models, Some(&local), true, false).await;
         assert!(tier == LOCAL && run.is_some());
         drop(run);
         // Down, or the flag Off: the role's tier.
         let normal = implementer_tier(None, 0, &models, false);
         assert_eq!(
-            tier_for(None, 0, &models, Some(&LocalModel::off()), true).await.0,
+            tier_for(None, 0, &models, Some(&LocalModel::off()), true, false)
+                .await
+                .0,
             normal
         );
-        assert_eq!(tier_for(None, 0, &models, None, true).await.0, normal);
+        assert_eq!(tier_for(None, 0, &models, None, true, false).await.0, normal);
     }
 
     #[test]

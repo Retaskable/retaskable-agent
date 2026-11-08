@@ -331,7 +331,8 @@ impl RunStarter for PlanRuns {
         let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
             // Off, the planner stays on the chore tier as before.
             if flagged {
-                tiers::top_tier(None, crate::telemetry::now_ms() / 1000, models, local)
+                let floored = tiers::limit_floor(None, self.roster.sessions.claude_at_limit(), local);
+                tiers::top_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, models, local)
             } else {
                 tiers::chore_tier()
             }

@@ -194,7 +194,8 @@ impl AskHost for ClaudeAsks {
             };
             let repo_path = PathBuf::from(&project.repo_path);
             let up = local.ladder_for(chosen == Engine::Claude);
-            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
+            let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
+            let tier = implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
             // Held until the session ends.
             let claimed = local.claim(tier).await;
             let spec = match session_spec(&Session {

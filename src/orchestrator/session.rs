@@ -441,7 +441,9 @@ async fn attempt(
     let tier = if up && (if resumed { was_local } else { job.wants_local }) {
         LOCAL
     } else {
-        implementer_tier(usage.as_ref(), now, models, up && !resumed)
+        // Claude at its limit reads as the floor tier for a fresh session only (`local-limit-fallback`).
+        let floored = crate::tiers::limit_floor(usage.as_ref(), !resumed && sessions.claude_at_limit(), up);
+        implementer_tier(floored.as_ref(), now, models, up && !resumed)
     };
     let local_run = if tier == LOCAL {
         Some(job.local.run().await)

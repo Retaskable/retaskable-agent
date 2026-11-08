@@ -114,11 +114,13 @@ impl ClaudeStarter {
                 .display()
                 .to_string(),
         );
+        let up = self.local.ladder_for(placed.engine == EngineId::Claude);
+        let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
         let tier = mid_tier(implementer_tier(
-            usage.as_ref(),
+            floored.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
-            self.local.ladder_for(placed.engine == EngineId::Claude),
+            up,
         ));
         let (model, local) = (tier.to_string(), self.local.clone());
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
@@ -229,12 +231,9 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let top = top_tier(
-            None,
-            0,
-            &self.models,
-            self.local.ladder_for(placed.engine == EngineId::Claude),
-        );
+        let up = self.local.ladder_for(placed.engine == EngineId::Claude);
+        let floored = crate::tiers::limit_floor(None, sessions.claude_at_limit(), up);
+        let top = top_tier(floored.as_ref(), 0, &self.models, up);
         let local = self.local.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top);
         tokio::spawn(async move {

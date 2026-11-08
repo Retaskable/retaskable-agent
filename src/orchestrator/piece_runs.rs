@@ -397,6 +397,7 @@ async fn session(
         &job.models,
         ladder.then_some(&job.local),
         job.wants_local,
+        !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
     )
     .await;
     let model = model_for(chore.as_ref(), tier, &item, is_retry(&job.piece)).to_string();
