@@ -72,6 +72,7 @@ async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
 
 #[tokio::test]
 async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
+    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(true)));
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
     let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
@@ -96,6 +97,7 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
 
 #[tokio::test]
 async fn a_plan_is_listed_while_it_runs_and_not_after() {
+    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(true)));
     let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
     let (req, mut s) = request(brief());
     r.starter.start(req).unwrap();
@@ -286,11 +288,7 @@ fn offered_local(flag: bool, up: bool, engine: Engine) -> bool {
     let mut r = rig(&answer(GOOD), "", choice);
     let root = r.root.clone();
     on_every_engine(&mut r.starter.roster, &root);
-    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(if flag {
-        &["engine-placement", "local-tier-ladder"]
-    } else {
-        &["engine-placement"]
-    }));
+    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(flag)));
     if up {
         r.starter.roster.local = crate::local_model::LocalModel::up_for_test();
     }
@@ -324,4 +322,15 @@ fn the_planner_is_on_the_top_tier_and_stays_off_a_free_local_slot_above_the_limi
     assert_eq!(tiers::top_tier(Some(&usage(0.94)), 0, &m, true), tiers::OPUS);
     assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, true), tiers::LOCAL);
     assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, false), tiers::OPUS);
+}
+
+#[tokio::test]
+async fn with_the_flag_off_the_planner_stays_on_the_chore_tier() {
+    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(false)));
+    let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    let rows = rows_once_running(&r.starter.roster.sessions).await;
+    assert_eq!(rows[0].info.model, tiers::chore_tier());
+    end_of(&mut s.ends).await;
 }

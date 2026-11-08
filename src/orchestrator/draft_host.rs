@@ -97,7 +97,7 @@ impl DraftHost for ClaudeDrafts {
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
             let titles = titles_text(&draft.titles, &themes);
-            let up = chosen == Engine::Claude && local.ladder();
+            let up = local.ladder_for(chosen == Engine::Claude);
             let tier = drafter_tier(
                 draft.request.as_deref().unwrap_or(""),
                 implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up),

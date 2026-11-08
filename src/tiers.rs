@@ -146,8 +146,18 @@ pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
     let _ = FLAG.set(flags);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's own answer for the `local-tier-ladder` flag, on its thread.
+    pub static LADDER_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// Whether the `local-tier-ladder` flag was On at its last answer; Off until the flags client is handed over.
 pub fn local_ladder_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = LADDER_FOR_TEST.with(|c| c.get()) {
+        return on;
+    }
     FLAG.get().is_some_and(|f| f.last("local-tier-ladder"))
 }
 

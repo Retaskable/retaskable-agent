@@ -118,7 +118,7 @@ impl ClaudeStarter {
             usage.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
-            placed.engine == EngineId::Claude && self.local.ladder(),
+            self.local.ladder_for(placed.engine == EngineId::Claude),
         ));
         let (model, local) = (tier.to_string(), self.local.clone());
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
@@ -233,7 +233,7 @@ impl ClaudeStarter {
             None,
             0,
             &self.models,
-            placed.engine == EngineId::Claude && self.local.ladder(),
+            self.local.ladder_for(placed.engine == EngineId::Claude),
         );
         let local = self.local.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top);

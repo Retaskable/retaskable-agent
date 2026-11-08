@@ -193,7 +193,7 @@ impl AskHost for ClaudeAsks {
                 Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
             };
             let repo_path = PathBuf::from(&project.repo_path);
-            let up = chosen == Engine::Claude && local.ladder();
+            let up = local.ladder_for(chosen == Engine::Claude);
             let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
             // Held until the session ends.
             let claimed = local.claim(tier).await;

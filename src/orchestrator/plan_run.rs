@@ -278,8 +278,7 @@ impl Roster {
         }
         let placed = place(engine, role, &self.env, &self.cursor_models)?;
         // `local` only where the role is on Claude, the `local-tier-ladder` flag is On and the model is up.
-        let tier =
-            tier(placed.engine == EngineId::Claude && self.flags.last("local-tier-ladder") && self.local.available());
+        let tier = tier(self.local.ladder_for(placed.engine == EngineId::Claude));
         let model = tier.to_string();
         let guard = slot
             .take()
@@ -328,8 +327,14 @@ impl RunStarter for PlanRuns {
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
         let models = &self.roster.models;
+        let flagged = tiers::local_ladder_on();
         let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
-            tiers::top_tier(None, crate::telemetry::now_ms() / 1000, models, local)
+            // Off, the planner stays on the chore tier as before.
+            if flagged {
+                tiers::top_tier(None, crate::telemetry::now_ms() / 1000, models, local)
+            } else {
+                tiers::chore_tier()
+            }
         })?;
         let cut = Cut::default();
         spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));

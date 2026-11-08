@@ -101,6 +101,11 @@ impl LocalModel {
         crate::tiers::local_ladder_on() && self.available()
     }
 
+    /// [`Self::ladder`] for a session on `engine`: only Claude Code runs on the local model.
+    pub fn ladder_for(&self, on_claude: bool) -> bool {
+        on_claude && self.ladder()
+    }
+
     /// For a session whose tier came out `local`: waits for the one slot and gives it with the target to run on
     /// (the fallback rows wait, they don't skip the slot). `None` for any other tier.
     pub async fn claim(&self, tier: &str) -> Option<(LocalSlot, LocalTarget)> {
@@ -272,10 +277,54 @@ mod tests {
         assert!(second.await.unwrap());
     }
 
+    /// What each role does with the gate and the claim, as the drafter, triager, ask and second look call them.
+    #[tokio::test]
+    async fn each_role_is_local_only_in_its_rows_and_falls_back_with_local_down() {
+        use crate::tiers::{LOCAL, OPUS, SONNET, implementer_tier, mid_tier, top_tier};
+        let m = crate::config::ModelsConfig::default();
+        let usage = |used: f64| serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
+        crate::tiers::LADDER_FOR_TEST.with(|c| c.set(Some(true)));
+        let up = LocalModel::up_for_test();
+        let down = LocalModel::off();
+        // (used, mid/asks tier with local up, with it down, top tier up, down)
+        for (used, mid_up, mid_down, top_up, top_down) in [
+            (0.2, SONNET, SONNET, OPUS, OPUS),
+            (0.9, LOCAL, SONNET, OPUS, OPUS),
+            (0.99, LOCAL, SONNET, LOCAL, OPUS),
+        ] {
+            let u = usage(used);
+            let tier = |l: &LocalModel| mid_tier(implementer_tier(Some(&u), 0, &m, l.ladder_for(true)));
+            assert_eq!(tier(&up), mid_up, "{used}");
+            assert_eq!(tier(&down), mid_down, "{used}");
+            assert_eq!(top_tier(Some(&u), 0, &m, up.ladder_for(true)), top_up, "{used}");
+            assert_eq!(top_tier(Some(&u), 0, &m, down.ladder_for(true)), top_down, "{used}");
+            // Above the limit nothing is claimed, so the free slot stays free.
+            if mid_up != LOCAL {
+                assert!(up.claim(mid_up).await.is_none());
+                assert!(up.try_take().is_some());
+            }
+        }
+        crate::tiers::LADDER_FOR_TEST.with(|c| c.set(None));
+    }
+
     #[test]
     fn the_ladder_needs_the_model_up_and_the_flag_on() {
         // No flags client is handed over in a unit test, so the flag reads Off.
         assert!(!LocalModel::up_for_test().ladder());
+        let ladder = |on: bool, up: bool, claude: bool| {
+            crate::tiers::LADDER_FOR_TEST.with(|c| c.set(Some(on)));
+            let local = if up {
+                LocalModel::up_for_test()
+            } else {
+                LocalModel::off()
+            };
+            local.ladder_for(claude)
+        };
+        assert!(ladder(true, true, true));
+        assert!(!ladder(false, true, true), "flag Off");
+        assert!(!ladder(true, false, true), "local down");
+        assert!(!ladder(true, true, false), "not on Claude");
+        crate::tiers::LADDER_FOR_TEST.with(|c| c.set(None));
         assert!(!LocalModel::off().ladder());
     }
 
