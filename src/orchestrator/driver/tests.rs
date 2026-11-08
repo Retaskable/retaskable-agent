@@ -882,110 +882,6 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
     );
 }
 
-fn flag_on(rig: &mut Rig) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
-}
-
-fn step_events(rig: &mut Rig, kind: &str) -> Vec<Value> {
-    (rig.lp(0).events().recent().iter())
-        .map(Entry::to_value)
-        .filter(|e| e["kind"] == kind)
-        .collect()
-}
-
-#[tokio::test]
-async fn a_checking_step_writes_a_keyed_step_start_and_a_step_end() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
-    let fake = rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    *fake.to.lock().unwrap() = Some(ItemState::Reviewing);
-    rig.machine.poll().await;
-    let start = step_events(&mut rig, "step_start").remove(0);
-    assert_eq!(
-        (start["step"].as_str(), start["key"].as_str()),
-        (Some("checking"), Some("slice 1 round 1"))
-    );
-    assert!(start.get("again").is_none());
-    settle().await;
-    rig.machine.poll().await;
-    let end = step_events(&mut rig, "step_end").remove(0);
-    assert_eq!(
-        (end["item"].as_str(), end["step"].as_str()),
-        (Some("a"), Some("checking"))
-    );
-    assert_eq!(
-        (end["key"].as_str(), end["ok"].as_bool(), end["outcome"].as_str()),
-        (Some("slice 1 round 1"), Some(true), Some("reviewing"))
-    );
-    assert!(end["ms"].is_number());
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_step_start_has_no_key_and_no_step_end_follows() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    *fake.to.lock().unwrap() = Some(ItemState::Reviewing);
-    rig.machine.poll().await;
-    settle().await;
-    rig.machine.poll().await;
-    assert!(step_events(&mut rig, "step_start")[0].get("key").is_none());
-    assert!(step_events(&mut rig, "step_end").is_empty());
-}
-
-#[tokio::test]
-async fn a_step_started_while_one_is_open_is_again() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
-    let fake = rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    rig.lp(0).step_started(
-        "a",
-        &ItemRun {
-            state: ItemState::Checking,
-            ..ItemRun::new()
-        },
-    );
-    fake.hold.store(true, Ordering::SeqCst);
-    rig.machine.poll().await;
-    let starts = step_events(&mut rig, "step_start");
-    assert_eq!(starts.len(), 2);
-    assert!(starts[0].get("again").is_none());
-    assert_eq!(starts[1]["again"], true);
-}
-
-#[tokio::test]
-async fn a_panicking_or_cut_step_still_writes_step_end_with_ok_false() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
-    let fake = rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    fake.step_panics.store(true, Ordering::SeqCst);
-    rig.machine.poll().await;
-    settle().await;
-    fake.hold.store(true, Ordering::SeqCst);
-    rig.machine.poll().await;
-    let ends = step_events(&mut rig, "step_end");
-    assert_eq!(
-        (ends[0]["ok"].as_bool(), ends[0]["outcome"].as_str()),
-        (Some(false), Some("panicked"))
-    );
-    // The retried step is held, then cut by a restart.
-    rig.machine.stopping_override = Some(true);
-    rig.machine.poll().await;
-    let ends = step_events(&mut rig, "step_end");
-    assert_eq!(ends.len(), 2);
-    assert_eq!(
-        (ends[1]["ok"].as_bool(), ends[1]["outcome"].as_str()),
-        (Some(false), Some("cut"))
-    );
-}
-
 #[tokio::test]
 async fn concurrency_caps_starts_and_claims() {
     let (base, asked) = claim_stub(json!([]), handed_out()).await;
@@ -1080,6 +976,7 @@ mod restart;
 mod runs;
 mod settling;
 mod starter;
+mod step_events;
 mod triage;
 mod trial;
 mod vet_daily;
