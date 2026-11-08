@@ -3,14 +3,8 @@ use tokio::io::{AsyncReadExt, DuplexStream, duplex};
 
 fn item(id: &str, text: &str, action: Option<Action>) -> Item {
     Item {
-        id: id.into(),
-        text: text.into(),
-        enabled: true,
-        hidden: false,
-        checked: false,
-        inline: false,
-        children: vec![],
         action,
+        ..Item::new(id, text)
     }
 }
 
