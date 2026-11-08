@@ -138,3 +138,20 @@ impl ProjectLoop {
         gate.is_some_and(|g| g.holds(self, shared, lane))
     }
 }
+
+impl ProjectLoop {
+    /// Tells the live state when Claude's limit lifts, while `start_blocked` says the usage limit or the weekly
+    /// cutoff holds new work; otherwise clears it.
+    pub(super) fn report_limit(
+        &self,
+        cant_start: Option<&str>,
+        limits: &crate::orchestrator::fresh_start::EngineLimits,
+    ) {
+        let now = Instant::now();
+        let resets = cant_start
+            .filter(|c| matches!(*c, "usage limit" | "weekly limit"))
+            .and_then(|_| limits.limited_until(EngineId::Claude, now));
+        let at = resets.map(|at| crate::orchestrator::live::iso8601_in(at - now));
+        self.live.set_limit(&self.id, at);
+    }
+}

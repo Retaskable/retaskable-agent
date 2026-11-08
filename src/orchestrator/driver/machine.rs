@@ -24,7 +24,7 @@ use crate::link::TokenStore;
 use crate::orchestrator::Action;
 use crate::orchestrator::fresh_start::EngineLimits;
 use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::{LiveHandle, iso8601_in};
+use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
 use crate::process_tree;
 use crate::telemetry::{Event, event};
@@ -663,12 +663,7 @@ impl Machine {
             (self.projects.iter_mut().zip(read_items).zip(paused)).zip(scheduled)
         {
             let cant_start = lp.start_blocked(&shared!(self, false), &self.pool).await;
-            // Claude at its limit (the usage limit or the weekly cutoff): the project waits for its reset.
-            let now = std::time::Instant::now();
-            let resets = cant_start
-                .filter(|c| matches!(*c, "usage limit" | "weekly limit"))
-                .and_then(|_| self.engine_limits.limited_until(crate::engines::EngineId::Claude, now));
-            lp.live.set_limit(&lp.id, resets.map(|at| iso8601_in(at - now)));
+            lp.report_limit(cant_start, &self.engine_limits);
             match items {
                 Some(items) => steps.push(lp.record(items, paused, cant_start, actions, &self.pool, live).await),
                 None => steps.push(Step::Skipped),
@@ -702,11 +697,7 @@ impl Machine {
             self.settle_outcomes().await;
         }
         self.pace_step(ready, &live).await;
-        let effective = self.effective_concurrency();
-        if let Some(lp) = self.projects.first() {
-            lp.live.set_concurrency(effective);
-        }
-        let concurrency = self.room_total(effective);
+        let concurrency = self.room_total(self.report_concurrency());
         if let Some(starter) = starter.as_deref() {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {

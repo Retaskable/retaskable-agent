@@ -58,6 +58,15 @@ impl Machine {
         }
     }
 
+    /// [`effective_concurrency`](Self::effective_concurrency), also left in the live state for the snapshot.
+    pub(super) fn report_concurrency(&self) -> u32 {
+        let effective = self.effective_concurrency();
+        if let Some(lp) = self.projects.first() {
+            lp.live.set_concurrency(effective);
+        }
+        effective
+    }
+
     /// Settles the flag for this pass, feeds the pacer the Claude readings that settled since the last pass and
     /// steps it when it is due.
     pub(super) async fn pace_step(&mut self, ready: &[bool], live: &[bool]) {
