@@ -83,6 +83,7 @@ pub mod tags;
 pub mod telemetry;
 #[cfg(test)]
 mod test_support;
+pub mod terminal_menu;
 pub mod text;
 pub mod tiers;
 pub mod tray;
