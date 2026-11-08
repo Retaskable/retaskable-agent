@@ -333,9 +333,14 @@ pub(crate) fn repo_with_origin(root: &Path) -> PathBuf {
 
 /// Stub binaries for claude, cursor-agent, pi and codex (except those in `missing`) in `root`, each logging
 /// `<program> <args>` to `calls.txt`, running `claude_step` first when it is claude, and printing `out.jsonl`.
-/// Gives an `Env` whose `RETASKABLE_*` variables name them.
+/// Gives each program's `RETASKABLE_*` variable and path.
 #[cfg(unix)]
-pub(crate) fn stub_engines(root: &Path, out: &str, claude_step: &str, missing: &[&str]) -> crate::env::Env {
+pub(crate) fn stub_engine_vars(
+    root: &Path,
+    out: &str,
+    claude_step: &str,
+    missing: &[&str],
+) -> Vec<(&'static str, String)> {
     std::fs::write(root.join("out.jsonl"), out).unwrap();
     let mut vars = Vec::new();
     for (var, program) in [
@@ -355,5 +360,12 @@ pub(crate) fn stub_engines(root: &Path, out: &str, claude_step: &str, missing: &
         }
         vars.push((var, bin.to_string_lossy().into_owned()));
     }
+    vars
+}
+
+/// [`stub_engine_vars`] as an `Env`.
+#[cfg(unix)]
+pub(crate) fn stub_engines(root: &Path, out: &str, claude_step: &str, missing: &[&str]) -> crate::env::Env {
+    let vars = stub_engine_vars(root, out, claude_step, missing);
     crate::env::Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone()))
 }
