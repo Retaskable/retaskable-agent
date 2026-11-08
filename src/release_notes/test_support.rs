@@ -31,6 +31,7 @@ pub(crate) fn item(
         branch: None,
         kind: None,
         milestone: milestone.map(ToString::to_string),
+        draft_id: None,
         reopened: None,
         red_sha: None,
         no_fix_sha: None,

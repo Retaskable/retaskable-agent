@@ -68,6 +68,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         branch: None,
         kind: None,
         milestone: None,
+        draft_id: None,
         reopened: None,
         no_fix_sha: None,
         red_sha: None,

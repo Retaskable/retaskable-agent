@@ -270,7 +270,7 @@ async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
 
 /// The full sha production says it serves (`{ "sha": ... }` at `url`), or `None` while it doesn't say or names a
 /// commit this clone doesn't know.
-async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
+pub(super) async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
     let answer = (reqwest::Client::new().get(url))
         .timeout(Duration::from_secs(10))
         .send()
@@ -285,7 +285,7 @@ async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
 }
 
 /// `<url><versionPath>` (`/version.json` by default) for production with a URL, else `None`.
-fn version_url(target: &DeployTarget) -> Option<String> {
+pub(super) fn version_url(target: &DeployTarget) -> Option<String> {
     let url = target.url.as_deref()?.trim().trim_end_matches('/');
     if url.is_empty() {
         return None;
@@ -332,7 +332,7 @@ async fn contained(ctx: &Ctx, items: impl Iterator<Item = &Awaiting>, at: &str) 
 }
 
 /// Whether `at` has `commit` in its history; a commit this clone doesn't know isn't.
-async fn contains(repo_path: &Path, commit: &str, at: &str) -> bool {
+pub(super) async fn contains(repo_path: &Path, commit: &str, at: &str) -> bool {
     git(repo_path, &["merge-base", "--is-ancestor", commit, at])
         .await
         .is_some()

@@ -17,6 +17,7 @@ use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::project::signed_out;
 use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
+use crate::ask::follow_up;
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
 use crate::config::ProjectConfig;
@@ -69,6 +70,7 @@ struct Ctx {
     lease: String,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
+    flags: Arc<crate::flags::Flags>,
     wait: Duration,
     placement: bool,
     /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
@@ -81,6 +83,18 @@ impl Ctx {
         let sent = (self.client).draft_report(self.repo, Some(&self.token), id, &self.lease, &report);
         if let Err(e) = sent.await {
             tracing::warn!("a draft's report didn't reach the store: {e}");
+        }
+    }
+
+    /// Retaskable's own message about `draft`'s landing, once, behind the `ask-claude` flag. The draft's state is already
+    /// reported, so a message the store doesn't take is only logged.
+    async fn say(&self, draft: &crate::backlog::drafts::ClaimedDraft, text: &str) {
+        if !self.flags.on("ask-claude").await {
+            return;
+        }
+        let ask = draft.ask_id.as_deref();
+        if let Err(e) = follow_up::post_once(&self.client, self.repo, &self.token, &draft.id, ask, text).await {
+            tracing::warn!("a draft's chat message didn't reach the store: {e}");
         }
     }
 
@@ -253,6 +267,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
             ..Default::default()
         };
         ctx.report(&id, report).await;
+        ctx.say(draft, follow_up::WAITING_FOR_MERGE).await;
         return None;
     } else if let Err(first) = ctx.merge(pr, delete, 1).await {
         // Behind the base, perhaps: rebase it when that's clean, and merge once GitHub sees the push.
@@ -303,9 +318,10 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         ..Default::default()
     };
     ctx.report(&id, report).await;
-    let item_ids = (draft.other.get("itemIds").and_then(Value::as_array))
+    let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    ctx.say(draft, &follow_up::merged(item_ids.len(), &draft.titles)).await;
     Some(Landed {
         item_ids,
         asked_by: text(&taken, "requestedBy").map(String::from),
@@ -381,6 +397,7 @@ impl ProjectLoop {
                 lease: taken.token.clone(),
                 project: self.project.clone(),
                 host: host.clone(),
+                flags: self.flags.clone(),
                 wait,
                 placement,
                 engine,

@@ -115,6 +115,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         branch: None,
         kind: None,
         milestone: None,
+        draft_id: None,
         reopened: None,
         red_sha: None,
         no_fix_sha: None,
