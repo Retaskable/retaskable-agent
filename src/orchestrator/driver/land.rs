@@ -68,6 +68,7 @@ struct Ctx {
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     wait: Duration,
+    placement: bool,
 }
 
 impl Ctx {
@@ -156,6 +157,7 @@ impl Ctx {
             resume: true,
             follow_up: rebase_request(reason),
             usage: None,
+            placement: self.placement,
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
         if result.status == DrafterStatus::Failed {
@@ -337,6 +339,7 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
+        let placement = self.flags.on("engine-placement").await;
         for press in presses {
             let (DraftCommand::Approve { draft, .. }
             | DraftCommand::Merge { draft, .. }
@@ -359,6 +362,7 @@ impl ProjectLoop {
                 project: self.project.clone(),
                 host: host.clone(),
                 wait,
+                placement,
             };
             let task = if matches!(press, DraftCommand::Discard { .. }) {
                 tokio::spawn(discard(ctx, id, taken))

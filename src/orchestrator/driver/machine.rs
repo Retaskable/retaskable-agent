@@ -16,7 +16,7 @@ use super::{
 };
 use crate::backlog::runs::RunKind;
 use crate::backlog::{BacklogError, Client, Item};
-use crate::config::{EngineChoiceConfig, Playtests, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -83,6 +83,8 @@ pub struct Links {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
+    /// The Cursor model name per tier, for a Cursor session placed here (an ideas round).
+    pub cursor_models: CursorModels,
     /// The latest setup checks, for the engines `run_take` says this computer has. None have run yet: none are sent.
     pub checks: SetupChecksHandle,
     /// Each project's hub link, for reporting Retaskable's own bugs (06.9 bullet 19). A project without one reports none.
@@ -313,6 +315,7 @@ impl Machine {
             project: lp.project.clone(),
             env: self.links.env.clone(),
             engine_choice: self.links.engine_choice.clone(),
+            cursor_models: self.links.cursor_models.clone(),
             machine: self.links.machine.clone(),
             backlog_url: self.links.backlog_url.clone(),
             keychain: self.links.keychain.clone(),
@@ -737,6 +740,7 @@ pub struct SpawnArgs<'a> {
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
     pub engine_choice: EngineChoiceConfig,
+    pub cursor_models: CursorModels,
     pub checks: SetupChecksHandle,
     pub bugs: std::collections::HashMap<String, Arc<crate::connector::bug_link::BugLink>>,
     pub bug_version: String,
@@ -765,6 +769,7 @@ pub fn spawn_all(args: SpawnArgs) {
             tags: args.tags,
             env: args.env,
             engine_choice: args.engine_choice,
+            cursor_models: args.cursor_models,
             checks: args.checks,
             bugs: args.bugs,
             bug_version: args.bug_version,
