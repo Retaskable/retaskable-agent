@@ -95,3 +95,40 @@ fn csrf_ok_checks_the_header_against_the_expected_token() {
     assert!(!csrf_ok(&headers, "something-else"));
     assert!(!csrf_ok(&HeaderMap::new(), "expected"), "missing header");
 }
+
+fn server_with_own(network: bool, own: Vec<IpAddr>) -> SettingsServer {
+    let dir = tempfile::tempdir().unwrap();
+    if network {
+        MachineStore::load(dir.path())
+            .unwrap()
+            .set_network(crate::network::NetworkAccess {
+                enabled: true,
+                password_hash: Some("x".into()),
+            })
+            .unwrap();
+    }
+    let mut s = SettingsServer::new(
+        dir.keep(),
+        4700,
+        4700,
+        network,
+        Env::empty(),
+        || 0,
+        |_: i32| {},
+        test_keychain(std::path::Path::new(".")),
+    );
+    s.own_addresses = Box::new(move || own.clone());
+    s
+}
+
+#[test]
+fn host_may_be_an_own_address_only_while_network_access_is_on() {
+    let own: Vec<IpAddr> = vec!["192.168.1.20".parse().unwrap(), "fd00::20".parse().unwrap()];
+    let on = server_with_own(true, own.clone());
+    assert!(on.host_is_allowed("192.168.1.20:4700"));
+    assert!(on.host_is_allowed("[fd00::20]:4700"));
+    assert!(!on.host_is_allowed("192.168.1.20:1"));
+    assert!(!on.host_is_allowed("192.168.1.21:4700"));
+    assert!(!on.host_is_allowed("evil.example.com:4700"));
+    assert!(!server_with_own(false, own).host_is_allowed("192.168.1.20:4700"));
+}

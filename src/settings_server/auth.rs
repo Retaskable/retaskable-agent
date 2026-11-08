@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use axum::extract::{Request, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -78,20 +80,29 @@ impl SettingsServer {
     /// while network access is on (section 3.1: "Turning it off keeps the hash" so it can be
     /// turned back on, but doesn't go on signing in while it's off).
     pub(super) fn verify_password(&self, password_attempt: &str) -> bool {
-        let access = match &self.env_network_access {
-            Some(access) => access.clone(),
-            None => {
-                let Ok(machine) = MachineStore::load(&self.dir) else {
-                    return false;
-                };
-                machine.network().unwrap_or_default()
-            }
+        let Some(access) = self.live_network_access() else {
+            return false;
         };
         access.enabled
             && access
                 .password_hash
                 .as_deref()
                 .is_some_and(|hash| password::verify_password(password_attempt, hash))
+    }
+
+    /// Network access as it is right now: the variable's, else `machine.json`'s, read on each
+    /// call so a save that turns it off takes effect at once (section 4.4). `None` when the file
+    /// can't be read (fail closed).
+    fn live_network_access(&self) -> Option<crate::network::NetworkAccess> {
+        match &self.env_network_access {
+            Some(access) => Some(access.clone()),
+            None => Some(MachineStore::load(&self.dir).ok()?.network().unwrap_or_default()),
+        }
+    }
+
+    /// Whether network access is on right now (not as the agent started).
+    pub(super) fn network_on(&self) -> bool {
+        self.live_network_access().is_some_and(|a| a.enabled)
     }
 
     pub(super) fn create_session(&self) -> (String, String) {
@@ -167,9 +178,8 @@ impl SettingsServer {
     }
 
     /// Its Host is this computer's own, at the port it answered on (section 4.3): no DNS
-    /// rebinding. Network access can already make the port listen on every address (section
-    /// 4.4), but this still only accepts the loopback names; widening it to the computer's own
-    /// network addresses isn't ported yet (tracked outside this change).
+    /// rebinding. `127.0.0.1`, `localhost` and `[::1]` always; while network access is on, also
+    /// an IP literal that is one of this computer's own interface addresses. Never another name.
     pub(super) fn host_is_allowed(&self, host_header: &str) -> bool {
         let (host, port) = split_host_port(host_header);
         if let Some(port) = port
@@ -177,10 +187,18 @@ impl SettingsServer {
         {
             return false;
         }
-        matches!(
-            host.to_ascii_lowercase().as_str(),
-            "127.0.0.1" | "localhost" | "[::1]" | "::1"
-        )
+        let host = host.to_ascii_lowercase();
+        if matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+            return true;
+        }
+        let literal = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(&host);
+        let Ok(ip) = literal.parse::<IpAddr>() else {
+            return false;
+        };
+        self.network_on() && (self.own_addresses)().contains(&ip)
     }
 }
 
@@ -189,6 +207,7 @@ impl SettingsServer {
 /// away about which paths exist (agent/08-http-api.md: the port takes no command either way).
 pub(super) async fn security_envelope(
     State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -200,7 +219,8 @@ pub(super) async fn security_envelope(
     else {
         return not_found_response();
     };
-    if !settings.host_is_allowed(&host) {
+    // Another computer gets in only while network access is on, read live (section 4.4).
+    if (!peer.ip().is_loopback() && !settings.network_on()) || !settings.host_is_allowed(&host) {
         return not_found_response();
     }
     if req.method() == Method::POST {

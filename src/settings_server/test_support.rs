@@ -8,7 +8,7 @@ use axum::http::Request;
 use axum::http::header;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -20,6 +20,16 @@ pub(crate) const HOST: &str = "127.0.0.1:4700";
 
 pub(crate) fn app(settings: Arc<SettingsServer>) -> Router {
     super::router(settings).layer(MockConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 54321))))
+}
+
+/// Like [`app`], but the request comes from `peer` (e.g. a 192.168.x.x address).
+pub(crate) fn app_from(settings: Arc<SettingsServer>, peer: IpAddr) -> Router {
+    super::router(settings).layer(MockConnectInfo(SocketAddr::from((peer, 54321))))
+}
+
+/// Replaces the interface addresses a Host is checked against.
+pub(crate) fn set_own_addresses(settings: &mut SettingsServer, addrs: Vec<IpAddr>) {
+    settings.own_addresses = Box::new(move || addrs.clone());
 }
 
 pub(crate) fn request(method: &str, path: &str) -> axum::http::request::Builder {

@@ -69,6 +69,8 @@ pub struct SettingsServer {
     /// process runs.
     env_network_access: Option<NetworkAccess>,
     env: Env,
+    /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
+    own_addresses: Box<dyn Fn() -> Vec<std::net::IpAddr> + Send + Sync>,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
     /// This machine's stored cloud tokens, for `GET /api/link` (section 9.2's "computer's link
@@ -101,6 +103,11 @@ impl SettingsServer {
             network_enabled,
             env_network_access,
             env,
+            own_addresses: Box::new(|| {
+                if_addrs::get_if_addrs()
+                    .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
+                    .unwrap_or_default()
+            }),
             now: Box::new(now),
             exit: Box::new(exit),
             keychain,
@@ -407,3 +414,5 @@ pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
 mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod network_tests;
