@@ -248,19 +248,43 @@ pub fn top_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, lo
 
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
 /// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
-/// kept for retries, reopened items and the bigger ones. Only a tier of `opus` is ever moved; a tier
-/// already below it (from a usage reading, section 7.1's table) is returned unchanged.
-///
-/// Not yet: the store's claimed item (backlog/06.1-an-item.md) carries no retry count and no size
-/// (estimates.md section 3.2 — sizing came from the TypeScript agent's own planner, removed before
-/// this rule existed, so an item from the store never has one), so both are read as a first try on
-/// a size below L until the store carries them; only `reopened`, which the store does send, can keep
-/// `opus` here today.
-pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
+/// kept for a reopened item and, behind the `implementer-step-up` flag, a retry (`attempt` over 0: this agent
+/// counts Start over from 0) and an item of size L or XL (any case). With the flag Off only `reopened` keeps
+/// `opus`. Only a tier of `opus` is ever moved; a tier already below it (from a usage reading, section 7.1's
+/// table, or `local`) is returned unchanged.
+pub fn implementer_model(tier: &'static str, item: &Item, attempt: u32) -> &'static str {
     if tier != OPUS {
         return tier;
     }
-    if item.reopened.is_some() { OPUS } else { SONNET }
+    let big = item
+        .size
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("L") || s.eq_ignore_ascii_case("XL"));
+    if item.reopened.is_some() || (step_up_on() && (attempt > 0 || big)) {
+        OPUS
+    } else {
+        SONNET
+    }
+}
+
+/// Whether the `implementer-step-up` flag was On at its last answer; Off until the flags client is handed over.
+fn step_up_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = STEP_UP_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("implementer-step-up"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static STEP_UP_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `implementer-step-up` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_step_up_for_test(on: bool) {
+    STEP_UP_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
 /// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
@@ -628,7 +652,7 @@ mod tests {
 
     #[test]
     fn implementer_model_keeps_local() {
-        assert_eq!(implementer_model(LOCAL, &item(true)), LOCAL);
+        assert_eq!(implementer_model(LOCAL, &item(true), 0), LOCAL);
     }
 
     fn item(reopened: bool) -> Item {
@@ -654,21 +678,53 @@ mod tests {
             }),
             red_sha: None,
             no_fix_sha: None,
+            size: None,
         }
     }
 
     #[test]
     fn a_first_try_at_a_full_window_runs_on_sonnet_not_opus() {
-        assert_eq!(implementer_model(OPUS, &item(false)), SONNET);
+        assert_eq!(implementer_model(OPUS, &item(false), 0), SONNET);
+    }
+
+    fn sized(size: Option<&str>) -> Item {
+        Item {
+            size: size.map(str::to_string),
+            ..item(false)
+        }
+    }
+
+    #[test]
+    fn with_the_step_up_flag_on_retries_and_big_items_keep_opus() {
+        set_step_up_for_test(true);
+        assert_eq!(implementer_model(OPUS, &sized(None), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(Some("M")), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(None), 1), OPUS);
+        assert_eq!(implementer_model(OPUS, &sized(Some("L")), 0), OPUS);
+        assert_eq!(implementer_model(OPUS, &sized(Some("xl")), 0), OPUS);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
+        for tier in [SONNET, LOCAL] {
+            for (it, attempt) in [(item(true), 0), (sized(Some("XL")), 0), (sized(None), 2)] {
+                assert_eq!(implementer_model(tier, &it, attempt), tier);
+            }
+        }
+    }
+
+    #[test]
+    fn with_the_step_up_flag_off_only_reopened_keeps_opus() {
+        set_step_up_for_test(false);
+        assert_eq!(implementer_model(OPUS, &sized(None), 1), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(Some("XL")), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
     }
 
     #[test]
     fn a_reopened_item_keeps_opus() {
-        assert_eq!(implementer_model(OPUS, &item(true)), OPUS);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
     }
 
     #[test]
     fn a_tier_already_below_opus_is_kept_whatever_the_item_is() {
-        assert_eq!(implementer_model(SONNET, &item(true)), SONNET);
+        assert_eq!(implementer_model(SONNET, &item(true), 0), SONNET);
     }
 }

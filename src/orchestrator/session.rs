@@ -98,7 +98,7 @@ impl ClaudeStarter {
 
 /// Whether a fresh Claude implementer may start: the model [`implementer_tier`] gives for `usage` isn't capped and full.
 /// The item isn't known before it's claimed: on the `opus` tier a reopened item keeps `opus` and a first try runs on
-/// `sonnet` (`implementer_model`), so both need room; any other tier checks its own model. `pending` is the starts
+/// `sonnet` (`implementer_model`; a retry or an L/XL item keeps `opus` behind `implementer-step-up`), so both need room; any other tier checks its own model. `pending` is the starts
 /// already made that haven't taken their slot yet.
 pub fn model_has_room(
     slots: Option<&ModelSlots>,
@@ -448,7 +448,7 @@ async fn attempt(
     } else {
         None
     };
-    let model = implementer_model(tier, item).to_string();
+    let model = implementer_model(tier, item, *attempt_no).to_string();
     let info = SessionInfo {
         project: project_id.clone(),
         item_id: item.id.clone(),
