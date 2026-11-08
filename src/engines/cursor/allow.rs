@@ -142,7 +142,10 @@ pub fn with_project(project: &ProjectConfig, base: CursorOptions) -> CursorOptio
             allow.push(entry.to_string());
         }
     }
-    let cli = match crate::repo::origin_url(std::path::Path::new(&project.repo_path)) {
+    let origin = (!project.repo_path.is_empty())
+        .then(|| crate::repo::origin_url(std::path::Path::new(&project.repo_path)))
+        .flatten();
+    let cli = match origin {
         Some(url) => host_cli_of(&url),
         None => (!project.github_repo.is_empty()).then_some("gh"),
     };
