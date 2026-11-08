@@ -634,7 +634,7 @@ impl Machine {
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
             if *ready && !lp.week_checked {
                 lp.week_checked = true;
-                if lp.flags.on("weekly-limit-reading").await
+                if ProjectLoop::weekly_on(&lp.flags).await
                     && let Some(usage) = lp.store.usage()
                 {
                     ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
@@ -856,6 +856,7 @@ pub fn spawn_all(args: SpawnArgs) {
         tokio::spawn(async move {
             loop {
                 limits.record_any_role(flag.on("engine-limit-records").await);
+                limits.set_week_cutoff(flag.on("weekly-cutoff").await);
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
