@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::config::{LaneEngine, RoleEngines};
+use crate::engines::EngineId;
+use crate::engines::choose::Role;
 use crate::lane_pool::LaneSizes;
+use crate::orchestrator::live::sessions::SessionInfo;
 use crate::orchestrator::live::{HeldLane, ProjectLive, StoreFailure};
 use crate::view::{PauseState, ProjectView};
 
@@ -68,6 +71,7 @@ fn settled(choice: EngineChoiceConfig, lanes: u32) -> Settled {
         lanes,
         codex_tokens: Some(42),
         cursor_tokens: None,
+        live_sessions: false,
     }
 }
 
@@ -363,4 +367,88 @@ fn the_vet_line_names_each_verdict_leaves_out_zeros_and_is_absent_before_a_run()
     assert_eq!(vet_of(&[("spam", 1)]).as_deref(), Some("1 suggestion: 1 spam"));
     let none = status_with(&live(OrchestratorMode::Runs, &[("a", ProjectLive::default())]));
     assert_eq!(none.orchestrator.projects[0].vet, None);
+}
+
+fn info(item: &str, role: Role, lane: Option<u32>) -> SessionInfo {
+    SessionInfo {
+        project: "a".into(),
+        item_id: item.into(),
+        title: Some(format!("Title {item}")),
+        role,
+        lane,
+        engine: EngineId::Codex,
+        model: "gpt-x".into(),
+    }
+}
+
+fn live_status(on: bool, src: &StatusSource) -> ComputerStatus {
+    let mut s = settled(EngineChoiceConfig::default(), 3);
+    s.live_sessions = on;
+    build(&s, src, None, &src.live.snapshot())
+}
+
+#[test]
+fn live_sessions_join_their_lane_and_the_rest_are_listed_apart() {
+    let src = source(&["a"]);
+    let reg = src.live.sessions();
+    let _g1 = reg.register(info("i1", Role::Implementer, Some(2)));
+    let _g2 = reg.register(info("ask1", Role::Assistant, None));
+    let _g3 = reg.register(info("d1", Role::Drafter, None));
+    let _g4 = reg.register(info("s1", Role::Scout, None));
+    let s = live_status(true, &src);
+    assert_eq!(s.header.lanes_busy, 1);
+    let lane = &s.lanes[1];
+    assert_eq!(lane.state, "busy");
+    let ses = lane.session.as_ref().unwrap();
+    assert_eq!(
+        (ses.role.as_deref(), ses.engine.as_deref(), ses.model.as_deref()),
+        (Some("implementer"), Some("codex"), Some("gpt-x"))
+    );
+    assert_eq!((ses.run_sec, ses.quiet_sec), (Some(0), Some(0)));
+    assert_eq!(s.lanes[0].state, "free");
+    let ids: Vec<&str> = s.sessions.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["ask1", "d1", "s1"]);
+}
+
+#[test]
+fn the_json_has_names_and_times_but_no_prompt_or_transcript() {
+    let src = source(&["a"]);
+    let _g = src.live.sessions().register(info("i1", Role::Implementer, Some(1)));
+    let v = serde_json::to_value(live_status(true, &src)).unwrap();
+    let ses = &v["lanes"][0]["session"];
+    assert_eq!(ses["runSec"], 0);
+    assert_eq!(ses["quietSec"], 0);
+    let mut keys: Vec<&String> = ses.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "engine", "id", "model", "project", "quietSec", "role", "runSec", "title"
+        ]
+    );
+}
+
+#[test]
+fn with_the_flag_off_the_registry_is_ignored_and_the_old_view_stays() {
+    let src = source(&["a"]);
+    let _g = src.live.sessions().register(info("i1", Role::Implementer, Some(1)));
+    let s = live_status(false, &src);
+    assert_eq!(s.header.lanes_busy, 0);
+    assert!(s.lanes.iter().all(|l| l.session.is_none() && l.state == "free"));
+    assert!(s.sessions.is_empty());
+    let v = serde_json::to_value(&s).unwrap();
+    assert!(v["lanes"][0].get("session").is_none());
+}
+
+#[test]
+fn the_page_renders_lane_sessions_and_the_list_without_a_lane() {
+    let html = include_str!("../../../assets/settings.html");
+    for needle in [
+        "id=\"sessions-list\"",
+        "renderSessions(st)",
+        "run \" + secs(x.runSec)",
+        "l.session",
+    ] {
+        assert!(html.contains(needle), "{needle}");
+    }
 }

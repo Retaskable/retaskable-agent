@@ -203,6 +203,7 @@
       <section class="block" aria-labelledby="lanes-h">
         <div class="block-head"><h2 id="lanes-h">Lanes</h2><span class="meta">Shared by every project on this computer</span></div>
         <div class="lanes" id="lane-cards"></div>
+        <div id="sessions-list" hidden aria-label="Sessions with no lane"></div>
       </section>
       <section class="block" aria-labelledby="eng-h">
         <div class="block-head"><h2 id="eng-h">Engines</h2><span class="meta">Each has its own limit and only pauses its own work</span></div>
@@ -512,6 +513,23 @@
     }));
   }
 
+  function secs(n) {
+    return n >= 3600 ? Math.floor(n / 3600) + "h " + Math.floor((n % 3600) / 60) + "m" : n >= 60 ? Math.floor(n / 60) + "m" : n + "s";
+  }
+
+  function sessionLine(x) {
+    return x.role + " · " + x.engine + " " + x.model + " · run " + secs(x.runSec) + ", quiet " + secs(x.quietSec);
+  }
+
+  function renderSessions(st) {
+    var rows = st.sessions.filter(function (x) { return x.runSec !== undefined; });
+    var box = $("sessions-list");
+    box.hidden = !rows.length;
+    box.replaceChildren.apply(box, rows.length ? [h("p", "meta", "Sessions with no lane")].concat(rows.map(function (x) {
+      return h("p", "calm", x.title + " (" + x.project + ") · " + sessionLine(x));
+    })) : []);
+  }
+
   function renderLanes(st) {
     if (!st.lanes.length) return $("lane-cards").replaceChildren(h("p", "calm", "No lanes yet: Setup has not run."));
     $("lane-cards").replaceChildren.apply(
@@ -520,8 +538,10 @@
         var chip = h("span", "chip " + l.engine, l.own ? ENGINE_WORD[l.engine] : "Default · " + ENGINE_WORD[l.engine]);
         var what = h("div", "what", h("span", "state " + l.state, l.stateText),
           l.item ? h("span", "item", l.item.title) : h("span", "item none", "Nothing yet"),
-          l.item ? h("span", "sub", l.item.project) : "");
-        return h("article", l.item ? "lane" : "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what, h("span", "note", l.note));
+          l.item ? h("span", "sub", l.item.project) : l.session ? h("span", "sub", l.session.project) : "");
+        if (l.session) what.children[1].className = "item", what.children[1].textContent = l.session.title;
+        return h("article", l.item || l.session ? "lane" : "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what,
+          h("span", "note", l.session ? sessionLine(l.session) : l.note));
       })
     );
   }
@@ -583,6 +603,7 @@
     renderAlerts(st);
     renderOrchestrator(st);
     renderLanes(st);
+    renderSessions(st);
     renderEngineRows(st);
     paintLaneHints();
   }
