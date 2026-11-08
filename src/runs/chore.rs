@@ -125,7 +125,7 @@ pub fn model_for(chore: Option<&Chore>, normal_tier: &'static str, item: &crate:
 pub fn tier_for(chore: Option<&Chore>, now: i64, models: &crate::config::ModelsConfig) -> &'static str {
     match chore {
         Some(c) if c.kind != ChoreKind::PlaytestFix => chore_tier(),
-        _ => implementer_tier(None, now, models, false),
+        _ => implementer_tier(None, now, models),
     }
 }
 
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn the_tier_is_the_chore_tier_except_for_a_playtest_fix_or_a_roadmap_piece() {
         let models = crate::config::ModelsConfig::default();
-        let normal = implementer_tier(None, 0, &models, false);
+        let normal = implementer_tier(None, 0, &models);
         let chore = |kind| Chore {
             kind,
             recent: vec![],

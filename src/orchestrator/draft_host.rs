@@ -92,7 +92,7 @@ impl DraftHost for ClaudeDrafts {
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
             let titles = titles_text(&draft.titles, &themes);
-            let tier = implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, false);
+            let tier = implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
             let spec = session_spec(
                 &Session {
                     template: TEMPLATE,

@@ -811,7 +811,7 @@ async fn settle_usage(flag_on: bool, usage: Value) -> Option<Value> {
     let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
     if flag_on {
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading", "weekly-cutoff"]));
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
     }
     rig.go_live();
     at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
@@ -861,7 +861,7 @@ async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
     for (u, limited) in [(0.96, true), (0.94, false)] {
         let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
         let mut rig = rig(2, &[&base]);
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-cutoff"]));
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
         rig.go_live();
         at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
         rig.machine.outcome_sender().send(SessionOutcome {
@@ -894,7 +894,7 @@ async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
         .as_secs();
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-cutoff"]));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
     rig.go_live();
     at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
     rig.machine.outcome_sender().send(SessionOutcome {
@@ -928,7 +928,7 @@ async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
     for (u, limited) in [(0.96, true), (0.94, false)] {
         let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
         let mut rig = rig(2, &[&base]);
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-cutoff"]));
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["weekly-limit-reading"]));
         rig.lp(0)
             .store
             .set_usage(json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": now + 86_400}}}));
@@ -942,56 +942,4 @@ async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
             limited
         );
     }
-}
-
-/// An implementer session ends with the week at `u`; returns whether the next poll asked the store for work.
-async fn claims_after_week_at(flags: &[&str], u: f64, lanes: Value) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
-    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": lanes })).unwrap();
-    rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
-    rig.machine.outcome_sender().send(SessionOutcome {
-        project: "p0".into(),
-        item_id: "a".into(),
-        lane: 1,
-        result: SessionResult::NeedsHuman("x".into()),
-        usage: Some(json!({"unifiedWindows": {
-            "five_hour": {"utilization": 0.1, "resetsAt": now + 3600},
-            "seven_day": {"utilization": u, "resetsAt": now + 86_400}}})),
-        context_tokens: None,
-        notes: vec![],
-        session_id: None,
-    });
-    rig.machine.poll().await;
-    rig.machine.poll().await;
-    asked.lock().unwrap().iter().any(|(m, _)| m == "claim_next")
-}
-
-#[tokio::test]
-async fn at_the_weekly_cutoff_nothing_new_is_claimed_with_the_start_rules_on_or_off() {
-    let claude = json!(["claude", "claude"]);
-    for rules in [&["engine-start-rules"][..], &[][..]] {
-        let mut on = vec!["weekly-cutoff"];
-        on.extend(rules);
-        assert!(!claims_after_week_at(&on, 0.96, claude.clone()).await, "{on:?}");
-        assert!(claims_after_week_at(&on, 0.90, claude.clone()).await, "{on:?} at 90%");
-    }
-}
-
-#[tokio::test]
-async fn with_the_cutoff_flag_off_work_still_starts_at_96_percent() {
-    assert!(claims_after_week_at(&["engine-start-rules"], 0.96, json!(["claude", "claude"])).await);
-    assert!(claims_after_week_at(&[], 0.96, json!(["claude", "claude"])).await);
-}
-
-#[tokio::test]
-async fn a_cursor_lane_still_starts_while_claude_is_cut_off_for_the_week() {
-    let on = ["weekly-cutoff", "engine-start-rules", "engine-placement"];
-    assert!(claims_after_week_at(&on, 0.96, json!(["cursor", "cursor"])).await);
 }

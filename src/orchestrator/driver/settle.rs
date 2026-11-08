@@ -132,14 +132,19 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
-    /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited on this computer until the week's
-    /// reset, so nothing new starts while running sessions finish.
+    /// Whether the weekly window is read: `weekly-limit-reading` or `weekly-cutoff` is On.
+    pub(super) async fn weekly_on(flags: &crate::flags::Flags) -> bool {
+        flags.on("weekly-limit-reading").await || flags.on("weekly-cutoff").await
+    }
+
+    /// At the weekly cutoff Claude counts limited on this computer until the week's reset
+    /// ([`EngineLimits::cut_off_for_week`](crate::orchestrator::fresh_start::EngineLimits::cut_off_for_week)).
     pub(super) fn cut_off_for_week(
         id: &str,
         usage: &Value,
         limits: &mut crate::orchestrator::fresh_start::EngineLimits,
     ) {
-        if limits.hit_week_cutoff(usage) {
+        if limits.cut_off_for_week(usage) {
             tracing::info!(
                 "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
                 id,
@@ -383,10 +388,8 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        let weekly = self.flags.on("weekly-limit-reading").await;
-        if self.flags.on("weekly-cutoff").await
-            && let Some(usage) = &outcome.usage
-        {
+        let weekly = ProjectLoop::weekly_on(&self.flags).await;
+        if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
         if let Some(usage) = outcome
@@ -503,14 +506,13 @@ impl ProjectLoop {
         // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
         let cursor_flag = self.flags.on("cursor-limit-retry").await;
         // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
-        let fall_over = self.flags.on("engine-fall-over").await;
         let carry_on = match self.records.get(&item) {
             Some(record)
                 if cursor_flag
                     && matches!(result, SessionResult::Limited { .. })
                     && record.impl_session_engine != EngineId::Pi =>
             {
-                takeover_in(&self.project, pool, shared, record.impl_session_engine, fall_over)
+                takeover_in(&self.project, pool, shared, record.impl_session_engine)
                     .map(|to| (record.impl_session_engine, to))
             }
             _ => None,

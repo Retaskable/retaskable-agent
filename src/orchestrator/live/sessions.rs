@@ -76,17 +76,20 @@ static MACHINE_WRITE: Mutex<()> = Mutex::new(());
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
     let _ = LIMITS.try_with(|limits| {
         if engine == EngineId::Claude
-            && limits.week_cutoff()
+            && limits.week_cutoff_on()
             && let Some(usage) = &result.usage
         {
-            limits.hit_week_cutoff(usage);
+            limits.cut_off_for_week(usage);
         }
         if !limits.records_any_role() {
             return;
         }
         if result.limit_hit {
-            let wait = crate::engines::engine::resets_in(result.usage.as_ref(), crate::tiers::weekly_reading_on())
-                .unwrap_or(LIMIT_PAUSE);
+            let wait = crate::engines::engine::resets_in(
+                result.usage.as_ref(),
+                crate::tiers::weekly_reading_on() || limits.week_cutoff_on(),
+            )
+            .unwrap_or(LIMIT_PAUSE);
             limits.hit(engine, Instant::now() + wait);
         }
         let _ = MACHINE_DIR.try_with(|dir| {
@@ -363,6 +366,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86_400;
+        let usage = |u: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": at}}});
+        for (on, u, engine, limited) in [
+            (true, 0.96, EngineId::Claude, true),
+            (true, 0.90, EngineId::Claude, false),
+            (true, 0.96, EngineId::Cursor, false),
+            (false, 0.96, EngineId::Claude, false),
+        ] {
+            let s = Sessions::default();
+            s.limits().set_week_cutoff(on);
+            end_in_scope(&s, engine, ended(false, Some(usage(u)))).await;
+            let t = Instant::now();
+            let day = std::time::Duration::from_secs(80_000);
+            assert_eq!(s.limits().is_limited(EngineId::Claude, t + day), limited);
+            assert!(!s.limits().is_limited(EngineId::Claude, t + 2 * day));
+        }
+    }
+
+    #[tokio::test]
     async fn a_session_that_did_not_hit_the_limit_or_ran_with_the_flag_off_records_nothing() {
         let s = Sessions::default();
         s.limits().record_any_role(true);
@@ -463,31 +490,5 @@ mod tests {
         end_in_scope(&s, EngineId::Codex, with_tokens(false, 1, 1)).await;
         let text = std::fs::read_to_string(dir.path().join("machine.json")).unwrap();
         assert!(text.contains("network") && text.contains("codexTokens"));
-    }
-
-    #[tokio::test]
-    async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let usage =
-            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.96, "resetsAt": now + 86_400}}});
-        let s = Sessions::default();
-        end_in_scope(&s, EngineId::Claude, ended(false, Some(usage.clone()))).await;
-        assert!(!s.limits().is_limited(EngineId::Claude, Instant::now()), "flag Off");
-        s.limits().set_week_cutoff(true);
-        end_in_scope(&s, EngineId::Cursor, ended(false, Some(usage.clone()))).await;
-        assert!(!s.limits().is_limited(EngineId::Cursor, Instant::now()));
-        end_in_scope(&s, EngineId::Claude, ended(false, Some(usage))).await;
-        let now = Instant::now();
-        assert!(
-            s.limits()
-                .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(86_000))
-        );
-        assert!(
-            !s.limits()
-                .is_limited(EngineId::Claude, now + std::time::Duration::from_secs(86_500))
-        );
     }
 }

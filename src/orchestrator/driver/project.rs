@@ -798,8 +798,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
-        let fall_over = self.flags.on("engine-fall-over").await;
-        let takeover = self.takeover(pool, shared, engine, fall_over);
+        let takeover = self.takeover(pool, shared, engine);
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
@@ -892,12 +891,13 @@ impl ProjectLoop {
             return None;
         }
         let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        if Self::claim_held_by_sign_out(shared, gate.as_ref())
-            || (gate.is_none()
-                && self.flags.on("weekly-cutoff").await
-                && shared
-                    .engine_limits
-                    .is_limited(crate::engines::EngineId::Claude, std::time::Instant::now()))
+        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
+            return None;
+        }
+        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
+        if gate.is_none()
+            && self.flags.on("weekly-cutoff").await
+            && shared.engine_limits.week_cut_off(std::time::Instant::now())
         {
             return None;
         }

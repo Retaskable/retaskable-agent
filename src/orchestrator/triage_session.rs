@@ -118,7 +118,6 @@ impl ClaudeStarter {
             usage.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
-            false,
         ))
         .to_string();
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
@@ -227,8 +226,7 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let top = top_tier(None, 0, &self.models, false);
-        let info = triager_info(&project_id, &item_id, lane, &placed, top);
+        let info = triager_info(&project_id, &item_id, lane, &placed, top_tier());
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
             let quiet = watch_for(&project, placed.engine);
@@ -240,7 +238,7 @@ impl ClaudeStarter {
                     session: EphemeralSessionConfig {
                         cwd: &cwd,
                         budget_usd: project.budget.reviewer_usd,
-                        model: top.to_string(),
+                        model: top_tier().to_string(),
                         local: None,
                         engine: Some(placed.engine),
                         cursor: placed.cursor.clone(),

@@ -132,7 +132,7 @@ impl TrialHost for ClaudeTrial {
                 tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base)).await??;
             let item = trial_item();
             let now = crate::telemetry::now_ms() / 1000;
-            let model = implementer_model(implementer_tier(job.usage.as_ref(), now, &models, false), &item).to_string();
+            let model = implementer_model(implementer_tier(job.usage.as_ref(), now, &models), &item).to_string();
             let mut spec = session_spec(
                 &Session {
                     template: TEMPLATE,
