@@ -211,8 +211,7 @@ pub trait SessionStarter: Send + Sync {
     fn implementer_may_start(&self, _usage: Option<&serde_json::Value>, _pending: u32) -> bool {
         true
     }
-    /// Whether the session `session` of `item_id` started on the local model (its transcript's first line,
-    /// `engines/transcripts.rs`'s `started_on`): section 7.1's "a local session stays local".
+    /// Whether `session` of `item_id` started on the local model (`transcripts::started_on`; section 7.1).
     fn started_local(&self, _project: &str, _item_id: &str, _session: &str) -> bool {
         false
     }
