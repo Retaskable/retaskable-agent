@@ -383,3 +383,30 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         play_command: String::new(),
     }
 }
+
+/// An `AgentView` with every part but these defaulted, for tests that read the snapshot.
+pub(crate) fn agent_view(
+    tags: Vec<String>,
+    projects: Vec<crate::view::ProjectView>,
+    version: &str,
+    lanes: u32,
+) -> crate::view::AgentView {
+    use crate::lane_pool::LaneSizes;
+    use crate::view::AgentView;
+    AgentView {
+        machine: "pc".into(),
+        tags,
+        projects,
+        version: version.into(),
+        lanes,
+        chore_lane: Some(lanes),
+        lane_sizes: LaneSizes::default(),
+        paused: Default::default(),
+        item_commands: Default::default(),
+        work: Default::default(),
+        restart: Default::default(),
+        settings: Default::default(),
+        local: Default::default(),
+        live: Default::default(),
+    }
+}

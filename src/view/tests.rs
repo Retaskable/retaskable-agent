@@ -14,22 +14,7 @@ fn project(id: &str, repo: &str) -> ProjectView {
 }
 
 fn view(projects: Vec<ProjectView>) -> AgentView {
-    AgentView {
-        machine: "pc".into(),
-        tags: vec!["windows".into()],
-        projects,
-        version: "1.2.3".into(),
-        lanes: 3,
-        chore_lane: Some(3),
-        lane_sizes: LaneSizes::default(),
-        paused: PauseState::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-        settings: Default::default(),
-        local: Default::default(),
-        live: Default::default(),
-    }
+    crate::test_support::agent_view(vec!["windows".into()], projects, "1.2.3", 3)
 }
 
 #[test]
