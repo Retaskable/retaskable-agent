@@ -446,7 +446,10 @@ async fn session(
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = live.changed(), if live_due.is_none() => {
-                live_due = Some(tokio::time::Instant::now() + t.live_coalesce);
+                // With `snapshot-reporting` Off the snapshot doesn't carry the loop's state: nothing to resend.
+                if view.settings.snapshot_reporting_on() {
+                    live_due = Some(tokio::time::Instant::now() + t.live_coalesce);
+                }
                 None
             },
             () = tokio::time::sleep_until(live_due.unwrap_or_else(tokio::time::Instant::now)), if live_due.is_some() => {

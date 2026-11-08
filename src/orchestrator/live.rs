@@ -50,6 +50,8 @@ pub struct ProjectLive {
     pub vet: Option<BTreeMap<String, usize>>,
     /// When Claude's limit lifts (ISO 8601), while the loop can't start work because Claude is at its limit.
     pub limit_resets_at: Option<String>,
+    /// The instant `limit_resets_at` was made from, so the same limit keeps the same string pass after pass.
+    pub limit_until: Option<std::time::Instant>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -145,8 +147,15 @@ impl LiveHandle {
     }
 
     /// Says when Claude's limit lifts while the project can't start work for it, or nothing.
-    pub fn set_limit(&self, project: &str, resets_at: Option<String>) {
-        self.edit(|s| s.projects.entry(project.to_string()).or_default().limit_resets_at = resets_at);
+    pub fn set_limit(&self, project: &str, until: Option<std::time::Instant>) {
+        self.edit(|s| {
+            let entry = s.projects.entry(project.to_string()).or_default();
+            if entry.limit_until != until {
+                entry.limit_until = until;
+                entry.limit_resets_at =
+                    until.map(|u| iso8601_in(u.saturating_duration_since(std::time::Instant::now())));
+            }
+        });
     }
 
     pub fn snapshot(&self) -> LiveState {
@@ -181,6 +190,7 @@ impl LiveHandle {
                 chores: entry.chores,
                 vet: entry.vet.take(),
                 limit_resets_at: entry.limit_resets_at.take(),
+                limit_until: entry.limit_until.take(),
             };
         });
     }
@@ -310,11 +320,13 @@ mod tests {
         assert!(!changed(&mut rx), "ticks that change nothing reported");
         live.ticked("p", true, "t3".into(), vec![], "d".into());
         assert!(changed(&mut rx), "paused");
-        live.set_limit("p", Some("later".into()));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        live.set_limit("p", Some(until));
         assert!(changed(&mut rx), "limit");
         live.ticked("p", true, "t4".into(), vec![], "d".into());
-        assert_eq!(live.snapshot().projects["p"].limit_resets_at.as_deref(), Some("later"));
-        live.set_limit("p", Some("later".into()));
+        assert!(live.snapshot().projects["p"].limit_resets_at.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        live.set_limit("p", Some(until));
         live.set_concurrency(0);
         assert!(!changed(&mut rx), "same values");
         live.set_concurrency(2);

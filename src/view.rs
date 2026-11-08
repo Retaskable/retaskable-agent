@@ -759,11 +759,14 @@ mod tests {
             orch(&v),
             json!({ "status": "running", "machine": "pc", "concurrency": 3 })
         );
-        v.live.set_limit("a", Some("2026-11-08T12:00:00Z".into()));
+        v.live.set_limit(
+            "a",
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        );
         let o = orch(&v);
         assert_eq!(
-            (&o["status"], &o["resetsAt"]),
-            (&json!("waiting_for_limit"), &json!("2026-11-08T12:00:00Z"))
+            (&o["status"], o["resetsAt"].is_string()),
+            (&json!("waiting_for_limit"), true)
         );
         v.paused.set("a", Some("Paused from the site".into()));
         let o = orch(&v);

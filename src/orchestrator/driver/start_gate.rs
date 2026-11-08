@@ -151,7 +151,6 @@ impl ProjectLoop {
         let resets = cant_start
             .filter(|c| matches!(*c, "usage limit" | "weekly limit"))
             .and_then(|_| limits.limited_until(EngineId::Claude, now));
-        let at = resets.map(|at| crate::orchestrator::live::iso8601_in(at - now));
-        self.live.set_limit(&self.id, at);
+        self.live.set_limit(&self.id, resets);
     }
 }
