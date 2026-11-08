@@ -86,5 +86,6 @@ pub mod text;
 pub mod tiers;
 pub mod triage;
 pub mod trial_plan;
+pub mod vet;
 pub mod view;
 pub mod work_signal;
