@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::report;
 pub(super) use super::signed_out::signed_out;
-use super::start_gate::StartGate;
+use super::start_gate::{StartGate, local_at_limit};
 use super::{LanePlay, Shared};
 use crate::backlog::{Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
@@ -575,10 +575,11 @@ impl ProjectLoop {
         let Some(gate) = gate else {
             let week =
                 self.flags.on("weekly-cutoff").await && shared.engine_limits.week_cut_off(std::time::Instant::now());
-            return week.then_some("weekly limit");
+            return (week && !local_at_limit(shared)).then_some("weekly limit");
         };
+        // A Claude lane the limit holds counts as able to start on the local model, even while its slot is busy.
         let lanes = pool.rules().lanes;
-        (lanes > 0 && !(1..=lanes).any(|k| gate.lane_may_start(self, shared, k))).then_some("usage limit")
+        (lanes > 0 && (1..=lanes).all(|k| gate.holds(self, shared, k))).then_some("usage limit")
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone

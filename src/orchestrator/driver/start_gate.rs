@@ -15,6 +15,19 @@ use crate::orchestrator::{Action, decide_where};
 pub(super) struct StartGate {
     used: Vec<EngineId>,
     out: BTreeSet<EngineId>,
+    /// Claude is limited (not signed out) and `local-limit-fallback` sends its sessions to the local model:
+    /// a Claude lane then counts as able to start (section 7.2's "Fallback").
+    local_at_limit: bool,
+}
+
+/// Whether Claude is at its limit on this computer, not signed out, with `local-limit-fallback` On and the local
+/// model up: fresh Claude work goes to the model instead of waiting for the reset (section 7.2).
+pub(super) fn local_at_limit(shared: &Shared<'_>) -> bool {
+    let now = Instant::now();
+    crate::tiers::local_limit_fallback_on()
+        && shared.local.ladder()
+        && !shared.claude_signed_out_until.is_some_and(|until| until > now)
+        && shared.engine_limits.is_limited(EngineId::Claude, now)
 }
 
 impl StartGate {
@@ -30,10 +43,15 @@ impl StartGate {
         }
         let used = engines_used_here(&shared.links.engine_choice, lp.project.engines.as_ref(), lanes);
         let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, Instant::now());
-        Some(StartGate { used, out })
+        Some(StartGate {
+            used,
+            out,
+            local_at_limit: local_at_limit(shared),
+        })
     }
 
     /// Whether new work may start in `lane`: its engine, after `engine_now`, isn't out.
+    /// A Claude lane held only by the limit may start on the local model while no session waits for its slot.
     pub(super) fn lane_may_start(&self, lp: &ProjectLoop, shared: &Shared<'_>, lane: u32) -> bool {
         lane_may_start(
             &shared.links.engine_choice,
@@ -41,7 +59,9 @@ impl StartGate {
             lane,
             &self.used,
             &self.out,
-        )
+        ) || (self.local_at_limit
+            && self.engine_now(lp, shared, lane) == EngineId::Claude
+            && shared.local.waiting() == 0)
     }
 
     /// The engine a fresh session in `lane` starts on.
@@ -86,7 +106,8 @@ impl StartGate {
 
     /// Whether a fresh implementer in `lane` is held back: its engine is still out after `engine_now`.
     pub(super) fn holds(&self, lp: &ProjectLoop, shared: &Shared<'_>, lane: u32) -> bool {
-        !may_start(self.engine_now(lp, shared, lane), &self.out)
+        let engine = self.engine_now(lp, shared, lane);
+        !may_start(engine, &self.out) && !(self.local_at_limit && engine == EngineId::Claude)
     }
 }
 

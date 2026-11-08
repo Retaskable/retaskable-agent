@@ -54,6 +54,7 @@ async fn blocked(rig: &mut Rig) -> Option<&'static str> {
         claim_paused_until: &mut m.claim_paused_until,
         claude_signed_out_until: &mut m.claude_signed_out_until,
         engine_limits: &mut m.engine_limits,
+        local: &crate::local_model::LocalModel::off(),
         stopping: false,
     };
     m.projects[0].start_blocked(&shared, &m.pool).await

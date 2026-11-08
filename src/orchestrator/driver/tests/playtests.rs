@@ -263,6 +263,7 @@ async fn beat(rig: &mut Rig) {
         claim_paused_until: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
+        local: &crate::local_model::LocalModel::off(),
         stopping: false,
     };
     let now = std::time::Instant::now() + Duration::from_secs(61);

@@ -102,6 +102,8 @@ pub struct Shared<'a> {
     pub claude_signed_out_until: &'a mut Option<Instant>,
     /// Which engines are at their usage limit on this computer ([`Machine::engine_limits`]).
     pub engine_limits: &'a mut EngineLimits,
+    /// The computer's local model ([`Machine::local`]), for the `local-limit-fallback` start rules.
+    pub local: &'a crate::local_model::LocalModel,
     /// [`process_tree::stopping`] as of this pass's start: a restart or Quit cutting every
     /// session, so no project claims or starts new work either
     /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
@@ -205,6 +207,7 @@ macro_rules! shared {
             claim_paused_until: &mut $m.claim_paused_until,
             claude_signed_out_until: &mut $m.claude_signed_out_until,
             engine_limits: &mut $m.engine_limits,
+            local: &$m.local,
             stopping: $stopping,
         }
     };
@@ -540,6 +543,7 @@ impl Machine {
                 claim_paused_until: &mut claim_paused_until,
                 claude_signed_out_until: &mut signed_out_until,
                 engine_limits: &mut limits,
+                local: &self.local,
                 stopping: stopping || paused,
             };
             let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
@@ -742,6 +746,7 @@ impl Machine {
                     claim_paused_until: &mut self.claim_paused_until,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
+                    local: &self.local,
                     stopping,
                 };
                 lp.idea_pass(&shared).await;

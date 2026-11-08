@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::Shared;
 use super::project::{ProjectLoop, SessionStarter};
-use super::start_gate::StartGate;
+use super::start_gate::{StartGate, local_at_limit};
 use crate::backlog::{ClaimNextAgent, ClaimNextAnswer};
 use crate::item_lifecycle::ItemState;
 use crate::lane_pool::LanePool;
@@ -34,9 +34,11 @@ impl ProjectLoop {
             return None;
         }
         // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
+        // At the cutoff with `local-limit-fallback`, Claude's work goes to the local model: one item queues for its slot.
         if gate.is_none()
             && self.flags.on("weekly-cutoff").await
             && shared.engine_limits.week_cut_off(std::time::Instant::now())
+            && !(local_at_limit(shared) && shared.local.waiting() == 0)
         {
             return None;
         }
