@@ -8,6 +8,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
+use crate::engines::EngineId;
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
@@ -30,6 +31,7 @@ pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
 
 /// Watchdog kills in a row that are resumed; the next one goes to a person.
 const MAX_SILENCE_RESUMES: u32 = 3;
+const MAX_CURSOR_LIMIT_HITS: u32 = 3;
 
 /// Own failures in a row (a session that wouldn't start, or a hand-back) that are retried or handed back; the
 /// next one goes to a person.
@@ -468,6 +470,36 @@ impl ProjectLoop {
         } else if let Some(record) = self.records.get_mut(&item) {
             // Any answer ends the run of kills.
             record.silence_kills = 0;
+        }
+        // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
+        let cursor_flag = self.flags.on("cursor-limit-retry").await;
+        if let Some(record) = self.records.get_mut(&item) {
+            let cursor_hit = matches!(result, SessionResult::Limited { .. })
+                && cursor_flag
+                && record.impl_session_engine == EngineId::Cursor;
+            if !cursor_hit {
+                record.cursor_limit_hits = 0;
+            } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
+                record.cursor_limit_hits += 1;
+                self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
+                if let SessionResult::Limited { why, .. } = result {
+                    result = SessionResult::Silenced(why);
+                }
+                self.events.add_in(
+                    &self.id,
+                    Event::ItemState(event::ItemState {
+                        item: Some(item.clone()),
+                        from: Some("implementing".into()),
+                        to: Some("implementing".into()),
+                        note: Some("Hit Cursor's usage limit; trying again in 30 minutes".into()),
+                        lane: Some(outcome.lane),
+                        ..Default::default()
+                    }),
+                );
+            } else {
+                record.cursor_limit_hits = 0;
+                result = SessionResult::NeedsHuman("Cursor's usage limit was hit 3 times in a row".into());
+            }
         }
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
