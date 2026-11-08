@@ -89,6 +89,23 @@ impl MachineStore {
         self.data.get("cursorLimitAt").and_then(Value::as_i64)
     }
 
+    /// Cursor's input and output tokens over the rolling 7 local days, today included; `None` before a
+    /// Cursor session reported any.
+    pub fn cursor_week_tokens(&self) -> Option<(u64, u64)> {
+        self.week_on("cursorTokens", chrono::Local::now().date_naive())
+    }
+
+    fn week_on(&self, key: &str, today: NaiveDate) -> Option<(u64, u64)> {
+        let all = self.data.get(key)?.as_object()?;
+        let sum = |field: &str| -> u64 {
+            (0..7)
+                .filter_map(|i| all.get(&day_key(today - chrono::Days::new(i))))
+                .map(|d| d[field].as_u64().unwrap_or(0))
+                .sum()
+        };
+        Some((sum("input"), sum("output")))
+    }
+
     fn add_tokens(&mut self, key: &str, input: u64, output: u64, today: NaiveDate) -> Result<()> {
         let all = self
             .data
@@ -391,6 +408,25 @@ mod tests {
         let keys: Vec<&String> = saved["cursorTokens"].as_object().unwrap().keys().collect();
         assert_eq!(keys, vec!["2026-3-9"]);
         assert!(saved.get("spend").is_none());
+    }
+
+    #[test]
+    fn cursor_tokens_sum_over_the_rolling_week_with_input_and_output_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.cursor_week_tokens(), None);
+        let today = chrono::Local::now().date_naive();
+        let ago = |n: u64| today - chrono::Days::new(n);
+        store.add_tokens("cursorTokens", 100, 100, ago(7)).unwrap();
+        store.add_tokens("cursorTokens", 1, 10, ago(6)).unwrap();
+        store.add_tokens("cursorTokens", 2, 20, ago(3)).unwrap();
+        store.add_tokens("cursorTokens", 4, 40, ago(0)).unwrap();
+        assert_eq!(store.cursor_week_tokens(), Some((7, 70)), "day 7 back is dropped");
+        assert_eq!(store.cursor_today_tokens(), Some(44));
+        store.add_tokens("cursorTokens", 1, 1, ago(0)).unwrap();
+        assert_eq!(store.cursor_week_tokens(), Some((8, 71)));
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(saved["cursorTokens"].as_object().unwrap().len(), 3);
     }
 
     #[test]

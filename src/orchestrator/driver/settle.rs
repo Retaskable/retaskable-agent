@@ -433,10 +433,14 @@ impl ProjectLoop {
         if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
+        let keep_week = weekly
+            || (self.auto_enabled
+                && self.flags.on("auto-concurrency").await
+                && self.flags.on("auto-concurrency-week").await);
         let week = outcome
             .usage
             .clone()
-            .filter(|u| weekly && crate::tiers::carries_week(u));
+            .filter(|u| keep_week && crate::tiers::carries_week(u));
         let five_hour = outcome
             .usage
             .clone()
@@ -780,6 +784,7 @@ impl Machine {
             let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
                 Some(lp) => {
+                    lp.auto_enabled = self.auto.cfg.enabled;
                     lp.settle(
                         outcome,
                         &mut self.pool,

@@ -13,6 +13,7 @@ use crate::config::{GalleryConfig, ProjectConfig};
 use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
+mod cursor;
 mod orchestrator;
 
 /// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
@@ -441,6 +442,9 @@ impl AgentView {
         if self.local.down() {
             state["usage"]["localDown"] = json!(true);
         }
+        if let Some(cursor) = self.cursor_usage() {
+            state["usage"]["cursor"] = cursor;
+        }
         if let Some((allowed, reason)) = self.item_commands.auto() {
             state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
         }
@@ -798,6 +802,38 @@ mod tests {
             orch,
             json!({ "status": "paused", "machine": "pc", "pausedReason": NO_WORK_YET })
         );
+    }
+
+    #[test]
+    fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |on: bool| {
+            let mut v = reporting_view(on);
+            v.settings = HelloSettings::new(
+                dir.path().to_path_buf(),
+                crate::env::Env::empty(),
+                4700,
+                Arc::new(crate::flags::Flags::fixed(if on {
+                    &[SNAPSHOT_REPORTING_FLAG]
+                } else {
+                    &[]
+                })),
+            );
+            v
+        };
+        let cursor = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("cursor").cloned();
+        assert_eq!(cursor(&mk(true)), None, "no tokens yet");
+        let mut m = crate::store::MachineStore::load(dir.path()).unwrap();
+        m.add_cursor_tokens(30, 4).unwrap();
+        m.add_cursor_tokens(1, 2).unwrap();
+        m.stamp_cursor_limit_at().unwrap();
+        let got = cursor(&mk(true)).unwrap();
+        assert_eq!(
+            (&got["todayTokens"], &got["weekInputTokens"], &got["weekOutputTokens"]),
+            (&json!(37), &json!(31), &json!(6))
+        );
+        assert!(got["limitHitAt"].is_string());
+        assert_eq!(cursor(&mk(false)), None, "flag Off");
     }
 
     #[test]
