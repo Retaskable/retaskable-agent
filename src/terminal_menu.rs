@@ -4,6 +4,7 @@
 //! ids, not positions, so it stays on the same item as the menu changes.
 #[cfg(test)]
 mod tests;
+pub mod when;
 
 use crate::tray::menu::{Item, Menu, SEPARATOR};
 
