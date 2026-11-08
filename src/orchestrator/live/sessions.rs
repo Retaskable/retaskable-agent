@@ -79,7 +79,8 @@ pub fn record_session_end(engine: EngineId, result: &SessionResult) {
             return;
         }
         if result.limit_hit {
-            let wait = crate::engines::engine::resets_in(result.usage.as_ref(), crate::tiers::weekly_reading_on()).unwrap_or(LIMIT_PAUSE);
+            let wait = crate::engines::engine::resets_in(result.usage.as_ref(), crate::tiers::weekly_reading_on())
+                .unwrap_or(LIMIT_PAUSE);
             limits.hit(engine, Instant::now() + wait);
         }
         let _ = MACHINE_DIR.try_with(|dir| {
