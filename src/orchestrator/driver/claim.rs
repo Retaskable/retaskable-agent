@@ -33,22 +33,19 @@ impl ProjectLoop {
         if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
             return None;
         }
-        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim, unless
-        // the local model stands in for Claude (`local-limit-fallback`), which takes one claim at a time.
-        let cut_off = shared.engine_limits.week_cut_off(std::time::Instant::now());
-        let held = gate.is_none() && cut_off && self.flags.on("weekly-cutoff").await;
-        let on_local = match &gate {
-            Some(g) => g.fallback,
-            None => held && super::start_gate::local_fallback(shared),
-        };
-        if held && (!on_local || shared.local.waiting() > 0) {
+        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
+        if gate.is_none()
+            && self.flags.on("weekly-cutoff").await
+            && shared.engine_limits.week_cut_off(std::time::Instant::now())
+            && !Self::limit_fallback(shared)
+        {
             return None;
         }
         let caps_on = self.flags.on("model-concurrency-caps").await;
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
-            let model_full = self.model_full(starter, caps_on);
+            let model_full = self.model_full(starter, caps_on) || self.local_queue_full(shared);
             let asks = self
                 .decide_gated(pool, shared, gate.as_ref(), model_full)
                 .contains(&Action::AskForWork);
@@ -59,8 +56,7 @@ impl ProjectLoop {
                 break;
             };
             last = Some(answer);
-            // The one local slot: no second item is claimed onto it before the first is waiting there.
-            if !more || on_local {
+            if !more {
                 break;
             }
         }

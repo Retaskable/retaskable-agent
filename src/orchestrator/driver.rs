@@ -32,11 +32,11 @@ mod lane_play;
 mod main_sync;
 pub use lane_play::LanePlay;
 mod auto;
-mod backlog_read;
 mod claim;
 mod ideas_daily;
 mod ideas_round;
 mod machine;
+mod panic;
 mod playtest_round;
 mod project;
 mod report;
@@ -55,8 +55,8 @@ mod trial;
 mod vet_daily;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
-pub(crate) use backlog_read::repo_id;
 pub use drafts::{DraftHost, DraftJob};
+pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
 use project::Launch;
 pub use project::{

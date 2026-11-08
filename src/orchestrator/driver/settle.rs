@@ -790,10 +790,10 @@ impl Machine {
                         &mut self.pool,
                         &mut Shared {
                             links: &self.links,
+                            local: &self.local,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
                             engine_limits: &mut self.engine_limits,
-                            local: &self.local,
                             stopping,
                         },
                     )

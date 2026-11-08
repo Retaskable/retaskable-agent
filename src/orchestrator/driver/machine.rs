@@ -10,13 +10,13 @@ use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
-use super::backlog_read::{Fail, Read, read};
+use super::panic::panic_message;
 use super::run_starters::RunStarters;
 use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
     playtest_round, vet_daily,
 };
-use crate::backlog::{Client, Item};
+use crate::backlog::{BacklogError, Client, Item};
 use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
@@ -34,6 +34,37 @@ use crate::view::{ItemCommands, PauseState};
 /// How often the loop reads every project's backlog and writes its `tick` events: the TS agent's once a
 /// minute (`MINUTE_MS` in `agent/src/pool.ts`).
 pub const EVERY: Duration = Duration::from_secs(60);
+
+/// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
+/// project's backlog in the store.
+pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
+    let out = tokio::process::Command::new("gh")
+        .args(["api", &format!("repos/{github_repo}"), "--jq", ".id"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)
+}
+
+/// Why a project's items weren't read this pass.
+enum Fail {
+    /// Before the store could be asked (no repo id, no link): the page hears of it, no `store_error` event.
+    Cant(String),
+    Store(BacklogError),
+}
+
+/// A project's backlog read: the repo id it learned and the items or why not.
+struct Read {
+    repo: Option<u64>,
+    items: Result<Vec<Item>, Fail>,
+}
 
 /// The inputs every pass shares.
 pub struct Links {
@@ -72,12 +103,50 @@ pub struct Shared<'a> {
     pub claude_signed_out_until: &'a mut Option<Instant>,
     /// Which engines are at their usage limit on this computer ([`Machine::engine_limits`]).
     pub engine_limits: &'a mut EngineLimits,
+    /// The local model, for the limit fallback ([`StartGate`]).
+    pub local: &'a crate::local_model::LocalModel,
     /// [`process_tree::stopping`] as of this pass's start: a restart or Quit cutting every
     /// session, so no project claims or starts new work either
     /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
     pub stopping: bool,
-    /// The computer's local model, for the limit fallback (`local-limit-fallback`).
-    pub local: &'a crate::local_model::LocalModel,
+}
+
+/// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
+/// project's failed read and nothing else's.
+async fn read(
+    client: Arc<Client>,
+    id: String,
+    github_repo: String,
+    cached: Option<u64>,
+    backlog_url: String,
+    keychain: Arc<dyn TokenStore>,
+) -> Read {
+    let repo = match cached {
+        Some(repo) => Some(repo),
+        None => repo_id(&github_repo).await,
+    };
+    let Some(repo_id) = repo else {
+        tracing::warn!("{id}: dry tick skipped: gh couldn't say the id of {github_repo}");
+        let items = Err(Fail::Cant(format!("gh couldn't say the id of {github_repo}")));
+        return Read { repo, items };
+    };
+    let token = match keychain.get(&backlog_url) {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::warn!("{id}: dry tick skipped: reading the backlog link: {e:#}");
+            let items = Err(Fail::Cant(format!("reading the backlog link: {e:#}")));
+            return Read { repo, items };
+        }
+    };
+    let items = match token {
+        None => Err(Fail::Store(BacklogError::BadAnswer {
+            status: 401,
+            code: Some("unauthorized".into()),
+            message: "this computer holds no link to the backlog store".into(),
+        })),
+        Some(token) => client.list(repo_id, Some(&token)).await.map_err(Fail::Store),
+    };
+    Read { repo, items }
 }
 
 /// The computer's orchestrator: one shared lane pool and every project's state. Each pass reads every
@@ -136,10 +205,10 @@ macro_rules! shared {
     ($m:ident, $stopping:expr) => {
         Shared {
             links: &$m.links,
+            local: &$m.local,
             claim_paused_until: &mut $m.claim_paused_until,
             claude_signed_out_until: &mut $m.claude_signed_out_until,
             engine_limits: &mut $m.engine_limits,
-            local: &$m.local,
             stopping: $stopping,
         }
     };
@@ -472,10 +541,10 @@ impl Machine {
             }
             let shared = Shared {
                 links: &self.links,
+                local: &self.local,
                 claim_paused_until: &mut claim_paused_until,
                 claude_signed_out_until: &mut signed_out_until,
                 engine_limits: &mut limits,
-                local: &self.local,
                 stopping: stopping || paused,
             };
             let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
@@ -675,10 +744,10 @@ impl Machine {
             if live {
                 let shared = Shared {
                     links: &self.links,
+                    local: &self.local,
                     claim_paused_until: &mut self.claim_paused_until,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
-                    local: &self.local,
                     stopping,
                 };
                 lp.idea_pass(&shared).await;
@@ -758,13 +827,6 @@ impl Machine {
         self.auto.work_waiting = slots == 0 && starter.is_some() && self.work_waits(&live, paused);
         scheduled
     }
-}
-
-/// What a caught panic said.
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
-    (panic.downcast_ref::<&str>().map(ToString::to_string))
-        .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_default()
 }
 
 /// What `spawn_all` starts the orchestrator from.

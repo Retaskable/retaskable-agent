@@ -573,12 +573,13 @@ impl ProjectLoop {
             return Some("Claude signed out");
         }
         let Some(gate) = gate else {
-            let week =
-                self.flags.on("weekly-cutoff").await && shared.engine_limits.week_cut_off(std::time::Instant::now());
-            return (week && !super::start_gate::local_fallback(shared)).then_some("weekly limit");
+            let week = self.flags.on("weekly-cutoff").await
+                && shared.engine_limits.week_cut_off(std::time::Instant::now())
+                && !Self::limit_fallback(shared);
+            return week.then_some("weekly limit");
         };
         let lanes = pool.rules().lanes;
-        (lanes > 0 && !(1..=lanes).any(|k| gate.lane_can_start(self, shared, k))).then_some("usage limit")
+        (lanes > 0 && !(1..=lanes).any(|k| gate.lane_may_start(self, shared, k))).then_some("usage limit")
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
