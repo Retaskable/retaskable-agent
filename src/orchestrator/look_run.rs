@@ -16,7 +16,7 @@ pub use super::slot::Slot;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
 use crate::connector::bug_link::BugLink;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::{EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
+use crate::engines::{EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
 use crate::looks::{LookBrief, Looker, decide};
 use crate::process_tree::ProcessTree;
 use crate::tiers::{implementer_tier, mid_tier};
@@ -97,8 +97,8 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
             budget_usd: project.budget.reviewer_usd,
             model: job.model.clone(),
             local: None,
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            engine: Some(job.engine),
+            cursor: job.cursor.clone(),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
             shell: true,
         },
@@ -118,7 +118,7 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
     });
     let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
     let decided = decide(&looker, &brief, |spec| async move {
-        let engine = engine_of(Some(EngineId::Claude))?;
+        let engine = engine_of(Some(job.engine))?;
         run_session_tracked(engine.as_ref(), &job.bin, &spec, "look", Some(&sink), quiet, Some(tx)).await
     })
     .await;

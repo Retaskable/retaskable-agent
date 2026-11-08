@@ -12,13 +12,12 @@ use std::time::Instant;
 
 use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, EphemeralSessionConfig, Role, engine_for, engine_of, run_session};
+use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::link::TokenStore;
-use crate::orchestrator::session::{exists, quiet_timeout};
+use crate::orchestrator::session::quiet_timeout;
 use crate::playtest_groups::{LastGrouped, Planner, PlaytestEntry, TRYOUT_GROUPS_LOCK, plan, should_group, signature};
 use crate::runs::RunLocks;
 use crate::telemetry::now_ms;
@@ -34,6 +33,9 @@ pub(super) struct Job {
     pub project: ProjectConfig,
     pub env: Env,
     pub engine_choice: EngineChoiceConfig,
+    pub cursor_models: CursorModels,
+    /// The `engine-placement` release flag: Off, only Claude runs the planner session.
+    pub flags: Arc<crate::flags::Flags>,
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
@@ -80,27 +82,20 @@ pub(super) async fn run(job: Job) {
         return;
     }
     let engine = engine_for(&job.engine_choice, job.project.engines.as_ref(), Role::Planner, None);
-    if engine != Engine::Claude {
+    if engine != Engine::Claude && !job.flags.on("engine-placement").await {
         tracing::info!(
             "{}: playtest grouping round skipped: only Claude runs a planner session yet",
             job.id
         );
         return;
     }
-    let bin = match resolve_claude_on_path(&job.env) {
-        Ok(bin) => bin,
+    let placed = match place(engine, Role::Planner, &job.env, &job.cursor_models) {
+        Ok(placed) => placed,
         Err(e) => {
-            tracing::warn!("{}: playtest grouping round skipped: {e:#}", job.id);
+            tracing::warn!("{}: playtest grouping round skipped: {e}", job.id);
             return;
         }
     };
-    if !exists(&bin, &job.env) {
-        tracing::warn!(
-            "{}: playtest grouping round skipped: the claude binary wasn't found",
-            job.id
-        );
-        return;
-    }
     let lock_token = match &job.locks {
         None => {
             let answer = match job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, true).await {
@@ -153,16 +148,16 @@ pub(super) async fn run(job: Job) {
             budget_usd: job.project.budget.planner_usd,
             model: "sonnet".to_string(),
             local: None,
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            engine: Some(placed.engine),
+            cursor: placed.cursor.clone(),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },
     };
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
     let planned = plan(&planner, &entries, |spec| async move {
-        let engine = engine_of(Some(EngineId::Claude))?;
-        run_session(engine.as_ref(), &bin, &spec, "playtest-groups", None, quiet).await
+        let engine = engine_of(Some(placed.engine))?;
+        run_session(engine.as_ref(), &placed.bin, &spec, "playtest-groups", None, quiet).await
     })
     .await;
     let still_held = match (&job.locks, &lock_token) {
@@ -348,6 +343,8 @@ mod tests {
             project,
             env,
             engine_choice: EngineChoiceConfig::default(),
+            cursor_models: Default::default(),
+            flags: Arc::new(crate::flags::Flags::fixed(&[])),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
@@ -409,6 +406,38 @@ mod tests {
         fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
         run(job(&base, &bin, dir.path())).await;
         assert_eq!(ops(&seen), vec!["tryouts_list", "chore_lock"]);
+    }
+
+    /// Four waiting entries, a Codex planner, and `codex` pointing at `codex_bin`: the ops the store saw.
+    async fn codex_round(flag_on: bool, codex_bin: &str) -> Vec<String> {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false),
+        ]);
+        let (base, seen) = store(waiting, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(fake_name());
+        fake_claude(&bin, &dir.path().join("out.jsonl"), GROUPED);
+        let mut job = job(&base, &bin, dir.path());
+        let codex = codex_bin.replace("{bin}", &bin.to_string_lossy());
+        job.env = Env::new(move |k| (k == "RETASKABLE_CODEX").then(|| codex.clone()));
+        job.engine_choice.roles.planner = Some(Engine::Codex);
+        job.flags = Arc::new(crate::flags::Flags::fixed(if flag_on {
+            &["engine-placement"]
+        } else {
+            &[]
+        }));
+        run(job).await;
+        ops(&seen)
+    }
+
+    #[tokio::test]
+    async fn a_codex_planner_runs_only_with_placement_on_and_its_binary_there() {
+        assert_eq!(codex_round(false, "{bin}").await, vec!["tryouts_list"]);
+        assert_eq!(codex_round(true, "/no/such/codex").await, vec!["tryouts_list"]);
+        assert_eq!(codex_round(true, "{bin}").await[..2], ["tryouts_list", "chore_lock"]);
     }
 
     #[tokio::test]

@@ -91,6 +91,8 @@ pub(super) fn roster(
         choice,
         env,
         models: Default::default(),
+        cursor_models: Default::default(),
+        flags: std::sync::Arc::new(crate::flags::Flags::fixed(&[])),
     };
     (dir, root, roster)
 }
