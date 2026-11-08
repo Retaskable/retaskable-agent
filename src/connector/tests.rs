@@ -246,20 +246,24 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
     c.stop(Duration::from_secs(1)).await;
 }
 
-#[tokio::test]
-async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved() {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let view = view(&["one", "two"]);
-    let c = Connector::start(
-        &url,
+fn start_connector(url: &str, store: Arc<dyn TokenStore>, view: &Arc<AgentView>, dir: &std::path::Path) -> Connector {
+    Connector::start(
+        url,
         store,
         reqwest::Client::new(),
         view.clone(),
         timing(),
         noop_exit(),
-        dir.path(),
-    );
+        dir,
+    )
+}
+
+#[tokio::test]
+async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one", "two"]);
+    let c = start_connector(&url, store, &view, dir.path());
     let mut one = next(&mut rx).await;
     let mut two = next(&mut rx).await;
     for a in [&mut one, &mut two] {
@@ -278,15 +282,7 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let view = view(&["one"]);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view.clone(),
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
+    let c = start_connector(&url, store, &view, dir.path());
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello
     let lanes = read(&mut first).await["state"]["lanes"].clone();
