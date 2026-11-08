@@ -224,10 +224,17 @@ mod tests {
         let sub = tracing_subscriber::fmt().with_writer(buf.clone()).finish();
         let _g = tracing::subscriber::set_default(sub);
         // Other tests may have cached this callsite as disabled while no subscriber was set.
-        tracing::callsite::rebuild_interest_cache();
         let a = asker("http://127.0.0.1:1".to_string(), Arc::default());
-        a.ask().await;
-        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        // Parallel tests can race the cached interest, so rebuild and retry.
+        let mut log = String::new();
+        for _ in 0..20 {
+            tracing::callsite::rebuild_interest_cache();
+            a.ask().await;
+            log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+            if log.contains("whether ideas is due") {
+                break;
+            }
+        }
         assert!(log.contains("whether ideas is due"), "{log}");
     }
 }
