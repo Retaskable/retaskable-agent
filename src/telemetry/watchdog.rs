@@ -94,6 +94,8 @@ pub struct Input<'a> {
     pub recent: &'a [RecentEvent<'a>],
     pub now_ms: i64,
     pub restart: Option<RestartView>,
+    /// The `watchdog-anomaly-rules` flag: Off, `duplicate_step` stays quiet.
+    pub anomaly_rules: bool,
     pub lease_idle_minutes: u32,
     pub idle_lanes_minutes: u32,
     pub no_progress_minutes: u32,
@@ -304,6 +306,9 @@ fn restart_wait(input: &Input, out: &mut Vec<Found>) {
 /// in between). Shown at once, for `DUPLICATE_SHOWN_MINUTES` after the latest repeated start. A start with
 /// no key never counts.
 fn duplicate_step(input: &Input, out: &mut Vec<Found>) {
+    if !input.anomaly_rules {
+        return;
+    }
     let mut open: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
     let mut duplicated: BTreeMap<(&str, &str, &str), i64> = BTreeMap::new();
     for e in input.recent {

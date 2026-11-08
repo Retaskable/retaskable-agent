@@ -537,15 +537,15 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
-        let restart_rules = self.flags.on("watchdog-anomaly-rules").await;
-        self.check_watchdog(paused, &actions, pool, restart_rules);
+        let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
+        self.check_watchdog(paused, &actions, pool, anomaly_rules);
         Step::Ticked { would }
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool, restart_rules: bool) {
+    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool, anomaly_rules: bool) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -568,8 +568,9 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            anomaly_rules,
             // Behind `watchdog-anomaly-rules`: Off, no restart reaches the rules.
-            restart: restart_rules
+            restart: anomaly_rules
                 .then(|| watchdog::RestartView::of(crate::restart::state()))
                 .flatten(),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
