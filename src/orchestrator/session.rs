@@ -389,7 +389,7 @@ async fn attempt(
         ..c
     });
     let now = crate::telemetry::now_ms() / 1000;
-    let tier = implementer_tier(usage.as_ref(), now, models);
+    let tier = implementer_tier(usage.as_ref(), now, models, false);
     let model = implementer_model(tier, item).to_string();
     let info = SessionInfo {
         project: project_id.clone(),
