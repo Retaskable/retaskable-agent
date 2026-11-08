@@ -57,6 +57,7 @@ fn checks(ok: bool) -> SetupChecks {
         cursor: check(false),
         pi: None,
         codex: None,
+        docker: None,
     }
 }
 
