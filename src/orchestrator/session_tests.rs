@@ -42,8 +42,8 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         env,
         50,
         ModelsConfig::default(),
-        150_000,
         Default::default(),
+        150_000,
     );
     Rig {
         _dir: dir,
@@ -670,8 +670,8 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         rig.starter.env.clone(),
         50,
         ModelsConfig::default(),
-        150_000,
         Default::default(),
+        150_000,
     )
 }
 

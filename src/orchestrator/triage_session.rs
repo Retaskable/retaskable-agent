@@ -1,7 +1,7 @@
 //! The real triager session for `claim` mode (docs/specs/agent/06.9-triage-claude-looks-at-needs-you-first.md): one
-//! read-only Claude session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
+//! read-only session on the middle tier, with `budget.reviewerUsd`, in the item's lane if it kept one, else the
 //! base checkout (or the repo itself before that checkout exists). Its end is a [`SessionResult::Triage`] on the outcome
-//! channel. On the triager's chosen engine.
+//! channel. It runs on the engine chosen for the triager (`engines::place`).
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -12,8 +12,9 @@ use super::driver::{
 use super::session::{ClaudeStarter, quiet_timeout};
 use crate::config::{Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::place::place;
-use crate::engines::{EphemeralSessionConfig, Role, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::{
+    EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
+};
 use crate::implementer::new_session_id;
 use crate::tiers::{implementer_tier, mid_tier, top_tier};
 use crate::triage::schedule::MAX_TRIAGES;
@@ -35,9 +36,19 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
 }
 
 impl ClaudeStarter {
-    /// The engine chat is placed on (section 3.1).
-    fn triager_engine(&self, project: &ProjectConfig) -> Engine {
-        engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None)
+    /// Where the triager (and its second look) runs: the engine chosen for the role and its binary. With
+    /// `engine-placement` Off (`placement`), the engine chosen is not used: only Claude runs, as before.
+    fn place_triager(&self, project: &ProjectConfig, placement: bool) -> Result<Placement, String> {
+        let chosen = engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None);
+        if !placement && chosen != Engine::Claude {
+            return Err("only Claude sessions run in the Rust agent yet".into());
+        }
+        place(
+            if placement { chosen } else { Engine::Claude },
+            Role::Triager,
+            &self.env,
+            &self.cursor_models,
+        )
     }
 
     /// A new session's id, where its transcript goes, and the running count it's now part of.
@@ -59,12 +70,7 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let chosen = self.triager_engine(&project);
-        // Off (`engine-placement`) is today's behaviour: only Claude sessions run.
-        if !request.placement && chosen != Engine::Claude {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let placed = place(chosen, Role::Triager, &self.env, &self.cursor_models)?;
+        let placed = self.place_triager(&project, request.placement)?;
         let TriageRequest {
             project: project_id,
             item_id,
@@ -169,12 +175,7 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let engine = if request.placement {
-            self.triager_engine(&project)
-        } else {
-            Engine::Claude
-        };
-        let placed = place(engine, Role::Triager, &self.env, &self.cursor_models)?;
+        let placed = self.place_triager(&project, request.placement)?;
         let SecondLookRequest {
             project: project_id,
             item_id,

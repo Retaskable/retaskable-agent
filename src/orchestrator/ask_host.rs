@@ -1,6 +1,6 @@
 //! The real [`AskHost`]: reads the store for the assistant's prompt (`asks_list`, `facts_get`, the items and the
 //! drafts) and the agent's run state, runs the assistant session through `claude -p` in the project's base checkout
-//! (Claude only, like the drafter's host), carries out its actions with `ask::perform` and hands back the answer
+//! (on the engine chosen for the assistant), carries out its actions with `ask::perform` and hands back the answer
 //! and each action's result for the loop to send with `ask_report`. The session's process tree registers with
 //! `process_tree`, so a restart or Quit cuts it.
 use std::path::PathBuf;
@@ -16,8 +16,7 @@ use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, Sta
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig};
-use crate::engines::place::place;
-use crate::engines::{Role, SessionSpec, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::implementer::Interrupted;
 use crate::implementer::session::new_session_id;
@@ -166,18 +165,21 @@ impl AskHost for ClaudeAsks {
                 answer,
                 actions: vec![],
             };
-            let engine = engine_for(&choice, project.engines.as_ref(), Role::Assistant, None);
             let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
-            if !placement && engine != Engine::Claude {
+            // The local model places as Claude Code with no local target, like `place` says.
+            let chosen = match engine_for(&choice, project.engines.as_ref(), Role::Assistant, None) {
+                Engine::Local => Engine::Claude,
+                other => other,
+            };
+            if !placement && chosen != Engine::Claude {
                 return Ok(reply(
                     "Sorry, I couldn't answer that: only Claude sessions run in the Rust agent yet.".into(),
                 ));
             }
-            let placed = match place(engine, Role::Assistant, &env, &cursor_models) {
+            let placed = match place(chosen, Role::Assistant, &env, &cursor_models) {
                 Ok(placed) => placed,
-                Err(e) => return Ok(sorry(anyhow::Error::msg(e))),
+                Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
             };
-            let bin = placed.bin;
             let repo_path = PathBuf::from(&project.repo_path);
             let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
             let spec = match session_spec(&Session {
@@ -194,16 +196,14 @@ impl AskHost for ClaudeAsks {
                     reply_to: ask.reply_to.as_deref(),
                     question: &question,
                 },
-                engine,
+                engine: chosen,
                 tier,
                 budget: &project.budget,
                 cwd: &repo_path,
                 local: None,
+                cursor: placed.cursor.clone(),
             }) {
-                Ok(spec) => SessionSpec {
-                    cursor: placed.cursor,
-                    ..spec
-                },
+                Ok(spec) => spec,
                 Err(e) => return Ok(sorry(e)),
             };
             let project_id = project.id_or_derived();
@@ -217,7 +217,15 @@ impl AskHost for ClaudeAsks {
             };
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
             let follower = follow(sink.path.clone(), engine_of(spec.engine)?, events);
-            let r = run_session(engine.as_ref(), &bin, &spec, &new_session_id(), Some(&sink), quiet).await;
+            let r = run_session(
+                engine.as_ref(),
+                &placed.bin,
+                &spec,
+                &new_session_id(),
+                Some(&sink),
+                quiet,
+            )
+            .await;
             follower.abort();
             let r = match r {
                 Ok(r) => r,

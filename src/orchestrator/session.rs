@@ -48,10 +48,10 @@ pub struct ClaudeStarter {
     pub(super) env: Env,
     max_turns: u32,
     pub(super) models: ModelsConfig,
+    /// The machine's Cursor model names (`cursor.models`).
+    pub(super) cursor_models: CursorModels,
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
-    /// The machine's Cursor model names, for placing a Cursor session.
-    pub(super) cursor_models: CursorModels,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     pub(super) running: Arc<AtomicU32>,
 }
@@ -65,8 +65,8 @@ impl ClaudeStarter {
         env: Env,
         max_turns: u32,
         models: ModelsConfig,
-        max_resume_context_tokens: u32,
         cursor_models: CursorModels,
+        max_resume_context_tokens: u32,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -75,8 +75,8 @@ impl ClaudeStarter {
             env,
             max_turns,
             models,
-            max_resume_context_tokens,
             cursor_models,
+            max_resume_context_tokens,
             running: Arc::new(AtomicU32::new(0)),
         })
     }
