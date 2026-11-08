@@ -67,6 +67,7 @@ async fn settle(f: &mut Fixture) {
         let m = &mut f.rig.machine;
         let shared = Shared {
             links: &m.links,
+            local: &m.local,
             claim_paused_until: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
