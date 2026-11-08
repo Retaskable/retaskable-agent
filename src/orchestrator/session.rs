@@ -430,7 +430,9 @@ async fn attempt(
     let now = crate::telemetry::now_ms() / 1000;
     // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
     // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
-    let ladder = placed.engine == EngineId::Claude && crate::tiers::local_ladder_on();
+    // Never on a resume: an Anthropic session isn't resumed against the local server (section 7.2), so it goes on `sonnet`.
+    let ladder =
+        placed.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && crate::tiers::local_ladder_on();
     let up = ladder && job.local.available();
     let tier = if up && job.wants_local {
         LOCAL

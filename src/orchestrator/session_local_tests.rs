@@ -157,3 +157,25 @@ async fn an_engine_set_to_local_with_local_down_runs_on_the_roles_tier() {
     let args = std::fs::read_to_string(&rig.args).unwrap();
     assert!(args.contains("--model opus") && !args.contains("BASE=http"), "{args}");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resumed_session_never_takes_the_local_model_even_with_local_up() {
+    crate::tiers::set_local_ladder_for_test(true);
+    let local = LocalModel::up();
+    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local.clone());
+    recording_claude(&rig, 0);
+    for resume in [false, true] {
+        let (mut request, mut rx) = request();
+        request.usage = low_usage();
+        request.resume = resume;
+        rig.starter.start(request).unwrap();
+        rx.recv().await.unwrap();
+        let args = std::fs::read_to_string(&rig.args).unwrap();
+        assert_eq!(args.contains("BASE=http://"), !resume, "resume={resume}: {args}");
+        assert!(args.contains("--model sonnet"), "{args}");
+        if resume {
+            assert!(args.contains("--resume"), "{args}");
+        }
+    }
+}
