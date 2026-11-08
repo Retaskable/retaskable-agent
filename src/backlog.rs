@@ -121,6 +121,9 @@ pub struct Item {
     pub kind: Option<String>,
     #[serde(default)]
     pub milestone: Option<String>,
+    /// The spec draft that added the item (`draft-…`), when one did.
+    #[serde(default)]
+    pub draft_id: Option<String>,
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,

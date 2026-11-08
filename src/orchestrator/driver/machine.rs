@@ -606,6 +606,7 @@ impl Machine {
             {
                 self.projects[i].backlog_items = items.len();
                 self.projects[i].readopt(items, &mut self.pool);
+                self.projects[i].follow_drafts(items, &self.links).await;
             }
         }
         if self.starter.is_some() {
