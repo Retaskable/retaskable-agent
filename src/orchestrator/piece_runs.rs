@@ -16,6 +16,7 @@ use super::piece_review::{ReviewState, Reviewed, review as review_change};
 use super::session::{
     Attempt, ChecksStage, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout,
 };
+use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
@@ -24,7 +25,7 @@ use crate::engines::resolve::resolve_claude_on_path;
 use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
-use crate::runs::chore::{chore_end, chore_of, model_for, tier_for};
+use crate::runs::chore::{chore_end, chore_lock_name, chore_of, model_for, tier_for};
 use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::{lanes, paths};
 
@@ -39,6 +40,8 @@ pub struct PieceStarter {
     pub max_turns: u32,
     pub models: ModelsConfig,
     pub flags: std::sync::Arc<crate::flags::Flags>,
+    /// This computer, for a chore lock's note.
+    pub machine: String,
 }
 
 impl PieceStarter {
@@ -109,12 +112,15 @@ impl RunStarter for PieceStarter {
             piece: request.piece,
             processes: request.processes,
             flags: self.flags.clone(),
+            context: request.context,
+            machine: self.machine.clone(),
+            lock: None,
         };
         let ends = request.ends;
         let token = request.token;
         // The inner task is joined, so even a panic in it ends in exactly one end.
         tokio::spawn(async move {
-            let (outcome, result) = match tokio::spawn(run(job)).await {
+            let (outcome, result) = match tokio::spawn(run_locked(job)).await {
                 Ok(end) => end,
                 Err(e) => (RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({})),
             };
@@ -138,6 +144,10 @@ pub(super) struct Job {
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
     pub(super) flags: std::sync::Arc<crate::flags::Flags>,
+    pub(super) context: crate::orchestrator::driver::RunContext,
+    pub(super) machine: String,
+    /// The token of the chore lock the run holds, checked before it pushes.
+    pub(super) lock: Option<String>,
 }
 
 /// A sender for a session's process tree: it goes to the run as soon as the session starts, so a stop can cut it.
@@ -164,6 +174,47 @@ pub(super) fn piece_item(piece: &RunPiece) -> Item {
         status: ItemStatus::Building,
         ..Item::default()
     }
+}
+
+/// A chore holds its kind's store lock through the run (section 6.7): another holder leaves the chore to them
+/// (`interrupted`, nothing started), a store that can't be asked fails closed (`failed`, outside). The lock is
+/// dropped whatever the run's end. A roadmap piece and a playtest fix take none.
+async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
+    let chore = if job.flags.on("chore-rotation").await {
+        chore_of(&job.piece)
+    } else {
+        None
+    };
+    let Some(name) = chore.and_then(|c| chore_lock_name(c.kind, &job.project.base_branch)) else {
+        return run(job).await;
+    };
+    let ctx = job.context.clone();
+    let note = format!("{} on {}", piece_id(&job.piece), job.machine);
+    let token = match ctx
+        .client
+        .lock_take(ctx.repo, Some(ctx.token.as_str()), &name, Some(&note))
+        .await
+    {
+        Ok(LockTake::Held(token)) => token,
+        Ok(LockTake::HeldBy { by, note }) => {
+            let note = note.map(|n| format!(" ({n})")).unwrap_or_default();
+            tracing::info!(
+                "{}: the {name} lock is held by {by}{note}; leaving the chore to them",
+                job.token
+            );
+            return (RunOutcome::Interrupted, json!({}));
+        }
+        Err(e) => {
+            let why = format!("Couldn't take the {name} lock: {e}");
+            return (RunOutcome::Failed(why), json!({ "outside": true }));
+        }
+    };
+    ctx.locks.add(&token, &name, std::time::Instant::now());
+    job.lock = Some(token.clone());
+    let end = run(job).await;
+    let _ = ctx.client.lock_drop(ctx.repo, Some(ctx.token.as_str()), &token).await;
+    ctx.locks.remove(&token);
+    end
 }
 
 /// The run's end: its lane is prepared on the piece's branch, a session runs, the gates check it and its change is
@@ -370,6 +421,10 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             Gated::GaveUp(_, _, why) => return Ok(failed(why)),
         };
         let pushed = match &a.answer {
+            Ok(_) if job.lock.as_ref().is_some_and(|t| !job.context.locks.held(t)) => {
+                tracing::warn!("{}: the chore's lock was lost; nothing is pushed", job.token);
+                return Ok((RunOutcome::Interrupted, json!({})));
+            }
             Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
                 let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
                 let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
