@@ -36,6 +36,7 @@ pub fn restart_handler(
     projects: Vec<config::ProjectConfig>,
     data_dir: PathBuf,
     state: Arc<restart::RestartState>,
+    before_exit: Arc<dyn Fn() + Send + Sync>,
 ) -> Arc<view::Exit> {
     Arc::new(move |code: i32| {
         let state = state.clone();
@@ -61,6 +62,7 @@ pub fn restart_handler(
         let updater = updater.clone();
         let exe_path = exe_path.clone();
         let projects = projects.clone();
+        let before_exit = before_exit.clone();
         // Restarting answers the request first: the process exit happens on another thread, a
         // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
         // none in flight on its own HTTP thread, but the response still deserves to flush).
@@ -82,7 +84,10 @@ pub fn restart_handler(
                 exe_path.as_deref(),
                 &RunWait::real(),
                 &seq,
-                |code| std::process::exit(code),
+                |code| {
+                    before_exit();
+                    std::process::exit(code)
+                },
             );
         });
     })

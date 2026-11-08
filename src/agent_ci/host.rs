@@ -1,374 +1,401 @@
-//! The code host side of agent CI (docs/specs/agent-ci.md sections 3.3 and 3.5): commit statuses, reading them
-//! back, and the failure comment, all through `gh api` or `glab api`. The program is a parameter so tests use a
-//! fake.
+//! The host side of a CI check's fetch step (agent-ci.md section 3.2 step 1): a fresh directory
+//! under the project's data folder holding the pull request's merge into main (or main alone for a
+//! push), with a `.git` that carries no remote, credential helper or token, so the container that
+//! mounts it has nothing to leak.
+use crate::git_bin;
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
-
-use crate::ci_watch::LOG_TAIL_LINES;
-
-// Copied from Retaskable.com's `.agent-ci/runner.mjs` (the TypeScript runner), so the orchestrator's wait is
-// unchanged: the contexts it posts, its `ME` (`agent-ci <computer>`) and its three descriptions.
-/// The context of a pull request's check.
-pub const PR_CONTEXT: &str = "ci/agent/pr/ci";
-/// The context of a push to main's check.
-pub const PUSH_CONTEXT: &str = "ci/agent/push/ci";
-/// A status description is cut to this many characters.
-const DESCRIPTION_MAX: usize = 140;
-
-/// The runner's name for a computer: `agent-ci <computer>`.
-pub fn me(computer: &str) -> String {
-    format!("agent-ci {computer}")
-}
-
-pub fn running_text(me: &str) -> String {
-    format!("{me}: running")
-}
-
-pub fn passed_text(me: &str, minutes: u64) -> String {
-    format!("{me}: passed in {minutes}m")
-}
-
-pub fn failed_text(me: &str, minutes: u64, last_error_line: &str) -> String {
-    format!("{me}: failed in {minutes}m {}", last_error_line.trim())
-}
-
+/// What a check runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Pending,
-    Success,
-    Failure,
+pub enum Mode<'a> {
+    /// The pull request's head (a ref the remote serves, e.g. `refs/pull/7/head` or a branch)
+    /// merged into main.
+    PullRequest { head_ref: &'a str },
+    /// Main alone.
+    Push,
 }
 
-impl State {
-    fn github(self) -> &'static str {
-        match self {
-            State::Pending => "pending",
-            State::Success => "success",
-            State::Failure => "failure",
-        }
-    }
-    fn gitlab(self) -> &'static str {
-        match self {
-            State::Pending => "pending",
-            State::Success => "success",
-            State::Failure => "failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Github,
-    Gitlab,
-}
-
-/// One commit status, as read back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Status {
-    pub context: String,
-    /// `pending`, `success` or `failure` (GitLab's `failed` is `failure`).
-    pub state: String,
-    pub description: String,
-    pub creator: String,
-    pub updated_at: String,
+pub enum FetchOutcome {
+    /// The directory is ready, detached at this commit.
+    Ready { dir: PathBuf, commit: String },
+    /// The head doesn't merge into main: no container is started and the directory is already gone.
+    Conflict { reason: String },
 }
 
-pub struct Host {
-    /// `gh` or `glab`.
-    pub program: PathBuf,
-    pub kind: Kind,
-    /// `owner/repo` (GitLab: the project's full path).
-    pub repo: String,
-    /// Where the program runs.
-    pub dir: PathBuf,
+/// git at below-normal priority (agent-ci.md section 3.1). The fetch uses only the host's global
+/// or system git credentials; nothing is written to the clone's config.
+fn git_command(dir: &Path) -> std::process::Command {
+    git_bin::command_from(super::priority::low_priority(git_bin::program()), dir)
 }
 
-/// The hidden marker that carries a check key in the failure comment.
-pub fn marker(key: &str) -> String {
-    format!("<!-- agent-ci-key:{key} -->")
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let output = git_command(dir)
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+        .args(args)
+        .output()
+        .context("running git")?;
+    if !output.status.success() {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        bail!("{}", text.trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The failure comment: its head names the check and short sha, then the last 120 log lines, then the marker.
-pub fn failure_comment(name: &str, sha: &str, key: &str, log: &str) -> String {
-    let lines: Vec<&str> = log.trim_end().lines().collect();
-    let tail = lines[lines.len().saturating_sub(LOG_TAIL_LINES)..]
-        .join("\n")
-        .replace("```", "'''");
-    let short: String = sha.chars().take(8).collect();
-    format!("{name} failed on {short}.\n\n```\n{tail}\n```\n{}\n", marker(key))
-}
-
-fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
-    keys.iter()
-        .find_map(|k| v.get(*k).and_then(Value::as_str))
-        .unwrap_or("")
-}
-
-impl Host {
-    fn api(&self, method: &str, endpoint: &str, fields: &[(&str, &str)]) -> Result<String> {
-        let mut command = Command::new(&self.program);
-        command
-            .current_dir(&self.dir)
-            .arg("api")
-            .args(["-X", method])
-            .arg(endpoint);
-        for (k, v) in fields {
-            command.arg("-f").arg(format!("{k}={v}"));
+/// Makes a fresh directory under the project's CI folder, clones `repo` (its object store) into it,
+/// fetches main (and the head) from the repo's `origin` with the host's own credentials, merges and
+/// detaches, then strips the clone's config. `main_branch` is e.g. `main`.
+pub fn fetch(data_dir: &Path, project: &str, repo: &Path, main_branch: &str, mode: Mode) -> Result<FetchOutcome> {
+    let root = crate::paths::ci_dir(data_dir, project);
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = root.join(format!("check-{}-{nanos}-{n}", std::process::id()));
+    std::fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    match fetch_into(&dir, repo, main_branch, mode) {
+        Ok(commit) => Ok(FetchOutcome::Ready { dir, commit }),
+        Err(Failure::Conflict(reason)) => {
+            cleanup(&dir);
+            Ok(FetchOutcome::Conflict { reason })
         }
-        let out = command
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("starting {}", Path::new(&self.program).display()))?;
-        if !out.status.success() {
-            bail!(
-                "{} api {endpoint}: {}",
-                self.program.display(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+        Err(Failure::Other(e)) => {
+            cleanup(&dir);
+            Err(e)
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
+}
 
-    fn project(&self) -> String {
-        self.repo.replace('/', "%2F")
+enum Failure {
+    Conflict(String),
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for Failure {
+    fn from(e: anyhow::Error) -> Self {
+        Failure::Other(e)
     }
+}
 
-    /// Posts a commit status; `target_url` (the log) only when given.
-    pub fn post_status(
-        &self,
-        sha: &str,
-        context: &str,
-        state: State,
-        description: &str,
-        target_url: Option<&str>,
-    ) -> Result<()> {
-        let description: String = description.chars().take(DESCRIPTION_MAX).collect();
-        let (endpoint, state_key, context_key, value) = match self.kind {
-            Kind::Github => (
-                format!("repos/{}/statuses/{sha}", self.repo),
-                "state",
-                "context",
-                state.github(),
-            ),
-            Kind::Gitlab => (
-                format!("projects/{}/statuses/{sha}", self.project()),
-                "state",
-                "name",
-                state.gitlab(),
-            ),
-        };
-        let mut fields = vec![
-            (state_key, value),
-            (context_key, context),
-            ("description", description.as_str()),
-        ];
-        if let Some(url) = target_url {
-            fields.push(("target_url", url));
+fn fetch_into(dir: &Path, repo: &Path, main_branch: &str, mode: Mode) -> Result<String, Failure> {
+    let repo_str = repo.to_string_lossy();
+    let dir_str = dir.to_string_lossy();
+    // The URL goes on the command line, never into the clone's config.
+    let url = git(repo, &["remote", "get-url", "origin"])?;
+    git(
+        dir,
+        &[
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            // Never share object files with the host repo: the container mounts this directory.
+            "--no-hardlinks",
+            "-c",
+            "core.autocrlf=false",
+            &repo_str,
+            &dir_str,
+        ],
+    )?;
+    git(dir, &["config", "core.autocrlf", "false"])?;
+    let main_spec = format!("+refs/heads/{main_branch}:refs/retaskable/main");
+    let mut args = vec!["fetch", "--quiet", "--no-tags", url.as_str(), main_spec.as_str()];
+    let head_spec;
+    if let Mode::PullRequest { head_ref } = mode {
+        head_spec = format!("+{head_ref}:refs/retaskable/head");
+        args.push(&head_spec);
+    }
+    git(dir, &args)?;
+    git(dir, &["checkout", "--quiet", "--detach", "refs/retaskable/main"])?;
+    if matches!(mode, Mode::PullRequest { .. }) {
+        let merged = git(
+            dir,
+            &[
+                "-c",
+                "user.name=Retaskable CI",
+                "-c",
+                "user.email=ci@retaskable.invalid",
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "--quiet",
+                "refs/retaskable/head",
+            ],
+        );
+        if let Err(e) = merged {
+            // Only a real conflict is the pull request's fault; anything else is the host's.
+            return if git(dir, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
+                Err(Failure::Other(e))
+            } else {
+                Err(Failure::Conflict(e.to_string()))
+            };
         }
-        self.api("POST", &endpoint, &fields).map(|_| ())
     }
+    let commit = git(dir, &["rev-parse", "HEAD"])?;
+    scrub(dir)?;
+    Ok(commit)
+}
 
-    /// A commit's statuses, newest first as the host lists them.
-    pub fn read_statuses(&self, sha: &str) -> Result<Vec<Status>> {
-        let endpoint = match self.kind {
-            Kind::Github => format!("repos/{}/commits/{sha}/statuses?per_page=100", self.repo),
-            Kind::Gitlab => format!(
-                "projects/{}/repository/commits/{sha}/statuses?per_page=100",
-                self.project()
-            ),
-        };
-        let v: Value = serde_json::from_str(&self.api("GET", &endpoint, &[])?)?;
-        let rows = v.as_array().ok_or_else(|| anyhow!("statuses: not a list"))?;
-        Ok(rows
-            .iter()
-            .map(|r| {
-                let state = match str_of(r, &["state", "status"]) {
-                    "failed" | "error" => "failure",
-                    s => s,
-                };
-                let creator = r.get("creator").or_else(|| r.get("author"));
-                Status {
-                    context: str_of(r, &["context", "name"]).to_string(),
-                    state: state.to_string(),
-                    description: str_of(r, &["description"]).to_string(),
-                    creator: creator
-                        .map(|c| str_of(c, &["login", "username"]))
-                        .unwrap_or("")
-                        .to_string(),
-                    updated_at: str_of(r, &["updated_at", "finished_at", "created_at"]).to_string(),
-                }
-            })
-            .collect())
+/// Leaves `.git/config` with no remote, no `credential`, no `http` and no `url.*` sections, and the
+/// fetch's working refs gone.
+fn scrub(dir: &Path) -> Result<()> {
+    for r in ["refs/retaskable/main", "refs/retaskable/head"] {
+        let _ = git(dir, &["update-ref", "-d", r]);
     }
-
-    /// Comments the failure on the pull request (`pr`): edits this key's earlier comment if there is one, else
-    /// adds a new one.
-    pub fn post_failure_comment(&self, pr: u64, name: &str, sha: &str, key: &str, log: &str) -> Result<()> {
-        let body = failure_comment(name, sha, key, log);
-        let (list, base) = match self.kind {
-            Kind::Github => (
-                format!("repos/{}/issues/{pr}/comments?per_page=100", self.repo),
-                format!("repos/{}/issues", self.repo),
-            ),
-            Kind::Gitlab => {
-                let p = format!("projects/{}/merge_requests/{pr}/notes", self.project());
-                (format!("{p}?per_page=100"), p)
+    let _ = git(dir, &["remote", "remove", "origin"]);
+    let listed = git(dir, &["config", "--local", "--name-only", "--list"])?;
+    let mut sections: Vec<String> = Vec::new();
+    for key in listed.lines() {
+        let mut parts = key.split('.');
+        let first = parts.next().unwrap_or("");
+        if matches!(first, "remote" | "credential" | "http" | "url" | "branch") {
+            let section = match key.rsplit_once('.') {
+                Some((s, _)) if key.matches('.').count() >= 2 => s.to_string(),
+                _ => first.to_string(),
+            };
+            if !sections.contains(&section) {
+                sections.push(section);
             }
-        };
-        let rows: Value = serde_json::from_str(&self.api("GET", &list, &[])?)?;
-        let mark = marker(key);
-        let existing = rows
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|c| str_of(c, &["body"]).contains(&mark))
-            .and_then(|c| c.get("id").and_then(Value::as_u64));
-        let (method, endpoint) = match (self.kind, existing) {
-            (Kind::Github, Some(id)) => ("PATCH", format!("repos/{}/issues/comments/{id}", self.repo)),
-            (Kind::Github, None) => ("POST", format!("{base}/{pr}/comments")),
-            (Kind::Gitlab, Some(id)) => ("PUT", format!("{base}/{id}")),
-            (Kind::Gitlab, None) => ("POST", base),
-        };
-        self.api(method, &endpoint, &[("body", &body)]).map(|_| ())
+        }
+    }
+    for section in sections {
+        let _ = git(dir, &["config", "--local", "--remove-section", &section]);
+    }
+    Ok(())
+}
+
+/// Deletes a check's directory when it ends.
+pub fn cleanup(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Deletes every directory left from a prior run (at start and on a restart's recovery).
+pub fn sweep(data_dir: &Path, project: &str) {
+    let root = crate::paths::ci_dir(data_dir, project);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            cleanup(&path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
+    #[cfg(not(windows))]
     #[test]
-    fn comment_keeps_the_last_120_lines_and_the_marker() {
-        let log: String = (1..=300).map(|i| format!("line {i}\n")).collect();
-        let c = failure_comment("agent-ci box", "0123456789abcdef", "k1", &log);
-        assert!(c.starts_with("agent-ci box failed on 01234567."));
-        assert!(c.contains("line 181\n") && !c.contains("line 180\n") && c.contains("line 300\n"));
-        assert!(c.contains(&marker("k1")));
-        assert_eq!(c.lines().filter(|l| l.starts_with("line ")).count(), 120);
+    fn git_runs_under_nice() {
+        let cmd = git_command(Path::new("."));
+        assert_eq!(cmd.get_program(), "nice");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], "-n");
+        assert_eq!(args[1], "10");
+        assert_eq!(args[2], git_bin::program().as_os_str());
+    }
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare origin with `main` (a.txt), a clone of it, and a branch `feature` pushed with b.txt.
+    fn setup(root: &Path) -> PathBuf {
+        let bare = root.join("origin.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        sh(&bare, &["init", "--bare", "-b", "main"]);
+        let repo = root.join("repo");
+        sh(root, &["clone", bare.to_str().unwrap(), repo.to_str().unwrap()]);
+        sh(&repo, &["checkout", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-m", "a"]);
+        sh(&repo, &["push", "origin", "main"]);
+        sh(&repo, &["checkout", "-b", "feature"]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-m", "b"]);
+        sh(&repo, &["push", "origin", "feature"]);
+        sh(&repo, &["checkout", "main"]);
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-m", "c"]);
+        sh(&repo, &["push", "origin", "main"]);
+        repo
+    }
+
+    fn fetch_pr(data: &Path, repo: &Path, head_ref: &str) -> Result<FetchOutcome> {
+        fetch(data, "p", repo, "main", Mode::PullRequest { head_ref })
+    }
+
+    fn ready(outcome: FetchOutcome) -> (PathBuf, String) {
+        match outcome {
+            FetchOutcome::Ready { dir, commit } => (dir, commit),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
-    fn descriptions_are_the_runners() {
-        let m = me("box");
-        assert_eq!(running_text(&m), "agent-ci box: running");
-        assert_eq!(passed_text(&m, 3), "agent-ci box: passed in 3m");
-        assert_eq!(failed_text(&m, 4, " boom "), "agent-ci box: failed in 4m boom");
+    fn pull_request_merge_has_both_parents_and_is_detached() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        let data = root.path().join("data");
+        let out = fetch_pr(&data, &repo, "refs/heads/feature").unwrap();
+        let (dir, commit) = ready(out);
+        assert!(dir.starts_with(crate::paths::ci_dir(&data, "p")));
+        assert_eq!(sh(&dir, &["rev-parse", "HEAD"]), commit);
+        assert_eq!(
+            sh(&dir, &["rev-list", "--parents", "-n1", "HEAD"]).split(' ').count(),
+            3
+        );
+        assert!(sh(&dir, &["branch", "--show-current"]).is_empty());
+        assert!(dir.join("b.txt").is_file() && dir.join("c.txt").is_file());
     }
 
+    #[test]
+    fn conflicting_head_returns_the_conflict_and_leaves_no_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        sh(&repo, &["checkout", "-b", "clash", "HEAD~1"]);
+        std::fs::write(repo.join("c.txt"), "other\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-m", "clash"]);
+        sh(&repo, &["push", "origin", "clash"]);
+        let data = root.path().join("data");
+        let out = fetch_pr(&data, &repo, "refs/heads/clash").unwrap();
+        assert!(
+            matches!(out, FetchOutcome::Conflict { ref reason } if reason.contains("c.txt")),
+            "{out:?}"
+        );
+        assert_eq!(std::fs::read_dir(crate::paths::ci_dir(&data, "p")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn config_carries_no_remote_credential_or_token() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        sh(&repo, &["config", "credential.helper", "store"]);
+        sh(
+            &repo,
+            &["config", "http.extraheader", "AUTHORIZATION: bearer FAKETOKEN123"],
+        );
+        sh(
+            &repo,
+            &[
+                "config",
+                "url.https://FAKETOKEN123@example.com/.insteadOf",
+                "https://example.com/",
+            ],
+        );
+        let data = root.path().join("data");
+        let out = fetch_pr(&data, &repo, "refs/heads/feature").unwrap();
+        let (dir, _) = ready(out);
+        let config = std::fs::read_to_string(dir.join(".git").join("config")).unwrap();
+        assert!(!config.contains("[remote"), "{config}");
+        assert!(!config.contains("credential"), "{config}");
+        assert!(!config.contains("extraheader"), "{config}");
+        assert!(!config.contains("insteadOf"), "{config}");
+        assert!(!config.contains("FAKETOKEN123"), "{config}");
+        assert!(config.contains("autocrlf = false"), "{config}");
+    }
+
+    #[test]
+    fn push_mode_checks_out_main_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        let data = root.path().join("data");
+        let (dir, commit) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
+        assert_eq!(commit, sh(&repo, &["rev-parse", "main"]));
+        assert!(dir.join("c.txt").is_file() && !dir.join("b.txt").exists());
+        assert!(sh(&dir, &["branch", "--show-current"]).is_empty());
+    }
+
+    #[test]
+    fn sweep_removes_leftovers_and_cleanup_removes_one() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        let data = root.path().join("data");
+        let (a, _) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
+        let (b, _) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
+        cleanup(&a);
+        assert!(!a.exists() && b.exists());
+        let (_c, _) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
+        sweep(&data, "p");
+        assert_eq!(std::fs::read_dir(crate::paths::ci_dir(&data, "p")).unwrap().count(), 0);
+    }
+
+    #[test]
     #[cfg(unix)]
-    mod fake {
-        use super::*;
-        use crate::test_support::write_executable;
+    fn objects_are_copied_not_hardlinked() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        sh(&repo, &["gc", "--quiet"]);
+        let data = root.path().join("data");
+        let (dir, _) = ready(fetch(&data, "p", &repo, "main", Mode::Push).unwrap());
+        let pack_dir = dir.join(".git").join("objects").join("pack");
+        let mut packs = 0;
+        for e in std::fs::read_dir(pack_dir).unwrap().flatten() {
+            assert_eq!(e.metadata().unwrap().nlink(), 1, "{}", e.path().display());
+            packs += 1;
+        }
+        assert!(packs > 0);
+    }
 
-        /// A program that logs each call as `CALL <args>` and answers listings from files in `dir`.
-        fn host(dir: &Path, kind: Kind) -> Host {
-            let program = dir.join("fake");
-            write_executable(
-                &program,
-                "#!/bin/sh\n[ -n \"$1\" ] || exit 0\nprintf 'CALL %s\\n' \"$*\" | head -1 >> calls.log\n\
-                 case \"$*\" in *comments?per_page*|*notes?per_page*) cat comments.json;; \
-                 *statuses?per_page*) cat statuses.json;; esac\n",
-            );
-            std::fs::write(dir.join("comments.json"), "[]").unwrap();
-            Host {
-                program,
-                kind,
-                repo: "o/r".into(),
-                dir: dir.to_path_buf(),
+    fn all_text(dir: &Path, out: &mut String) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n != "objects") {
+                    all_text(&path, out);
+                }
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push_str(&text);
             }
         }
+    }
 
-        fn calls(dir: &Path) -> Vec<String> {
-            std::fs::read_to_string(dir.join("calls.log"))
-                .unwrap_or_default()
-                .lines()
-                .map(String::from)
-                .collect()
-        }
-
-        #[test]
-        fn github_statuses_use_the_contexts_and_descriptions() {
-            let d = tempfile::tempdir().unwrap();
-            let h = host(d.path(), Kind::Github);
-            let m = me("box");
-            h.post_status("abc", PR_CONTEXT, State::Pending, &running_text(&m), None)
-                .unwrap();
-            h.post_status(
-                "abc",
-                PR_CONTEXT,
-                State::Success,
-                &passed_text(&m, 2),
-                Some("http://x/log"),
-            )
-            .unwrap();
-            h.post_status("abc", PUSH_CONTEXT, State::Failure, &failed_text(&m, 2, "bad"), None)
-                .unwrap();
-            let c = calls(d.path());
-            assert_eq!(
-                c[0],
-                "CALL api -X POST repos/o/r/statuses/abc -f state=pending -f context=ci/agent/pr/ci -f description=agent-ci box: running"
-            );
-            assert!(c[1].ends_with("-f state=success -f context=ci/agent/pr/ci -f description=agent-ci box: passed in 2m -f target_url=http://x/log"));
-            assert!(c[2].ends_with(
-                "-f state=failure -f context=ci/agent/push/ci -f description=agent-ci box: failed in 2m bad"
-            ));
-        }
-
-        #[test]
-        fn gitlab_statuses_use_name_and_failed() {
-            let d = tempfile::tempdir().unwrap();
-            let h = host(d.path(), Kind::Gitlab);
-            h.post_status("abc", PR_CONTEXT, State::Failure, "d", None).unwrap();
-            assert_eq!(
-                calls(d.path())[0],
-                "CALL api -X POST projects/o%2Fr/statuses/abc -f state=failed -f name=ci/agent/pr/ci -f description=d"
-            );
-        }
-
-        #[test]
-        fn reads_creator_description_and_updated_at() {
-            let d = tempfile::tempdir().unwrap();
-            let h = host(d.path(), Kind::Github);
-            std::fs::write(
-                d.path().join("statuses.json"),
-                r#"[{"context":"ci/agent/pr/ci","state":"pending","description":"agent-ci box: running","updated_at":"2026-11-08T10:00:00Z","creator":{"login":"bot"}}]"#,
-            )
-            .unwrap();
-            let s = h.read_statuses("abc").unwrap();
-            assert_eq!(
-                s,
-                vec![Status {
-                    context: "ci/agent/pr/ci".into(),
-                    state: "pending".into(),
-                    description: "agent-ci box: running".into(),
-                    creator: "bot".into(),
-                    updated_at: "2026-11-08T10:00:00Z".into(),
-                }]
-            );
-        }
-
-        #[test]
-        fn a_second_failure_for_a_key_edits_its_comment() {
-            let d = tempfile::tempdir().unwrap();
-            let h = host(d.path(), Kind::Github);
-            let log: String = (1..=300).map(|i| format!("line {i}\n")).collect();
-            h.post_failure_comment(7, "agent-ci box", "abc", "k1", &log).unwrap();
-            let mut c = calls(d.path());
-            assert!(c[1].starts_with("CALL api -X POST repos/o/r/issues/7/comments"));
-            let existing = serde_json::json!([{"id": 55, "body": failure_comment("agent-ci box", "abc", "k1", &log)}]);
-            std::fs::write(d.path().join("comments.json"), existing.to_string()).unwrap();
-            h.post_failure_comment(7, "agent-ci box", "abc", "k1", &log).unwrap();
-            h.post_failure_comment(7, "agent-ci box", "def", "k2", &log).unwrap();
-            c = calls(d.path());
-            assert!(
-                c.iter()
-                    .any(|l| l.starts_with("CALL api -X PATCH repos/o/r/issues/comments/55"))
-            );
-            assert_eq!(c.iter().filter(|l| l.contains("-X POST")).count(), 2);
-            assert_eq!(c.iter().filter(|l| l.contains("-X PATCH")).count(), 1);
-        }
+    #[test]
+    fn a_token_in_origins_url_never_lands_in_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = setup(root.path());
+        let bare = root.path().join("origin.git");
+        let url = format!("file://user:FAKETOKEN123@localhost{}", bare.display());
+        sh(&repo, &["remote", "set-url", "origin", &url]);
+        let data = root.path().join("data");
+        let (dir, _) = ready(fetch_pr(&data, &repo, "refs/heads/feature").unwrap());
+        let mut text = String::new();
+        all_text(&dir.join(".git"), &mut text);
+        assert!(!text.contains("FAKETOKEN123"));
     }
 }

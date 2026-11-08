@@ -17,6 +17,11 @@ pub fn gallery_dir(data_dir: &Path, project: &str, slug: &str) -> PathBuf {
     project_dir(data_dir, project).join("galleries").join(slug)
 }
 
+/// Where a project's CI checks get their fresh directories (agent-ci.md section 3.2).
+pub fn ci_dir(data_dir: &Path, project: &str) -> PathBuf {
+    project_dir(data_dir, project).join("ci")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

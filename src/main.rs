@@ -10,7 +10,7 @@ use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
     api, backlog, config, connector, hello_settings, lane_pool, link, local_model, network, orchestrator, release,
-    runtime, setup_check, setup_questions, spec_split, store, tags, telemetry, view,
+    runtime, setup_check, setup_questions, spec_split, store, tags, telemetry, tray, view,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -301,6 +301,9 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
+    // Card flag `tray-icon-menu`: the tray, when it runs, is told to exit before a restart ends the process.
+    let tray_slot: Arc<std::sync::OnceLock<tray::run::TrayHandle>> = Arc::default();
+    let tray_down = tray_slot.clone();
     let exit = runtime::restart_handler(
         is_release,
         exe_path.clone(),
@@ -308,14 +311,25 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         cfg.projects.clone(),
         dir.to_path_buf(),
         view.restart.clone(),
+        Arc::new(move || {
+            if let Some(t) = tray_down.get() {
+                t.shutdown();
+            }
+        }),
     );
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
+    let cloud_handles: Vec<_> = cloud_urls
+        .iter()
+        .cloned()
+        .zip(connectors.iter().map(|c| c.handle()))
+        .collect();
     let latest_checks = runtime::spawn_setup_checks(
         is_release,
         env.clone(),
         Arc::new(retaskable_agent::flags::Flags::from_env()),
     );
+
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
     // session runner exists) or runs (short runs on pieces). Read and logged once, here.
     // Where the TS agent may be listening: its default for this build, the shared default and the
@@ -340,6 +354,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = orchestrator::live::LiveHandle::new(mode);
+    let tray_sessions = live.sessions().clone();
     view.item_commands
         .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
@@ -482,7 +497,10 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         network_enabled,
         env.clone(),
         || (telemetry::now_ms() / 1000) as u64,
-        move |code| exit(code),
+        {
+            let exit = exit.clone();
+            move |code| exit(code)
+        },
         keychain.clone(),
     ));
     // Card flag `settings-page`: Off keeps the Host check loopback-only. The flag client's `PROJECT_ID`
@@ -507,12 +525,62 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     {
         tracing::warn!("first-run settings page: {e:#}");
     }
+    // Card flag `tray-icon-menu`: Off keeps today's console-only agent.
+    let quit_now = Arc::new(tokio::sync::Notify::new());
+    if retaskable_agent::flags::Flags::from_env().on("tray-icon-menu").await {
+        let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
+        let backlog_url = backlog::url(env);
+        let (backlog_links, backlog_keys, backlog_http, backlog_env) =
+            (links.clone(), keychain.clone(), http.clone(), env.clone());
+        let backlog_version = version.to_string();
+        let tray = tray::boot::boot(tray::boot::Boot {
+            args: &std::env::args().skip(1).collect::<Vec<_>>(),
+            env,
+            build,
+            exe: exe_path.as_deref(),
+            view: view.clone(),
+            clouds: cloud_handles,
+            links: links.clone(),
+            settings: settings.clone(),
+            sessions: Arc::new(move || tray_sessions.snapshot().len()),
+            restart: view.restart.clone(),
+            exit: exit.clone(),
+            quit_now: quit_now.clone(),
+            link_backlog: Arc::new(move || {
+                tokio::spawn(auto_link_backlog(
+                    backlog_links.clone(),
+                    backlog_keys.clone(),
+                    backlog_http.clone(),
+                    backlog_env.clone(),
+                    backlog_version.clone(),
+                ));
+            }),
+            on_stopped: Box::new(move |why| {
+                tracing::warn!("Tray: the tray stopped ({why}); running headless.");
+                tracing::info!(
+                    "{}",
+                    link::links_line(&stopped_urls, &backlog_url, |url| matches!(
+                        stopped_keys.get(url),
+                        Ok(Some(_))
+                    ))
+                );
+            }),
+        })
+        .await;
+        if let Some(tray) = tray {
+            let _ = tray_slot.set(tray);
+        }
+    }
     axum::serve(
         listener,
         api::router(version.to_string(), settings).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown())
+    .with_graceful_shutdown(shutdown(quit_now))
     .await?;
+    if let Some(tray) = tray_slot.get() {
+        // Quit, Ctrl+C or SIGTERM: the helper is told to exit and its input closed.
+        tokio::task::block_in_place(|| tray.shutdown());
+    }
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }
@@ -833,7 +901,7 @@ fn filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_env("RETASKABLE_LOG").unwrap_or_else(|_| "info".into())
 }
 
-async fn shutdown() {
+async fn shutdown(quit_now: Arc<tokio::sync::Notify>) {
     #[cfg(not(windows))]
     {
         // Linux/macOS's own Quit path (a service stop, a `kill`) as well as Ctrl+C.
@@ -842,11 +910,15 @@ async fn shutdown() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = quit_now.notified() => {}
         }
     }
     #[cfg(windows)]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = quit_now.notified() => {}
+        }
     }
     tracing::info!("Stopping");
 }
