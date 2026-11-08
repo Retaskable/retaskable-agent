@@ -10,12 +10,12 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-use super::session::{exists, quiet_timeout};
+use super::session::quiet_timeout;
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::engine::CursorOptions;
+use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
 use crate::tiers::{implementer_model, implementer_tier};
@@ -35,6 +35,8 @@ pub struct TrialJob {
     pub branch: String,
     pub session_id: String,
     pub usage: Option<Value>,
+    /// The `engine-placement` flag: Off, only a Claude trial runs.
+    pub placement: bool,
 }
 
 /// How the trial ended. `Dropped` carries why; the trial isn't retried.
@@ -56,15 +58,23 @@ pub struct ClaudeTrial {
     data_dir: PathBuf,
     env: Env,
     models: ModelsConfig,
+    cursor_models: CursorModels,
 }
 
 impl ClaudeTrial {
-    pub fn new(data_dir: PathBuf, choice: EngineChoiceConfig, env: Env, models: ModelsConfig) -> Arc<Self> {
+    pub fn new(
+        data_dir: PathBuf,
+        choice: EngineChoiceConfig,
+        env: Env,
+        models: ModelsConfig,
+        cursor_models: CursorModels,
+    ) -> Arc<Self> {
         Arc::new(Self {
             choice,
             data_dir,
             env,
             models,
+            cursor_models,
         })
     }
 }
@@ -87,21 +97,22 @@ fn trial_item() -> Item {
 
 impl TrialHost for ClaudeTrial {
     fn run(&self, job: TrialJob) -> BoxFuture<'static, Result<TrialEnd>> {
-        let (choice, data_dir, env, models) = (
+        let (choice, data_dir, env, models, cursor_models) = (
             self.choice.clone(),
             self.data_dir.clone(),
             self.env.clone(),
             self.models,
+            self.cursor_models.clone(),
         );
         Box::pin(async move {
             let project = &job.project;
-            if engine_for(&choice, project.engines.as_ref(), Role::Implementer, None) != Engine::Claude {
-                return dropped("only Claude sessions run in the Rust agent yet");
+            let chosen = engine_for(&choice, project.engines.as_ref(), Role::Implementer, None);
+            if chosen != Engine::Claude && !job.placement {
+                return dropped(format!("{chosen} sessions don't run yet"));
             }
-            let bin = match resolve_claude_on_path(&env) {
-                Ok(bin) if exists(&bin, &env) => bin,
-                Ok(bin) => return dropped(format!("the claude binary wasn't found ({})", bin.display())),
-                Err(e) => return dropped(format!("{e:#}")),
+            let placed = match place(chosen, Role::Implementer, &env, &cursor_models) {
+                Ok(placed) => placed,
+                Err(why) => return dropped(why),
             };
             let (repo, worktrees, lane, branch, base) = (
                 PathBuf::from(&project.repo_path),
@@ -132,8 +143,11 @@ impl TrialHost for ClaudeTrial {
                     model,
                     budget_usd: project.budget.drafter_usd,
                     max_turns: None,
-                    engine: Some(EngineId::Claude),
-                    cursor: None,
+                    engine: Some(placed.engine),
+                    cursor: placed.cursor.clone().map(|c| CursorOptions {
+                        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
+                        ..c
+                    }),
                     local: None,
                     sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                 },
@@ -145,11 +159,11 @@ impl TrialHost for ClaudeTrial {
                     .join(format!("{}.jsonl", job.session_id)),
                 lane: None,
             };
-            let engine = engine_of(Some(EngineId::Claude))?;
+            let engine = engine_of(Some(placed.engine))?;
             let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
             let id = job.session_id.clone();
             let (answer, _) = run_implementer(spec, |spec| async move {
-                run_session(engine.as_ref(), &bin, &spec, &id, Some(&sink), quiet).await
+                run_session(engine.as_ref(), &placed.bin, &spec, &id, Some(&sink), quiet).await
             })
             .await;
             let result = match answer {

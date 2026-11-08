@@ -102,6 +102,8 @@ pub(super) async fn run(daily: Daily) {
         audiences,
         queue: None,
         max_waits: None,
+        placement: flags.on("engine-placement").await,
+        placed: None,
     };
     let ask = Ask {
         fresh: true,

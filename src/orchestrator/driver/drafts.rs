@@ -41,6 +41,8 @@ pub struct DraftJob {
     pub follow_up: String,
     /// The project's latest `state.usage` reading, for the drafter's model tier.
     pub usage: Option<Value>,
+    /// The `engine-placement` flag: Off, only a Claude drafter runs.
+    pub placement: bool,
 }
 
 /// The parts of a draft that touch the machine: git, the code host and the engine. Faked in tests.
@@ -285,6 +287,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             .draft_answer_taken(ctx.repo, Some(&ctx.token), &id, &ctx.lease)
             .await?;
     }
+    let job_session = session_id.clone();
     let job = DraftJob {
         project: ctx.project.clone(),
         follow_up: follow_up(&draft),
@@ -294,6 +297,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         session_id,
         resume,
         usage: ctx.usage.clone(),
+        placement: ctx.flags.on("engine-placement").await,
     };
     let result = match ctx.host.run(job).await {
         Ok(result) => result,
@@ -301,6 +305,17 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok(()),
         Err(e) => return ctx.failed(&id, failed(format!("{e:#}"))).await,
     };
+    // A Cursor draft's chat id is the one the session reported, kept so a revision's `--resume` is that chat.
+    if let Some(chat) = result.session_id.as_deref().filter(|c| *c != job_session) {
+        ctx.report(
+            &id,
+            DraftReport {
+                session_id: Some(chat.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
     let sorted = sort_fixes(&result);
     let ask = |qs: &[Question]| -> Vec<String> {
         match qs {

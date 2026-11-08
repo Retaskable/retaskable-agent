@@ -122,6 +122,7 @@ impl ProjectLoop {
                     branch: TRIAL_BRANCH.to_string(),
                     session_id: new_session_id(),
                     usage: self.store.usage(),
+                    placement: self.flags.on("engine-placement").await,
                 });
                 self.trial = Some(RunningTrial {
                     lane,

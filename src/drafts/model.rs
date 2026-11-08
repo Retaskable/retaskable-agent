@@ -66,6 +66,9 @@ pub struct DrafterResult {
     /// As the drafter wrote it; [`checked_breakdown`] decides what's kept.
     #[serde(default)]
     pub breakdown: Option<Value>,
+    /// The session's own id from the engine, set by `parse_result` (a Cursor chat's id is made by the engine).
+    #[serde(skip)]
+    pub session_id: Option<String>,
 }
 
 impl DrafterResult {

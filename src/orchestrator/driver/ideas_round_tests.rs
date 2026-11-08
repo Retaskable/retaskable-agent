@@ -75,6 +75,8 @@ fn job(base: &str) -> Job {
         audiences: vec![],
         queue: None,
         max_waits: None,
+        placement: false,
+        placed: None,
     }
 }
 
@@ -211,4 +213,64 @@ async fn a_failed_list_ends_the_round_and_still_drops_the_lock() {
         "{error}"
     );
     assert_eq!(ops(&seen), vec!["chore_lock", "ideas_list", "chore_lock"]);
+}
+
+/// A stub for every engine program that logs `<program> <args>` to `calls.txt` and prints nothing useful.
+#[cfg(unix)]
+fn stubs() -> (tempfile::TempDir, Env) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut vars = Vec::new();
+    for (var, program) in [
+        ("RETASKABLE_CLAUDE", "claude"),
+        ("RETASKABLE_CURSOR", "cursor-agent"),
+        ("RETASKABLE_PI", "pi"),
+        ("RETASKABLE_CODEX", "codex"),
+    ] {
+        let bin = root.join(format!("{program}.sh"));
+        let script = format!(
+            "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\n",
+            r = root.display()
+        );
+        crate::test_support::write_executable(&bin, &script);
+        vars.push((var, bin.to_string_lossy().into_owned()));
+    }
+    (
+        dir,
+        Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone())),
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_writer_runs_on_its_chosen_engine_with_placement_on_and_is_skipped_with_it_off() {
+    for (engine, program, model) in [
+        (crate::config::Engine::Codex, "codex", None),
+        (
+            crate::config::Engine::Cursor,
+            "cursor-agent",
+            Some("--model gpt-5-mini"),
+        ),
+    ] {
+        let (base, _) = store(json!([]), None, false).await;
+        let (dir, env) = stubs();
+        let mut j = job(&base);
+        j.base.env = env;
+        j.base.engine_choice.roles.writer = Some(engine);
+        j.base.cursor_models.scout = Some("gpt-5-mini".into());
+        j.placement = true;
+        run(j, asked()).await;
+        let calls = std::fs::read_to_string(dir.path().join("calls.txt")).unwrap_or_default();
+        assert!(calls.starts_with(program), "{program}: {calls}");
+        assert!(model.is_none_or(|m| calls.contains(m)), "{calls}");
+        assert_eq!(calls.lines().count(), 1, "{calls}");
+
+        let (dir, env) = stubs();
+        let mut j = job(&base);
+        j.base.env = env;
+        j.base.engine_choice.roles.writer = Some(engine);
+        let out = run(j, asked()).await;
+        assert!(matches!(out, Outcome::Skipped(_)), "{out:?}");
+        assert!(!dir.path().join("calls.txt").exists());
+    }
 }
