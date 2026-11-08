@@ -55,7 +55,7 @@ impl MachineStore {
     }
 
     /// Adds a finished Codex session's tokens to today's, dropping days older than the week.
-    /// Nothing calls this yet: this agent has no session pool to report them.
+    /// A later piece calls it when a Codex session ends.
     pub fn add_codex_tokens(&mut self, input: u64, output: u64) -> Result<()> {
         self.add_tokens("codexTokens", input, output, chrono::Local::now().date_naive())
     }
@@ -68,6 +68,24 @@ impl MachineStore {
     /// Cursor's tokens today, the same way; `None` before a Cursor session reported any.
     pub fn cursor_today_tokens(&self) -> Option<u64> {
         self.tokens_on("cursorTokens", chrono::Local::now().date_naive())
+    }
+
+    /// Adds a finished Cursor session's tokens to today's, the same way (never to `spend`).
+    /// A later piece calls it when a Cursor session ends.
+    pub fn add_cursor_tokens(&mut self, input: u64, output: u64) -> Result<()> {
+        self.add_tokens("cursorTokens", input, output, chrono::Local::now().date_naive())
+    }
+
+    /// Records that Cursor hit its limit just now (`cursorLimitAt`, epoch ms) and writes the file.
+    pub fn stamp_cursor_limit_at(&mut self) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.data.insert("cursorLimitAt".to_string(), Value::from(now));
+        self.save()
+    }
+
+    /// When Cursor last hit its limit, in epoch ms; `None` if it never has.
+    pub fn cursor_limit_at(&self) -> Option<i64> {
+        self.data.get("cursorLimitAt").and_then(Value::as_i64)
     }
 
     fn add_tokens(&mut self, key: &str, input: u64, output: u64, today: NaiveDate) -> Result<()> {
@@ -301,5 +319,49 @@ mod tests {
         let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
         let keys: Vec<&String> = saved["codexTokens"].as_object().unwrap().keys().collect();
         assert_eq!(keys, vec!["2026-3-9"]);
+    }
+
+    #[test]
+    fn cursor_tokens_add_up_by_local_day_and_stay_apart_from_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.cursor_today_tokens(), None);
+        store.add_cursor_tokens(100, 20).unwrap();
+        store.add_cursor_tokens(5, 1).unwrap();
+        assert_eq!(store.cursor_today_tokens(), Some(126));
+        assert_eq!(store.codex_today_tokens(), None);
+        store.add_codex_tokens(7, 3).unwrap();
+        assert_eq!(store.cursor_today_tokens(), Some(126));
+        assert_eq!(store.codex_today_tokens(), Some(10));
+        let day = NaiveDate::from_ymd_opt(2026, 3, 9).unwrap();
+        store
+            .add_tokens("cursorTokens", 1, 1, day - chrono::Days::new(20))
+            .unwrap();
+        store.add_tokens("cursorTokens", 1, 1, day).unwrap();
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        let keys: Vec<&String> = saved["cursorTokens"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["2026-3-9"]);
+        assert!(saved.get("spend").is_none());
+    }
+
+    #[test]
+    fn cursor_limit_at_round_trips_and_keeps_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MACHINE_FILE),
+            r#"{"tags":{},"network":{"enabled":false},"mystery":[1]}"#,
+        )
+        .unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.cursor_limit_at(), None);
+        let before = chrono::Utc::now().timestamp_millis();
+        store.stamp_cursor_limit_at().unwrap();
+        let at = store.cursor_limit_at().unwrap();
+        assert!(at >= before);
+        assert_eq!(MachineStore::load(dir.path()).unwrap().cursor_limit_at(), Some(at));
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(saved["mystery"], serde_json::json!([1]));
+        assert_eq!(saved["network"]["enabled"], Value::Bool(false));
+        assert!(saved.get("tags").is_some());
     }
 }

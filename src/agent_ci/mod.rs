@@ -1,13 +1,15 @@
 //! docs/specs/agent-ci.md: running CI on this computer. This is the loop: its own tokio task beside the
 //! orchestrator loop, with `ciSlots` permits that lanes, sessions and `concurrency` never take or wait for.
 //! Each poll it checks Docker, then for each project looks for the project's CI files on its base branch and
-//! lists the pull requests to check. Checks are listed here, not run.
+//! lists the pull requests to check. Checks are listed here, not run. `host.rs` is the fetch step; `report.rs`
+//! is the code host side: statuses and the failure comment.
 pub mod container;
 pub mod discovery;
 pub mod docker;
 pub mod host;
 pub mod priority;
 pub mod prs;
+pub mod report;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
