@@ -24,17 +24,29 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
-    let stubs = crate::test_support::stub_engines(&root, FINISHED, claude_step, missing);
+    std::fs::write(root.join("out.jsonl"), FINISHED).unwrap();
+    let mut vars = Vec::new();
+    for (var, program) in [
+        ("RETASKABLE_CLAUDE", "claude"),
+        ("RETASKABLE_CURSOR", "cursor-agent"),
+        ("RETASKABLE_PI", "pi"),
+        ("RETASKABLE_CODEX", "codex"),
+    ] {
+        let bin = root.join(format!("{program}.sh"));
+        if !missing.contains(&program) {
+            let step = if program == "claude" { claude_step } else { "" };
+            let script = format!(
+                "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"{program} $@\" >> '{r}/calls.txt'\ncat >/dev/null\n{step}\ncat '{r}/out.jsonl'\n",
+                r = root.display()
+            );
+            crate::test_support::write_executable(&bin, &script);
+        }
+        vars.push((var, bin.to_string_lossy().into_owned()));
+    }
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
-    let gh_path = gh.to_string_lossy().into_owned();
-    let env = Env::new(move |k| {
-        if k == "RETASKABLE_GH" {
-            Some(gh_path.clone())
-        } else {
-            stubs.get(k)
-        }
-    });
+    vars.push(("RETASKABLE_GH", gh.to_string_lossy().into_owned()));
+    let env = Env::new(move |k| vars.iter().find(|(v, _)| *v == k).map(|(_, p)| p.clone()));
     let cursor_models = crate::config::CursorModels {
         implementer: Some("gpt-5".into()),
         ..Default::default()
@@ -46,8 +58,8 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
         env,
         50,
         ModelsConfig::default(),
-        cursor_models,
         150_000,
+        cursor_models,
     );
     Rig {
         _dir: dir,

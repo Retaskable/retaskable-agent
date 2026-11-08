@@ -37,12 +37,9 @@ fn cwd_for(project: &ProjectConfig, lane: Option<u32>) -> PathBuf {
 
 impl ClaudeStarter {
     /// Where the triager (and its second look) runs: the engine chosen for the role and its binary. With
-    /// `engine-placement` Off (`placement`), the engine chosen is not used: only Claude runs, as before.
+    /// `engine-placement` Off (`placement`), the engine chosen is not used: only Claude runs. Only the triager itself is refused then when it isn't on Claude (`start_triage`); a second look always was Claude.
     fn place_triager(&self, project: &ProjectConfig, placement: bool) -> Result<Placement, String> {
         let chosen = engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None);
-        if !placement && chosen != Engine::Claude {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
         place(
             if placement { chosen } else { Engine::Claude },
             Role::Triager,
@@ -70,6 +67,11 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
+        if !request.placement
+            && engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None) != Engine::Claude
+        {
+            return Err("only Claude sessions run in the Rust agent yet".into());
+        }
         let placed = self.place_triager(&project, request.placement)?;
         let TriageRequest {
             project: project_id,

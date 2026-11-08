@@ -387,6 +387,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),
                     choice: config::engine_choice(cfg, env),
+                    cursor_models: config::cursor_models(cfg, env),
                     env: env.clone(),
                     max_turns: cfg.machine.max_turns,
                     models: cfg.machine.models,
@@ -435,8 +436,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 env.clone(),
                 cfg.machine.max_turns,
                 cfg.machine.models,
-                config::cursor_models(cfg, env),
                 cfg.machine.max_resume_context_tokens,
+                config::cursor_models(cfg, env),
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
