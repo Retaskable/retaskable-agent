@@ -397,7 +397,8 @@ fn chore_task(chore: &Chore, what: &str) -> Result<(&'static str, String)> {
             "write a spec draft",
             "Flesh out one thin or outdated spec under `docs/specs`, as a spec draft (section 6.5): change only spec files, describe the behaviour as it is built or decided, never write that something is built, done or partly done, and leave the rest of the specs as they are. A person approves the draft before it is used.".into(),
         ),
-        ChoreKind::SyncMain | ChoreKind::PlaytestFix => anyhow::bail!("a {:?} chore uses the piece prompt", chore.kind),
+        ChoreKind::SyncMain => ("sync main", String::new()),
+        ChoreKind::PlaytestFix => anyhow::bail!("a {:?} chore uses the piece prompt", chore.kind),
     })
 }
 
@@ -406,6 +407,24 @@ fn chore_task(chore: &Chore, what: &str) -> Result<(&'static str, String)> {
 pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) -> Result<String> {
     let piece = p.piece;
     let (label, instructions) = chore_task(chore, piece.what.trim())?;
+    if chore.kind == ChoreKind::SyncMain {
+        return fill_template(
+            template,
+            p,
+            vec![look_text(piece), attempts_text(&piece.attempts)],
+            vec![
+                ("main", chore.main.clone()),
+                (
+                    "conflictSection",
+                    if chore.conflicts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("## Files that conflicted\n\n{}\n\n", chore.conflicts)
+                    },
+                ),
+            ],
+        );
+    }
     let recent = if chore.recent.is_empty() {
         String::new()
     } else {
@@ -590,14 +609,32 @@ mod tests {
     }
 
     fn chore_prompt(kind: &str, extra: serde_json::Value, gates: CodeGates) -> Result<String> {
+        chore_prompt_on(kind, extra, serde_json::json!({}), gates)
+    }
+
+    fn chore_prompt_with(kind: &str, chore: serde_json::Value, piece: serde_json::Value) -> String {
+        chore_prompt_on(kind, chore, piece, CodeGates::default()).unwrap()
+    }
+
+    fn chore_prompt_on(
+        kind: &str,
+        extra: serde_json::Value,
+        mut on_piece: serde_json::Value,
+        gates: CodeGates,
+    ) -> Result<String> {
         let mut c = serde_json::json!({ "kind": kind });
         c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let p = piece(serde_json::json!({ "chore": c }));
+        on_piece["chore"] = c;
+        let p = piece(on_piece);
         let chore = crate::runs::chore::chore_of(&p).unwrap();
         let template = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("prompts")
-                .join("chore.md"),
+                .join(if kind == "sync_main" {
+                    "sync-main.md"
+                } else {
+                    "chore.md"
+                }),
         )
         .unwrap();
         build_chore_prompt(
@@ -656,10 +693,26 @@ mod tests {
     }
 
     #[test]
+    fn a_sync_prompt_names_the_base_main_and_the_conflicting_files() {
+        let extra = serde_json::json!({ "main": "trunk" });
+        let mut p = chore_prompt("sync_main", extra, CodeGates::default()).unwrap();
+        assert!(
+            p.contains("`main` has fallen behind `trunk`") && p.contains("git merge origin/trunk"),
+            "{p}"
+        );
+        assert!(!p.contains("Files that conflicted") && !p.contains("{{"));
+        p = chore_prompt_with(
+            "sync_main",
+            serde_json::json!({}),
+            serde_json::json!({ "remaining": "- src/a.rs" }),
+        );
+        assert!(p.contains("## Files that conflicted\n\n- src/a.rs") && p.contains("git merge origin/main"));
+    }
+
+    #[test]
     fn earlier_attempts_go_in_and_other_kinds_use_the_piece_prompt() {
         let out = chore_prompt("bugs", serde_json::json!({}), CodeGates::default()).unwrap();
         assert!(out.contains("## Earlier attempts") && out.contains("too big"));
-        assert!(chore_prompt("sync_main", serde_json::json!({}), CodeGates::default()).is_err());
         assert!(chore_prompt("playtest_fix", serde_json::json!({}), CodeGates::default()).is_err());
     }
 

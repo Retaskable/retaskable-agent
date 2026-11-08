@@ -123,6 +123,7 @@ impl ProjectLoop {
                     session_id: new_session_id(),
                     usage: self.store.usage(),
                     placement: self.flags.on("engine-placement").await,
+                    sessions: self.live.sessions().clone(),
                 });
                 self.trial = Some(RunningTrial {
                     lane,

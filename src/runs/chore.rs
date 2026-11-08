@@ -24,12 +24,16 @@ pub struct Chore {
     pub recent: Vec<String>,
     /// For `fix_main`: the failing checks or the staging smoke report.
     pub report: String,
+    /// For `sync_main`: the short sha of main the branch is named for, the main branch, and the conflicting files.
+    pub sync_sha: String,
+    pub main: String,
+    pub conflicts: String,
 }
 
 impl Chore {
-    /// Whether the chore has its own prompt: a playtest fix and a main sync keep the piece prompt.
+    /// Whether the chore has its own prompt: a playtest fix keeps the piece prompt.
     pub fn has_prompt(&self) -> bool {
-        !matches!(self.kind, ChoreKind::PlaytestFix | ChoreKind::SyncMain)
+        self.kind != ChoreKind::PlaytestFix
     }
 }
 
@@ -83,6 +87,15 @@ pub fn chore_of(piece: &RunPiece) -> Option<Chore> {
         kind,
         recent,
         report: text(chore, "report"),
+        sync_sha: [chore, &Value::Object(piece.other.clone())]
+            .iter()
+            .map(|v| text(v, "syncSha"))
+            .find(|s| !s.is_empty())
+            .unwrap_or_default(),
+        main: Some(text(chore, "main"))
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "main".into()),
+        conflicts: text(&Value::Object(piece.other.clone()), "remaining"),
     })
 }
 
@@ -186,11 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_rotation_or_fix_main_chore_has_its_own_prompt() {
+    fn every_chore_but_a_playtest_fix_has_its_own_prompt() {
         for (name, own) in [
             ("tidy", true),
             ("fix_main", true),
-            ("sync_main", false),
+            ("sync_main", true),
             ("playtest_fix", false),
         ] {
             let p = piece(json!({ "chore": { "kind": name } }));
@@ -213,6 +226,9 @@ mod tests {
             kind,
             recent: vec![],
             report: String::new(),
+            sync_sha: String::new(),
+            main: "main".into(),
+            conflicts: String::new(),
         };
         let tidy = chore(ChoreKind::Tidy);
         let fix = chore(ChoreKind::PlaytestFix);

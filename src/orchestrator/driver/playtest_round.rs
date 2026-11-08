@@ -42,6 +42,8 @@ pub(super) struct Job {
     /// The project's held locks in `runs` mode: the grouping lock is `lock_take`n into it and beats with the runs.
     /// `None` in `claim` mode, which uses `chore_lock`.
     pub locks: Option<RunLocks>,
+    /// The sessions running now: the round's planner is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// Runs one round for `job`'s project: nothing if there's no repo id yet, no backlog link, the
@@ -154,9 +156,20 @@ pub(super) async fn run(job: Job) {
         },
     };
     let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
+    let (sessions, id) = (job.sessions.clone(), job.id.clone());
     let planned = plan(&planner, &entries, |spec| async move {
         let engine = engine_of(Some(placed.engine))?;
-        run_session(engine.as_ref(), &placed.bin, &spec, "playtest-groups", None, quiet).await
+        let listed = sessions.register_spec(&id, "playtest-groups", None, Role::Planner, &spec);
+        listed
+            .scope(run_session(
+                engine.as_ref(),
+                &placed.bin,
+                &spec,
+                "playtest-groups",
+                None,
+                quiet,
+            ))
+            .await
     })
     .await;
     let still_held = match (&job.locks, &lock_token) {
@@ -348,6 +361,7 @@ mod tests {
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
             locks: None,
+            sessions: Default::default(),
         }
     }
 

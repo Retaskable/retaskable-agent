@@ -86,7 +86,11 @@ async fn run_session(job: &Job, bins: &[&Placement], spec: SessionSpec) -> Resul
     } else {
         Role::Scout
     };
-    let info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
+    let mut info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
+    // A scout holds no lane.
+    if role == Role::Scout {
+        info.lane = None;
+    }
     let run = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job)));
     let result = job.sessions.track(info, run).await?;
     // A cut session (a stop) isn't a failed review: the run ends `interrupted`.

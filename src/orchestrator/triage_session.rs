@@ -94,6 +94,7 @@ impl ClaudeStarter {
             lane,
             usage,
             outcomes,
+            sessions,
             ..
         } = request;
         context.transcripts_dir = Some(
@@ -108,7 +109,6 @@ impl ClaudeStarter {
         ))
         .to_string();
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let sessions = self.sessions.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, &model);
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);
@@ -205,6 +205,7 @@ impl ClaudeStarter {
             triager_reason,
             triager_suggest,
             triager_instructions,
+            sessions,
             ..
         } = request;
         context.transcripts_dir = Some(
@@ -213,7 +214,6 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let sessions = self.sessions.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top_tier());
         tokio::spawn(async move {
             let cwd = cwd_for(&project, lane);

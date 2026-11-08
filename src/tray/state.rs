@@ -1,7 +1,7 @@
 //! What the tray shows, as plain functions over what the agent knows (tray/04-the-tray-agent.md sections 4.1 and
 //! 4.6): the icon's state, the tooltip, the status line and the greyed-out computer line. No I/O.
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 use std::time::Duration;
 
@@ -33,7 +33,11 @@ pub enum LinkState {
 pub struct CloudInput {
     /// "Production", "Staging", "Local" or "Custom".
     pub name: String,
+    /// The cloud's URL, no trailing slash.
+    pub url: String,
     pub host: String,
+    /// While waiting: the `/link` page with the code filled in.
+    pub link_page: Option<String>,
     pub link: LinkState,
 }
 
@@ -50,6 +54,16 @@ pub enum Exit {
     },
 }
 
+/// The shared backlog's approval, waiting for the person at the machine (installers.md section 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacklogWait {
+    pub host: String,
+    /// While its code waits: the `/link` page with it filled in.
+    pub link_page: Option<String>,
+    /// Unlinked on the store's agents page: "link again?" instead of "Approve".
+    pub unlinked: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayInput {
     pub clouds: Vec<CloudInput>,
@@ -57,8 +71,14 @@ pub struct TrayInput {
     pub sessions: usize,
     pub has_project: bool,
     pub exit: Exit,
-    /// The shared backlog's approval waits for the person at the machine.
-    pub backlog_waits: bool,
+    /// Set while the shared backlog's approval waits for the person at the machine.
+    pub backlog: Option<BacklogWait>,
+    /// A release build: Open Retaskable, Start at login and Open the log.
+    pub is_release: bool,
+    /// Start at login is on (release build only).
+    pub start_at_login: bool,
+    /// "Start with Windows" instead of "Start at login".
+    pub windows: bool,
     pub machine: String,
     pub tags: Vec<String>,
 }
@@ -86,7 +106,7 @@ pub fn icon_state(input: &TrayInput) -> IconState {
     }
 }
 
-fn link_text(link: &LinkState) -> String {
+pub(super) fn link_text(link: &LinkState) -> String {
     match link {
         LinkState::NotLinked => "not linked".into(),
         LinkState::Waiting { code } => match code {
@@ -118,7 +138,7 @@ pub fn tooltip(input: &TrayInput) -> String {
     if paused(input) {
         parts.push("Paused".into());
     }
-    if input.backlog_waits {
+    if input.backlog.is_some() {
         parts.push("1 waiting for you".into());
     }
     parts.join(" · ")

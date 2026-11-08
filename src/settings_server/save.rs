@@ -83,6 +83,23 @@ impl Saver<'_> {
         Ok(())
     }
 
+    /// agent-settings.md section 3.1: "CI slots: a whole number from 0 to 8."
+    pub(crate) fn validate_ci_slots(&self, n: u32) -> Result<(), SaveError> {
+        self.env_gate("RETASKABLE_CI_SLOTS")?;
+        if !config::ci_slots_in_range(n) {
+            return Err(SaveError::Invalid("CI slots must be 0 to 8.".to_string()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn save_ci_slots(&self, n: u32) -> Result<(), SaveError> {
+        self.validate_ci_slots(n)?;
+        config::save_machine_settings(self.dir, |obj| {
+            obj.insert("ciSlots".to_string(), json!(n));
+        })?;
+        Ok(())
+    }
+
     /// agent-settings.md section 3.1: "Local model: on or off; its model's name ...; its
     /// address, http or https, with no user or password in it."
     pub(crate) fn validate_local(&self, update: &LocalUpdate) -> Result<(), SaveError> {
@@ -252,6 +269,9 @@ impl Saver<'_> {
         if let Some(secs) = update.poll_interval_sec {
             self.validate_poll_interval(secs)?;
         }
+        if let Some(n) = update.ci_slots {
+            self.validate_ci_slots(n)?;
+        }
         if let Some(local) = &update.local {
             self.validate_local(local)?;
         }
@@ -276,6 +296,9 @@ impl Saver<'_> {
         }
         if let Some(secs) = update.poll_interval_sec {
             self.save_poll_interval(secs)?;
+        }
+        if let Some(n) = update.ci_slots {
+            self.save_ci_slots(n)?;
         }
         if let Some(local) = &update.local {
             self.save_local(local)?;
@@ -411,6 +434,7 @@ pub(crate) struct SettingsUpdate {
     pub(super) tags: Option<Vec<String>>,
     pub(super) port: Option<u16>,
     pub(super) poll_interval_sec: Option<u32>,
+    pub(super) ci_slots: Option<u32>,
     pub(super) local: Option<LocalUpdate>,
     pub(super) engine_choice: Option<EngineChoiceUpdate>,
     pub(super) cursor_models: Option<CursorModelsUpdate>,

@@ -561,6 +561,31 @@ async fn a_review_on_cursor_runs_scouts_on_the_scout_model_and_the_reviewer_on_t
     assert!(log.contains("--model gpt-top"), "{log}");
 }
 
+#[tokio::test]
+async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
+    let root = std::env::temp_dir().join(format!("scout-go-{}", std::process::id()));
+    let go = root.join("go");
+    std::fs::create_dir_all(&root).unwrap();
+    let hold = format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display());
+    let mut r = rig(&[COMMIT, &hold, &hold, &hold], &answer("pr_opened", ""));
+    Arc::get_mut(&mut r.starter).unwrap().projects[0]
+        .review
+        .min_scout_diff_lines = 0;
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let rows = r.starter.sessions.rows_when_running().await;
+    let info = &rows[0].info;
+    assert_eq!((info.project.as_str(), info.item_id.as_str()), ("p", "pc1"));
+    assert_eq!(info.title.as_deref(), Some("Show the thing"));
+    assert_eq!((info.role, info.lane), (crate::engines::Role::Scout, None));
+    assert_eq!(info.engine, crate::engines::EngineId::Claude);
+    assert!(rows.iter().all(|row| row.info.role == crate::engines::Role::Scout));
+    std::fs::write(&go, "").unwrap();
+    end_of(&mut s.ends).await;
+    assert!(r.starter.sessions.snapshot().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 fn with_flag(r: &mut Rig) {
     Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
 }
@@ -807,4 +832,64 @@ async fn a_roadmap_piece_and_a_playtest_fix_send_no_lock_take() {
         end_of(&mut s.ends).await;
         assert!(ops(&log).is_empty(), "{:?}", ops(&log));
     }
+}
+
+fn sync_rig(r: &mut Rig, flags: &[&str]) {
+    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(flags));
+}
+
+fn sync_piece() -> Value {
+    let mut p = piece();
+    p["chore"] = json!({ "kind": "sync_main" });
+    p["syncSha"] = json!("0123456789abcdef");
+    p["remaining"] = json!("- src/a.rs");
+    p
+}
+
+async fn sync_run(r: &Rig) -> RunEnd {
+    let (url, _log) = lock_store("free").await;
+    let (mut req, mut s) = request(r, RunKind::Build, sync_piece());
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    end_of(&mut s.ends).await
+}
+
+#[tokio::test]
+async fn a_main_sync_runs_on_its_own_branch_and_ends_pr_opened_without_a_review() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", r#","change_title":"Resolved it""#));
+    sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
+    let end = sync_run(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap();
+    assert!(log.contains("--title Sync: main into main (0 commits)"), "{log}");
+    assert!(!log.contains("Resolved it"), "{log}");
+    assert!(origin_has(&r, "retaskable/sync-main-0123456"));
+    assert!(!origin_has(&r, BRANCH));
+    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
+    assert!(
+        prompt.contains("main sync") && prompt.contains("- src/a.rs"),
+        "{prompt}"
+    );
+    assert!(!r.root.join("reviewer1.txt").exists(), "no reviewer");
+    assert!(!r.root.join("count_r").exists());
+}
+
+#[tokio::test]
+async fn a_main_sync_that_asks_questions_ends_questions() {
+    let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
+    let mut r = rig(&[COMMIT], &answer("needs_clarification", q));
+    sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
+    assert_eq!(sync_run(&r).await.outcome, RunOutcome::Questions);
+}
+
+#[tokio::test]
+async fn with_the_sync_flag_off_a_sync_piece_runs_like_any_other() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    sync_rig(&mut r, &["chore-rotation"]);
+    let end = sync_run(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    assert!(origin_has(&r, BRANCH));
+    assert!(r.root.join("reviewer1.txt").exists(), "reviewed as before");
+    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
+    assert!(!prompt.contains("main sync"), "{prompt}");
 }

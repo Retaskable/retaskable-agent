@@ -69,6 +69,7 @@ struct Ctx {
     host: Arc<dyn DraftHost>,
     wait: Duration,
     placement: bool,
+    sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 impl Ctx {
@@ -158,6 +159,7 @@ impl Ctx {
             follow_up: rebase_request(reason),
             usage: None,
             placement: self.placement,
+            sessions: self.sessions.clone(),
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
         if result.status == DrafterStatus::Failed {
@@ -363,6 +365,7 @@ impl ProjectLoop {
                 host: host.clone(),
                 wait,
                 placement,
+                sessions: self.live.sessions().clone(),
             };
             let task = if matches!(press, DraftCommand::Discard { .. }) {
                 tokio::spawn(discard(ctx, id, taken))
