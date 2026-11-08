@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::{LaneEngine, RoleEngines};
-use crate::engines::EngineId;
 use crate::engines::choose::Role;
+use crate::engines::EngineId;
 use crate::lane_pool::LaneSizes;
 use crate::orchestrator::live::sessions::SessionInfo;
 use crate::orchestrator::live::{HeldLane, ProjectLive, StoreFailure};
@@ -47,7 +47,7 @@ fn source(projects: &[&str]) -> StatusSource {
             work: Default::default(),
             restart: Default::default(),
             settings: Default::default(),
-        local: Default::default(),
+            local: Default::default(),
         },
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),
@@ -435,9 +435,7 @@ fn the_json_has_names_and_times_but_no_prompt_or_transcript() {
     keys.sort();
     assert_eq!(
         keys,
-        [
-            "engine", "id", "model", "project", "quietSec", "role", "runSec", "title"
-        ]
+        ["engine", "id", "model", "project", "quietSec", "role", "runSec", "title"]
     );
 }
 
