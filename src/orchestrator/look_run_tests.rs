@@ -131,7 +131,7 @@ async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
         })
     );
     // It runs in the base checkout, read-only, on the middle tier with the reviewer's budget.
-    assert_ran_read_only_in(&r.root, &base);
+    assert_ran_read_only_in(&r.root, &base, "sonnet");
     // The prompt carries the piece and its attempts.
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(

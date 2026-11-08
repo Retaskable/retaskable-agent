@@ -11,7 +11,7 @@ use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::drafts::land;
-use crate::drafts::session::{Session, Start, parse_result, session_spec};
+use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
@@ -72,19 +72,24 @@ impl DraftHost for ClaudeDrafts {
     }
 
     fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
-        let (data_dir, choice, env, models, cursor_models) = (
+        let (data_dir, choice, env, models, cursor_models, local) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
             self.models,
             self.cursor_models.clone(),
+            self.local.clone(),
         );
         Box::pin(async move {
             let project = &job.project;
-            let chosen = start_engine(
+            // The local model places as Claude Code with no local target, like `place` says.
+            let chosen = match start_engine(
                 job.engine,
                 engine_for(&choice, project.engines.as_ref(), Role::Drafter, None),
-            );
+            ) {
+                Engine::Local => Engine::Claude,
+                other => other,
+            };
             if chosen != Engine::Claude && !job.placement {
                 return Err(anyhow!("{chosen} sessions don't run yet"));
             }
@@ -92,7 +97,13 @@ impl DraftHost for ClaudeDrafts {
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
             let titles = titles_text(&draft.titles, &themes);
-            let tier = implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, false);
+            let up = local.ladder_for(chosen == Engine::Claude);
+            let tier = drafter_tier(
+                draft.request.as_deref().unwrap_or(""),
+                implementer_tier(job.usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up),
+            );
+            // Held until the session ends.
+            let claimed = local.claim(tier).await;
             let spec = session_spec(
                 &Session {
                     template: TEMPLATE,
@@ -104,7 +115,7 @@ impl DraftHost for ClaudeDrafts {
                     tier,
                     budget: &project.budget,
                     cwd: &job.dir,
-                    local: None,
+                    local: claimed.as_ref().map(|(_, target)| target.clone()),
                     cursor: placed.cursor.clone(),
                 },
                 if job.resume {

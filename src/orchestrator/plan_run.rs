@@ -237,7 +237,6 @@ pub(super) struct Job {
     pub sessions: Sessions,
     /// The row the session lists itself as.
     pub info: SessionInfo,
-    #[allow(dead_code)] // read by the tier ladder's later pieces
     pub local: crate::local_model::LocalModel,
 }
 
@@ -262,7 +261,7 @@ impl Roster {
         role: Role,
         request: &RunRequest,
         slot: &Slot,
-        model: String,
+        tier: impl FnOnce(bool) -> &'static str,
     ) -> Result<(Job, SlotGuard), String> {
         let project = self
             .projects
@@ -278,6 +277,9 @@ impl Roster {
             return Err("Claude alone starts sessions while engine-placement is off".into());
         }
         let placed = place(engine, role, &self.env, &self.cursor_models)?;
+        // `local` only where the role is on Claude, the `local-tier-ladder` flag is On and the model is up.
+        let tier = tier(self.local.ladder_for(placed.engine == EngineId::Claude));
+        let model = tier.to_string();
         let guard = slot
             .take()
             .ok_or("a plan or look run is already running on this computer")?;
@@ -324,9 +326,16 @@ impl RunStarter for PlanRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let (job, guard) = self
-            .roster
-            .begin(Role::Planner, &request, &self.slot, tiers::chore_tier().to_string())?;
+        let models = &self.roster.models;
+        let flagged = tiers::local_ladder_on();
+        let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
+            // Off, the planner stays on the chore tier as before.
+            if flagged {
+                tiers::top_tier(None, crate::telemetry::now_ms() / 1000, models, local)
+            } else {
+                tiers::chore_tier()
+            }
+        })?;
         let cut = Cut::default();
         spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
@@ -387,11 +396,13 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
     } else {
         PathBuf::from(&project.repo_path)
     };
+    // Waits for the local model's slot when the tier is `local`; held until the session ends.
+    let claimed = job.local.claim(&job.model).await;
     let spec = EphemeralSessionConfig {
         cwd: &cwd,
         budget_usd: project.budget.planner_usd,
-        model: job.model.clone(),
-        local: None,
+        model: tiers::claude_model_for(job.engine, &job.model),
+        local: claimed.as_ref().map(|(_, target)| target.clone()),
         engine: Some(job.engine),
         cursor: job.cursor.clone(),
         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),

@@ -9,6 +9,7 @@ use super::prompt::{AssistantInput, build_prompt};
 use crate::config::{Engine, ProjectBudget};
 use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
+use crate::tiers::{LOCAL, claude_model};
 
 /// What an assistant session runs with.
 pub struct Session<'a> {
@@ -30,7 +31,7 @@ pub struct Session<'a> {
 /// The assistant's `SessionSpec`: fresh and read-only, in the base checkout.
 pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
     let (engine, model) = match s.engine {
-        Engine::Claude => (Some(EngineId::Claude), s.tier),
+        Engine::Claude => (Some(EngineId::Claude), claude_model(s.tier)),
         Engine::Cursor => (Some(EngineId::Cursor), s.tier),
         Engine::Pi => (Some(EngineId::Pi), s.tier),
         Engine::Codex => (Some(EngineId::Codex), s.tier),
@@ -44,7 +45,7 @@ pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
         s.cwd.to_path_buf(),
         s.budget.ask_usd,
         s.cursor.clone(),
-        if s.engine == Engine::Local {
+        if s.engine == Engine::Local || (s.engine == Engine::Claude && s.tier == LOCAL) {
             s.local.clone()
         } else {
             None
@@ -85,10 +86,29 @@ mod tests {
         with_cursor(engine, tier, None, f)
     }
 
+    fn with_local<T>(
+        engine: Engine,
+        tier: &'static str,
+        local: Option<LocalTarget>,
+        f: impl FnOnce(SessionSpec) -> T,
+    ) -> T {
+        with_all(engine, tier, None, local, f)
+    }
+
     fn with_cursor<T>(
         engine: Engine,
         tier: &'static str,
         cursor: Option<CursorOptions>,
+        f: impl FnOnce(SessionSpec) -> T,
+    ) -> T {
+        with_all(engine, tier, cursor, None, f)
+    }
+
+    fn with_all<T>(
+        engine: Engine,
+        tier: &'static str,
+        cursor: Option<CursorOptions>,
+        local: Option<LocalTarget>,
         f: impl FnOnce(SessionSpec) -> T,
     ) -> T {
         let budget = ProjectBudget {
@@ -123,7 +143,7 @@ mod tests {
             tier,
             budget: &budget,
             cwd: Path::new("base"),
-            local: None,
+            local,
             cursor,
         };
         f(session_spec(&s).unwrap())
@@ -142,6 +162,23 @@ mod tests {
             assert!(!matches!(spec.start, SessionStart::Resume(_)));
             assert!(spec.prompt.contains("why is step 5 stuck?"));
         });
+    }
+
+    #[test]
+    fn a_local_tier_runs_claude_on_sonnet_against_the_local_target() {
+        let target = LocalTarget {
+            base_url: "http://x".into(),
+            model: "m".into(),
+        };
+        let got = |engine| {
+            let mut got = None;
+            with_local(engine, "local", Some(target.clone()), |s| {
+                got = Some((s.model.clone(), s.local.clone()))
+            });
+            got.unwrap()
+        };
+        assert_eq!(got(Engine::Claude), ("sonnet".to_string(), Some(target.clone())));
+        assert_eq!(got(Engine::Cursor).1, None);
     }
 
     #[test]
