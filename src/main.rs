@@ -201,7 +201,9 @@ async fn main() -> Result<()> {
     // machine.json's overrides and RETASKABLE_TAGS over them. Missing is fine; broken is fatal,
     // the same as config.json.
     let machine = store::MachineStore::load(&dir)?;
-    let tag_list = log_runtime_settings(&cfg, &machine, &engine_choice, lane_count, env);
+    // One handle per computer: the watch writes its up flag, the jobs share its one slot.
+    let local = local_model::LocalModel::new(config::local_model(&cfg, env));
+    let tag_list = log_runtime_settings(&cfg, &machine, &engine_choice, lane_count, env, &local);
     // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
     // address instead, so another computer on the local network can reach the settings page.
     let network_access = network::network_access(machine.network().as_ref(), env);
@@ -235,6 +237,7 @@ async fn main() -> Result<()> {
             port,
             default_port,
             listener,
+            local,
         },
         env,
     )
@@ -280,12 +283,14 @@ struct ServeArgs<'a> {
     port: u16,
     default_port: u16,
     listener: tokio::net::TcpListener,
+    local: local_model::LocalModel,
 }
 
 /// Runs each cloud's outbound connector, the shared backlog's auto-link, the first-run check,
 /// and the settings/health HTTP server, until the server shuts down.
 async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let ServeArgs {
+        local,
         dir,
         cfg,
         version,
@@ -419,6 +424,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 cursor_models: config::cursor_models(cfg, env),
                 flags: placement.clone(),
                 sessions: live.sessions().clone(),
+                local: local.clone(),
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
@@ -441,6 +447,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     flags: placement,
                     machine: link::machine_name(env),
                     sessions: live.sessions().clone(),
+                    local: local.clone(),
                 }) as Arc<dyn orchestrator::driver::RunStarter>,
             ]
         } else {
@@ -453,6 +460,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 env.clone(),
                 cfg.machine.models,
                 config::cursor_models(cfg, env),
+                local.clone(),
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
         trial: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
@@ -476,6 +484,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::cursor_models(cfg, env),
                 cfg.machine.budget.daily_usd,
                 view.clone(),
+                local.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>
         }),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
@@ -489,6 +498,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 cfg.machine.max_resume_context_tokens,
                 config::cursor_models(cfg, env),
                 live.sessions().clone(),
+                local.clone(),
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
@@ -722,6 +732,7 @@ fn log_runtime_settings(
     engine_choice: &config::EngineChoiceConfig,
     lane_count: u32,
     env: &Env,
+    local: &local_model::LocalModel,
 ) -> Vec<String> {
     let found = tags::found_tags(&tags::machine_facts(env));
     let overrides = machine.tags();
@@ -749,7 +760,7 @@ fn log_runtime_settings(
     // orchestrator exists yet to start one.
     if local_model.enabled {
         tracing::info!("Watching the local model at {}", local_model.base_url);
-        tokio::spawn(local_model::watch(local_model.base_url.clone()));
+        tokio::spawn(local_model::watch(local.clone()));
     }
     // agent-settings.md section 3.1: the computer-wide shape of `engineChoice` (resolved per
     // project and role group above), and Cursor's model per tier. Cursor's models aren't read by

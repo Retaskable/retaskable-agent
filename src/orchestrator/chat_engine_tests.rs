@@ -91,6 +91,7 @@ async fn ask_listed(
         models(),
         0.0,
         view,
+        crate::local_model::LocalModel::off(),
     );
     let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let job = AskJob {
@@ -168,6 +169,7 @@ fn starter(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> (Arc
         150_000,
         models(),
         Default::default(),
+        crate::local_model::LocalModel::off(),
     );
     (starter, repo)
 }

@@ -55,6 +55,7 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         flags: Arc::new(crate::flags::Flags::fixed(&[])),
         machine: "pc".into(),
         sessions: Default::default(),
+        local: crate::local_model::LocalModel::off(),
     });
     Rig {
         _dir: dir,

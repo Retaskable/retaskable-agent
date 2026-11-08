@@ -94,6 +94,7 @@ pub(super) fn roster(
         cursor_models: Default::default(),
         flags: Arc::new(crate::flags::Flags::fixed(&["engine-placement"])),
         sessions: Default::default(),
+        local: crate::local_model::LocalModel::off(),
     };
     (dir, root, roster)
 }
