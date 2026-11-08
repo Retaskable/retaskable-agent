@@ -248,6 +248,12 @@ impl Machine {
         self
     }
 
+    /// Keeps the pacer's number across a restart in `<dir>/machine.json`.
+    pub fn with_machine_dir(mut self, dir: &Path) -> Self {
+        self.auto.dir = Some(dir.to_path_buf());
+        self
+    }
+
     /// [`process_tree::stopping`], unless a test has overridden it.
     pub(super) fn stopping(&self) -> bool {
         #[cfg(test)]
@@ -909,7 +915,7 @@ pub fn spawn_all(args: SpawnArgs) {
         },
     );
     machine.engine_limits = limits;
-    machine = machine.with_auto(args.auto_concurrency);
+    machine = machine.with_auto(args.auto_concurrency).with_machine_dir(args.dir);
     if args.live.snapshot().mode == OrchestratorMode::Runs {
         machine = machine.with_run_starters(args.run_starters);
         let kinds = machine.run_starters.kinds();

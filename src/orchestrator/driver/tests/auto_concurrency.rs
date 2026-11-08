@@ -140,3 +140,45 @@ async fn a_cursor_sessions_reading_does_not_reach_the_pacer() {
         assert_eq!(rig.lp(0).pace_readings.len(), taken, "{engine:?}");
     }
 }
+
+/// Restarts the machine: the same pacer settings and `dir`, nothing else carried.
+fn restart(rig: &mut Rig, dir: &std::path::Path) {
+    rig.machine.auto = crate::orchestrator::driver::auto::Auto::new(AutoConcurrency::default());
+    rig.machine.auto.dir = Some(dir.to_path_buf());
+}
+
+#[tokio::test]
+async fn a_restart_in_the_same_window_keeps_the_number_and_after_the_reset_starts_from_concurrency() {
+    let (mut rig, fake) = rig_with(true, AutoConcurrency::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    restart(&mut rig, dir.path());
+    step(&mut rig, &fake, 0, 0.10, RESET, 0).await;
+    step(&mut rig, &fake, 300, 0.30, RESET, 3).await;
+    step(&mut rig, &fake, 600, 0.50, RESET, 3).await;
+    assert_eq!(rig.machine.effective_concurrency(), 1);
+
+    restart(&mut rig, dir.path());
+    rig.machine.clock = Some(T + 700);
+    rig.machine.poll().await;
+    assert_eq!(rig.machine.effective_concurrency(), 1, "the number carries over");
+    assert!(!rig.machine.auto.pacer.due(T + 700), "and so does the 5-minute clock");
+
+    restart(&mut rig, dir.path());
+    rig.machine.clock = Some(RESET + 10);
+    rig.machine.poll().await;
+    assert_eq!(
+        rig.machine.effective_concurrency(),
+        3,
+        "a reset window starts from concurrency"
+    );
+}
+
+#[tokio::test]
+async fn with_the_flag_off_nothing_is_read_or_written() {
+    let (mut rig, fake) = rig_with(false, AutoConcurrency::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    restart(&mut rig, dir.path());
+    step(&mut rig, &fake, 0, 0.10, RESET, 0).await;
+    step(&mut rig, &fake, 300, 0.50, RESET, 3).await;
+    assert!(!dir.path().join("machine.json").exists());
+}
