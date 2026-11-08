@@ -8,7 +8,7 @@ use axum::http::Request;
 use axum::http::header;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -20,6 +20,36 @@ pub(crate) const HOST: &str = "127.0.0.1:4700";
 
 pub(crate) fn app(settings: Arc<SettingsServer>) -> Router {
     super::router(settings).layer(MockConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 54321))))
+}
+
+/// [`app`] with the peer at `ip` instead of this computer, for a request "from another computer".
+pub(crate) fn app_from(settings: Arc<SettingsServer>, ip: IpAddr) -> Router {
+    super::router(settings).layer(MockConnectInfo(SocketAddr::new(ip, 54321)))
+}
+
+/// A settings server whose own network addresses are `own`, with network access `stored` in
+/// machine.json (or none).
+pub(crate) fn settings_with_own_addresses(
+    dir: &Path,
+    stored: Option<NetworkAccess>,
+    own: Vec<IpAddr>,
+) -> Arc<SettingsServer> {
+    if let Some(network) = stored {
+        MachineStore::load(dir).unwrap().set_network(network).unwrap();
+    }
+    Arc::new(
+        SettingsServer::new(
+            dir.to_path_buf(),
+            4700,
+            4700,
+            false,
+            Env::empty(),
+            || 1_700_000_000,
+            |_: i32| {},
+            test_keychain(dir),
+        )
+        .with_own_addresses(move || own.clone()),
+    )
 }
 
 pub(crate) fn request(method: &str, path: &str) -> axum::http::request::Builder {

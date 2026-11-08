@@ -95,3 +95,34 @@ fn csrf_ok_checks_the_header_against_the_expected_token() {
     assert!(!csrf_ok(&headers, "something-else"));
     assert!(!csrf_ok(&HeaderMap::new(), "expected"), "missing header");
 }
+
+#[test]
+fn host_is_allowed_for_an_own_network_address_only_while_network_access_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let own = vec!["192.168.1.20".parse().unwrap(), "fe80::1".parse().unwrap()];
+    let make = |dir: &std::path::Path| {
+        SettingsServer::new(
+            dir.to_path_buf(),
+            4700,
+            4700,
+            false,
+            Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "a good enough password")]),
+            || 0,
+            |_: i32| {},
+            test_keychain(dir),
+        )
+        .with_own_addresses({
+            let own = own.clone();
+            move || own.clone()
+        })
+    };
+    let on = make(dir.path());
+    assert!(on.host_is_allowed("192.168.1.20:4700"));
+    assert!(on.host_is_allowed("[fe80::1]:4700"));
+    assert!(!on.host_is_allowed("192.168.1.20:4701"), "wrong port");
+    assert!(!on.host_is_allowed("192.168.1.21:4700"), "not one of ours");
+    assert!(!on.host_is_allowed("evil.example.com:4700"), "a DNS name");
+
+    let off = server(4700).with_own_addresses(move || own.clone());
+    assert!(!off.host_is_allowed("192.168.1.20:4700"), "access is off");
+}

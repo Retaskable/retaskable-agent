@@ -2,9 +2,9 @@
 //! CSRF check, the wrong-try rate limit, and the Host and Origin checks every request goes
 //! through (agent-settings.md section 4.3).
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -166,10 +166,20 @@ impl SettingsServer {
         self.state.lock().unwrap().failures.remove(&addr);
     }
 
-    /// Its Host is this computer's own, at the port it answered on (section 4.3): no DNS
-    /// rebinding. Network access can already make the port listen on every address (section
-    /// 4.4), but this still only accepts the loopback names; widening it to the computer's own
-    /// network addresses isn't ported yet (tracked outside this change).
+    /// Whether network access is on right now, read on each call: `RETASKABLE_NETWORK_PASSWORD`
+    /// wins, otherwise `machine.json` (section 4.4: turned off while running, other computers
+    /// are refused at once, though the socket stays as it was bound until the restart). An
+    /// unreadable `machine.json` reads as off.
+    pub(super) fn network_access_on(&self) -> bool {
+        match &self.env_network_access {
+            Some(access) => access.enabled,
+            None => MachineStore::load(&self.dir).is_ok_and(|m| m.network().unwrap_or_default().enabled),
+        }
+    }
+
+    /// Its Host is this computer's own, at the port it answered on (section 4.3): `127.0.0.1`,
+    /// `localhost` or `[::1]`, and while network access is on, an IP literal that is one of this
+    /// computer's own addresses. Never another DNS name: no DNS rebinding.
     pub(super) fn host_is_allowed(&self, host_header: &str) -> bool {
         let (host, port) = split_host_port(host_header);
         if let Some(port) = port
@@ -177,21 +187,40 @@ impl SettingsServer {
         {
             return false;
         }
-        matches!(
+        if matches!(
             host.to_ascii_lowercase().as_str(),
             "127.0.0.1" | "localhost" | "[::1]" | "::1"
-        )
+        ) {
+            return true;
+        }
+        let literal = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+        let Ok(ip) = literal.parse::<IpAddr>() else {
+            return false;
+        };
+        self.network_access_on() && (self.own_addresses)().contains(&ip)
     }
 }
 
-/// Section 4.3, every request: Host is this computer's own, and a POST's Origin is its own.
+/// This computer's own interface addresses, for [`SettingsServer::host_is_allowed`].
+pub(super) fn interface_addresses() -> Vec<IpAddr> {
+    if_addrs::get_if_addrs()
+        .map(|all| all.into_iter().map(|i| i.ip()).collect())
+        .unwrap_or_default()
+}
+
+/// Section 4.3, every request: a peer that isn't this computer is served only while network access
+/// is on, Host is this computer's own, and a POST's Origin is its own.
 /// Anything else answers the same 404 as a path this agent doesn't serve, so it gives nothing
 /// away about which paths exist (agent/08-http-api.md: the port takes no command either way).
 pub(super) async fn security_envelope(
     State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
+    if !peer.ip().to_canonical().is_loopback() && !settings.network_access_on() {
+        return not_found_response();
+    }
     let Some(host) = req
         .headers()
         .get(header::HOST)
