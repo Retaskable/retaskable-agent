@@ -2,10 +2,12 @@
 //! for the whole of it: pending, fetch (`host.rs`), a conflict fails it with no container, else run
 //! (`container.rs`), then success or failure (and on failure the comment), then the directory goes.
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::json;
 
+use super::claim::{self, Verdict};
 use super::report::{self, Host, Kind, State};
 use super::{CheckKey, Programs, RunningCheck, container, host};
 use crate::config::ProjectConfig;
@@ -23,6 +25,17 @@ pub struct Job {
     pub project: ProjectConfig,
     pub image: String,
     pub key: CheckKey,
+    pub clock: super::Clock,
+    pub refresh: std::time::Duration,
+}
+
+/// How a poll's attempt at a key ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ran {
+    /// Claimed and run, or finished by a computer already: not tried again.
+    Done,
+    /// Another computer's claim comes first: look again at the next poll.
+    Lost,
 }
 
 fn short(sha: &str) -> String {
@@ -59,9 +72,32 @@ fn name_file(dir: &Path) -> PathBuf {
     dir.with_extension("name")
 }
 
-/// Runs the check; the last status is posted before this returns. Failures to reach the host are logged: the
-/// check still counts as finished, so a broken `gh` doesn't rerun the container every poll.
-pub async fn run(j: Job) {
+/// Claims the key and, if this computer wins, runs the check; the last status is posted before this returns.
+/// Failures to reach the host are logged: the check still counts as finished, so a broken `gh` doesn't rerun
+/// the container every poll. A key that can't be claimed (host unreachable) is tried again next poll.
+pub async fn run(j: Job) -> Ran {
+    let host_api = Arc::new(Host {
+        program: PathBuf::from(&j.programs.gh),
+        kind: Kind::Github,
+        repo: j.project.github_repo.clone(),
+        dir: PathBuf::from(&j.project.repo_path),
+    });
+    let key = key_text(&j.key);
+    match claim::claim(&host_api, &j.key.head, &key, &j.computer, || (j.clock)()).await {
+        Ok(Verdict::Run { stale }) => {
+            if !stale.is_empty() {
+                tracing::info!("agent CI: taking over {key} from {}", stale.join(", "));
+                emit(&j, "stale_taken_over", 0);
+            }
+            emit(&j, "claimed", 0);
+        }
+        Ok(Verdict::Lose) => return Ran::Lost,
+        Ok(Verdict::Finished) => return Ran::Done,
+        Err(e) => {
+            tracing::warn!("agent CI: claiming {key} failed: {e:#}");
+            return Ran::Lost;
+        }
+    }
     let begun = Instant::now();
     let started_ms = now_ms();
     let sha7 = short(&j.key.head);
@@ -75,7 +111,7 @@ pub async fn run(j: Job) {
         c.running = c.checks.len() as u32;
     });
     emit(&j, "started", 0);
-    let ok = go(&j, begun).await;
+    let ok = go(&j, begun, host_api).await;
     let ms = begun.elapsed().as_millis();
     emit(&j, "finished", ms);
     j.live.update_ci(|c| {
@@ -84,21 +120,17 @@ pub async fn run(j: Job) {
         c.running = c.checks.len() as u32;
         c.last_result = Some(json!({ "project": j.id, "pr": j.key.pr, "sha": sha7, "ok": ok, "at": started_ms }));
     });
+    Ran::Done
 }
 
-async fn go(j: &Job, begun: Instant) -> bool {
+async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     let me = report::me(&j.computer);
     let repo = PathBuf::from(&j.project.repo_path);
-    let host_api = std::sync::Arc::new(Host {
-        program: PathBuf::from(&j.programs.gh),
-        kind: Kind::Github,
-        repo: j.project.github_repo.clone(),
-        dir: repo.clone(),
-    });
+    let key = key_text(&j.key);
     let head = j.key.head.clone();
     let minutes = || begun.elapsed().as_secs() / 60;
     let post = |state: State, text: String| {
-        let (h, head) = (host_api.clone(), head.clone());
+        let (h, head, text) = (host_api.clone(), head.clone(), claim::describe(&text, &key));
         async move {
             let r =
                 tokio::task::spawn_blocking(move || h.post_status(&head, report::PR_CONTEXT, state, &text, None)).await;
@@ -109,7 +141,8 @@ async fn go(j: &Job, begun: Instant) -> bool {
             }
         }
     };
-    post(State::Pending, report::running_text(&me)).await;
+    // The claim is already posted; it is posted again every few minutes until the last status.
+    let refresh = || post(State::Pending, report::running_text(&me));
     let fail = |reason: String, log: String| {
         let (h, key, head) = (host_api.clone(), key_text(&j.key), j.key.head.clone());
         let pr = j.key.pr;
@@ -126,69 +159,75 @@ async fn go(j: &Job, begun: Instant) -> bool {
         }
     };
 
-    let (data, id, main) = (j.data_dir.clone(), j.id.clone(), j.project.base_branch.clone());
-    let head_ref = format!("refs/pull/{}/head", j.key.pr);
-    let fetched = tokio::task::spawn_blocking(move || {
-        host::fetch(
-            &data,
-            &id,
-            &repo,
-            &main,
-            host::Mode::PullRequest { head_ref: &head_ref },
-        )
-    })
-    .await;
-    let dir = match fetched {
-        Ok(Ok(host::FetchOutcome::Ready { dir, .. })) => dir,
-        Ok(Ok(host::FetchOutcome::Conflict { reason })) => {
-            let line = format!("conflicts with {}: {}", j.project.base_branch, last_line(&reason));
-            fail(line, reason).await;
-            return false;
-        }
-        other => {
-            let why = match other {
-                Ok(Err(e)) => format!("{e:#}"),
-                Err(e) => e.to_string(),
-                Ok(Ok(_)) => unreachable!(),
-            };
-            tracing::warn!("agent CI: fetch failed: {why}");
-            fail(format!("fetch failed: {}", last_line(&why)), why).await;
-            return false;
-        }
-    };
+    // Only the fetch and the run are refreshed: the final status and the comment are posted after the last
+    // refresh, so a late refresh can't turn the finished check pending again.
+    let result: Result<(), (String, String)> = claim::refreshing(j.refresh, refresh, async {
+        let (data, id, main) = (j.data_dir.clone(), j.id.clone(), j.project.base_branch.clone());
+        let head_ref = format!("refs/pull/{}/head", j.key.pr);
+        let fetched = tokio::task::spawn_blocking(move || {
+            host::fetch(
+                &data,
+                &id,
+                &repo,
+                &main,
+                host::Mode::PullRequest { head_ref: &head_ref },
+            )
+        })
+        .await;
+        let dir = match fetched {
+            Ok(Ok(host::FetchOutcome::Ready { dir, .. })) => dir,
+            Ok(Ok(host::FetchOutcome::Conflict { reason })) => {
+                let line = format!("conflicts with {}: {}", j.project.base_branch, last_line(&reason));
+                return Err((line, reason));
+            }
+            other => {
+                let why = match other {
+                    Ok(Err(e)) => format!("{e:#}"),
+                    Err(e) => e.to_string(),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                tracing::warn!("agent CI: fetch failed: {why}");
+                return Err((format!("fetch failed: {}", last_line(&why)), why));
+            }
+        };
 
-    let name = container::container_name(&j.project.github_repo, &j.key.head);
-    let _ = std::fs::write(name_file(&dir), &name);
-    let log_dir = crate::paths::project_dir(&j.data_dir, &j.id).join("ci-logs");
-    let outcome = container::run(&container::Check {
-        docker: &j.programs.docker,
-        repo: &j.project.github_repo,
-        sha: &j.key.head,
-        dir: &dir,
-        image: &j.image,
-        mode: container::Mode::PullRequest,
-        log_dir: &log_dir,
-        ceiling: container::CEILING,
+        let name = container::container_name(&j.project.github_repo, &j.key.head);
+        let _ = std::fs::write(name_file(&dir), &name);
+        let log_dir = crate::paths::project_dir(&j.data_dir, &j.id).join("ci-logs");
+        let outcome = container::run(&container::Check {
+            docker: &j.programs.docker,
+            repo: &j.project.github_repo,
+            sha: &j.key.head,
+            dir: &dir,
+            image: &j.image,
+            mode: container::Mode::PullRequest,
+            log_dir: &log_dir,
+            ceiling: container::CEILING,
+        })
+        .await;
+        host::cleanup(&dir);
+        let _ = std::fs::remove_file(name_file(&dir));
+        match outcome {
+            Ok(o) if o.exit_code == Some(0) => Ok(()),
+            Ok(o) => {
+                let reason = if o.timed_out {
+                    "timed out".to_string()
+                } else {
+                    last_line(&o.tail).to_string()
+                };
+                Err((reason, o.tail))
+            }
+            Err(e) => Err((format!("couldn't run: {e:#}"), format!("{e:#}"))),
+        }
     })
     .await;
-    host::cleanup(&dir);
-    let _ = std::fs::remove_file(name_file(&dir));
-    match outcome {
-        Ok(o) if o.exit_code == Some(0) => {
+    match result {
+        Ok(()) => {
             post(State::Success, report::passed_text(&me, minutes())).await;
             true
         }
-        Ok(o) => {
-            let reason = if o.timed_out {
-                "timed out".to_string()
-            } else {
-                last_line(&o.tail).to_string()
-            };
-            fail(reason, o.tail).await;
-            false
-        }
-        Err(e) => {
-            fail(format!("couldn't run: {e:#}"), format!("{e:#}")).await;
+        Err((reason, log)) => {
+            fail(reason, log).await;
             false
         }
     }

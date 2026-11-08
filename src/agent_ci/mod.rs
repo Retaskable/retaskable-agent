@@ -4,6 +4,7 @@
 //! lists the pull requests to check. Checks are listed here, not run. `host.rs` is the fetch step; `report.rs`
 //! is the code host side: statuses and the failure comment.
 pub mod check;
+pub mod claim;
 pub mod container;
 pub mod discovery;
 pub mod docker;
@@ -15,8 +16,8 @@ pub mod report;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -27,6 +28,9 @@ use crate::env::Env;
 use crate::item_lifecycle::ci_when_ready_active;
 use crate::orchestrator::live::LiveHandle;
 pub use prs::CheckKey;
+
+/// Milliseconds since 1970.
+pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 use tokio::task::JoinHandle;
 
 /// What the loop reports to the cloud tick and the Now tab's CI header.
@@ -94,7 +98,11 @@ pub struct CiLoop {
     /// The reason last written to `agent.log` for each project, so a standing reason is said once.
     logged: HashMap<String, String>,
     /// Checks started (running or finished) by this loop, so none runs twice.
-    seen: HashSet<(String, CheckKey)>,
+    seen: Arc<Mutex<HashSet<(String, CheckKey)>>>,
+    /// Milliseconds since 1970; a test injects its own.
+    pub clock: Clock,
+    /// How often a running check's claim is refreshed.
+    pub refresh: Duration,
 }
 
 impl CiLoop {
@@ -107,7 +115,9 @@ impl CiLoop {
             permits: 0,
             owed: Arc::new(AtomicU32::new(0)),
             logged: HashMap::new(),
-            seen: HashSet::new(),
+            seen: Arc::default(),
+            clock: Arc::new(crate::telemetry::now_ms),
+            refresh: claim::REFRESH,
         }
     }
 
@@ -167,7 +177,7 @@ impl CiLoop {
         // Forget keys no longer listed, unless still running. Only for a project whose list was read this poll:
         // otherwise a finished key would run again when the list comes back.
         let running = self.live.snapshot().ci.map(|c| c.checks).unwrap_or_default();
-        self.seen.retain(|(id, k)| match keys.get(id) {
+        self.seen.lock().unwrap().retain(|(id, k)| match keys.get(id) {
             Some(l) if docker == "ok" => {
                 l.contains(k)
                     || running
@@ -206,13 +216,14 @@ impl CiLoop {
                 continue;
             };
             for key in list {
-                if self.seen.contains(&(id.clone(), key.clone())) {
+                if self.seen.lock().unwrap().contains(&(id.clone(), key.clone())) {
                     continue;
                 }
                 let Ok(permit) = self.slot.clone().try_acquire_owned() else {
                     return tasks;
                 };
-                self.seen.insert((id.clone(), key.clone()));
+                self.seen.lock().unwrap().insert((id.clone(), key.clone()));
+                let seen = self.seen.clone();
                 let owed = self.owed.clone();
                 let job = check::Job {
                     programs: self.programs.clone(),
@@ -223,9 +234,15 @@ impl CiLoop {
                     project: p.clone(),
                     image: image.clone(),
                     key,
+                    clock: self.clock.clone(),
+                    refresh: self.refresh,
                 };
                 tasks.push(tokio::spawn(async move {
-                    check::run(job).await;
+                    let forget = (job.id.clone(), job.key.clone());
+                    // A loser forgets the key, so the next poll looks again (the winner may go stale).
+                    if check::run(job).await == check::Ran::Lost {
+                        seen.lock().unwrap().remove(&forget);
+                    }
                     // A shrink while this ran: this permit is one it owed, so it doesn't return.
                     let owing = owed.try_update(Ordering::SeqCst, Ordering::SeqCst, |o| o.checked_sub(1));
                     if owing.is_ok() {
