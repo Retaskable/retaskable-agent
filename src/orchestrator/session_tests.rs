@@ -1,10 +1,8 @@
 use std::time::Duration;
-
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
-use crate::backlog::ItemStatus;
-use crate::orchestrator::driver::OutcomeSender;
+use crate::{backlog::ItemStatus, local_model::LocalModel, orchestrator::driver::OutcomeSender};
 
 const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
 
@@ -45,7 +43,7 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         150_000,
         Default::default(),
         Default::default(),
-        crate::local_model::LocalModel::off(),
+        LocalModel::off(),
     );
     Rig {
         _dir: dir,
@@ -730,7 +728,7 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         150_000,
         Default::default(),
         Default::default(),
-        crate::local_model::LocalModel::off(),
+        LocalModel::off(),
     )
 }
 
