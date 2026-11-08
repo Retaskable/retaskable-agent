@@ -154,19 +154,24 @@ pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
     let _ = FLAG.set(flags);
 }
 
-#[cfg(test)]
-thread_local! {
-    /// A test's own answer for the `local-tier-ladder` flag, on its thread.
-    pub static LADDER_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
 /// Whether the `local-tier-ladder` flag was On at its last answer; Off until the flags client is handed over.
 pub fn local_ladder_on() -> bool {
     #[cfg(test)]
-    if let Some(on) = LADDER_FOR_TEST.with(|c| c.get()) {
+    if let Some(on) = LADDER_FOR_TEST.with(std::cell::Cell::get) {
         return on;
     }
     FLAG.get().is_some_and(|f| f.last("local-tier-ladder"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static LADDER_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-tier-ladder` flag on or off for the calling test's thread (each test runs on its own).
+#[cfg(test)]
+pub fn set_local_ladder_for_test(on: bool) {
+    LADDER_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
 /// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's

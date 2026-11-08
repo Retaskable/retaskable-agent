@@ -72,7 +72,7 @@ async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
 
 #[tokio::test]
 async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
-    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(true)));
+    tiers::set_local_ladder_for_test(true);
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
     let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
@@ -97,7 +97,7 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
 
 #[tokio::test]
 async fn a_plan_is_listed_while_it_runs_and_not_after() {
-    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(true)));
+    tiers::set_local_ladder_for_test(true);
     let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
     let (req, mut s) = request(brief());
     r.starter.start(req).unwrap();
@@ -288,9 +288,9 @@ fn offered_local(flag: bool, up: bool, engine: Engine) -> bool {
     let mut r = rig(&answer(GOOD), "", choice);
     let root = r.root.clone();
     on_every_engine(&mut r.starter.roster, &root);
-    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(flag)));
+    tiers::set_local_ladder_for_test(flag);
     if up {
-        r.starter.roster.local = crate::local_model::LocalModel::up_for_test();
+        r.starter.roster.local = crate::local_model::LocalModel::up();
     }
     let (req, _s) = request(brief());
     let mut offered = None;
@@ -326,7 +326,7 @@ fn the_planner_is_on_the_top_tier_and_stays_off_a_free_local_slot_above_the_limi
 
 #[tokio::test]
 async fn with_the_flag_off_the_planner_stays_on_the_chore_tier() {
-    tiers::LADDER_FOR_TEST.with(|c| c.set(Some(false)));
+    tiers::set_local_ladder_for_test(false);
     let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
     let (req, mut s) = request(brief());
     r.starter.start(req).unwrap();
