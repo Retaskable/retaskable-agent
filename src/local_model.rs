@@ -111,6 +111,11 @@ impl LocalModel {
         })
     }
 
+    /// Whether it's turned on in the config.
+    pub fn enabled(&self) -> bool {
+        self.config.enabled
+    }
+
     /// True only while it's turned on and the last check found it up.
     pub fn available(&self) -> bool {
         self.config.enabled && self.up.load(Ordering::SeqCst)
