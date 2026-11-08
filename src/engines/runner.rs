@@ -221,6 +221,7 @@ async fn spawn_and_read(
         let Some(line) = next.context("reading the session's output")? else {
             break;
         };
+        crate::orchestrator::live::sessions::touch();
         if let Some(file) = sink.as_mut() {
             use std::io::Write as _;
             let _ = writeln!(file, "{line}");
@@ -368,6 +369,29 @@ mod tests {
     async fn read_printed_file(dir: &Path, out: &Path) -> SessionResult {
         let (bin, args) = print_file_command(out);
         run_spawn(&bin, &args, dir, None, None, Box::new(SessionReader::new(false))).await
+    }
+
+    #[tokio::test]
+    async fn a_scoped_session_is_touched_on_each_line_it_prints() {
+        use crate::engines::{choose::Role, engine::EngineId};
+        use crate::orchestrator::live::sessions::{SessionInfo, Sessions};
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("lines.jsonl");
+        std::fs::write(&out, "{\"type\":\"system\"}\n{\"type\":\"system\"}\n").unwrap();
+        let sessions = Sessions::default();
+        let guard = sessions.register(SessionInfo {
+            project: "p".into(),
+            item_id: "i".into(),
+            title: None,
+            role: Role::Implementer,
+            lane: None,
+            engine: EngineId::default(),
+            model: "m".into(),
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        guard.scope(read_printed_file(dir.path(), &out)).await;
+        let row = &sessions.snapshot()[0];
+        assert!(row.last_output > row.started);
     }
 
     #[tokio::test]
