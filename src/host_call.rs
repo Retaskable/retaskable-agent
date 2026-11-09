@@ -3,9 +3,9 @@
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
 //! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 #[cfg(not(test))]
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
 
