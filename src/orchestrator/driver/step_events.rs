@@ -82,6 +82,7 @@ impl ProjectLoop {
         let Some(open) = self.open_steps.remove(item) else {
             return;
         };
+        let with_checks = self.flags.last("step-events-complete");
         let end = event::StepEnd {
             item: Some(item.into()),
             step: Some(open.step),
@@ -89,7 +90,7 @@ impl ProjectLoop {
             ms: Some(open.began.elapsed().as_millis() as f64),
             ok: Some(ok),
             outcome: Some(outcome.into()),
-            checks: detail.filter(|d| !d.checks.is_empty()).map(|d| {
+            checks: detail.filter(|d| with_checks && !d.checks.is_empty()).map(|d| {
                 (d.checks.iter())
                     .map(|c| event::Check {
                         name: Some(c.name.clone()),

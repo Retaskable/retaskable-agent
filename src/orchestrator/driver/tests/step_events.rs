@@ -6,6 +6,13 @@ fn flag_on(rig: &mut Rig) {
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
 }
 
+fn complete_on(rig: &mut Rig) {
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[
+        "watchdog-anomaly-rules",
+        "step-events-complete",
+    ]));
+}
+
 fn step_events(rig: &mut Rig, kind: &str) -> Vec<Value> {
     (rig.lp(0).events().recent().iter())
         .map(Entry::to_value)
@@ -122,7 +129,7 @@ fn two_checks() -> StepDetail {
 async fn a_checking_step_with_checks_writes_them_in_step_end() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
+    complete_on(&mut rig);
     let fake = rig.go_live();
     *fake.detail.lock().unwrap() = two_checks();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
@@ -160,4 +167,20 @@ async fn with_the_flag_off_checks_write_no_step_end() {
     settle().await;
     rig.machine.poll().await;
     assert!(step_events(&mut rig, "step_end").is_empty());
+}
+
+#[tokio::test]
+async fn without_step_events_complete_the_checks_are_left_out() {
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    flag_on(&mut rig);
+    let fake = rig.go_live();
+    *fake.detail.lock().unwrap() = two_checks();
+    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
+    rig.machine.poll().await;
+    settle().await;
+    rig.machine.poll().await;
+    let ends = step_events(&mut rig, "step_end");
+    assert_eq!(ends.len(), 1);
+    assert!(ends[0].get("checks").is_none());
 }
