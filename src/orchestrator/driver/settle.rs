@@ -282,15 +282,25 @@ impl ProjectLoop {
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
             return;
         };
+        let note_rules = !self.unreleased.is_empty() && self.flags.on("give-back-note-rules").await;
         for (id, (lease, note)) in self.unreleased.clone() {
+            // With `give-back-note-rules`: the note is trimmed and cut at MAX_NOTE_CHARS, and a blank one sends
+            // the release alone.
+            let note = if note_rules {
+                crate::text::truncate(note.trim(), MAX_NOTE_CHARS)
+            } else {
+                note
+            };
             // report then release (section 7.5): the note lands in the item's history while the
             // lease still holds. A refusal of either keeps both for the next pass.
-            match self.client.report(repo, Some(&token), &id, &lease, &note).await {
-                Ok(()) => {}
-                Err(e) if e.code() == Some("stale_lease") => {}
-                Err(e) => {
-                    self.store_error("report", &e);
-                    continue;
+            if !note_rules || !note.is_empty() {
+                match self.client.report(repo, Some(&token), &id, &lease, &note).await {
+                    Ok(()) => {}
+                    Err(e) if e.code() == Some("stale_lease") => {}
+                    Err(e) => {
+                        self.store_error("report", &e);
+                        continue;
+                    }
                 }
             }
             match self.client.release(repo, Some(&token), &id, &lease).await {
