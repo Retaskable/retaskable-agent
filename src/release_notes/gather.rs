@@ -117,6 +117,8 @@ pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
     cwd: &Path,
     args: &[String],
 ) -> Result<Vec<T>> {
+    let guarded: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::host_call::guard_program(gh_bin, Some(cwd), &guarded)?;
     let output = Command::new(gh_bin)
         .args(args)
         .current_dir(cwd)
@@ -175,8 +177,10 @@ pub async fn fill_draft_files(
             continue;
         }
         let number = pr.number.to_string();
+        let args = ["pr", "view", &number, "--repo", repo, "--json", "files"];
+        crate::host_call::guard_program(gh_bin, Some(cwd), &args)?;
         let output = Command::new(gh_bin)
-            .args(["pr", "view", &number, "--repo", repo, "--json", "files"])
+            .args(args)
             .current_dir(cwd)
             .output()
             .await
@@ -301,6 +305,17 @@ mod tests {
 
     // gather_merged_prs / gather_commits (a fake `gh`/`git` binary that ignores its arguments and
     // just prints a fixture file, like session.rs's own fake-session tests do for `claude`)
+
+    #[tokio::test]
+    async fn gather_merged_prs_refuses_an_empty_base() {
+        use crate::host_call_sites_tests::{fake, on, refused};
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake(dir.path(), "gh");
+        on(dir.path());
+        let err = gather_merged_prs(&gh, dir.path(), "o/y", "", "a", "b", 5).await;
+        assert!(err.unwrap_err().to_string().contains("gh was not run"));
+        refused(dir.path(), "gh", "pr");
+    }
 
     #[tokio::test]
     async fn gather_merged_prs_parses_ghs_json_output() {

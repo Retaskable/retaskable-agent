@@ -3,7 +3,9 @@
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
 //! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(test))]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
 
@@ -70,8 +72,17 @@ pub struct Sink(Arc<Mutex<Vec<Refusal>>>);
 impl Sink {
     /// The process-wide sink.
     pub fn global() -> &'static Sink {
-        static SINK: OnceLock<Sink> = OnceLock::new();
-        SINK.get_or_init(Sink::default)
+        // Tests run in parallel threads, so under test it is per thread (like `ON`).
+        #[cfg(test)]
+        {
+            thread_local!(static SINK: &'static Sink = Box::leak(Box::default()));
+            SINK.with(|s| *s)
+        }
+        #[cfg(not(test))]
+        {
+            static SINK: OnceLock<Sink> = OnceLock::new();
+            SINK.get_or_init(Sink::default)
+        }
     }
 
     pub fn add(&self, refusal: Refusal) {
@@ -92,6 +103,40 @@ pub fn undefined_arg(args: &[&str]) -> Option<usize> {
             || a.split(|c: char| matches!(c, '/' | '=' | ':' | ',' | '#') || c.is_whitespace())
                 .any(|p| p == "undefined" || p == "NaN")
     })
+}
+
+/// Checks a call to `program` (recorded as its file stem, `gh` or `glab`, never a path) before it runs. With no
+/// `dir` the call is guarded when any project has the flag On, and its refusal is written to every project's log.
+pub fn guard_program(program: impl AsRef<Path>, dir: Option<&Path>, args: &[&str]) -> Result<(), Refused> {
+    let cmd = program
+        .as_ref()
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    match dir {
+        Some(dir) => guard(&cmd, dir, args),
+        None => {
+            if !any_on() {
+                return Ok(());
+            }
+            let Some(i) = undefined_arg(args) else {
+                return Ok(());
+            };
+            Sink::global().add(Refusal {
+                cmd: cmd.clone(),
+                args: args.iter().map(|a| scrub(a, MAX_TEXT)).collect(),
+                dir: None,
+            });
+            Err(Refused { cmd, n: i + 1 })
+        }
+    }
+}
+
+fn any_on() -> bool {
+    let some = |o: &Mutex<Vec<PathBuf>>| !o.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
+    #[cfg(test)]
+    return ON.with(some);
+    #[cfg(not(test))]
+    some(&ON)
 }
 
 /// Checks a call before it runs: on a match (and with the flag On) records it in the global sink and refuses.

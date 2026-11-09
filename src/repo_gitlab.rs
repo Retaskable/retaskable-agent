@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::repo::{RepoInfo, RepoSummary, Upstream};
 
 fn run(program: &str, dir: Option<&Path>, args: &[&str]) -> std::io::Result<Output> {
+    crate::host_call::guard_program(program, dir, args).map_err(std::io::Error::other)?;
     let mut cmd = Command::new(program);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
@@ -130,8 +131,10 @@ pub fn list_repos(program: &str, owner: &str) -> Result<Vec<RepoSummary>> {
 
 /// Clones `repo` into `dest` with `glab repo clone`.
 pub fn clone_repo(program: &str, repo: &str, dest: &Path) -> Result<()> {
+    let args = ["repo", "clone", repo];
+    crate::host_call::guard_program(program, None, &args)?;
     let output = Command::new(program)
-        .args(["repo", "clone", repo])
+        .args(args)
         .arg(dest)
         .output()
         .context("running glab repo clone")?;
