@@ -546,7 +546,7 @@ fn list_images(pngs: &[String], manifest: Option<&[ManifestEntry]>) -> Vec<(Stri
         .map(|m| (m.file.as_str(), m))
         .collect();
     let mut sorted = pngs.to_vec();
-    sorted.sort_by(|a, b| natural_cmp(a, b));
+    sorted.sort_by(|a, b| natural_cmp(a, b).then_with(|| a.cmp(b)));
     let mut taken: HashSet<String> = HashSet::new();
     sorted
         .into_iter()
