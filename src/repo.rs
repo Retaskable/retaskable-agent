@@ -7,11 +7,14 @@
 //! match. A plain remote is handled with git alone (`repo_info` reads its default branch with `git
 //! ls-remote --symref`, `remote_reachable` checks it, `clone_remote` clones it, `find_checkout`
 //! matches it by its normalised URL), and it has no owner list, so listing it is an error. A
-//! local-only project and the full `GithubPicker`'s clone-serialising
-//! lock aren't (its caching is `repo_picker`), since this agent's trimmed spec doesn't reach them yet.
+//! local-only project (a git repo with no remote at all: `has_remote`, `local_default_branch`,
+//! `local_branch_exists`, `RepoInfo::local_only`) is ported from `suggest`/`validate`; the full
+//! `GithubPicker`'s clone-serialising lock isn't (its caching is `repo_picker`).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
+
+pub use crate::repo_local::{has_remote, local_branch_exists, local_default_branch};
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -31,6 +34,8 @@ pub struct RepoInfo {
     pub github_repo: Option<String>,
     pub default_branch: Option<String>,
     pub upstream: Option<Upstream>,
+    /// A git repo with no remote at all: the work stays on this computer.
+    pub local_only: bool,
 }
 
 /// A fork's parent and its default branch (github-workflow.md section 4.3).
@@ -77,6 +82,13 @@ struct DefaultBranchOnly {
 /// GitHub, `glab repo view` on GitLab, and just the origin for a plain remote.
 pub fn repo_info(repo_path: &Path) -> RepoInfo {
     let Some(url) = origin_url(repo_path) else {
+        if !has_remote(repo_path) {
+            return RepoInfo {
+                local_only: true,
+                default_branch: local_default_branch(repo_path),
+                ..RepoInfo::default()
+            };
+        }
         return RepoInfo::default();
     };
     let host = code_host(&url);
@@ -316,7 +328,7 @@ pub fn remote_repo(url: &str) -> Option<String> {
     gitlab_remote(url).map(|(_, path)| path)
 }
 
-fn git(repo_path: &Path) -> Command {
+pub(crate) fn git(repo_path: &Path) -> Command {
     crate::git_bin::command(repo_path)
 }
 
@@ -506,6 +518,11 @@ pub struct RepoCheck {
     /// `Some(false)` when the backlog file isn't on `origin/<baseBranch>` yet. `None` when
     /// there's no base branch or backlog path to check yet.
     pub backlog_on_origin: Option<bool>,
+    /// A git repo with no remote: no CLI, remote or integration branch is needed.
+    pub local_only: bool,
+    /// `Some(false)` when a local-only repo has no commit on its base branch; `None` when not
+    /// checked.
+    pub base_branch_exists: Option<bool>,
 }
 
 /// "The repo" bullet's own wording (section 9.1) for why a folder won't do, over an already
@@ -513,6 +530,14 @@ pub struct RepoCheck {
 pub fn repo_problems(check: &RepoCheck, base_branch: &str) -> Vec<String> {
     if !check.is_git_repo {
         return vec!["The repo path isn't a git repo.".to_string()];
+    }
+    if check.local_only {
+        if check.base_branch_exists == Some(false) {
+            return vec![format!(
+                "There's no {base_branch} branch in this repo yet. Commit something to it first."
+            )];
+        }
+        return Vec::new();
     }
     let mut problems = Vec::new();
     // A plain remote is accepted: work merges with plain git and there are no pull requests,
@@ -842,6 +867,7 @@ mod tests {
             code_host: Some(CodeHost::Github),
             integration_branch_error: None,
             backlog_on_origin: Some(true),
+            ..Default::default()
         };
         assert!(repo_problems(&check, "main").is_empty());
     }
@@ -855,6 +881,7 @@ mod tests {
             code_host: None,
             integration_branch_error: Some("Couldn't create dev/octocat from main: no such ref".to_string()),
             backlog_on_origin: Some(false),
+            ..Default::default()
         };
         assert_eq!(
             repo_problems(&check, "main"),
