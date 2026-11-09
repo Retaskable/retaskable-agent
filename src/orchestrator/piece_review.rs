@@ -5,7 +5,6 @@
 //! only, so a re-review reads what changed since.
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
     program_of, run_session_tracked, start_engine,
 };
-use crate::implementer::publish::run as run_command;
+use crate::implementer::publish::{gh_command, run as run_command};
 use crate::implementer::{Interrupted, Playtest};
 use crate::local_model::{LocalModel, LocalSlot};
 use crate::orchestrator::live::sessions::model_name;
@@ -208,9 +207,7 @@ fn requests(result: &ReviewerResult) -> String {
 }
 
 fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
-    let mut cmd = Command::new(gh);
-    cmd.current_dir(cwd)
-        .args(["pr", "comment", &number.to_string(), "--body-file", "-"]);
+    let cmd = gh_command(gh, cwd, &["pr", "comment", &number.to_string(), "--body-file", "-"])?;
     run_command(cmd, Some(comment), "gh pr comment").map(|_| ())
 }
 

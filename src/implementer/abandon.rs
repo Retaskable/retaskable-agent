@@ -6,18 +6,15 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use super::publish::run;
+use super::publish::{gh_command, run};
 
 /// Closes `pr_url`, or drops `branch` when there is no PR. `git` and `gh` are parameters so tests can fake them.
 pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url: Option<&str>) -> Result<()> {
     if let Some(pr) = pr_url {
-        let mut view = Command::new(gh);
-        view.current_dir(repo)
-            .args(["pr", "view", pr, "--json", "state", "--jq", ".state"]);
+        let view = gh_command(gh, repo, &["pr", "view", pr, "--json", "state", "--jq", ".state"])?;
         // Only an open PR is closed: a merged slice stays as it is, and a closed one needs nothing.
         if run(view, None, "gh pr view")?.trim() == "OPEN" {
-            let mut close = Command::new(gh);
-            close.current_dir(repo).args(["pr", "close", pr]);
+            let close = gh_command(gh, repo, &["pr", "close", pr])?;
             run(close, None, "gh pr close")?;
         }
         return Ok(());

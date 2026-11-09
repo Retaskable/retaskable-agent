@@ -25,6 +25,15 @@ struct Listed {
     url: String,
 }
 
+/// A `gh` command for `args` in `dir`, after the `host_call` guard: an undefined argument (flag On) is an `Err`
+/// and nothing is spawned.
+pub(crate) fn gh_command(gh: &Path, dir: &Path, args: &[&str]) -> Result<Command> {
+    crate::host_call::guard("gh", dir, args)?;
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(args);
+    Ok(cmd)
+}
+
 pub(crate) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<String> {
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -44,17 +53,20 @@ pub(crate) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<S
 
 /// The first open PR for `branch`, if any.
 fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
-    let mut list = Command::new(gh);
-    list.current_dir(dir).args([
-        "pr",
-        "list",
-        "--head",
-        branch,
-        "--state",
-        "open",
-        "--json",
-        "number,url",
-    ]);
+    let list = gh_command(
+        gh,
+        dir,
+        &[
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+        ],
+    )?;
     let listed = run(list, None, "gh pr list")?;
     let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
     Ok(open.into_iter().next())
@@ -87,19 +99,22 @@ pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &s
             created: false,
         });
     }
-    let mut create = Command::new(gh);
-    create.current_dir(dir).args([
-        "pr",
-        "create",
-        "--base",
-        base,
-        "--head",
-        branch,
-        "--title",
-        title,
-        "--body-file",
-        "-",
-    ]);
+    let create = gh_command(
+        gh,
+        dir,
+        &[
+            "pr",
+            "create",
+            "--base",
+            base,
+            "--head",
+            branch,
+            "--title",
+            title,
+            "--body-file",
+            "-",
+        ],
+    )?;
     let made = run(create, Some(body), "gh pr create")?;
     let url = made
         .lines()
@@ -127,10 +142,7 @@ pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Resul
     let Some(pr) = open_change(gh, dir, branch)? else {
         return Ok(false);
     };
-    let mut close = Command::new(gh);
-    close
-        .current_dir(dir)
-        .args(["pr", "close", &pr.number.to_string(), "--comment", comment]);
+    let close = gh_command(gh, dir, &["pr", "close", &pr.number.to_string(), "--comment", comment])?;
     run(close, None, "gh pr close")?;
     Ok(true)
 }
