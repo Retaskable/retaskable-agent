@@ -570,3 +570,28 @@ fn project_view_derives_its_id_from_the_config() {
     };
     assert_eq!(ProjectView::from(&cfg).id, "custom");
 }
+
+#[test]
+fn snapshot_carries_commands_waiting_only_while_one_waits_and_the_flag_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = view(vec![]);
+    let gates = v.item_commands.gates();
+    gates.open(dir.path(), "p");
+    let settings = |version: u64, play: &str| -> crate::backlog::settings::StoreSettings {
+        serde_json::from_value(json!({
+            "version": version, "commandsVersion": version, "updatedBy": "ann", "values": { "playCommand": play }
+        }))
+        .unwrap()
+    };
+    let file = crate::config::ProjectConfig::default();
+    let waiting = |v: &AgentView| v.snapshot("p", dir.path())["state"].get("commandsWaiting").cloned();
+    gates.consider("p", Some(&settings(1, "run it")), &file).unwrap();
+    assert_eq!(waiting(&v), None, "flag Off");
+    v.item_commands.set_flag("p", crate::command_gate::FLAG, true);
+    let shown = waiting(&v).unwrap();
+    assert_eq!(shown["version"], 1);
+    assert_eq!(shown["by"], "ann");
+    assert!(shown["text"].as_str().unwrap().contains("run it"));
+    gates.approve("p", 1).unwrap();
+    assert_eq!(waiting(&v), None, "approved");
+}

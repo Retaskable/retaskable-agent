@@ -27,7 +27,11 @@ struct Gate {
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct CommandGates(Arc<Mutex<HashMap<String, Gate>>>);
+pub struct CommandGates(
+    Arc<Mutex<HashMap<String, Gate>>>,
+    /// Counts the changes in what waits, across projects; the connector resends the snapshot on one.
+    Arc<tokio::sync::watch::Sender<u64>>,
+);
 
 /// The command fields of `cfg`, as the store's settings values spell them.
 fn command_values(cfg: &ProjectConfig) -> Value {
@@ -100,16 +104,39 @@ impl CommandGates {
             }
         }
         let record = settings.map(record_of);
-        g.allowing
-            .consider(record.as_ref(), &running, &commands_of(&command_values(file)))
+        let moved = g
+            .allowing
+            .consider(record.as_ref(), &running, &commands_of(&command_values(file)))?;
+        drop(gates);
+        self.changed(moved);
+        Ok(moved)
+    }
+
+    /// Subscribes to changes in what waits (one starts waiting, is replaced or is approved); the value only counts them.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.1.subscribe()
+    }
+
+    fn changed(&self, moved: Moved) {
+        if moved.waiting {
+            self.1.send_modify(|n| *n += 1);
+        }
+    }
+
+    /// `project`'s waiting version as the snapshot's `commandsWaiting`, with the flag On (`on`) and one waiting.
+    pub fn waiting_json(&self, project: &str, on: bool) -> Option<Value> {
+        let w = self.lock().get(project)?.allowing.waiting().filter(|_| on)?;
+        Some(json!({ "version": w.version, "text": w.text, "by": w.by }))
     }
 
     /// `approve_commands`: runs the waiting `version`'s commands from now on.
     pub fn approve(&self, project: &str, version: u64) -> Result<Moved, String> {
-        match self.lock().get_mut(project) {
+        let moved = match self.lock().get_mut(project) {
             Some(g) => g.allowing.approve(version),
             None => Err(crate::allowed_commands::NOT_WAITING.to_string()),
-        }
+        }?;
+        self.changed(moved);
+        Ok(moved)
     }
 
     /// The allowed commands as saved, for a test or the snapshot.
