@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 
-use super::{SetupCheck, SetupChecks};
+use super::SetupChecks;
 
 /// How often the checks run again, whether or not a site is linked.
 pub const RERUN_EVERY: Duration = Duration::from_secs(600);
@@ -119,21 +119,6 @@ impl PartialEq for SetupCheckRunner {
 /// A runner whose probe finds nothing out (every check unknown), for views built without one.
 impl Default for SetupCheckRunner {
     fn default() -> Self {
-        let unknown = || SetupCheck::unknown("not checked", None);
-        Self::with_probe(Box::new(move || {
-            Box::pin(async move {
-                SetupChecks {
-                    git: unknown(),
-                    gh_installed: unknown(),
-                    gh: unknown(),
-                    claude: unknown(),
-                    claude_signed_in: unknown(),
-                    cursor: unknown(),
-                    pi: None,
-                    codex: None,
-                    docker: None,
-                }
-            })
-        }))
+        Self::with_probe(Box::new(|| Box::pin(async { SetupChecks::all_unknown() })))
     }
 }

@@ -8,6 +8,15 @@
 //! branch with the notes as its prompt (`Launch::Continuing`, the lane reused as it is). With no notes it goes
 //! back to `checking`, so its checks run again.
 //!
+//! **Playtest** (`playtest-answer-command`) on an item that is `awaiting_playtest` in `runs` (`playtests: "on"`,
+//! agent/06.4-playtests.md): an item in any other state, or unknown here, has its command dropped and logged. A pass
+//! is `ItemRun::playtest_finished` (`Passed`), so the item goes to `merging` and no session starts. A fail raises
+//! `review_rounds`: past `max_review_rounds` the item is `needs_human`; otherwise it waits for a lane (`playtest_fails`),
+//! then the implementer resumes on the existing branch (`Launch::Continuing`) with the person's notes as its message
+//! (a short line saying they found a problem when the notes are blank). The run record keeps no playtest steps, so
+//! none are sent. This agent doesn't send the on-branch `tryout_add` row, so there is no store row to record the
+//! answer on and `tryout_result` isn't called on this path.
+//!
 //! **Start over** (`retry`) on a `needs_human` item (agent/09-web-ui.md section 9.3) waits for a free lane, then
 //! lets go of the old work ([`SessionStarter::abandon`]: `gh pr close`, or the branch dropped when there is no PR; a
 //! merged slice is never touched), bumps the item's attempt, clears its rounds (`resume_from_needs_human`) and starts
@@ -22,7 +31,7 @@
 //! (`skip`), so no computer claims it again. Its branch and pull request are kept.
 use super::project::signed_out;
 use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
-use crate::item_lifecycle::ItemState;
+use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
@@ -65,8 +74,8 @@ impl ProjectLoop {
                     self.ideas_command(fresh, shared.links).await;
                     continue;
                 }
-                ItemCommand::Playtest { id, .. } => {
-                    tracing::info!("{}: dropped a playtest answer for {id}: not carried out yet", self.id);
+                ItemCommand::Playtest { id, passed, notes, .. } => {
+                    self.playtest_answer(&id, passed, notes);
                     continue;
                 }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
@@ -108,6 +117,21 @@ impl ProjectLoop {
                 self.starting_over.push((item, notes));
             }
         }
+        for (item, message) in std::mem::take(&mut self.playtest_fails) {
+            if !self
+                .resume_after_playtest(
+                    pool,
+                    &item,
+                    message.as_deref().unwrap_or_default(),
+                    &mut room,
+                    starter,
+                    shared,
+                )
+                .await
+            {
+                self.playtest_fails.push((item, message));
+            }
+        }
         let waiting: Vec<&String> = self
             .continuing
             .iter()
@@ -115,6 +139,108 @@ impl ProjectLoop {
             .map(|(id, _)| id)
             .collect();
         self.claude_pending.retain(|id| waiting.contains(&id));
+    }
+
+    /// Takes in a person's answer to the playtest of `item_id`. Only an `awaiting_playtest` item takes it; any
+    /// other, or an unknown one, has the command dropped and logged. A pass moves the item on at once; a fail past
+    /// `max_review_rounds` stops it (`needs_human`); any other fail waits for a lane to resume the implementer.
+    fn playtest_answer(&mut self, item_id: &str, passed: bool, notes: Option<String>) {
+        let Some(run) = self
+            .runs
+            .get_mut(item_id)
+            .filter(|r| r.state == ItemState::AwaitingPlaytest)
+        else {
+            tracing::info!(
+                "{}: dropped a playtest answer for {item_id}: it isn't awaiting a playtest here",
+                self.id
+            );
+            return;
+        };
+        if self.playtest_fails.iter().any(|(id, _)| id == item_id) {
+            tracing::info!(
+                "{}: dropped a playtest answer for {item_id}: one is already waiting",
+                self.id
+            );
+            return;
+        }
+        let note = |who: &str| Some(format!("a person's playtest: {who}"));
+        let (outcome, who) = if passed {
+            (PlaytestOutcome::Passed, "passed")
+        } else {
+            (PlaytestOutcome::Failed, "found a problem")
+        };
+        if !passed && run.review_rounds < self.project.max_review_rounds {
+            let notes = notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let message = match notes {
+                Some(n) => format!("A person played this build and found a problem. Their notes:\n\n{n}"),
+                None => "A person played this build and found a problem, but left no notes.".to_string(),
+            };
+            self.playtest_fails.push((item_id.to_string(), Some(message)));
+            return;
+        }
+        run.playtest_finished(outcome, &self.project);
+        let to = state_name(run.state);
+        self.events.add_in(
+            &self.id,
+            Event::ItemState(event::ItemState {
+                item: Some(item_id.to_string()),
+                from: Some("awaiting_playtest".into()),
+                to: Some(to.into()),
+                note: note(who),
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// Carries out one failed playtest: the implementer resumes on the item's existing branch with the message.
+    /// False when it must wait for a lane or a session slot.
+    async fn resume_after_playtest(
+        &mut self,
+        pool: &mut LanePool,
+        item_id: &str,
+        message: &str,
+        room: &mut u32,
+        starter: &dyn SessionStarter,
+        shared: &mut Shared<'_>,
+    ) -> bool {
+        if !self
+            .runs
+            .get(item_id)
+            .is_some_and(|r| r.state == ItemState::AwaitingPlaytest)
+        {
+            tracing::info!(
+                "{}: dropped a playtest answer for {item_id}: it isn't awaiting a playtest here",
+                self.id
+            );
+            return true;
+        }
+        if *room == 0 {
+            return false;
+        }
+        let Some(lane) = self.take_lane(pool, item_id) else {
+            return false;
+        };
+        if self.start_held(pool, shared, lane).await {
+            self.give_back_lane(pool, item_id, lane);
+            return false;
+        }
+        let run = self.runs.get_mut(item_id).expect("checked above");
+        run.playtest_finished(PlaytestOutcome::Failed, &self.project);
+        let to = run.state;
+        self.events.add_in(
+            &self.id,
+            Event::ItemState(event::ItemState {
+                item: Some(item_id.to_string()),
+                from: Some("awaiting_playtest".into()),
+                to: Some(state_name(to).into()),
+                lane: Some(lane),
+                note: Some("a person's playtest: found a problem".into()),
+                ..Default::default()
+            }),
+        );
+        let kind = Launch::Continuing(message.to_string());
+        *room -= u32::from(self.launch(pool, item_id, lane, kind, starter, shared).await);
+        true
     }
 
     /// A person acted on `item_id`, so Claude's decision waiting for a lane is dropped (06.9 bullet 17).
