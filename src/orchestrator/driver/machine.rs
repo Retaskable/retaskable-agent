@@ -70,7 +70,7 @@ pub struct Links {
     pub machine: String,
     pub environment: String,
     /// This computer's tags, as `claim_next` is told them (agent-settings.md section 3.1).
-    pub tags: Vec<String>,
+    pub tags: crate::tags::LiveTags,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -857,7 +857,7 @@ pub struct SpawnArgs<'a> {
     pub guard: Option<&'a PortGuard>,
     pub machine: String,
     pub environment: String,
-    pub tags: Vec<String>,
+    pub tags: crate::tags::LiveTags,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts in `claim` mode. None claims no draft.

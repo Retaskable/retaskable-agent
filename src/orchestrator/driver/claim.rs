@@ -96,7 +96,7 @@ impl ProjectLoop {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
+            tags: shared.links.tags.get(),
         };
         let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
             Err(e) => {

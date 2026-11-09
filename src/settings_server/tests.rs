@@ -536,7 +536,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
     settings.set_status_source(StatusSource {
         view: crate::view::AgentView {
             machine: "pc".into(),
-            tags: vec![],
+            tags: Default::default(),
             projects: vec![],
             version: "1.2.3".into(),
             lanes: 3,

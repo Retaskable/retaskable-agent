@@ -37,7 +37,7 @@ pub struct AgentView {
     /// `link::machine_name`.
     pub machine: String,
     /// This computer's tags (computer-tags.md section 3.1).
-    pub tags: Vec<String>,
+    pub tags: crate::tags::LiveTags,
     /// The projects, the first first; none before Setup.
     pub projects: Vec<ProjectView>,
     /// This crate's version in a checkout, or a release build's `build.json` one
@@ -502,7 +502,7 @@ impl AgentView {
     pub(crate) fn blank() -> Self {
         Self {
             machine: "pc".into(),
-            tags: vec![],
+            tags: Default::default(),
             projects: vec![],
             version: "1".into(),
             lanes: 1,
@@ -554,7 +554,7 @@ impl AgentView {
             "capabilities": [],
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
-            "tags": self.tags,
+            "tags": self.tags.get(),
         });
         if self.settings.on().await {
             hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
