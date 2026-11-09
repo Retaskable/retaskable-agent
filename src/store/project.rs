@@ -254,6 +254,21 @@ impl Store {
         self.data.insert("unskipped".to_string(), serde_json::json!(unskipped));
     }
 
+    /// A person's playtest answers for the store's try-out queue that the store hasn't taken yet: the id the
+    /// command named to (passed, notes). Sent again on later passes. Empty when missing.
+    pub fn unanswered(&self) -> std::collections::BTreeMap<String, (bool, Option<String>)> {
+        self.data
+            .get("unanswered")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.unanswered`. Doesn't save on its own; call `save` after.
+    pub fn set_unanswered(&mut self, unanswered: &std::collections::BTreeMap<String, (bool, Option<String>)>) {
+        self.data
+            .insert("unanswered".to_string(), serde_json::json!(unanswered));
+    }
+
     /// Leases let go while their item waits, which the store hasn't taken yet: item id to
     /// (lease token, what it waits for, the item's state). Sent again on later passes.
     pub fn unparked(&self) -> std::collections::BTreeMap<String, (String, String, String)> {
