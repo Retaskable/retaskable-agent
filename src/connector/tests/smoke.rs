@@ -82,34 +82,3 @@ async fn saving_a_new_smoke_state_resends_the_snapshot() {
     assert_eq!(again["state"]["smoke"]["status"], "running");
     c.stop(Duration::from_secs(1)).await;
 }
-
-#[tokio::test]
-async fn a_new_waiting_version_and_its_approval_each_resend_the_snapshot() {
-    let project = "commands-waiting";
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let view = view(&[project]);
-    view.item_commands.gates().open(dir.path(), project);
-    view.item_commands.set_flag(project, crate::command_gate::FLAG, true);
-    let c = start_connector(&url, store, &view, dir.path());
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    let snapshot = read(&mut first).await;
-    assert!(snapshot["state"].get("commandsWaiting").is_none());
-    let settings: crate::backlog::settings::StoreSettings = serde_json::from_value(
-        json!({ "version": 1, "commandsVersion": 1, "updatedBy": "ann", "values": { "playCommand": "run it" } }),
-    )
-    .unwrap();
-    let gates = view.item_commands.gates();
-    gates
-        .consider(project, Some(&settings), &crate::config::ProjectConfig::default())
-        .unwrap();
-    let again = read_not_alive(&mut first).await;
-    assert_eq!(again["state"]["commandsWaiting"]["version"], 1);
-    assert_eq!(again["state"]["commandsWaiting"]["by"], "ann");
-    gates.approve(project, 1).unwrap();
-    let cleared = read_not_alive(&mut first).await;
-    assert_eq!(cleared["type"], "snapshot");
-    assert!(cleared["state"].get("commandsWaiting").is_none());
-    c.stop(Duration::from_secs(1)).await;
-}

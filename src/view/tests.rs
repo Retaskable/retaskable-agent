@@ -573,25 +573,27 @@ fn project_view_derives_its_id_from_the_config() {
 
 #[test]
 fn snapshot_carries_commands_waiting_only_while_one_waits_and_the_flag_is_on() {
+    use crate::backlog::settings::StoreSettings;
     let dir = tempfile::tempdir().unwrap();
     let v = view(vec![]);
-    let gates = v.item_commands.gates();
-    gates.open(dir.path(), "p");
-    let settings = |version: u64, play: &str| -> crate::backlog::settings::StoreSettings {
+    let waiting = || v.snapshot("p", dir.path())["state"].get("commandsWaiting").cloned();
+    let store = |version: u64, play: &str| -> StoreSettings {
         serde_json::from_value(json!({
-            "version": version, "commandsVersion": version, "updatedBy": "ann", "values": { "playCommand": play }
+            "version": version, "commandsVersion": version, "updatedBy": "ann",
+            "values": { "playCommand": play },
         }))
         .unwrap()
     };
     let file = crate::config::ProjectConfig::default();
-    let waiting = |v: &AgentView| v.snapshot("p", dir.path())["state"].get("commandsWaiting").cloned();
-    gates.consider("p", Some(&settings(1, "run it")), &file).unwrap();
-    assert_eq!(waiting(&v), None, "flag Off");
+    let gates = v.item_commands.gates();
+    gates.open(dir.path(), "p");
+    gates.consider("p", Some(&store(1, "run it")), &file).unwrap();
+    assert_eq!(waiting(), None, "flag Off");
     v.item_commands.set_flag("p", crate::command_gate::FLAG, true);
-    let shown = waiting(&v).unwrap();
-    assert_eq!(shown["version"], 1);
-    assert_eq!(shown["by"], "ann");
-    assert!(shown["text"].as_str().unwrap().contains("run it"));
+    let w = waiting().expect("waiting");
+    assert_eq!((w["version"].clone(), w["by"].clone()), (json!(1), json!("ann")));
+    assert!(w["text"].as_str().unwrap().contains("run it"), "{w}");
+    assert!(w.get("values").is_none());
     gates.approve("p", 1).unwrap();
-    assert_eq!(waiting(&v), None, "approved");
+    assert_eq!(waiting(), None, "approved");
 }
