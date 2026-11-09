@@ -29,7 +29,7 @@
 //! [`refilled`]'s fold, `profiles` is the user types and the prompt builder, `store` reads and writes
 //! the shared backlog's own copy of the queue, `write` runs the session and picks the round, and `accept` writes an idea up as a draft.
 //! `test_support` is shared fixtures for this module's own tests.
-mod accept;
+pub(crate) mod accept;
 /// The store's `chore_lock` name for a round (`IDEAS_LOCK`, shared/storeIdeas.ts).
 pub const IDEAS_LOCK: &str = "ideas";
 

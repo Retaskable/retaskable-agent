@@ -14,6 +14,7 @@ fn view() -> AgentView {
             base_branch: String::new(),
             galleries: vec![],
             play_command: String::new(),
+            project_type: Default::default(),
         }],
         version: "9.9.9".into(),
         ..AgentView::blank()

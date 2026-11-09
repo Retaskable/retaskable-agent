@@ -20,6 +20,7 @@ fn project(id: &str, root: &std::path::Path, command: &str) -> ProjectView {
         base_branch: "main".into(),
         galleries: vec![],
         play_command: command.into(),
+        project_type: Default::default(),
     }
 }
 
