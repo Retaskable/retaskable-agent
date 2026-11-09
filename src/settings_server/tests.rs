@@ -602,3 +602,19 @@ async fn settings_link_makes_a_new_token_that_signs_in_once_from_loopback() {
     *now.lock().unwrap() += 299;
     assert!(settings.verify_token(&c, local));
 }
+
+#[tokio::test]
+async fn the_page_has_the_cursor_may_also_run_box_hidden_until_a_role_is_on_cursor() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains(r#"id="cursorAllowGroup" hidden"#));
+    assert!(body.contains("Cursor may also run"));
+    assert!(body.contains("Already allowed, from your checks and galleries: "));
+    // Shown only when the settings carry cursorAllow (flag On) and some role or lane picks Cursor.
+    assert!(body.contains("group.hidden = !rows || !usesCursor(s.engineChoice)"));
+    assert!(body.contains(r#"JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } })"#));
+}

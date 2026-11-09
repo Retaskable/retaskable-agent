@@ -271,6 +271,11 @@
             <p class="hint" id="cursorHint" hidden></p>
             <button type="button" class="btn save" id="saveCursor">Save</button>
           </section>
+          <section class="card group" id="cursorAllowGroup" hidden>
+            <h2>Cursor may also run</h2>
+            <p class="hint">Separate entries with commas or new lines.</p>
+            <div id="cursorAllowProjects"></div>
+          </section>
           <section class="card">
             <div class="head2 inline"><h2>This page</h2><span class="chip warn">Changes need a restart</span></div>
             <div class="field group" id="portGroup">
@@ -433,6 +438,7 @@
     $("localModel").value = s.local.model;
     $("localBaseUrl").value = s.local.baseUrl;
     renderEngines(s.engineChoice, s.lanes);
+    renderCursorAllow(s);
     $("cursorTop").value = s.cursorModels.top || "";
     $("cursorImplementer").value = s.cursorModels.implementer || "";
     $("cursorScout").value = s.cursorModels.scout || "";
@@ -442,6 +448,55 @@
       ? "A password is already set. Empty keeps it."
       : "No password is set yet; one is needed to turn network access on.";
     applyEnvGating(s.envVars);
+  }
+
+  // engines/06-permissions-the-allowlist.md section 6.4: shown only with the flag On (the settings carry
+  // cursorAllow) and once any role or lane is on Cursor.
+  function usesCursor(c) {
+    var picks = [c.default || "claude"].concat(Object.keys(c.roles || {}).map(function (k) { return c.roles[k]; }), c.lanes || []);
+    return picks.indexOf("cursor") >= 0;
+  }
+
+  function renderCursorAllow(s) {
+    var rows = s.cursorAllow;
+    var group = $("cursorAllowGroup");
+    group.hidden = !rows || !usesCursor(s.engineChoice);
+    var box = $("cursorAllowProjects");
+    box.replaceChildren();
+    if (group.hidden) return;
+    rows.forEach(function (row) {
+      var area = h("textarea", "");
+      area.rows = 3;
+      area.placeholder = "Shell(just), Read(docs/**)";
+      area.value = (row.allow || []).join("\n");
+      area.setAttribute("aria-label", "Cursor may also run, " + row.project);
+      var reason = h("p", "hint", "");
+      reason.hidden = true;
+      var inForce = h("p", "hint", row.inForce.line);
+      if (row.inForce.problem) inForce.style.color = "var(--bad-fg)";
+      var button = h("button", "btn save", "Save");
+      button.type = "button";
+      button.addEventListener("click", function () {
+        reason.hidden = true;
+        api("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } }),
+        })
+          .then(function () { setStatus("Saved."); return loadSettings(); })
+          .catch(function (e) {
+            reason.textContent = e.message;
+            reason.style.color = "var(--bad-fg)";
+            reason.hidden = false;
+          });
+      });
+      var parts = ["div", "field", h("h3", "", row.project), area, reason, inForce];
+      if (row.commandShells.length) {
+        parts.push(h("p", "hint", "Already allowed, from your checks and galleries: " + row.commandShells.join(", ")));
+      }
+      parts.push(button);
+      box.append(h.apply(null, parts));
+    });
   }
 
   function loadSettings() {
