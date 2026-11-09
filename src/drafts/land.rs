@@ -56,8 +56,10 @@ pub fn deletes_head(branch: &str) -> bool {
 
 /// `gh pr merge <pr> --squash [--delete-branch]`, run in the project's checkout.
 pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch: bool) -> Result<()> {
+    let number = pr.to_string();
+    crate::host_call::guard("gh", dir, &["pr", "merge", &number, method_flag])?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir).args(["pr", "merge", &pr.to_string(), method_flag]);
+    cmd.current_dir(dir).args(["pr", "merge", &number, method_flag]);
     if delete_branch {
         cmd.arg("--delete-branch");
     }
@@ -78,9 +80,10 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
 
 /// `gh pr close <pr> --delete-branch`, run in the project's checkout.
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
+    let number = pr.to_string();
+    crate::host_call::guard("gh", dir, &["pr", "close", &number])?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir)
-        .args(["pr", "close", &pr.to_string(), "--delete-branch"]);
+    cmd.current_dir(dir).args(["pr", "close", &number, "--delete-branch"]);
     run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
 }
 

@@ -78,6 +78,17 @@ impl Sink {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).push(refusal);
     }
 
+    /// Removes and returns the refusals for calls run in `dir` (tests share the process-wide sink).
+    #[cfg(test)]
+    pub fn take_for(&self, dir: &Path) -> Vec<Refusal> {
+        let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let (mine, rest) = std::mem::take(&mut *all)
+            .into_iter()
+            .partition(|r| r.dir.as_deref() == Some(dir));
+        *all = rest;
+        mine
+    }
+
     /// Everything added since the last call.
     pub fn take(&self) -> Vec<Refusal> {
         std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))

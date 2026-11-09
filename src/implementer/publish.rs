@@ -44,6 +44,7 @@ pub(crate) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<S
 
 /// The first open PR for `branch`, if any.
 fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
+    crate::host_call::guard("gh", dir, &["pr", "list", "--head", branch])?;
     let mut list = Command::new(gh);
     list.current_dir(dir).args([
         "pr",
@@ -87,6 +88,7 @@ pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &s
             created: false,
         });
     }
+    crate::host_call::guard("gh", dir, &["pr", "create", "--base", base, "--head", branch])?;
     let mut create = Command::new(gh);
     create.current_dir(dir).args([
         "pr",
@@ -127,10 +129,12 @@ pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Resul
     let Some(pr) = open_change(gh, dir, branch)? else {
         return Ok(false);
     };
+    let number = pr.number.to_string();
+    crate::host_call::guard("gh", dir, &["pr", "close", &number])?;
     let mut close = Command::new(gh);
     close
         .current_dir(dir)
-        .args(["pr", "close", &pr.number.to_string(), "--comment", comment]);
+        .args(["pr", "close", &number, "--comment", comment]);
     run(close, None, "gh pr close")?;
     Ok(true)
 }
@@ -173,6 +177,50 @@ mod tests {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect()
+    }
+
+    /// With the flag On for `dir`, one refusal for `gh` with `args` and nothing run.
+    fn assert_refused(dir: &Path, args: &[&str]) {
+        assert!(calls(dir).is_empty(), "the fake gh must not run");
+        let got = crate::host_call::Sink::global().take_for(dir);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cmd, "gh");
+        assert_eq!(got[0].args, args);
+    }
+
+    #[test]
+    fn an_undefined_branch_is_refused_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "[]");
+        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
+        let err = open_or_create(&gh, dir.path(), "", "main", "t", "b").unwrap_err();
+        assert!(err.to_string().contains("argument 4 was undefined"), "{err}");
+        assert_refused(dir.path(), &["pr", "list", "--head", ""]);
+        assert!(close_change(&gh, dir.path(), "undefined", "c").is_err());
+        assert_refused(dir.path(), &["pr", "list", "--head", "undefined"]);
+        crate::host_call::set_on_for(vec![]);
+    }
+
+    #[test]
+    fn an_undefined_base_is_refused_before_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "[]");
+        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
+        assert!(open_or_create(&gh, dir.path(), "feat", "NaN", "t", "b").is_err());
+        let got = crate::host_call::Sink::global().take_for(dir.path());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].args, ["pr", "create", "--base", "NaN", "--head", "feat"]);
+        assert_eq!(calls(dir.path()).len(), 1, "only the list ran");
+        crate::host_call::set_on_for(vec![]);
+    }
+
+    #[test]
+    fn with_the_flag_off_an_empty_branch_runs_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "[]");
+        crate::host_call::set_on_for(vec![]);
+        assert!(!close_change(&gh, dir.path(), "", "c").unwrap());
+        assert_eq!(calls(dir.path()).len(), 1);
     }
 
     #[test]
