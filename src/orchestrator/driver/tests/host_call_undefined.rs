@@ -91,7 +91,7 @@ async fn a_project_with_the_flag_off_keeps_today_s_behaviour_beside_one_that_is_
     rig.machine.pass().await;
     let mut n = |i| {
         (rig.lp(i).events.recent().iter())
-            .filter(|e| e.to_value()["kind"] == "host_call_undefined" && e.to_value().to_string().contains("checks"))
+            .filter(|e| e.to_value()["kind"] == "host_call_undefined")
             .count()
     };
     assert_eq!((n(0), n(1)), (1, 0));

@@ -75,7 +75,8 @@ impl ProjectLoop {
             return;
         };
         if self.seen.default_branch.is_none() {
-            self.seen.default_branch = default_branch(&self.project.github_repo).await;
+            self.seen.default_branch =
+                default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
         }
         let Some(main) = self.seen.default_branch.clone() else {
             tracing::warn!(
@@ -386,15 +387,13 @@ async fn git_out(repo_path: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The repo's default branch on GitHub (`gh api repos/<repo> --jq .default_branch`).
-pub(super) async fn default_branch(github_repo: &str) -> Option<String> {
+pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<String> {
     if github_repo.is_empty() {
         return None;
     }
-    let out = tokio::process::Command::new("gh")
-        .args(["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"])
-        .output()
-        .await
-        .ok()?;
+    let args = ["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"];
+    crate::host_call::guard("gh", dir, &args).ok()?;
+    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !branch.is_empty()).then_some(branch)
 }

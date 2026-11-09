@@ -81,7 +81,6 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
 /// `gh pr close <pr> --delete-branch`, run in the project's checkout.
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
     let number = pr.to_string();
-    crate::host_call::guard("gh", dir, &["pr", "close", &number, "--delete-branch"])?;
     let mut cmd = Command::new(gh);
     cmd.current_dir(dir).args(["pr", "close", &number, "--delete-branch"]);
     run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
