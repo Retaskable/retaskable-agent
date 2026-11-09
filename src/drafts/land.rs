@@ -172,15 +172,7 @@ mod tests {
     #[test]
     fn a_merge_with_an_undefined_argument_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
-        let ran = dir.path().join("ran");
-        let gh = dir.path().join(if cfg!(windows) { "gh.cmd" } else { "gh.sh" });
-        let script = if cfg!(windows) {
-            format!("@echo off\r\necho x > \"{}\"\r\n", ran.display())
-        } else {
-            format!("#!/bin/sh\ntouch \"{}\"\n", ran.display())
-        };
-        crate::test_support::write_executable(&gh, &script);
-        let _ = std::fs::remove_file(&ran); // the helper ran the script once
+        let (gh, ran) = crate::test_support::fake_gh_that_marks(dir.path());
         crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
         let err = merge_pr(&gh, dir.path(), 7, "", true).unwrap_err();
         assert!(err.to_string().contains("was not run"), "{err}");
