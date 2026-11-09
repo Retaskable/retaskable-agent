@@ -7,8 +7,8 @@
 //! match. A plain remote is handled with git alone (`repo_info` reads its default branch with `git
 //! ls-remote --symref`, `remote_reachable` checks it, `clone_remote` clones it, `find_checkout`
 //! matches it by its normalised URL), and it has no owner list, so listing it is an error. A
-//! local-only project and the full `GithubPicker`'s caching and
-//! clone-serialising lock aren't, since this agent's trimmed spec doesn't reach them yet.
+//! local-only project and the full `GithubPicker`'s clone-serialising
+//! lock aren't (its caching is `repo_picker`), since this agent's trimmed spec doesn't reach them yet.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
