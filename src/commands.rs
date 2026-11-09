@@ -463,7 +463,7 @@ fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
 fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
     let slug = cmd.args.get("gallery").and_then(Value::as_str).unwrap_or("");
     let not_found = || nack(&cmd.id, format!("No gallery called {slug}."));
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+    let Some(p) = allowed_project(view, project) else {
         return not_found();
     };
     let Some(gallery) = p.galleries.iter().find(|g| g.slug() == slug) else {
@@ -538,7 +538,7 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
         Some(0) => {}
         Some(k) if k > 0 && k <= i64::from(view.lanes) => {
             claim_check(view)?;
-            let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+            let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
             let (project, lane) = (project.to_string(), k as u32);
@@ -555,11 +555,11 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
         Some(k) if k > 0 => return Err(format!("This computer has no lane {k}.")),
         _ => return Err(format!("{name} needs a lane.")),
     }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+    let Some(p) = allowed_project(view, project) else {
         return Err("Finish setup first.".to_string());
     };
     if play {
-        crate::play::start(project, p)
+        crate::play::start(project, &p)
     } else {
         crate::play::stop(project)
     }
@@ -572,7 +572,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         Some(k) if k > i64::from(view.lanes) => return Err(format!("This computer has no lane {k}.")),
         Some(k) if k > 0 => {
             claim_check(view)?;
-            let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+            let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
             if p.play_command.trim().is_empty() {
@@ -586,10 +586,16 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         }
         _ => return Err("restart_play needs a lane.".to_string()),
     }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+    let Some(p) = allowed_project(view, project) else {
         return Err("Finish setup first.".to_string());
     };
-    crate::play::restart(project, p)
+    crate::play::restart(project, &p)
+}
+
+/// The project as the connector holds it, with the commands this computer may run (`approve-commands-gate`).
+fn allowed_project(view: &AgentView, project: &str) -> Option<crate::view::ProjectView> {
+    let p = view.projects.iter().find(|p| p.id == project)?;
+    Some(view.item_commands.allowed_view(p))
 }
 
 /// `ack`, or `nack` with the reason.
