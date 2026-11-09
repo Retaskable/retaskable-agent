@@ -580,3 +580,85 @@ fn list_images_gives_every_picture_a_servable_unique_jpg_name() {
     assert_eq!(files.len(), 8);
     assert_eq!(png_to_jpg_name("é.png"), "-.jpg");
 }
+
+fn feedback_fixture(root: &Path) -> Vec<GalleryConfig> {
+    let galleries = vec![
+        GalleryConfig {
+            name: "Models".into(),
+            command: "x".into(),
+            out_dir: "shots".into(),
+        },
+        GalleryConfig {
+            name: "UI".into(),
+            command: "x".into(),
+            out_dir: "shots".into(),
+        },
+    ];
+    let dir = paths::gallery_dir(root, "proj", &galleries[0].slug());
+    std::fs::create_dir_all(&dir).unwrap();
+    let index = GalleryIndex {
+        name: "Models".into(),
+        shot_at: "2026-01-01T00:00:00Z".into(),
+        sha: "abc".into(),
+        images: vec![GalleryImage {
+            file: "ship.jpg".into(),
+            title: "Ship".into(),
+            group: Some("Hulls".into()),
+        }],
+    };
+    std::fs::write(dir.join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+    galleries
+}
+
+fn request(root: &Path, g: &[GalleryConfig], slug: &str, file: Option<&str>, notes: &str) -> Result<String, String> {
+    feedback_request(root, "proj", g, crate::config::ProjectType::Game, slug, file, notes)
+}
+
+#[test]
+fn feedback_for_a_whole_gallery_names_it_and_quotes_the_notes() {
+    let root = tempfile::tempdir().unwrap();
+    let g = feedback_fixture(root.path());
+    let out = request(root.path(), &g, "models", None, "  Hulls are too dark  ").unwrap();
+    assert!(out.contains("**Models** gallery") && out.contains("the gallery as a whole"));
+    assert!(out.contains("> Hulls are too dark\n"));
+    assert!(out.contains("\"Models\" theme") && !out.contains("{{"));
+}
+
+#[test]
+fn feedback_for_a_picture_gives_its_title_group_and_saved_path() {
+    let root = tempfile::tempdir().unwrap();
+    let g = feedback_fixture(root.path());
+    let out = request(root.path(), &g, "models", Some("ship.jpg"), "Too dark").unwrap();
+    let path = paths::gallery_dir(root.path(), "proj", "models").join("ship.jpg");
+    assert!(out.contains("**Ship** (Hulls)"));
+    assert!(out.contains(&format!("`{}`", path.display())));
+    assert!(!out.contains("{{"));
+}
+
+#[test]
+fn feedback_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    let g = feedback_fixture(root.path());
+    assert_eq!(
+        request(root.path(), &g, "nope", None, "x").unwrap_err(),
+        "No gallery called nope."
+    );
+    assert_eq!(
+        request(root.path(), &g, "../models", None, "x").unwrap_err(),
+        "No gallery called ../models."
+    );
+    assert_eq!(
+        request(root.path(), &g, "ui", None, "x").unwrap_err(),
+        "No pictures in UI yet: shoot it first."
+    );
+    assert_eq!(
+        request(root.path(), &g, "models", None, "  ").unwrap_err(),
+        "Say what should change."
+    );
+    for file in ["other.jpg", "../ship.jpg", "a/ship.jpg", "a\\ship.jpg"] {
+        assert_eq!(
+            request(root.path(), &g, "models", Some(file), "x").unwrap_err(),
+            format!("No picture {file} in Models")
+        );
+    }
+}
