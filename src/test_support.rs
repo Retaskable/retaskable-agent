@@ -381,6 +381,7 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         base_branch: String::new(),
         galleries: vec![],
         play_command: String::new(),
+        project_type: Default::default(),
     }
 }
 

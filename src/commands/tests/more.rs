@@ -690,3 +690,88 @@ mod gallery_read {
         assert!(go(&old, &mut seen)["reason"].as_str().unwrap().starts_with("Expired"));
     }
 }
+
+/// A view whose project has a "Models" gallery, shot once into `dir`, with the flag On.
+fn feedback_view(dir: &Path, flag: bool) -> AgentView {
+    let mut v = claiming();
+    v.projects[0].galleries = vec![
+        crate::config::GalleryConfig {
+            name: "Models".into(),
+            command: "x".into(),
+            out_dir: "shots".into(),
+        },
+        crate::config::GalleryConfig {
+            name: "UI".into(),
+            command: "x".into(),
+            out_dir: "shots".into(),
+        },
+    ];
+    let shot = paths::gallery_dir(dir, "one", "models");
+    std::fs::create_dir_all(&shot).unwrap();
+    let index = json!({ "name": "Models", "shotAt": "2026-01-01T00:00:00Z", "sha": "abc", "images": [] });
+    std::fs::write(shot.join("index.json"), index.to_string()).unwrap();
+    v.item_commands.set_flag("one", "gallery-feedback-command", flag);
+    v
+}
+
+fn feedback(v: &AgentView, args: Value, dir: &Path) -> Value {
+    run(
+        &cmd("gallery_feedback", args),
+        "one",
+        &mut Seen::default(),
+        v,
+        &|_| {},
+        dir,
+    )
+}
+
+fn nothing_saved(dir: &Path) -> bool {
+    !dir.join("attachments").exists() || std::fs::read_dir(dir.join("attachments")).unwrap().count() == 0
+}
+
+#[test]
+fn gallery_feedback_is_an_unknown_command_while_the_flag_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = feedback_view(dir.path(), false);
+    let a = feedback(&v, json!({ "gallery": "models", "notes": "Darker" }), dir.path());
+    assert_eq!(a["reason"], "Not a command this agent takes yet: gallery_feedback");
+    assert!(v.item_commands.take_feedback("one").is_empty());
+}
+
+#[test]
+fn gallery_feedback_refusals_queue_nothing_and_save_no_picture() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = feedback_view(dir.path(), true);
+    let bad = json!([picture(10), { "type": "text/plain", "data": "x" }]);
+    for args in [
+        json!({ "gallery": "nope", "notes": "x", "pictures": [picture(10)] }),
+        json!({ "gallery": "ui", "notes": "x", "pictures": [picture(10)] }),
+        json!({ "gallery": "models", "notes": "  ", "pictures": [picture(10)] }),
+        json!({ "gallery": "models", "notes": "x", "pictures": bad }),
+    ] {
+        assert_eq!(feedback(&v, args, dir.path())["type"], "nack");
+    }
+    assert!(nothing_saved(dir.path()));
+    assert!(v.item_commands.take_feedback("one").is_empty());
+}
+
+#[test]
+fn a_good_gallery_feedback_is_pending_and_queued_with_the_pictures_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = feedback_view(dir.path(), true);
+    let args = json!({ "gallery": "models", "notes": "Darker", "pictures": [picture(10)] });
+    assert_eq!(feedback(&v, args, dir.path())["type"], crate::commands::PENDING);
+    let off = json!({ "gallery": "models", "notes": "Darker", "doNext": false });
+    assert_eq!(feedback(&v, off, dir.path())["type"], crate::commands::PENDING);
+    let queued = v.item_commands.take_feedback("one");
+    assert_eq!(queued.len(), 2);
+    assert!(queued[0].do_next && !queued[1].do_next);
+    assert_eq!((queued[0].by.as_str(), queued[0].command_id.as_str()), ("jc", "c1"));
+    let saved = std::fs::read_dir(dir.path().join("attachments"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert!(queued[0].request.contains(&saved.path().display().to_string()));
+    assert!(queued[0].request.contains("Darker"));
+}

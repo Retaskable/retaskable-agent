@@ -25,6 +25,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
             base_branch: "main".into(),
             galleries: vec![],
             play_command: command.into(),
+            project_type: Default::default(),
         }],
         version: "9.9.9".into(),
         lanes: 2,

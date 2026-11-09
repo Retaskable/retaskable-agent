@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::config::{GalleryConfig, ProjectConfig};
+use crate::config::{GalleryConfig, ProjectConfig, ProjectType};
 use crate::galleries;
 use crate::hello_settings::HelloSettings;
 
@@ -157,6 +157,19 @@ pub struct IdeaCommand {
     pub by: String,
 }
 
+/// A `gallery_feedback` waiting for the loop, which queues the request as a spec draft and answers command `command_id`.
+#[derive(Debug, Clone)]
+pub struct GalleryFeedbackCommand {
+    pub project: String,
+    pub command_id: String,
+    /// The rendered request (`galleries::feedback_request`) with the saved pictures' paths.
+    pub request: String,
+    /// Whether the draft goes on to be built (`intake.doNext`).
+    pub do_next: bool,
+    /// Who sent it.
+    pub by: String,
+}
+
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -169,6 +182,7 @@ pub struct ItemCommands {
     /// The `(project, flag)` pairs On, set by the loop each pass.
     flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
+    feedback: Arc<std::sync::Mutex<Vec<GalleryFeedbackCommand>>>,
     /// The number auto concurrency last allowed and why; `None` while it is Off or has not stepped yet.
     auto: Arc<std::sync::Mutex<Option<(u32, String)>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
@@ -239,6 +253,20 @@ impl ItemCommands {
     /// Removes and returns the `idea_accept`s queued for `project`, oldest first.
     pub fn take_ideas(&self, project: &str) -> Vec<IdeaCommand> {
         let mut queue = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project == project);
+        *queue = rest;
+        mine
+    }
+
+    pub fn push_feedback(&self, command: GalleryFeedbackCommand) {
+        self.feedback.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the `gallery_feedback`s queued for `project`, oldest first.
+    pub fn take_feedback(&self, project: &str) -> Vec<GalleryFeedbackCommand> {
+        let mut queue = self.feedback.lock().unwrap_or_else(|e| e.into_inner());
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
@@ -364,6 +392,8 @@ pub struct ProjectView {
     pub galleries: Vec<GalleryConfig>,
     /// Play main's command (`commands.rs`'s `play`).
     pub play_command: String,
+    /// Picks the words of a gallery feedback request.
+    pub project_type: ProjectType,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -377,6 +407,7 @@ impl From<&ProjectConfig> for ProjectView {
             base_branch: p.base_branch.clone(),
             galleries: p.galleries.clone(),
             play_command: p.play_command.clone(),
+            project_type: p.project_type,
         }
     }
 }
