@@ -414,6 +414,8 @@ async fn session(
     local_down.mark_unchanged();
     let mut settings_saved = view.settings.subscribe();
     settings_saved.mark_unchanged();
+    let mut checks_changed = view.checks.subscribe();
+    checks_changed.mark_unchanged();
     let mut live = view.live.subscribe();
     live.mark_unchanged();
     // When a change in the loop's state is due to be sent: later changes in the wait go in the same snapshot.
@@ -446,6 +448,7 @@ async fn session(
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
+            Ok(()) = checks_changed.changed() => Some(view.hello(project).await),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = live.changed(), if live_due.is_none() => {
