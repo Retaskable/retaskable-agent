@@ -228,6 +228,33 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
 }
 
 #[tokio::test]
+async fn with_the_tags_flag_on_a_wake_ends_a_run_wait_only_when_the_tags_changed() {
+    let (mut rig, script) = setup(2).await;
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["tags-reread-on-save"]));
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] })]);
+    pass(&mut rig, &starter, t0).await;
+    assert_eq!(script.lock().unwrap().args("run_take").len(), 1);
+    let id = rig.machine.projects[0].id.clone();
+    rig.machine.links.work.wake(&id);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(2)).await;
+    assert_eq!(
+        script.lock().unwrap().args("run_take").len(),
+        1,
+        "an unchanged list: no new ask"
+    );
+    rig.machine.links.tags.set(vec!["gpu".to_string()]);
+    rig.machine.links.work.wake(&id);
+    rig.machine.links.work.wake(&id);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(3)).await;
+    let asks = script.lock().unwrap().args("run_take");
+    assert_eq!(asks.len(), 2, "one new ask after a change");
+    assert_eq!(asks[1]["agent"]["tags"], json!(["gpu"]));
+}
+
+#[tokio::test]
 async fn each_minute_one_beat_with_every_live_token_and_stop_interrupts() {
     let (mut rig, script) = setup(2).await;
     let starter = FakeRuns::new(&[RunKind::Build]);

@@ -22,7 +22,7 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> Option<String> {
-        self.hear_work_wake(shared);
+        self.hear_work_wake(shared).await;
         if self.claim_waiting {
             return None;
         }
@@ -92,6 +92,7 @@ impl ProjectLoop {
                 return None;
             }
         };
+        self.tags_seen = shared.links.tags.generation();
         let agent = ClaimNextAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
