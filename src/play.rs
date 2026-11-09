@@ -126,6 +126,15 @@ pub fn stop(project: &str) -> Result<(), String> {
     }
 }
 
+/// Restarts Play main: stops it if it is running (nacking as [`stop`] does, and starting nothing, if it didn't
+/// close), then [`start`]s it with its own checks and refusals. Not running is not an error.
+pub fn restart(project: &str, p: &ProjectView) -> Result<(), String> {
+    if running(project) {
+        stop(project)?;
+    }
+    start(project, p)
+}
+
 // A window opens for this one (no CREATE_NO_WINDOW), unlike every other child.
 #[cfg(windows)]
 fn shell(command: &str) -> std::process::Command {

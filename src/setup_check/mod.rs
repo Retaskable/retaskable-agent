@@ -17,6 +17,9 @@ use crate::engines::resolve::{
     codex_found, pi_found, resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
 };
 
+pub mod runner;
+pub use runner::SetupCheckRunner;
+
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
 mod fixes {
@@ -82,6 +85,37 @@ pub struct SetupChecks {
     pub codex: Option<SetupCheck>,
     /// Docker for agent CI (agent-ci.md section 3.6); `None` unless the `agent-ci` flag is On.
     pub docker: Option<SetupCheck>,
+}
+
+impl SetupCheck {
+    fn to_json(&self) -> Value {
+        let mut v = serde_json::json!({ "ok": self.ok, "detail": self.detail });
+        if let Some(fix) = &self.fix {
+            v["fix"] = Value::String(fix.clone());
+        }
+        v
+    }
+}
+
+impl SetupChecks {
+    /// `SetupChecks` in `shared/types.ts`. `node` is a stand-in: the hub's schema asks for one.
+    pub fn to_json(&self) -> Value {
+        let mut v = serde_json::json!({
+            "node": { "ok": true, "detail": "Not needed: this agent is a compiled program" },
+            "git": self.git.to_json(),
+            "ghInstalled": self.gh_installed.to_json(),
+            "gh": self.gh.to_json(),
+            "claude": self.claude.to_json(),
+            "claudeSignedIn": self.claude_signed_in.to_json(),
+            "cursor": self.cursor.to_json(),
+        });
+        for (key, check) in [("pi", &self.pi), ("codex", &self.codex), ("docker", &self.docker)] {
+            if let Some(c) = check {
+                v[key] = c.to_json();
+            }
+        }
+        v
+    }
 }
 
 struct RunOutput {

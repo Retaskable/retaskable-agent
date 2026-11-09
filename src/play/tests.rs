@@ -85,3 +85,38 @@ fn play_is_refused_while_a_shoot_holds_the_base_checkout() {
     );
     assert!(!running(id));
 }
+
+#[test]
+fn restart_starts_when_nothing_runs_and_replaces_a_running_process() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "play-restart";
+    let p = project(id, root.path(), LONG_RUNNING);
+    restart(id, &p).unwrap();
+    assert!(running(id));
+    let first = lock(&RUNNING).get(id).cloned().unwrap();
+    restart(id, &p).unwrap();
+    let second = lock(&RUNNING).get(id).cloned().unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert!(running(id));
+    assert!(crate::base_hold::base_holder(id).is_some());
+    stop(id).unwrap();
+    wait_for(|| !running(id) && crate::base_hold::base_holder(id).is_none());
+}
+
+#[test]
+fn restart_is_refused_like_play() {
+    let root = tempfile::tempdir().unwrap();
+    let blank = project("restart-blank", root.path(), " ");
+    assert_eq!(
+        restart("restart-blank", &blank).unwrap_err(),
+        "No play command set for this project."
+    );
+    let id = "restart-vs-shoot";
+    let root2 = tempfile::tempdir().unwrap();
+    let p = project(id, root2.path(), LONG_RUNNING);
+    let _shoot = crate::base_hold::hold_base(id, "a shoot").unwrap();
+    assert_eq!(
+        restart(id, &p).unwrap_err(),
+        "The base checkout is busy: a shoot is using it."
+    );
+}
