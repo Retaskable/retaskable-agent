@@ -431,6 +431,11 @@ impl AgentView {
         if let Some(settings) = self.settings.json().await {
             hello["settings"] = settings;
         }
+        if self.settings.setup_checks_on().await
+            && let Some(checks) = self.checks.latest()
+        {
+            hello["checks"] = checks.to_json();
+        }
         hello
     }
 

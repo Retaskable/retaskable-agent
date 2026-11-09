@@ -14,6 +14,7 @@ use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
 use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 
+mod checks;
 mod live;
 mod smoke;
 

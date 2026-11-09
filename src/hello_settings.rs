@@ -52,6 +52,10 @@ pub const FLAG: &str = "machine-settings";
 /// The release flag that shows the CI slots setting (agent-ci.md); Off leaves the hello and the page as they were.
 pub const CI_FLAG: &str = "agent-ci";
 
+/// The release flag that sends the setup checks in the hello (first-run-check.md section 3.1); Off leaves the hello as it was.
+/// The flag client's `PROJECT_ID` and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
+pub const CHECKS_FLAG: &str = "setup-check-command";
+
 #[derive(Clone)]
 struct Source {
     dir: PathBuf,
@@ -104,6 +108,14 @@ impl HelloSettings {
     pub async fn on(&self) -> bool {
         match &self.source {
             Some(s) => s.flags.on(FLAG).await,
+            None => false,
+        }
+    }
+
+    /// Whether the `setup-check-command` flag is On, asking again when the last answer is stale; no source means Off.
+    pub async fn setup_checks_on(&self) -> bool {
+        match &self.source {
+            Some(s) => s.flags.on(CHECKS_FLAG).await,
             None => false,
         }
     }
