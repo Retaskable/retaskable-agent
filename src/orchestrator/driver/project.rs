@@ -332,6 +332,8 @@ pub struct ProjectLoop {
     pub(super) max_resume_context_tokens: u32,
     /// Continues waiting for a free lane (`item_commands.rs`).
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
+    /// Failed playtest answers waiting for a lane: the item and the message to resume the implementer with.
+    pub(super) playtest_fails: Vec<super::item_commands::PendingContinue>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
     pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
@@ -425,6 +427,7 @@ impl ProjectLoop {
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
+            playtest_fails: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
@@ -525,7 +528,7 @@ impl ProjectLoop {
             0
         };
         let payload = tick_payload(paused, pool, sessions);
-        let would: Vec<String> = actions.iter().map(describe).collect();
+        let would: Vec<String> = actions.iter().map(super::start_gate::describe).collect();
         let decision = match actions.first() {
             None if paused => "paused: would do nothing".to_string(),
             None => "would do nothing".to_string(),
@@ -988,13 +991,5 @@ impl ProjectLoop {
                 .collect();
         }
         started
-    }
-}
-
-fn describe(action: &Action) -> String {
-    match action {
-        Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
-        Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
-        Action::AskForWork => "ask_for_work".into(),
     }
 }
