@@ -587,6 +587,11 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .on("cursor-allow-derive")
             .await,
     );
+    settings.set_backlog_link_flag(
+        retaskable_agent::flags::Flags::from_env()
+            .on("backlog-link-route")
+            .await,
+    );
     settings.set_agent_ci_flag(retaskable_agent::flags::Flags::from_env().on("agent-ci").await);
     settings.set_live_sessions_flag(
         retaskable_agent::flags::Flags::from_env()
@@ -594,6 +599,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .await,
     );
     settings.set_saved_signal(view.settings.clone());
+    settings.set_links(links.clone());
     // `tags-reread-on-save`: a save on the settings page changes the list the next ask carries.
     {
         let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
