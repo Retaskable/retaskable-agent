@@ -109,6 +109,9 @@ pub struct ProjectFacts {
     /// The project's own pause (for every computer on it), set from the store.
     #[serde(default)]
     pub paused: bool,
+    /// The store's own words for that pause ("Paused by @james for everyone").
+    #[serde(default)]
+    pub paused_reason: Option<String>,
     /// What the project's sessions cost today, in USD, across computers.
     #[serde(default)]
     pub spent_today_usd: f64,

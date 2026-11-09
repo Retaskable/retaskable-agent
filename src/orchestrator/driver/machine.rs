@@ -30,7 +30,7 @@ use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
 use crate::process_tree;
 use crate::telemetry::{Event, event};
-use crate::view::{ItemCommands, PauseState};
+use crate::view::{ItemCommands, PauseState, StorePause, StorePauseState};
 
 /// How often the loop reads every project's backlog and writes its `tick` events: the TS agent's once a
 /// minute (`MINUTE_MS` in `agent/src/pool.ts`).
@@ -59,6 +59,8 @@ pub struct Links {
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
     pub paused: PauseState,
+    /// The store's pause for each project, recorded from the pass's read (`obey-shared-pause`).
+    pub store_paused: StorePauseState,
     /// Item commands (Continue) queued by the connector's thread, drained on each pass.
     pub item_commands: ItemCommands,
     /// The cloud link's `work_available` wake-ups, one per project.
@@ -550,16 +552,18 @@ impl Machine {
             .iter()
             .map(|lp| (lp.id.clone(), lp.flags.clone()))
             .collect();
+        let mut obey_on = Vec::new();
         for (id, flags) in asked {
             let on = flags.on(crate::command_gate::FLAG).await;
             self.links.item_commands.set_flag(&id, crate::command_gate::FLAG, on);
             gate_on.push(on);
+            obey_on.push(flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await);
         }
         let jobs: Vec<_> = self
             .projects
             .iter()
-            .zip(&gate_on)
-            .map(|(lp, &on)| {
+            .zip(gate_on.iter().zip(&obey_on))
+            .map(|(lp, (&on, &facts))| {
                 tokio::spawn(read(
                     lp.client.clone(),
                     lp.id.clone(),
@@ -568,6 +572,7 @@ impl Machine {
                     self.links.backlog_url.clone(),
                     self.links.keychain.clone(),
                     on,
+                    facts,
                 ))
             })
             .collect();
@@ -579,9 +584,19 @@ impl Machine {
                     repo: lp.repo,
                     items: Err(Fail::Cant(format!("the backlog read failed: {e}"))),
                     settings: None,
+                    facts: None,
                 }
             });
             lp.repo = done.repo;
+            // Off: nothing was read, so nothing is held. A failed read, of the items or the facts, is unknown.
+            let pause = match (&done.items, done.facts) {
+                (Ok(_), Some(Ok(facts))) if facts.paused => {
+                    StorePause::Paused(facts.paused_reason.unwrap_or_else(|| "Paused for everyone".to_string()))
+                }
+                (Ok(_), Some(Ok(_))) => StorePause::NotPaused,
+                _ => StorePause::Unknown,
+            };
+            self.links.store_paused.set(&lp.id, pause);
             lp.take_allowed_commands(&self.links.item_commands, done.settings);
             read_items.push(match done.items {
                 Ok(items) => Some(items),
@@ -811,6 +826,7 @@ pub struct SpawnArgs<'a> {
     pub backlog_url: &'a str,
     pub keychain: &'a Arc<dyn TokenStore>,
     pub paused: &'a PauseState,
+    pub store_paused: &'a StorePauseState,
     pub item_commands: &'a ItemCommands,
     pub work: &'a crate::work_signal::WorkSignals,
     pub live: &'a LiveHandle,
@@ -869,6 +885,7 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             keychain: args.keychain.clone(),
             paused: args.paused.clone(),
+            store_paused: args.store_paused.clone(),
             item_commands: args.item_commands.clone(),
             work: args.work.clone(),
             machine: args.machine,

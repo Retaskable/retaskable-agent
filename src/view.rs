@@ -51,6 +51,9 @@ pub struct AgentView {
     /// Each paused project's reason, Pause and Resume's (orchestrator.ts's `paused`/`pausedReason`); a change
     /// sends that project's snapshot again, as a lane-size change does.
     pub paused: PauseState,
+    /// Each project's pause as the shared backlog's store says it (`obey-shared-pause`); a change sends that
+    /// project's snapshot again.
+    pub store_paused: StorePauseState,
     /// Item commands (Continue) the connector's thread hands to the orchestrator loop.
     pub item_commands: ItemCommands,
     /// Each project's `work_available` wake-up for its run loop.
@@ -403,6 +406,60 @@ impl PauseState {
     }
 }
 
+/// The release flag that has the loop read the shared backlog's pause each pass.
+pub const OBEY_SHARED_PAUSE_FLAG: &str = "obey-shared-pause";
+
+/// What the store says about a project's own pause.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum StorePause {
+    NotPaused,
+    /// Paused, in the store's own words.
+    Paused(String),
+    /// The store wasn't reached, or wasn't asked.
+    #[default]
+    Unknown,
+}
+
+/// Each project's [`StorePause`], kept and watched like [`PauseState`]: a change resends the project's snapshot.
+/// A project with nothing recorded is [`StorePause::Unknown`].
+#[derive(Debug, Clone)]
+pub struct StorePauseState(Arc<watch::Sender<BTreeMap<String, StorePause>>>);
+
+impl Default for StorePauseState {
+    fn default() -> Self {
+        Self(Arc::new(watch::Sender::new(BTreeMap::new())))
+    }
+}
+
+impl PartialEq for StorePauseState {
+    fn eq(&self, other: &Self) -> bool {
+        *self.0.borrow() == *other.0.borrow()
+    }
+}
+
+impl StorePauseState {
+    pub fn get(&self, project: &str) -> StorePause {
+        self.0.borrow().get(project).cloned().unwrap_or_default()
+    }
+
+    pub fn set(&self, project: &str, pause: StorePause) {
+        self.0.send_if_modified(|all| {
+            if pause == StorePause::Unknown {
+                return all.remove(project).is_some();
+            }
+            if all.get(project) == Some(&pause) {
+                return false;
+            }
+            all.insert(project.to_string(), pause);
+            true
+        });
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<BTreeMap<String, StorePause>> {
+        self.0.subscribe()
+    }
+}
+
 /// A project as its hub knows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectView {
@@ -450,6 +507,7 @@ impl AgentView {
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            store_paused: Default::default(),
             item_commands: Default::default(),
             work: Default::default(),
             restart: Default::default(),

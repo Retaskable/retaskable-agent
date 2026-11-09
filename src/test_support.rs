@@ -403,6 +403,7 @@ pub(crate) fn agent_view(
         chore_lane: Some(lanes),
         lane_sizes: LaneSizes::default(),
         paused: Default::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),

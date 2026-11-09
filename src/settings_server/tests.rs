@@ -543,6 +543,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            store_paused: Default::default(),
             item_commands: Default::default(),
             work: Default::default(),
             restart: Default::default(),

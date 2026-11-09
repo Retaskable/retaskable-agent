@@ -575,3 +575,23 @@ fn a_command_with_no_entry_logs_its_args_unchanged() {
     let (_, a) = logged("skip", json!({ "id": "a" }));
     assert_eq!(a, json!({ "id": "a" }));
 }
+
+#[test]
+fn resume_computer_leaves_the_stores_pause_alone() {
+    let v = view();
+    let noop = |_: i32| {};
+    v.store_paused
+        .set("one", crate::view::StorePause::Paused("Paused for everyone".into()));
+    run(
+        &cmd("resume", json!({ "computer": true })),
+        "one",
+        &mut Seen::default(),
+        &v,
+        &noop,
+        &data_dir(),
+    );
+    assert_eq!(
+        v.store_paused.get("one"),
+        crate::view::StorePause::Paused("Paused for everyone".into())
+    );
+}

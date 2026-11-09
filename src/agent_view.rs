@@ -30,6 +30,7 @@ pub fn agent_view(
         local: local.clone(),
         lane_sizes: lane_pool::LaneSizes::default(),
         paused: view::PauseState::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),

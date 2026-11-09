@@ -132,6 +132,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         machine: "my-pc".into(),
@@ -989,6 +990,7 @@ mod settling;
 mod start_blocked;
 mod starter;
 mod step_events;
+mod store_pause;
 mod triage;
 mod trial;
 mod vet_daily;

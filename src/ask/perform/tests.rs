@@ -32,6 +32,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         chore_lane: None,
         lane_sizes: Default::default(),
         paused: Default::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),

@@ -400,6 +400,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         backlog_url: &backlog::url(env),
         keychain: &keychain,
         paused: &view.paused,
+        store_paused: &view.store_paused,
         item_commands: &view.item_commands,
         work: &view.work,
         live: &live,
