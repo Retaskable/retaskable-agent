@@ -105,13 +105,22 @@ pub fn repo_info(repo_path: &Path) -> RepoInfo {
     info
 }
 
+/// Runs `gh` (in `dir` when given) unless an argument is undefined ([`crate::host_call::guard_program`]).
+fn gh(dir: Option<&Path>, args: &[&str]) -> std::io::Result<std::process::Output> {
+    crate::host_call::guard_program("gh", dir, args).map_err(std::io::Error::other)?;
+    let mut cmd = Command::new("gh");
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    cmd.args(args).output()
+}
+
 /// `gh repo view --json nameWithOwner,defaultBranchRef,isFork,parent` over `origin`.
 fn github_repo_info(repo_path: &Path) -> RepoInfo {
-    let Ok(output) = Command::new("gh")
-        .current_dir(repo_path)
-        .args(["repo", "view", "--json", "nameWithOwner,defaultBranchRef,isFork,parent"])
-        .output()
-    else {
+    let Ok(output) = gh(
+        Some(repo_path),
+        &["repo", "view", "--json", "nameWithOwner,defaultBranchRef,isFork,parent"],
+    ) else {
         return RepoInfo::default();
     };
     if !output.status.success() {
@@ -161,9 +170,7 @@ fn upstream_of(is_fork: bool, parent: Option<&Parent>) -> Option<Upstream> {
     let owner = parent.owner.as_ref()?.login.as_ref()?;
     let name = parent.name.as_ref()?;
     let repo = format!("{owner}/{name}");
-    let default_branch = Command::new("gh")
-        .args(["repo", "view", &repo, "--json", "defaultBranchRef"])
-        .output()
+    let default_branch = gh(None, &["repo", "view", &repo, "--json", "defaultBranchRef"])
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| serde_json::from_slice::<DefaultBranchOnly>(&o.stdout).ok())
@@ -174,10 +181,7 @@ fn upstream_of(is_fork: bool, parent: Option<&Parent>) -> Option<Upstream> {
 
 /// `gh api user`'s `login`, or `None` when `gh` isn't signed in.
 pub fn github_login() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["api", "user", "--jq", ".login"])
-        .output()
-        .ok()?;
+    let output = gh(None, &["api", "user", "--jq", ".login"]).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -187,10 +191,7 @@ pub fn github_login() -> Option<String> {
 
 /// Whether `gh` is signed in (`gh auth status`'s exit code).
 pub fn gh_authenticated() -> bool {
-    Command::new("gh")
-        .args(["auth", "status"])
-        .output()
-        .is_ok_and(|o| o.status.success())
+    gh(None, &["auth", "status"]).is_ok_and(|o| o.status.success())
 }
 
 /// `glab api user`'s `username`, or `None` when `glab` isn't signed in.
@@ -215,16 +216,17 @@ pub fn list_owners(host: CodeHost) -> Result<Vec<String>> {
 
 fn github_owners() -> Result<Vec<String>> {
     let login = github_login().context("gh isn't signed in")?;
-    let output = Command::new("gh")
-        .args([
+    let output = gh(
+        None,
+        &[
             "api",
             "--paginate",
             "user/memberships/orgs?state=active",
             "--jq",
             ".[].organization.login",
-        ])
-        .output()
-        .context("running gh api")?;
+        ],
+    )
+    .context("running gh api")?;
     let mut owners = vec![login];
     if output.status.success() {
         owners.extend(
@@ -259,8 +261,9 @@ pub fn list_repos(host: CodeHost, owner: &str) -> Result<Vec<RepoSummary>> {
 }
 
 fn github_repos(owner: &str) -> Result<Vec<RepoSummary>> {
-    let output = Command::new("gh")
-        .args([
+    let output = gh(
+        None,
+        &[
             "repo",
             "list",
             owner,
@@ -269,9 +272,9 @@ fn github_repos(owner: &str) -> Result<Vec<RepoSummary>> {
             "--no-archived",
             "--json",
             "nameWithOwner,description,visibility,isFork",
-        ])
-        .output()
-        .context("running gh repo list")?;
+        ],
+    )
+    .context("running gh repo list")?;
     if !output.status.success() {
         bail!(
             "Couldn't list {owner}'s repos: {}",
@@ -405,11 +408,7 @@ fn clone_or_find_with(
 }
 
 fn clone_github(github_repo: &str, dest: &Path) -> Result<()> {
-    let output = Command::new("gh")
-        .args(["repo", "clone", github_repo])
-        .arg(dest)
-        .output()
-        .context("running gh repo clone")?;
+    let output = gh(None, &["repo", "clone", github_repo, &dest.to_string_lossy()]).context("running gh repo clone")?;
     if !output.status.success() {
         bail!(
             "Couldn't clone {github_repo}: {}",

@@ -30,6 +30,8 @@ pub mod galleries;
 pub mod git_bin;
 pub mod hello_settings;
 pub mod host_call;
+#[cfg(all(test, unix))]
+mod host_call_sites_tests;
 pub mod ideas;
 pub mod implementer;
 pub mod item_lifecycle;
