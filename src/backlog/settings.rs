@@ -65,8 +65,17 @@ pub fn changed_by(settings: &StoreSettings) -> Option<String> {
 impl Client {
     /// `settings_get`: the project's settings, or `None` when no one has set any yet.
     pub async fn settings_get(&self, repo_id: u64, token: Option<&str>) -> Result<Option<StoreSettings>, BacklogError> {
-        self.op(repo_id, token, "settings_get", json!({}), "project settings")
-            .await
+        let (status, body) = self.send(repo_id, token, "settings_get", json!({})).await?;
+        match body.value {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => serde_json::from_value(v)
+                .map(Some)
+                .map_err(|e| BacklogError::BadAnswer {
+                    status,
+                    code: None,
+                    message: format!("couldn't read the project settings it sent: {e}"),
+                }),
+        }
     }
 }
 
