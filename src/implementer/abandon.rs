@@ -17,10 +17,9 @@ pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url:
         view.current_dir(repo).args(args);
         // Only an open PR is closed: a merged slice stays as it is, and a closed one needs nothing.
         if run(view, None, "gh pr view")?.trim() == "OPEN" {
-            let args = ["pr", "close", pr];
-            crate::host_call::guard("gh", repo, &args)?;
+            crate::host_call::guard("gh", repo, &["pr", "close", pr])?;
             let mut close = Command::new(gh);
-            close.current_dir(repo).args(args);
+            close.current_dir(repo).args(["pr", "close", pr]);
             run(close, None, "gh pr close")?;
         }
         return Ok(());
@@ -42,30 +41,22 @@ pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url:
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn an_undefined_pr_is_refused_before_gh_runs() {
+    fn an_undefined_pr_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
-        let gh = crate::host_call::fake_gh_flag_on(dir.path());
-        let err = abandon(
-            Path::new("git"),
-            &gh,
-            dir.path(),
-            None,
-            Some("https://x/pull/undefined"),
-        )
-        .unwrap_err();
+        let (gh, ran) = crate::test_support::fake_gh_that_marks(dir.path());
+        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
+        let err = abandon(Path::new("git"), &gh, dir.path(), None, Some("undefined")).unwrap_err();
         assert!(err.to_string().contains("was not run"), "{err}");
-        let refused = crate::host_call::Sink::global().take_in(dir.path());
-        assert!(!dir.path().join("ran").exists(), "the fake gh ran");
-        assert_eq!(refused.len(), 1);
-        assert_eq!(
-            (refused[0].cmd.as_str(), &refused[0].args[..2]),
-            ("gh", &["pr".into(), "view".into()][..])
-        );
-        assert_eq!(refused[0].args[2], "https://x/pull/undefined");
+        assert!(!ran.exists());
+        let got = crate::host_call::refusals_in(dir.path());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cmd, "gh");
+        assert_eq!(got[0].args[..3], ["pr", "view", "undefined"]);
+        crate::host_call::set_on_for(vec![]);
     }
 }

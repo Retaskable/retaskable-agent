@@ -57,13 +57,12 @@ pub fn deletes_head(branch: &str) -> bool {
 /// `gh pr merge <pr> --squash [--delete-branch]`, run in the project's checkout.
 pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch: bool) -> Result<()> {
     let number = pr.to_string();
-    let mut args = vec!["pr", "merge", &number, method_flag];
-    if delete_branch {
-        args.push("--delete-branch");
-    }
-    crate::host_call::guard("gh", dir, &args)?;
+    crate::host_call::guard("gh", dir, &["pr", "merge", &number, method_flag])?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir).args(args);
+    cmd.current_dir(dir).args(["pr", "merge", &number, method_flag]);
+    if delete_branch {
+        cmd.arg("--delete-branch");
+    }
     run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ())
 }
 
@@ -82,10 +81,9 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
 /// `gh pr close <pr> --delete-branch`, run in the project's checkout.
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
     let number = pr.to_string();
-    let args = ["pr", "close", &number, "--delete-branch"];
-    crate::host_call::guard("gh", dir, &args)?;
+    crate::host_call::guard("gh", dir, &["pr", "close", &number, "--delete-branch"])?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir).args(args);
+    cmd.current_dir(dir).args(["pr", "close", &number, "--delete-branch"]);
     run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
 }
 
@@ -171,18 +169,19 @@ mod tests {
         push_rebased(Path::new("git"), &repo, "b").unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_merge_with_an_empty_method_is_refused_before_gh_runs() {
+    fn a_merge_with_an_undefined_argument_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
-        let gh = crate::host_call::fake_gh_flag_on(dir.path());
+        let (gh, ran) = crate::test_support::fake_gh_that_marks(dir.path());
+        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
         let err = merge_pr(&gh, dir.path(), 7, "", true).unwrap_err();
         assert!(err.to_string().contains("was not run"), "{err}");
-        let refused = crate::host_call::Sink::global().take_in(dir.path());
-        assert!(!dir.path().join("ran").exists(), "the fake gh ran");
-        assert_eq!(refused.len(), 1);
-        assert_eq!(refused[0].cmd, "gh");
-        assert_eq!(refused[0].args, ["pr", "merge", "7", "", "--delete-branch"]);
+        assert!(!ran.exists());
+        let got = crate::host_call::refusals_in(dir.path());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cmd, "gh");
+        assert_eq!(got[0].args[..3], ["pr", "merge", "7"]);
+        crate::host_call::set_on_for(vec![]);
     }
 
     #[test]
