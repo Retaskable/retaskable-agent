@@ -63,6 +63,8 @@ pub struct AgentView {
     pub local: crate::local_model::LocalModel,
     /// What the orchestrator loops are doing, for the snapshot's orchestrator block.
     pub live: crate::orchestrator::live::LiveHandle,
+    /// The setup checks' runner (first-run-check.md section 3.1), for `hello` and commands.
+    pub checks: Arc<crate::setup_check::SetupCheckRunner>,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -385,6 +387,7 @@ impl AgentView {
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
+            checks: Default::default(),
         }
     }
 

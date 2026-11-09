@@ -549,6 +549,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
+            checks: Default::default(),
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),

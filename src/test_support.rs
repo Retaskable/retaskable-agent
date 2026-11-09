@@ -408,5 +408,6 @@ pub(crate) fn agent_view(
         settings: Default::default(),
         local: Default::default(),
         live: Default::default(),
+        checks: Default::default(),
     }
 }
