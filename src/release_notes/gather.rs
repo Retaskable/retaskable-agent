@@ -117,6 +117,8 @@ pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
     cwd: &Path,
     args: &[String],
 ) -> Result<Vec<T>> {
+    let guarded: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::host_call::guard(&crate::host_call::stem(gh_bin.as_ref()), cwd, &guarded)?;
     let output = Command::new(gh_bin)
         .args(args)
         .current_dir(cwd)
@@ -175,8 +177,10 @@ pub async fn fill_draft_files(
             continue;
         }
         let number = pr.number.to_string();
+        let args = ["pr", "view", &number, "--repo", repo, "--json", "files"];
+        crate::host_call::guard(&crate::host_call::stem(gh_bin.as_ref()), cwd, &args)?;
         let output = Command::new(gh_bin)
-            .args(["pr", "view", &number, "--repo", repo, "--json", "files"])
+            .args(args)
             .current_dir(cwd)
             .output()
             .await
@@ -276,6 +280,21 @@ mod tests {
     use crate::release_notes::test_support::{pr, write_fake_binary_printing};
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_empty_base_is_refused_and_recorded_without_running_gh() {
+        use crate::host_call::testing::{after, fake};
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake(dir.path(), "gh");
+        let err = gather_merged_prs(&gh, dir.path(), "o/r", "", "a", "b", 5)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("gh was not run"), "{err}");
+        let (ran, refused) = after(dir.path());
+        assert!(!ran);
+        assert_eq!((refused.len(), refused[0].cmd.as_str()), (1, "gh"));
+    }
 
     // merged_pr_args / commit_log_args
 

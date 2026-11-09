@@ -73,14 +73,16 @@ pub fn ready(json: &str, main: &str, ci_when_ready: bool) -> Result<Vec<CheckKey
 
 /// `gh pr list` for the open pull requests into `base`, run in the project's checkout so `gh` uses its login.
 pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result<String, String> {
-    let mut cmd = low_priority_tokio(gh);
-    cmd.args([
+    let args = [
         "pr", "list", "--repo", repo, "--state", "open", "--base", base, "--limit", "200",
-    ])
-    .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
-    .current_dir(repo_dir)
-    .stdin(Stdio::null())
-    .kill_on_drop(true);
+    ];
+    crate::host_call::guard(&crate::host_call::stem(gh), repo_dir, &args).map_err(|e| e.to_string())?;
+    let mut cmd = low_priority_tokio(gh);
+    cmd.args(args)
+        .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
+        .current_dir(repo_dir)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
     let out = cmd.output().await.map_err(|e| format!("gh didn't start: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -89,5 +91,22 @@ pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result
             "gh pr list failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod guard_tests {
+    use super::*;
+    use crate::host_call::testing::{after, fake};
+
+    #[tokio::test]
+    async fn an_empty_base_is_refused_and_recorded_without_running_gh() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake(dir.path(), "gh");
+        let err = list(gh.as_os_str(), dir.path(), "o/r", "").await.unwrap_err();
+        assert!(err.contains("gh was not run"), "{err}");
+        let (ran, refused) = after(dir.path());
+        assert!(!ran);
+        assert_eq!((refused.len(), refused[0].cmd.as_str()), (1, "gh"));
     }
 }

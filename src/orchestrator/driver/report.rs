@@ -390,8 +390,10 @@ pub(super) async fn default_branch(github_repo: &str) -> Option<String> {
     if github_repo.is_empty() {
         return None;
     }
+    let path = format!("repos/{github_repo}");
+    crate::host_call::guard_in("gh", None, &["api", &path, "--jq", ".default_branch"]).ok()?;
     let out = tokio::process::Command::new("gh")
-        .args(["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"])
+        .args(["api", &path, "--jq", ".default_branch"])
         .output()
         .await
         .ok()?;

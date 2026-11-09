@@ -37,8 +37,10 @@ pub const EVERY: Duration = Duration::from_secs(60);
 /// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
 /// project's backlog in the store.
 pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
+    let path = format!("repos/{github_repo}");
+    crate::host_call::guard_in("gh", None, &["api", &path, "--jq", ".id"]).ok()?;
     let out = tokio::process::Command::new("gh")
-        .args(["api", &format!("repos/{github_repo}"), "--jq", ".id"])
+        .args(["api", &path, "--jq", ".id"])
         .output()
         .await
         .ok()?;
