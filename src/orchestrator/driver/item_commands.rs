@@ -75,7 +75,11 @@ impl ProjectLoop {
                     continue;
                 }
                 ItemCommand::Playtest { id, passed, notes, .. } => {
-                    self.playtest_answer(&id, passed, notes);
+                    if self.runs.contains_key(&id) {
+                        self.playtest_answer(&id, passed, notes);
+                    } else {
+                        self.owe_answer(&id, passed, notes, shared.links).await;
+                    }
                     continue;
                 }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
