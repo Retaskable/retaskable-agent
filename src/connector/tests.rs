@@ -493,6 +493,45 @@ async fn every_command_answered_is_logged_to_remote_log() {
 }
 
 #[tokio::test]
+async fn setup_check_acks_with_the_checks_and_is_audited() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let mut v = view(&["one"]);
+    Arc::get_mut(&mut v).unwrap().settings = crate::hello_settings::HelloSettings::new(
+        std::path::PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        Arc::new(crate::flags::Flags::fixed(&["setup-check-command"])),
+    );
+    let c = Connector::start(
+        &url,
+        store,
+        reqwest::Client::new(),
+        v,
+        timing(),
+        noop_exit(),
+        dir.path(),
+    );
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    read(&mut a).await; // snapshot
+    a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
+        .await
+        .unwrap();
+    let ack = read(&mut a).await;
+    assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
+    assert!(ack["answer"]["git"].is_object());
+    c.stop(Duration::from_secs(1)).await;
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (line["name"].as_str(), line["outcome"].as_str()),
+        (Some("setup_check"), Some("ack"))
+    );
+    assert!(line["answerBytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
 async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     let (c, mut a, _dir) = connected_project(noop_exit()).await;
 

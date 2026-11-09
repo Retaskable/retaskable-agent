@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::*;
 use crate::view::ProjectView;
 
-fn view() -> AgentView {
+pub(super) fn view() -> AgentView {
     AgentView {
         projects: vec![ProjectView {
             id: "one".into(),
@@ -20,11 +20,11 @@ fn view() -> AgentView {
     }
 }
 
-fn data_dir() -> PathBuf {
+pub(super) fn data_dir() -> PathBuf {
     std::env::temp_dir().join("retaskable-commands-test")
 }
 
-fn cmd(name: &str, args: Value) -> Command {
+pub(super) fn cmd(name: &str, args: Value) -> Command {
     Command {
         id: "c1".into(),
         name: name.into(),
