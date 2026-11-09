@@ -913,6 +913,7 @@ mod local_one_slot;
 mod main_sync;
 mod model_caps;
 mod note_rules;
+mod stuck_release;
 mod own_failures;
 mod playtest_answers;
 mod playtests;

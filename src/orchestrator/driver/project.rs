@@ -627,22 +627,6 @@ impl ProjectLoop {
         self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
     }
 
-    /// Epoch seconds, or the test's clock.
-    pub(super) fn now_secs(&self) -> i64 {
-        #[cfg(test)]
-        if let Some(t) = self.clock {
-            return t;
-        }
-        crate::telemetry::now_ms() / 1000
-    }
-
-    /// Lists a lease the store hasn't taken back yet; one already listed keeps the time it was first listed.
-    pub(super) fn list_unreleased(&mut self, id: String, token: String, note: String) {
-        let now = self.now_secs();
-        self.unreleased_since.entry(id.clone()).or_insert(now);
-        self.unreleased.insert(id, (token, note));
-    }
-
     /// Writes the held and the unreleased leases to the state file.
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);

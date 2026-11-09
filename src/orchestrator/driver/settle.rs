@@ -358,6 +358,22 @@ impl ProjectLoop {
         self.save_leases();
     }
 
+    /// Epoch seconds, or the test's clock.
+    pub(super) fn now_secs(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(t) = self.clock {
+            return t;
+        }
+        crate::telemetry::now_ms() / 1000
+    }
+
+    /// Lists a lease the store hasn't taken back yet; one already listed keeps the time it was first listed.
+    pub(super) fn list_unreleased(&mut self, id: String, token: String, note: String) {
+        let now = self.now_secs();
+        self.unreleased_since.entry(id.clone()).or_insert(now);
+        self.unreleased.insert(id, (token, note));
+    }
+
     /// With `stuck-release-drop` On, drops an `unreleased` entry (and the skip owed after it) first listed
     /// [`STUCK_RELEASE_SECS`] or more ago, with one `error` event.
     async fn drop_if_stuck(&mut self, id: &str) {
