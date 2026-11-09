@@ -53,9 +53,15 @@ pub fn hold_base_for_sync(project: &str) -> Option<BaseHold> {
     Some(BaseHold(project.to_string()))
 }
 
-/// The projects whose put-off sync is now due (the hold was given back), each once.
-pub fn take_due_syncs() -> HashSet<String> {
-    std::mem::take(&mut lock(&BASE_HELD).due)
+/// The projects (ids without `scope`, which is empty in the agent) whose put-off sync is now due (the hold
+/// was given back), each once.
+pub fn take_due_syncs(scope: &str) -> HashSet<String> {
+    let mut state = lock(&BASE_HELD);
+    let (mine, rest) = std::mem::take(&mut state.due)
+        .into_iter()
+        .partition(|k: &String| k.starts_with(scope));
+    state.due = rest;
+    mine.into_iter().map(|k: String| k[scope.len()..].to_string()).collect()
 }
 
 /// Who holds `project`'s base checkout, if anyone.
@@ -108,12 +114,12 @@ mod tests {
     fn a_put_off_sync_is_due_once_when_the_holder_drops() {
         let shoot = hold_base("base-hold-t5", "a shoot").unwrap();
         assert!(hold_base_for_sync("base-hold-t5").is_none());
-        assert!(!take_due_syncs().contains("base-hold-t5"));
+        assert!(!take_due_syncs("").contains("base-hold-t5"));
         drop(shoot);
-        assert!(take_due_syncs().contains("base-hold-t5"));
-        assert!(!take_due_syncs().contains("base-hold-t5"));
+        assert!(take_due_syncs("").contains("base-hold-t5"));
+        assert!(!take_due_syncs("").contains("base-hold-t5"));
         drop(hold_base("base-hold-t5", "a shoot").unwrap());
-        assert!(!take_due_syncs().contains("base-hold-t5"));
+        assert!(!take_due_syncs("").contains("base-hold-t5"));
     }
 
     #[test]
@@ -122,6 +128,6 @@ mod tests {
         assert!(hold_base_for_sync("base-hold-t6a").is_none());
         let b = hold_base_for_sync("base-hold-t6b").unwrap();
         drop(b);
-        assert!(!take_due_syncs().contains("base-hold-t6b"));
+        assert!(!take_due_syncs("").contains("base-hold-t6b"));
     }
 }

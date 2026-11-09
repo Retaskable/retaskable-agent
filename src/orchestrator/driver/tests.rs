@@ -145,6 +145,8 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         bug_version: "test".into(),
     };
     let mut machine = Machine::new(lanes, 8, links);
+    static RIGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    machine.base_scope = format!("rig{}:", RIGS.fetch_add(1, Ordering::Relaxed));
     for (i, base) in bases.iter().enumerate() {
         let store = Store::load(&dir.path().join(i.to_string())).unwrap();
         let mut lp = ProjectLoop::new(

@@ -191,9 +191,7 @@ async fn a_held_base_puts_the_sync_off_until_it_is_given_back() {
     let (base, asked) = store(Arc::new(Mutex::new(json!([]))), Arc::default()).await;
     let root = tempfile::tempdir().unwrap();
     let (mut rig, repo) = live_rig(&base, root.path());
-    // The hold is process-wide, so this test's project gets an id no other test fetches.
-    rig.lp(0).id = "base-hold-sync-driver".into();
-    let id = rig.lp(0).id.clone();
+    let id = format!("{}p0", rig.machine.base_scope);
     push(
         &repo,
         "docs/specs/cloud.md",
@@ -220,8 +218,7 @@ async fn the_sync_gives_the_base_back_after_a_failed_fetch() {
     let (base, _asked) = store(Arc::new(Mutex::new(json!([]))), Arc::default()).await;
     let root = tempfile::tempdir().unwrap();
     let (mut rig, _repo) = live_rig(&base, root.path());
-    rig.lp(0).id = "base-hold-sync-failed".into();
-    let id = rig.lp(0).id.clone();
+    let id = format!("{}p0", rig.machine.base_scope);
     rig.lp(0).project.repo_path = root.path().join("nowhere").to_string_lossy().into_owned();
     rig.machine.fetch().await;
     assert!(kinds(&mut rig).contains(&"error".to_string()));
