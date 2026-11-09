@@ -126,6 +126,9 @@ impl ProjectLoop {
                 self.starting_over.push((item, notes));
             }
         }
+        if self.flags.on("release-playtests-off").await {
+            self.release_playtests();
+        }
         for (item, message) in std::mem::take(&mut self.playtest_fails) {
             if !self
                 .resume_after_playtest(
@@ -148,6 +151,37 @@ impl ProjectLoop {
             .map(|(id, _)| id)
             .collect();
         self.claude_pending.retain(|id| waiting.contains(&id));
+    }
+
+    /// With `playtests` off, lets every `awaiting_playtest` run go on to its merge as if passed, and forgets any
+    /// failure or owed answer held for it. Nothing is left waiting, so a second pass does nothing.
+    fn release_playtests(&mut self) {
+        if self.project.playtests != crate::config::Playtests::Off {
+            return;
+        }
+        let ids: Vec<String> = self
+            .runs
+            .iter()
+            .filter(|(_, r)| r.state == ItemState::AwaitingPlaytest)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.playtest_fails.retain(|(item, _)| *item != id);
+            self.unanswered.remove(&id);
+            let run = self.runs.get_mut(&id).expect("listed above");
+            run.playtest_finished(PlaytestOutcome::Passed, &self.project);
+            let to = state_name(run.state);
+            self.events.add_in(
+                &self.id,
+                Event::ItemState(event::ItemState {
+                    item: Some(id),
+                    from: Some("awaiting_playtest".into()),
+                    to: Some(to.into()),
+                    note: Some("playtests are off: released".into()),
+                    ..Default::default()
+                }),
+            );
+        }
     }
 
     /// Takes in a person's answer to the playtest of `item_id`. Only an `awaiting_playtest` item takes it; any

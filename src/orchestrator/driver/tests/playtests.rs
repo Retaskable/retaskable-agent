@@ -299,3 +299,67 @@ async fn a_lock_lost_to_a_beat_stop_sends_no_grouping() {
     until("the round's end", || !running.load(Ordering::SeqCst)).await;
     assert_eq!(runs_ops(&asked), vec!["tryouts_list", "lock_take", "run_beat"]);
 }
+
+/// A rig whose items "a", "b", "c" wait for a playtest, each with a queued failure and an owed answer.
+fn three_waiting(playtests: Playtests, flag: bool) -> (Rig, Arc<Fake>) {
+    let mut rig = rig(2, &["http://127.0.0.1:1"]);
+    let fake = rig.go_live();
+    rig.queue(0, &["a", "b", "c"]);
+    let lp = rig.lp(0);
+    lp.project.playtests = playtests;
+    if flag {
+        lp.flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
+    }
+    for id in ["a", "b", "c"] {
+        lp.runs.get_mut(id).unwrap().state = ItemState::AwaitingPlaytest;
+        lp.playtest_fails.push((id.into(), Some("broken".into())));
+        lp.unanswered.insert(id.into(), (false, None));
+    }
+    (rig, fake)
+}
+
+fn released_events(rig: &mut Rig) -> usize {
+    rig.lp(0)
+        .events()
+        .recent()
+        .iter()
+        .map(Entry::to_value)
+        .filter(|e| e["kind"] == "item_state" && e["from"] == "awaiting_playtest")
+        .count()
+}
+
+#[tokio::test]
+async fn playtests_off_release_every_waiting_run_once() {
+    let (mut rig, fake) = three_waiting(Playtests::Off, true);
+    rig.machine.poll().await;
+    for id in ["a", "b", "c"] {
+        assert_eq!(rig.lp(0).runs[id].state, ItemState::Merging);
+    }
+    assert_eq!(released_events(&mut rig), 3);
+    assert!(rig.lp(0).playtest_fails.is_empty());
+    assert!(rig.lp(0).unanswered.is_empty());
+    assert!(fake.started.lock().unwrap().is_empty());
+    rig.machine.poll().await;
+    assert_eq!(released_events(&mut rig), 3);
+}
+
+#[tokio::test]
+async fn playtests_on_or_after_merge_leave_waiting_runs_alone() {
+    for playtests in [Playtests::On, Playtests::AfterMerge] {
+        let (mut rig, _fake) = three_waiting(playtests, true);
+        rig.lp(0).playtest_fails.clear();
+        rig.machine.poll().await;
+        for id in ["a", "b", "c"] {
+            assert_eq!(rig.lp(0).runs[id].state, ItemState::AwaitingPlaytest);
+        }
+        assert_eq!(released_events(&mut rig), 0);
+    }
+}
+
+#[tokio::test]
+async fn playtests_off_with_the_flag_off_release_nothing() {
+    let (mut rig, _fake) = three_waiting(Playtests::Off, false);
+    rig.lp(0).playtest_fails.clear();
+    rig.machine.poll().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::AwaitingPlaytest);
+}
