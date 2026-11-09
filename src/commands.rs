@@ -9,7 +9,7 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
-//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; a lane from 1 is queued for the loop,
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop,
 //! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
@@ -110,7 +110,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
-        "play" | "stop" => play(cmd, project, view),
+        "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
         "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
@@ -431,10 +431,19 @@ fn ideas_generate(cmd: &Command, project: &str, view: &AgentView) -> Value {
     ack(&cmd.id)
 }
 
-/// `play { lane }` / `stop { lane }`.
+/// `play { lane }` / `stop { lane }` (also `stop_play`) / `restart_play { lane }`.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if matches!(cmd.name.as_str(), "restart_play" | "stop_play")
+        && !view.item_commands.flag_on(project, "restart-play-command")
+    {
+        return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
+    }
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
-    let result = play_lane(view, project, cmd.name == "play", lane);
+    let result = if cmd.name == "restart_play" {
+        restart_lane(view, project, lane)
+    } else {
+        play_lane(view, project, cmd.name == "play", lane)
+    };
     if lane == Some(0) && result.is_ok() {
         view.live.bump();
     }
@@ -475,6 +484,20 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
     } else {
         crate::play::stop(project)
     }
+}
+
+/// `restart_play` of a lane: lane 0 is Play main ([`crate::play::restart`]). A lane from 1 isn't taken yet.
+fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<(), String> {
+    match lane {
+        Some(0) => {}
+        Some(k) if k > i64::from(view.lanes) => return Err(format!("This computer has no lane {k}.")),
+        Some(k) if k > 0 => return Err("Not a command this agent takes yet: restart_play".to_string()),
+        _ => return Err("restart_play needs a lane.".to_string()),
+    }
+    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+        return Err("Finish setup first.".to_string());
+    };
+    crate::play::restart(project, p)
 }
 
 /// `ack`, or `nack` with the reason.
