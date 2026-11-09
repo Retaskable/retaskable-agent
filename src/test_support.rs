@@ -396,7 +396,7 @@ pub(crate) fn agent_view(
     use crate::view::AgentView;
     AgentView {
         machine: "pc".into(),
-        tags,
+        tags: tags.into(),
         projects,
         version: version.into(),
         lanes,

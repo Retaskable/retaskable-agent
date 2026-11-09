@@ -214,7 +214,10 @@ impl ProjectLoop {
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
     pub(super) fn hear_work_wake(&mut self, shared: &Shared<'_>) {
-        if shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
+        // A re-read that changed the tags ends the waits too: the next ask carries the new list.
+        let generation = shared.links.tags.generation();
+        let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
+        if tags_changed | shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
             self.run_loop.waiting = false;
             self.claim_waiting = false;
         }
@@ -379,7 +382,7 @@ impl ProjectLoop {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
+            tags: shared.links.tags.get(),
             engines: engines_here(shared.links, self.flags.on("engine-placement").await, start.as_ref()),
             uses: uses_here(shared.links, self.project.engines.as_ref(), start.as_ref()),
             chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),

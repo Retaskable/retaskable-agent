@@ -143,7 +143,7 @@ async fn the_first_pass_drops_before_taking_and_a_failed_drop_takes_nothing() {
 #[tokio::test]
 async fn run_take_carries_tags_and_the_starters_kinds_and_stops_asking_when_lanes_are_full() {
     let (mut rig, script) = setup(1).await;
-    rig.machine.links.tags = vec!["gpu".into()];
+    rig.machine.links.tags = vec!["gpu".to_string()].into();
     let starter = FakeRuns::new(&[RunKind::Build, RunKind::Watch]);
     script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
     pass(&mut rig, &starter, Instant::now()).await;
@@ -158,6 +158,19 @@ async fn run_take_carries_tags_and_the_starters_kinds_and_stops_asking_when_lane
     assert_eq!(takes[0]["agent"]["tags"], json!(["gpu"]));
     assert_eq!(takes[0]["agent"]["machine"], "my-pc");
     assert_eq!(takes[1]["kinds"], json!(["watch"]), "a watch run needs no lane");
+}
+
+#[tokio::test]
+async fn run_take_carries_the_tags_a_save_changed_to() {
+    let (mut rig, script) = setup(1).await;
+    rig.machine.links.tags = vec!["web".to_string()].into();
+    let starter = FakeRuns::new(&[RunKind::Watch]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    rig.machine.links.tags.set(vec!["gpu".to_string(), "web".to_string()]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    let takes = script.lock().unwrap().args("run_take");
+    assert_eq!(takes[0]["agent"]["tags"], json!(["web"]));
+    assert_eq!(takes.last().unwrap()["agent"]["tags"], json!(["gpu", "web"]));
 }
 
 #[tokio::test]

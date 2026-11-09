@@ -262,6 +262,8 @@ pub struct ProjectLoop {
     /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
     /// `work_available` wake.
     pub(super) claim_waiting: bool,
+    /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
+    pub(super) tags_seen: u64,
     /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
     pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
@@ -330,6 +332,7 @@ impl ProjectLoop {
         Self {
             run_loop: super::RunLoop::new(&id),
             claim_waiting: false,
+            tags_seen: 0,
             claim_logged: None,
             id,
             project,

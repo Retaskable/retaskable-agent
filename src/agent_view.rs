@@ -9,7 +9,7 @@ use retaskable_agent::{config, hello_settings, lane_pool, link, local_model, vie
 #[allow(clippy::too_many_arguments)]
 pub fn agent_view(
     cfg: &config::ConfigFile,
-    tags: Vec<String>,
+    tags: crate::tags::LiveTags,
     version: &str,
     env: &Env,
     dir: &Path,

@@ -267,7 +267,7 @@ impl TrayAgent {
             start_at_login: self.deps.login.as_ref().is_some_and(|l| l.is_on()),
             windows: self.deps.windows,
             machine: self.deps.view.machine.clone(),
-            tags: self.deps.view.tags.clone(),
+            tags: self.deps.view.tags.get(),
         }
     }
 

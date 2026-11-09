@@ -137,7 +137,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
-        tags: Vec::new(),
+        tags: Default::default(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
         cursor_models: Default::default(),
@@ -702,7 +702,7 @@ async fn claim_next_sends_this_computers_tags() {
     let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(1, &[&base]);
     rig.go_live();
-    rig.machine.links.tags = vec!["windows".into(), "gpu".into()];
+    rig.machine.links.tags = vec!["windows".to_string(), "gpu".to_string()].into();
     rig.machine.pass().await;
     let agent = asked.lock().unwrap()[1].1["agent"].clone();
     assert_eq!(agent["tags"], json!(["windows", "gpu"]));

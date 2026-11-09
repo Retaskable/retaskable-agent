@@ -211,7 +211,7 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
         machine: links.machine.clone(),
         environment: links.environment.clone(),
         base_branch: project.base_branch.clone(),
-        tags: links.tags.clone(),
+        tags: links.tags.get(),
     }
 }
 

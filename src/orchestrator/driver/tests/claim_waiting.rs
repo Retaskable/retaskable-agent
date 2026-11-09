@@ -100,3 +100,45 @@ async fn with_the_flag_off_a_wait_is_a_store_error_as_before() {
         .collect();
     assert!(kinds.iter().any(|k| k == "store_error"), "{kinds:?}");
 }
+
+fn claim_tags(asked: &Asked) -> Vec<Value> {
+    asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(op, _)| op == "claim_next")
+        .map(|(_, args)| args["agent"].get("tags").cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_save_that_adds_gpu_ends_a_wait_and_the_next_ask_carries_it_with_no_wake() {
+    let (base, asked, answer) = stub(json!({ "waitingFor": ["gpu"] })).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["claim-next-waiting"]));
+    rig.machine.links.tags = vec!["web".to_string()].into();
+    rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(claims(&asked), 1, "waiting: nothing asked");
+
+    *answer.lock().unwrap() = json!([]);
+    rig.machine.links.tags.set(vec!["gpu".to_string(), "web".to_string()]);
+    rig.machine.pass().await;
+    assert_eq!(claims(&asked), 2, "the changed list ends the wait");
+    assert_eq!(claim_tags(&asked)[1], json!(["gpu", "web"]));
+}
+
+#[tokio::test]
+async fn an_empty_list_after_a_save_is_left_out_of_the_body() {
+    let (base, asked, _) = stub(json!([])).await;
+    let mut rig = rig(1, &[&base]);
+    rig.machine.links.tags = vec!["web".to_string()].into();
+    rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.links.tags.set(vec![]);
+    rig.machine.pass().await;
+    let tags = claim_tags(&asked);
+    assert_eq!(tags[0], json!(["web"]));
+    assert_eq!(tags[1], Value::Null);
+}

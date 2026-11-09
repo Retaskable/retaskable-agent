@@ -286,7 +286,7 @@ struct ServeArgs<'a> {
     version: &'a str,
     build: Option<&'a release::Build>,
     exe_path: Option<&'a Path>,
-    tag_list: Vec<String>,
+    tag_list: tags::LiveTags,
     network_enabled: bool,
     port: u16,
     default_port: u16,
@@ -412,7 +412,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .and_then(|u| reqwest::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default(),
-        tags: tag_list,
+        tags: tag_list.clone(),
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
         cursor_models: config::cursor_models(cfg, env),
@@ -592,6 +592,19 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .await,
     );
     settings.set_saved_signal(view.settings.clone());
+    // `tags-reread-on-save`: a save on the settings page changes the list the next ask carries.
+    {
+        let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
+        let flags = retaskable_agent::flags::Flags::from_env();
+        let mut saved = view.settings.subscribe();
+        tokio::spawn(async move {
+            while saved.changed().await.is_ok() {
+                if tags.on_save(&flags, &dir, &env).await {
+                    log_tags(&tags.get());
+                }
+            }
+        });
+    }
     settings.set_status_source(StatusSource {
         view: (*view).clone(),
         started: std::time::Instant::now(),
@@ -679,6 +692,17 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     Ok(())
 }
 
+fn log_tags(tag_list: &[String]) {
+    tracing::info!(
+        "Tags: {}",
+        if tag_list.is_empty() {
+            "none".to_string()
+        } else {
+            tag_list.join(", ")
+        }
+    );
+}
+
 /// Resolves and logs this run's settings: this computer's tags, the poll interval, the local
 /// model and Cursor's models, and watches the local model if it's on. Returns the effective tags,
 /// since [`serve`] needs them for the cloud view.
@@ -689,18 +713,11 @@ fn log_runtime_settings(
     lane_count: u32,
     env: &Env,
     local: &local_model::LocalModel,
-) -> Vec<String> {
+) -> tags::LiveTags {
     let found = tags::found_tags(&tags::machine_facts(env));
     let overrides = machine.tags();
     let tag_list = tags::effective_tags(&found, overrides.as_ref(), env);
-    tracing::info!(
-        "Tags: {}",
-        if tag_list.is_empty() {
-            "none".to_string()
-        } else {
-            tag_list.join(", ")
-        }
-    );
+    log_tags(&tag_list);
     let poll_interval_sec = config::poll_interval_sec(cfg, env);
     let local_model = config::local_model(cfg, env);
     tracing::info!(
@@ -735,7 +752,7 @@ fn log_runtime_settings(
         cursor_models.implementer.as_deref().unwrap_or("auto"),
         cursor_models.scout.as_deref().unwrap_or("auto"),
     );
-    tag_list
+    tag_list.into()
 }
 
 /// `retaskable link [production|staging|local]`, or `retaskable link backlog`
