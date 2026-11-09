@@ -127,6 +127,9 @@ impl ProjectLoop {
             }
         }
         if self.flags.on("release-playtests-off").await {
+            if self.note_playtests_switch() {
+                self.flush_owed(shared.links).await;
+            }
             self.release_playtests();
         }
         for (item, message) in std::mem::take(&mut self.playtest_fails) {

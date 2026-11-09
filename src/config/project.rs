@@ -63,6 +63,23 @@ pub enum Playtests {
     Off,
 }
 
+impl Playtests {
+    /// The config value's spelling.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::AfterMerge => "after_merge",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::On, Self::AfterMerge, Self::Off]
+            .into_iter()
+            .find(|p| p.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckConfig {

@@ -194,6 +194,10 @@ pub struct ProjectLoop {
     pub(super) unskipped: std::collections::BTreeSet<String>,
     /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
+    /// The `playtests` value (config.json's) the last pass saw, and whether the store still owes a
+    /// `release_playtests`; see `playtest_owed.rs`. Kept in the state file.
+    pub(super) playtests_seen: Option<crate::config::Playtests>,
+    pub(super) release_owed: bool,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
@@ -349,6 +353,8 @@ impl ProjectLoop {
             clock: None,
             unskipped: store.unskipped(),
             unanswered: store.unanswered(),
+            playtests_seen: store.playtests_seen().and_then(|v| crate::config::Playtests::from_name(&v)),
+            release_owed: store.release_owed(),
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
@@ -638,6 +644,8 @@ impl ProjectLoop {
         self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unskipped(&self.unskipped);
         self.store.set_unanswered(&self.unanswered);
+        self.store
+            .set_playtests_release(self.playtests_seen.map(crate::config::Playtests::name), self.release_owed);
         self.store.set_unparked(&self.unparked);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);

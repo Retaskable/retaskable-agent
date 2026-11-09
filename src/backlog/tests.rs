@@ -315,6 +315,18 @@ async fn tryout_result_sends_the_key_outcome_and_notes() {
 }
 
 #[tokio::test]
+async fn release_playtests_sends_its_op_with_no_arguments() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "release_playtests");
+        assert_eq!(req["args"], json!({}));
+        Json(json!({}))
+    }))
+    .await;
+
+    Client::new(base).release_playtests(1, Some("tok")).await.unwrap();
+}
+
+#[tokio::test]
 async fn release_sends_the_item_id_and_its_lease_token() {
     let base = fake_store(post(|Json(req): Json<Value>| async move {
         assert_eq!(req["op"], "release");

@@ -280,6 +280,7 @@ impl ProjectLoop {
                 || !self.unparked.is_empty()
                 || !self.unskipped.is_empty()
                 || !self.unanswered.is_empty()
+                || self.release_owed
         }) else {
             return;
         };
@@ -335,6 +336,7 @@ impl ProjectLoop {
             self.unskipped.remove(&id);
         }
         self.send_owed_answers(repo, &token).await;
+        self.send_owed_release(repo, &token).await;
         for (id, (lease, waits_for, state)) in self.unparked.clone() {
             match self.client.park(repo, Some(&token), &id, &lease, &waits_for).await {
                 Ok(()) => {}

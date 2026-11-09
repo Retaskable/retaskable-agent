@@ -49,3 +49,38 @@ impl ProjectLoop {
         self.save_leases();
     }
 }
+
+impl ProjectLoop {
+    /// Remembers config.json's `playtests` (not a gated overlay's) and, when it has just become Off, owes the store
+    /// its `release_playtests`. A first run with nothing remembered and Off already set owes nothing: the TS agent
+    /// releases only on a change it sees, and with no earlier value there is no switch to see (what already waited
+    /// is released on this computer by `release_playtests`, and by the TS agent's own pass).
+    /// Returns whether a release is owed, so the caller can send it now rather than on the next flush.
+    pub(super) fn note_playtests_switch(&mut self) -> bool {
+        let now = self.file_project.playtests;
+        if self.playtests_seen == Some(now) {
+            return false;
+        }
+        use crate::config::Playtests::Off;
+        if now == Off && self.playtests_seen.is_some() {
+            self.release_owed = true;
+        }
+        self.playtests_seen = Some(now);
+        self.save_leases();
+        self.release_owed
+    }
+
+    /// Sends the owed `release_playtests`; cleared on success, kept owed (and logged) on a failure.
+    pub(super) async fn send_owed_release(&mut self, repo: u64, token: &str) {
+        if !self.release_owed {
+            return;
+        }
+        match self.client.release_playtests(repo, Some(token)).await {
+            Ok(()) => {
+                self.release_owed = false;
+                self.save_leases();
+            }
+            Err(e) => self.store_error("release_playtests", &e),
+        }
+    }
+}

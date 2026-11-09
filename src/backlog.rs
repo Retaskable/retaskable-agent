@@ -562,6 +562,13 @@ impl Client {
         Ok(())
     }
 
+    /// `release_playtests` (docs/specs/agent/06.4-playtests.md): playtests were switched off, so the store lets go of
+    /// every try-out in its queue and every item it holds in `awaiting_playtest`.
+    pub async fn release_playtests(&self, repo_id: u64, token: Option<&str>) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "release_playtests", json!({})).await?;
+        Ok(())
+    }
+
     /// `tryout_groups` (docs/specs/agent/06.4-playtests.md "Grouped into sessions"): sends the
     /// planner's grouping of the waiting try-outs, under `signature` (its own, so a stale round
     /// never overwrites a newer one).
