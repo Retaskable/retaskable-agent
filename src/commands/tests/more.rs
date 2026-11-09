@@ -568,3 +568,125 @@ fn restart_play_of_a_lane_is_queued_in_claim_mode_and_nacked_otherwise() {
     assert_eq!(go(&v, 1)["reason"], "No play command set for this project.");
     assert!(v.item_commands.take_lane("one").is_empty());
 }
+
+mod gallery_read {
+    use super::*;
+    use image::{ImageBuffer, Rgb};
+
+    fn setup(files: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, AgentView) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = paths::gallery_dir(tmp.path(), "one", "shots");
+        std::fs::create_dir_all(&dir).unwrap();
+        let images: Vec<Value> = files.iter().map(|(f, _)| json!({ "file": f, "title": f })).collect();
+        let index = json!({ "name": "Shots", "shotAt": "2026-01-01T00:00:00Z", "sha": "abc", "images": images });
+        std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
+        for (f, b) in files {
+            std::fs::write(dir.join(f), b).unwrap();
+        }
+        let v = view();
+        v.item_commands.set_flag("one", "gallery-read-commands", true);
+        (tmp, v)
+    }
+
+    fn ask(v: &AgentView, tmp: &Path, name: &str, args: Value) -> Value {
+        run(&cmd(name, args), "one", &mut Seen::default(), v, &|_| {}, tmp)
+    }
+
+    fn noisy_jpeg() -> Vec<u8> {
+        let img = ImageBuffer::from_fn(2400, 1800, |x, y| {
+            let n = x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503);
+            Rgb([(n >> 3) as u8, (n >> 11) as u8, (n >> 19) as u8])
+        });
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 98)
+            .encode_image(&img)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn index_and_image_are_acked() {
+        use base64::Engine;
+        let bytes = vec![0xff, 0xd8, 1, 2, 3];
+        let (tmp, v) = setup(&[("a.jpg", bytes.clone())]);
+        let idx = ask(&v, tmp.path(), "gallery_index", json!({ "gallery": "shots" }));
+        assert_eq!(idx["type"], "ack", "{idx}");
+        assert_eq!(idx["answer"]["name"], "Shots");
+        assert_eq!(idx["answer"]["shotAt"], "2026-01-01T00:00:00Z");
+        assert_eq!(idx["answer"]["sha"], "abc");
+        assert_eq!(idx["answer"]["images"][0]["file"], "a.jpg");
+        let img = ask(
+            &v,
+            tmp.path(),
+            "gallery_image",
+            json!({ "gallery": "shots", "file": "a.jpg" }),
+        );
+        assert_eq!(img["type"], "ack", "{img}");
+        assert_eq!(img["answer"]["file"], "a.jpg");
+        assert_eq!(img["answer"]["type"], "image/jpeg");
+        let data = img["answer"]["data"].as_str().unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(data).unwrap(), bytes);
+    }
+
+    #[test]
+    fn bad_requests_are_nacked() {
+        let (tmp, v) = setup(&[("a.jpg", vec![1])]);
+        for (name, args) in [
+            ("gallery_index", json!({ "gallery": "nope" })),
+            ("gallery_index", json!({ "gallery": "../x" })),
+            ("gallery_index", json!({})),
+            ("gallery_image", json!({ "gallery": "nope", "file": "a.jpg" })),
+            ("gallery_image", json!({ "gallery": "../x", "file": "a.jpg" })),
+            ("gallery_image", json!({ "gallery": "shots", "file": "b.jpg" })),
+            ("gallery_image", json!({ "gallery": "shots", "file": "../a.jpg" })),
+            ("gallery_image", json!({ "gallery": "shots", "file": "x/a.jpg" })),
+            ("gallery_image", json!({ "gallery": "shots" })),
+        ] {
+            let answer = ask(&v, tmp.path(), name, args.clone());
+            assert_eq!(answer["type"], "nack", "{name} {args}: {answer}");
+        }
+    }
+
+    #[test]
+    fn an_off_flag_leaves_the_commands_unported() {
+        let (tmp, v) = setup(&[]);
+        v.item_commands.set_flag("one", "gallery-read-commands", false);
+        let answer = ask(&v, tmp.path(), "gallery_index", json!({ "gallery": "shots" }));
+        assert!(answer["reason"].as_str().unwrap().starts_with("Not a command"));
+    }
+
+    #[test]
+    fn a_big_picture_is_shrunk_and_the_log_holds_no_base64() {
+        let bytes = noisy_jpeg();
+        assert!(bytes.len().div_ceil(3) * 4 > galleries::MAX_PICTURE_BASE64);
+        let (tmp, v) = setup(&[("big.jpg", bytes.clone())]);
+        let c = cmd("gallery_image", json!({ "gallery": "shots", "file": "big.jpg" }));
+        let answer = run(&c, "one", &mut Seen::default(), &v, &|_| {}, tmp.path());
+        assert_eq!(answer["type"], "ack", "{answer}");
+        assert!(answer["answer"]["data"].as_str().unwrap().len() <= galleries::MAX_PICTURE_BASE64);
+        assert!(answer.to_string().len() < MAX_MESSAGE_BYTES);
+        let on_disk = paths::gallery_dir(tmp.path(), "one", "shots").join("big.jpg");
+        assert_eq!(std::fs::read(on_disk).unwrap(), bytes);
+
+        audit(tmp.path(), &c, &answer, "wss://x");
+        let log = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
+        assert!(log.contains("\"answerBytes\":"));
+        assert!(!log.contains(answer["answer"]["data"].as_str().unwrap()));
+        assert!(log.len() < 1000);
+    }
+
+    #[test]
+    fn a_replayed_or_expired_read_is_refused() {
+        let (tmp, v) = setup(&[("a.jpg", vec![1])]);
+        let c = cmd("gallery_image", json!({ "gallery": "shots", "file": "a.jpg" }));
+        let mut seen = Seen::default();
+        let go = |c: &Command, seen: &mut Seen| run(c, "one", seen, &v, &|_| {}, tmp.path());
+        assert_eq!(go(&c, &mut seen)["type"], "ack");
+        assert_eq!(go(&c, &mut seen)["reason"], "Already received: a command runs once.");
+        let mut old = cmd("gallery_index", json!({ "gallery": "shots" }));
+        old.id = "c2".into();
+        old.issued_at = now_ms() - 61_000;
+        old.expires_at = old.issued_at + 60_000;
+        assert!(go(&old, &mut seen)["reason"].as_str().unwrap().starts_with("Expired"));
+    }
+}

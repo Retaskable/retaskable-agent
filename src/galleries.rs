@@ -51,7 +51,7 @@ const MAX_WIDTH: u32 = 1920;
 const TAIL_LINES: usize = 40;
 /// A picture sent as-is above this many base64 bytes is re-encoded smaller instead (tray.md
 /// 5.3.2: "768 KiB").
-const MAX_PICTURE_BASE64: usize = 768 * 1024;
+pub(crate) const MAX_PICTURE_BASE64: usize = 768 * 1024;
 /// Narrower widths tried in order until a picture's base64 fits under [`MAX_PICTURE_BASE64`].
 const RESEND_WIDTHS: [u32; 2] = [1280, 960];
 const RESEND_QUALITY: u8 = 75;

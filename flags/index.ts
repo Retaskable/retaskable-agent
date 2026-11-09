@@ -39,3 +39,6 @@ export const engineSetupProbes = (): boolean => flags.on("engine-setup-probes");
 
 /** The `playtest-answer-command` flag: take a person's playtest answer from the site. Off until there is an answer. */
 export const playtestAnswerCommand = (): boolean => flags.on("playtest-answer-command");
+
+/** The `gallery-read-commands` flag: answer the site's requests for a gallery's pictures. Off until there is an answer. */
+export const galleryReadCommands = (): boolean => flags.on("gallery-read-commands");
