@@ -3,6 +3,7 @@
 //! before the orchestrator loop that will call it exists: a `pub` item here is this crate's own
 //! API, not dead code just because `main` doesn't reach it yet.
 pub mod agent_ci;
+pub mod allowed_commands;
 pub mod api;
 pub mod app_menu;
 pub mod ask;
