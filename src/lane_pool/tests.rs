@@ -345,3 +345,50 @@ fn claim_lane_where_skips_lanes_the_filter_refuses() {
     assert_eq!(pool.claim_where(&w, |k| k != 1), Some(2));
     assert_eq!(pool.claim_where(&w, |_| true), Some(1));
 }
+
+#[test]
+fn lane_for_merge_is_kept_for_the_merge_turn_and_never_offered_to_that_item_itself() {
+    let mut pool = LanePool::new(rules(2));
+    assert_eq!(pool.lane_for_merge(None), None, "nothing waits for the merge turn");
+    pool.set_merge_turn(Some(want("p", "H")));
+    assert_eq!(pool.lane_for_merge(None), Some(1), "the next free lane is kept");
+    assert_eq!(pool.lane_for_merge(Some(("p", "N"))), Some(1), "kept from anyone else");
+    assert_eq!(
+        pool.lane_for_merge(Some(("p", "H"))),
+        None,
+        "asked as H itself, it doesn't keep a lane from itself"
+    );
+    assert_eq!(
+        pool.lane_for_merge(Some(("q", "H"))),
+        Some(1),
+        "the same item id in another project is someone else"
+    );
+    assert!(pool.take(1, item("p", "A")));
+    assert!(pool.take(2, item("p", "B")));
+    assert_eq!(pool.lane_for_merge(None), None, "no lane is free");
+    pool.set_merge_turn(None);
+    assert!(pool.release(2, &item("p", "B")));
+    assert_eq!(pool.lane_for_merge(None), None, "cleared merge turn keeps nothing");
+}
+
+#[test]
+fn every_kind_of_holder_names_its_project_but_only_an_item_is_found_by_lane_of() {
+    let play = Holder::Play {
+        project: "p".into(),
+        item: "A".into(),
+    };
+    let trial = Holder::Trial { project: "p".into() };
+    for holder in [item("p", "A"), play.clone(), run("p", "A"), trial.clone()] {
+        assert_eq!(holder.project(), "p");
+    }
+    let mut pool = LanePool::new(rules(3));
+    assert!(pool.take(1, play));
+    assert!(pool.take(2, run("p", "A")));
+    assert!(pool.take(3, trial));
+    assert_eq!(
+        pool.lane_of("p", "A"),
+        None,
+        "a play, run or trial isn't the item's own lane"
+    );
+    assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2, 3]);
+}
