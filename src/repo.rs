@@ -11,7 +11,7 @@
 //! lock aren't (its caching is `repo_picker`), since this agent's trimmed spec doesn't reach them yet.
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -369,6 +369,32 @@ pub fn clone_repo(host: CodeHost, repo: &str, dest: &Path) -> Result<()> {
     }
 }
 
+static CLONE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Clones `github_repo` into `dest` unless a checkout of it is already in `search_dir`, holding
+/// one process-wide lock throughout so a second clone of the same repo at the same moment waits
+/// for the first, then finds its checkout instead of cloning again. Returns the checkout's path.
+pub fn clone_or_find(search_dir: &Path, github_repo: &str, dest: &Path) -> Result<PathBuf> {
+    clone_or_find_with(search_dir, github_repo, dest, || {
+        clone_repo(CodeHost::Github, github_repo, dest)
+    })
+}
+
+fn clone_or_find_with(
+    search_dir: &Path,
+    github_repo: &str,
+    dest: &Path,
+    clone: impl FnOnce() -> Result<()>,
+) -> Result<PathBuf> {
+    // A poisoned lock guards no data, so it is still safe to take.
+    let _guard = CLONE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(found) = find_checkout(search_dir, github_repo) {
+        return Ok(found);
+    }
+    clone()?;
+    Ok(dest.to_path_buf())
+}
+
 fn clone_github(github_repo: &str, dest: &Path) -> Result<()> {
     let output = gh(None, &["repo", "clone", github_repo, &dest.to_string_lossy()]).context("running gh repo clone")?;
     if !output.status.success() {
@@ -519,6 +545,8 @@ pub fn repo_problems(check: &RepoCheck, base_branch: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::test_support::{git, repo_with_origin, run};
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn remote_repo_reads_an_https_url() {
@@ -638,6 +666,69 @@ mod tests {
         run(git(&repo).args(["add", "BACKLOG.md"]));
         run(git(&repo).args(["commit", "--quiet", "-m", "add backlog"]));
         assert!(!backlog_on_origin(&repo, "main", "BACKLOG.md").unwrap());
+    }
+
+    /// A fake clone: makes a repo in `dest` whose origin is `url`, counting its calls.
+    fn fake_clone(search: &Path, url: &str, calls: &AtomicUsize) -> Result<()> {
+        calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let repo = repo_with_origin(search);
+        run(git(&repo).args(["remote", "set-url", "origin", url]));
+        Ok(())
+    }
+
+    #[test]
+    fn clone_or_find_clones_once_for_two_simultaneous_calls() {
+        let root = tempfile::tempdir().unwrap();
+        let search = root.path();
+        let dest = search.join("repo");
+        let calls = AtomicUsize::new(0);
+        let barrier = Barrier::new(2);
+        let url = "https://github.com/octocat/repo.git";
+        let results: Vec<PathBuf> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        clone_or_find_with(search, "octocat/repo", &dest, || fake_clone(search, url, &calls)).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(results, vec![dest.clone(), dest]);
+    }
+
+    #[test]
+    fn clone_or_find_returns_an_existing_checkout_without_cloning() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        run(git(&repo).args(["remote", "set-url", "origin", "https://github.com/octocat/repo.git"]));
+        let calls = AtomicUsize::new(0);
+        let dest = root.path().join("other");
+        let found = clone_or_find_with(root.path(), "octocat/repo", &dest, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(found, repo);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn clone_or_find_returns_a_clone_error_and_leaves_the_lock_free() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("repo");
+        let err = clone_or_find_with(root.path(), "octocat/repo", &dest, || bail!("no network")).unwrap_err();
+        assert!(err.to_string().contains("no network"));
+        let calls = AtomicUsize::new(0);
+        let path = clone_or_find_with(root.path(), "octocat/repo", &dest, || {
+            fake_clone(root.path(), "https://github.com/octocat/repo.git", &calls)
+        })
+        .unwrap();
+        assert_eq!(path, dest);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

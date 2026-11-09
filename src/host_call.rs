@@ -71,6 +71,7 @@ pub struct Sink(Arc<Mutex<Vec<Refusal>>>);
 
 impl Sink {
     /// The process-wide sink.
+    #[cfg(not(test))]
     pub fn global() -> &'static Sink {
         // Tests run in parallel threads, so under test it is per thread (like `ON`).
         #[cfg(test)]
@@ -83,6 +84,13 @@ impl Sink {
             static SINK: OnceLock<Sink> = OnceLock::new();
             SINK.get_or_init(Sink::default)
         }
+    }
+
+    /// Under test each thread has its own, so parallel tests (and their loop passes) never see each other's.
+    #[cfg(test)]
+    pub fn global() -> &'static Sink {
+        thread_local!(static SINK: &'static Sink = Box::leak(Box::default()));
+        SINK.with(|s| *s)
     }
 
     pub fn add(&self, refusal: Refusal) {
@@ -156,6 +164,12 @@ pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
         cmd: cmd.into(),
         n: i + 1,
     })
+}
+
+/// Test helper: what the (per-thread) sink holds, drained.
+#[cfg(test)]
+pub(crate) fn refusals_in(_dir: &Path) -> Vec<Refusal> {
+    Sink::global().take()
 }
 
 #[cfg(test)]
