@@ -43,7 +43,10 @@ impl ProjectLoop {
         for command in links.item_commands.take_lane(&self.id) {
             match command {
                 ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, starter),
-                ItemCommand::Stop { lane, .. } => self.stop_lane(pool, lane),
+                ItemCommand::Stop { lane, .. } => {
+                    self.restarting.remove(&lane);
+                    self.stop_lane(pool, lane);
+                }
                 ItemCommand::RestartPlay { lane, .. } if !hold => self.restart_lane(pool, lane, starter),
                 ItemCommand::RestartPlay { lane, .. } => {
                     self.stop_lane(pool, lane);

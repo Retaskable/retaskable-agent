@@ -66,7 +66,7 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     let no_id = go(&v, json!({}));
     assert_eq!(no_id["type"], "nack");
     assert!(no_id["reason"].as_str().unwrap().contains("Skip"));
-    assert!(v.item_commands.take_lane("one").is_empty());
+    assert!(v.item_commands.take("one").is_empty());
     assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
 }
 
@@ -264,7 +264,7 @@ fn ideas_generate_queues_a_round_and_nacks_when_paused_or_not_set_up() {
         go(json!({}), "one", &v)["reason"],
         "The project is paused: resume it first."
     );
-    assert!(v.item_commands.take_lane("one").is_empty());
+    assert!(v.item_commands.take("one").is_empty());
 }
 
 const SEED: &str = r#"{ "version": 2, "projects": [], "pollIntervalSec": 30, "custom": true }"#;
@@ -443,7 +443,7 @@ fn playtest_with_a_bad_picture_saves_none_and_queues_nothing() {
         !dir.path().join("attachments").exists()
             || std::fs::read_dir(dir.path().join("attachments")).unwrap().count() == 0
     );
-    assert!(v.item_commands.take_lane("one").is_empty());
+    assert!(v.item_commands.take("one").is_empty());
 }
 
 #[test]

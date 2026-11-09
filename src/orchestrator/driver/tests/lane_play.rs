@@ -221,3 +221,20 @@ async fn a_restart_whose_game_never_closes_is_dropped_after_the_limit() {
     rig.machine.poll().await;
     assert_eq!(fake.games.lock().unwrap().len(), 1, "no second game");
 }
+
+#[tokio::test]
+async fn a_stop_after_a_restart_cancels_it() {
+    let (mut rig, fake) = idle(1);
+    fake.stubborn_games.store(true, Ordering::SeqCst);
+    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::AwaitingPlaytest;
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    send(&rig, stop, 1);
+    rig.machine.poll().await;
+    fake.games.lock().unwrap()[0].3.store(true, Ordering::SeqCst);
+    rig.machine.poll().await;
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 1, "no second game");
+}
