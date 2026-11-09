@@ -271,3 +271,69 @@ async fn gh_errors_send_no_ci_event() {
     assert!(matches!(end.outcome, RunOutcome::Failed(_)));
     assert!(seen.is_empty());
 }
+
+#[test]
+fn no_checks_or_a_green_with_the_no_ci_note_read_as_none() {
+    use crate::ci_watch::{Check, CheckState};
+    let check = |state| Check {
+        name: "t".into(),
+        state,
+        link: String::new(),
+        started: None,
+    };
+    let wait = Decision::Wait;
+    assert_eq!(ci_state(&[], &wait), "none");
+    assert_eq!(
+        ci_state(
+            &[check(CheckState::Pass)],
+            &Decision::Green {
+                note: Some("no CI".into())
+            }
+        ),
+        "none"
+    );
+    assert_eq!(
+        ci_state(&[check(CheckState::Pass), check(CheckState::Pending)], &wait),
+        "pending"
+    );
+    assert_eq!(
+        ci_state(&[check(CheckState::Pass), check(CheckState::Fail)], &wait),
+        "fail"
+    );
+    assert_eq!(
+        ci_state(&[check(CheckState::Pass), check(CheckState::Skipping)], &wait),
+        "pass"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repo_with_no_ci_sends_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_ci(dir.path());
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git").args(args).current_dir(&repo).status();
+        assert!(ok.unwrap().success());
+    };
+    // The base branch's workflow is gone, so no CI covers it.
+    git(&["rm", "-rq", ".github"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    set(dir.path(), "checks", "");
+    let (mut request, mut rx) = request(&repo, json!({ "number": 7 }), 120);
+    let (events, mut events_rx) = crate::orchestrator::driver::RunEventSender::channel();
+    request.events = events;
+    WatchRuns::with(fake_gh(dir.path()), Duration::from_millis(5), None)
+        .start(request)
+        .unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(end.outcome, RunOutcome::Green);
+    let Ok(crate::telemetry::Event::Ci(c)) = events_rx.try_recv() else {
+        panic!("no ci event")
+    };
+    assert_eq!(c.state.as_deref(), Some("none"));
+    assert!(events_rx.try_recv().is_err());
+}
