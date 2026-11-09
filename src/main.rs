@@ -585,7 +585,11 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .on("cursor-allow-derive")
             .await,
     );
-    settings.set_backlog_link_flag(retaskable_agent::flags::Flags::from_env().on("backlog-link-route").await);
+    settings.set_backlog_link_flag(
+        retaskable_agent::flags::Flags::from_env()
+            .on("backlog-link-route")
+            .await,
+    );
     settings.set_agent_ci_flag(retaskable_agent::flags::Flags::from_env().on("agent-ci").await);
     settings.set_live_sessions_flag(
         retaskable_agent::flags::Flags::from_env()
