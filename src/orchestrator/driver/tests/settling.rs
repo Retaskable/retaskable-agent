@@ -11,7 +11,7 @@ fn done(result: ImplementerOutcome) -> SessionResult {
 
 /// A rig that has claimed "a" on lane 1 with its session ended by `result` (not yet read), the store
 /// refusing `release` while `fail_release` is set.
-async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
+pub(super) async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), fail_release.clone()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();

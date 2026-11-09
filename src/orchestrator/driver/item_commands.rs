@@ -338,8 +338,7 @@ impl ProjectLoop {
         let Some(lease) = self.leases.remove(item_id) else {
             return;
         };
-        self.unreleased
-            .insert(item_id.to_string(), (lease, format!("{who} chose Skip.")));
+        self.list_unreleased(item_id.to_string(), lease, format!("{who} chose Skip."));
         self.unskipped.insert(item_id.to_string());
         self.save_leases();
         self.flush_owed(shared.links).await;

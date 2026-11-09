@@ -924,6 +924,7 @@ mod start_blocked;
 mod starter;
 mod step_events;
 mod store_pause;
+mod stuck_release;
 mod triage;
 mod trial;
 mod vet_daily;
