@@ -35,8 +35,8 @@ impl RepoPicker {
     /// The real `gh` fetchers and `Instant::now`.
     pub fn new() -> Self {
         Self::with(
-            Box::new(repo::list_owners),
-            Box::new(repo::list_repos),
+            Box::new(|| repo::list_owners(repo::CodeHost::Github)),
+            Box::new(|owner| repo::list_repos(repo::CodeHost::Github, owner)),
             Box::new(Instant::now),
         )
     }

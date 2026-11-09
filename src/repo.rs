@@ -1,9 +1,10 @@
 //! "The repo" (docs/specs/agent/09-web-ui.md section 9.1), ported from `repoInfo`, `githubLogin`,
 //! `devBranch`, `createBranchIfMissing` (`agent/src/setup.ts`) and `listOwners`/`listRepos`/
 //! `remoteRepo` (`agent/src/github.ts`). A local folder, or one of the person's (and their GitHub
-//! organisations') `gh repo list` repos. Telling GitHub, GitLab and plain git remotes apart
-//! (`code_host`) is ported; a local-only project and the full `GithubPicker`'s clone-serialising
-//! lock aren't, since this agent's trimmed spec doesn't reach them yet.
+//! organisations') `gh repo list` repos, or, on GitLab, the person's and their groups' `glab repo
+//! list` repos (`repo_gitlab`). Telling GitHub, GitLab and plain git remotes apart (`code_host`)
+//! is ported, and `repo_info`, `list_owners`, `list_repos` and `clone_repo` use `gh` or `glab` to
+//! match; a plain remote has no CLI, so listing it is an error. A local-only project and the full `GithubPicker`'s clone-serialising lock aren't, since this agent's trimmed spec doesn't reach them yet.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -17,6 +18,12 @@ use serde::Deserialize;
 /// there at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepoInfo {
+    /// `origin`'s URL and the host it's on; `None` without an origin.
+    pub origin_url: Option<String>,
+    pub code_host: Option<CodeHost>,
+    /// The project on its code host: the GitHub `owner/name` or the GitLab `path_with_namespace`.
+    pub repo: Option<String>,
+    /// `repo` when `code_host` is GitHub, `None` otherwise.
     pub github_repo: Option<String>,
     pub default_branch: Option<String>,
     pub upstream: Option<Upstream>,
@@ -62,9 +69,25 @@ struct DefaultBranchOnly {
     default_branch_ref: Option<BranchRef>,
 }
 
-/// The checkout's `githubRepo`, default branch and (for a fork) upstream, read from `origin` with
-/// `gh repo view --json nameWithOwner,defaultBranchRef,isFork,parent`.
+/// The checkout's `origin`, project, default branch and (for a fork) upstream: `gh repo view` on
+/// GitHub, `glab repo view` on GitLab, and just the origin for a plain remote.
 pub fn repo_info(repo_path: &Path) -> RepoInfo {
+    let Some(url) = origin_url(repo_path) else {
+        return RepoInfo::default();
+    };
+    let host = code_host(&url);
+    let mut info = match host {
+        CodeHost::Github => github_repo_info(repo_path),
+        CodeHost::Gitlab => crate::repo_gitlab::repo_info("glab", repo_path),
+        CodeHost::Plain => RepoInfo::default(),
+    };
+    info.origin_url = Some(url);
+    info.code_host = Some(host);
+    info
+}
+
+/// `gh repo view --json nameWithOwner,defaultBranchRef,isFork,parent` over `origin`.
+fn github_repo_info(repo_path: &Path) -> RepoInfo {
     let Ok(output) = Command::new("gh")
         .current_dir(repo_path)
         .args(["repo", "view", "--json", "nameWithOwner,defaultBranchRef,isFork,parent"])
@@ -80,9 +103,11 @@ pub fn repo_info(repo_path: &Path) -> RepoInfo {
     };
     let upstream = upstream_of(j.is_fork.unwrap_or(false), j.parent.as_ref());
     RepoInfo {
+        repo: j.name_with_owner.clone(),
         github_repo: j.name_with_owner,
         default_branch: j.default_branch_ref.and_then(|b| b.name),
         upstream,
+        ..RepoInfo::default()
     }
 }
 
@@ -127,9 +152,27 @@ pub fn gh_authenticated() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// The person's own login and GitHub organisations, to list repos for (`listOwners` in
-/// `github.ts`). The login is always first.
-pub fn list_owners() -> Result<Vec<String>> {
+/// `glab api user`'s `username`, or `None` when `glab` isn't signed in.
+pub fn glab_login() -> Option<String> {
+    crate::repo_gitlab::login("glab")
+}
+
+/// Whether `glab` is signed in (`glab auth status`'s exit code).
+pub fn glab_authenticated() -> bool {
+    crate::repo_gitlab::authenticated("glab")
+}
+
+/// The person's own login and their organisations (GitHub) or groups (GitLab), to list repos for
+/// (`listOwners` in `github.ts`). The login is always first.
+pub fn list_owners(host: CodeHost) -> Result<Vec<String>> {
+    match host {
+        CodeHost::Github => github_owners(),
+        CodeHost::Gitlab => crate::repo_gitlab::list_owners("glab"),
+        CodeHost::Plain => bail!("A plain git remote has no owners to list"),
+    }
+}
+
+fn github_owners() -> Result<Vec<String>> {
     let login = github_login().context("gh isn't signed in")?;
     let output = Command::new("gh")
         .args([
@@ -165,8 +208,16 @@ pub struct RepoSummary {
     pub is_fork: bool,
 }
 
-/// `owner`'s repos, as `gh repo list` orders them.
-pub fn list_repos(owner: &str) -> Result<Vec<RepoSummary>> {
+/// `owner`'s repos, as `gh repo list` or `glab repo list` orders them.
+pub fn list_repos(host: CodeHost, owner: &str) -> Result<Vec<RepoSummary>> {
+    match host {
+        CodeHost::Github => github_repos(owner),
+        CodeHost::Gitlab => crate::repo_gitlab::list_repos("glab", owner),
+        CodeHost::Plain => bail!("A plain git remote has no repos to list"),
+    }
+}
+
+fn github_repos(owner: &str) -> Result<Vec<RepoSummary>> {
     let output = Command::new("gh")
         .args([
             "repo",
@@ -267,8 +318,16 @@ pub fn find_checkout(search_dir: &Path, github_repo: &str) -> Option<PathBuf> {
     None
 }
 
-/// Clones `github_repo` into `dest` with `gh repo clone`.
-pub fn clone_repo(github_repo: &str, dest: &Path) -> Result<()> {
+/// Clones `repo` into `dest` with `gh repo clone` or `glab repo clone`.
+pub fn clone_repo(host: CodeHost, repo: &str, dest: &Path) -> Result<()> {
+    match host {
+        CodeHost::Github => clone_github(repo, dest),
+        CodeHost::Gitlab => crate::repo_gitlab::clone_repo("glab", repo, dest),
+        CodeHost::Plain => bail!("A plain git remote can't be cloned by name"),
+    }
+}
+
+fn clone_github(github_repo: &str, dest: &Path) -> Result<()> {
     let output = Command::new("gh")
         .args(["repo", "clone", github_repo])
         .arg(dest)
