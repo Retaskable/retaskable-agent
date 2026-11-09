@@ -318,6 +318,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
+    let check_flags = Arc::new(retaskable_agent::flags::Flags::from_env());
+    let checks = runtime::setup_check_runner(env.clone(), check_flags.clone());
     let view = Arc::new(agent_view(
         cfg,
         tag_list.clone(),
@@ -326,6 +328,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         dir,
         default_port,
         &local,
+        checks.clone(),
     ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
@@ -354,11 +357,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         .cloned()
         .zip(connectors.iter().map(|c| c.handle()))
         .collect();
-    let latest_checks = runtime::spawn_setup_checks(
-        is_release,
-        env.clone(),
-        Arc::new(retaskable_agent::flags::Flags::from_env()),
-    );
+    runtime::spawn_setup_checks(is_release, &checks, check_flags);
+    let latest_checks = checks.shared();
 
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
     // session runner exists) or runs (short runs on pieces). Read and logged once, here.
