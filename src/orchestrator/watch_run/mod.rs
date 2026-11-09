@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter};
+use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
 use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_coverage::{ci_coverage, read_workflows};
-use crate::ci_watch::{AfterError, Decision, GhErrors, decide, read_checks, red_entry};
+use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
 use crate::process_tree::ProcessTree;
 use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
+use crate::telemetry::{Event, event};
 
 /// How often the checks are read.
 pub const POLL_EVERY: Duration = Duration::from_secs(15);
@@ -79,6 +80,20 @@ pub(super) fn change_ref(change: &Value) -> Option<String> {
     }
 }
 
+/// The CI state a read shows, as the `ci` event names it. A read that ends Green with the no-CI note is `none`.
+fn ci_state(checks: &[Check], decision: &Decision) -> &'static str {
+    let live = || checks.iter().filter(|c| c.state != CheckState::Skipping);
+    if matches!(decision, Decision::Green { note: Some(_) }) || checks.is_empty() {
+        "none"
+    } else if live().any(|c| matches!(c.state, CheckState::Fail | CheckState::Cancel)) {
+        "fail"
+    } else if live().any(|c| c.state == CheckState::Pending) {
+        "pending"
+    } else {
+        "pass"
+    }
+}
+
 /// How the run ended; `None` when the loop stopped it (it has already ended it `interrupted`).
 async fn watch(
     request: &RunRequest,
@@ -102,6 +117,7 @@ async fn watch(
     let start = Instant::now();
     let limit = ceiling(RunKind::Watch).saturating_sub(CEILING_MARGIN);
     let mut errors = GhErrors::default();
+    let mut last_state = "";
     loop {
         if trees.stopped() {
             return None;
@@ -131,13 +147,24 @@ async fn watch(
             Err(e) => return failed(&format!("Reading the checks broke: {e}")),
         };
         errors.answered();
-        match decide(
+        let decision = decide(
             &checks,
             coverage,
             start.elapsed(),
             config.tuning.ci_grace_minutes,
             config.tuning.ci_max_minutes,
-        ) {
+        );
+        // The loop writes it to the log only with `ci-merged-events` On; never the same state twice in a row.
+        let state = ci_state(&checks, &decision);
+        if state != std::mem::replace(&mut last_state, state) {
+            request.events.send(Event::Ci(event::Ci {
+                item: Some(piece_id(&request.piece).into()),
+                state: Some(state.into()),
+                ms: Some(start.elapsed().as_millis() as f64),
+                ..Default::default()
+            }));
+        }
+        match decision {
             Decision::Wait => tokio::time::sleep(poll).await,
             Decision::Green { note } => return Some((RunOutcome::Green, json!({ "note": note }))),
             Decision::Failed { why } => return failed(&why),
