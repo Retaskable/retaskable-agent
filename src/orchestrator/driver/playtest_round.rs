@@ -14,6 +14,7 @@ use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::link::TokenStore;
@@ -150,7 +151,7 @@ pub(super) async fn run(job: Job) {
             model: "sonnet".to_string(),
             local: None,
             engine: Some(placed.engine),
-            cursor: placed.cursor.clone(),
+            cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },

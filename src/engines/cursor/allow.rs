@@ -6,7 +6,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::config::{CheckConfig, GalleryConfig};
+use crate::config::{CheckConfig, GalleryConfig, ProjectConfig};
+use crate::engines::engine::CursorOptions;
 
 use super::allowlist::{DENY, outside_write};
 
@@ -107,6 +108,66 @@ pub(super) fn allow_entry_problem(entry: &str) -> Option<String> {
         return None;
     }
     Some(format!("{entry} isn't Shell(…), Read(…) or Write(…)"))
+}
+
+/// The code host's CLI for a remote URL: `gh` on GitHub, `glab` on GitLab, none for anything else.
+fn host_cli_of(url: &str) -> Option<&'static str> {
+    let url = url.to_lowercase();
+    if url.contains("github.com") {
+        Some("gh")
+    } else if url.contains("gitlab") {
+        Some("glab")
+    } else {
+        None
+    }
+}
+
+/// Today's options for the implementer and trial sessions with the flag Off: `gh` when the project names a repo.
+pub fn with_project_or_gh(project: &ProjectConfig, base: CursorOptions) -> CursorOptions {
+    if crate::tiers::cursor_allow_derive_on() {
+        return with_project(project, base);
+    }
+    CursorOptions {
+        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
+        ..base
+    }
+}
+
+/// With the `cursor-allow-derive` flag On, `base` (the model `place` set) with the project's allowlist extras and code host's CLI, read from
+/// `project` as it is now (`hostCli`). Read-only roles are given the same; `prepare_cursor` ignores the
+/// extras for them. The host comes from the repo's `origin`, else GitHub when the project names a repo.
+pub fn with_project(project: &ProjectConfig, base: CursorOptions) -> CursorOptions {
+    if !crate::tiers::cursor_allow_derive_on() {
+        return base;
+    }
+    let mut allow = command_shells(&project.checks, &project.galleries);
+    let typed = project
+        .engines
+        .as_ref()
+        .and_then(|e| e.get("allow"))
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.as_str())
+        .map(str::trim)
+        .filter(|e| allow_entry_problem(e).is_none());
+    for entry in typed {
+        if !allow.iter().any(|a| a == entry) {
+            allow.push(entry.to_string());
+        }
+    }
+    let origin = (!project.repo_path.is_empty())
+        .then(|| crate::repo::origin_url(std::path::Path::new(&project.repo_path)))
+        .flatten();
+    let cli = match origin {
+        Some(url) => host_cli_of(&url),
+        None => (!project.github_repo.is_empty()).then_some("gh"),
+    };
+    CursorOptions {
+        allow,
+        cli: cli.map(String::from),
+        ..base
+    }
 }
 
 /// The typed entries, split on commas and new lines, trimmed, empties dropped.

@@ -12,6 +12,7 @@ use super::driver::{
 use super::session::{ClaudeStarter, watch_for};
 use crate::config::{Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
     start_engine,
@@ -141,7 +142,7 @@ impl ClaudeStarter {
                         model: claude_model_for(placed.engine, tier),
                         local: claimed.as_ref().map(|(_, target)| target.clone()),
                         engine: Some(placed.engine),
-                        cursor: placed.cursor.clone(),
+                        cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                         shell: true,
                     },
@@ -251,7 +252,7 @@ impl ClaudeStarter {
                         model: claude_model_for(placed.engine, top),
                         local: claimed.as_ref().map(|(_, target)| target.clone()),
                         engine: Some(placed.engine),
-                        cursor: placed.cursor.clone(),
+                        cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                         shell: true,
                     },

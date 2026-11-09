@@ -16,6 +16,7 @@ use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, Sta
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig};
+use crate::engines::cursor::with_project;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::Interrupted;
@@ -217,7 +218,7 @@ impl AskHost for ClaudeAsks {
                 budget: &project.budget,
                 cwd: &repo_path,
                 local: claimed.as_ref().map(|(_, target)| target.clone()),
-                cursor: placed.cursor.clone(),
+                cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
             }) {
                 Ok(spec) => spec,
                 Err(e) => return Ok(sorry(e)),

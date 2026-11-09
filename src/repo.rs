@@ -203,7 +203,7 @@ fn git(repo_path: &Path) -> Command {
 }
 
 /// `repo_path`'s `origin` remote, or `None` without one.
-fn origin_url(repo_path: &Path) -> Option<String> {
+pub fn origin_url(repo_path: &Path) -> Option<String> {
     let output = git(repo_path).args(["remote", "get-url", "origin"]).output().ok()?;
     if !output.status.success() {
         return None;

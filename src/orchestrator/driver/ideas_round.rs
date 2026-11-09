@@ -17,6 +17,7 @@ use crate::backlog::asks::Audience;
 use crate::backlog::runs::LockTake;
 use crate::config::Engine;
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
     run_session,
@@ -241,7 +242,11 @@ where
             model: "sonnet".to_string(),
             local: None,
             engine: Some(job.placed.as_ref().map_or(EngineId::Claude, |p| p.engine)),
-            cursor: job.placed.as_ref().and_then(|p| p.cursor.clone()),
+            cursor: job
+                .placed
+                .as_ref()
+                .and_then(|p| p.cursor.clone())
+                .map(|c| with_project(&job.project, c)),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },

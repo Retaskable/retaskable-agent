@@ -435,6 +435,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             placement.keep_fresh("local-limit-fallback", std::time::Duration::from_secs(30));
             placement.keep_fresh("implementer-step-up", std::time::Duration::from_secs(30));
             placement.keep_fresh("tier-kept-on-resume", std::time::Duration::from_secs(30));
+            placement.keep_fresh("cursor-allow-derive", std::time::Duration::from_secs(30));
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );
