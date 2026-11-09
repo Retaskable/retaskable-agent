@@ -506,7 +506,8 @@ fn ideas_generate(cmd: &Command, project: &str, view: &AgentView) -> Value {
     if !view.projects.iter().any(|p| p.id == project) {
         return nack(&cmd.id, "Finish setup first.".to_string());
     }
-    if view.paused.reason(project).is_some() {
+    let store_paused = matches!(view.store_paused.get(project), crate::view::StorePause::Paused(_));
+    if view.paused.reason(project).is_some() || store_paused {
         return nack(&cmd.id, "The project is paused: resume it first.".to_string());
     }
     let fresh = cmd.args.get("fresh").and_then(Value::as_bool).unwrap_or(false);

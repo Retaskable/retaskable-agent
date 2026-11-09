@@ -596,3 +596,22 @@ fn resume_computer_leaves_the_stores_pause_alone() {
         crate::view::StorePause::Paused("Paused for everyone".into())
     );
 }
+
+#[test]
+fn the_ideas_round_is_refused_during_the_stores_pause() {
+    let v = view();
+    let go = |v: &AgentView| {
+        run(
+            &cmd("ideas_generate", json!({})),
+            "one",
+            &mut Seen::default(),
+            v,
+            &|_: i32| {},
+            &data_dir(),
+        )
+    };
+    assert_eq!(go(&v)["type"], "ack");
+    v.store_paused
+        .set("one", crate::view::StorePause::Paused("Paused for everyone".into()));
+    assert_eq!(go(&v)["type"], "nack");
+}

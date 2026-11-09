@@ -249,10 +249,23 @@ impl Machine {
         self.starter.is_some() && lp.mode == OrchestratorMode::Claim
     }
 
-    fn paused(&self) -> Vec<bool> {
-        (self.projects.iter())
-            .map(|lp| self.links.paused.reason(&lp.id).is_some())
-            .collect()
+    /// Whether each project holds new work: this computer's pause is on, or, with `obey-shared-pause` On, the
+    /// store's is on or unknown (fails closed; work already running carries on).
+    fn paused(&self) -> impl std::future::Future<Output = Vec<bool>> + Send + 'static {
+        let projects: Vec<_> = (self.projects.iter())
+            .map(|lp| {
+                let own = self.links.paused.reason(&lp.id).is_some();
+                (own, self.links.store_paused.get(&lp.id), lp.flags.clone())
+            })
+            .collect();
+        async move {
+            let mut out = Vec::new();
+            for (own, store, flags) in projects {
+                let obey = !own && flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
+                out.push(own || (obey && store != StorePause::NotPaused));
+            }
+            out
+        }
     }
 
     /// The poll between the minute's passes (`pollIntervalSec`): the live projects take in their ended steps,
@@ -263,7 +276,7 @@ impl Machine {
         if !ready.contains(&true) {
             return;
         }
-        let paused = self.paused();
+        let paused = self.paused().await;
         if let Err(panic) = AssertUnwindSafe(self.schedule(&ready, &paused)).catch_unwind().await {
             tracing::error!("orchestrator: a poll panicked, skipping it: {}", panic_message(&*panic));
         }
@@ -347,7 +360,7 @@ impl Machine {
     /// paused and has the `ideas-session` flag On, unless one is still running (`ideas_daily::run` asks the store
     /// whether it's due). Each is its own task, so the pass never waits.
     pub async fn ideas_rounds(&mut self, steps: &[Step]) {
-        let paused = self.paused();
+        let paused = self.paused().await;
         let jobs: Vec<_> = (self.projects.iter().enumerate())
             .filter(|(i, lp)| {
                 (self.live(lp) || lp.mode == OrchestratorMode::Runs)
@@ -429,7 +442,7 @@ impl Machine {
                 lp.live.set_vet(&lp.id, Some(record.counts));
             }
         }
-        let paused = self.paused();
+        let paused = self.paused().await;
         let jobs: Vec<_> = (self.projects.iter().enumerate())
             .filter(|(i, lp)| {
                 (self.live(lp) || lp.mode == OrchestratorMode::Runs)
@@ -463,7 +476,7 @@ impl Machine {
     /// read failed (`Step::Skipped`), a paused one, one with `playtests: off`, and every project with no
     /// starter or in `dry` mode run no round.
     pub async fn playtest_rounds(&mut self, steps: &[Step]) {
-        let paused = self.paused();
+        let paused = self.paused().await;
         let jobs: Vec<_> = self
             .projects
             .iter()
@@ -504,7 +517,7 @@ impl Machine {
     /// asks for nothing but still drops, ends and beats. A panic costs this pass only.
     pub async fn run_passes(&mut self) {
         let stopping = self.stopping() || crate::runs::winding_down();
-        let paused = self.paused();
+        let paused = self.paused().await;
         let (mut claim_paused_until, mut signed_out_until) = (None, None);
         let mut limits = EngineLimits::default();
         for (lp, paused) in self.projects.iter_mut().zip(paused) {
@@ -635,7 +648,7 @@ impl Machine {
                 }
             });
         }
-        let paused = self.paused();
+        let paused = self.paused().await;
         let n = self.projects.len();
         // A panic deciding or recording costs this pass only: it is logged and the next pass runs.
         match AssertUnwindSafe(self.decide_and_record(read_items, paused))

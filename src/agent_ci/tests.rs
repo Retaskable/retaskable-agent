@@ -456,7 +456,7 @@ mod stubbed {
     async fn one_slot_runs_two_pull_requests_one_after_the_other() {
         let mut r = pr_rig("exit 0");
         let log = r._dir.path().join("calls.log");
-        let body = format!("echo begin >> {l}; sleep 0.4; echo end >> {l}", l = log.display());
+        let body = format!("echo begin >> {l}; sleep 1.5; echo end >> {l}", l = log.display());
         script(
             &r._dir.path().join("bin"),
             "docker",

@@ -9,9 +9,9 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 
 /// What the fake host was asked, and what it answers.
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     answers: Mutex<Vec<Value>>,
-    jobs: Mutex<Vec<(String, bool, String)>>,
+    pub(super) jobs: Mutex<Vec<(String, bool, String)>>,
     engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
     published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,

@@ -5,7 +5,7 @@ use crate::orchestrator::driver::{AskHost, AskJob, AskReply, AskStore, WAITING};
 use crate::view::AskCommand;
 
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     /// `blocked` answers: the project's pause or the daily budget.
     blocked: AtomicBool,
     /// The store can't be read.
@@ -13,7 +13,7 @@ struct Host {
     hold: AtomicBool,
     /// The session fails: the host answers that it couldn't.
     crashed: AtomicBool,
-    jobs: Mutex<Vec<AskCommand>>,
+    pub(super) jobs: Mutex<Vec<AskCommand>>,
     engines: Mutex<Vec<Option<EngineId>>>,
     /// Tool events the session emits, a pause apart, before it answers.
     reads: Mutex<Vec<&'static str>>,
@@ -111,7 +111,7 @@ async fn rig_failing(fail: &'static str) -> (Rig, Arc<Host>, Asked) {
     (rig, host, asked)
 }
 
-fn ask(id: &str, text: &str) -> AskCommand {
+pub(super) fn ask(id: &str, text: &str) -> AskCommand {
     AskCommand {
         project: "p0".into(),
         ask_id: id.into(),
@@ -122,11 +122,11 @@ fn ask(id: &str, text: &str) -> AskCommand {
     }
 }
 
-fn push(rig: &Rig, a: AskCommand) {
+pub(super) fn push(rig: &Rig, a: AskCommand) {
     rig.machine.links.item_commands.push_ask(a);
 }
 
-fn reports(asked: &Asked) -> Vec<Value> {
+pub(super) fn reports(asked: &Asked) -> Vec<Value> {
     (asked.lock().unwrap().iter())
         .filter(|(op, _)| op == "ask_report")
         .map(|(_, a)| a.clone())
@@ -134,7 +134,7 @@ fn reports(asked: &Asked) -> Vec<Value> {
 }
 
 /// Passes until the store has `n` ask reports.
-async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent = reports(asked);
@@ -146,7 +146,7 @@ async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     panic!("the store never got {n} ask reports: {:?}", reports(asked));
 }
 
-async fn quiet_passes(rig: &mut Rig) {
+pub(super) async fn quiet_passes(rig: &mut Rig) {
     for _ in 0..8 {
         rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;

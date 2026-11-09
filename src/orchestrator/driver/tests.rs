@@ -925,6 +925,7 @@ mod reporting;
 mod restart;
 mod runs;
 mod settling;
+mod shared_pause;
 mod start_blocked;
 mod starter;
 mod step_events;
