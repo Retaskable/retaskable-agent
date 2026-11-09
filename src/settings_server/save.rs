@@ -1,5 +1,6 @@
 //! The settings page's saves: each setting's validation and write, and the check of a whole
 //! body before any of it is written (agent-settings.md sections 3.1 and 3.2).
+use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -220,7 +221,7 @@ impl Saver<'_> {
         let clean = |name: &Option<String>| -> Result<Option<String>, SaveError> {
             match name {
                 None => Ok(None),
-                Some(s) if s.trim().is_empty() => Ok(None),
+                Some(s) if is_blank(s) => Ok(None),
                 Some(s) if config::valid_cursor_model_name(s) => Ok(Some(s.clone())),
                 Some(_) => Err(SaveError::Invalid(
                     "Cursor's model name must be letters, digits, '_', '.', ':', '/' or '-', not starting with '-'."

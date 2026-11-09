@@ -5,6 +5,7 @@
 //! `releases.offered.json`); a note the store already has is left as it is. The files stay in the repo:
 //! this computer never writes to the repo without a change someone approves. Saving a note
 //! (`release_set`) is the site's, as a writer: this computer only reads them (`releases_get`).
+use crate::text::is_blank;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -96,7 +97,7 @@ pub fn release_of_file(file: &ReleaseFile) -> Option<ReleaseOffer> {
     let to = front_day(&front, "to")?;
     let name = file.path.rsplit('/').next().unwrap_or(&file.path);
     let id = name.strip_suffix(".md").unwrap_or(name);
-    if !RELEASE_ID.is_match(id) || file.content.trim().is_empty() || file.content.len() > RELEASE_BODY_MAX_BYTES {
+    if !RELEASE_ID.is_match(id) || is_blank(&file.content) || file.content.len() > RELEASE_BODY_MAX_BYTES {
         return None;
     }
     let title = FIRST_HEADING

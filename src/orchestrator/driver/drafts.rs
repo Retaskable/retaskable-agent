@@ -4,6 +4,7 @@
 //! loop keeps only the running draft's id and session id, in memory: the store has the draft, and a
 //! claim that comes back with a session id resumes that session, so a restart carries on. What a person
 //! does with the draft afterwards is mostly not here: Edit is the `draft_edit` command (`drafts::actions`); Approve, Merge into main and Discard are carried out by `driver::land`. A claim that carries send-back notes or answers resumes the session with them, and answers are acknowledged with `draft_answer_taken`.
+use crate::text::is_blank;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -91,7 +92,7 @@ fn follow_up(d: &ClaimedDraft) -> String {
             "The person answered your questions, in order:\n{}",
             a.answers.join("\n")
         )
-    } else if let Some(n) = d.notes.as_deref().filter(|n| !n.trim().is_empty()) {
+    } else if let Some(n) = d.notes.as_deref().filter(|n| !is_blank(n)) {
         format!("The person sent the draft back with these notes:\n{n}")
     } else if let Some(r) = &d.rebase_reason {
         rebase_request(r)
@@ -441,12 +442,12 @@ async fn open_pr(
     let title = r
         .change_title
         .clone()
-        .filter(|t| !t.trim().is_empty())
+        .filter(|t| !is_blank(t))
         .unwrap_or_else(|| format!("Spec: {}", r.title.clone().unwrap_or_else(|| id.to_string())));
     let body = r
         .change_body
         .clone()
-        .filter(|b| !b.trim().is_empty())
+        .filter(|b| !is_blank(b))
         .unwrap_or_else(|| r.summary.clone());
     let published = {
         let (host, project, dir, branch) = (

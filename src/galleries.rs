@@ -46,7 +46,7 @@ use crate::orchestrator::live::now_iso8601;
 use crate::paths;
 use crate::proc;
 use crate::sync::lock;
-use crate::text::capitalize;
+use crate::text::{capitalize, is_blank};
 
 const SHOOT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const JPEG_QUALITY: u8 = 82;
@@ -241,7 +241,7 @@ pub fn busy(project: &str) -> bool {
 /// command runs: a gallery's command or out dir may have changed, or another shoot may have
 /// started, since Shoot was first asked for.
 pub fn shoot_refusal(project: &str, gallery: &GalleryConfig) -> Option<String> {
-    if gallery.command.trim().is_empty() {
+    if is_blank(&gallery.command) {
         return Some("No command set for this gallery.".to_string());
     }
     if safe_out_dir(&gallery.out_dir).is_none() {

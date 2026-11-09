@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::text::clip;
+use crate::text::{clip, is_blank};
 
 /// `ideasQueue`'s default (shared/tuning.ts): at most this many ideas wait at a time.
 pub const QUEUE: usize = 5;
@@ -141,7 +141,7 @@ pub fn refilled(
     let fresh: Vec<Idea> = res
         .ideas
         .iter()
-        .filter(|i| !i.title.trim().is_empty())
+        .filter(|i| !is_blank(&i.title))
         .filter(|i| !taken.contains(&i.title.trim().to_lowercase()))
         .take(room)
         .enumerate()
@@ -153,8 +153,8 @@ pub fn refilled(
                 }
             }
             for_profiles.truncate(IDEA_FOR_MAX);
-            let feature = (!i.feature.trim().is_empty()).then(|| clip(i.feature.trim(), IDEA_FEATURE_MAX));
-            let new_feature = (feature.is_none() && !i.new_feature.trim().is_empty())
+            let feature = (!is_blank(&i.feature)).then(|| clip(i.feature.trim(), IDEA_FEATURE_MAX));
+            let new_feature = (feature.is_none() && !is_blank(&i.new_feature))
                 .then(|| clip(i.new_feature.trim(), IDEA_NEW_FEATURE_MAX));
             Idea {
                 id: format!("{stamp}-{n}"),

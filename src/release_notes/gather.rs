@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 use super::model::{Commit, MergedPr};
 use crate::backlog::Draft;
-use crate::text::clip;
+use crate::text::{clip, is_blank};
 
 /// `releaseMaxPrs`'s default (shared/tuning.ts): more than this many merged PRs in one range is
 /// refused rather than guessed at.
@@ -130,7 +130,7 @@ pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
         anyhow::bail!("gh pr list failed: {}", clip(&stderr, 300));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() {
+    if is_blank(&stdout) {
         return Ok(Vec::new());
     }
     serde_json::from_str(&stdout).context("parsing gh pr list output")

@@ -1,6 +1,7 @@
 //! docs/specs/agent-ci.md sections 3.2 and 3.3: one claimed check end to end. The caller holds the slot's permit
 //! for the whole of it: pending, fetch (`host.rs`), a conflict fails it with no container, else run
 //! (`container.rs`), then success or failure (and on failure the comment), then the directory goes.
+use crate::text::is_blank;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -82,7 +83,7 @@ fn emit(j: &Job, state: &str, ms: u128) {
 
 /// The log's last non-empty line, for the failure status.
 fn last_line(tail: &str) -> &str {
-    tail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")
+    tail.lines().rev().find(|l| !is_blank(l)).unwrap_or("")
 }
 
 /// The check's directory has a sibling file naming its container, so a restart can remove a cut one.
@@ -299,7 +300,7 @@ pub async fn recover(docker: &std::ffi::OsStr, data_dir: &Path, project: &str) {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "name")
                 && let Ok(name) = std::fs::read_to_string(&p)
-                && !name.trim().is_empty()
+                && !is_blank(&name)
             {
                 container::remove_stale(docker, name.trim()).await;
             }

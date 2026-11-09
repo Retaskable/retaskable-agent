@@ -2,6 +2,7 @@
 //! given, the prompt (`prompts/look.md`), the session and the decision it answers with. Modelled on
 //! [`crate::triage`]; `orchestrator::look_run` runs it.
 
+use crate::text::is_blank;
 use std::future::Future;
 
 use anyhow::{Context as _, Result};
@@ -147,7 +148,7 @@ pub struct LookResult {
 impl LookResult {
     /// Why the answer can't be used, if it can't.
     fn problem(&self, plan: bool) -> Option<&'static str> {
-        let has = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let has = |s: &Option<String>| s.as_deref().is_some_and(|s| !is_blank(s));
         if self.engine.as_deref().is_some_and(|e| !ENGINES.contains(&e)) {
             return Some("named an engine that doesn't exist");
         }
@@ -166,7 +167,7 @@ impl LookResult {
         let mut m = Map::new();
         m.insert("decision".into(), json!(self.decision.wire()));
         m.insert("reason".into(), json!(self.reason));
-        if let Some(i) = self.instructions.as_deref().filter(|i| !i.trim().is_empty()) {
+        if let Some(i) = self.instructions.as_deref().filter(|i| !is_blank(i)) {
             m.insert("instructions".into(), json!(i));
         }
         if !self.pieces.is_empty() {

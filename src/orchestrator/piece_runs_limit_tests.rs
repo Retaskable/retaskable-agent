@@ -1,5 +1,6 @@
 //! A review that hits its engine's usage limit (docs/specs/engines/03-choosing-the-engine.md section 3.5).
 use super::*;
+use crate::text::is_blank;
 
 /// A build whose review roles are on Cursor, whose stub ends every session at its usage limit.
 fn cursor_review_at_its_limit(
@@ -73,7 +74,7 @@ async fn a_review_starts_on_claude_when_cursor_was_already_out() {
     let r = cursor_review_at_its_limit(vec![Cursor, Claude], &[Cursor], true);
     assert_eq!(end_with_fall(&r).await.outcome, RunOutcome::PrOpened);
     let log = std::fs::read_to_string(r.root.join("cursor.log")).unwrap_or_default();
-    assert!(log.trim().is_empty(), "nothing started on Cursor: {log}");
+    assert!(is_blank(&log), "nothing started on Cursor: {log}");
     assert!(r.root.join("reviewer1.txt").exists());
 }
 

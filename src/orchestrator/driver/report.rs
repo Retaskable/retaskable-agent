@@ -4,6 +4,7 @@
 //! the store as `upsert_from_specs` (backlog.md section 6.4), and the items whose merge commits reached the
 //! default branch or production are sent as `landed` (section 6.5). Plain code: no model reads anything. A
 //! failure is only logged; the next fetch tries again.
+use crate::text::is_blank;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -214,7 +215,7 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
     let Some(main_head) = head(ctx, &ctx.main).await else {
         return Ok(format!("no {}", ctx.origin(&ctx.main)));
     };
-    let production = production.filter(|p| !p.branch.trim().is_empty());
+    let production = production.filter(|p| !is_blank(&p.branch));
     let version = production.and_then(version_url);
     let production_head = match production {
         Some(p) => head(ctx, p.branch.trim()).await,

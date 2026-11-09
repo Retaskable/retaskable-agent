@@ -2,6 +2,7 @@
 //! structured result, and reading that result into the `planned` result for `run_done`; and [`PlanRuns`], which
 //! runs the store's `plan` runs: one read-only planner session in the project's base checkout, one at a time on
 //! this computer.
+use crate::text::is_blank;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -160,7 +161,7 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
             return Err(format!("Piece {n} has no title."));
         }
         for field in ["what", "doneWhen"] {
-            if text(p, field).trim().is_empty() {
+            if is_blank(&text(p, field)) {
                 return Err(format!("Piece {n} (\"{title}\") has an empty {field}."));
             }
         }
@@ -204,7 +205,7 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     let mut result = Map::new();
     result.insert("pieces".into(), Value::Array(out));
     let no_flag = text(structured, "noFlag");
-    if !no_flag.trim().is_empty() {
+    if !is_blank(&no_flag) {
         result.insert("noFlag".into(), Value::String(no_flag.trim().to_string()));
     }
     Ok(Value::Object(result))

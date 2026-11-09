@@ -56,9 +56,14 @@ pub fn collapse_whitespace(s: &str) -> String {
     out
 }
 
+/// Whether `s` is empty or only whitespace.
+pub fn is_blank(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
 /// `s` trimmed, or `None` when nothing but whitespace is left.
 pub fn non_blank(s: &str) -> Option<&str> {
-    Some(s.trim()).filter(|t| !t.is_empty())
+    Some(s.trim()).filter(|t| !is_blank(t))
 }
 
 /// `s` with its first character upper-cased.

@@ -35,6 +35,7 @@ use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
+use crate::text::is_blank;
 use crate::triage::schedule::nothing_to_continue;
 use crate::view::ItemCommand;
 
@@ -103,7 +104,7 @@ impl ProjectLoop {
                 } else {
                     &mut self.continuing
                 };
-                queue.push((item, notes.filter(|n| !n.trim().is_empty())));
+                queue.push((item, notes.filter(|n| !is_blank(n))));
             }
         }
         let rules_on = self.flags.on("engine-start-rules").await;
