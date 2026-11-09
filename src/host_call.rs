@@ -113,6 +113,20 @@ pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
     })
 }
 
+/// Test helper: turns the flag On for `dir` and returns what the global sink holds for it, without draining it
+/// (tests run in parallel and share the sink).
+#[cfg(test)]
+pub(crate) fn refusals_in(dir: &Path) -> Vec<Refusal> {
+    Sink::global()
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.dir.as_deref() == Some(dir))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -208,9 +208,11 @@ fn requests(result: &ReviewerResult) -> String {
 }
 
 fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
+    let number = number.to_string();
+    crate::host_call::guard("gh", cwd, &["pr", "comment", &number, "--body-file", "-"])?;
     let mut cmd = Command::new(gh);
     cmd.current_dir(cwd)
-        .args(["pr", "comment", &number.to_string(), "--body-file", "-"]);
+        .args(["pr", "comment", &number, "--body-file", "-"]);
     run_command(cmd, Some(comment), "gh pr comment").map(|_| ())
 }
 

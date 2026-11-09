@@ -56,8 +56,10 @@ pub fn deletes_head(branch: &str) -> bool {
 
 /// `gh pr merge <pr> --squash [--delete-branch]`, run in the project's checkout.
 pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch: bool) -> Result<()> {
+    let number = pr.to_string();
+    crate::host_call::guard("gh", dir, &["pr", "merge", &number, method_flag])?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir).args(["pr", "merge", &pr.to_string(), method_flag]);
+    cmd.current_dir(dir).args(["pr", "merge", &number, method_flag]);
     if delete_branch {
         cmd.arg("--delete-branch");
     }
@@ -78,9 +80,10 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
 
 /// `gh pr close <pr> --delete-branch`, run in the project's checkout.
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
+    let number = pr.to_string();
+    crate::host_call::guard("gh", dir, &["pr", "close", &number, "--delete-branch"])?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir)
-        .args(["pr", "close", &pr.to_string(), "--delete-branch"]);
+    cmd.current_dir(dir).args(["pr", "close", &number, "--delete-branch"]);
     run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
 }
 
@@ -164,6 +167,29 @@ mod tests {
         // Rewrite the pushed commit: a plain push would be rejected.
         run(git(&repo).args(["commit", "--quiet", "--amend", "-m", "rewritten"]));
         push_rebased(Path::new("git"), &repo, "b").unwrap();
+    }
+
+    #[test]
+    fn a_merge_with_an_undefined_argument_is_refused_and_recorded_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let gh = dir.path().join(if cfg!(windows) { "gh.cmd" } else { "gh.sh" });
+        let script = if cfg!(windows) {
+            format!("@echo off\r\necho x > \"{}\"\r\n", ran.display())
+        } else {
+            format!("#!/bin/sh\ntouch \"{}\"\n", ran.display())
+        };
+        crate::test_support::write_executable(&gh, &script);
+        let _ = std::fs::remove_file(&ran); // the helper ran the script once
+        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
+        let err = merge_pr(&gh, dir.path(), 7, "", true).unwrap_err();
+        assert!(err.to_string().contains("was not run"), "{err}");
+        assert!(!ran.exists());
+        let got = crate::host_call::refusals_in(dir.path());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cmd, "gh");
+        assert_eq!(got[0].args[..3], ["pr", "merge", "7"]);
+        crate::host_call::set_on_for(vec![]);
     }
 
     #[test]
