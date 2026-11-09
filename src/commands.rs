@@ -106,14 +106,11 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
-        "setup_check" => setup_check(cmd, project, view),
+        "setup_check" if view.settings.setup_checks_now() => setup_check(cmd, project, view),
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
-        "playtest" if view.item_commands.flag_on(project, "playtest-answer-command") => {
-            playtest(cmd, project, view, data_dir)
-        }
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
@@ -215,18 +212,12 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
     if let Err(reason) = claim_check(view) {
         return nack(&cmd.id, reason);
     }
-    let notes = match notes_with_pictures(&cmd.args, data_dir) {
-        Ok(n) => n,
+    let pictures = match save_pictures(&cmd.args, "pictures", data_dir) {
+        Ok(p) => p,
         Err(reason) => return nack(&cmd.id, reason),
     };
-    queue_item(view, project, id, notes, start_over);
-    ack(&cmd.id)
-}
-
-/// The notes, trimmed, with the paths of the saved `pictures` added after them; `None` when both are empty.
-fn notes_with_pictures(args: &Value, data_dir: &Path) -> Result<Option<String>, String> {
-    let pictures = save_pictures(args, "pictures", data_dir)?;
-    let mut notes = args
+    let mut notes = cmd
+        .args
         .get("notes")
         .and_then(Value::as_str)
         .unwrap_or("")
@@ -236,52 +227,7 @@ fn notes_with_pictures(args: &Value, data_dir: &Path) -> Result<Option<String>, 
         notes.push_str(if notes.is_empty() { "Picture: " } else { "\nPicture: " });
         notes.push_str(&path.display().to_string());
     }
-    Ok((!notes.is_empty()).then_some(notes))
-}
-
-/// **playtest** (`playtest { itemId (or id), mergedAt?, result: "pass" | "fail", notes?, pictures? }`), behind the `playtest-answer-command`
-/// flag: a person's answer to a playtest, queued for the loop. `itemId` is the item's id, as in TypeScript; `id` is also taken. Refused
-/// outside `claim` mode, and for an item the loop holds in a state other than `awaiting_playtest`.
-fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
-    let text = |k: &str| {
-        cmd.args
-            .get(k)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    };
-    let id = text("itemId").or_else(|| text("id")).unwrap_or("");
-    if id.is_empty() {
-        return nack(&cmd.id, "A playtest answer needs the item's id.".into());
-    }
-    let passed = match cmd.args.get("result").and_then(Value::as_str) {
-        Some("pass") => true,
-        Some("fail") => false,
-        _ => return nack(&cmd.id, "A playtest answer's result must be pass or fail.".into()),
-    };
-    if let Err(reason) = claim_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    let held = view
-        .live
-        .snapshot()
-        .projects
-        .get(project)
-        .and_then(|p| p.items.iter().find(|i| i.id == id).map(|i| i.state.clone()));
-    if let Some(state) = held.filter(|s| s != "awaiting_playtest") {
-        return nack(&cmd.id, format!("{id} isn't waiting for a playtest (it is {state})."));
-    }
-    let notes = match notes_with_pictures(&cmd.args, data_dir) {
-        Ok(n) => n,
-        Err(reason) => return nack(&cmd.id, reason),
-    };
-    view.item_commands.push(ItemCommand::Playtest {
-        project: project.to_string(),
-        id: id.to_string(),
-        passed,
-        notes,
-        merged_at: text("mergedAt").map(str::to_string),
-    });
+    queue_item(view, project, id, (!notes.is_empty()).then_some(notes), start_over);
     ack(&cmd.id)
 }
 
@@ -345,6 +291,27 @@ fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value
 /// the `ack` or `nack` later ([`crate::view::ItemCommands::answer`]).
 pub const PENDING: &str = "pending";
 
+/// `setup_check {}` (**Check again**, first-run-check.md section 3.1): runs the fixed probes now. They take up to 20 s
+/// each, so this answers `pending` and a task sends the `ack` with the checks as its `answer`. The run goes through the
+/// runner, so it shares the one-at-a-time lock and a changed result also goes up in `hello`.
+fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let no_args = match &cmd.args {
+        Value::Null => true,
+        Value::Object(o) => o.is_empty(),
+        _ => false,
+    };
+    if !no_args {
+        return nack(&cmd.id, "setup_check takes no arguments.".into());
+    }
+    let (runner, commands) = (view.checks.clone(), view.item_commands.clone());
+    let (id, project) = (cmd.id.clone(), project.to_string());
+    tokio::spawn(async move {
+        let checks = runner.run_now().await;
+        commands.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
+    });
+    json!({ "type": PENDING, "id": cmd.id })
+}
+
 /// `idea_accept { idea }` (**Build this** on an idea): behind the `ideas-session` flag, queued for the loop, which reads the
 /// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.
 fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
@@ -368,25 +335,6 @@ fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
         command_id: cmd.id.clone(),
         idea: idea.to_string(),
         by: cmd.issued_by.clone(),
-    });
-    json!({ "type": PENDING, "id": cmd.id })
-}
-
-/// `setup_check {}` (**Check again**): the probes take up to 20 s each, so this answers pending and a task runs them
-/// through the runner (one run at a time, a changed result resends `hello`), then acks with the checks as `answer`.
-fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    if cmd.args.as_object().is_some_and(|a| !a.is_empty()) || !(cmd.args.is_null() || cmd.args.is_object()) {
-        return nack(&cmd.id, "setup_check takes no arguments.".into());
-    }
-    let (runner, out, id, project) = (
-        view.checks.clone(),
-        view.item_commands.clone(),
-        cmd.id.clone(),
-        project.to_string(),
-    );
-    tokio::spawn(async move {
-        let checks = runner.run_now().await;
-        out.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
     });
     json!({ "type": PENDING, "id": cmd.id })
 }

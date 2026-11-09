@@ -36,6 +36,3 @@ export const watchdogAnomalyRules = (): boolean => flags.on("watchdog-anomaly-ru
 
 /** The `engine-setup-probes` flag: probe pi and Codex at setup and say why each failed. Off until there is an answer. */
 export const engineSetupProbes = (): boolean => flags.on("engine-setup-probes");
-
-/** The `playtest-answer-command` flag: take a person's playtest answer from the site. Off until there is an answer. */
-export const playtestAnswerCommand = (): boolean => flags.on("playtest-answer-command");

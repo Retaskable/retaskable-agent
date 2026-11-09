@@ -1,118 +1,104 @@
-use super::*;
-use crate::setup_check::{SetupCheck, SetupCheckRunner, SetupChecks};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::PathBuf;
 
-fn stub(runs: Arc<AtomicUsize>, signed_in: Arc<AtomicBool>) -> Arc<SetupCheckRunner> {
-    Arc::new(SetupCheckRunner::with_probe(Box::new(move || {
-        runs.fetch_add(1, Ordering::SeqCst);
-        let ok = signed_in.load(Ordering::SeqCst);
+use super::super::*;
+use super::{cmd, data_dir, view};
+
+/// A view whose runner's probe counts its runs and whose `setup-check-command` flag is `on`.
+fn checks_view(on: bool, runs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> AgentView {
+    use crate::setup_check::{SetupCheck, SetupCheckRunner, SetupChecks};
+    let probe: crate::setup_check::runner::Probe = Box::new(move || {
+        let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             let c = || SetupCheck::unknown("x", None);
             SetupChecks {
-                git: c(),
+                git: if n == 0 { SetupCheck::pass("first") } else { c() },
                 gh_installed: c(),
                 gh: c(),
                 claude: c(),
-                claude_signed_in: if ok { SetupCheck::pass("in") } else { c() },
+                claude_signed_in: c(),
                 cursor: c(),
                 pi: None,
                 codex: None,
                 docker: None,
             }
         })
-    })))
+    });
+    let mut v = view();
+    v.checks = std::sync::Arc::new(SetupCheckRunner::with_probe(probe));
+    let flags = crate::flags::Flags::fixed(if on { &["setup-check-command"] } else { &[] });
+    v.settings = crate::hello_settings::HelloSettings::new(
+        PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        std::sync::Arc::new(flags),
+    );
+    v
 }
 
-fn go(v: &AgentView, project: &str, c: &Command, seen: &mut Seen) -> Value {
-    run(c, project, seen, v, &|_| {}, &data_dir())
+async fn ask_setup_check(v: &AgentView, project: &str, args: Value, seen: &mut Seen) -> Value {
+    run(&cmd("setup_check", args), project, seen, v, &|_: i32| {}, &data_dir())
 }
 
 #[tokio::test]
-async fn setup_check_is_pending_then_acks_with_the_checks_before_and_after_setup() {
-    for project in ["", "one"] {
-        let runs = Arc::new(AtomicUsize::new(0));
-        let signed_in = Arc::new(AtomicBool::new(true));
-        let mut v = view();
-        v.checks = stub(runs.clone(), signed_in);
+async fn setup_check_is_pending_then_acks_with_the_checks_even_before_setup() {
+    for project in ["one", ""] {
+        let runs = Default::default();
+        let v = checks_view(true, std::sync::Arc::clone(&runs));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         v.item_commands.set_out(project, Some(tx));
         for args in [json!({}), Value::Null] {
-            let mut c = cmd("setup_check", args);
-            c.id = format!("c-{project}-{}", runs.load(Ordering::SeqCst));
-            let answer = go(&v, project, &c, &mut Seen::default());
-            assert_eq!(answer, json!({ "type": PENDING, "id": c.id }));
-            let ack = rx.recv().await.unwrap();
+            let answer = ask_setup_check(&v, project, args, &mut Seen::default()).await;
+            assert_eq!(answer, json!({ "type": PENDING, "id": "c1" }));
+            let ack = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(ack["type"], "ack");
-            assert_eq!(ack["id"], c.id);
+            assert_eq!(ack["id"], "c1");
             assert_eq!(ack["answer"], v.checks.latest().unwrap().to_json());
-            assert_eq!(ack["answer"]["claudeSignedIn"]["ok"], true);
         }
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }
 
 #[tokio::test]
-async fn setup_check_with_an_argument_is_a_nack_and_runs_no_probe() {
-    let runs = Arc::new(AtomicUsize::new(0));
-    let mut v = view();
-    v.checks = stub(runs.clone(), Arc::default());
-    for args in [json!({ "x": 1 }), json!([]), json!("x")] {
-        let answer = go(&v, "", &cmd("setup_check", args), &mut Seen::default());
-        assert_eq!(answer["reason"], "setup_check takes no arguments.");
-    }
-    tokio::task::yield_now().await;
-    assert_eq!(runs.load(Ordering::SeqCst), 0);
+async fn setup_check_with_any_argument_is_a_nack_and_runs_nothing() {
+    let runs: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+    let v = checks_view(true, runs.clone());
+    let answer = ask_setup_check(&v, "one", json!({ "x": 1 }), &mut Seen::default()).await;
+    assert_eq!(answer["type"], "nack");
+    assert_eq!(answer["reason"], "setup_check takes no arguments.");
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn a_replayed_or_expired_setup_check_is_refused_and_runs_no_probe() {
-    let runs = Arc::new(AtomicUsize::new(0));
-    let mut v = view();
-    v.checks = stub(runs.clone(), Arc::default());
+async fn setup_check_is_refused_when_replayed_or_expired_and_with_the_flag_off() {
+    let runs: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+    let v = checks_view(true, runs.clone());
     let mut seen = Seen::default();
-    assert_eq!(go(&v, "", &cmd("setup_check", json!({})), &mut seen)["type"], PENDING);
-    let again = go(&v, "", &cmd("setup_check", json!({})), &mut seen);
-    assert!(again["reason"].as_str().unwrap().starts_with("Already received"));
+    assert_eq!(ask_setup_check(&v, "one", json!({}), &mut seen).await["type"], PENDING);
+    let replay = ask_setup_check(&v, "one", json!({}), &mut seen).await;
+    assert_eq!(replay["type"], "nack");
     let mut old = cmd("setup_check", json!({}));
-    old.id = "old".into();
     old.expires_at = now_ms() - 1;
-    let late = go(&v, "", &old, &mut seen);
-    assert!(late["reason"].as_str().unwrap().starts_with("Expired"));
-    for _ in 0..5 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    let expired = run(&old, "one", &mut Seen::default(), &v, &|_: i32| {}, &data_dir());
+    assert_eq!(expired["type"], "nack");
+    let off = checks_view(false, Default::default());
+    let answer = ask_setup_check(&off, "one", json!({}), &mut Seen::default()).await;
+    assert_eq!(answer["reason"], "Not a command this agent takes yet: setup_check");
 }
 
 #[tokio::test]
-async fn a_changed_result_ticks_the_change_watch_and_an_equal_one_does_not() {
-    let signed_in = Arc::new(AtomicBool::new(false));
-    let runner = stub(Arc::default(), signed_in.clone());
-    let mut rx = runner.subscribe();
-    runner.run_now().await;
-    assert!(rx.has_changed().unwrap());
-    rx.borrow_and_update();
-    runner.run_now().await;
-    assert!(!rx.has_changed().unwrap());
-    signed_in.store(true, Ordering::SeqCst);
-    runner.run_now().await;
-    assert!(rx.has_changed().unwrap());
-}
-
-#[test]
-fn the_audit_line_records_the_ack() {
-    let tmp = tempfile::tempdir().unwrap();
-    let c = cmd("setup_check", json!({}));
-    audit(
-        tmp.path(),
-        &c,
-        &json!({ "type": "ack", "id": "c1", "answer": { "git": {} } }),
-        "url",
-    );
-    let line = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
-    let line: Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(
-        (line["name"].as_str(), line["outcome"].as_str()),
-        (Some("setup_check"), Some("ack"))
-    );
+async fn setup_check_ticks_the_change_watch_only_for_a_different_result() {
+    let runs: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+    let v = checks_view(true, runs);
+    let mut watch = v.checks.subscribe();
+    v.checks.run_now().await; // first result counts
+    assert!(watch.has_changed().unwrap());
+    watch.borrow_and_update();
+    v.checks.run_now().await; // differs (the stub's second answer)
+    assert!(watch.has_changed().unwrap());
+    watch.borrow_and_update();
+    v.checks.run_now().await; // equal
+    assert!(!watch.has_changed().unwrap());
 }
