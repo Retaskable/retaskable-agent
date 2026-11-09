@@ -22,8 +22,11 @@
 //! uploading a shot gallery's set to the backlog store, refusing a shoot while the baseline, Play
 //! main or a sync holds the base checkout (none of which exist yet either), and the settings page
 //! that lets someone set a gallery's command.
+mod feedback;
 #[cfg(test)]
 mod tests;
+
+pub use feedback::feedback_request;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
