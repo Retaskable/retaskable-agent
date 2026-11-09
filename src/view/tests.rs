@@ -10,6 +10,7 @@ fn project(id: &str, repo: &str) -> ProjectView {
         base_branch: "main".into(),
         galleries: vec![],
         play_command: String::new(),
+        project_type: Default::default(),
     }
 }
 

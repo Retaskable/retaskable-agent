@@ -42,3 +42,6 @@ export const playtestAnswerCommand = (): boolean => flags.on("playtest-answer-co
 
 /** The `gallery-read-commands` flag: answer the site's requests for a gallery's pictures. Off until there is an answer. */
 export const galleryReadCommands = (): boolean => flags.on("gallery-read-commands");
+
+/** The `gallery-feedback-command` flag: take the site's gallery feedback and queue its spec draft. Off until there is an answer. */
+export const galleryFeedbackCommand = (): boolean => flags.on("gallery-feedback-command");

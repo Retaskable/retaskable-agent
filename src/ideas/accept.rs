@@ -11,7 +11,7 @@ use super::store::{IdeaAnswer, IdeaState, Ideas, StoreIdea};
 const TITLE_MAX: usize = 300;
 
 /// A GitHub login: 1 to 39 letters, digits or single hyphens, not starting or ending with one (`isLogin`, shared/assign.ts).
-fn is_login(s: &str) -> bool {
+pub(crate) fn is_login(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 39
         && !s.starts_with('-')

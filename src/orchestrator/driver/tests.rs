@@ -970,6 +970,7 @@ mod deprecations;
 mod drafts;
 mod fix_main;
 mod follow;
+mod gallery_feedback;
 mod idea_accept;
 mod ideas;
 mod ideas_daily;
