@@ -508,7 +508,20 @@ impl AgentView {
         if let Some(smoke) = self.smoke_json(project, data_dir) {
             state["smoke"] = smoke;
         }
+        if let Some(waiting) = self.commands_waiting_json(project) {
+            state["commandsWaiting"] = waiting;
+        }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `commandsWaiting`: the version of a shared project's commands that waits for the owner's
+    /// approval, with the text to show. Only with `approve-commands-gate` On; the values are never sent.
+    pub fn commands_waiting_json(&self, project: &str) -> Option<Value> {
+        if !self.item_commands.flag_on(project, crate::command_gate::FLAG) {
+            return None;
+        }
+        let w = self.item_commands.gates().waiting(project)?;
+        Some(json!({ "version": w.version, "text": w.text, "by": w.by }))
     }
 
     /// The snapshot's `items` and `milestones` (09.2): with `snapshot-reporting` On, the items this agent holds a

@@ -15,6 +15,7 @@ use crate::telemetry::events::now_ms;
 use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 
 mod checks;
+mod commands;
 mod live;
 mod smoke;
 
