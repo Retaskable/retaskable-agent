@@ -1,9 +1,8 @@
 //! Host calls (`gh`, `glab`) with a missing argument are refused and recorded (agent-telemetry.md section 3.3,
 //! `host_call_undefined`). A call deep in the code has no event log, so a refusal goes to a process-wide sink that
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
-//! Behind the `host-call-undefined-event` flag: Off ([`set_on`]), the guard neither refuses nor records.
+//! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
@@ -13,23 +12,32 @@ pub const FLAG: &str = "host-call-undefined-event";
 
 // Tests run in parallel threads and each pass sets this, so under test it is per thread.
 #[cfg(not(test))]
-static ON: AtomicBool = AtomicBool::new(false);
+static ON: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 #[cfg(test)]
-thread_local!(static ON: AtomicBool = const { AtomicBool::new(false) });
+thread_local!(static ON: Mutex<Vec<PathBuf>> = const { Mutex::new(Vec::new()) });
 
-/// Turns the guard on or off; the orchestrator sets it each pass from the flag.
-pub fn set_on(on: bool) {
+/// Sets the repos whose project has the flag On; the orchestrator does it each pass. A call is guarded only when
+/// its directory is under one of them, so a project with the flag Off keeps today's behaviour.
+pub fn set_on_for(repos: Vec<PathBuf>) {
     #[cfg(test)]
-    ON.with(|o| o.store(on, Ordering::SeqCst));
+    ON.with(|o| *o.lock().unwrap_or_else(|p| p.into_inner()) = repos);
     #[cfg(not(test))]
-    ON.store(on, Ordering::SeqCst);
+    {
+        *ON.lock().unwrap_or_else(|p| p.into_inner()) = repos;
+    }
 }
 
-fn is_on() -> bool {
+fn is_on(dir: &Path) -> bool {
+    let under = |o: &Mutex<Vec<PathBuf>>| {
+        o.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|r| dir.starts_with(r))
+    };
     #[cfg(test)]
-    return ON.with(|o| o.load(Ordering::SeqCst));
+    return ON.with(under);
     #[cfg(not(test))]
-    ON.load(Ordering::SeqCst)
+    under(&ON)
 }
 
 /// One refused call: the command, its arguments (scrubbed and cut) and the directory it would have run in.
@@ -88,7 +96,7 @@ pub fn undefined_arg(args: &[&str]) -> Option<usize> {
 
 /// Checks a call before it runs: on a match (and with the flag On) records it in the global sink and refuses.
 pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
-    if !is_on() {
+    if !is_on(dir) {
         return Ok(());
     }
     let Some(i) = undefined_arg(args) else {

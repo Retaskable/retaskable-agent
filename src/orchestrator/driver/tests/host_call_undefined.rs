@@ -27,7 +27,7 @@ async fn run(on: bool) -> (bool, bool, Vec<Value>, Vec<String>) {
     rig.lp(0).events = EventLog::new();
     rig.lp(0).project.repo_path = dir.path().to_string_lossy().into_owned();
     rig.go_live();
-    crate::host_call::set_on(on);
+    rig.machine.pass().await; // publishes the On repos
     let err = crate::ci_watch::gh_out(&gh, dir.path(), &["pr", "checks", "undefined"], &|_| {}).is_err();
     rig.machine.pass().await;
     let events = (rig.lp(0).events.recent().iter())
@@ -63,4 +63,36 @@ async fn with_the_flag_off_the_call_runs_and_nothing_is_written() {
     let (ran, err, events, _) = run(false).await;
     assert!(ran && !err);
     assert!(events.is_empty());
+}
+
+#[tokio::test]
+async fn a_project_with_the_flag_off_keeps_today_s_behaviour_beside_one_that_is_on() {
+    let _turn = TURN.lock().await;
+    let (base, _) = claim_stub(json!([]), None).await;
+    let mut rig = rig(2, &[&base, &base]);
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let marker = dir.path().join("ran");
+    let gh = dir.path().join("fake_gh.sh");
+    crate::test_support::write_executable(&gh, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+    std::fs::remove_file(&marker).unwrap();
+    for (i, d, flag) in [(0, &a, "host-call-undefined-event"), (1, &b, "watchdog-anomaly-rules")] {
+        rig.lp(i).flags = Arc::new(crate::flags::Flags::fixed(&[flag]));
+        rig.lp(i).events = EventLog::new();
+        rig.lp(i).project.repo_path = d.to_string_lossy().into_owned();
+    }
+    rig.go_live();
+    rig.machine.pass().await; // publishes the On repos
+    assert!(crate::ci_watch::gh_out(&gh, &b, &["pr", "checks", "undefined"], &|_| {}).is_ok());
+    assert!(marker.exists());
+    assert!(crate::ci_watch::gh_out(&gh, &a, &["pr", "checks", "undefined"], &|_| {}).is_err());
+    rig.machine.pass().await;
+    let mut n = |i| {
+        (rig.lp(i).events.recent().iter())
+            .filter(|e| e.to_value()["kind"] == "host_call_undefined")
+            .count()
+    };
+    assert_eq!((n(0), n(1)), (1, 0));
 }
