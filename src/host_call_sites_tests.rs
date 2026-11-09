@@ -119,7 +119,7 @@ async fn release_notes_gather_refuses_an_empty_repo() {
     let d = tempfile::tempdir().unwrap();
     let gh = fake(d.path(), "gh");
     on(d.path());
-    let err = crate::release_notes::gather::gather_merged_prs(&gh, d.path(), "", "main", "a", "b", 5).await;
+    let err = crate::release_notes::gather_merged_prs(&gh, d.path(), "", "main", "a", "b", 5).await;
     assert!(err.unwrap_err().to_string().contains("was undefined"));
     refused(d.path(), "gh", "--repo");
 }
