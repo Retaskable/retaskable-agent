@@ -538,7 +538,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
             retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
         )));
-        tokio::spawn(retaskable_agent::agent_ci::run(ci, dir.to_path_buf(), env.clone()));
+        tokio::spawn(retaskable_agent::agent_ci::run(
+            ci,
+            dir.to_path_buf(),
+            env.clone(),
+            view.item_commands.clone(),
+        ));
     }
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;

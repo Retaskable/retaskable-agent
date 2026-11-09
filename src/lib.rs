@@ -13,6 +13,7 @@ pub mod baseline;
 pub mod checks;
 pub mod ci_coverage;
 pub mod ci_watch;
+pub mod command_gate;
 pub mod commands;
 pub mod config;
 pub mod connector;

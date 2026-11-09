@@ -63,7 +63,7 @@ pub enum Playtests {
     Off,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckConfig {
     #[serde(default)]
@@ -77,7 +77,7 @@ pub struct CheckConfig {
 }
 
 /// A tab of pictures the game takes of itself (spec section 6.8).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GalleryConfig {
     #[serde(default)]
@@ -300,7 +300,7 @@ pub struct DeployTarget {
 }
 
 /// Play on phone (play-on-phone.md section 2): builds the Android app and installs it on a phone over adb.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneConfig {
     #[serde(default)]
