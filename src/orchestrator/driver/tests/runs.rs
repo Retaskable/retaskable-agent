@@ -220,9 +220,11 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
         .iter()
         .map(Entry::to_value)
         .collect::<Vec<_>>();
-    assert!(claim
-        .iter()
-        .any(|e| e["kind"] == "claim" && e["answer"]["waitingFor"] == json!(["gpu"])));
+    assert!(
+        claim
+            .iter()
+            .any(|e| e["kind"] == "claim" && e["answer"]["waitingFor"] == json!(["gpu"]))
+    );
 }
 
 #[tokio::test]
@@ -444,7 +446,7 @@ async fn a_worker_takes_a_lock_through_its_context_and_the_next_beat_sends_its_t
 /// fake `gh` that the store hands one `watch` run.
 #[cfg(unix)]
 async fn watch_rig(dir: &std::path::Path, poll: Duration) -> (Rig, Shared_, Arc<dyn RunStarter>) {
-    use crate::orchestrator::watch_run::{tests as w, WatchRuns};
+    use crate::orchestrator::watch_run::{WatchRuns, tests as w};
     let (mut rig, script) = setup(1).await;
     assert!(rig.machine.pool.claim_run("other", "x").is_some(), "the lane is busy");
     rig.machine.projects[0].project.repo_path = w::repo_with_ci(dir).display().to_string();
@@ -717,9 +719,11 @@ async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     assert_eq!(rig.live.snapshot().projects[&id].chores, None);
     pass(&mut rig, &starter, Instant::now()).await;
 
-    assert!(script.lock().unwrap().args("run_take")[0]["agent"]
-        .get("chores")
-        .is_none());
+    assert!(
+        script.lock().unwrap().args("run_take")[0]["agent"]
+            .get("chores")
+            .is_none()
+    );
     assert_eq!(starter.started(), vec!["tidy"]);
     let c = rig.live.snapshot().projects[&id].chores.unwrap();
     assert_eq!((c.today, c.limit), (2, 3));
@@ -825,13 +829,15 @@ async fn with_engine_fall_over_a_build_started_while_cursor_is_limited_is_placed
     let starter = cursor_limited_build(&["engine-fall-over"]).await;
     let started = starter.started.lock().unwrap();
     assert_eq!(started[0].engine, Some(Claude));
-    assert!(started[0]
-        .context
-        .fall
-        .as_ref()
-        .unwrap()
-        .out
-        .contains(&crate::engines::EngineId::Cursor));
+    assert!(
+        started[0]
+            .context
+            .fall
+            .as_ref()
+            .unwrap()
+            .out
+            .contains(&crate::engines::EngineId::Cursor)
+    );
 }
 
 #[tokio::test]
@@ -904,10 +910,12 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
         assert_eq!(takes.is_empty(), !asks, "{case:?}");
         if asks {
             assert_eq!(takes[0]["kinds"], json!(["build", "plan"]));
-            assert!(takes[0]["agent"]["engines"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("claude")));
+            assert!(
+                takes[0]["agent"]["engines"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("claude"))
+            );
         }
     }
 }
