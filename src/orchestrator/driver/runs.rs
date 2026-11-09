@@ -211,6 +211,15 @@ impl RunLoop {
 }
 
 impl ProjectLoop {
+    /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
+    /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
+    pub(super) fn hear_work_wake(&mut self, shared: &Shared<'_>) {
+        if shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
+            self.run_loop.waiting = false;
+            self.claim_waiting = false;
+        }
+    }
+
     /// One pass of the run loop at `now`: `runs_drop` first (once; if it fails nothing is taken), then the
     /// ends that came back, the ceilings, the minute's beat, the ends to send, and asking for runs.
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
@@ -218,9 +227,7 @@ impl ProjectLoop {
             return;
         };
         let token = Some(token.as_str());
-        if shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
-            self.run_loop.waiting = false;
-        }
+        self.hear_work_wake(shared);
         while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
             if !self.run_loop.runs.add_process(&run, tree.clone()) {
                 tree.cut();

@@ -259,6 +259,11 @@ pub struct ProjectLoop {
     pub(super) telemetry: Telemetry,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
+    /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
+    /// `work_available` wake.
+    pub(super) claim_waiting: bool,
+    /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
+    pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     pub(super) max_resume_context_tokens: u32,
@@ -324,6 +329,8 @@ impl ProjectLoop {
         live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
         Self {
             run_loop: super::RunLoop::new(&id),
+            claim_waiting: false,
+            claim_logged: None,
             id,
             project,
             leases: store.leases(),

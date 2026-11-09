@@ -184,8 +184,14 @@ pub struct ClaimNextAgent {
 /// to claim right now (paused, or nothing ready).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimNextAnswer {
-    Item { item: Box<Item>, token: String },
+    Item {
+        item: Box<Item>,
+        token: String,
+    },
     Nothing,
+    /// Tags the project needs that this computer lacks (`{ waitingFor }`): nothing is handed out until
+    /// `work_available`.
+    WaitingFor(Value),
 }
 
 /// What `tryout_add` sends for a merged slice's after-merge try-out (backlog/06-data-and-operations.md
@@ -420,6 +426,9 @@ impl Client {
             .await?;
         match body.value {
             None | Some(Value::Null) => Ok(ClaimNextAnswer::Nothing),
+            Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
+                Ok(ClaimNextAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
+            }
             Some(value) => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]

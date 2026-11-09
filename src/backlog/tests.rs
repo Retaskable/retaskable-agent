@@ -165,7 +165,7 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
             assert_eq!(item.id, "a");
             assert_eq!(token, "lease-1");
         }
-        ClaimNextAnswer::Nothing => panic!("expected an item"),
+        ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) => panic!("expected an item"),
     }
 }
 
@@ -191,6 +191,15 @@ async fn claim_next_reads_a_null_value_as_nothing_not_a_bad_answer() {
     let agent = test_agent();
     let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
     assert_eq!(answer, ClaimNextAnswer::Nothing);
+}
+
+#[tokio::test]
+async fn claim_next_reads_waiting_for_as_a_wait_not_an_error() {
+    let base = fake_store(post(|| async { Json(json!({ "value": { "waitingFor": ["gpu"] } })) })).await;
+
+    let agent = test_agent();
+    let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
+    assert_eq!(answer, ClaimNextAnswer::WaitingFor(json!(["gpu"])));
 }
 
 #[tokio::test]
