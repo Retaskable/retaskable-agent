@@ -240,6 +240,29 @@ impl Store {
             .insert("unreleased".to_string(), serde_json::json!(unreleased));
     }
 
+    /// When each `unreleased` entry was first listed, in epoch seconds. An entry with no time (a state file
+    /// from before it was kept) counts as listed at `now`, so it gets a full day.
+    pub fn unreleased_since(&self, now: i64) -> std::collections::BTreeMap<String, i64> {
+        let saved: std::collections::BTreeMap<String, i64> = self
+            .data
+            .get("unreleased_since")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        self.unreleased()
+            .into_keys()
+            .map(|id| {
+                let at = saved.get(&id).copied().unwrap_or(now);
+                (id, at)
+            })
+            .collect()
+    }
+
+    /// Replaces `state.unreleased_since`. Doesn't save on its own; call `save` after.
+    pub fn set_unreleased_since(&mut self, since: &std::collections::BTreeMap<String, i64>) {
+        self.data
+            .insert("unreleased_since".to_string(), serde_json::json!(since));
+    }
+
     /// Items a person skipped here whose `skip` the store hasn't taken yet (sent after their `release`, again
     /// on later passes until it answers). Empty when missing.
     pub fn unskipped(&self) -> std::collections::BTreeSet<String> {
@@ -397,6 +420,26 @@ mod tests {
         assert_eq!(again.trial(), TrialRecord::opened("https://x/pr/1"));
         assert!(read(dir.path()).contains(r#""other":{"a":1}"#));
         assert!(read(dir.path()).contains("\"trialPlan\""));
+    }
+
+    #[test]
+    fn an_old_unreleased_entry_without_a_time_reads_as_listed_now_and_a_saved_time_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"unreleased":{"a":["t","note"],"b":["u","n"]}}"#,
+        )
+        .unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(
+            store.unreleased_since(500),
+            [("a".to_string(), 500), ("b".to_string(), 500)].into()
+        );
+        store.set_unreleased_since(&[("a".to_string(), 100)].into());
+        store.save().unwrap();
+        let again = Store::load(dir.path()).unwrap();
+        let since = again.unreleased_since(500);
+        assert_eq!((since["a"], since["b"]), (100, 500));
     }
 
     #[test]

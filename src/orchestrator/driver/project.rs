@@ -183,6 +183,12 @@ pub struct ProjectLoop {
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
     pub(super) unreleased: BTreeMap<String, (String, String)>,
+    /// When each `unreleased` entry was first listed (epoch seconds), kept in the state file; a release that
+    /// keeps failing is dropped after [`super::settle::STUCK_RELEASE_SECS`] (behind `stuck-release-drop`).
+    pub(super) unreleased_since: BTreeMap<String, i64>,
+    /// The test's clock, as `Machine::clock` is.
+    #[cfg(test)]
+    pub(super) clock: Option<i64>,
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
     /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in the state file.
     pub(super) unskipped: std::collections::BTreeSet<String>,
@@ -335,6 +341,9 @@ impl ProjectLoop {
             project,
             leases: store.leases(),
             unreleased: store.unreleased(),
+            unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
+            #[cfg(test)]
+            clock: None,
             unskipped: store.unskipped(),
             unanswered: store.unanswered(),
             unparked: store.unparked(),
@@ -618,10 +627,28 @@ impl ProjectLoop {
         self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
     }
 
+    /// Epoch seconds, or the test's clock.
+    pub(super) fn now_secs(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(t) = self.clock {
+            return t;
+        }
+        crate::telemetry::now_ms() / 1000
+    }
+
+    /// Lists a lease the store hasn't taken back yet; one already listed keeps the time it was first listed.
+    pub(super) fn list_unreleased(&mut self, id: String, token: String, note: String) {
+        let now = self.now_secs();
+        self.unreleased_since.entry(id.clone()).or_insert(now);
+        self.unreleased.insert(id, (token, note));
+    }
+
     /// Writes the held and the unreleased leases to the state file.
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
+        self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
+        self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unskipped(&self.unskipped);
         self.store.set_unanswered(&self.unanswered);
         self.store.set_unparked(&self.unparked);
@@ -687,7 +714,7 @@ impl ProjectLoop {
             {
                 tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
                 let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
-                self.unreleased.insert(id, (token, why));
+                self.list_unreleased(id, token, why);
                 continue;
             }
             let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);

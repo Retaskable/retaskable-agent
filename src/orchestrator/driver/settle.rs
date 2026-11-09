@@ -41,6 +41,10 @@ const MAX_OWN_FAILURES: u32 = 3;
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
 
+/// How long a release the store keeps refusing stays listed before it is dropped (behind `stuck-release-drop`):
+/// the store has expired the lease by then.
+pub(super) const STUCK_RELEASE_SECS: i64 = 24 * 60 * 60;
+
 /// The `needs_human` reason a Cursor implementer stops with after 3 limit hits in a row; the first fetch's
 /// give-back (`readopt`) matches it exactly.
 pub(super) const CURSOR_LIMIT_STOP: &str = "Cursor's usage limit was hit 3 times in a row";
@@ -187,7 +191,7 @@ impl ProjectLoop {
         );
         if let Some(token) = self.leases.remove(item_id) {
             let note = crate::text::truncate(why, MAX_NOTE_CHARS);
-            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.list_unreleased(item_id.to_string(), token, note);
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -216,7 +220,7 @@ impl ProjectLoop {
         self.free_lane(pool, item_id, "queued", &why);
         if let Some(token) = self.leases.remove(item_id) {
             let note = crate::text::truncate(&why, MAX_NOTE_CHARS);
-            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.list_unreleased(item_id.to_string(), token, note);
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -299,6 +303,7 @@ impl ProjectLoop {
                     Err(e) if e.code() == Some("stale_lease") => {}
                     Err(e) => {
                         self.store_error("report", &e);
+                        self.drop_if_stuck(&id).await;
                         continue;
                     }
                 }
@@ -308,6 +313,7 @@ impl ProjectLoop {
                 Err(e) if e.code() == Some("stale_lease") => {}
                 Err(e) => {
                     self.store_error("release", &e);
+                    self.drop_if_stuck(&id).await;
                     continue;
                 }
             }
@@ -350,6 +356,28 @@ impl ProjectLoop {
             );
         }
         self.save_leases();
+    }
+
+    /// With `stuck-release-drop` On, drops an `unreleased` entry (and the skip owed after it) first listed
+    /// [`STUCK_RELEASE_SECS`] or more ago, with one `error` event.
+    async fn drop_if_stuck(&mut self, id: &str) {
+        let Some(&since) = self.unreleased_since.get(id) else {
+            return;
+        };
+        if self.now_secs() - since < STUCK_RELEASE_SECS || !self.flags.on("stuck-release-drop").await {
+            return;
+        }
+        self.unreleased.remove(id);
+        self.unskipped.remove(id);
+        self.events.add_in(
+            &self.id,
+            Event::Error(event::Error {
+                item: Some(id.to_string()),
+                r#where: Some("release".into()),
+                error: Some("the release was dropped after 24 hours: the store has expired the lease by then".into()),
+                ..Default::default()
+            }),
+        );
     }
 
     /// What an item's run moving from `from` to its state now means, after a session or a step ended
