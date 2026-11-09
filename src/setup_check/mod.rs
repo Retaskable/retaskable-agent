@@ -45,7 +45,7 @@ pub struct SetupCheck {
 }
 
 impl SetupCheck {
-    fn pass(detail: impl Into<String>) -> Self {
+    pub(crate) fn pass(detail: impl Into<String>) -> Self {
         Self {
             ok: Some(true),
             detail: detail.into(),
@@ -61,7 +61,7 @@ impl SetupCheck {
         }
     }
 
-    fn unknown(detail: impl Into<String>, fix: Option<&str>) -> Self {
+    pub(crate) fn unknown(detail: impl Into<String>, fix: Option<&str>) -> Self {
         Self {
             ok: None,
             detail: detail.into(),

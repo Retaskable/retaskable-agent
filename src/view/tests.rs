@@ -159,6 +159,45 @@ async fn hello_names_the_project_or_null_before_setup_or_without_a_repo() {
     assert!(v.hello("unknown").await["project"].is_null());
 }
 
+fn view_with_checks_flag(on: bool) -> AgentView {
+    let mut v = view(vec![project("a", "o/a")]);
+    v.settings = crate::hello_settings::HelloSettings::new(
+        PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        Arc::new(crate::flags::Flags::fixed(if on {
+            &["setup-check-command"]
+        } else {
+            &[]
+        })),
+    );
+    v
+}
+
+#[tokio::test]
+async fn hello_has_no_checks_until_the_first_run_then_carries_them_with_node() {
+    let v = view_with_checks_flag(true);
+    for id in ["", "a"] {
+        assert!(v.hello(id).await.get("checks").is_none());
+    }
+    v.checks.run_now().await;
+    for id in ["", "a"] {
+        let checks = &v.hello(id).await["checks"];
+        assert_eq!(checks["node"]["ok"], true);
+        assert!(checks["ghInstalled"].is_object());
+        assert!(checks["claudeSignedIn"].is_object());
+    }
+}
+
+#[tokio::test]
+async fn hello_has_no_checks_while_the_setup_check_command_flag_is_off() {
+    let v = view_with_checks_flag(false);
+    v.checks.run_now().await;
+    for id in ["", "a"] {
+        assert!(v.hello(id).await.get("checks").is_none());
+    }
+}
+
 #[test]
 fn snapshot_before_setup_says_setup() {
     let snap = view(vec![]).snapshot("", Path::new("."));
