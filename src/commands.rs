@@ -671,4 +671,6 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 }
 
 #[cfg(test)]
+mod setup_check_tests;
+#[cfg(test)]
 mod tests;
