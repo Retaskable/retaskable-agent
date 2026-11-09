@@ -47,7 +47,7 @@ fn approve_and_merge_into_main_are_queued_for_the_loop() {
     );
 }
 
-fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {
+pub(super) fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {
     run(c, "one", &mut Seen::default(), v, exit, &data_dir())
 }
 

@@ -506,5 +506,5 @@ fn draft_edit_commits_and_pushes() {
     assert_eq!(missing["type"], "nack");
 }
 
-#[test]
 mod more;
+use more::run_cmd;
