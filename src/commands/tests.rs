@@ -869,3 +869,100 @@ fn agent_settings_is_an_unknown_command_while_the_flag_is_off_and_writes_nothing
     assert_eq!(answer["reason"], "Not a command this agent takes yet: agent_settings");
     assert!(!dir.path().join("config.json").exists());
 }
+
+fn playtest_view() -> AgentView {
+    let v = claiming();
+    v.item_commands.set_flag("one", "playtest-answer-command", true);
+    v
+}
+
+fn answer_playtest(v: &AgentView, args: Value, dir: &Path) -> Value {
+    run(&cmd("playtest", args), "one", &mut Seen::default(), v, &|_| {}, dir)
+}
+
+#[test]
+fn playtest_queues_the_answer_with_notes_and_picture_paths() {
+    let v = playtest_view();
+    let dir = tempfile::tempdir().unwrap();
+    let args = json!({ "id": "a", "result": "fail", "notes": " Broken. ", "pictures": [picture(10)] });
+    assert_eq!(answer_playtest(&v, args, dir.path())["type"], "ack");
+    let ItemCommand::Playtest { id, passed, notes, .. } = v.item_commands.take("one").remove(0) else {
+        panic!("not a playtest")
+    };
+    assert_eq!((id.as_str(), passed), ("a", false));
+    assert!(notes.unwrap().starts_with("Broken.\nPicture: "));
+    let pass = answer_playtest(&v, json!({ "id": "a", "result": "pass" }), dir.path());
+    assert_eq!(pass["type"], "ack");
+    let ItemCommand::Playtest { passed, notes, .. } = v.item_commands.take("one").remove(0) else {
+        panic!("not a playtest")
+    };
+    assert!(passed && notes.is_none());
+}
+
+#[test]
+fn playtest_is_nacked_for_bad_arguments_and_modes() {
+    let v = playtest_view();
+    let d = data_dir();
+    for args in [
+        json!({ "result": "pass" }),
+        json!({ "id": "  ", "result": "pass" }),
+        json!({ "id": "a" }),
+        json!({ "id": "a", "result": "maybe" }),
+    ] {
+        assert_eq!(answer_playtest(&v, args, &d)["type"], "nack");
+    }
+    let off = view();
+    off.item_commands.set_flag("one", "playtest-answer-command", true);
+    let answer = answer_playtest(&off, json!({ "id": "a", "result": "pass" }), &d);
+    assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
+    let flagless = claiming();
+    assert_eq!(
+        answer_playtest(&flagless, json!({ "id": "a", "result": "pass" }), &d)["type"],
+        "nack"
+    );
+    assert!(v.item_commands.take("one").is_empty() && off.item_commands.take("one").is_empty());
+}
+
+#[test]
+fn playtest_with_a_bad_picture_saves_none_and_queues_nothing() {
+    let v = playtest_view();
+    let dir = tempfile::tempdir().unwrap();
+    let args = json!({ "id": "a", "result": "pass", "pictures": [picture(10), { "type": "text/plain", "data": "x" }] });
+    assert_eq!(answer_playtest(&v, args, dir.path())["type"], "nack");
+    assert!(
+        !dir.path().join("attachments").exists()
+            || std::fs::read_dir(dir.path().join("attachments")).unwrap().count() == 0
+    );
+    assert!(v.item_commands.take("one").is_empty());
+}
+
+#[test]
+fn playtest_is_nacked_for_an_item_held_in_another_state() {
+    let v = playtest_view();
+    let held = |id: &str, state: &str| crate::orchestrator::live::HeldItem {
+        id: id.into(),
+        title: String::new(),
+        state: state.into(),
+        lane: None,
+        branch: String::new(),
+        pr_url: None,
+        attempt: 0,
+        chore: false,
+    };
+    v.live
+        .set_items("one", vec![held("a", "building"), held("b", "awaiting_playtest")]);
+    let d = data_dir();
+    assert_eq!(
+        answer_playtest(&v, json!({ "id": "a", "result": "pass" }), &d)["type"],
+        "nack"
+    );
+    assert_eq!(
+        answer_playtest(&v, json!({ "id": "b", "result": "pass" }), &d)["type"],
+        "ack"
+    );
+    assert_eq!(
+        answer_playtest(&v, json!({ "id": "other", "result": "pass" }), &d)["type"],
+        "ack"
+    );
+    assert_eq!(v.item_commands.take("one").len(), 2);
+}

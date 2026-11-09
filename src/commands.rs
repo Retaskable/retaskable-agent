@@ -110,6 +110,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
+        "playtest" if view.item_commands.flag_on(project, "playtest-answer-command") => {
+            playtest(cmd, project, view, data_dir)
+        }
         "play" | "stop" => play(cmd, project, view),
         "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
@@ -211,12 +214,18 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
     if let Err(reason) = claim_check(view) {
         return nack(&cmd.id, reason);
     }
-    let pictures = match save_pictures(&cmd.args, "pictures", data_dir) {
-        Ok(p) => p,
+    let notes = match notes_with_pictures(&cmd.args, data_dir) {
+        Ok(n) => n,
         Err(reason) => return nack(&cmd.id, reason),
     };
-    let mut notes = cmd
-        .args
+    queue_item(view, project, id, notes, start_over);
+    ack(&cmd.id)
+}
+
+/// The notes, trimmed, with the paths of the saved `pictures` added after them; `None` when both are empty.
+fn notes_with_pictures(args: &Value, data_dir: &Path) -> Result<Option<String>, String> {
+    let pictures = save_pictures(args, "pictures", data_dir)?;
+    let mut notes = args
         .get("notes")
         .and_then(Value::as_str)
         .unwrap_or("")
@@ -226,7 +235,44 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
         notes.push_str(if notes.is_empty() { "Picture: " } else { "\nPicture: " });
         notes.push_str(&path.display().to_string());
     }
-    queue_item(view, project, id, (!notes.is_empty()).then_some(notes), start_over);
+    Ok((!notes.is_empty()).then_some(notes))
+}
+
+/// **playtest** (`playtest { id, result: "pass" | "fail", notes?, pictures? }`), behind the `playtest-answer-command`
+/// flag: a person's answer to a playtest, queued for the loop. `id` is the item's id (TypeScript's `itemId`). Refused
+/// outside `claim` mode, and for an item the loop holds in a state other than `awaiting_playtest`.
+fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    if id.is_empty() {
+        return nack(&cmd.id, "A playtest answer needs the item's id.".into());
+    }
+    let passed = match cmd.args.get("result").and_then(Value::as_str) {
+        Some("pass") => true,
+        Some("fail") => false,
+        _ => return nack(&cmd.id, "A playtest answer's result must be pass or fail.".into()),
+    };
+    if let Err(reason) = claim_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    let held = view
+        .live
+        .snapshot()
+        .projects
+        .get(project)
+        .and_then(|p| p.items.iter().find(|i| i.id == id).map(|i| i.state.clone()));
+    if let Some(state) = held.filter(|s| s != "awaiting_playtest") {
+        return nack(&cmd.id, format!("{id} isn't waiting for a playtest (it is {state})."));
+    }
+    let notes = match notes_with_pictures(&cmd.args, data_dir) {
+        Ok(n) => n,
+        Err(reason) => return nack(&cmd.id, reason),
+    };
+    view.item_commands.push(ItemCommand::Playtest {
+        project: project.to_string(),
+        id: id.to_string(),
+        passed,
+        notes,
+    });
     ack(&cmd.id)
 }
 

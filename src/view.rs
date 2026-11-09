@@ -81,6 +81,13 @@ pub enum ItemCommand {
         item: String,
         notes: Option<String>,
     },
+    /// A person's answer to the playtest of item `id`; `notes` carry any picture paths.
+    Playtest {
+        project: String,
+        id: String,
+        passed: bool,
+        notes: Option<String>,
+    },
     /// **Skip** on a stopped item: it's let go and skipped in the store, its branch kept.
     Skip { project: String, item: String },
     /// **Play** in lane `lane` (> 0), decided by the loop, which owns the lanes.
@@ -101,6 +108,7 @@ impl ItemCommand {
             Self::Continue { project, .. }
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
+            | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
             | Self::Ideas { project, .. } => project,
