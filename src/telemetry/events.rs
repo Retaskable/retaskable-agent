@@ -46,14 +46,10 @@ pub fn scrub(text: &str, max: usize) -> String {
         })
         .into_owned();
     t = WHITESPACE.replace_all(&t, " ").trim().to_string();
-    if t.len() > max {
-        let keep = max.saturating_sub(1);
-        // Cut on a char boundary.
-        let mut end = keep;
-        while end > 0 && !t.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &t[..end])
+    if t.chars().count() > max {
+        // Count characters, not bytes, so non-ASCII text isn't cut early.
+        let kept: String = t.chars().take(max.saturating_sub(1)).collect();
+        format!("{kept}…")
     } else {
         t
     }
@@ -499,6 +495,12 @@ mod tests {
         assert_eq!(long.chars().count(), MAX_TEXT);
         assert!(long.ends_with('…'));
         assert_eq!(scrub("two\n  lines", MAX_TEXT), "two lines");
+        // The limit counts characters, not bytes: 300 multi-byte characters fit whole.
+        let wide = "é".repeat(MAX_TEXT);
+        assert_eq!(scrub(&wide, MAX_TEXT), wide);
+        let wider = scrub(&"é".repeat(MAX_TEXT + 1), MAX_TEXT);
+        assert_eq!(wider.chars().count(), MAX_TEXT);
+        assert!(wider.ends_with('…'));
         let cleaned = clean(
             &json!({
                 "item": "R-1",
