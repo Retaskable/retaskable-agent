@@ -123,3 +123,106 @@ async fn an_answer_for_an_item_not_awaiting_a_playtest_changes_nothing() {
     assert!(rig.lp(0).playtest_fails.is_empty());
     assert!(fake.started.lock().unwrap().is_empty());
 }
+
+/// A store whose `tryouts_list` holds one waiting try-out (key "k1", item "7") and whose first `fail` answers to
+/// `tryout_result` are 500s; every `tryout_result` it gets is kept.
+async fn tryout_store(fail: usize) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let seen = results.clone();
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                let op = body["op"].as_str().unwrap_or("");
+                let value = match op {
+                    "tryouts_list" => {
+                        let taken = seen.lock().unwrap().len() > fail;
+                        let waiting = if taken {
+                            json!([])
+                        } else {
+                            json!([{"key": "k1", "itemId": "7", "title": "T", "what": "W"}])
+                        };
+                        json!({"waiting": waiting, "groups": null})
+                    }
+                    "tryout_result" => {
+                        let mut all = seen.lock().unwrap();
+                        all.push(body["args"].clone());
+                        if all.len() <= fail {
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))).into_response();
+                        }
+                        Value::Null
+                    }
+                    _ => json!([]),
+                };
+                Json(json!({ "value": value })).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), results)
+}
+
+use axum::response::IntoResponse;
+
+fn tryout_rig(base: &str) -> Rig {
+    let mut rig = rig(2, &[base]);
+    rig.go_live();
+    rig
+}
+
+#[tokio::test]
+async fn a_pass_on_a_waiting_tryout_sends_one_passed_result() {
+    let (base, results) = tryout_store(0).await;
+    let mut rig = tryout_rig(&base);
+    answer(&rig, "7", true, None);
+    rig.machine.poll().await;
+    rig.machine.poll().await;
+    let sent = results.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        (sent[0]["key"].as_str(), sent[0]["result"].as_str()),
+        (Some("k1"), Some("passed"))
+    );
+    assert!(rig.lp(0).unanswered.is_empty());
+}
+
+#[tokio::test]
+async fn a_fail_sends_a_problem_with_the_notes() {
+    let (base, results) = tryout_store(0).await;
+    let mut rig = tryout_rig(&base);
+    answer(&rig, "k1", false, Some("Broken. Pictures: /tmp/a.png"));
+    rig.machine.poll().await;
+    let sent = results.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["result"], "problem");
+    assert_eq!(sent[0]["notes"], "Broken. Pictures: /tmp/a.png");
+}
+
+#[tokio::test]
+async fn an_answer_the_store_refuses_goes_again_and_only_once_after_it_is_taken() {
+    let (base, results) = tryout_store(1).await;
+    let mut rig = tryout_rig(&base);
+    answer(&rig, "7", true, None);
+    rig.machine.poll().await;
+    assert_eq!(results.lock().unwrap().len(), 1);
+    assert!(rig.lp(0).unanswered.contains_key("7"));
+    rig.machine.pass().await;
+    assert_eq!(results.lock().unwrap().len(), 2);
+    assert!(rig.lp(0).unanswered.is_empty());
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(results.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_id_with_no_waiting_tryout_sends_nothing() {
+    let (base, results) = tryout_store(0).await;
+    let mut rig = tryout_rig(&base);
+    answer(&rig, "nope", true, None);
+    rig.machine.poll().await;
+    assert!(results.lock().unwrap().is_empty());
+    assert!(rig.lp(0).unanswered.is_empty());
+}
