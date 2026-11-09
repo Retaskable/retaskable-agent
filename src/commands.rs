@@ -106,6 +106,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
+        "setup_check" => setup_check(cmd, project, view),
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
@@ -367,6 +368,25 @@ fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
         command_id: cmd.id.clone(),
         idea: idea.to_string(),
         by: cmd.issued_by.clone(),
+    });
+    json!({ "type": PENDING, "id": cmd.id })
+}
+
+/// `setup_check {}` (**Check again**): the probes take up to 20 s each, so this answers pending and a task runs them
+/// through the runner (one run at a time, a changed result resends `hello`), then acks with the checks as `answer`.
+fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if cmd.args.as_object().is_some_and(|a| !a.is_empty()) || !(cmd.args.is_null() || cmd.args.is_object()) {
+        return nack(&cmd.id, "setup_check takes no arguments.".into());
+    }
+    let (runner, out, id, project) = (
+        view.checks.clone(),
+        view.item_commands.clone(),
+        cmd.id.clone(),
+        project.to_string(),
+    );
+    tokio::spawn(async move {
+        let checks = runner.run_now().await;
+        out.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
     });
     json!({ "type": PENDING, "id": cmd.id })
 }
