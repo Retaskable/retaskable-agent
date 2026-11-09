@@ -89,6 +89,7 @@ payload!(StepStart {
 });
 payload!(StepEnd {
     item: String, step: String, key: String, ms: f64, ok: bool, outcome: String, checks: Vec<Check>,
+    lines: u64, scouts: u32,
 });
 payload!(Ci {
     item: String,
@@ -389,6 +390,17 @@ mod tests {
             "host_call_undefined"
         );
         assert_eq!(Event::Anomaly(Anomaly::default()).kind(), "anomaly");
+    }
+
+    #[test]
+    fn a_step_end_keeps_a_reviews_lines_and_scouts_through_a_round_trip() {
+        let line = json!({ "at": "2026-01-01T00:00:00Z", "kind": "step_end", "item": "R-12", "ok": true, "lines": 40, "scouts": 2 });
+        let entry = Entry::from_value(&line).unwrap();
+        let Some(Event::StepEnd(end)) = entry.event() else {
+            panic!("not a step_end")
+        };
+        assert_eq!((end.lines, end.scouts), (Some(40), Some(2)));
+        assert_eq!(entry.to_value(), line);
     }
 
     #[test]

@@ -91,6 +91,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
         engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees })

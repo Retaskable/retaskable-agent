@@ -83,6 +83,7 @@ impl ProjectLoop {
             return;
         };
         let with_checks = self.flags.last("step-events-complete");
+        let review = detail.filter(|_| with_checks && open.step == "reviewing");
         let end = event::StepEnd {
             item: Some(item.into()),
             step: Some(open.step),
@@ -100,6 +101,9 @@ impl ProjectLoop {
                     })
                     .collect()
             }),
+            // A review's diff lines and scout count; never on a step that panicked or was cut.
+            lines: review.and_then(|d| d.lines),
+            scouts: review.and_then(|d| d.scouts),
             ..Default::default()
         };
         self.events.add_in(&self.id, Event::StepEnd(end));
