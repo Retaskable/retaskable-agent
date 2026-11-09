@@ -775,6 +775,7 @@ async fn link_command(
     if args == [String::from("backlog")] {
         let keychain = link::keychain(dir, env);
         let url = backlog::url(env);
+        backlog::clear_unlinked_on_site(); // the person's own "Link again"
         return match run_link_in_terminal(&keychain, &url, link::BACKLOG_TARGET, env, version).await {
             Ok(id) => {
                 println!(

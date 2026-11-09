@@ -20,6 +20,7 @@ pub mod suggestions;
 
 use crate::env::Env;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -34,6 +35,20 @@ use crate::link::{self, DeviceCode, TokenStore};
 pub const DEFAULT_URL: &str = "https://backlog.retaskable.com";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `BacklogStore.unlinkedOnSite()`: set when a store call made with this machine's own token answers
+/// `invalid_grant` (the site unlinked it). Held in memory only and never saved, so a restart links again.
+static UNLINKED_ON_SITE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the store has answered `invalid_grant` since the last link (or since this process started).
+pub fn unlinked_on_site() -> bool {
+    UNLINKED_ON_SITE.load(Ordering::SeqCst)
+}
+
+/// A link is approved or asked for by the person: forget any `invalid_grant`.
+pub fn clear_unlinked_on_site() {
+    UNLINKED_ON_SITE.store(false, Ordering::SeqCst);
+}
 
 /// The store this agent reads: `RETASKABLE_BACKLOG_URL`, else the default. No trailing slash.
 pub fn url(env: &Env) -> String {
@@ -66,6 +81,9 @@ pub async fn auto_link(
     if matches!(store.get(&backlog_url), Ok(Some(_))) {
         return Ok(None); // already linked
     }
+    if unlinked_on_site() {
+        return Ok(None); // the site unlinked this machine: wait for the person's `retaskable link backlog`
+    }
     let flow = link::Link {
         http,
         store: store.as_ref(),
@@ -73,7 +91,9 @@ pub async fn auto_link(
         target: link::BACKLOG_TARGET,
         second: Duration::from_secs(1),
     };
-    flow.run(&backlog_url, on_code).await.map(Some)
+    let id = flow.run(&backlog_url, on_code).await?;
+    clear_unlinked_on_site();
+    Ok(Some(id))
 }
 
 /// backlog/06.1-an-item.md: an item's status in the store.
@@ -708,6 +728,9 @@ impl Client {
         let status = res.status();
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
+            if token.is_some() && body.error.as_deref() == Some("invalid_grant") {
+                UNLINKED_ON_SITE.store(true, Ordering::SeqCst);
+            }
             let message = body
                 .message
                 .or_else(|| body.error.clone())
