@@ -64,6 +64,7 @@ pub mod release_update;
 pub mod release_upload;
 pub mod reopen;
 pub mod repo;
+pub mod repo_gitlab;
 pub mod restart;
 pub mod review_context;
 pub mod review_run;
