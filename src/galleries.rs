@@ -486,7 +486,7 @@ fn title_from_file(file: &str) -> String {
         .unwrap_or_else(|| file.to_string());
     let without_prefix = strip_numeric_prefix(&stem);
     let spaced = without_prefix.replace('-', " ");
-    let collapsed: String = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = crate::text::squish(&spaced);
     let base = if collapsed.is_empty() {
         file.to_string()
     } else {

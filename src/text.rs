@@ -35,7 +35,13 @@ pub fn tail(s: &str, max_chars: usize) -> String {
 /// to at most `n` chars. Every engine's reader uses this to fit a tool call's argument onto one
 /// transcript line.
 pub fn collapse_and_clip(s: &str, n: usize) -> String {
-    clip(&s.split_whitespace().collect::<Vec<_>>().join(" "), n)
+    clip(&squish(s), n)
+}
+
+/// `s` with leading and trailing whitespace dropped and every inner run of whitespace (including
+/// newlines) replaced by a single space.
+pub fn squish(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `s` with every run of whitespace (including newlines) replaced by a single space.
@@ -120,6 +126,12 @@ mod tests {
     fn tail_keeps_only_the_last_n_characters() {
         assert_eq!(tail("hello world", 5), "world");
         assert_eq!(tail("hi", 10), "hi");
+    }
+
+    #[test]
+    fn squish_trims_and_collapses_whitespace_runs() {
+        assert_eq!(squish("  a \n\t b  c "), "a b c");
+        assert_eq!(squish(" \n "), "");
     }
 
     #[test]
