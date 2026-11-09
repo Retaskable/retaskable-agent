@@ -238,11 +238,18 @@ fn notes_with_pictures(args: &Value, data_dir: &Path) -> Result<Option<String>, 
     Ok((!notes.is_empty()).then_some(notes))
 }
 
-/// **playtest** (`playtest { id, result: "pass" | "fail", notes?, pictures? }`), behind the `playtest-answer-command`
-/// flag: a person's answer to a playtest, queued for the loop. `id` is the item's id (TypeScript's `itemId`). Refused
+/// **playtest** (`playtest { itemId (or id), mergedAt?, result: "pass" | "fail", notes?, pictures? }`), behind the `playtest-answer-command`
+/// flag: a person's answer to a playtest, queued for the loop. `itemId` is the item's id, as in TypeScript; `id` is also taken. Refused
 /// outside `claim` mode, and for an item the loop holds in a state other than `awaiting_playtest`.
 fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
-    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let text = |k: &str| {
+        cmd.args
+            .get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let id = text("itemId").or_else(|| text("id")).unwrap_or("");
     if id.is_empty() {
         return nack(&cmd.id, "A playtest answer needs the item's id.".into());
     }
@@ -272,6 +279,7 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
         id: id.to_string(),
         passed,
         notes,
+        merged_at: text("mergedAt").map(str::to_string),
     });
     ack(&cmd.id)
 }

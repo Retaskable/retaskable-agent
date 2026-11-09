@@ -89,6 +89,8 @@ pub enum ItemCommand {
         id: String,
         passed: bool,
         notes: Option<String>,
+        /// When the item merged, for a deferred playtest's try-out key `<id>@<mergedAt>`.
+        merged_at: Option<String>,
     },
     /// **Skip** on a stopped item: it's let go and skipped in the store, its branch kept.
     Skip { project: String, item: String },

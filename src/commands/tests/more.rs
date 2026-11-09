@@ -321,10 +321,12 @@ fn agent_settings_refuses_bad_values_empty_changes_and_computer_only_fields_and_
         assert_eq!(answer["type"], "nack", "{args}");
     }
     let answer = send(&v, "agent_settings", json!({ "pollIntervalSec": 5 }));
-    assert!(answer["reason"]
-        .as_str()
-        .unwrap()
-        .starts_with("Not a command this agent takes"));
+    assert!(
+        answer["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Not a command this agent takes")
+    );
     let kept: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(kept, serde_json::from_str::<Value>(SEED).unwrap());
     assert!(!seen.has_changed().unwrap());
@@ -385,6 +387,26 @@ fn playtest_queues_the_answer_with_notes_and_picture_paths() {
         panic!("not a playtest")
     };
     assert!(passed && notes.is_none());
+}
+
+#[test]
+fn playtest_takes_item_id_and_keeps_merged_at() {
+    let v = playtest_view();
+    let d = data_dir();
+    let args = json!({ "itemId": "a", "result": "pass", "mergedAt": " 2026-01-02 " });
+    assert_eq!(answer_playtest(&v, args, &d)["type"], "ack");
+    let ItemCommand::Playtest { id, merged_at, .. } = v.item_commands.take("one").remove(0) else {
+        panic!("not a playtest")
+    };
+    assert_eq!((id.as_str(), merged_at.as_deref()), ("a", Some("2026-01-02")));
+    assert_eq!(
+        answer_playtest(&v, json!({ "itemId": "a", "result": "pass", "mergedAt": " " }), &d)["type"],
+        "ack"
+    );
+    let ItemCommand::Playtest { merged_at, .. } = v.item_commands.take("one").remove(0) else {
+        panic!("not a playtest")
+    };
+    assert!(merged_at.is_none());
 }
 
 #[test]
