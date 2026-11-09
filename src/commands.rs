@@ -122,6 +122,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "gallery_index" | "gallery_image" if view.item_commands.flag_on(project, "gallery-read-commands") => {
             gallery_read(cmd, project, data_dir)
         }
+        "approve_commands" if view.item_commands.flag_on(project, crate::command_gate::FLAG) => {
+            approve_commands(cmd, project, view)
+        }
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
@@ -590,6 +593,31 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         return Err("Finish setup first.".to_string());
     };
     crate::play::restart(project, &p)
+}
+
+/// `approve_commands { version }` (behind `approve-commands-gate`): the owner, freshly signed in on the site, has the
+/// waiting commands run from now on. Nacked from anyone else, without a numeric `version`, or when that isn't the
+/// version waiting.
+fn approve_commands(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let Some(version) = cmd.args.get("version").and_then(Value::as_u64) else {
+        return nack(
+            &cmd.id,
+            "approve_commands needs the version it shows (a number).".into(),
+        );
+    };
+    if view.owner().as_deref() != Some(cmd.issued_by.as_str()) {
+        return nack(
+            &cmd.id,
+            "Only this computer's owner can approve its project's commands.".into(),
+        );
+    }
+    match view.item_commands.gates().approve(project, version) {
+        Ok(_) => {
+            view.work.wake(project);
+            ack(&cmd.id)
+        }
+        Err(reason) => nack(&cmd.id, reason),
+    }
 }
 
 /// The project as the connector holds it, with the commands this computer may run (`approve-commands-gate`).

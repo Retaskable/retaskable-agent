@@ -65,6 +65,8 @@ pub struct AgentView {
     pub live: crate::orchestrator::live::LiveHandle,
     /// The setup checks' runner (first-run-check.md section 3.1), for `hello` and commands.
     pub checks: Arc<crate::setup_check::SetupCheckRunner>,
+    /// The GitHub login of this computer's `gh`: the owner `approve_commands` is checked against. Read once.
+    pub owner: Arc<std::sync::OnceLock<String>>,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -426,7 +428,17 @@ impl AgentView {
             local: Default::default(),
             live: Default::default(),
             checks: Default::default(),
+            owner: Default::default(),
         }
+    }
+
+    /// This computer's owner (`repo::github_login`), read on first use; `None` while `gh` can't say.
+    pub fn owner(&self) -> Option<String> {
+        if let Some(o) = self.owner.get() {
+            return Some(o.clone());
+        }
+        let login = crate::repo::github_login()?;
+        Some(self.owner.get_or_init(|| login).clone())
     }
 
     /// The hubs to connect to: each project's by its id, or the agent's own ("") before the first project.
