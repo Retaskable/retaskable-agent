@@ -14,7 +14,7 @@ use super::session::watch_for;
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::engine::CursorOptions;
+use crate::engines::cursor::with_project_or_gh;
 use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
@@ -166,10 +166,7 @@ impl TrialHost for ClaudeTrial {
                     budget_usd: project.budget.drafter_usd,
                     max_turns: None,
                     engine: Some(placed.engine),
-                    cursor: placed.cursor.clone().map(|c| CursorOptions {
-                        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
-                        ..c
-                    }),
+                    cursor: placed.cursor.clone().map(|c| with_project_or_gh(project, c)),
                     local: local_run.as_ref().map(|r| r.target.clone()),
                     sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                 },

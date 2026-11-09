@@ -73,7 +73,7 @@ impl StartGate {
         } else {
             chosen
         };
-        may_start(now, &self.out).then_some((now != chosen).then_some(now))
+        self.may_start_fresh(now).then_some((now != chosen).then_some(now))
     }
 
     /// Whether `engine` may start now.
@@ -84,7 +84,13 @@ impl StartGate {
     /// Whether a fresh implementer in `lane` is held back: its engine is still out after `engine_now`.
     pub(super) fn holds(&self, lp: &ProjectLoop, shared: &Shared<'_>, lane: u32) -> bool {
         let engine = self.engine_now(lp, shared, lane);
-        !may_start(engine, &self.out) && !(self.fallback && engine == EngineId::Claude)
+        !self.may_start_fresh(engine)
+    }
+
+    /// Whether a fresh session may start on `engine`: it isn't out, or it is Claude held only by its usage limit
+    /// with the fallback in force (the session then starts on the local model).
+    fn may_start_fresh(&self, engine: EngineId) -> bool {
+        may_start(engine, &self.out) || (self.fallback && engine == EngineId::Claude)
     }
 }
 
@@ -142,6 +148,13 @@ impl ProjectLoop {
     /// out) holds no fresh work for a Claude lane, which starts on the local model.
     pub(super) fn limit_fallback(shared: &Shared<'_>) -> bool {
         crate::tiers::local_limit_fallback_on() && shared.local.ladder() && !signed_out(shared)
+    }
+
+    /// Whether `engine` is limited now and so holds a fresh session (the start rules Off): Claude's usage limit
+    /// doesn't while the fallback is in force.
+    pub(super) fn engine_limited(shared: &Shared<'_>, engine: EngineId) -> bool {
+        shared.engine_limits.is_limited(engine, Instant::now())
+            && !(engine == EngineId::Claude && Self::limit_fallback(shared))
     }
 
     /// Whether Claude is limited now with the fallback in force and the one local slot already has a session

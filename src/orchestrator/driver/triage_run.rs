@@ -198,7 +198,7 @@ impl ProjectLoop {
             },
             None => {
                 let engine = self.triager_engine(shared);
-                if super::project::signed_out(shared) || shared.engine_limits.is_limited(engine, Instant::now()) {
+                if super::project::signed_out(shared) || ProjectLoop::engine_limited(shared, engine) {
                     return;
                 }
                 (engine, None)

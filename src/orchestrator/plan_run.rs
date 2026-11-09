@@ -15,6 +15,7 @@ use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of, place,
@@ -292,6 +293,7 @@ impl Roster {
             engine: placed.engine,
             model: model_name(placed.engine, &model, placed.cursor.as_ref()),
         };
+        let cursor = placed.cursor.map(|c| with_project(&project, c));
         let job = Job {
             sessions: self.sessions.clone(),
             info,
@@ -299,7 +301,7 @@ impl Roster {
             project,
             engine: placed.engine,
             bin: placed.bin,
-            cursor: placed.cursor,
+            cursor,
             model,
             local: self.local.clone(),
         };
