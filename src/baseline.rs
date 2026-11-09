@@ -188,6 +188,7 @@ mod tests {
             timed_out: false,
             output_tail: String::new(),
             preexisting: false,
+            seconds: 0.0,
         };
         let mut pr = vec![run("a", 1), run("b", 1), run("c", 0)];
         mark_preexisting(&mut pr, &[run("a", 1), run("b", 0), run("c", 1)]);

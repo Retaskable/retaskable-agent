@@ -769,8 +769,9 @@ impl ProjectLoop {
         // Keeps `watchdog-anomaly-rules` fresh for `step_started`, which can't wait on a request.
         self.flags.on("watchdog-anomaly-rules").await;
         for (item, after) in self.running.finished() {
-            let outcome = after.map_or("panicked", |a| state_name(a.state));
-            self.step_ended(&item, after.is_some(), outcome);
+            let outcome = after.as_ref().map_or("panicked", |a| state_name(a.run.state));
+            let detail = after.as_ref().map(|a| &a.detail);
+            self.step_ended(&item, after.is_some(), outcome, detail);
             let Some(run) = self.runs.get_mut(&item) else { continue };
             let Some(after) = after else {
                 tracing::error!("{}: a step for {item} panicked", self.id);
@@ -783,7 +784,7 @@ impl ProjectLoop {
                 self.events.add_in(&self.id, Event::Error(error));
                 continue;
             };
-            let before = std::mem::replace(run, after);
+            let before = std::mem::replace(run, after.run);
             self.moved(pool, &item, before.state, "the step ended", links).await;
         }
     }

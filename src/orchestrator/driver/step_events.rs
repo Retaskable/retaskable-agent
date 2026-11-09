@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use super::ProjectLoop;
 use crate::item_lifecycle::{ItemRun, ItemState};
-use crate::orchestrator::steps::state_name;
+use crate::orchestrator::steps::{StepDetail, state_name};
 use crate::telemetry::event::{Body, Entry};
 use crate::telemetry::{Event, event};
 
@@ -78,7 +78,7 @@ impl ProjectLoop {
     }
 
     /// Writes the `step_end` of `item`'s open step, if it has one.
-    pub(super) fn step_ended(&mut self, item: &str, ok: bool, outcome: &str) {
+    pub(super) fn step_ended(&mut self, item: &str, ok: bool, outcome: &str, detail: Option<&StepDetail>) {
         let Some(open) = self.open_steps.remove(item) else {
             return;
         };
@@ -89,6 +89,16 @@ impl ProjectLoop {
             ms: Some(open.began.elapsed().as_millis() as f64),
             ok: Some(ok),
             outcome: Some(outcome.into()),
+            checks: detail.filter(|d| !d.checks.is_empty()).map(|d| {
+                (d.checks.iter())
+                    .map(|c| event::Check {
+                        name: Some(c.name.clone()),
+                        ok: Some(c.ok),
+                        sec: Some(c.sec),
+                        ..Default::default()
+                    })
+                    .collect()
+            }),
             ..Default::default()
         };
         self.events.add_in(&self.id, Event::StepEnd(end));
@@ -98,7 +108,7 @@ impl ProjectLoop {
     pub(super) fn cut_steps(&mut self) {
         let items: Vec<String> = self.open_steps.keys().cloned().collect();
         for item in items {
-            self.step_ended(&item, false, "cut");
+            self.step_ended(&item, false, "cut", None);
         }
     }
 }

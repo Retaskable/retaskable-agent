@@ -62,11 +62,43 @@ pub struct StepRequest {
     pub token: String,
 }
 
+/// How long one check took, as a step reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckTime {
+    pub name: String,
+    pub ok: bool,
+    pub sec: f64,
+}
+
+/// What a step reports besides the run: the detail its `step_end` carries.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StepDetail {
+    pub checks: Vec<CheckTime>,
+    pub lines: Option<u64>,
+    pub scouts: Option<u32>,
+}
+
+/// What a step hands back: the item's run as it left it, and its detail.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepDone {
+    pub run: ItemRun,
+    pub detail: StepDetail,
+}
+
+impl From<ItemRun> for StepDone {
+    fn from(run: ItemRun) -> Self {
+        Self {
+            run,
+            detail: StepDetail::default(),
+        }
+    }
+}
+
 /// One project's steps still running, by item.
 #[derive(Default)]
 pub struct Running {
     busy: BTreeSet<String>,
-    tasks: JoinSet<(String, Option<ItemRun>)>,
+    tasks: JoinSet<(String, Option<StepDone>)>,
 }
 
 impl Running {
@@ -76,7 +108,7 @@ impl Running {
     }
 
     /// Runs `step` for `item` as its own task. A panic in it is caught: the item keeps the run it had.
-    pub fn spawn(&mut self, item: String, step: BoxFuture<'static, ItemRun>) {
+    pub fn spawn(&mut self, item: String, step: BoxFuture<'static, StepDone>) {
         self.busy.insert(item.clone());
         self.tasks.spawn(async move {
             let run = AssertUnwindSafe(step).catch_unwind().await.ok();
@@ -84,9 +116,9 @@ impl Running {
         });
     }
 
-    /// The steps that ended since last asked, without waiting: each item and its run after the step,
+    /// The steps that ended since last asked, without waiting: each item and what it handed back,
     /// `None` when the step panicked.
-    pub fn finished(&mut self) -> Vec<(String, Option<ItemRun>)> {
+    pub fn finished(&mut self) -> Vec<(String, Option<StepDone>)> {
         let mut done = Vec::new();
         while let Some(joined) = self.tasks.try_join_next() {
             if let Ok((item, run)) = joined {
@@ -131,7 +163,7 @@ mod tests {
             "a".into(),
             async move {
                 rx.await.ok();
-                after
+                StepDone::from(after)
             }
             .boxed(),
         );
@@ -145,7 +177,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         done.sort_by(|x, y| x.0.cmp(&y.0));
-        assert_eq!(done, vec![("a".into(), Some(after)), ("b".into(), None)]);
+        assert_eq!(done, vec![("a".into(), Some(after.into())), ("b".into(), None)]);
         assert!(!running.busy("a") && !running.busy("b"));
     }
 }

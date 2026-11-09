@@ -366,7 +366,7 @@ async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
         fn active(&self) -> u32 {
             0
         }
-        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
             None
         }
     }

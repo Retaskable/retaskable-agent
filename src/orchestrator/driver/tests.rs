@@ -7,7 +7,7 @@ use crate::lane_pool::Holder;
 use crate::link::TokenStore;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle};
-use crate::orchestrator::steps::StepRequest;
+use crate::orchestrator::steps::{StepDetail, StepDone, StepRequest};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::EventLog;
 use crate::telemetry::event::Entry;
@@ -503,6 +503,8 @@ struct Fake {
     active: AtomicU32,
     /// Where a step leaves its item; `None` keeps its state.
     to: Mutex<Option<ItemState>>,
+    /// What the next steps hand back besides the run.
+    detail: Mutex<StepDetail>,
     /// While set, a step never ends.
     hold: AtomicBool,
     /// The next step panics.
@@ -533,7 +535,8 @@ impl LanePlay for FakeGame {
 }
 
 impl Fake {
-    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, ItemRun> {
+    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, StepDone> {
+        let detail = self.detail.lock().unwrap().clone();
         if let Some(to) = *self.to.lock().unwrap() {
             run.state = to;
         }
@@ -548,7 +551,7 @@ impl Fake {
             if panics {
                 panic!("a step that goes wrong");
             }
-            run
+            StepDone { run, detail }
         }
         .boxed()
     }
