@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Deserialize;
 
