@@ -869,3 +869,28 @@ fn agent_settings_is_an_unknown_command_while_the_flag_is_off_and_writes_nothing
     assert_eq!(answer["reason"], "Not a command this agent takes yet: agent_settings");
     assert!(!dir.path().join("config.json").exists());
 }
+
+#[test]
+fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
+    let mut v = view();
+    v.lanes = 2;
+    let noop = |_: i32| {};
+    let go = |name, args, v: &AgentView| run(&cmd(name, args), "one", &mut Seen::default(), v, &noop, &data_dir());
+    assert_eq!(
+        go("restart_play", json!({}), &v)["reason"],
+        "restart_play needs a lane."
+    );
+    assert_eq!(
+        go("restart_play", json!({ "lane": 3 }), &v)["reason"],
+        "This computer has no lane 3."
+    );
+    assert_eq!(
+        go("restart_play", json!({ "lane": 1 }), &v)["reason"],
+        "Not a command this agent takes yet: restart_play"
+    );
+    assert_eq!(
+        go("restart_play", json!({ "lane": 0 }), &v)["reason"],
+        "No play command set for this project."
+    );
+    assert_eq!(go("stop_play", json!({}), &v)["reason"], "stop needs a lane.");
+}
