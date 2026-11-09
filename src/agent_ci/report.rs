@@ -109,20 +109,18 @@ fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
 
 impl Host {
     pub(super) fn api(&self, method: &str, endpoint: &str, fields: &[(&str, &str)]) -> Result<String> {
-        // Only the method and the path: a field's value is free text (a log) that may say "undefined".
-        crate::host_call::guard(
-            &crate::host_call::stem(self.program.as_ref()),
-            &self.dir,
-            &["api", "-X", method, endpoint],
-        )?;
+        let mut guarded = vec!["api", "-X", method, endpoint];
+        let fields: Vec<(&str, String)> = fields.iter().map(|(k, v)| (*k, format!("{k}={v}"))).collect();
+        guarded.extend(fields.iter().map(|(_, f)| f.as_str()));
+        crate::host_call::guard_program(&self.program, Some(&self.dir), &guarded)?;
         let mut command = Command::new(&self.program);
         command
             .current_dir(&self.dir)
             .arg("api")
             .args(["-X", method])
             .arg(endpoint);
-        for (k, v) in fields {
-            command.arg("-f").arg(format!("{k}={v}"));
+        for (_, f) in &fields {
+            command.arg("-f").arg(f);
         }
         let out = command
             .stdin(Stdio::null())
@@ -293,21 +291,6 @@ mod tests {
                 .lines()
                 .map(String::from)
                 .collect()
-        }
-
-        #[test]
-        fn an_undefined_number_in_the_path_is_refused_and_recorded_as_glab() {
-            use crate::host_call::testing::{after, fake};
-            let d = tempfile::tempdir().unwrap();
-            let mut h = host(d.path(), Kind::Gitlab);
-            h.program = fake(d.path(), "glab");
-            let err = h
-                .api("GET", "projects/o%2Fr/merge_requests/NaN/notes", &[])
-                .unwrap_err();
-            assert!(err.to_string().contains("glab was not run"), "{err}");
-            let (ran, refused) = after(d.path());
-            assert!(!ran);
-            assert_eq!((refused.len(), refused[0].cmd.as_str()), (1, "glab"));
         }
 
         #[test]

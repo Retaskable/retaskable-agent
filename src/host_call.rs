@@ -3,6 +3,8 @@
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
 //! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
@@ -27,11 +29,12 @@ pub fn set_on_for(repos: Vec<PathBuf>) {
     }
 }
 
-fn is_on(dir: Option<&Path>) -> bool {
-    // A call with no directory (the repo picker, the profile) is guarded when any project has the flag On.
+fn is_on(dir: &Path) -> bool {
     let under = |o: &Mutex<Vec<PathBuf>>| {
-        let on = o.lock().unwrap_or_else(|p| p.into_inner());
-        dir.map_or(!on.is_empty(), |d| on.iter().any(|r| d.starts_with(r)))
+        o.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|r| dir.starts_with(r))
     };
     #[cfg(test)]
     return ON.with(under);
@@ -67,17 +70,19 @@ impl std::error::Error for Refused {}
 pub struct Sink(Arc<Mutex<Vec<Refusal>>>);
 
 impl Sink {
-    /// The process-wide sink (per thread under test, like the flag).
-    #[cfg(not(test))]
-    pub fn global() -> Sink {
-        static SINK: std::sync::OnceLock<Sink> = std::sync::OnceLock::new();
-        SINK.get_or_init(Sink::default).clone()
-    }
-
-    #[cfg(test)]
-    pub fn global() -> Sink {
-        thread_local!(static SINK: Sink = Sink::default());
-        SINK.with(Sink::clone)
+    /// The process-wide sink.
+    pub fn global() -> &'static Sink {
+        // Tests run in parallel threads, so under test it is per thread (like `ON`).
+        #[cfg(test)]
+        {
+            thread_local!(static SINK: &'static Sink = Box::leak(Box::default()));
+            SINK.with(|s| *s)
+        }
+        #[cfg(not(test))]
+        {
+            static SINK: OnceLock<Sink> = OnceLock::new();
+            SINK.get_or_init(Sink::default)
+        }
     }
 
     pub fn add(&self, refusal: Refusal) {
@@ -100,13 +105,42 @@ pub fn undefined_arg(args: &[&str]) -> Option<usize> {
     })
 }
 
-/// Checks a call before it runs: on a match (and with the flag On) records it in the global sink and refuses.
-pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
-    guard_in(cmd, Some(dir), args)
+/// Checks a call to `program` (recorded as its file stem, `gh` or `glab`, never a path) before it runs. With no
+/// `dir` the call is guarded when any project has the flag On, and its refusal is written to every project's log.
+pub fn guard_program(program: impl AsRef<Path>, dir: Option<&Path>, args: &[&str]) -> Result<(), Refused> {
+    let cmd = program
+        .as_ref()
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    match dir {
+        Some(dir) => guard(&cmd, dir, args),
+        None => {
+            if !any_on() {
+                return Ok(());
+            }
+            let Some(i) = undefined_arg(args) else {
+                return Ok(());
+            };
+            Sink::global().add(Refusal {
+                cmd: cmd.clone(),
+                args: args.iter().map(|a| scrub(a, MAX_TEXT)).collect(),
+                dir: None,
+            });
+            Err(Refused { cmd, n: i + 1 })
+        }
+    }
 }
 
-/// [`guard`] for a call that may have no directory: then any project with the flag On covers it.
-pub fn guard_in(cmd: &str, dir: Option<&Path>, args: &[&str]) -> Result<(), Refused> {
+fn any_on() -> bool {
+    let some = |o: &Mutex<Vec<PathBuf>>| !o.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
+    #[cfg(test)]
+    return ON.with(some);
+    #[cfg(not(test))]
+    some(&ON)
+}
+
+/// Checks a call before it runs: on a match (and with the flag On) records it in the global sink and refuses.
+pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
     if !is_on(dir) {
         return Ok(());
     }
@@ -116,38 +150,12 @@ pub fn guard_in(cmd: &str, dir: Option<&Path>, args: &[&str]) -> Result<(), Refu
     Sink::global().add(Refusal {
         cmd: cmd.into(),
         args: args.iter().map(|a| scrub(a, MAX_TEXT)).collect(),
-        dir: dir.map(Path::to_path_buf),
+        dir: Some(dir.to_path_buf()),
     });
     Err(Refused {
         cmd: cmd.into(),
         n: i + 1,
     })
-}
-
-/// A program's name for the event: its file stem (`gh`, `glab`), never a full path.
-pub fn stem(program: &std::ffi::OsStr) -> String {
-    let path = Path::new(program);
-    path.file_stem().unwrap_or(program).to_string_lossy().into_owned()
-}
-
-/// For the call sites' tests: a fake `gh`/`glab` that only leaves a marker, the guard On for its directory.
-#[cfg(all(test, unix))]
-pub(crate) mod testing {
-    use super::*;
-
-    /// A program `name` in `dir` that touches `dir/ran`; turns the guard On for `dir`.
-    pub fn fake(dir: &Path, name: &str) -> PathBuf {
-        let program = dir.join(name);
-        crate::test_support::write_executable(&program, &format!("#!/bin/sh\ntouch '{}'\n", dir.join("ran").display()));
-        let _ = std::fs::remove_file(dir.join("ran")); // `write_executable` ran it once
-        set_on_for(vec![dir.to_path_buf()]);
-        program
-    }
-
-    /// Whether the fake ran, and the refusals recorded since the last call.
-    pub fn after(dir: &Path) -> (bool, Vec<Refusal>) {
-        (dir.join("ran").exists(), Sink::global().take())
-    }
 }
 
 #[cfg(test)]

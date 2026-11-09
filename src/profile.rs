@@ -38,11 +38,9 @@ fn parse(body: &[u8]) -> Option<Profile> {
 
 /// `gh api user`, or [`NOT_SIGNED_IN`] when `gh` can't answer.
 pub fn read() -> Result<Profile, &'static str> {
-    crate::host_call::guard_in("gh", None, &["api", "user"]).map_err(|_| NOT_SIGNED_IN)?;
-    let output = Command::new("gh")
-        .args(["api", "user"])
-        .output()
-        .map_err(|_| NOT_SIGNED_IN)?;
+    let args = ["api", "user"];
+    crate::host_call::guard_program("gh", None, &args).map_err(|_| NOT_SIGNED_IN)?;
+    let output = Command::new("gh").args(args).output().map_err(|_| NOT_SIGNED_IN)?;
     if !output.status.success() {
         return Err(NOT_SIGNED_IN);
     }

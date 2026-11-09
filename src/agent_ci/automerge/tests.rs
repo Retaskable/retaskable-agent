@@ -183,33 +183,3 @@ async fn a_head_pushed_while_the_lock_was_waited_for_is_not_merged() {
     assert!(!gh_calls(&r).contains("pr merge"));
     assert_eq!(r.log.lock().unwrap().last().unwrap(), "drop L1");
 }
-
-#[tokio::test]
-async fn an_undefined_pull_request_is_refused_and_recorded_without_running_gh() {
-    let r = rig(LABELLED, CHECKED_MAIN, 0);
-    let dir = r.dir.path();
-    let gh = crate::host_call::testing::fake(dir, "gh");
-    let key = CheckKey {
-        pr: 7,
-        head: "h7".into(),
-        main: CHECKED_MAIN.into(),
-    };
-    let t = Target {
-        gh: gh.as_os_str(),
-        git: gh.as_os_str(),
-        repo_dir: dir,
-        github_repo: "o/NaN",
-        base: "main",
-        computer: "pc",
-        key: &key,
-    };
-    let ended = run(&r.am, &t).await;
-    assert!(
-        matches!(ended, Ended::Failed(ref e) if e.contains("gh was not run")),
-        "{ended:?}"
-    );
-    let (ran, refused) = crate::host_call::testing::after(dir);
-    assert!(!ran);
-    assert_eq!(refused.len(), 1);
-    assert_eq!(refused[0].cmd, "gh");
-}

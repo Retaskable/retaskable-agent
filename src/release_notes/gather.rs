@@ -118,7 +118,7 @@ pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
     args: &[String],
 ) -> Result<Vec<T>> {
     let guarded: Vec<&str> = args.iter().map(String::as_str).collect();
-    crate::host_call::guard(&crate::host_call::stem(gh_bin.as_ref()), cwd, &guarded)?;
+    crate::host_call::guard_program(gh_bin, Some(cwd), &guarded)?;
     let output = Command::new(gh_bin)
         .args(args)
         .current_dir(cwd)
@@ -178,7 +178,7 @@ pub async fn fill_draft_files(
         }
         let number = pr.number.to_string();
         let args = ["pr", "view", &number, "--repo", repo, "--json", "files"];
-        crate::host_call::guard(&crate::host_call::stem(gh_bin.as_ref()), cwd, &args)?;
+        crate::host_call::guard_program(gh_bin, Some(cwd), &args)?;
         let output = Command::new(gh_bin)
             .args(args)
             .current_dir(cwd)
@@ -281,21 +281,6 @@ mod tests {
 
     use super::*;
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn an_empty_base_is_refused_and_recorded_without_running_gh() {
-        use crate::host_call::testing::{after, fake};
-        let dir = tempfile::tempdir().unwrap();
-        let gh = fake(dir.path(), "gh");
-        let err = gather_merged_prs(&gh, dir.path(), "o/r", "", "a", "b", 5)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("gh was not run"), "{err}");
-        let (ran, refused) = after(dir.path());
-        assert!(!ran);
-        assert_eq!((refused.len(), refused[0].cmd.as_str()), (1, "gh"));
-    }
-
     // merged_pr_args / commit_log_args
 
     #[test]
@@ -320,6 +305,17 @@ mod tests {
 
     // gather_merged_prs / gather_commits (a fake `gh`/`git` binary that ignores its arguments and
     // just prints a fixture file, like session.rs's own fake-session tests do for `claude`)
+
+    #[tokio::test]
+    async fn gather_merged_prs_refuses_an_empty_base() {
+        use crate::host_call_sites_tests::{fake, on, refused};
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake(dir.path(), "gh");
+        on(dir.path());
+        let err = gather_merged_prs(&gh, dir.path(), "o/y", "", "a", "b", 5).await;
+        assert!(err.unwrap_err().to_string().contains("gh was not run"));
+        refused(dir.path(), "gh", "pr");
+    }
 
     #[tokio::test]
     async fn gather_merged_prs_parses_ghs_json_output() {
