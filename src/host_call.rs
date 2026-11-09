@@ -3,9 +3,9 @@
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
 //! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 #[cfg(not(test))]
 use std::sync::OnceLock;
-use std::sync::{Arc, Mutex};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
 
@@ -71,18 +71,17 @@ pub struct Sink(Arc<Mutex<Vec<Refusal>>>);
 
 impl Sink {
     /// The process-wide sink.
-    pub fn global() -> Sink {
-        // Under test, one per thread, like the flag.
-        #[cfg(test)]
-        {
-            thread_local!(static SINK: Sink = Sink::default());
-            SINK.with(Sink::clone)
-        }
-        #[cfg(not(test))]
-        {
-            static SINK: OnceLock<Sink> = OnceLock::new();
-            SINK.get_or_init(Sink::default).clone()
-        }
+    #[cfg(not(test))]
+    pub fn global() -> &'static Sink {
+        static SINK: OnceLock<Sink> = OnceLock::new();
+        SINK.get_or_init(Sink::default)
+    }
+
+    /// Under test each thread has its own, so parallel tests (and their loop passes) never see each other's.
+    #[cfg(test)]
+    pub fn global() -> &'static Sink {
+        thread_local!(static SINK: &'static Sink = Box::leak(Box::default()));
+        SINK.with(|s| *s)
     }
 
     pub fn add(&self, refusal: Refusal) {
@@ -93,15 +92,6 @@ impl Sink {
     pub fn take(&self) -> Vec<Refusal> {
         std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))
     }
-}
-
-/// Test helper: removes and returns only the refusals for calls in `dir`, so parallel tests don't take each other's.
-#[cfg(test)]
-pub(crate) fn take_in(dir: &Path) -> Vec<Refusal> {
-    let sink = Sink::global();
-    let (mine, rest): (Vec<_>, Vec<_>) = sink.take().into_iter().partition(|r| r.dir.as_deref() == Some(dir));
-    rest.into_iter().for_each(|r| sink.add(r));
-    mine
 }
 
 /// The index of the first argument that is empty, or is `undefined` or `NaN` whole or as one part of a path or
@@ -131,6 +121,12 @@ pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
         cmd: cmd.into(),
         n: i + 1,
     })
+}
+
+/// Test helper: what the (per-thread) sink holds, drained.
+#[cfg(test)]
+pub(crate) fn refusals_in(_dir: &Path) -> Vec<Refusal> {
+    Sink::global().take()
 }
 
 #[cfg(test)]

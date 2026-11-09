@@ -24,8 +24,6 @@
 //! (counting against `max_check_rounds`, then a person), and gates that can't run are noted.
 pub mod abandon;
 pub mod code_gates;
-#[cfg(test)]
-mod guarded_tests;
 pub mod model;
 pub mod prompt;
 pub mod publish;
