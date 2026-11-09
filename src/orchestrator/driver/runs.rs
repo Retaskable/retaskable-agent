@@ -198,6 +198,8 @@ pub struct RunLoop {
     idle: bool,
     pub(super) fix_main: super::fix_main::State,
     pub(super) main_sync: super::main_sync::State,
+    /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
+    merges: std::collections::HashMap<String, event::Merged>,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
     pub(super) events_tx: RunEventSender,
@@ -219,6 +221,7 @@ impl RunLoop {
             idle: false,
             fix_main: Default::default(),
             main_sync: Default::default(),
+            merges: Default::default(),
             ends_tx,
             ends_rx,
             events_tx,
@@ -280,6 +283,13 @@ impl ProjectLoop {
         }
         self.write_run_events().await;
         while let Ok(end) = self.run_loop.ends_rx.try_recv() {
+            let merged = self.run_loop.merges.remove(&end.token);
+            if let Some(merged) = merged
+                && end.outcome == RunOutcome::Merged
+                && self.flags.on("ci-merged-events").await
+            {
+                self.events.add_in(&self.id, Event::Merged(merged));
+            }
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
         self.run_loop.runs.end_past_ceilings(pool, now);
@@ -545,6 +555,27 @@ impl ProjectLoop {
                 self.store_error("run_done", e);
             }
             return false;
+        }
+        if run.kind == RunKind::Merge
+            && let Some(pr) = run
+                .piece
+                .change
+                .as_ref()
+                .and_then(super::super::watch_run::change_ref)
+                .and_then(|c| {
+                    c.trim_end_matches('/')
+                        .rsplit(['/', '#'])
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                })
+        {
+            let merged = event::Merged {
+                item: Some(piece_id.clone()),
+                pr: Some(pr),
+                chore: Some(chore_of(&run.piece).is_some()),
+                ..Default::default()
+            };
+            self.run_loop.merges.insert(run.token.clone(), merged);
         }
         let live = self.run_loop.runs.live().iter().find(|r| r.token == run.token);
         let stop = live.map(|r| r.stop.clone()).unwrap_or_default();
