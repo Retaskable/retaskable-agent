@@ -457,7 +457,7 @@ impl ProjectLoop {
         } else {
             record.triages = Some((record.slice, count + 1));
         }
-        let notes = Some(instructions.trim().to_string()).filter(|n| !n.is_empty());
+        let notes = crate::text::non_blank(instructions).map(str::to_string);
         match decision {
             TriageDecision::Continue => {
                 self.claude_pending.insert(item_id.to_string());
