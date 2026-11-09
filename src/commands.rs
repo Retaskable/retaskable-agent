@@ -106,6 +106,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
+        "setup_check" if view.settings.setup_checks_now() => setup_check(cmd, project, view),
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
@@ -289,6 +290,27 @@ fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value
 /// What [`run`] answers a command the loop settles once the store has answered: nothing is sent yet, and the loop sends
 /// the `ack` or `nack` later ([`crate::view::ItemCommands::answer`]).
 pub const PENDING: &str = "pending";
+
+/// `setup_check {}` (**Check again**, first-run-check.md section 3.1): runs the fixed probes now. They take up to 20 s
+/// each, so this answers `pending` and a task sends the `ack` with the checks as its `answer`. The run goes through the
+/// runner, so it shares the one-at-a-time lock and a changed result also goes up in `hello`.
+fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let no_args = match &cmd.args {
+        Value::Null => true,
+        Value::Object(o) => o.is_empty(),
+        _ => false,
+    };
+    if !no_args {
+        return nack(&cmd.id, "setup_check takes no arguments.".into());
+    }
+    let (runner, commands) = (view.checks.clone(), view.item_commands.clone());
+    let (id, project) = (cmd.id.clone(), project.to_string());
+    tokio::spawn(async move {
+        let checks = runner.run_now().await;
+        commands.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
+    });
+    json!({ "type": PENDING, "id": cmd.id })
+}
 
 /// `idea_accept { idea }` (**Build this** on an idea): behind the `ideas-session` flag, queued for the loop, which reads the
 /// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.
