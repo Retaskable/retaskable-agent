@@ -66,7 +66,7 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     let no_id = go(&v, json!({}));
     assert_eq!(no_id["type"], "nack");
     assert!(no_id["reason"].as_str().unwrap().contains("Skip"));
-    assert!(v.item_commands.take("one").is_empty());
+    assert!(v.item_commands.take_lane("one").is_empty());
     assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
 }
 
@@ -264,7 +264,7 @@ fn ideas_generate_queues_a_round_and_nacks_when_paused_or_not_set_up() {
         go(json!({}), "one", &v)["reason"],
         "The project is paused: resume it first."
     );
-    assert!(v.item_commands.take("one").is_empty());
+    assert!(v.item_commands.take_lane("one").is_empty());
 }
 
 const SEED: &str = r#"{ "version": 2, "projects": [], "pollIntervalSec": 30, "custom": true }"#;
@@ -443,7 +443,7 @@ fn playtest_with_a_bad_picture_saves_none_and_queues_nothing() {
         !dir.path().join("attachments").exists()
             || std::fs::read_dir(dir.path().join("attachments")).unwrap().count() == 0
     );
-    assert!(v.item_commands.take("one").is_empty());
+    assert!(v.item_commands.take_lane("one").is_empty());
 }
 
 #[test]
@@ -498,10 +498,7 @@ fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
         go("restart_play", json!({ "lane": 3 }), &v)["reason"],
         "This computer has no lane 3."
     );
-    assert_eq!(
-        go("restart_play", json!({ "lane": 1 }), &v)["reason"],
-        "Not a command this agent takes yet: restart_play"
-    );
+    assert_eq!(go("restart_play", json!({ "lane": 1 }), &v)["type"], "nack");
     assert_eq!(
         go("restart_play", json!({ "lane": 0 }), &v)["reason"],
         "No play command set for this project."
@@ -540,4 +537,34 @@ fn stop_play_stops_play_main_like_stop() {
     assert!(crate::play::running(id));
     assert_eq!(go("stop_play", &v)["type"], "ack");
     assert!(!crate::play::running(id));
+}
+
+#[test]
+fn restart_play_of_a_lane_is_queued_in_claim_mode_and_nacked_otherwise() {
+    let mut v = view();
+    v.lanes = 2;
+    v.item_commands.set_flag("one", "restart-play-command", true);
+    v.projects[0].play_command = "the-game".into();
+    let go = |v: &AgentView, lane| {
+        run(
+            &cmd("restart_play", json!({ "lane": lane })),
+            "one",
+            &mut Seen::default(),
+            v,
+            &|_| {},
+            &data_dir(),
+        )
+    };
+    assert_eq!(go(&v, 1)["type"], "nack", "not in claim mode");
+    assert!(v.item_commands.take_lane("one").is_empty());
+    v.item_commands.set_claim(true);
+    assert_eq!(go(&v, 2)["type"], "ack");
+    assert!(matches!(
+        v.item_commands.take_lane("one").as_slice(),
+        [ItemCommand::RestartPlay { lane: 2, .. }]
+    ));
+    assert_eq!(go(&v, 3)["reason"], "This computer has no lane 3.");
+    v.projects[0].play_command = " ".into();
+    assert_eq!(go(&v, 1)["reason"], "No play command set for this project.");
+    assert!(v.item_commands.take_lane("one").is_empty());
 }

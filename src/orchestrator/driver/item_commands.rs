@@ -69,7 +69,7 @@ impl ProjectLoop {
                     tracing::info!("{}: dropped a playtest answer for {id}: not carried out yet", self.id);
                     continue;
                 }
-                ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
+                ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
             };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self

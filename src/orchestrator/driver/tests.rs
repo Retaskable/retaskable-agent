@@ -506,6 +506,8 @@ struct Fake {
     step_panics: AtomicBool,
     /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
     games: Mutex<Vec<Game>>,
+    /// Games that ignore `stop` (they close only when their flag is set).
+    stubborn_games: AtomicBool,
     triage: triage::Triager,
     /// The model slots `implementer_may_start` is asked against; none is no cap.
     slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
@@ -514,14 +516,16 @@ struct Fake {
 /// The directory, the command, the lane, and whether it has closed.
 type Game = (std::path::PathBuf, String, u32, Arc<AtomicBool>);
 
-struct FakeGame(Arc<AtomicBool>);
+struct FakeGame(Arc<AtomicBool>, bool);
 
 impl LanePlay for FakeGame {
     fn finished(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
     fn stop(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        if !self.1 {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 }
 
