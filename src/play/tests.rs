@@ -112,7 +112,8 @@ fn restart_is_refused_like_play() {
         "No play command set for this project."
     );
     let id = "restart-vs-shoot";
-    let p = project(id, root.path(), LONG_RUNNING);
+    let root2 = tempfile::tempdir().unwrap();
+    let p = project(id, root2.path(), LONG_RUNNING);
     let _shoot = crate::base_hold::hold_base(id, "a shoot").unwrap();
     assert_eq!(
         restart(id, &p).unwrap_err(),
