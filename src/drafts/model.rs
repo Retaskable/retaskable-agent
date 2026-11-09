@@ -2,7 +2,7 @@
 //! `agent/src/schemas.ts`, spec 06.5) and the plain-code check on its `breakdown`
 //! (plan-breakdown.md section 3.1, `checkedBreakdown` in `shared/planBreakdown.ts`).
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub use crate::implementer::Question;
 

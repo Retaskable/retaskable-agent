@@ -33,9 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::STANDARD as base64;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as base64;
 use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -470,11 +470,7 @@ pub fn safe_out_dir(out_dir: &str) -> Option<String> {
         return None;
     }
     let parts: Vec<&str> = raw.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("/"))
-    }
+    if parts.is_empty() { None } else { Some(parts.join("/")) }
 }
 
 fn is_windows_drive_path(raw: &str) -> bool {
