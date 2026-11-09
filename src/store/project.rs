@@ -269,6 +269,25 @@ impl Store {
             .insert("unanswered".to_string(), serde_json::json!(unanswered));
     }
 
+    /// The `playtests` value (config.json's) this project last saw, as its config name; `None` before the first pass.
+    pub fn playtests_seen(&self) -> Option<String> {
+        self.data
+            .get("playtestsSeen")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    /// Whether a `releasePlaytests` is owed to the store (`playtests` switched to off, not yet taken).
+    pub fn release_owed(&self) -> bool {
+        self.data.get("releaseOwed").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    /// Replaces `state.playtestsSeen` and `state.releaseOwed`. Doesn't save on its own; call `save` after.
+    pub fn set_playtests_seen(&mut self, seen: Option<&str>, owed: bool) {
+        self.data.insert("playtestsSeen".to_string(), serde_json::json!(seen));
+        self.data.insert("releaseOwed".to_string(), serde_json::json!(owed));
+    }
+
     /// Leases let go while their item waits, which the store hasn't taken yet: item id to
     /// (lease token, what it waits for, the item's state). Sent again on later passes.
     pub fn unparked(&self) -> std::collections::BTreeMap<String, (String, String, String)> {

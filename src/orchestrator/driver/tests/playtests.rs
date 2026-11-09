@@ -299,3 +299,114 @@ async fn a_lock_lost_to_a_beat_stop_sends_no_grouping() {
     until("the round's end", || !running.load(Ordering::SeqCst)).await;
     assert_eq!(runs_ops(&asked), vec!["tryouts_list", "lock_take", "run_beat"]);
 }
+
+/// A store counting `release_playtests` calls: the first `fail` of them are refused with a 500, and a taken one
+/// lets go of every try-out waiting (`waiting` goes to zero).
+async fn release_store(fail: usize, waiting: usize) -> (String, Arc<Mutex<(usize, usize)>>) {
+    let state = Arc::new(Mutex::new((0usize, waiting)));
+    let seen = state.clone();
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                let op = body["op"].as_str().unwrap_or("").to_string();
+                let mut s = seen.lock().unwrap();
+                let value = match op.as_str() {
+                    "release_playtests" => {
+                        s.0 += 1;
+                        if s.0 <= fail {
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))).into_response();
+                        }
+                        s.1 = 0;
+                        Value::Null
+                    }
+                    "tryouts_list" => json!({"waiting": [], "groups": null}),
+                    _ => json!([]),
+                };
+                Json(json!({ "value": value })).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), state)
+}
+
+fn set_playtests(rig: &mut Rig, value: Playtests) {
+    rig.lp(0).file_project.playtests = value;
+}
+
+#[tokio::test]
+async fn switching_to_off_releases_once_and_later_passes_send_nothing() {
+    let (base, state) = release_store(0, 3).await;
+    let mut rig = live_rig(&base);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
+    set_playtests(&mut rig, Playtests::AfterMerge);
+    rig.machine.pass().await;
+    assert_eq!(state.lock().unwrap().0, 0);
+    set_playtests(&mut rig, Playtests::Off);
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(*state.lock().unwrap(), (1, 0), "one call, and none left waiting");
+    assert!(!rig.lp(0).release_owed);
+}
+
+#[tokio::test]
+async fn a_first_run_already_off_sends_nothing() {
+    let (base, state) = release_store(0, 3).await;
+    let mut rig = live_rig(&base);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
+    set_playtests(&mut rig, Playtests::Off);
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(state.lock().unwrap().0, 0);
+}
+
+#[tokio::test]
+async fn a_failed_release_is_sent_again_then_stops_and_survives_a_restart() {
+    let (base, state) = release_store(1, 3).await;
+    let mut rig = live_rig(&base);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
+    set_playtests(&mut rig, Playtests::On);
+    rig.machine.pass().await;
+    set_playtests(&mut rig, Playtests::Off);
+    rig.machine.pass().await;
+    assert_eq!(state.lock().unwrap().0, 1);
+    assert!(rig.lp(0).release_owed);
+    let reloaded = Store::load(&rig._dir.path().join("0")).unwrap();
+    assert!(reloaded.release_owed(), "the owed release is in the state file");
+    assert_eq!(reloaded.playtests_seen().as_deref(), Some("off"));
+    rig.machine.pass().await;
+    assert_eq!(state.lock().unwrap().0, 2);
+    assert!(!rig.lp(0).release_owed);
+    rig.machine.pass().await;
+    assert_eq!(state.lock().unwrap().0, 2);
+}
+
+#[tokio::test]
+async fn off_then_on_then_off_sends_twice() {
+    let (base, state) = release_store(0, 3).await;
+    let mut rig = live_rig(&base);
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
+    set_playtests(&mut rig, Playtests::On);
+    rig.machine.pass().await;
+    for value in [Playtests::Off, Playtests::On, Playtests::Off] {
+        set_playtests(&mut rig, value);
+        rig.machine.pass().await;
+    }
+    assert_eq!(state.lock().unwrap().0, 2);
+}
+
+#[tokio::test]
+async fn with_the_flag_off_nothing_is_sent() {
+    let (base, state) = release_store(0, 3).await;
+    let mut rig = live_rig(&base);
+    set_playtests(&mut rig, Playtests::On);
+    rig.machine.pass().await;
+    set_playtests(&mut rig, Playtests::Off);
+    rig.machine.pass().await;
+    assert_eq!(*state.lock().unwrap(), (0, 3));
+}
