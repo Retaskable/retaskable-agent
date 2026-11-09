@@ -146,6 +146,7 @@ mod tests {
             timed_out: false,
             output_tail: String::new(),
             preexisting: false,
+            seconds: 0.0,
         }
     }
 

@@ -25,7 +25,7 @@ use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
-use crate::orchestrator::steps::{Running, StepRequest, state_name};
+use crate::orchestrator::steps::{Running, StepDone, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
@@ -151,7 +151,7 @@ pub trait SessionStarter: Send + Sync {
     /// waits where it is, and the loop asks again on its next wake.
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
-    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, StepDone>>;
     /// Starts a read-only triager session on a stopped item (06.9). Must not block; it reports its end through
     /// `request.outcomes` as [`SessionResult::Triage`](super::SessionResult::Triage). An `Err` counts as a failed look.
     fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {

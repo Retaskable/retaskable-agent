@@ -37,7 +37,7 @@ use crate::implementer::{
     new_session_id, run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
-use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
+use crate::item_lifecycle::ImplementerOutcome;
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
 use crate::tiers::{LOCAL, implementer_model, implementer_tier};
@@ -283,7 +283,7 @@ impl SessionStarter for ClaudeStarter {
     }
 
     /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
-    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         None
     }
 }

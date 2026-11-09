@@ -610,7 +610,7 @@ mod tests {
             json!({ "at": at, "kind": "session_start", "item": "R-12", "lane": 1, "role": "scout", "scout": "tests", "engine": "claude", "model": "opus", "session": "s-1", "detached": true, "attached": false }),
             json!({ "at": at, "kind": "session_end", "item": "R-12", "lane": 1, "role": "implementer", "engine": "claude", "model": "opus", "session": "s-1", "ms": 1140000.0, "cost": 1.25, "ok": false, "subtype": "error_max_turns", "error": "ran out", "limitHit": "5h" }),
             json!({ "at": at, "kind": "step_start", "item": "R-12", "step": "checks", "key": "slice 1 round 1", "again": true }),
-            json!({ "at": at, "kind": "step_end", "item": "R-12", "step": "checks", "key": "k", "ms": 240000.0, "ok": false, "outcome": "failed", "checks": [{ "name": "test", "ok": false, "sec": 200 }], "lines": 40, "scouts": 2 }),
+            json!({ "at": at, "kind": "step_end", "item": "R-12", "step": "checks", "key": "k", "ms": 240000.0, "ok": false, "outcome": "failed", "checks": [{ "name": "test", "ok": false, "sec": 200.0 }], "lines": 40, "scouts": 2 }),
             json!({ "at": at, "kind": "claim", "answer": "no work" }),
             json!({ "at": at, "kind": "store_error", "item": "R-12", "op": "claim", "code": "E_LOCK", "error": "locked" }),
             json!({ "at": at, "kind": "error", "item": "R-12", "where": "checks", "error": "timeout" }),

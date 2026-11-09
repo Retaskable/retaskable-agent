@@ -141,7 +141,7 @@ payload!(Anomaly {
 });
 payload!(
     /// One check of a `step_end`.
-    Check { name: String, ok: bool }
+    Check { name: String, ok: bool, sec: f64 }
 );
 
 /// One kind of event the log knows, by its `kind` string.
@@ -389,6 +389,14 @@ mod tests {
             "host_call_undefined"
         );
         assert_eq!(Event::Anomaly(Anomaly::default()).kind(), "anomaly");
+    }
+
+    #[test]
+    fn a_check_keeps_its_seconds_through_a_round_trip() {
+        let line = json!({ "name": "test", "ok": false, "sec": 12.5 });
+        let check: Check = serde_json::from_value(line.clone()).unwrap();
+        assert_eq!(check.sec, Some(12.5));
+        assert_eq!(serde_json::to_value(&check).unwrap(), line);
     }
 
     #[test]
