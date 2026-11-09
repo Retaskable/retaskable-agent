@@ -187,11 +187,7 @@ fn command_text(field: &str, value: Option<&Value>) -> String {
                         .collect()
                 })
                 .unwrap_or_default();
-            if list.is_empty() {
-                none()
-            } else {
-                list.join(", ")
-            }
+            if list.is_empty() { none() } else { list.join(", ") }
         }
         "phone" => format!("`{}`", s(v, "buildCommand")),
         "engines" => match v.get("allow").and_then(Value::as_array).filter(|a| !a.is_empty()) {
@@ -321,7 +317,8 @@ impl CommandAllowing {
 
     /// The store's record (`record`), what runs now (`running`) and the file's (`file`), each as `commands_of`: when
     /// the store's commands moved past what was approved, they wait for `approve`. A version that changes nothing
-    /// is taken without asking.
+    /// is taken without asking. `running` must be `commands_of` of what `with_allowed` gives now (empty before
+    /// anything is approved), not the file's values, or a store that matches the file is taken unapproved.
     pub fn consider(&mut self, record: Option<&StoreRecord>, running: &Map, file: &Map) -> anyhow::Result<Moved> {
         let settled = self.allowed.as_ref().map_or(0, |a| a.commands_version);
         let Some(record) = record.filter(|r| r.commands_version > settled) else {
@@ -391,8 +388,8 @@ impl CommandAllowing {
             at: now_ms(),
         };
         next.save(&self.file)?;
-        let moved = self.allowed.as_ref().is_none_or(|a| a.values != next.values)
-            && !(self.allowed.is_none() && next.values.is_empty());
+        // The first save always moves them: `with_allowed` gives None (nothing runs) and Some(empty) differently.
+        let moved = self.allowed.as_ref().is_none_or(|a| a.values != next.values);
         self.allowed = Some(next);
         Ok(moved)
     }

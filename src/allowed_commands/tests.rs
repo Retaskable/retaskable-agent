@@ -146,3 +146,20 @@ fn change_text_is_cut() {
     assert_eq!(t.chars().count(), 2000);
     assert!(t.starts_with("the play command: nothing → `x"));
 }
+
+#[test]
+fn first_save_of_an_empty_set_moves_the_allowed_commands() {
+    let (_d, f) = file();
+    let mut a = CommandAllowing::new(f);
+    let rec = StoreRecord {
+        commands_version: 1,
+        values: json!({"branch": "x"}),
+        ..StoreRecord::default()
+    };
+    let m = a.consider(Some(&rec), &Map::new(), &Map::new()).unwrap();
+    assert!(m.allowed);
+    assert_eq!(
+        with_allowed(&cfg("npm test"), a.allowed.as_ref(), true).checks,
+        cfg("npm test").checks
+    );
+}
