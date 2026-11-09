@@ -2,6 +2,7 @@
 //! one read-only session on the scouts' tier judges a batch of at most [`MAX_SUGGESTIONS_PER_RUN`] visitor
 //! suggestions. Pure: the caller reads the specs index and the past verdicts, asks the hub, and sends what
 //! [`plan`] returns. A session that fails yields no verdicts at all, never a partial batch.
+use crate::text::is_blank;
 use std::collections::HashSet;
 use std::future::Future;
 
@@ -182,7 +183,7 @@ fn clean(raw: Vec<Raw>, batch: &[Suggestion]) -> Vec<Judged> {
         .filter(|r| known.contains(r.id.as_str()) && seen.insert(r.id.clone()))
         .map(|r| Judged {
             matches: if r.verdict == Verdict::Duplicate {
-                r.matches.filter(|m| !m.trim().is_empty())
+                r.matches.filter(|m| !is_blank(m))
             } else {
                 None
             },

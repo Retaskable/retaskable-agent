@@ -192,6 +192,77 @@ pub fn effective_tags(found: &[String], overrides: Option<&TagOverrides>, env: &
     tags_from_env(env).unwrap_or_else(|| computer_tags(found, overrides))
 }
 
+/// This computer's effective tags, shared by the three asks, the hello and the settings-save
+/// listener. Cheap to clone; every clone sees a re-read. `generation` counts the changes, so a
+/// waiting project can tell the list moved since it last asked.
+#[derive(Clone, Default)]
+pub struct LiveTags {
+    inner: std::sync::Arc<std::sync::RwLock<(Vec<String>, u64)>>,
+}
+
+impl std::fmt::Debug for LiveTags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LiveTags").field(&self.get()).finish()
+    }
+}
+
+impl PartialEq for LiveTags {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl From<Vec<String>> for LiveTags {
+    fn from(list: Vec<String>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new((list, 0))),
+        }
+    }
+}
+
+impl LiveTags {
+    pub fn get(&self) -> Vec<String> {
+        self.inner.read().map(|g| g.0.clone()).unwrap_or_default()
+    }
+
+    /// Changes whenever the list does.
+    pub fn generation(&self) -> u64 {
+        self.inner.read().map(|g| g.1).unwrap_or(0)
+    }
+
+    /// Rebuilds the list from `machine.json` as startup does (`effective_tags`), so
+    /// `RETASKABLE_TAGS` still replaces it whole. Returns whether the list changed; an unreadable
+    /// `machine.json` leaves it as it was.
+    pub fn reread(&self, dir: &Path, env: &Env) -> bool {
+        let Ok(machine) = crate::store::MachineStore::load(dir) else {
+            return false;
+        };
+        let found = found_tags(&machine_facts(env));
+        let next = effective_tags(&found, machine.tags().as_ref(), env);
+        let Ok(mut g) = self.inner.write() else {
+            return false;
+        };
+        if g.0 == next {
+            return false;
+        }
+        *g = (next, g.1 + 1);
+        true
+    }
+
+    /// Stands in for a re-read that found `list`, for tests of what the list drives.
+    #[cfg(test)]
+    pub(crate) fn set(&self, list: Vec<String>) {
+        let mut g = self.inner.write().unwrap();
+        *g = (list, g.1 + 1);
+    }
+
+    /// What a settings save does (`tags-reread-on-save`): re-read when the flag is On, else leave the
+    /// list as startup read it.
+    pub async fn on_save(&self, flags: &crate::flags::Flags, dir: &Path, env: &Env) -> bool {
+        flags.on("tags-reread-on-save").await && self.reread(dir, env)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +371,56 @@ mod tests {
         let found = vec!["windows".into()];
         let env = Env::from_pairs([("RETASKABLE_TAGS", "not a tag!!")]);
         assert_eq!(effective_tags(&found, None, &env), Vec::<String>::new());
+    }
+
+    fn save_added(dir: &Path, added: &[&str]) {
+        let mut m = crate::store::MachineStore::load(dir).unwrap();
+        let o = TagOverrides {
+            added: added.iter().map(|t| t.to_string()).collect(),
+            removed: vec![],
+        };
+        m.set_tags(o).unwrap();
+    }
+
+    #[test]
+    fn reread_picks_up_a_saved_tag_once_and_counts_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env::empty();
+        let live = LiveTags::default();
+        live.reread(dir.path(), &env);
+        let (before, was) = (live.get(), live.generation());
+        assert!(!live.get().contains(&"zz-new".to_string()));
+        save_added(dir.path(), &["zz-new"]);
+        let clone = live.clone();
+        assert!(live.reread(dir.path(), &env));
+        assert!(clone.get().contains(&"zz-new".to_string()), "{before:?}");
+        assert_eq!(clone.generation(), was + 1);
+        assert!(!live.reread(dir.path(), &env), "unchanged: no new generation");
+        assert_eq!(live.generation(), was + 1);
+    }
+
+    #[test]
+    fn reread_leaves_a_list_that_retaskable_tags_replaces_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env::from_pairs([("RETASKABLE_TAGS", "a,b")]);
+        let live = LiveTags::from(vec!["a".to_string(), "b".to_string()]);
+        save_added(dir.path(), &["zz-new"]);
+        assert!(!live.reread(dir.path(), &env));
+        assert_eq!(live.get(), vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn on_save_does_nothing_with_the_flag_off_and_rereads_with_it_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env::empty();
+        let live = LiveTags::from(vec![]);
+        save_added(dir.path(), &["zz-new"]);
+        assert!(!live.on_save(&crate::flags::Flags::fixed(&[]), dir.path(), &env).await);
+        assert!(live.get().is_empty());
+        assert!(
+            live.on_save(&crate::flags::Flags::fixed(&["tags-reread-on-save"]), dir.path(), &env)
+                .await
+        );
+        assert!(live.get().contains(&"zz-new".to_string()));
     }
 }

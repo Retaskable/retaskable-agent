@@ -35,7 +35,13 @@ pub fn tail(s: &str, max_chars: usize) -> String {
 /// to at most `n` chars. Every engine's reader uses this to fit a tool call's argument onto one
 /// transcript line.
 pub fn collapse_and_clip(s: &str, n: usize) -> String {
-    clip(&s.split_whitespace().collect::<Vec<_>>().join(" "), n)
+    clip(&squish(s), n)
+}
+
+/// `s` with leading and trailing whitespace dropped and every inner run of whitespace (including
+/// newlines) replaced by a single space.
+pub fn squish(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `s` with every run of whitespace (including newlines) replaced by a single space.
@@ -56,6 +62,16 @@ pub fn collapse_whitespace(s: &str) -> String {
     out
 }
 
+/// Whether `s` is empty or only whitespace.
+pub fn is_blank(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
+/// `s` trimmed, or `None` when nothing but whitespace is left.
+pub fn non_blank(s: &str) -> Option<&str> {
+    Some(s.trim()).filter(|t| !is_blank(t))
+}
+
 /// `s` with its first character upper-cased.
 pub fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -68,6 +84,13 @@ pub fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_blank_trims_and_drops_whitespace_only_text() {
+        assert_eq!(non_blank("  hi \n"), Some("hi"));
+        assert_eq!(non_blank(" \t\n"), None);
+        assert_eq!(non_blank(""), None);
+    }
 
     #[test]
     fn clip_passes_short_text_through_and_truncates_with_an_ellipsis_otherwise() {
@@ -103,6 +126,12 @@ mod tests {
     fn tail_keeps_only_the_last_n_characters() {
         assert_eq!(tail("hello world", 5), "world");
         assert_eq!(tail("hi", 10), "hi");
+    }
+
+    #[test]
+    fn squish_trims_and_collapses_whitespace_runs() {
+        assert_eq!(squish("  a \n\t b  c "), "a b c");
+        assert_eq!(squish(" \n "), "");
     }
 
     #[test]

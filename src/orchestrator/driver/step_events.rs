@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use super::ProjectLoop;
 use crate::item_lifecycle::{ItemRun, ItemState};
-use crate::orchestrator::steps::state_name;
+use crate::orchestrator::steps::{StepDetail, state_name};
 use crate::telemetry::event::{Body, Entry};
 use crate::telemetry::{Event, event};
 
@@ -78,10 +78,12 @@ impl ProjectLoop {
     }
 
     /// Writes the `step_end` of `item`'s open step, if it has one.
-    pub(super) fn step_ended(&mut self, item: &str, ok: bool, outcome: &str) {
+    pub(super) fn step_ended(&mut self, item: &str, ok: bool, outcome: &str, detail: Option<&StepDetail>) {
         let Some(open) = self.open_steps.remove(item) else {
             return;
         };
+        let with_checks = self.flags.last("step-events-complete");
+        let review = detail.filter(|_| with_checks && open.step == "reviewing");
         let end = event::StepEnd {
             item: Some(item.into()),
             step: Some(open.step),
@@ -89,6 +91,19 @@ impl ProjectLoop {
             ms: Some(open.began.elapsed().as_millis() as f64),
             ok: Some(ok),
             outcome: Some(outcome.into()),
+            checks: detail.filter(|d| with_checks && !d.checks.is_empty()).map(|d| {
+                (d.checks.iter())
+                    .map(|c| event::Check {
+                        name: Some(c.name.clone()),
+                        ok: Some(c.ok),
+                        sec: Some(c.sec),
+                        ..Default::default()
+                    })
+                    .collect()
+            }),
+            // A review's diff lines and scout count; never on a step that panicked or was cut.
+            lines: review.and_then(|d| d.lines),
+            scouts: review.and_then(|d| d.scouts),
             ..Default::default()
         };
         self.events.add_in(&self.id, Event::StepEnd(end));
@@ -98,7 +113,7 @@ impl ProjectLoop {
     pub(super) fn cut_steps(&mut self) {
         let items: Vec<String> = self.open_steps.keys().cloned().collect();
         for item in items {
-            self.step_ended(&item, false, "cut");
+            self.step_ended(&item, false, "cut", None);
         }
     }
 }

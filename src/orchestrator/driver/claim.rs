@@ -4,7 +4,7 @@ use serde_json::json;
 use super::Shared;
 use super::project::{ProjectLoop, SessionStarter};
 use super::start_gate::StartGate;
-use crate::backlog::{ClaimNextAgent, ClaimNextAnswer};
+use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer};
 use crate::item_lifecycle::ItemState;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
@@ -22,6 +22,10 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> Option<String> {
+        self.hear_work_wake(shared).await;
+        if self.claim_waiting {
+            return None;
+        }
         if shared
             .claim_paused_until
             .is_some_and(|until| std::time::Instant::now() < until)
@@ -88,18 +92,48 @@ impl ProjectLoop {
                 return None;
             }
         };
+        self.tags_seen = shared.links.tags.generation();
         let agent = ClaimNextAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
+            tags: shared.links.tags.get(),
         };
         let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
             Err(e) => {
                 self.store_error("claim_next", &e);
                 ("failed".to_string(), false)
             }
-            Ok(ClaimNextAnswer::Nothing) => ("none".to_string(), false),
+            Ok(ClaimNextAnswer::Nothing) => {
+                self.claim_logged = None;
+                ("none".to_string(), false)
+            }
+            // The wait is behind `claim-next-waiting`; Off, the answer is a failure to read an item, as it was.
+            Ok(ClaimNextAnswer::WaitingFor(waiting)) if self.flags.on("claim-next-waiting").await => {
+                self.claim_waiting = true;
+                // Logged once per change of the list, so a wake that finds the same list adds nothing.
+                if self.claim_logged.as_ref() == Some(&waiting) {
+                    return Some(("waiting".to_string(), false));
+                }
+                self.events.add_in(
+                    &self.id,
+                    Event::Claim(event::Claim {
+                        answer: Some(json!({ "waitingFor": waiting })),
+                        ..Default::default()
+                    }),
+                );
+                self.claim_logged = Some(waiting);
+                return Some(("waiting".to_string(), false));
+            }
+            Ok(ClaimNextAnswer::WaitingFor(_)) => {
+                let e = BacklogError::BadAnswer {
+                    status: 200,
+                    code: None,
+                    message: "couldn't read the item it claimed: missing field `item`".into(),
+                };
+                self.store_error("claim_next", &e);
+                ("failed".to_string(), false)
+            }
             // Handed out again while this computer still has it: it isn't taken twice.
             Ok(ClaimNextAnswer::Item { item, .. }) if self.runs.contains_key(&item.id) => {
                 tracing::warn!(
@@ -110,6 +144,7 @@ impl ProjectLoop {
                 (item.id, false)
             }
             Ok(ClaimNextAnswer::Item { item, token }) => {
+                self.claim_logged = None;
                 self.take_lease(&item, token, ItemState::Queued);
                 let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
                 let model_full = self.model_full(starter, caps_on);

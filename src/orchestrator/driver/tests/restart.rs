@@ -18,7 +18,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
-        tags: Vec::new(),
+        tags: Default::default(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
         cursor_models: Default::default(),

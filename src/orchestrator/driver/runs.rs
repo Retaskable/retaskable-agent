@@ -57,6 +57,22 @@ impl RunEndSender {
     }
 }
 
+/// The sending end of the run-event channel: cloned into every [`RunRequest`], so a run's task can have the loop
+/// write an event to the project's log, which only the loop holds.
+#[derive(Debug, Clone)]
+pub struct RunEventSender(mpsc::UnboundedSender<Event>);
+
+impl RunEventSender {
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Event>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self(sender), receiver)
+    }
+
+    pub fn send(&self, event: Event) {
+        let _ = self.0.send(event);
+    }
+}
+
 /// Where a run's work registers each session's process tree, so a beat's `stop` or the ceiling can cut it.
 #[derive(Debug, Clone)]
 pub struct RunProcesses(mpsc::UnboundedSender<(String, Arc<ProcessTree>)>);
@@ -157,6 +173,8 @@ pub struct RunRequest {
     /// With `engine-fall-over` On: the engine the run's session starts on when its chosen one is out.
     pub engine: Option<EngineId>,
     pub ends: RunEndSender,
+    /// Events the run's task has the loop write to the project's log.
+    pub events: RunEventSender,
     pub context: RunContext,
 }
 
@@ -180,8 +198,12 @@ pub struct RunLoop {
     idle: bool,
     pub(super) fix_main: super::fix_main::State,
     pub(super) main_sync: super::main_sync::State,
+    /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
+    merges: std::collections::HashMap<String, event::Merged>,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
+    pub(super) events_tx: RunEventSender,
+    events_rx: mpsc::UnboundedReceiver<Event>,
     processes_tx: RunProcesses,
     processes_rx: mpsc::UnboundedReceiver<(String, Arc<ProcessTree>)>,
 }
@@ -189,6 +211,7 @@ pub struct RunLoop {
 impl RunLoop {
     pub fn new(project: &str) -> Self {
         let (ends_tx, ends_rx) = RunEndSender::channel();
+        let (events_tx, events_rx) = RunEventSender::channel();
         let (processes_tx, processes_rx) = RunProcesses::channel();
         Self {
             runs: Runs::new(project),
@@ -198,8 +221,11 @@ impl RunLoop {
             idle: false,
             fix_main: Default::default(),
             main_sync: Default::default(),
+            merges: Default::default(),
             ends_tx,
             ends_rx,
+            events_tx,
+            events_rx,
             processes_tx,
             processes_rx,
         }
@@ -211,6 +237,36 @@ impl RunLoop {
 }
 
 impl ProjectLoop {
+    /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
+    /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
+    /// With `tags-reread-on-save` On a wake ends a wait only when the tag list changed since the ask that got
+    /// the wait (`tags_seen`, set at each ask); otherwise it is used up and nothing is asked.
+    pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>) {
+        // A re-read that changed the tags ends the waits too: the next ask carries the new list.
+        let generation = shared.links.tags.generation();
+        let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
+        let woke = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
+        let wake_counts = woke && !self.flags.on("tags-reread-on-save").await;
+        if tags_changed | wake_counts {
+            self.run_loop.waiting = false;
+            self.claim_waiting = false;
+        }
+    }
+
+    /// Writes the events the runs' tasks sent. Behind `ci-merged-events`: Off, they are dropped.
+    pub(super) async fn write_run_events(&mut self) {
+        let mut sent = Vec::new();
+        while let Ok(event) = self.run_loop.events_rx.try_recv() {
+            sent.push(event);
+        }
+        if sent.is_empty() || !self.flags.on("ci-merged-events").await {
+            return;
+        }
+        for event in sent {
+            self.events.add_in(&self.id, event);
+        }
+    }
+
     /// One pass of the run loop at `now`: `runs_drop` first (once; if it fails nothing is taken), then the
     /// ends that came back, the ceilings, the minute's beat, the ends to send, and asking for runs.
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
@@ -218,16 +274,22 @@ impl ProjectLoop {
             return;
         };
         let token = Some(token.as_str());
-        if shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
-            self.run_loop.waiting = false;
-        }
+        self.hear_work_wake(shared).await;
         while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
             if !self.run_loop.runs.add_process(&run, tree.clone()) {
                 tree.cut();
                 tree.kill_and_wait(KILL_LIMIT);
             }
         }
+        self.write_run_events().await;
         while let Ok(end) = self.run_loop.ends_rx.try_recv() {
+            let merged = self.run_loop.merges.remove(&end.token);
+            if let Some(merged) = merged
+                && end.outcome == RunOutcome::Merged
+                && self.flags.on("ci-merged-events").await
+            {
+                self.events.add_in(&self.id, Event::Merged(merged));
+            }
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
         self.run_loop.runs.end_past_ceilings(pool, now);
@@ -368,11 +430,12 @@ impl ProjectLoop {
         now: Instant,
     ) -> bool {
         let start = self.start_rules(pool, shared, now).await;
+        self.tags_seen = shared.links.tags.generation();
         let agent = RunTakeAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
+            tags: shared.links.tags.get(),
             engines: engines_here(shared.links, self.flags.on("engine-placement").await, start.as_ref()),
             uses: uses_here(shared.links, self.project.engines.as_ref(), start.as_ref()),
             chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
@@ -493,6 +556,27 @@ impl ProjectLoop {
             }
             return false;
         }
+        if run.kind == RunKind::Merge
+            && let Some(pr) = run
+                .piece
+                .change
+                .as_ref()
+                .and_then(super::super::watch_run::change_ref)
+                .and_then(|c| {
+                    c.trim_end_matches('/')
+                        .rsplit(['/', '#'])
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                })
+        {
+            let merged = event::Merged {
+                item: Some(piece_id.clone()),
+                pr: Some(pr),
+                chore: Some(chore_of(&run.piece).is_some()),
+                ..Default::default()
+            };
+            self.run_loop.merges.insert(run.token.clone(), merged);
+        }
         let live = self.run_loop.runs.live().iter().find(|r| r.token == run.token);
         let stop = live.map(|r| r.stop.clone()).unwrap_or_default();
         let lane = live
@@ -509,6 +593,7 @@ impl ProjectLoop {
             lane,
             engine: fall.and_then(|s| s.takes_over(run.kind)),
             ends: self.run_loop.ends_tx.clone(),
+            events: self.run_loop.events_tx.clone(),
             context: RunContext {
                 project: self.id.clone(),
                 config: self.project.clone(),

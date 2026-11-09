@@ -44,8 +44,7 @@ pub(crate) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<S
 
 /// The first open PR for `branch`, if any.
 fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
-    let mut list = Command::new(gh);
-    list.current_dir(dir).args([
+    let args = [
         "pr",
         "list",
         "--head",
@@ -54,7 +53,10 @@ fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
         "open",
         "--json",
         "number,url",
-    ]);
+    ];
+    crate::host_call::guard("gh", dir, &args)?;
+    let mut list = Command::new(gh);
+    list.current_dir(dir).args(args);
     let listed = run(list, None, "gh pr list")?;
     let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
     Ok(open.into_iter().next())
@@ -87,6 +89,8 @@ pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &s
             created: false,
         });
     }
+    // The title and body are free text, so only the branches are checked.
+    crate::host_call::guard("gh", dir, &["pr", "create", "--base", base, "--head", branch])?;
     let mut create = Command::new(gh);
     create.current_dir(dir).args([
         "pr",
@@ -127,10 +131,12 @@ pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Resul
     let Some(pr) = open_change(gh, dir, branch)? else {
         return Ok(false);
     };
+    let number = pr.number.to_string();
+    crate::host_call::guard("gh", dir, &["pr", "close", &number])?;
     let mut close = Command::new(gh);
     close
         .current_dir(dir)
-        .args(["pr", "close", &pr.number.to_string(), "--comment", comment]);
+        .args(["pr", "close", &number, "--comment", comment]);
     run(close, None, "gh pr close")?;
     Ok(true)
 }
@@ -199,6 +205,25 @@ mod tests {
         let calls = calls(dir.path());
         assert_eq!(calls.len(), 1);
         assert!(calls[0].starts_with("pr list"));
+    }
+
+    #[test]
+    fn an_undefined_branch_is_refused_and_recorded_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "[]");
+        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
+        let err = open_or_create(&gh, dir.path(), "", "main", "t", "b").unwrap_err();
+        assert!(err.to_string().contains("argument 4 was undefined"), "{err}");
+        assert!(close_change(&gh, dir.path(), "undefined", "c").is_err());
+        assert!(calls(dir.path()).is_empty());
+        let got = crate::host_call::refusals_in(dir.path());
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].cmd, "gh");
+        assert_eq!(got[0].args[..4], ["pr", "list", "--head", ""]);
+        // With the flag Off the call runs as before.
+        crate::host_call::set_on_for(vec![]);
+        assert!(close_change(&gh, dir.path(), "", "c").is_ok());
+        assert_eq!(calls(dir.path()).len(), 1);
     }
 
     #[test]

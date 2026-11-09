@@ -7,7 +7,7 @@ use crate::lane_pool::Holder;
 use crate::link::TokenStore;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle};
-use crate::orchestrator::steps::StepRequest;
+use crate::orchestrator::steps::{StepDetail, StepDone, StepRequest};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::EventLog;
 use crate::telemetry::event::Entry;
@@ -137,7 +137,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
-        tags: Vec::new(),
+        tags: Default::default(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
         cursor_models: Default::default(),
@@ -146,6 +146,8 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         bug_version: "test".into(),
     };
     let mut machine = Machine::new(lanes, 8, links);
+    static RIGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    machine.base_scope = format!("rig{}:", RIGS.fetch_add(1, Ordering::Relaxed));
     for (i, base) in bases.iter().enumerate() {
         let store = Store::load(&dir.path().join(i.to_string())).unwrap();
         let mut lp = ProjectLoop::new(
@@ -501,6 +503,8 @@ struct Fake {
     active: AtomicU32,
     /// Where a step leaves its item; `None` keeps its state.
     to: Mutex<Option<ItemState>>,
+    /// What the next steps hand back besides the run.
+    detail: Mutex<StepDetail>,
     /// While set, a step never ends.
     hold: AtomicBool,
     /// The next step panics.
@@ -531,7 +535,8 @@ impl LanePlay for FakeGame {
 }
 
 impl Fake {
-    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, ItemRun> {
+    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, StepDone> {
+        let detail = self.detail.lock().unwrap().clone();
         if let Some(to) = *self.to.lock().unwrap() {
             run.state = to;
         }
@@ -546,7 +551,7 @@ impl Fake {
             if panics {
                 panic!("a step that goes wrong");
             }
-            run
+            StepDone { run, detail }
         }
         .boxed()
     }
@@ -700,7 +705,7 @@ async fn claim_next_sends_this_computers_tags() {
     let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(1, &[&base]);
     rig.go_live();
-    rig.machine.links.tags = vec!["windows".into(), "gpu".into()];
+    rig.machine.links.tags = vec!["windows".to_string(), "gpu".to_string()].into();
     rig.machine.pass().await;
     let agent = asked.lock().unwrap()[1].1["agent"].clone();
     assert_eq!(agent["tags"], json!(["windows", "gpu"]));
@@ -889,81 +894,12 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
     );
 }
 
-#[tokio::test]
-async fn concurrency_caps_starts_and_claims() {
-    let (base, asked) = claim_stub(json!([]), handed_out()).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    rig.machine.concurrency = 1;
-    rig.queue(0, &["q"]);
-    fake.active.store(1, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert!(fake.started.lock().unwrap().is_empty(), "no session slot left");
-    assert!(ops(&asked).is_empty(), "and no claim");
-    fake.active.store(0, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert_eq!(fake.started.lock().unwrap().len(), 1);
-    assert!(ops(&asked).is_empty(), "the one slot went to the queued item");
-}
-
-#[tokio::test]
-async fn stopping_blocks_new_claims_and_starts() {
-    let (base, asked) = claim_stub(json!([]), handed_out()).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    rig.queue(0, &["q"]);
-    rig.machine.stopping_override = Some(true);
-    rig.machine.poll().await;
-    assert!(fake.started.lock().unwrap().is_empty(), "no start while stopping");
-    assert!(ops(&asked).is_empty(), "no claim_next while stopping");
-}
-
-#[tokio::test]
-async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
-    let (base, asked) = claim_stub(json!([]), handed_out()).await;
-    let mut rig = rig(3, &[&base]);
-    let fake = rig.go_live();
-    rig.machine.concurrency = 1;
-    rig.queue(0, &["plain", "rush"]);
-    rig.lp(0).items.get_mut("rush").unwrap().do_next = true;
-    fake.active.store(1, Ordering::SeqCst);
-    rig.machine.poll().await;
-    let started: Vec<_> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
-    assert_eq!(started, ["rush"], "only the do-next item skips the full slots");
-    assert!(ops(&asked).is_empty(), "and nothing is claimed without a slot");
-    fake.active.store(0, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert_eq!(
-        fake.started.lock().unwrap().len(),
-        2,
-        "the rush start took no slot from the plain item"
-    );
-}
-
-#[tokio::test]
-async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base, &base]);
-    let repos = tempfile::tempdir().unwrap();
-    let repo = crate::test_support::repo_with_origin(repos.path());
-    rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
-    rig.lp(1).project.repo_path = repos.path().join("missing").to_string_lossy().into_owned();
-    rig.machine.fetch().await;
-    assert!(rig.lp(1).events().recent().is_empty(), "a dry project isn't fetched");
-    rig.go_live();
-    rig.pause("p0", true);
-    rig.machine.fetch().await;
-    assert!(
-        rig.lp(0).events().recent().is_empty(),
-        "a paused project is fetched too, and it worked"
-    );
-    let errors: Vec<_> = rig.lp(1).events().recent().iter().map(Entry::to_value).collect();
-    assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
-}
-
 mod approve;
 mod asks;
 mod auto_concurrency;
+mod caps_and_fetch;
+mod ci_events;
+mod claim_waiting;
 mod command_gate;
 mod commands;
 mod cursor_limit;
@@ -972,6 +908,7 @@ mod drafts;
 mod fix_main;
 mod follow;
 mod gallery_feedback;
+mod host_call_undefined;
 mod idea_accept;
 mod ideas;
 mod ideas_daily;
@@ -980,6 +917,7 @@ mod local_limit_fallback;
 mod local_one_slot;
 mod main_sync;
 mod model_caps;
+mod note_rules;
 mod own_failures;
 mod playtest_answers;
 mod playtests;
@@ -992,6 +930,7 @@ mod start_blocked;
 mod starter;
 mod step_events;
 mod store_pause;
+mod stuck_release;
 mod triage;
 mod trial;
 mod vet_daily;

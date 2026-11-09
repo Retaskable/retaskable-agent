@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
-use tokio::time::MissedTickBehavior;
 
 use super::panic::panic_message;
 use super::read::{Fail, Read, read};
@@ -17,16 +16,15 @@ use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
     playtest_round, vet_daily,
 };
-use crate::backlog::{Client, Item};
-use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
+use crate::backlog::Item;
+use crate::base_hold;
+use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
 use crate::link::TokenStore;
 use crate::orchestrator::Action;
 use crate::orchestrator::fresh_start::EngineLimits;
-use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::LiveHandle;
 use crate::orchestrator::round_robin::{Candidate, plan};
 use crate::process_tree;
 use crate::telemetry::{Event, event};
@@ -39,11 +37,10 @@ pub const EVERY: Duration = Duration::from_secs(60);
 /// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
 /// project's backlog in the store.
 pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
-    let out = tokio::process::Command::new("gh")
-        .args(["api", &format!("repos/{github_repo}"), "--jq", ".id"])
-        .output()
-        .await
-        .ok()?;
+    let path = format!("repos/{github_repo}");
+    let args = ["api", path.as_str(), "--jq", ".id"];
+    crate::host_call::guard_program("gh", None, &args).ok()?;
+    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -69,7 +66,7 @@ pub struct Links {
     pub machine: String,
     pub environment: String,
     /// This computer's tags, as `claim_next` is told them (agent-settings.md section 3.1).
-    pub tags: Vec<String>,
+    pub tags: crate::tags::LiveTags,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -121,6 +118,9 @@ pub struct Machine {
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
     pub(super) links: Links,
+    /// Put in front of a project's id to key its base checkout hold; empty in the agent. Tests give each
+    /// machine its own, since the hold is shared by the whole process and every test rig names a project `p0`.
+    pub(super) base_scope: String,
     /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
@@ -180,6 +180,7 @@ impl Machine {
             projects: Vec::new(),
             last_served: None,
             links,
+            base_scope: String::new(),
             starter: None,
             drafts: None,
             trial: None,
@@ -285,14 +286,33 @@ impl Machine {
     /// paused too), each in parallel, and then what it saw told to the store (`report`). A failed fetch is
     /// logged and an `error` event; the loop goes on.
     pub async fn fetch(&mut self) {
+        self.fetch_for(None).await;
+    }
+
+    /// The put-off syncs that are now due (the base checkout was given back): fetched on this poll, not the
+    /// next minute. A sync that finds the base still held is put off again.
+    pub async fn fetch_due(&mut self) {
+        let due = base_hold::take_due_syncs(&self.base_scope);
+        if !due.is_empty() {
+            self.fetch_for(Some(&due)).await;
+        }
+    }
+
+    /// Each project's fetch holds its base checkout ("a sync") for the length of the fetch; when that's held
+    /// the project's sync is put off (no fetch, no error event) and runs on the poll after it's given back.
+    async fn fetch_for(&mut self, only: Option<&std::collections::HashSet<String>>) {
         let jobs: Vec<_> = (self.projects.iter())
-            .filter(|lp| self.live(lp))
-            .map(|lp| {
+            .filter(|lp| self.live(lp) && only.is_none_or(|o| o.contains(&lp.id)))
+            .filter_map(|lp| {
+                let hold = base_hold::hold_base_for_sync(&format!("{}{}", self.base_scope, lp.id))?;
                 let repo = std::path::PathBuf::from(&lp.project.repo_path);
-                (
+                Some((
                     lp.id.clone(),
-                    tokio::task::spawn_blocking(move || lanes::fetch_latest(&repo)),
-                )
+                    tokio::task::spawn_blocking(move || {
+                        let _hold = hold;
+                        lanes::fetch_latest(&repo)
+                    }),
+                ))
             })
             .collect();
         for (id, job) in jobs {
@@ -559,6 +579,7 @@ impl Machine {
     /// One pass over every project, in the order added. A project whose read fails (or panics) is skipped
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
+        self.write_host_calls().await;
         let mut gate_on = Vec::new();
         let asked: Vec<_> = self
             .projects
@@ -570,7 +591,11 @@ impl Machine {
             let on = flags.on(crate::command_gate::FLAG).await;
             self.links.item_commands.set_flag(&id, crate::command_gate::FLAG, on);
             gate_on.push(on);
-            obey_on.push(flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await);
+            let obey = flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
+            self.links
+                .item_commands
+                .set_flag(&id, crate::view::OBEY_SHARED_PAUSE_FLAG, obey);
+            obey_on.push(obey);
         }
         let jobs: Vec<_> = self
             .projects
@@ -823,173 +848,5 @@ impl Machine {
     }
 }
 
-/// What `spawn_all` starts the orchestrator from.
-pub struct SpawnArgs<'a> {
-    pub dir: &'a Path,
-    pub projects: &'a [ProjectConfig],
-    pub lane_count: u32,
-    /// `concurrency`: how many sessions may run at once, across every project.
-    pub concurrency: u32,
-    /// The computer's local model, shared with the session starters.
-    pub local: crate::local_model::LocalModel,
-    /// `autoConcurrency`.
-    pub auto_concurrency: AutoConcurrency,
-    /// `pollIntervalSec`: how often the loop steps between the minute's passes.
-    pub poll_every: Duration,
-    pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
-    pub paused: &'a PauseState,
-    pub store_paused: &'a StorePauseState,
-    pub item_commands: &'a ItemCommands,
-    pub work: &'a crate::work_signal::WorkSignals,
-    pub live: &'a LiveHandle,
-    pub guard: Option<&'a PortGuard>,
-    pub machine: String,
-    pub environment: String,
-    pub tags: Vec<String>,
-    /// Runs sessions for claimed work. None in production until the implementer session is built.
-    pub starter: Option<Arc<dyn SessionStarter>>,
-    /// Runs spec drafts in `claim` mode. None claims no draft.
-    pub drafts: Option<Arc<dyn super::DraftHost>>,
-    /// Runs the trial plan in `claim` mode, with the setup checks it waits on. None runs none.
-    pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
-    /// Answers the chat's asks in `claim` mode. None answers none.
-    pub asks: Option<Arc<dyn super::AskHost>>,
-    /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
-    pub run_starters: Vec<Arc<dyn RunStarter>>,
-    /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
-    pub max_resume_context_tokens: u32,
-    /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
-    pub env: Env,
-    /// Which engine a playtest grouping round's `Role::Planner` session runs on.
-    pub engine_choice: EngineChoiceConfig,
-    pub cursor_models: CursorModels,
-    pub checks: SetupChecksHandle,
-    pub bugs: std::collections::HashMap<String, Arc<crate::connector::bug_link::BugLink>>,
-    pub bug_version: String,
-}
-
 /// The latest setup checks (`runtime::spawn_setup_checks`).
 pub type SetupChecksHandle = Arc<std::sync::Mutex<Option<crate::setup_check::SetupChecks>>>;
-
-/// Starts the computer's one orchestrator task when the mode isn't `Off`. A project that can't loop (no
-/// GitHub repo, unreadable state) is logged and left out; the others go on.
-pub fn spawn_all(args: SpawnArgs) {
-    if args.live.snapshot().mode == OrchestratorMode::Off {
-        return;
-    }
-    let limits = args.live.sessions().limits();
-    {
-        // `engine-limit-records`: kept fresh in the background; Off until there is an answer.
-        let flag = Arc::new(crate::flags::Flags::from_env());
-        let limits = limits.clone();
-        tokio::spawn(async move {
-            loop {
-                limits.record_any_role(flag.on("engine-limit-records").await);
-                limits.set_week_cutoff(flag.on("weekly-cutoff").await);
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            }
-        });
-    }
-    let mut machine = Machine::new(
-        args.lane_count,
-        args.concurrency,
-        Links {
-            backlog_url: args.backlog_url.to_string(),
-            keychain: args.keychain.clone(),
-            paused: args.paused.clone(),
-            store_paused: args.store_paused.clone(),
-            item_commands: args.item_commands.clone(),
-            work: args.work.clone(),
-            machine: args.machine,
-            environment: args.environment,
-            tags: args.tags,
-            env: args.env,
-            engine_choice: args.engine_choice,
-            cursor_models: args.cursor_models,
-            checks: args.checks,
-            bugs: args.bugs,
-            bug_version: args.bug_version,
-        },
-    );
-    machine.engine_limits = limits;
-    machine = machine
-        .with_local(args.local)
-        .with_auto(args.auto_concurrency)
-        .with_machine_dir(args.dir);
-    if args.live.snapshot().mode == OrchestratorMode::Runs {
-        machine = machine.with_run_starters(args.run_starters);
-        let kinds = machine.run_starters.kinds();
-        args.live.set_run_kinds(
-            kinds
-                .iter()
-                .filter_map(|k| serde_json::to_value(k).ok()?.as_str().map(String::from))
-                .collect(),
-        );
-    }
-    if let Some(starter) = args.starter {
-        machine = machine.with_starter(starter);
-        if let Some(drafts) = args.drafts {
-            machine = machine.with_drafts(drafts);
-        }
-        if let Some((host, checks)) = args.trial {
-            machine = machine.with_trial(host, checks);
-        }
-        if let Some(asks) = args.asks {
-            machine = machine.with_asks(asks);
-        }
-    } else if args.live.snapshot().mode == OrchestratorMode::Claim {
-        tracing::warn!("claim mode: no session runner yet, running dry");
-    }
-    for project in args.projects {
-        let id = project.id_or_derived();
-        if project.github_repo.is_empty() {
-            tracing::warn!("{id}: orchestrator skipped: the project has no githubRepo, so no backlog repo id");
-            continue;
-        }
-        let client = Client::new(args.backlog_url);
-        match ProjectLoop::open(
-            args.dir,
-            project,
-            client,
-            args.live.clone(),
-            args.guard.cloned(),
-            args.max_resume_context_tokens,
-        ) {
-            Ok(lp) => machine.add(lp),
-            Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
-        }
-    }
-    if !machine.projects.is_empty() {
-        tokio::spawn(run(machine, args.poll_every));
-    }
-}
-
-/// The poll's period: at least a second. The file's `pollIntervalSec` is used as written (only its environment
-/// variable is range-checked), and a hand-edited `0` would panic `tokio::time::interval` and end the loop.
-pub(super) fn poll_period(poll_every: Duration) -> Duration {
-    poll_every.max(Duration::from_secs(1))
-}
-
-/// The loop (section 7's pseudocode): every `poll_every` a poll, and about once a minute (at the first poll
-/// too) the fetch and the pass that reads every backlog and writes the `tick`s in its place.
-async fn run(mut machine: Machine, poll_every: Duration) {
-    let mut every = tokio::time::interval(poll_period(poll_every));
-    every.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut minute_at: Option<tokio::time::Instant> = None;
-    loop {
-        let now = every.tick().await;
-        if minute_at.is_none_or(|at| now.duration_since(at) >= EVERY) {
-            minute_at = Some(now);
-            machine.fetch().await;
-            let steps = machine.pass().await;
-            machine.playtest_rounds(&steps).await;
-            machine.ideas_rounds(&steps).await;
-            machine.deprecation_checks(&steps).await;
-            machine.vet_rounds(&steps).await;
-        } else {
-            machine.poll().await;
-        }
-        machine.run_passes().await;
-    }
-}

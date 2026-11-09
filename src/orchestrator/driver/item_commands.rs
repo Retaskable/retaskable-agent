@@ -35,6 +35,7 @@ use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
+use crate::text::is_blank;
 use crate::triage::schedule::nothing_to_continue;
 use crate::view::ItemCommand;
 
@@ -103,7 +104,7 @@ impl ProjectLoop {
                 } else {
                     &mut self.continuing
                 };
-                queue.push((item, notes.filter(|n| !n.trim().is_empty())));
+                queue.push((item, notes.filter(|n| !is_blank(n))));
             }
         }
         let rules_on = self.flags.on("engine-start-rules").await;
@@ -125,6 +126,9 @@ impl ProjectLoop {
             {
                 self.starting_over.push((item, notes));
             }
+        }
+        if self.flags.on("release-playtests-off").await {
+            self.release_playtests();
         }
         for (item, message) in std::mem::take(&mut self.playtest_fails) {
             if !self
@@ -148,6 +152,37 @@ impl ProjectLoop {
             .map(|(id, _)| id)
             .collect();
         self.claude_pending.retain(|id| waiting.contains(&id));
+    }
+
+    /// With `playtests` off, lets every `awaiting_playtest` run go on to its merge as if passed, and forgets any
+    /// failure or owed answer held for it. Nothing is left waiting, so a second pass does nothing.
+    fn release_playtests(&mut self) {
+        if self.project.playtests != crate::config::Playtests::Off {
+            return;
+        }
+        let ids: Vec<String> = self
+            .runs
+            .iter()
+            .filter(|(_, r)| r.state == ItemState::AwaitingPlaytest)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.playtest_fails.retain(|(item, _)| *item != id);
+            self.unanswered.remove(&id);
+            let run = self.runs.get_mut(&id).expect("listed above");
+            run.playtest_finished(PlaytestOutcome::Passed, &self.project);
+            let to = state_name(run.state);
+            self.events.add_in(
+                &self.id,
+                Event::ItemState(event::ItemState {
+                    item: Some(id),
+                    from: Some("awaiting_playtest".into()),
+                    to: Some(to.into()),
+                    note: Some("playtests are off: released".into()),
+                    ..Default::default()
+                }),
+            );
+        }
     }
 
     /// Takes in a person's answer to the playtest of `item_id`. Only an `awaiting_playtest` item takes it; any
@@ -179,7 +214,7 @@ impl ProjectLoop {
             (PlaytestOutcome::Failed, "found a problem")
         };
         if !passed && run.review_rounds < self.project.max_review_rounds {
-            let notes = notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let notes = notes.as_deref().and_then(crate::text::non_blank);
             let message = match notes {
                 Some(n) => format!("A person played this build and found a problem. Their notes:\n\n{n}"),
                 None => "A person played this build and found a problem, but left no notes.".to_string(),
@@ -304,8 +339,7 @@ impl ProjectLoop {
         let Some(lease) = self.leases.remove(item_id) else {
             return;
         };
-        self.unreleased
-            .insert(item_id.to_string(), (lease, format!("{who} chose Skip.")));
+        self.list_unreleased(item_id.to_string(), lease, format!("{who} chose Skip."));
         self.unskipped.insert(item_id.to_string());
         self.save_leases();
         self.flush_owed(shared.links).await;

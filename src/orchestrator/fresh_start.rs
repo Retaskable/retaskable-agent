@@ -281,6 +281,76 @@ mod tests {
     }
 
     #[test]
+    fn a_later_hit_never_shortens_a_limit_and_clones_share_it() {
+        use EngineId::*;
+        let now = Instant::now();
+        let limits = EngineLimits::default();
+        let clone = limits.clone();
+        limits.hit(Claude, now + Duration::from_secs(600));
+        clone.hit(Claude, now + Duration::from_secs(60));
+        assert_eq!(limits.limited_until(Claude, now), Some(now + Duration::from_secs(600)));
+        clone.hit(Claude, now + Duration::from_secs(900));
+        assert_eq!(limits.limited_until(Claude, now), Some(now + Duration::from_secs(900)));
+        assert!(limits.claude_at_limit(now));
+        assert!(!limits.is_limited(Cursor, now));
+        assert_eq!(limits.limited_until(Cursor, now), None);
+        assert_eq!(limits.limited_until(Claude, now + Duration::from_secs(900)), None);
+    }
+
+    #[test]
+    fn takeover_skips_the_engine_it_started_on_and_limited_candidates() {
+        use EngineId::*;
+        let now = Instant::now();
+        let limits = EngineLimits::default();
+        limits.hit(Claude, now + Duration::from_secs(60));
+        limits.hit(Cursor, now + Duration::from_secs(60));
+        assert_eq!(limits.takeover(Claude, &[Claude, Cursor, Codex], now), Some(Codex));
+        assert_eq!(limits.takeover(Claude, &[Cursor, Codex], now), Some(Codex));
+    }
+
+    #[test]
+    fn the_flags_start_off_and_can_be_turned_on_and_off() {
+        let limits = EngineLimits::default();
+        assert!(!limits.records_any_role());
+        assert!(!limits.week_cutoff_on());
+        limits.record_any_role(true);
+        limits.set_week_cutoff(true);
+        assert!(limits.clone().records_any_role());
+        assert!(limits.clone().week_cutoff_on());
+        limits.record_any_role(false);
+        limits.set_week_cutoff(false);
+        assert!(!limits.records_any_role());
+        assert!(!limits.week_cutoff_on());
+    }
+
+    #[test]
+    fn the_weekly_cutoff_limits_claude_until_the_reset() {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let limits = EngineLimits::default();
+        let now = Instant::now();
+        let below =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.10, "resetsAt": now_epoch + 3600}}});
+        assert!(!limits.cut_off_for_week(&below));
+        assert!(!limits.claude_at_limit(now));
+        assert!(!limits.week_cut_off(now));
+        let over =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.99, "resetsAt": now_epoch + 3600}}});
+        assert!(limits.cut_off_for_week(&over));
+        assert!(limits.claude_at_limit(now));
+        assert!(limits.week_cut_off(now));
+        assert!(!limits.week_cut_off(now + Duration::from_secs(3700)));
+        assert!(!limits.claude_at_limit(now + Duration::from_secs(3700)));
+        // A shorter reset later doesn't pull the week's hold in.
+        let sooner =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.99, "resetsAt": now_epoch + 60}}});
+        assert!(limits.cut_off_for_week(&sooner));
+        assert!(limits.week_cut_off(now + Duration::from_secs(600)));
+    }
+
+    #[test]
     fn the_prompt_opens_by_whether_there_is_a_pr_and_ends_with_the_follow_up() {
         for (has_pr, opening) in [
             (true, "You're picking up an existing PR"),

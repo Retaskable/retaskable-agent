@@ -37,7 +37,7 @@ pub struct AgentView {
     /// `link::machine_name`.
     pub machine: String,
     /// This computer's tags (computer-tags.md section 3.1).
-    pub tags: Vec<String>,
+    pub tags: crate::tags::LiveTags,
     /// The projects, the first first; none before Setup.
     pub projects: Vec<ProjectView>,
     /// This crate's version in a checkout, or a release build's `build.json` one
@@ -68,6 +68,8 @@ pub struct AgentView {
     pub live: crate::orchestrator::live::LiveHandle,
     /// The setup checks' runner (first-run-check.md section 3.1), for `hello` and commands.
     pub checks: Arc<crate::setup_check::SetupCheckRunner>,
+    /// The GitHub login of this computer's `gh`: the owner `approve_commands` is checked against. Read once.
+    pub owner: Arc<std::sync::OnceLock<String>>,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -500,7 +502,7 @@ impl AgentView {
     pub(crate) fn blank() -> Self {
         Self {
             machine: "pc".into(),
-            tags: vec![],
+            tags: Default::default(),
             projects: vec![],
             version: "1".into(),
             lanes: 1,
@@ -515,7 +517,17 @@ impl AgentView {
             local: Default::default(),
             live: Default::default(),
             checks: Default::default(),
+            owner: Default::default(),
         }
+    }
+
+    /// This computer's owner (`repo::github_login`), read on first use; `None` while `gh` can't say.
+    pub fn owner(&self) -> Option<String> {
+        if let Some(o) = self.owner.get() {
+            return Some(o.clone());
+        }
+        let login = crate::repo::github_login()?;
+        Some(self.owner.get_or_init(|| login).clone())
     }
 
     /// The hubs to connect to: each project's by its id, or the agent's own ("") before the first project.
@@ -542,7 +554,7 @@ impl AgentView {
             "capabilities": [],
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
-            "tags": self.tags,
+            "tags": self.tags.get(),
         });
         if self.settings.on().await {
             hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);

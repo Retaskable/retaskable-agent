@@ -4,6 +4,7 @@
 //! the store as `upsert_from_specs` (backlog.md section 6.4), and the items whose merge commits reached the
 //! default branch or production are sent as `landed` (section 6.5). Plain code: no model reads anything. A
 //! failure is only logged; the next fetch tries again.
+use crate::text::is_blank;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,7 +76,8 @@ impl ProjectLoop {
             return;
         };
         if self.seen.default_branch.is_none() {
-            self.seen.default_branch = default_branch(&self.project.github_repo).await;
+            self.seen.default_branch =
+                default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
         }
         let Some(main) = self.seen.default_branch.clone() else {
             tracing::warn!(
@@ -213,7 +215,7 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
     let Some(main_head) = head(ctx, &ctx.main).await else {
         return Ok(format!("no {}", ctx.origin(&ctx.main)));
     };
-    let production = production.filter(|p| !p.branch.trim().is_empty());
+    let production = production.filter(|p| !is_blank(&p.branch));
     let version = production.and_then(version_url);
     let production_head = match production {
         Some(p) => head(ctx, p.branch.trim()).await,
@@ -386,15 +388,13 @@ async fn git_out(repo_path: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The repo's default branch on GitHub (`gh api repos/<repo> --jq .default_branch`).
-pub(super) async fn default_branch(github_repo: &str) -> Option<String> {
+pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<String> {
     if github_repo.is_empty() {
         return None;
     }
-    let out = tokio::process::Command::new("gh")
-        .args(["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"])
-        .output()
-        .await
-        .ok()?;
+    let args = ["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"];
+    crate::host_call::guard("gh", dir, &args).ok()?;
+    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !branch.is_empty()).then_some(branch)
 }

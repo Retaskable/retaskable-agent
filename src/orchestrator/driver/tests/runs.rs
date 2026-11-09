@@ -143,7 +143,7 @@ async fn the_first_pass_drops_before_taking_and_a_failed_drop_takes_nothing() {
 #[tokio::test]
 async fn run_take_carries_tags_and_the_starters_kinds_and_stops_asking_when_lanes_are_full() {
     let (mut rig, script) = setup(1).await;
-    rig.machine.links.tags = vec!["gpu".into()];
+    rig.machine.links.tags = vec!["gpu".to_string()].into();
     let starter = FakeRuns::new(&[RunKind::Build, RunKind::Watch]);
     script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
     pass(&mut rig, &starter, Instant::now()).await;
@@ -158,6 +158,19 @@ async fn run_take_carries_tags_and_the_starters_kinds_and_stops_asking_when_lane
     assert_eq!(takes[0]["agent"]["tags"], json!(["gpu"]));
     assert_eq!(takes[0]["agent"]["machine"], "my-pc");
     assert_eq!(takes[1]["kinds"], json!(["watch"]), "a watch run needs no lane");
+}
+
+#[tokio::test]
+async fn run_take_carries_the_tags_a_save_changed_to() {
+    let (mut rig, script) = setup(1).await;
+    rig.machine.links.tags = vec!["web".to_string()].into();
+    let starter = FakeRuns::new(&[RunKind::Watch]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    rig.machine.links.tags.set(vec!["gpu".to_string(), "web".to_string()]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    let takes = script.lock().unwrap().args("run_take");
+    assert_eq!(takes[0]["agent"]["tags"], json!(["web"]));
+    assert_eq!(takes.last().unwrap()["agent"]["tags"], json!(["gpu", "web"]));
 }
 
 #[tokio::test]
@@ -212,6 +225,33 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
             .iter()
             .any(|e| e["kind"] == "claim" && e["answer"]["waitingFor"] == json!(["gpu"]))
     );
+}
+
+#[tokio::test]
+async fn with_the_tags_flag_on_a_wake_ends_a_run_wait_only_when_the_tags_changed() {
+    let (mut rig, script) = setup(2).await;
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["tags-reread-on-save"]));
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] })]);
+    pass(&mut rig, &starter, t0).await;
+    assert_eq!(script.lock().unwrap().args("run_take").len(), 1);
+    let id = rig.machine.projects[0].id.clone();
+    rig.machine.links.work.wake(&id);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(2)).await;
+    assert_eq!(
+        script.lock().unwrap().args("run_take").len(),
+        1,
+        "an unchanged list: no new ask"
+    );
+    rig.machine.links.tags.set(vec!["gpu".to_string()]);
+    rig.machine.links.work.wake(&id);
+    rig.machine.links.work.wake(&id);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(3)).await;
+    let asks = script.lock().unwrap().args("run_take");
+    assert_eq!(asks.len(), 2, "one new ask after a change");
+    assert_eq!(asks[1]["agent"]["tags"], json!(["gpu"]));
 }
 
 #[tokio::test]
@@ -906,3 +946,5 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
         }
     }
 }
+
+mod merged;

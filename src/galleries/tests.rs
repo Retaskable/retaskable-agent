@@ -662,3 +662,12 @@ fn feedback_refusals() {
         );
     }
 }
+
+#[test]
+fn list_images_orders_names_that_compare_equal_numerically_the_same_whatever_order_they_came_in() {
+    // "01.png" and "1.png" tie as numbers; the directory's own order must not decide the shoot order.
+    let a: Vec<String> = ["1.png", "01.png", "2.png"].map(String::from).to_vec();
+    let b: Vec<String> = ["2.png", "01.png", "1.png"].map(String::from).to_vec();
+    let files = |pngs: &[String]| list_images(pngs, None).into_iter().map(|(f, _)| f).collect::<Vec<_>>();
+    assert_eq!(files(&a), files(&b));
+}

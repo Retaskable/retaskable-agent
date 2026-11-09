@@ -73,14 +73,16 @@ pub fn ready(json: &str, main: &str, ci_when_ready: bool) -> Result<Vec<CheckKey
 
 /// `gh pr list` for the open pull requests into `base`, run in the project's checkout so `gh` uses its login.
 pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result<String, String> {
-    let mut cmd = low_priority_tokio(gh);
-    cmd.args([
+    let args = [
         "pr", "list", "--repo", repo, "--state", "open", "--base", base, "--limit", "200",
-    ])
-    .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
-    .current_dir(repo_dir)
-    .stdin(Stdio::null())
-    .kill_on_drop(true);
+    ];
+    crate::host_call::guard_program(gh, Some(repo_dir), &args).map_err(|e| e.to_string())?;
+    let mut cmd = low_priority_tokio(gh);
+    cmd.args(args)
+        .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
+        .current_dir(repo_dir)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
     let out = cmd.output().await.map_err(|e| format!("gh didn't start: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())

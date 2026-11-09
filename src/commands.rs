@@ -13,6 +13,7 @@
 //! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **gallery_index** / **gallery_image** (a gallery's last shoot, read off disk, behind the `gallery-read-commands` flag), **gallery_feedback** (a gallery's feedback, queued for the loop as a spec draft, behind the `gallery-feedback-command` flag, `orchestrator::driver::gallery_feedback`), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
+use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -121,6 +122,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "draft_files" => draft_files(cmd, project, view),
         "gallery_index" | "gallery_image" if view.item_commands.flag_on(project, "gallery-read-commands") => {
             gallery_read(cmd, project, data_dir)
+        }
+        "approve_commands" if view.item_commands.flag_on(project, crate::command_gate::FLAG) => {
+            approve_commands(cmd, project, view)
         }
         "gallery_feedback" if view.item_commands.flag_on(project, "gallery-feedback-command") => {
             gallery_feedback(cmd, project, view, data_dir)
@@ -302,7 +306,7 @@ fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value
         let v = cmd.args.get(key);
         match v {
             None | Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+            Some(Value::String(s)) => Ok(crate::text::non_blank(s).map(str::to_string)),
             Some(_) => Err(format!("ask's {key} must be text.")),
         }
     };
@@ -547,7 +551,7 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
             };
             let (project, lane) = (project.to_string(), k as u32);
             if play {
-                if p.play_command.trim().is_empty() {
+                if is_blank(&p.play_command) {
                     return Err("No play command set for this project.".to_string());
                 }
                 view.item_commands.push(ItemCommand::Play { project, lane });
@@ -579,7 +583,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
             let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
-            if p.play_command.trim().is_empty() {
+            if is_blank(&p.play_command) {
                 return Err("No play command set for this project.".to_string());
             }
             view.item_commands.push(ItemCommand::RestartPlay {
@@ -594,6 +598,31 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         return Err("Finish setup first.".to_string());
     };
     crate::play::restart(project, &p)
+}
+
+/// `approve_commands { version }` (behind `approve-commands-gate`): the owner, freshly signed in on the site, has the
+/// waiting commands run from now on. Nacked from anyone else, without a numeric `version`, or when that isn't the
+/// version waiting.
+fn approve_commands(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let Some(version) = cmd.args.get("version").and_then(Value::as_u64) else {
+        return nack(
+            &cmd.id,
+            "approve_commands needs the version it shows (a number).".into(),
+        );
+    };
+    if view.owner().as_deref() != Some(cmd.issued_by.as_str()) {
+        return nack(
+            &cmd.id,
+            "Only this computer's owner can approve its project's commands.".into(),
+        );
+    }
+    match view.item_commands.gates().approve(project, version) {
+        Ok(_) => {
+            view.work.wake(project);
+            ack(&cmd.id)
+        }
+        Err(reason) => nack(&cmd.id, reason),
+    }
 }
 
 /// The project as the connector holds it, with the commands this computer may run (`approve-commands-gate`).

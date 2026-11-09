@@ -15,7 +15,7 @@ const LONG_RUNNING: &str = "sleep 60";
 fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
     AgentView {
         machine: "pc".into(),
-        tags: vec![],
+        tags: Default::default(),
         projects: vec![ProjectView {
             id: project.into(),
             github_repo: "o/one".into(),
@@ -40,6 +40,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         local: Default::default(),
         live: Default::default(),
         checks: Default::default(),
+        owner: Default::default(),
     }
 }
 

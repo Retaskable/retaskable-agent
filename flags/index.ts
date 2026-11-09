@@ -45,3 +45,6 @@ export const galleryReadCommands = (): boolean => flags.on("gallery-read-command
 
 /** The `gallery-feedback-command` flag: take the site's gallery feedback and queue its spec draft. Off until there is an answer. */
 export const galleryFeedbackCommand = (): boolean => flags.on("gallery-feedback-command");
+
+/** The `step-events-complete` flag: each check's name, result and seconds in a `step_end`. Off until there is an answer. */
+export const stepEventsComplete = (): boolean => flags.on("step-events-complete");

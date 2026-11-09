@@ -25,7 +25,7 @@ use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
-use crate::orchestrator::steps::{Running, StepRequest, state_name};
+use crate::orchestrator::steps::{Running, StepDone, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
@@ -151,7 +151,7 @@ pub trait SessionStarter: Send + Sync {
     /// waits where it is, and the loop asks again on its next wake.
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
-    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, StepDone>>;
     /// Starts a read-only triager session on a stopped item (06.9). Must not block; it reports its end through
     /// `request.outcomes` as [`SessionResult::Triage`](super::SessionResult::Triage). An `Err` counts as a failed look.
     fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
@@ -183,11 +183,20 @@ pub struct ProjectLoop {
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
     pub(super) unreleased: BTreeMap<String, (String, String)>,
+    /// When each `unreleased` entry was first listed (epoch seconds), kept in the state file; a release that
+    /// keeps failing is dropped after [`super::settle::STUCK_RELEASE_SECS`] (behind `stuck-release-drop`).
+    pub(super) unreleased_since: BTreeMap<String, i64>,
+    /// The test's clock, as `Machine::clock` is.
+    #[cfg(test)]
+    pub(super) clock: Option<i64>,
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
     /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in the state file.
     pub(super) unskipped: std::collections::BTreeSet<String>,
     /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
+    /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`.
+    pub(super) playtests_seen: Option<String>,
+    pub(super) release_owed: bool,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
@@ -259,6 +268,13 @@ pub struct ProjectLoop {
     pub(super) telemetry: Telemetry,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
+    /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
+    /// `work_available` wake.
+    pub(super) claim_waiting: bool,
+    /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
+    pub(super) tags_seen: u64,
+    /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
+    pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     pub(super) max_resume_context_tokens: u32,
@@ -324,12 +340,20 @@ impl ProjectLoop {
         live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
         Self {
             run_loop: super::RunLoop::new(&id),
+            claim_waiting: false,
+            tags_seen: 0,
+            claim_logged: None,
             id,
             project,
             leases: store.leases(),
             unreleased: store.unreleased(),
+            unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
+            #[cfg(test)]
+            clock: None,
             unskipped: store.unskipped(),
             unanswered: store.unanswered(),
+            playtests_seen: store.playtests_seen(),
+            release_owed: store.release_owed(),
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
@@ -615,8 +639,12 @@ impl ProjectLoop {
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
+        self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
+        self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unskipped(&self.unskipped);
         self.store.set_unanswered(&self.unanswered);
+        self.store
+            .set_playtests_seen(self.playtests_seen.as_deref(), self.release_owed);
         self.store.set_unparked(&self.unparked);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);
@@ -680,7 +708,7 @@ impl ProjectLoop {
             {
                 tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
                 let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
-                self.unreleased.insert(id, (token, why));
+                self.list_unreleased(id, token, why);
                 continue;
             }
             let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);

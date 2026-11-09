@@ -336,24 +336,50 @@ pub(crate) fn parse_iso_ms(s: &str) -> Option<i64> {
     let s = s.strip_suffix('Z').unwrap_or(s);
     let (date, time) = s.split_once('T')?;
     let mut dparts = date.split('-');
-    let y: i64 = dparts.next()?.parse().ok()?;
-    let mo: u32 = dparts.next()?.parse().ok()?;
-    let d: u32 = dparts.next()?.parse().ok()?;
+    let y: i64 = digits(dparts.next()?)?;
+    let mo: u32 = digits(dparts.next()?)?;
+    let d: u32 = digits(dparts.next()?)?;
+    if dparts.next().is_some() || !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) {
+        return None;
+    }
     let (hms, frac) = match time.split_once('.') {
         Some((hms, frac)) => (hms, Some(frac)),
         None => (time, None),
     };
     let mut tparts = hms.split(':');
-    let hh: u32 = tparts.next()?.parse().ok()?;
-    let mm: u32 = tparts.next()?.parse().ok()?;
-    let ss: u32 = tparts.next()?.parse().ok()?;
+    let hh: u32 = digits(tparts.next()?)?;
+    let mm: u32 = digits(tparts.next()?)?;
+    let ss: u32 = digits(tparts.next()?)?;
+    if tparts.next().is_some() || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
     let mut millis: i64 = 0;
     if let Some(frac) = frac {
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         let digits: String = frac.chars().take(3).collect();
         let padded = format!("{digits:0<3}");
         millis = padded.parse().ok()?;
     }
     Some(ms_from_civil(y, mo, d, hh, mm, ss) + millis)
+}
+
+/// `s` as a number, only when it is nothing but ASCII digits (`str::parse` would also take a leading `+`).
+fn digits<T: std::str::FromStr>(s: &str) -> Option<T> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// Civil UTC components from epoch milliseconds (Howard Hinnant's `civil_from_days`).
@@ -393,6 +419,24 @@ fn ms_from_civil(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_iso_ms_rejects_times_that_do_not_exist() {
+        for bad in [
+            "2026-13-01T00:00:00Z",
+            "2026-00-10T00:00:00Z",
+            "2026-02-30T00:00:00Z",
+            "2026-10-15T25:00:00Z",
+            "2026-10-15T08:61:00Z",
+            "2026-10-15T08:00:61Z",
+            "2026-10-15T08:00:00.+5Z",
+            "2026-10-+5T08:00:00Z",
+        ] {
+            assert_eq!(parse_iso_ms(bad), None, "{bad}");
+        }
+        assert!(parse_iso_ms("2024-02-29T23:59:59.999Z").is_some());
+        assert_eq!(parse_iso_ms("2026-02-29T00:00:00Z"), None);
+    }
     use crate::telemetry::event::{Body, ItemState, Lease, Tick};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -610,7 +654,7 @@ mod tests {
             json!({ "at": at, "kind": "session_start", "item": "R-12", "lane": 1, "role": "scout", "scout": "tests", "engine": "claude", "model": "opus", "session": "s-1", "detached": true, "attached": false }),
             json!({ "at": at, "kind": "session_end", "item": "R-12", "lane": 1, "role": "implementer", "engine": "claude", "model": "opus", "session": "s-1", "ms": 1140000.0, "cost": 1.25, "ok": false, "subtype": "error_max_turns", "error": "ran out", "limitHit": "5h" }),
             json!({ "at": at, "kind": "step_start", "item": "R-12", "step": "checks", "key": "slice 1 round 1", "again": true }),
-            json!({ "at": at, "kind": "step_end", "item": "R-12", "step": "checks", "key": "k", "ms": 240000.0, "ok": false, "outcome": "failed", "checks": [{ "name": "test", "ok": false, "sec": 200 }], "lines": 40, "scouts": 2 }),
+            json!({ "at": at, "kind": "step_end", "item": "R-12", "step": "checks", "key": "k", "ms": 240000.0, "ok": false, "outcome": "failed", "checks": [{ "name": "test", "ok": false, "sec": 200.0 }], "lines": 40, "scouts": 2 }),
             json!({ "at": at, "kind": "claim", "answer": "no work" }),
             json!({ "at": at, "kind": "store_error", "item": "R-12", "op": "claim", "code": "E_LOCK", "error": "locked" }),
             json!({ "at": at, "kind": "error", "item": "R-12", "where": "checks", "error": "timeout" }),

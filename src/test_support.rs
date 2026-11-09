@@ -396,7 +396,7 @@ pub(crate) fn agent_view(
     use crate::view::AgentView;
     AgentView {
         machine: "pc".into(),
-        tags,
+        tags: tags.into(),
         projects,
         version: version.into(),
         lanes,
@@ -411,5 +411,20 @@ pub(crate) fn agent_view(
         local: Default::default(),
         live: Default::default(),
         checks: Default::default(),
+        owner: Default::default(),
     }
+}
+
+/// A fake `gh` that creates the returned `ran` file when run, so a test can show a call was not made.
+pub(crate) fn fake_gh_that_marks(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let ran = dir.join("ran");
+    let gh = dir.join(if cfg!(windows) { "gh.cmd" } else { "gh.sh" });
+    let script = if cfg!(windows) {
+        format!("@echo off\r\necho x > \"{}\"\r\n", ran.display())
+    } else {
+        format!("#!/bin/sh\ntouch \"{}\"\n", ran.display())
+    };
+    write_executable(&gh, &script);
+    let _ = std::fs::remove_file(&ran); // the helper ran the script once
+    (gh, ran)
 }
