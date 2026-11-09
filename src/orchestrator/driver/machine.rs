@@ -581,7 +581,11 @@ impl Machine {
             let on = flags.on(crate::command_gate::FLAG).await;
             self.links.item_commands.set_flag(&id, crate::command_gate::FLAG, on);
             gate_on.push(on);
-            obey_on.push(flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await);
+            let obey = flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
+            self.links
+                .item_commands
+                .set_flag(&id, crate::view::OBEY_SHARED_PAUSE_FLAG, obey);
+            obey_on.push(obey);
         }
         let jobs: Vec<_> = self
             .projects

@@ -254,7 +254,7 @@ impl TrayAgent {
         };
         TrayInput {
             clouds: self.deps.clouds.iter().map(|c| self.cloud_input(c)).collect(),
-            all_paused: projects.iter().all(|p| self.deps.view.paused.reason(&p.id).is_some()),
+            all_paused: projects.iter().all(|p| self.deps.view.pause_reason(&p.id).is_some()),
             sessions: (self.deps.sessions)(),
             has_project: !projects.is_empty(),
             exit,

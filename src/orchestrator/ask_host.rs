@@ -162,7 +162,7 @@ impl AskHost for ClaudeAsks {
                     })
                     .collect(),
                 status: "running".into(),
-                paused_reason: None,
+                paused_reason: view.pause_reason(&project.id_or_derived()),
                 spent_today_usd: facts.spent_today_usd,
                 daily_usd,
             };
