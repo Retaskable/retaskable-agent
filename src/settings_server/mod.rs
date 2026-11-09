@@ -73,6 +73,8 @@ pub struct SettingsServer {
     settings_page_flag: std::sync::atomic::AtomicBool,
     /// Card flag `agent-ci`, read once at startup: Off hides the CI slots field and refuses a change to it.
     agent_ci_flag: std::sync::atomic::AtomicBool,
+    /// Card flag `backlog-link-route`, read once at startup: Off, `GET /api/backlog/link` is a 404.
+    backlog_link_flag: std::sync::atomic::AtomicBool,
     cursor_allow_flag: std::sync::atomic::AtomicBool,
     /// Card flag `live-sessions-reporting`, read once at startup: Off keeps the Now tab's held-lane view.
     live_sessions_flag: std::sync::atomic::AtomicBool,
@@ -114,6 +116,7 @@ impl SettingsServer {
             env,
             settings_page_flag: std::sync::atomic::AtomicBool::new(false),
             agent_ci_flag: std::sync::atomic::AtomicBool::new(false),
+            backlog_link_flag: std::sync::atomic::AtomicBool::new(false),
             cursor_allow_flag: std::sync::atomic::AtomicBool::new(false),
             live_sessions_flag: std::sync::atomic::AtomicBool::new(false),
             own_addresses: Box::new(|| {
@@ -149,6 +152,11 @@ impl SettingsServer {
     /// Gives the card flag `agent-ci`'s answer (read once at start).
     pub fn set_agent_ci_flag(&self, on: bool) {
         self.agent_ci_flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Gives the card flag `backlog-link-route`'s answer (read once at start).
+    pub fn set_backlog_link_flag(&self, on: bool) {
+        self.backlog_link_flag.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn saver(&self) -> save::Saver<'_> {
@@ -410,6 +418,9 @@ async fn get_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMa
 }
 
 async fn get_backlog_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+    if !settings.backlog_link_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return not_found_response();
+    }
     if settings.authenticate(&headers).is_none() {
         return unauthorized("Sign in first.");
     }
