@@ -113,10 +113,9 @@ pub fn prepare_at(
 }
 
 /// `<worktrees_dir>/_planner`: the project's shared base checkout (docs/specs/agent/06.1
-/// "Planner (retired)"), detached at `origin/<base_branch>`. Shoot (06.8) is its first user here;
-/// the baseline, Play main, phone builds and main syncs take the same checkout one at a time once
-/// they're ported. Shoot and Play main hold it through [`crate::base_hold::hold_base`]; a caller of
-/// [`prepare_base_checkout`] for anything else holds it alone until that one takes the lock too.
+/// "Planner (retired)"), detached at `origin/<base_branch>`. Shoot (06.8), Play main, the baseline and
+/// the minute sync each hold it through [`crate::base_hold`], one at a time; a caller of
+/// [`prepare_base_checkout`] for anything else (phone builds) holds it alone until that takes the lock too.
 pub fn base_checkout_path(worktrees_dir: &Path) -> PathBuf {
     worktrees_dir.join("_planner")
 }

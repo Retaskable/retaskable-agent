@@ -18,6 +18,7 @@ use super::{
     playtest_round, vet_daily,
 };
 use crate::backlog::{Client, Item};
+use crate::base_hold;
 use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
@@ -121,6 +122,9 @@ pub struct Machine {
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
     pub(super) links: Links,
+    /// Put in front of a project's id to key its base checkout hold; empty in the agent. Tests give each
+    /// machine its own, since the hold is shared by the whole process and every test rig names a project `p0`.
+    pub(super) base_scope: String,
     /// Runs the sessions for what is claimed. With none, `claim` mode runs dry.
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
@@ -180,6 +184,7 @@ impl Machine {
             projects: Vec::new(),
             last_served: None,
             links,
+            base_scope: String::new(),
             starter: None,
             drafts: None,
             trial: None,
@@ -272,14 +277,33 @@ impl Machine {
     /// paused too), each in parallel, and then what it saw told to the store (`report`). A failed fetch is
     /// logged and an `error` event; the loop goes on.
     pub async fn fetch(&mut self) {
+        self.fetch_for(None).await;
+    }
+
+    /// The put-off syncs that are now due (the base checkout was given back): fetched on this poll, not the
+    /// next minute. A sync that finds the base still held is put off again.
+    pub async fn fetch_due(&mut self) {
+        let due = base_hold::take_due_syncs(&self.base_scope);
+        if !due.is_empty() {
+            self.fetch_for(Some(&due)).await;
+        }
+    }
+
+    /// Each project's fetch holds its base checkout ("a sync") for the length of the fetch; when that's held
+    /// the project's sync is put off (no fetch, no error event) and runs on the poll after it's given back.
+    async fn fetch_for(&mut self, only: Option<&std::collections::HashSet<String>>) {
         let jobs: Vec<_> = (self.projects.iter())
-            .filter(|lp| self.live(lp))
-            .map(|lp| {
+            .filter(|lp| self.live(lp) && only.is_none_or(|o| o.contains(&lp.id)))
+            .filter_map(|lp| {
+                let hold = base_hold::hold_base_for_sync(&format!("{}{}", self.base_scope, lp.id))?;
                 let repo = std::path::PathBuf::from(&lp.project.repo_path);
-                (
+                Some((
                     lp.id.clone(),
-                    tokio::task::spawn_blocking(move || lanes::fetch_latest(&repo)),
-                )
+                    tokio::task::spawn_blocking(move || {
+                        let _hold = hold;
+                        lanes::fetch_latest(&repo)
+                    }),
+                ))
             })
             .collect();
         for (id, job) in jobs {
@@ -975,6 +999,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             machine.deprecation_checks(&steps).await;
             machine.vet_rounds(&steps).await;
         } else {
+            machine.fetch_due().await;
             machine.poll().await;
         }
         machine.run_passes().await;
