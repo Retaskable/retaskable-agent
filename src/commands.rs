@@ -305,7 +305,7 @@ fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value
         let v = cmd.args.get(key);
         match v {
             None | Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) => Ok(Some(s.trim().to_string()).filter(|s| !s.is_empty())),
+            Some(Value::String(s)) => Ok(crate::text::non_blank(s).map(str::to_string)),
             Some(_) => Err(format!("ask's {key} must be text.")),
         }
     };

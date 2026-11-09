@@ -56,6 +56,11 @@ pub fn collapse_whitespace(s: &str) -> String {
     out
 }
 
+/// `s` trimmed, or `None` when nothing but whitespace is left.
+pub fn non_blank(s: &str) -> Option<&str> {
+    Some(s.trim()).filter(|t| !t.is_empty())
+}
+
 /// `s` with its first character upper-cased.
 pub fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -68,6 +73,13 @@ pub fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_blank_trims_and_drops_whitespace_only_text() {
+        assert_eq!(non_blank("  hi \n"), Some("hi"));
+        assert_eq!(non_blank(" \t\n"), None);
+        assert_eq!(non_blank(""), None);
+    }
 
     #[test]
     fn clip_passes_short_text_through_and_truncates_with_an_ellipsis_otherwise() {

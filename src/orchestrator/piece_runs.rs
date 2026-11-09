@@ -673,7 +673,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    s.and_then(crate::text::non_blank).map(str::to_string)
 }
 
 /// How many commits the lane's `HEAD` has that `base_ref` hasn't; 0 when git can't say.

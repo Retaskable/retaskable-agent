@@ -213,7 +213,7 @@ impl ProjectLoop {
             (PlaytestOutcome::Failed, "found a problem")
         };
         if !passed && run.review_rounds < self.project.max_review_rounds {
-            let notes = notes.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let notes = notes.as_deref().and_then(crate::text::non_blank);
             let message = match notes {
                 Some(n) => format!("A person played this build and found a problem. Their notes:\n\n{n}"),
                 None => "A person played this build and found a problem, but left no notes.".to_string(),
