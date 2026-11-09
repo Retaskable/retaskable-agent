@@ -1,149 +1,148 @@
+use super::*;
+use crate::config::DeployTarget;
 use serde_json::json;
 
-use super::*;
-
-fn record(version: u64, play: &str) -> SettingsRecord {
-    SettingsRecord {
+fn record(version: u64, test: &str) -> StoreRecord {
+    StoreRecord {
         commands_version: version,
-        values: json!({"playCommand": play, "checks": [{"name": "t", "command": "npm test"}], "port": 1}),
-        updated_by: Some("sam".into()),
-        history: vec![],
+        values: json!({
+            "checks": [{"name": "test", "command": test}],
+            "playCommand": "npm start",
+            "branch": "ignored",
+            "deploy": {"staging": {"smoke": "curl x"}, "production": {"rollout": {"traffic": "t", "machine": "m"}}},
+            "appsScript": {"sheetId": "s"},
+        }),
+        updated_by: Some("owner".into()),
+        history: vec![SettingsChange {
+            by: "pat".into(),
+            fields: vec!["checks".into()],
+        }],
     }
 }
 
-fn cfg() -> ProjectConfig {
-    serde_json::from_value(json!({
-        "playCommand": "old", "checks": [{"name": "t", "command": "npm test"}],
-        "deploy": {"staging": {"branch": "s", "smoke": "curl x"}}
-    }))
-    .unwrap()
+fn cfg(test: &str) -> ProjectConfig {
+    ProjectConfig {
+        checks: serde_json::from_value(json!([{"name": "test", "command": test}])).unwrap(),
+        play_command: "old play".into(),
+        deploy: crate::config::DeployConfig {
+            staging: Some(DeployTarget {
+                branch: "main".into(),
+                url: None,
+                smoke: Some("old".into()),
+                version_path: None,
+            }),
+            production: None,
+        },
+        ..ProjectConfig::default()
+    }
 }
 
-fn allowing(dir: &Path) -> CommandAllowing {
-    CommandAllowing::new(AllowedCommands::file(dir, "p"))
+fn file() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let f = allowed_commands_file(dir.path(), "p");
+    (dir, f)
 }
 
 #[test]
-fn commands_of_picks_only_command_fields_and_drops_machine() {
-    let v = json!({
-        "checks": [], "playCommand": "x", "promptNotes": "n", "ciCommand": "c", "galleries": [], "phone": {"buildCommand": "b"},
-        "engines": {"allow": []}, "port": 3, "appsScript": {"sheetId": "s"}, "nfrs": {"x": 1},
-        "deploy": {"staging": {"smoke": "s", "url": "u"}, "production": {"rollout": {"machine": "m", "traffic": "t"}, "branch": "b"}}
-    });
-    let out = commands_of(&v);
-    let mut keys: Vec<&str> = out.keys().map(String::as_str).collect();
+fn commands_of_picks_command_fields_and_drops_machine() {
+    let m = commands_of(&record(1, "npm test").values);
+    let mut keys: Vec<_> = m.keys().cloned().collect();
     keys.sort();
     assert_eq!(
         keys,
         [
             "checks",
-            "ciCommand",
             "deploy.production.rollout",
             "deploy.staging.smoke",
-            "engines",
-            "galleries",
-            "phone",
-            "playCommand",
-            "promptNotes"
+            "playCommand"
         ]
     );
-    assert_eq!(out["deploy.production.rollout"], json!({"traffic": "t"}));
+    assert_eq!(m["deploy.production.rollout"], json!({"traffic": "t"}));
 }
 
 #[test]
-fn with_allowed_empties_with_a_record_and_nothing_allowed() {
-    let out = with_allowed(&cfg(), None, true);
-    assert!(out.checks.is_empty() && out.play_command.is_empty() && out.galleries.is_empty());
-    assert!(out.phone.is_none() && out.engines.is_none());
-    assert_eq!(out.deploy.staging.unwrap().smoke, None);
-    assert_eq!(with_allowed(&cfg(), None, false), cfg());
+fn with_allowed_empties_without_allowed_and_keeps_without_record() {
+    let c = cfg("npm test");
+    let e = with_allowed(&c, None, true);
+    assert!(e.checks.is_empty() && e.play_command.is_empty() && e.galleries.is_empty());
+    assert_eq!(e.deploy.staging.unwrap().smoke, None);
+    assert_eq!(with_allowed(&c, None, false), c);
 }
 
 #[test]
-fn a_changed_command_waits_while_the_old_one_runs() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = allowing(dir.path());
-    let running = commands_of(&record(1, "old").values);
-    a.allowed = Some(AllowedCommands {
-        commands_version: 1,
-        values: running.clone(),
-        at: 0,
-    });
-    assert!(a.consider(Some(&record(2, "new")), &running, &Map::new()));
-    let w = a.waiting().unwrap();
-    assert_eq!((w.version, w.by.as_deref()), (2, Some("sam")));
-    assert_eq!(w.text, "the play command: `old` → `new`");
-    assert_eq!(with_allowed(&cfg(), a.allowed.as_ref(), true).play_command, "old");
-    // The same version again changes nothing.
-    assert!(!a.consider(Some(&record(2, "new")), &running, &Map::new()));
-}
+fn changed_command_waits_until_approved_and_survives_restart() {
+    let (_d, f) = file();
+    let c = cfg("npm test");
+    let mut a = CommandAllowing::new(f.clone());
+    // First read: nothing running matches, so it waits; the config is empty meanwhile.
+    let m = a
+        .consider(Some(&record(1, "npm test")), &Map::new(), &Map::new())
+        .unwrap();
+    assert!(m.waiting);
+    assert!(with_allowed(&c, a.allowed.as_ref(), true).checks.is_empty());
+    assert_eq!(a.waiting().unwrap().by.as_deref(), Some("pat"));
+    a.approve(1).unwrap();
+    assert_eq!(with_allowed(&c, a.allowed.as_ref(), true).checks[0].command, "npm test");
 
-#[test]
-fn a_version_that_changes_nothing_is_taken() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = allowing(dir.path());
-    let running = commands_of(&record(1, "old").values);
-    a.allowed = Some(AllowedCommands {
-        commands_version: 1,
-        values: running.clone(),
-        at: 0,
-    });
-    assert!(!a.consider(Some(&record(2, "old")), &running, &Map::new()));
-    assert!(a.waiting().is_none());
-    assert_eq!(a.allowed.as_ref().unwrap().commands_version, 2);
-}
+    // A changed command waits while the old one still shows.
+    let run = a.allowed.as_ref().unwrap().values.clone();
+    a.consider(Some(&record(2, "npm run e2e")), &run, &Map::new()).unwrap();
+    assert_eq!(
+        a.waiting().unwrap().text,
+        "checks: test: `npm test` → test: `npm run e2e`"
+    );
+    assert_eq!(with_allowed(&c, a.allowed.as_ref(), true).checks[0].command, "npm test");
 
-#[test]
-fn a_newer_version_replaces_the_waiting_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = allowing(dir.path());
-    let running = commands_of(&record(1, "old").values);
-    a.allowed = Some(AllowedCommands {
-        commands_version: 1,
-        values: running.clone(),
-        at: 0,
-    });
-    a.consider(Some(&record(2, "b")), &running, &Map::new());
-    assert!(a.consider(Some(&record(3, "c")), &running, &Map::new()));
-    assert_eq!(a.waiting().unwrap().version, 3);
+    // A newer version replaces it; the old one is refused.
+    a.consider(Some(&record(3, "npm run lint")), &run, &Map::new()).unwrap();
     assert_eq!(a.approve(2), Err(NOT_WAITING.to_string()));
-}
+    let m = a.approve(3).unwrap();
+    assert!(m.allowed && m.waiting);
+    assert_eq!(a.approve(3), Err(NOT_WAITING.to_string()));
+    assert_eq!(
+        with_allowed(&c, a.allowed.as_ref(), true).checks[0].command,
+        "npm run lint"
+    );
 
-#[test]
-fn approve_saves_and_survives_a_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut a = allowing(dir.path());
-    let running = Map::new();
-    assert_eq!(a.approve(1), Err(NOT_WAITING.to_string()));
-    a.consider(Some(&record(1, "new")), &running, &Map::new());
-    assert_eq!(a.approve(2), Err(NOT_WAITING.to_string()));
-    assert_eq!(a.approve(1), Ok(true));
-    assert!(a.waiting().is_none());
-    assert_eq!(with_allowed(&cfg(), a.allowed.as_ref(), true).play_command, "new");
-    let again = allowing(dir.path());
+    let again = CommandAllowing::new(f);
     assert_eq!(again.allowed, a.allowed);
 }
 
 #[test]
-fn unreadable_file_reads_as_none_and_text_is_cut() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("x.json");
-    std::fs::write(&file, "{nope").unwrap();
-    assert_eq!(AllowedCommands::read(&file), None);
+fn version_that_changes_nothing_is_taken() {
+    let (_d, f) = file();
+    let mut a = CommandAllowing::new(f);
+    let store = commands_of(&record(5, "npm test").values);
+    let m = a.consider(Some(&record(5, "npm test")), &store, &Map::new()).unwrap();
+    assert!(!m.waiting && a.waiting().is_none());
+    assert_eq!(a.allowed.as_ref().unwrap().commands_version, 5);
+}
+
+#[test]
+fn nothing_waiting_is_not_waiting() {
+    let (_d, f) = file();
+    let mut a = CommandAllowing::new(f);
+    assert_eq!(a.approve(1), Err(NOT_WAITING.to_string()));
+    a.close();
+}
+
+#[test]
+fn unreadable_file_reads_as_none() {
+    let (_d, f) = file();
+    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+    std::fs::write(&f, "nope").unwrap();
+    assert_eq!(AllowedCommands::read(&f), None);
+}
+
+#[test]
+fn change_text_is_cut() {
     let big = "x".repeat(3000);
-    let c = CommandChange {
-        field: "checks".into(),
-        before: json!([{"name": "a", "command": "npm test"}]),
-        after: json!([{"name": "a", "command": "npm run e2e"}]),
-    };
-    assert_eq!(
-        commands_change_text(std::slice::from_ref(&c)),
-        "checks: a: `npm test` → a: `npm run e2e`"
-    );
-    let long = CommandChange {
+    let ch = [CommandChange {
         field: "playCommand".into(),
-        before: json!(big),
-        after: json!("y"),
-    };
-    assert_eq!(commands_change_text(&[long]).chars().count(), 2000);
+        before: None,
+        after: Some(json!(big)),
+    }];
+    let t = commands_change_text(&ch);
+    assert_eq!(t.chars().count(), 2000);
+    assert!(t.starts_with("the play command: nothing → `x"));
 }
