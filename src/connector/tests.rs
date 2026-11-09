@@ -432,17 +432,13 @@ fn command(id: &str, name: &str, args: Value) -> Value {
 /// snapshot have been read, ready for a test to send it a command. The returned `TempDir` must
 /// be kept (as `_dir`): dropping it removes the credentials file the connector's still using.
 async fn connected_project(exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
+    connected_with(view(&["one"]), exit).await
+}
+
+async fn connected_with(v: Arc<AgentView>, exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        exit,
-        dir.path(),
-    );
+    let c = Connector::start(&url, store, reqwest::Client::new(), v, timing(), exit, dir.path());
     let mut a = next(&mut rx).await;
     read(&mut a).await; // hello
     read(&mut a).await; // snapshot
@@ -490,6 +486,35 @@ async fn every_command_answered_is_logged_to_remote_log() {
     assert_eq!(lines[1]["id"], "c2");
     assert_eq!(lines[1]["outcome"], "ack");
     assert_eq!(lines[1].get("reason"), None);
+}
+
+#[tokio::test]
+async fn setup_check_acks_with_the_checks_and_is_audited() {
+    let mut v = view(&["one"]);
+    Arc::get_mut(&mut v).unwrap().settings = crate::hello_settings::HelloSettings::new(
+        std::path::PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        Arc::new(crate::flags::Flags::fixed(&["setup-check-command"])),
+    );
+    let (c, mut a, dir) = connected_with(v, noop_exit()).await;
+    a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
+        .await
+        .unwrap();
+    let mut ack = read(&mut a).await;
+    while ack["type"] == "hello" {
+        ack = read(&mut a).await; // the changed result resends hello, in either order
+    }
+    assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
+    assert!(ack["answer"]["git"].is_object());
+    c.stop(Duration::from_secs(1)).await;
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (line["name"].as_str(), line["outcome"].as_str()),
+        (Some("setup_check"), Some("ack"))
+    );
+    assert!(line["answerBytes"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

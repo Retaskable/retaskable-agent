@@ -120,6 +120,11 @@ impl HelloSettings {
         }
     }
 
+    /// The `setup-check-command` flag at the last answer, without asking; Off until there is one.
+    pub fn setup_checks_now(&self) -> bool {
+        self.source.as_ref().is_some_and(|s| s.flags.last(CHECKS_FLAG))
+    }
+
     /// The same from the last answer, without asking (for code that isn't async); Off until there is one.
     pub fn on_now(&self) -> bool {
         self.source.as_ref().is_some_and(|s| s.flags.last(FLAG))

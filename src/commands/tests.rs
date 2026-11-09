@@ -130,15 +130,6 @@ fn before_setup_only_the_exempt_commands_run() {
         &data_dir(),
     );
     assert_eq!(answer["reason"], "Finish setup first.");
-    let answer = run(
-        &cmd("setup_check", json!({})),
-        "",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &data_dir(),
-    );
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: setup_check");
 }
 
 #[test]
@@ -511,4 +502,5 @@ fn draft_edit_commits_and_pushes() {
 }
 
 mod more;
+mod setup_check;
 use more::run_cmd;

@@ -98,6 +98,22 @@ impl SetupCheck {
 }
 
 impl SetupChecks {
+    /// Every check unknown ("not checked"), for a runner built without a real probe.
+    pub(crate) fn all_unknown() -> Self {
+        let unknown = || SetupCheck::unknown("not checked", None);
+        Self {
+            git: unknown(),
+            gh_installed: unknown(),
+            gh: unknown(),
+            claude: unknown(),
+            claude_signed_in: unknown(),
+            cursor: unknown(),
+            pi: None,
+            codex: None,
+            docker: None,
+        }
+    }
+
     /// `SetupChecks` in `shared/types.ts`. `node` is a stand-in: the hub's schema asks for one.
     pub fn to_json(&self) -> Value {
         let mut v = serde_json::json!({
