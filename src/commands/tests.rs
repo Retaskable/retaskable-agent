@@ -444,7 +444,10 @@ fn a_bad_or_oversized_picture_nacks_and_saves_nothing() {
 #[test]
 fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
     let args = json!({ "id": "a", "pictures": [{ "type": "image/png", "data": "AAAA" }] });
-    assert_eq!(audit_args(&args)["pictures"], json!({ "count": 1, "bytes": 4 }));
+    assert_eq!(
+        audit_args("continue", &args)["pictures"],
+        json!({ "count": 1, "bytes": 4 })
+    );
 }
 
 #[test]
@@ -505,3 +508,70 @@ fn draft_edit_commits_and_pushes() {
 mod more;
 mod setup_check;
 use more::run_cmd;
+
+fn logged(name: &str, args: Value) -> (String, Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let c = cmd(name, args);
+    audit(dir.path(), &c, &json!({ "type": "ack", "id": "c1" }), "wss://x");
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.trim()).unwrap();
+    (log, line["args"].clone())
+}
+
+const SECRET: &str = "hunter2-é";
+
+#[test]
+fn continue_retry_and_playtest_log_notes_by_size() {
+    for name in ["continue", "retry", "playtest"] {
+        let args = json!({ "id": "a", "notes": SECRET, "pictures": [{ "type": "image/png", "data": "PICDATA" }],
+            "pictureIds": ["p1", "p2"] });
+        let (log, a) = logged(name, args);
+        assert!(
+            !log.contains(SECRET) && !log.contains("PICDATA") && !log.contains("p1"),
+            "{name}: {log}"
+        );
+        assert_eq!(a["notes"], json!({ "bytes": SECRET.len() }));
+        assert_eq!(a["pictureIds"], 2);
+        assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
+        assert_eq!(a["id"], "a");
+    }
+}
+
+#[test]
+fn ask_logs_its_text_by_size_and_keeps_its_ids() {
+    let args =
+        json!({ "askId": "k", "replyTo": "r", "about": "x", "text": SECRET, "pictures": [{ "data": "PICDATA" }] });
+    let (log, a) = logged("ask", args);
+    assert!(!log.contains(SECRET) && !log.contains("PICDATA"), "{log}");
+    assert_eq!(a["text"], json!({ "bytes": SECRET.len() }));
+    assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
+    assert_eq!(
+        (&a["askId"], &a["replyTo"], &a["about"]),
+        (&json!("k"), &json!("r"), &json!("x"))
+    );
+}
+
+#[test]
+fn draft_edit_logs_its_content_by_size_and_keeps_its_path() {
+    let (log, a) = logged(
+        "draft_edit",
+        json!({ "id": "d", "path": "a.md", "branch": "b", "content": SECRET }),
+    );
+    assert!(!log.contains(SECRET), "{log}");
+    assert_eq!(
+        a,
+        json!({ "id": "d", "path": "a.md", "branch": "b", "content": { "bytes": SECRET.len() } })
+    );
+}
+
+#[test]
+fn a_typed_value_that_is_not_a_string_is_sized_zero() {
+    let (_, a) = logged("continue", json!({ "id": "a", "notes": { "secret": SECRET } }));
+    assert_eq!(a["notes"], json!({ "bytes": 0 }));
+}
+
+#[test]
+fn a_command_with_no_entry_logs_its_args_unchanged() {
+    let (_, a) = logged("skip", json!({ "id": "a" }));
+    assert_eq!(a, json!({ "id": "a" }));
+}

@@ -11,12 +11,13 @@ use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 
 use super::panic::panic_message;
+use super::read::{Fail, Read, read};
 use super::run_starters::RunStarters;
 use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
     playtest_round, vet_daily,
 };
-use crate::backlog::{BacklogError, Client, Item};
+use crate::backlog::{Client, Item};
 use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests, ProjectConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
@@ -51,19 +52,6 @@ pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
         .parse()
         .ok()
         .filter(|&n| n > 0)
-}
-
-/// Why a project's items weren't read this pass.
-enum Fail {
-    /// Before the store could be asked (no repo id, no link): the page hears of it, no `store_error` event.
-    Cant(String),
-    Store(BacklogError),
-}
-
-/// A project's backlog read: the repo id it learned and the items or why not.
-struct Read {
-    repo: Option<u64>,
-    items: Result<Vec<Item>, Fail>,
 }
 
 /// The inputs every pass shares.
@@ -109,44 +97,6 @@ pub struct Shared<'a> {
     /// session, so no project claims or starts new work either
     /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
     pub stopping: bool,
-}
-
-/// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
-/// project's failed read and nothing else's.
-async fn read(
-    client: Arc<Client>,
-    id: String,
-    github_repo: String,
-    cached: Option<u64>,
-    backlog_url: String,
-    keychain: Arc<dyn TokenStore>,
-) -> Read {
-    let repo = match cached {
-        Some(repo) => Some(repo),
-        None => repo_id(&github_repo).await,
-    };
-    let Some(repo_id) = repo else {
-        tracing::warn!("{id}: dry tick skipped: gh couldn't say the id of {github_repo}");
-        let items = Err(Fail::Cant(format!("gh couldn't say the id of {github_repo}")));
-        return Read { repo, items };
-    };
-    let token = match keychain.get(&backlog_url) {
-        Ok(token) => token,
-        Err(e) => {
-            tracing::warn!("{id}: dry tick skipped: reading the backlog link: {e:#}");
-            let items = Err(Fail::Cant(format!("reading the backlog link: {e:#}")));
-            return Read { repo, items };
-        }
-    };
-    let items = match token {
-        None => Err(Fail::Store(BacklogError::BadAnswer {
-            status: 401,
-            code: Some("unauthorized".into()),
-            message: "this computer holds no link to the backlog store".into(),
-        })),
-        Some(token) => client.list(repo_id, Some(&token)).await.map_err(Fail::Store),
-    };
-    Read { repo, items }
 }
 
 /// The computer's orchestrator: one shared lane pool and every project's state. Each pass reads every
@@ -594,10 +544,22 @@ impl Machine {
     /// One pass over every project, in the order added. A project whose read fails (or panics) is skipped
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
+        let mut gate_on = Vec::new();
+        let asked: Vec<_> = self
+            .projects
+            .iter()
+            .map(|lp| (lp.id.clone(), lp.flags.clone()))
+            .collect();
+        for (id, flags) in asked {
+            let on = flags.on(crate::command_gate::FLAG).await;
+            self.links.item_commands.set_flag(&id, crate::command_gate::FLAG, on);
+            gate_on.push(on);
+        }
         let jobs: Vec<_> = self
             .projects
             .iter()
-            .map(|lp| {
+            .zip(&gate_on)
+            .map(|(lp, &on)| {
                 tokio::spawn(read(
                     lp.client.clone(),
                     lp.id.clone(),
@@ -605,6 +567,7 @@ impl Machine {
                     lp.repo,
                     self.links.backlog_url.clone(),
                     self.links.keychain.clone(),
+                    on,
                 ))
             })
             .collect();
@@ -615,9 +578,11 @@ impl Machine {
                 Read {
                     repo: lp.repo,
                     items: Err(Fail::Cant(format!("the backlog read failed: {e}"))),
+                    settings: None,
                 }
             });
             lp.repo = done.repo;
+            lp.take_allowed_commands(&self.links.item_commands, done.settings);
             read_items.push(match done.items {
                 Ok(items) => Some(items),
                 Err(Fail::Cant(message)) => {

@@ -291,6 +291,7 @@ pub struct Moved {
     pub allowed: bool,
 }
 
+#[derive(Debug)]
 pub struct CommandAllowing {
     file: PathBuf,
     pub allowed: Option<AllowedCommands>,

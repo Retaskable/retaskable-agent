@@ -466,7 +466,7 @@ fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
 fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
     let slug = cmd.args.get("gallery").and_then(Value::as_str).unwrap_or("");
     let not_found = || nack(&cmd.id, format!("No gallery called {slug}."));
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+    let Some(p) = allowed_project(view, project) else {
         return not_found();
     };
     let Some(gallery) = p.galleries.iter().find(|g| g.slug() == slug) else {
@@ -541,7 +541,7 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
         Some(0) => {}
         Some(k) if k > 0 && k <= i64::from(view.lanes) => {
             claim_check(view)?;
-            let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+            let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
             let (project, lane) = (project.to_string(), k as u32);
@@ -558,11 +558,11 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
         Some(k) if k > 0 => return Err(format!("This computer has no lane {k}.")),
         _ => return Err(format!("{name} needs a lane.")),
     }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+    let Some(p) = allowed_project(view, project) else {
         return Err("Finish setup first.".to_string());
     };
     if play {
-        crate::play::start(project, p)
+        crate::play::start(project, &p)
     } else {
         crate::play::stop(project)
     }
@@ -575,7 +575,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         Some(k) if k > i64::from(view.lanes) => return Err(format!("This computer has no lane {k}.")),
         Some(k) if k > 0 => {
             claim_check(view)?;
-            let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+            let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
             if p.play_command.trim().is_empty() {
@@ -589,10 +589,16 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         }
         _ => return Err("restart_play needs a lane.".to_string()),
     }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+    let Some(p) = allowed_project(view, project) else {
         return Err("Finish setup first.".to_string());
     };
-    crate::play::restart(project, p)
+    crate::play::restart(project, &p)
+}
+
+/// The project as the connector holds it, with the commands this computer may run (`approve-commands-gate`).
+fn allowed_project(view: &AgentView, project: &str) -> Option<crate::view::ProjectView> {
+    let p = view.projects.iter().find(|p| p.id == project)?;
+    Some(view.item_commands.allowed_view(p))
 }
 
 /// `ack`, or `nack` with the reason.
@@ -764,9 +770,33 @@ fn nack(id: &str, reason: String) -> Value {
     json!({ "type": "nack", "id": id, "reason": reason })
 }
 
-/// A command's args for the log: pictures as `{ count, bytes }` only, never their data (tray/05.3 section 5.3.4).
-fn audit_args(args: &Value) -> Value {
+/// The size entry for a typed value: `{ bytes }`, the UTF-8 length of a string; any other type is `{ bytes: 0 }`, never its value.
+fn sized(value: &Value) -> Value {
+    json!({ "bytes": value.as_str().map_or(0, str::len) })
+}
+
+/// A command's args for the log, the one place that decides what each command may leave in `remote.log`
+/// (cloud.md section 6.3, tray/05.3 section 5.3.4). Per command name: text a person typed (`notes`, `text`, a draft file's
+/// `content`) as `{ bytes }`; `pictureIds` as a count; `pictures` (for any command) as `{ count, bytes }`, never their data.
+/// A command with no entry logs its args unchanged.
+// TODO: gallery feedback, `read_file`, `release_edit` and `ci_link` aren't commands this agent takes yet; shape each like
+// TypeScript's `auditArgs` (`shared/cloudCommands.ts`) when it is ported.
+fn audit_args(name: &str, args: &Value) -> Value {
     let mut args = args.clone();
+    let typed: &[&str] = match name {
+        "continue" | "retry" | "playtest" => &["notes"],
+        "ask" => &["text"],
+        "draft_edit" => &["content"],
+        _ => &[],
+    };
+    for key in typed {
+        if let Some(v) = args.get_mut(*key) {
+            *v = sized(v);
+        }
+    }
+    if let Some(Value::Array(ids)) = args.get("pictureIds") {
+        args["pictureIds"] = json!(ids.len());
+    }
     if let Some(Value::Array(list)) = args.get("pictures") {
         let bytes: usize = (list.iter())
             .filter_map(|p| p.get("data").and_then(Value::as_str))
@@ -779,8 +809,8 @@ fn audit_args(args: &Value) -> Value {
 
 /// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
 /// ones and replays included, never an answer's content: a read command (`draft_files`, `gallery_image`) logs
-/// `answerBytes` only, so a picture's base64 never reaches the log. `auditArgs`'s release_edit/ci_link sanitising
-/// (`agent/src/commands.ts`) isn't ported, since those commands aren't.
+/// `answerBytes` only, so a picture's base64 never reaches the log. The args go through [`audit_args`], which
+/// keeps typed text, picture data and ids out of the line.
 /// A write that fails is dropped silently, the same as the event log's.
 pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     let outcome = answer.get("type").and_then(Value::as_str).unwrap_or("nack");
@@ -789,7 +819,7 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     entry.insert("id".into(), json!(cmd.id));
     entry.insert("name".into(), json!(cmd.name));
     entry.insert("issuedBy".into(), json!(cmd.issued_by));
-    entry.insert("args".into(), audit_args(&cmd.args));
+    entry.insert("args".into(), audit_args(&cmd.name, &cmd.args));
     entry.insert("outcome".into(), json!(outcome));
     if outcome == "nack" {
         entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));

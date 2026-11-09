@@ -187,6 +187,8 @@ pub struct ItemCommands {
     auto: Arc<std::sync::Mutex<Option<(u32, String)>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
+    /// Each project's allowed commands (`approve-commands-gate`), kept by its loop.
+    gates: crate::command_gate::CommandGates,
 }
 
 impl PartialEq for ItemCommands {
@@ -203,6 +205,29 @@ impl ItemCommands {
 
     pub fn claim(&self) -> bool {
         self.claim.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A project's `cfg` as it may run: with the allowed commands over it while `approve-commands-gate` is On for
+    /// it, else as given. Everything that runs a project command takes its config through here.
+    pub fn allowed_config(&self, project: &str, cfg: &ProjectConfig) -> ProjectConfig {
+        if self.flag_on(project, crate::command_gate::FLAG) {
+            self.gates.config(project, cfg)
+        } else {
+            cfg.clone()
+        }
+    }
+
+    /// [`allowed_config`](Self::allowed_config) for a project as the connector holds it.
+    pub fn allowed_view(&self, project: &ProjectView) -> ProjectView {
+        if self.flag_on(&project.id, crate::command_gate::FLAG) {
+            self.gates.view(project)
+        } else {
+            project.clone()
+        }
+    }
+
+    pub fn gates(&self) -> &crate::command_gate::CommandGates {
+        &self.gates
     }
 
     pub fn push(&self, command: ItemCommand) {
@@ -514,7 +539,20 @@ impl AgentView {
         if let Some(smoke) = self.smoke_json(project, data_dir) {
             state["smoke"] = smoke;
         }
+        if let Some(waiting) = self.commands_waiting_json(project) {
+            state["commandsWaiting"] = waiting;
+        }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `commandsWaiting`: the version of a shared project's commands that waits for the owner's
+    /// approval, with the text to show. Only with `approve-commands-gate` On; the values are never sent.
+    pub fn commands_waiting_json(&self, project: &str) -> Option<Value> {
+        if !self.item_commands.flag_on(project, crate::command_gate::FLAG) {
+            return None;
+        }
+        let w = self.item_commands.gates().waiting(project)?;
+        Some(json!({ "version": w.version, "text": w.text, "by": w.by }))
     }
 
     /// The snapshot's `items` and `milestones` (09.2): with `snapshot-reporting` On, the items this agent holds a

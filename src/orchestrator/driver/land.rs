@@ -38,6 +38,8 @@ pub(super) struct Landed {
     item_ids: Vec<String>,
     asked_by: Option<String>,
     draft_id: String,
+    /// The item to mark do next once the store has it: the draft's first, when its intake asked for it.
+    do_next: Option<String>,
 }
 
 /// The presses being carried out, and what merged drafts have yet to tell the store.
@@ -46,6 +48,7 @@ pub(super) struct Landing {
     tasks: Vec<JoinHandle<Option<Landed>>>,
     approved: Vec<String>,
     asked_by: BTreeMap<String, String>,
+    do_next: Vec<String>,
 }
 
 impl Landing {
@@ -55,6 +58,11 @@ impl Landing {
 
     pub(super) fn asked_by(&self) -> BTreeMap<String, String> {
         self.asked_by.clone()
+    }
+
+    /// The items to mark do next now that the store has them; each is owed once.
+    pub(super) fn take_do_next(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.do_next)
     }
 
     /// The store took the headers: nothing is owed for those drafts.
@@ -326,7 +334,11 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
     ctx.say(draft, &follow_up::merged(item_ids.len(), &draft.titles)).await;
+    let do_next = (draft.intake.as_ref().is_some_and(|i| i.do_next))
+        .then(|| item_ids.first().cloned())
+        .flatten();
     Some(Landed {
+        do_next,
         item_ids,
         asked_by: text(&taken, "requestedBy").map(String::from),
         draft_id: id,
@@ -353,6 +365,9 @@ impl ProjectLoop {
                     if let Some(by) = &landed.asked_by {
                         self.landing.asked_by.insert(id.clone(), by.clone());
                     }
+                }
+                if self.flags.on("gallery-feedback-command").await {
+                    self.landing.do_next.extend(landed.do_next);
                 }
                 self.landing.approved.extend(landed.item_ids);
                 merged = true;

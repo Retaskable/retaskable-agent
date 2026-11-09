@@ -15,7 +15,8 @@ use super::report;
 pub(super) use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
-use crate::backlog::{Client, Item, ItemStatus};
+use crate::backlog::settings::StoreSettings;
+use crate::backlog::{BacklogError, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
 use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::implementer::new_session_id;
@@ -29,6 +30,7 @@ use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
 use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
+use crate::view::ItemCommands;
 
 pub use super::mode::{MODE_VAR, OrchestratorMode};
 
@@ -298,6 +300,11 @@ pub struct ProjectLoop {
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
     pub(super) backlog_items: usize,
+    /// The project as config.json has it; `project` is this with the allowed commands over it while
+    /// `approve-commands-gate` is On (`command_gate.rs`).
+    pub(super) file_project: ProjectConfig,
+    /// Whether `project` has the allowed commands over it.
+    pub(super) gated: bool,
 }
 
 impl ProjectLoop {
@@ -312,6 +319,7 @@ impl ProjectLoop {
         max_resume_context_tokens: u32,
     ) -> Self {
         live.register(&id);
+        let file_project = project.clone();
         let vet = store.vet();
         live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
         Self {
@@ -378,6 +386,8 @@ impl ProjectLoop {
             asks: Default::default(),
             trial: None,
             backlog_items: 0,
+            file_project,
+            gated: false,
         }
     }
 
@@ -406,6 +416,37 @@ impl ProjectLoop {
         )
         .with_guard(guard)
         .with_data_dir(dir))
+    }
+
+    /// With `approve-commands-gate` On: takes this pass's `settings_get` (`None`: not asked; an error changes
+    /// nothing, so the allowed commands keep running) into the project's allowed commands, then lays them over
+    /// `file_project` as `project`. Off: `project` is config.json's.
+    pub(super) fn take_allowed_commands(
+        &mut self,
+        commands: &ItemCommands,
+        settings: Option<Result<Option<StoreSettings>, BacklogError>>,
+    ) {
+        if !commands.flag_on(&self.id, crate::command_gate::FLAG) {
+            if std::mem::take(&mut self.gated) {
+                self.project = self.file_project.clone();
+            }
+            return;
+        }
+        let gates = commands.gates();
+        if let Some(dir) = &self.data_dir {
+            gates.open(dir, &self.id);
+        }
+        match settings {
+            Some(Ok(settings)) => {
+                if let Err(e) = gates.consider(&self.id, settings.as_ref(), &self.file_project) {
+                    tracing::warn!("{}: saving the allowed commands: {e:#}", self.id);
+                }
+            }
+            Some(Err(e)) => self.store_error("settings_get", &e),
+            None => {}
+        }
+        self.project = commands.allowed_config(&self.id, &self.file_project);
+        self.gated = true;
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).

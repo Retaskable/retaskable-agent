@@ -10,11 +10,13 @@ use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
     api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
-    setup_questions, spec_split, store, tags, telemetry, tray, view,
+    setup_questions, spec_split, store, tags, telemetry, tray,
 };
 
 mod agent_view;
+mod link_clouds;
 use agent_view::agent_view;
+use link_clouds::link_clouds;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -538,7 +540,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
             retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
         )));
-        tokio::spawn(retaskable_agent::agent_ci::run(ci, dir.to_path_buf(), env.clone()));
+        tokio::spawn(retaskable_agent::agent_ci::run(
+            ci,
+            dir.to_path_buf(),
+            env.clone(),
+            view.item_commands.clone(),
+        ));
     }
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
@@ -669,58 +676,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     .await
     .ok();
     Ok(())
-}
-
-/// cloud.md section 5 / environments.md section 3.4: starts one outbound link to each cloud,
-/// every project on it, and the shared backlog's auto-link beside them.
-#[allow(clippy::too_many_arguments)]
-fn link_clouds(
-    cloud_urls: &[String],
-    keychain: &Arc<dyn link::TokenStore>,
-    http: &reqwest::Client,
-    view: &Arc<view::AgentView>,
-    exit: &Arc<view::Exit>,
-    dir: &Path,
-    version: &str,
-    env: &Env,
-    links: &link::pending::Links,
-) -> Vec<connector::Connector> {
-    let connectors: Vec<_> = cloud_urls
-        .iter()
-        .map(|url| {
-            connector::Connector::start(
-                url,
-                keychain.clone(),
-                http.clone(),
-                view.clone(),
-                connector::Timing::default(),
-                exit.clone(),
-                dir,
-            )
-        })
-        .collect();
-    // installers/03-the-bundle-agent-bundle.md section 3.10: named once, after the connections above
-    // start, so the log says whether this build is linked — the start check greps for it, and a
-    // release build has no other way to tell.
-    let backlog_url = backlog::url(env);
-    tracing::info!(
-        "{}",
-        link::links_line(cloud_urls, &backlog_url, |url| matches!(keychain.get(url), Ok(Some(_))))
-    );
-    // installers/04-every-agent-on-the-shared-backlog-shared.md: once this computer already holds a
-    // retaskable.com link, the shared backlog's device flow starts by itself too, opening its own
-    // `/link` page. Fire-and-forget so a slow or unreachable store doesn't delay serving `/api/health`;
-    // it isn't tried again this run (a failed or expired code waits for the next start).
-    if cloud_urls.iter().any(|url| matches!(keychain.get(url), Ok(Some(_)))) {
-        tokio::spawn(auto_link_backlog(
-            links.clone(),
-            keychain.clone(),
-            http.clone(),
-            env.clone(),
-            version.to_string(),
-        ));
-    }
-    connectors
 }
 
 /// Resolves and logs this run's settings: this computer's tags, the poll interval, the local
