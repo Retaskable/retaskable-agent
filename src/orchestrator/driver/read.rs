@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use super::machine::repo_id;
+use crate::backlog::asks::ProjectFacts;
 use crate::backlog::settings::StoreSettings;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::link::TokenStore;
@@ -19,10 +20,13 @@ pub(super) struct Read {
     pub(super) items: Result<Vec<Item>, Fail>,
     /// The project's settings, read only with `approve-commands-gate` On and the items read; an error keeps what runs.
     pub(super) settings: Option<Result<Option<StoreSettings>, BacklogError>>,
+    /// The project's facts (its pause), read only with `obey-shared-pause` On and the items read.
+    pub(super) facts: Option<Result<ProjectFacts, BacklogError>>,
 }
 
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
 /// project's failed read and nothing else's.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn read(
     client: Arc<Client>,
     id: String,
@@ -31,6 +35,7 @@ pub(super) async fn read(
     backlog_url: String,
     keychain: Arc<dyn TokenStore>,
     want_settings: bool,
+    want_facts: bool,
 ) -> Read {
     let repo = match cached {
         Some(repo) => Some(repo),
@@ -43,6 +48,7 @@ pub(super) async fn read(
             repo,
             items,
             settings: None,
+            facts: None,
         };
     };
     let token = match keychain.get(&backlog_url) {
@@ -54,6 +60,7 @@ pub(super) async fn read(
                 repo,
                 items,
                 settings: None,
+                facts: None,
             };
         }
     };
@@ -65,9 +72,18 @@ pub(super) async fn read(
         })),
         Some(ref token) => client.list(repo_id, Some(token)).await.map_err(Fail::Store),
     };
-    let settings = match token {
-        Some(token) if want_settings => Some(client.settings_get(repo_id, Some(&token)).await),
+    let settings = match &token {
+        Some(token) if want_settings => Some(client.settings_get(repo_id, Some(token)).await),
         _ => None,
     };
-    Read { repo, items, settings }
+    let facts = match &token {
+        Some(token) if want_facts && items.is_ok() => Some(client.project_facts(repo_id, Some(token)).await),
+        _ => None,
+    };
+    Read {
+        repo,
+        items,
+        settings,
+        facts,
+    }
 }

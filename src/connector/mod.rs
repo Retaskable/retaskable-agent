@@ -408,6 +408,8 @@ async fn session(
     sizes.mark_unchanged();
     let mut paused = view.paused.subscribe();
     paused.mark_unchanged();
+    let mut store_paused = view.store_paused.subscribe();
+    store_paused.mark_unchanged();
     let mut restart = view.restart.subscribe();
     restart.mark_unchanged();
     let mut local_down = view.local.subscribe_down();
@@ -469,6 +471,7 @@ async fn session(
                 Some(view.snapshot(project, &cloud.dir))
             },
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = store_paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = trial_saved.changed() => {
                 let now = view.trial_json(project, &cloud.dir);
                 if now != trial_sent {

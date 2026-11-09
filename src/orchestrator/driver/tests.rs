@@ -132,6 +132,7 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         machine: "my-pc".into(),
@@ -975,6 +976,7 @@ mod ideas;
 mod ideas_daily;
 mod lane_play;
 mod local_limit_fallback;
+mod store_pause;
 mod local_one_slot;
 mod main_sync;
 mod model_caps;

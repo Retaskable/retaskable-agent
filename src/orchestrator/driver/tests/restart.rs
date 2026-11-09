@@ -13,6 +13,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         machine: "my-pc".into(),
