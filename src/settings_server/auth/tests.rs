@@ -39,6 +39,17 @@ fn split_host_port_falls_back_to_the_whole_header_when_it_cant_make_sense_of_it(
 }
 
 #[test]
+fn a_port_too_big_to_be_one_is_not_read_as_no_port() {
+    assert_eq!(split_host_port("127.0.0.1:99999"), ("127.0.0.1:99999", None));
+    assert_eq!(split_host_port("[::1]:99999"), ("[::1]:99999", None));
+    assert_eq!(split_host_port("[::1]:"), ("[::1]:", None));
+    let settings = server(4700);
+    for bad in ["127.0.0.1:99999", "localhost:70000", "[::1]:99999", "[::1]:"] {
+        assert!(!settings.host_is_allowed(bad), "{bad}");
+    }
+}
+
+#[test]
 fn host_is_allowed_only_for_loopback_names_at_the_agents_own_port() {
     let settings = server(4700);
     assert!(settings.host_is_allowed("127.0.0.1:4700"));
