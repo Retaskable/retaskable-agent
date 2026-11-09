@@ -120,3 +120,28 @@ async fn with_the_flag_off_config_json_runs_and_settings_are_not_read() {
     assert_eq!(commands(&mut rig), (vec!["file test".into()], "file play".into()));
     assert!(!asked.lock().unwrap().contains(&"settings_get".to_string()));
 }
+
+#[tokio::test]
+async fn a_changed_command_waits_the_old_one_runs_and_approve_commands_makes_the_new_one_run() {
+    let (mut rig, _, _) = gated(true, Some(record(2, "new test"))).await;
+    allow(&rig, 1, "old test");
+    rig.machine.pass().await;
+    assert_eq!(commands(&mut rig), (vec!["old test".into()], "play old test".into()));
+    let mut view = crate::view::AgentView::blank();
+    view.item_commands = rig.machine.links.item_commands.clone();
+    view.work = rig.machine.links.work.clone();
+    view.owner.set("jc".into()).unwrap();
+    let now = crate::telemetry::events::now_ms();
+    let cmd = crate::commands::Command {
+        id: "a1".into(),
+        name: "approve_commands".into(),
+        args: json!({ "version": 2 }),
+        issued_by: "jc".into(),
+        issued_at: now,
+        expires_at: now + 60_000,
+    };
+    let answer = crate::commands::run(&cmd, "p0", &mut Default::default(), &view, &|_| {}, rig._dir.path());
+    assert_eq!(answer, json!({ "type": "ack", "id": "a1" }));
+    rig.machine.pass().await;
+    assert_eq!(commands(&mut rig), (vec!["new test".into()], "play new test".into()));
+}

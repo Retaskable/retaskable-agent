@@ -40,6 +40,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         local: Default::default(),
         live: Default::default(),
         checks: Default::default(),
+        owner: Default::default(),
     }
 }
 
