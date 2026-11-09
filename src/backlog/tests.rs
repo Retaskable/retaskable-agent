@@ -315,7 +315,7 @@ async fn tryout_result_sends_the_key_outcome_and_notes() {
 }
 
 #[tokio::test]
-async fn release_playtests_sends_its_op_with_no_arguments() {
+async fn release_playtests_sends_its_op_with_an_empty_body() {
     let base = fake_store(post(|Json(req): Json<Value>| async move {
         assert_eq!(req["op"], "release_playtests");
         assert_eq!(req["args"], json!({}));

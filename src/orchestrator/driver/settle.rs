@@ -275,12 +275,13 @@ impl ProjectLoop {
     /// Sends the releases, skips, parks and playtest answers still owed. One the store refuses (or can't reach) stays listed for
     /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
     pub(super) async fn flush_owed(&mut self, links: &Links) {
+        self.note_playtests_setting().await;
         let Some(repo) = self.repo.filter(|_| {
-            !self.unreleased.is_empty()
+            self.release_owed
+                || !self.unreleased.is_empty()
                 || !self.unparked.is_empty()
                 || !self.unskipped.is_empty()
                 || !self.unanswered.is_empty()
-                || self.release_owed
         }) else {
             return;
         };
