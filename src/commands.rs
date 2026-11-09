@@ -9,7 +9,7 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
-//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop,
+//! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop, `restart_play` too,
 //! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **gallery_index** / **gallery_image** (a gallery's last shoot, read off disk, behind the `gallery-read-commands` flag), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
@@ -565,12 +565,25 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
     }
 }
 
-/// `restart_play` of a lane: lane 0 is Play main ([`crate::play::restart`]). A lane from 1 isn't taken yet.
+/// `restart_play` of a lane: lane 0 is Play main ([`crate::play::restart`]); a lane from 1 is queued for the loop, checked as `play` is.
 fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<(), String> {
     match lane {
         Some(0) => {}
         Some(k) if k > i64::from(view.lanes) => return Err(format!("This computer has no lane {k}.")),
-        Some(k) if k > 0 => return Err("Not a command this agent takes yet: restart_play".to_string()),
+        Some(k) if k > 0 => {
+            claim_check(view)?;
+            let Some(p) = view.projects.iter().find(|p| p.id == project) else {
+                return Err("Finish setup first.".to_string());
+            };
+            if p.play_command.trim().is_empty() {
+                return Err("No play command set for this project.".to_string());
+            }
+            view.item_commands.push(ItemCommand::RestartPlay {
+                project: project.to_string(),
+                lane: k as u32,
+            });
+            return Ok(());
+        }
         _ => return Err("restart_play needs a lane.".to_string()),
     }
     let Some(p) = view.projects.iter().find(|p| p.id == project) else {

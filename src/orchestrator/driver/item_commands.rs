@@ -87,7 +87,7 @@ impl ProjectLoop {
                     }
                     continue;
                 }
-                ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
+                ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
             };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self

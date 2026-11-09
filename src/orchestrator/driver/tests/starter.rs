@@ -50,7 +50,7 @@ impl SessionStarter for Fake {
             .lock()
             .unwrap()
             .push((dir.to_path_buf(), command.into(), lane, closed.clone()));
-        Ok(Box::new(FakeGame(closed)))
+        Ok(Box::new(FakeGame(closed, self.stubborn_games.load(Ordering::SeqCst))))
     }
 
     fn abandon(&self, old: Abandon) -> BoxFuture<'static, Result<(), String>> {

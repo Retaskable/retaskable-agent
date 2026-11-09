@@ -98,13 +98,15 @@ pub enum ItemCommand {
     Play { project: String, lane: u32 },
     /// **Stop** the game in lane `lane`.
     Stop { project: String, lane: u32 },
+    /// **Restart** the game in lane `lane`: stop it if one runs, then play again.
+    RestartPlay { project: String, lane: u32 },
     /// **Generate ideas** (`ideas_generate { fresh }`): one non-quiet ideas round; `fresh` drops the waiting ideas first.
     Ideas { project: String, fresh: bool },
 }
 
 impl ItemCommand {
     fn is_lane(&self) -> bool {
-        matches!(self, Self::Play { .. } | Self::Stop { .. })
+        matches!(self, Self::Play { .. } | Self::Stop { .. } | Self::RestartPlay { .. })
     }
 
     fn project(&self) -> &str {
@@ -115,6 +117,7 @@ impl ItemCommand {
             | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
+            | Self::RestartPlay { project, .. }
             | Self::Ideas { project, .. } => project,
         }
     }
