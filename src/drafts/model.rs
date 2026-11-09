@@ -2,7 +2,7 @@
 //! `agent/src/schemas.ts`, spec 06.5) and the plain-code check on its `breakdown`
 //! (plan-breakdown.md section 3.1, `checkedBreakdown` in `shared/planBreakdown.ts`).
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 pub use crate::implementer::Question;
 
@@ -151,8 +151,7 @@ pub struct Breakdown {
 
 fn words(v: Option<&Value>, max: usize) -> String {
     let s = v.and_then(Value::as_str).unwrap_or("");
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::text::truncate(&s, max)
+    crate::text::truncate(&crate::text::squish(s), max)
 }
 
 /// The drafter's breakdown, checked: a `build` entry whose id isn't one of `item_ids`, a second entry

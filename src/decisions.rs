@@ -23,7 +23,7 @@ pub const MAX_REASKS: u32 = 2;
 /// A question's text, loosely: case and run-of-whitespace insensitive, so the same question
 /// asked again in slightly different words still matches.
 fn same(s: &str) -> String {
-    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::text::squish(&s.to_lowercase())
 }
 
 /// The decisions after answering `questions` with `answers` at `at`: a question answered again
