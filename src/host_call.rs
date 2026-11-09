@@ -3,7 +3,9 @@
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
 //! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(not(test))]
+use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
 
@@ -69,9 +71,17 @@ pub struct Sink(Arc<Mutex<Vec<Refusal>>>);
 
 impl Sink {
     /// The process-wide sink.
+    #[cfg(not(test))]
     pub fn global() -> &'static Sink {
         static SINK: OnceLock<Sink> = OnceLock::new();
         SINK.get_or_init(Sink::default)
+    }
+
+    /// Under test each thread has its own, so parallel tests (and their loop passes) never see each other's.
+    #[cfg(test)]
+    pub fn global() -> &'static Sink {
+        thread_local!(static SINK: &'static Sink = Box::leak(Box::default()));
+        SINK.with(|s| *s)
     }
 
     pub fn add(&self, refusal: Refusal) {
@@ -111,6 +121,12 @@ pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
         cmd: cmd.into(),
         n: i + 1,
     })
+}
+
+/// Test helper: what the (per-thread) sink holds, drained.
+#[cfg(test)]
+pub(crate) fn refusals_in(_dir: &Path) -> Vec<Refusal> {
+    Sink::global().take()
 }
 
 #[cfg(test)]

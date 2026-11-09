@@ -98,7 +98,9 @@ impl ProjectLoop {
 
     async fn start_sync(&mut self, repo: u64, token: Option<&str>, machine: &str, now: Instant) -> Result<()> {
         if self.seen.default_branch.is_none() {
-            self.seen.default_branch = super::report::default_branch(&self.project.github_repo).await;
+            self.seen.default_branch =
+                super::report::default_branch(&self.project.github_repo, std::path::Path::new(&self.project.repo_path))
+                    .await;
         }
         let Some(main) = self.seen.default_branch.clone() else {
             anyhow::bail!("gh couldn't say the default branch");
