@@ -1,0 +1,133 @@
+//! Host calls (`gh`, `glab`) with a missing argument are refused and recorded (agent-telemetry.md section 3.3,
+//! `host_call_undefined`). A call deep in the code has no event log, so a refusal goes to a process-wide sink that
+//! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
+//! Behind the `host-call-undefined-event` flag: Off ([`set_on`]), the guard neither refuses nor records.
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::telemetry::events::{MAX_TEXT, scrub};
+
+/// The release flag.
+pub const FLAG: &str = "host-call-undefined-event";
+
+// Tests run in parallel threads and each pass sets this, so under test it is per thread.
+#[cfg(not(test))]
+static ON: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+thread_local!(static ON: AtomicBool = const { AtomicBool::new(false) });
+
+/// Turns the guard on or off; the orchestrator sets it each pass from the flag.
+pub fn set_on(on: bool) {
+    #[cfg(test)]
+    ON.with(|o| o.store(on, Ordering::SeqCst));
+    #[cfg(not(test))]
+    ON.store(on, Ordering::SeqCst);
+}
+
+fn is_on() -> bool {
+    #[cfg(test)]
+    return ON.with(|o| o.load(Ordering::SeqCst));
+    #[cfg(not(test))]
+    ON.load(Ordering::SeqCst)
+}
+
+/// One refused call: the command, its arguments (scrubbed and cut) and the directory it would have run in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal {
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub dir: Option<PathBuf>,
+}
+
+/// The call was not run: this argument (counting from 1) was undefined.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refused {
+    pub cmd: String,
+    pub n: usize,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} was not run: argument {} was undefined", self.cmd, self.n)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// A shared list of [`Refusal`]s; clones share it.
+#[derive(Debug, Clone, Default)]
+pub struct Sink(Arc<Mutex<Vec<Refusal>>>);
+
+impl Sink {
+    /// The process-wide sink.
+    pub fn global() -> &'static Sink {
+        static SINK: OnceLock<Sink> = OnceLock::new();
+        SINK.get_or_init(Sink::default)
+    }
+
+    pub fn add(&self, refusal: Refusal) {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).push(refusal);
+    }
+
+    /// Everything added since the last call.
+    pub fn take(&self) -> Vec<Refusal> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// The index of the first argument that is empty, or is `undefined` or `NaN` whole or as one part of a path or
+/// value in it (parts split on `/`, `=`, `:`, `,`, `#` and whitespace).
+pub fn undefined_arg(args: &[&str]) -> Option<usize> {
+    args.iter().position(|a| {
+        a.is_empty()
+            || a.split(|c: char| matches!(c, '/' | '=' | ':' | ',' | '#') || c.is_whitespace())
+                .any(|p| p == "undefined" || p == "NaN")
+    })
+}
+
+/// Checks a call before it runs: on a match (and with the flag On) records it in the global sink and refuses.
+pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
+    if !is_on() {
+        return Ok(());
+    }
+    let Some(i) = undefined_arg(args) else {
+        return Ok(());
+    };
+    Sink::global().add(Refusal {
+        cmd: cmd.into(),
+        args: args.iter().map(|a| scrub(a, MAX_TEXT)).collect(),
+        dir: Some(dir.to_path_buf()),
+    });
+    Err(Refused {
+        cmd: cmd.into(),
+        n: i + 1,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_an_empty_or_undefined_argument() {
+        assert_eq!(undefined_arg(&["pr", "checks", "undefined"]), Some(2));
+        assert_eq!(undefined_arg(&["NaN"]), Some(0));
+        assert_eq!(undefined_arg(&["pr", ""]), Some(1));
+        assert_eq!(undefined_arg(&["api", "repos/o/r/pulls/undefined"]), Some(1));
+        assert_eq!(undefined_arg(&["--field=pr=NaN"]), Some(0));
+        assert_eq!(undefined_arg(&["pr=undefined"]), Some(0));
+        assert_eq!(undefined_arg(&["a,NaN"]), Some(0));
+        assert_eq!(undefined_arg(&["x#undefined"]), Some(0));
+        assert_eq!(undefined_arg(&["a b:undefined"]), Some(0));
+    }
+
+    #[test]
+    fn near_misses_pass() {
+        assert_eq!(
+            undefined_arg(&["undefinedness", "NaNa", "nan", "feature/banana", "pr=7", "--json"]),
+            None
+        );
+        assert_eq!(undefined_arg(&[]), None);
+    }
+}

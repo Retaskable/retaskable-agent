@@ -567,6 +567,7 @@ impl Machine {
     /// One pass over every project, in the order added. A project whose read fails (or panics) is skipped
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
+        self.write_host_calls().await;
         let mut gate_on = Vec::new();
         let asked: Vec<_> = self
             .projects

@@ -899,6 +899,7 @@ mod asks;
 mod auto_concurrency;
 mod caps_and_fetch;
 mod ci_events;
+mod host_call_undefined;
 mod claim_waiting;
 mod command_gate;
 mod commands;
