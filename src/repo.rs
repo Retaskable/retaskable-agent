@@ -2,7 +2,7 @@
 //! `devBranch`, `createBranchIfMissing` (`agent/src/setup.ts`) and `listOwners`/`listRepos`/
 //! `remoteRepo` (`agent/src/github.ts`). Only the plain-GitHub-repo path: a local folder, or one
 //! of the person's (and their GitHub organisations') `gh repo list` repos. GitLab, a plain git
-//! remote, a local-only project and the full `GithubPicker`'s caching and clone-serialising lock
+//! remote, a local-only project and the full `GithubPicker`'s clone-serialising lock
 //! aren't ported, since this agent's trimmed spec doesn't reach them yet.
 use std::path::{Path, PathBuf};
 use std::process::Command;
