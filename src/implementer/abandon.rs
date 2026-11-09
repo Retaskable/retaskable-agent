@@ -11,13 +11,16 @@ use super::publish::run;
 /// Closes `pr_url`, or drops `branch` when there is no PR. `git` and `gh` are parameters so tests can fake them.
 pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url: Option<&str>) -> Result<()> {
     if let Some(pr) = pr_url {
+        let args = ["pr", "view", pr, "--json", "state", "--jq", ".state"];
+        crate::host_call::guard("gh", repo, &args)?;
         let mut view = Command::new(gh);
-        view.current_dir(repo)
-            .args(["pr", "view", pr, "--json", "state", "--jq", ".state"]);
+        view.current_dir(repo).args(args);
         // Only an open PR is closed: a merged slice stays as it is, and a closed one needs nothing.
         if run(view, None, "gh pr view")?.trim() == "OPEN" {
+            let args = ["pr", "close", pr];
+            crate::host_call::guard("gh", repo, &args)?;
             let mut close = Command::new(gh);
-            close.current_dir(repo).args(["pr", "close", pr]);
+            close.current_dir(repo).args(args);
             run(close, None, "gh pr close")?;
         }
         return Ok(());
@@ -37,4 +40,32 @@ pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url:
     local.current_dir(repo).args(["branch", "-D", branch]);
     let _ = run(local, None, "git branch -D");
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_undefined_pr_is_refused_before_gh_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = crate::host_call::fake_gh_flag_on(dir.path());
+        let err = abandon(
+            Path::new("git"),
+            &gh,
+            dir.path(),
+            None,
+            Some("https://x/pull/undefined"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("was not run"), "{err}");
+        let refused = crate::host_call::Sink::global().take_in(dir.path());
+        assert!(!dir.path().join("ran").exists(), "the fake gh ran");
+        assert_eq!(refused.len(), 1);
+        assert_eq!(
+            (refused[0].cmd.as_str(), &refused[0].args[..2]),
+            ("gh", &["pr".into(), "view".into()][..])
+        );
+        assert_eq!(refused[0].args[2], "https://x/pull/undefined");
+    }
 }

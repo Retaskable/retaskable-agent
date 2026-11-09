@@ -78,6 +78,16 @@ impl Sink {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).push(refusal);
     }
 
+    /// Takes what was added for calls run in `dir` or under it, leaving the rest.
+    pub fn take_in(&self, dir: &Path) -> Vec<Refusal> {
+        let mut all = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let (mine, rest) = std::mem::take(&mut *all)
+            .into_iter()
+            .partition(|r| r.dir.as_deref().is_some_and(|d| d.starts_with(dir)));
+        *all = rest;
+        mine
+    }
+
     /// Everything added since the last call.
     pub fn take(&self) -> Vec<Refusal> {
         std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))
@@ -111,6 +121,16 @@ pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
         cmd: cmd.into(),
         n: i + 1,
     })
+}
+
+/// For tests of the call sites: turns the flag On for `dir`, and gives a fake `gh` that touches `dir/ran`.
+#[cfg(all(test, unix))]
+pub(crate) fn fake_gh_flag_on(dir: &Path) -> PathBuf {
+    set_on_for(vec![dir.to_path_buf()]);
+    let gh = dir.join("marker_gh.sh");
+    crate::test_support::write_executable(&gh, &format!("#!/bin/sh\ntouch '{}'\n", dir.join("ran").display()));
+    let _ = std::fs::remove_file(dir.join("ran")); // `write_executable` ran it once
+    gh
 }
 
 #[cfg(test)]
