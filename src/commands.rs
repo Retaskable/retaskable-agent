@@ -106,6 +106,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
+        "setup_check" => setup_check(cmd, project, view),
         "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
@@ -289,6 +290,26 @@ fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value
 /// What [`run`] answers a command the loop settles once the store has answered: nothing is sent yet, and the loop sends
 /// the `ack` or `nack` later ([`crate::view::ItemCommands::answer`]).
 pub const PENDING: &str = "pending";
+
+/// `setup_check {}` (**Check again**, first-run-check.md section 3.1): runs the fixed probes now through the view's runner
+/// (one at a time, ticking its change watch so `hello` resends) and answers `ack` with the checks once they're done.
+/// The probes take up to 20 s each, so this is pending and a task sends the answer.
+fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if cmd.args.as_object().is_some_and(|a| !a.is_empty()) || !(cmd.args.is_null() || cmd.args.is_object()) {
+        return nack(&cmd.id, "setup_check takes no arguments.".into());
+    }
+    let (runner, items, project, id) = (
+        view.checks.clone(),
+        view.item_commands.clone(),
+        project.to_string(),
+        cmd.id.clone(),
+    );
+    tokio::spawn(async move {
+        let checks = runner.run_now().await;
+        items.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
+    });
+    json!({ "type": PENDING, "id": cmd.id })
+}
 
 /// `idea_accept { idea }` (**Build this** on an idea): behind the `ideas-session` flag, queued for the loop, which reads the
 /// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.

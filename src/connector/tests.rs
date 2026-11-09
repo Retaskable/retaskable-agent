@@ -492,6 +492,25 @@ async fn every_command_answered_is_logged_to_remote_log() {
 }
 
 #[tokio::test]
+async fn setup_check_acks_with_the_checks_and_is_audited() {
+    let (c, mut a, dir) = connected_project(noop_exit()).await;
+    a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
+        .await
+        .unwrap();
+    let ack = read(&mut a).await;
+    assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
+    assert!(ack["answer"]["git"].is_object());
+    c.stop(Duration::from_secs(1)).await;
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (line["name"].as_str(), line["outcome"].as_str()),
+        (Some("setup_check"), Some("ack"))
+    );
+    assert!(line["answerBytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
 async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     let (c, mut a, _dir) = connected_project(noop_exit()).await;
 
