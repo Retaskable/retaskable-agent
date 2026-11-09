@@ -598,3 +598,56 @@ fn snapshot_carries_commands_waiting_only_while_one_waits_and_the_flag_is_on() {
     gates.approve("p", 1).unwrap();
     assert_eq!(waiting(), None, "approved");
 }
+
+fn pause_block(live: bool, obey: bool, store: StorePause, computer: bool) -> Value {
+    let v = reporting_view(true);
+    if live {
+        v.live.register("a");
+    }
+    v.item_commands.set_flag("a", OBEY_SHARED_PAUSE_FLAG, obey);
+    v.store_paused.set("a", store);
+    v.paused
+        .set("a", computer.then(|| "Paused from retaskable.com by sam".to_string()));
+    v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone()
+}
+
+#[test]
+fn obey_shared_pause_reports_which_pause_is_on_in_both_blocks() {
+    let words = || StorePause::Paused("Paused by @james for everyone".into());
+    for live in [true, false] {
+        let reason = |b: Value| b["pausedReason"].clone();
+        assert_eq!(
+            reason(pause_block(live, true, words(), false)),
+            "Paused by @james for everyone"
+        );
+        assert_eq!(
+            reason(pause_block(live, true, StorePause::NotPaused, true)),
+            "This computer is paused"
+        );
+        assert_eq!(
+            reason(pause_block(live, true, words(), true)),
+            "Paused by @james for everyone"
+        );
+        assert_eq!(
+            reason(pause_block(live, true, StorePause::Unknown, true)),
+            "This computer is paused"
+        );
+        let neither = pause_block(live, true, StorePause::NotPaused, false);
+        let unknown = pause_block(live, true, StorePause::Unknown, false);
+        assert_eq!(neither, unknown, "an unknown store pause alone isn't paused");
+        if live {
+            assert_eq!(neither["status"], "running");
+        } else {
+            assert_eq!(reason(neither), NO_WORK_YET);
+        }
+        // Off: the old output, the store's pause ignored and this computer's own reason kept.
+        assert_eq!(
+            reason(pause_block(live, false, words(), true)),
+            "Paused from retaskable.com by sam"
+        );
+        assert_eq!(
+            pause_block(live, false, words(), false).get("pausedReason").is_some(),
+            !live
+        );
+    }
+}

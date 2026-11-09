@@ -1,7 +1,7 @@
 //! The snapshot's `orchestrator` block (cloud.md section 5.2): what the project's loop is doing.
 use serde_json::{Value, json};
 
-use super::{AgentView, NO_WORK_YET};
+use super::{AgentView, NO_WORK_YET, StorePause};
 use crate::telemetry::debounce::OpenAnomaly;
 use crate::telemetry::events::{MAX_TEXT, iso_utc_millis, scrub};
 
@@ -32,6 +32,21 @@ fn cut_details(details: &Value) -> Value {
 }
 
 impl AgentView {
+    /// Why `project` is paused, if it is. With `obey-shared-pause` On the store's own words win, then "This computer
+    /// is paused"; an unknown store pause alone isn't a pause. With it Off, only this computer's pause counts.
+    pub fn pause_reason(&self, project: &str) -> Option<String> {
+        if !self.item_commands.flag_on(project, super::OBEY_SHARED_PAUSE_FLAG) {
+            return self.paused.reason(project);
+        }
+        match self.store_paused.get(project) {
+            StorePause::Paused(words) => Some(words),
+            _ => self
+                .paused
+                .reason(project)
+                .map(|_| "This computer is paused".to_string()),
+        }
+    }
+
     /// The `orchestrator` block for `project` ("" before Setup). With `snapshot-reporting` Off, or for a project
     /// whose loop isn't running, the project reads as paused with [`NO_WORK_YET`] unless a person's pause set a reason.
     pub(super) fn orchestrator_block(&self, project: &str) -> Value {
@@ -41,7 +56,7 @@ impl AgentView {
             match self.loop_state(project) {
                 Some(live) => self.live_block(project, &live),
                 None => {
-                    let reason = self.paused.reason(project).unwrap_or_else(|| NO_WORK_YET.to_string());
+                    let reason = self.pause_reason(project).unwrap_or_else(|| NO_WORK_YET.to_string());
                     json!({ "status": "paused", "machine": self.machine, "pausedReason": reason })
                 }
             }
@@ -112,7 +127,7 @@ impl AgentView {
 
     fn live_block(&self, project: &str, state: &crate::orchestrator::live::LiveState) -> Value {
         let mut block = json!({ "machine": self.machine, "concurrency": state.concurrency });
-        if let Some(reason) = self.paused.reason(project) {
+        if let Some(reason) = self.pause_reason(project) {
             block["status"] = json!("paused");
             block["pausedReason"] = json!(reason);
         } else if let Some(at) = &state.projects[project].limit_resets_at {
