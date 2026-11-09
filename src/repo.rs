@@ -1,9 +1,9 @@
 //! "The repo" (docs/specs/agent/09-web-ui.md section 9.1), ported from `repoInfo`, `githubLogin`,
 //! `devBranch`, `createBranchIfMissing` (`agent/src/setup.ts`) and `listOwners`/`listRepos`/
-//! `remoteRepo` (`agent/src/github.ts`). Only the plain-GitHub-repo path: a local folder, or one
-//! of the person's (and their GitHub organisations') `gh repo list` repos. GitLab, a plain git
-//! remote, a local-only project and the full `GithubPicker`'s clone-serialising lock
-//! aren't ported, since this agent's trimmed spec doesn't reach them yet.
+//! `remoteRepo` (`agent/src/github.ts`). A local folder, or one of the person's (and their GitHub
+//! organisations') `gh repo list` repos. Telling GitHub, GitLab and plain git remotes apart
+//! (`code_host`) is ported; a local-only project and the full `GithubPicker`'s clone-serialising
+//! lock aren't, since this agent's trimmed spec doesn't reach them yet.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -192,10 +192,48 @@ pub fn list_repos(owner: &str) -> Result<Vec<RepoSummary>> {
 static GITHUB_REMOTE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$").unwrap());
 
-/// The `owner/name` a remote URL points at on GitHub, or `None` for anything else (a GitLab
-/// host, a plain path, `file://`). Pure (`remoteRepo` in `github.ts`).
+/// Where a project's `origin` lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeHost {
+    Github,
+    Gitlab,
+    /// Any other host, a local path or `file://`: merged with plain git, no pull requests.
+    Plain,
+}
+
+/// A remote URL with a scheme or a `user@` (HTTPS, `ssh://`, scp-style `git@host:path`):
+/// capture 1 is the host, 2 the path.
+static HOSTED_REMOTE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/\s]+@)?|[^@/\s]+@)([^/:\s]+)(?::\d+)?[:/](.+?)(?:\.git)?/?$")
+        .unwrap()
+});
+
+fn gitlab_remote(url: &str) -> Option<(String, String)> {
+    let c = HOSTED_REMOTE.captures(url.trim())?;
+    c[1].to_lowercase()
+        .contains("gitlab")
+        .then(|| (c[1].to_string(), c[2].to_string()))
+}
+
+/// Which code host an `origin` URL is on: github.com, a GitLab host (gitlab.com or any host
+/// containing `gitlab`, like `host_cli_of`), or anything else. Pure.
+pub fn code_host(url: &str) -> CodeHost {
+    if GITHUB_REMOTE.is_match(url.trim()) {
+        CodeHost::Github
+    } else if gitlab_remote(url).is_some() {
+        CodeHost::Gitlab
+    } else {
+        CodeHost::Plain
+    }
+}
+
+/// The project a remote URL points at: `owner/name` on GitHub, the full group path (nested
+/// groups kept) on GitLab, or `None` for a plain remote. Pure (`remoteRepo` in `github.ts`).
 pub fn remote_repo(url: &str) -> Option<String> {
-    GITHUB_REMOTE.captures(url.trim()).map(|c| c[1].to_string())
+    if let Some(c) = GITHUB_REMOTE.captures(url.trim()) {
+        return Some(c[1].to_string());
+    }
+    gitlab_remote(url).map(|(_, path)| path)
 }
 
 fn git(repo_path: &Path) -> Command {
@@ -316,7 +354,10 @@ pub fn backlog_on_origin(repo_path: &Path, base_branch: &str, backlog_path: &str
 pub struct RepoCheck {
     pub is_git_repo: bool,
     pub github_repo: Option<String>,
-    pub gh_authenticated: bool,
+    /// The host's CLI (`gh` on GitHub, `glab` on GitLab) is signed in. Ignored for a plain remote.
+    pub host_cli_authenticated: bool,
+    /// `None` when the checkout has no `origin`.
+    pub code_host: Option<CodeHost>,
     /// The error text from `create_branch_if_missing`, when the GitHub workflow pattern asked
     /// for an integration branch and creating it failed. `None` when none was needed, or it
     /// succeeded.
@@ -333,11 +374,23 @@ pub fn repo_problems(check: &RepoCheck, base_branch: &str) -> Vec<String> {
         return vec!["The repo path isn't a git repo.".to_string()];
     }
     let mut problems = Vec::new();
-    if !check.gh_authenticated {
-        problems.push("gh isn't authenticated. Run `gh auth login`.".to_string());
-    }
-    if check.github_repo.is_none() {
-        problems.push("No GitHub remote found for this repo.".to_string());
+    // A plain remote is accepted: work merges with plain git and there are no pull requests,
+    // so it needs no CLI and isn't a problem.
+    match check.code_host {
+        Some(CodeHost::Plain) => {}
+        Some(CodeHost::Gitlab) => {
+            if !check.host_cli_authenticated {
+                problems.push("glab isn't authenticated. Run `glab auth login`.".to_string());
+            }
+        }
+        _ => {
+            if !check.host_cli_authenticated {
+                problems.push("gh isn't authenticated. Run `gh auth login`.".to_string());
+            }
+            if check.github_repo.is_none() {
+                problems.push("No GitHub remote found for this repo.".to_string());
+            }
+        }
     }
     if let Some(err) = &check.integration_branch_error {
         problems.push(err.clone());
@@ -370,8 +423,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_repo_is_none_for_a_non_github_host() {
-        assert_eq!(remote_repo("https://gitlab.com/Retaskable/retaskable-agent.git"), None);
+    fn remote_repo_is_none_for_a_plain_remote() {
+        assert_eq!(remote_repo("https://example.com/Retaskable/retaskable-agent.git"), None);
         assert_eq!(remote_repo("/local/path/repo.git"), None);
     }
 
@@ -448,6 +501,82 @@ mod tests {
     }
 
     #[test]
+    fn code_host_tells_the_hosts_apart() {
+        for (url, host) in [
+            ("https://github.com/o/r.git", CodeHost::Github),
+            ("git@github.com:o/r.git", CodeHost::Github),
+            ("https://gitlab.com/g/r.git", CodeHost::Gitlab),
+            ("git@gitlab.com:g/r.git", CodeHost::Gitlab),
+            ("https://gitlab.example.org/g/r", CodeHost::Gitlab),
+            ("ssh://git@code.gitlab.corp:2222/g/r.git", CodeHost::Gitlab),
+            ("ssh://example.com/x.git", CodeHost::Plain),
+            ("/local/path/repo.git", CodeHost::Plain),
+            ("gitlab-stuff/foo/bar", CodeHost::Plain),
+            ("file:///srv/gitlab/repo.git", CodeHost::Plain),
+        ] {
+            assert_eq!(code_host(url), host, "{url}");
+        }
+    }
+
+    #[test]
+    fn remote_repo_reads_gitlab_urls() {
+        assert_eq!(
+            remote_repo("https://gitlab.com/group/name.git").as_deref(),
+            Some("group/name")
+        );
+        assert_eq!(
+            remote_repo("git@gitlab.com:group/name.git").as_deref(),
+            Some("group/name")
+        );
+        assert_eq!(
+            remote_repo("https://gitlab.com/group/sub/name.git/").as_deref(),
+            Some("group/sub/name")
+        );
+        assert_eq!(
+            remote_repo("ssh://git@gitlab.example.org:2222/a/b/c").as_deref(),
+            Some("a/b/c")
+        );
+        assert_eq!(remote_repo("ssh://example.com/x.git"), None);
+    }
+
+    #[test]
+    fn find_checkout_matches_a_gitlab_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let _ = std::fs::remove_dir_all(&repo);
+        let gl = root.path().join("gl");
+        std::fs::create_dir_all(&gl).unwrap();
+        let run = |args: &[&str]| {
+            assert!(git(&gl).args(args).status().unwrap().success());
+        };
+        run(&["init", "-q"]);
+        run(&["remote", "add", "origin", "https://gitlab.com/group/sub/name.git"]);
+        assert_eq!(find_checkout(root.path(), "group/sub/name"), Some(gl));
+    }
+
+    #[test]
+    fn repo_problems_on_gitlab_and_plain() {
+        let mut check = RepoCheck {
+            is_git_repo: true,
+            github_repo: Some("g/r".to_string()),
+            code_host: Some(CodeHost::Gitlab),
+            ..Default::default()
+        };
+        assert_eq!(
+            repo_problems(&check, "main"),
+            vec!["glab isn't authenticated. Run `glab auth login`."]
+        );
+        check.host_cli_authenticated = true;
+        assert!(repo_problems(&check, "main").is_empty());
+        check = RepoCheck {
+            is_git_repo: true,
+            code_host: Some(CodeHost::Plain),
+            ..Default::default()
+        };
+        assert!(repo_problems(&check, "main").is_empty());
+    }
+
+    #[test]
     fn repo_problems_reports_not_a_git_repo_alone() {
         let check = RepoCheck {
             is_git_repo: false,
@@ -461,7 +590,8 @@ mod tests {
         let check = RepoCheck {
             is_git_repo: true,
             github_repo: Some("octocat/repo".to_string()),
-            gh_authenticated: true,
+            host_cli_authenticated: true,
+            code_host: Some(CodeHost::Github),
             integration_branch_error: None,
             backlog_on_origin: Some(true),
         };
@@ -473,7 +603,8 @@ mod tests {
         let check = RepoCheck {
             is_git_repo: true,
             github_repo: None,
-            gh_authenticated: false,
+            host_cli_authenticated: false,
+            code_host: None,
             integration_branch_error: Some("Couldn't create dev/octocat from main: no such ref".to_string()),
             backlog_on_origin: Some(false),
         };

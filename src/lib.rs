@@ -29,6 +29,7 @@ pub mod fs_util;
 pub mod galleries;
 pub mod git_bin;
 pub mod hello_settings;
+pub mod host_call;
 pub mod ideas;
 pub mod implementer;
 pub mod item_lifecycle;
