@@ -433,6 +433,11 @@ fn ideas_generate(cmd: &Command, project: &str, view: &AgentView) -> Value {
 
 /// `play { lane }` / `stop { lane }` (also `stop_play`) / `restart_play { lane }`.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if matches!(cmd.name.as_str(), "restart_play" | "stop_play")
+        && !view.item_commands.flag_on(project, "restart-play-command")
+    {
+        return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
+    }
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
     let result = if cmd.name == "restart_play" {
         restart_lane(view, project, lane)

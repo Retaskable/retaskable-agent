@@ -876,6 +876,13 @@ fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
     v.lanes = 2;
     let noop = |_: i32| {};
     let go = |name, args, v: &AgentView| run(&cmd(name, args), "one", &mut Seen::default(), v, &noop, &data_dir());
+    for name in ["restart_play", "stop_play"] {
+        assert_eq!(
+            go(name, json!({ "lane": 0 }), &v)["reason"],
+            format!("Not a command this agent takes yet: {name}")
+        );
+    }
+    v.item_commands.set_flag("one", "restart-play-command", true);
     assert_eq!(
         go("restart_play", json!({}), &v)["reason"],
         "restart_play needs a lane."
@@ -893,4 +900,37 @@ fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
         "No play command set for this project."
     );
     assert_eq!(go("stop_play", json!({}), &v)["reason"], "stop needs a lane.");
+}
+
+#[test]
+fn stop_play_stops_play_main_like_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let id = "cmd-stop-play";
+    let mut v = view();
+    v.projects[0].id = id.into();
+    v.projects[0].repo_path = crate::test_support::repo_with_origin(root.path());
+    v.projects[0].worktrees_dir = root.path().join("worktrees");
+    v.projects[0].base_branch = "main".into();
+    #[cfg(windows)]
+    let long = "ping -n 60 127.0.0.1 >nul";
+    #[cfg(not(windows))]
+    let long = "sleep 60";
+    v.projects[0].play_command = long.into();
+    v.item_commands.set_flag(id, "restart-play-command", true);
+    let noop = |_: i32| {};
+    let go = |name, v: &AgentView| {
+        run(
+            &cmd(name, json!({ "lane": 0 })),
+            id,
+            &mut Seen::default(),
+            v,
+            &noop,
+            &data_dir(),
+        )
+    };
+    assert_eq!(go("stop_play", &v)["reason"], "Play main isn't running.");
+    assert_eq!(go("play", &v)["type"], "ack");
+    assert!(crate::play::running(id));
+    assert_eq!(go("stop_play", &v)["type"], "ack");
+    assert!(!crate::play::running(id));
 }
