@@ -15,6 +15,7 @@ pub mod asks;
 pub mod drafts;
 pub mod failures;
 pub mod runs;
+pub mod settings;
 pub mod suggestions;
 
 use crate::env::Env;
