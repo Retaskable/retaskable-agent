@@ -37,6 +37,7 @@ mod claim;
 mod ideas_daily;
 mod ideas_round;
 mod machine;
+mod spawn;
 mod mode;
 mod panic;
 mod playtest_owed;
@@ -61,7 +62,8 @@ mod vet_daily;
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
 pub(crate) use machine::repo_id;
-pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
+pub use machine::{Links, Machine, Shared};
+pub use spawn::{SpawnArgs, spawn_all};
 use project::Launch;
 pub use project::{
     Abandon, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
