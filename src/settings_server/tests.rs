@@ -408,18 +408,21 @@ async fn link_lists_the_three_environments_and_which_one_is_connected() {
     assert_eq!(production["connected"], json!(false));
 }
 
-async fn backlog_link_body(settings: Arc<SettingsServer>) -> Value {
+async fn backlog_link_signed_in(settings: Arc<SettingsServer>) -> axum::response::Response {
     let app = app(settings.clone());
     let (cookie, _csrf) = sign_in(&app, &settings).await;
-    let res = app
-        .oneshot(
-            request("GET", "/api/backlog/link")
-                .header("Cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    app.oneshot(
+        request("GET", "/api/backlog/link")
+            .header("Cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn backlog_link_body(settings: Arc<SettingsServer>) -> Value {
+    let res = backlog_link_signed_in(settings).await;
     assert_eq!(res.status(), StatusCode::OK);
     json_body(res).await
 }
@@ -438,17 +441,7 @@ async fn backlog_link_without_a_session_is_refused() {
 #[tokio::test]
 async fn backlog_link_is_a_404_with_the_flag_off() {
     let (settings, _dir) = test_server();
-    let app = app(settings.clone());
-    let (cookie, _csrf) = sign_in(&app, &settings).await;
-    let res = app
-        .oneshot(
-            request("GET", "/api/backlog/link")
-                .header("Cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let res = backlog_link_signed_in(settings).await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
