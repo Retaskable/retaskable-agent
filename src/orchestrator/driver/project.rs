@@ -528,7 +528,7 @@ impl ProjectLoop {
             0
         };
         let payload = tick_payload(paused, pool, sessions);
-        let would: Vec<String> = actions.iter().map(describe).collect();
+        let would: Vec<String> = actions.iter().map(super::start_gate::describe).collect();
         let decision = match actions.first() {
             None if paused => "paused: would do nothing".to_string(),
             None => "would do nothing".to_string(),
@@ -991,13 +991,5 @@ impl ProjectLoop {
                 .collect();
         }
         started
-    }
-}
-
-fn describe(action: &Action) -> String {
-    match action {
-        Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
-        Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
-        Action::AskForWork => "ask_for_work".into(),
     }
 }

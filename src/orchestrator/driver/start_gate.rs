@@ -179,3 +179,12 @@ impl ProjectLoop {
         self.live.set_limit(&self.id, resets);
     }
 }
+
+/// One line saying what an action would do, for the dry-run log.
+pub(super) fn describe(action: &Action) -> String {
+    match action {
+        Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
+        Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
+        Action::AskForWork => "ask_for_work".into(),
+    }
+}
