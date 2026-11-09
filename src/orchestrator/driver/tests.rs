@@ -908,6 +908,7 @@ mod drafts;
 mod fix_main;
 mod follow;
 mod gallery_feedback;
+mod host_call_undefined;
 mod idea_accept;
 mod ideas;
 mod ideas_daily;
