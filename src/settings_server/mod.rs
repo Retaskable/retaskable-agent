@@ -88,6 +88,8 @@ pub struct SettingsServer {
     status: OnceLock<StatusSource>,
     /// Fired after a save, so every project's connection sends a fresh hello (given once at start).
     saved: OnceLock<HelloSettings>,
+    /// The running agent's device-link state, for `GET /api/backlog/link`'s `waiting` (given once at start).
+    links: OnceLock<link::pending::Links>,
 }
 
 impl SettingsServer {
@@ -125,6 +127,7 @@ impl SettingsServer {
             state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
             saved: OnceLock::new(),
+            links: OnceLock::new(),
         }
     }
 
@@ -158,6 +161,11 @@ impl SettingsServer {
     /// The signal a successful save fires.
     pub fn set_saved_signal(&self, signal: HelloSettings) {
         let _ = self.saved.set(signal);
+    }
+
+    /// Gives `GET /api/backlog/link` the running agent's device-link state; with none, `waiting` is null.
+    pub fn set_links(&self, links: link::pending::Links) {
+        let _ = self.links.set(links);
     }
 
     fn current_settings(&self) -> Result<Value> {
@@ -253,6 +261,19 @@ impl SettingsServer {
             .collect();
         Ok(json!({ "environments": environments }))
     }
+
+    /// `GET /api/backlog/link`: whether this machine holds a token for the shared backlog's store, the
+    /// store's address, and the approval page while a device-link code waits.
+    fn backlog_link_view(&self) -> Value {
+        let url = crate::backlog::url(&self.env);
+        let linked = matches!(self.keychain.get(&url), Ok(Some(_)));
+        let waiting = self
+            .links
+            .get()
+            .and_then(|l| l.backlog())
+            .map(|w| json!({ "url": w.page_url, "label": w.label }));
+        json!({ "linked": linked, "url": url, "waiting": waiting })
+    }
 }
 
 /// The 404 for a path this agent doesn't serve. A request the Host/Origin checks refuse gets the
@@ -271,6 +292,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
+        .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(settings.clone(), security_envelope))
@@ -385,6 +407,13 @@ async fn get_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMa
         Ok(value) => Json(value).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+async fn get_backlog_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+    if settings.authenticate(&headers).is_none() {
+        return unauthorized("Sign in first.");
+    }
+    Json(settings.backlog_link_view()).into_response()
 }
 
 /// `GET /api/profile?fresh=1`: every read already calls `gh api user` fresh (no cache here for

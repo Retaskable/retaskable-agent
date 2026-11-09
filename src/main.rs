@@ -592,6 +592,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .await,
     );
     settings.set_saved_signal(view.settings.clone());
+    settings.set_links(links.clone());
     // `tags-reread-on-save`: a save on the settings page changes the list the next ask carries.
     {
         let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
