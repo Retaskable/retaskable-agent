@@ -354,10 +354,12 @@ fn retry_queues_start_over_with_the_same_checks_and_pictures() {
             notes: Some("Go again.".into())
         }]
     );
-    assert!(run(json!({ "id": " " }))["reason"]
-        .as_str()
-        .unwrap()
-        .contains("Start over"));
+    assert!(
+        run(json!({ "id": " " }))["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Start over")
+    );
     assert_eq!(run(json!({ "id": "a", "pictures": [picture(10)] }))["type"], "ack");
     let ItemCommand::StartOver { notes, .. } = v.item_commands.take("one").remove(0) else {
         panic!()
@@ -378,10 +380,12 @@ fn retry_queues_start_over_with_the_same_checks_and_pictures() {
 #[test]
 fn continue_needs_an_id_and_claim_mode() {
     let v = claiming();
-    assert!(go(&v, json!({}), &data_dir())["reason"]
-        .as_str()
-        .unwrap()
-        .contains("id"));
+    assert!(
+        go(&v, json!({}), &data_dir())["reason"]
+            .as_str()
+            .unwrap()
+            .contains("id")
+    );
     assert!(go(&v, json!({ "id": "  " }), &data_dir())["type"] == "nack");
     let off = view();
     let answer = go(&off, json!({ "id": "a" }), &data_dir());

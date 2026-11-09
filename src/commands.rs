@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::galleries;
 use crate::paths;
@@ -653,7 +653,7 @@ fn gallery_read(cmd: &Command, project: &str, data_dir: &Path) -> Value {
 /// the draft's PR branch, and answers with the files listed again (`answer.files`). Nothing on retaskable.com sends
 /// it yet. `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
 fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    use crate::drafts::actions::{branch_of, edit, Where};
+    use crate::drafts::actions::{Where, branch_of, edit};
     let arg = |k: &str| cmd.args.get(k).and_then(Value::as_str);
     let id = arg("id").map(str::trim).unwrap_or("");
     if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
