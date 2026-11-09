@@ -184,3 +184,61 @@ async fn without_step_events_complete_the_checks_are_left_out() {
     assert_eq!(ends.len(), 1);
     assert!(ends[0].get("checks").is_none());
 }
+
+fn review_detail() -> StepDetail {
+    StepDetail {
+        lines: Some(40),
+        scouts: Some(2),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_reviewing_step_writes_its_lines_and_scouts() {
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    complete_on(&mut rig);
+    let fake = rig.go_live();
+    *fake.detail.lock().unwrap() = review_detail();
+    at(&mut rig, 0, "a", ItemState::Reviewing, Some(1));
+    rig.machine.poll().await;
+    settle().await;
+    rig.machine.poll().await;
+    let end = step_events(&mut rig, "step_end").remove(0);
+    assert_eq!((end["lines"].as_u64(), end["scouts"].as_u64()), (Some(40), Some(2)));
+}
+
+#[tokio::test]
+async fn a_checking_step_end_has_no_lines_or_scouts() {
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    complete_on(&mut rig);
+    let fake = rig.go_live();
+    *fake.detail.lock().unwrap() = two_checks();
+    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
+    rig.machine.poll().await;
+    settle().await;
+    rig.machine.poll().await;
+    let end = step_events(&mut rig, "step_end").remove(0);
+    assert!(end.get("lines").is_none() && end.get("scouts").is_none());
+}
+
+#[tokio::test]
+async fn a_panicked_review_step_end_has_no_lines_or_scouts() {
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    complete_on(&mut rig);
+    let fake = rig.go_live();
+    *fake.detail.lock().unwrap() = review_detail();
+    fake.step_panics.store(true, Ordering::SeqCst);
+    at(&mut rig, 0, "a", ItemState::Reviewing, Some(1));
+    rig.machine.poll().await;
+    settle().await;
+    rig.machine.poll().await;
+    let end = step_events(&mut rig, "step_end").remove(0);
+    assert_eq!(
+        (end["ok"].as_bool(), end["outcome"].as_str()),
+        (Some(false), Some("panicked"))
+    );
+    assert!(end.get("lines").is_none() && end.get("scouts").is_none());
+}
