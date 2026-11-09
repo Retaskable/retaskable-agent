@@ -42,6 +42,11 @@ impl ProjectLoop {
         mut room: u32,
         shared: &mut Shared<'_>,
     ) {
+        let on = self.flags.on("playtest-answer-command").await;
+        shared
+            .links
+            .item_commands
+            .set_flag(&self.id, "playtest-answer-command", on);
         for command in shared.links.item_commands.take(&self.id) {
             if let ItemCommand::Continue { item, .. }
             | ItemCommand::StartOver { item, .. }
@@ -58,6 +63,10 @@ impl ProjectLoop {
                 }
                 ItemCommand::Ideas { fresh, .. } => {
                     self.ideas_command(fresh, shared.links).await;
+                    continue;
+                }
+                ItemCommand::Playtest { id, .. } => {
+                    tracing::info!("{}: dropped a playtest answer for {id}: not carried out yet", self.id);
                     continue;
                 }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } => continue,
