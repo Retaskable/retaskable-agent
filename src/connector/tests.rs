@@ -265,6 +265,15 @@ async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved
 
 #[tokio::test]
 async fn hello_is_sent_again_when_the_setup_checks_change_and_not_when_a_rerun_is_equal() {
+    changed_checks(true).await;
+}
+
+#[tokio::test]
+async fn no_hello_is_sent_for_changed_setup_checks_while_the_flag_is_off() {
+    changed_checks(false).await;
+}
+
+async fn changed_checks(flag_on: bool) {
     use crate::setup_check::{SetupCheck, SetupChecks};
     let signed_in = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = signed_in.clone();
@@ -287,6 +296,13 @@ async fn hello_is_sent_again_when_the_setup_checks_change_and_not_when_a_rerun_i
     });
     let mut v = view(&["one"]);
     Arc::get_mut(&mut v).unwrap().checks = Arc::new(crate::setup_check::SetupCheckRunner::with_probe(probe));
+    let flags = crate::flags::Flags::fixed(if flag_on { &["setup-check-command"] } else { &[] });
+    Arc::get_mut(&mut v).unwrap().settings = crate::hello_settings::HelloSettings::new(
+        std::path::PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        Arc::new(flags),
+    );
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let c = start_connector(&url, store, &v, dir.path());
@@ -295,6 +311,14 @@ async fn hello_is_sent_again_when_the_setup_checks_change_and_not_when_a_rerun_i
     assert!(hello.get("checks").is_none());
     assert_eq!(read(&mut a).await["type"], "snapshot");
     v.checks.run_now().await;
+    if !flag_on {
+        signed_in.store(true, std::sync::atomic::Ordering::SeqCst);
+        v.checks.run_now().await;
+        let quiet = tokio::time::timeout(Duration::from_millis(300), read_not_alive(&mut a)).await;
+        assert!(quiet.is_err(), "no hello while the flag is Off");
+        c.stop(Duration::from_secs(1)).await;
+        return;
+    }
     let hello = read_not_alive(&mut a).await;
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["checks"]["claudeSignedIn"]["ok"], Value::Null);
