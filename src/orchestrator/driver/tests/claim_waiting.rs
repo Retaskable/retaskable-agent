@@ -142,3 +142,65 @@ async fn an_empty_list_after_a_save_is_left_out_of_the_body() {
     assert_eq!(tags[0], json!(["web"]));
     assert_eq!(tags[1], Value::Null);
 }
+
+fn both_flags() -> Arc<crate::flags::Flags> {
+    Arc::new(crate::flags::Flags::fixed(&[
+        "claim-next-waiting",
+        "tags-reread-on-save",
+    ]))
+}
+
+#[tokio::test]
+async fn with_the_tags_flag_on_a_wake_with_no_tag_change_asks_nothing() {
+    let (base, asked, _) = stub(json!({ "waitingFor": ["gpu"] })).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = both_flags();
+    rig.go_live();
+    rig.machine.pass().await;
+    let id = rig.machine.projects[0].id.clone();
+    rig.machine.links.work.wake(&id);
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(claims(&asked), 1, "the wake is used up, nothing asked");
+    assert_eq!(waiting_events(&mut rig).len(), 1);
+    let kinds: Vec<_> = rig
+        .lp(0)
+        .events()
+        .recent()
+        .iter()
+        .map(|e| e.kind().to_string())
+        .collect();
+    assert!(!kinds.iter().any(|k| k == "store_error"), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn a_save_then_several_wakes_ask_once_with_the_new_tags() {
+    let (base, asked, answer) = stub(json!({ "waitingFor": ["gpu"] })).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = both_flags();
+    rig.machine.links.tags = vec!["web".to_string()].into();
+    rig.go_live();
+    rig.machine.pass().await;
+    *answer.lock().unwrap() = json!([]);
+    rig.machine.links.tags.set(vec!["gpu".to_string(), "web".to_string()]);
+    let id = rig.machine.projects[0].id.clone();
+    rig.machine.links.work.wake(&id);
+    rig.machine.links.work.wake(&id);
+    rig.machine.pass().await;
+    assert_eq!(claims(&asked), 2, "exactly one new ask");
+    assert_eq!(claim_tags(&asked)[1], json!(["gpu", "web"]));
+}
+
+#[tokio::test]
+async fn a_wake_for_a_project_that_is_not_waiting_asks_as_before() {
+    let (base, asked, _) = stub(json!([])).await;
+    let mut rig = rig(2, &[&base]);
+    rig.lp(0).flags = both_flags();
+    rig.go_live();
+    rig.machine.pass().await;
+    let before = claims(&asked);
+    let id = rig.machine.projects[0].id.clone();
+    rig.machine.links.work.wake(&id);
+    rig.machine.pass().await;
+    assert!(claims(&asked) > before);
+}

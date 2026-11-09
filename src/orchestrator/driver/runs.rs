@@ -213,11 +213,15 @@ impl RunLoop {
 impl ProjectLoop {
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
-    pub(super) fn hear_work_wake(&mut self, shared: &Shared<'_>) {
+    /// With `tags-reread-on-save` On a wake ends a wait only when the tag list changed since the ask that got
+    /// the wait (`tags_seen`, set at each ask); otherwise it is used up and nothing is asked.
+    pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>) {
         // A re-read that changed the tags ends the waits too: the next ask carries the new list.
         let generation = shared.links.tags.generation();
         let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
-        if tags_changed | shared.links.work.signal(&self.id).notified().now_or_never().is_some() {
+        let woke = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
+        let wake_counts = woke && !self.flags.on("tags-reread-on-save").await;
+        if tags_changed | wake_counts {
             self.run_loop.waiting = false;
             self.claim_waiting = false;
         }
@@ -230,7 +234,7 @@ impl ProjectLoop {
             return;
         };
         let token = Some(token.as_str());
-        self.hear_work_wake(shared);
+        self.hear_work_wake(shared).await;
         while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
             if !self.run_loop.runs.add_process(&run, tree.clone()) {
                 tree.cut();
@@ -378,6 +382,7 @@ impl ProjectLoop {
         now: Instant,
     ) -> bool {
         let start = self.start_rules(pool, shared, now).await;
+        self.tags_seen = shared.links.tags.generation();
         let agent = RunTakeAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
