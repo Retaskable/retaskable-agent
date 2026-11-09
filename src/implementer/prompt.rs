@@ -11,7 +11,7 @@ use crate::config::{CheckConfig, CodeGates, ProjectType};
 use crate::decisions::{Decision, decisions_text};
 use crate::prompt::{project_words, render_prompt};
 use crate::runs::chore::{Chore, ChoreKind};
-use crate::text::capitalize;
+use crate::text::{capitalize, is_blank};
 
 /// `checksText` (agent/src/steps.ts): the prompt's bulleted list of a project's checks, one per
 /// line, or a line saying there are none.
@@ -442,7 +442,7 @@ pub fn build_chore_prompt(template: &str, chore: &Chore, p: &PiecePrompt<'_>) ->
             .and_then(|n| n.get("what"))
             .and_then(|w| w.as_str()),
     ) {
-        (true, Some(w)) if !w.trim().is_empty() => format!("## What to fix\n\n{}", w.trim()),
+        (true, Some(w)) if !is_blank(w) => format!("## What to fix\n\n{}", w.trim()),
         (true, _) => {
             "## What to fix\n\nThe change needs fixing; read its failing checks and conflicts on the pushed branch."
                 .into()

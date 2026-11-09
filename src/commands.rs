@@ -13,6 +13,7 @@
 //! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **gallery_index** / **gallery_image** (a gallery's last shoot, read off disk, behind the `gallery-read-commands` flag), **gallery_feedback** (a gallery's feedback, queued for the loop as a spec draft, behind the `gallery-feedback-command` flag, `orchestrator::driver::gallery_feedback`), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
+use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -549,7 +550,7 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
             };
             let (project, lane) = (project.to_string(), k as u32);
             if play {
-                if p.play_command.trim().is_empty() {
+                if is_blank(&p.play_command) {
                     return Err("No play command set for this project.".to_string());
                 }
                 view.item_commands.push(ItemCommand::Play { project, lane });
@@ -581,7 +582,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
             let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
-            if p.play_command.trim().is_empty() {
+            if is_blank(&p.play_command) {
                 return Err("No play command set for this project.".to_string());
             }
             view.item_commands.push(ItemCommand::RestartPlay {

@@ -1,6 +1,7 @@
 //! A local-only project: a git repo with no remote at all (`suggest`/`validate` in
 //! `agent/src/setup.ts`). `repo::repo_info` and `repo::repo_problems` use these.
 
+use crate::text::is_blank;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -11,7 +12,7 @@ use crate::repo::git;
 /// counts as having one.
 pub fn has_remote(repo_path: &Path) -> bool {
     match git(repo_path).arg("remote").output() {
-        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        Ok(o) if o.status.success() => !is_blank(&String::from_utf8_lossy(&o.stdout)),
         _ => true,
     }
 }

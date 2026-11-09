@@ -1,5 +1,6 @@
 //! The `watch` run (docs/specs/pieces.md section 3.2): it takes no lane, reads the piece's change's checks every
 //! 15 seconds until they settle, and ends `green`, `red` or `failed`. The reading and deciding are `ci_watch`'s.
+use crate::text::is_blank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -73,7 +74,7 @@ impl RunStarter for WatchRuns {
 /// The change as `gh pr checks` takes it: a number or a URL. `None` when the piece has none.
 pub(super) fn change_ref(change: &Value) -> Option<String> {
     match change {
-        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Value::String(s) if !is_blank(s) => Some(s.trim().to_string()),
         Value::Number(n) => Some(n.to_string()),
         Value::Object(o) => ["number", "url"].iter().find_map(|k| change_ref(o.get(*k)?)),
         _ => None,

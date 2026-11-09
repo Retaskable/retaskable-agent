@@ -1,6 +1,7 @@
 //! The per-session `EngineReader` for Cursor: the final message's own fenced `json` block (or
 //! last top-level object) becomes the structured result, checked against the session's schema
 //! (`cursor.reader(spec, sessionId)` in Retaskable.com).
+use crate::text::is_blank;
 use serde_json::Value;
 
 use crate::engines::engine::{EngineReader, SessionResult, exited_without_result};
@@ -54,7 +55,7 @@ impl EngineReader for CursorReader {
         let raw = event
             .get("result")
             .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
+            .filter(|s| !is_blank(s))
             .map(str::to_string)
             .unwrap_or_else(|| self.last_text.clone());
         let structured = if is_error { None } else { extract_json(&raw) };

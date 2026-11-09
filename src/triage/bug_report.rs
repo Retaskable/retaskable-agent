@@ -13,7 +13,7 @@ use regex::{Match, Regex, RegexBuilder};
 
 use crate::config::ProjectConfig;
 use crate::link::machine_name;
-use crate::text::{collapse_whitespace, truncate};
+use crate::text::{collapse_whitespace, is_blank, truncate};
 
 use super::{KnownBug, RetaskableBug};
 
@@ -50,7 +50,7 @@ pub fn prepare_bug_report(
     needs_human_reason: Option<&str>,
     words: &[ScrubWord],
 ) -> Option<PreparedBugReport> {
-    if bug.title.trim().is_empty() {
+    if is_blank(&bug.title) {
         return None;
     }
     let signature_source = needs_human_reason

@@ -4,6 +4,7 @@
 //! the base checkout ([`crate::base_hold::hold_base`]) for as long as it runs, so Shoot is refused meanwhile,
 //! and it is refused while Shoot holds it. `stop` kills its process tree.
 
+use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
@@ -30,7 +31,7 @@ pub fn running(project: &str) -> bool {
 /// Starts Play main: takes the base checkout, moves it to `origin/<baseBranch>`, and runs
 /// `playCommand` there on its own thread. `Ok` once the process has started.
 pub fn start(project: &str, p: &ProjectView) -> Result<(), String> {
-    if p.play_command.trim().is_empty() {
+    if is_blank(&p.play_command) {
         return Err("No play command set for this project.".to_string());
     }
     if running(project) {
