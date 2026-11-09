@@ -267,20 +267,30 @@ pub(super) fn parse_cookie(header: &str, name: &str) -> Option<String> {
 }
 
 /// Splits a Host header into its hostname and, when one is given, its port. An IPv6 literal
-/// (`[::1]` or `[::1]:4700`) keeps its brackets as part of the hostname, same as a browser sends.
+/// (`[::1]` or `[::1]:4700`) keeps its brackets as part of the hostname, same as a browser sends. A port that isn't
+/// a number up to 65535 leaves the whole header as the host, which no allowed name matches.
 pub(super) fn split_host_port(host_header: &str) -> (&str, Option<u16>) {
     if let Some(after_bracket) = host_header.strip_prefix('[') {
         return match after_bracket.find(']') {
             Some(end) => {
                 let host = &host_header[..end + 2];
-                let port = after_bracket[end + 1..].strip_prefix(':').and_then(|p| p.parse().ok());
-                (host, port)
+                match after_bracket[end + 1..].strip_prefix(':') {
+                    None => (host, None),
+                    Some(p) => match p.parse() {
+                        Ok(port) if p.chars().all(|c| c.is_ascii_digit()) => (host, Some(port)),
+                        _ => (host_header, None),
+                    },
+                }
             }
             None => (host_header, None),
         };
     }
     match host_header.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => (host, port.parse().ok()),
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => match port.parse() {
+            Ok(port) => (host, Some(port)),
+            // Too big for a port: not a Host this agent answers, rather than "no port" skipping the check.
+            Err(_) => (host_header, None),
+        },
         _ => (host_header, None),
     }
 }
