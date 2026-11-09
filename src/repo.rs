@@ -4,7 +4,10 @@
 //! organisations') `gh repo list` repos, or, on GitLab, the person's and their groups' `glab repo
 //! list` repos (`repo_gitlab`). Telling GitHub, GitLab and plain git remotes apart (`code_host`)
 //! is ported, and `repo_info`, `list_owners`, `list_repos` and `clone_repo` use `gh` or `glab` to
-//! match; a plain remote has no CLI, so listing it is an error. A local-only project and the full `GithubPicker`'s caching and
+//! match. A plain remote is handled with git alone (`repo_info` reads its default branch with `git
+//! ls-remote --symref`, `remote_reachable` checks it, `clone_remote` clones it, `find_checkout`
+//! matches it by its normalised URL), and it has no owner list, so listing it is an error. A
+//! local-only project and the full `GithubPicker`'s caching and
 //! clone-serialising lock aren't, since this agent's trimmed spec doesn't reach them yet.
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -80,7 +83,10 @@ pub fn repo_info(repo_path: &Path) -> RepoInfo {
     let mut info = match host {
         CodeHost::Github => github_repo_info(repo_path),
         CodeHost::Gitlab => crate::repo_gitlab::repo_info("glab", repo_path),
-        CodeHost::Plain => RepoInfo::default(),
+        CodeHost::Plain => RepoInfo {
+            default_branch: plain_default_branch(repo_path),
+            ..RepoInfo::default()
+        },
     };
     info.origin_url = Some(url);
     info.code_host = Some(host);
@@ -110,6 +116,28 @@ fn github_repo_info(repo_path: &Path) -> RepoInfo {
         upstream,
         ..RepoInfo::default()
     }
+}
+
+/// A plain remote's default branch: `git ls-remote --symref origin HEAD`'s `ref: refs/heads/<b>`.
+fn plain_default_branch(repo_path: &Path) -> Option<String> {
+    let output = git(repo_path)
+        .args(["ls-remote", "--symref", "origin", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("ref: refs/heads/"))
+        .and_then(|l| l.split('\t').next())
+        .map(str::to_string)
+}
+
+/// Whether `origin` answers `git ls-remote origin` (the Setup check for a plain remote).
+pub fn remote_reachable(repo_path: &Path) -> bool {
+    git(repo_path)
+        .args(["ls-remote", "origin"])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// A fork's parent and its default branch (`upstreamOf` in `setup.ts`).
@@ -302,17 +330,27 @@ pub fn origin_url(repo_path: &Path) -> Option<String> {
     (!url.is_empty()).then_some(url)
 }
 
-/// A checkout of `github_repo` among `search_dir`'s immediate subfolders: the first one whose
-/// `origin` remote matches, found by its `.git` folder (a narrowed `findCheckouts` in
+/// What identifies a remote: its project path on GitHub or GitLab, else the URL with a trailing
+/// `/` and `.git` dropped (a plain remote).
+fn remote_identity(url: &str) -> String {
+    remote_repo(url).unwrap_or_else(|| {
+        let u = url.trim().trim_end_matches('/');
+        u.strip_suffix(".git").unwrap_or(u).to_string()
+    })
+}
+
+/// A checkout of `github_repo` (or of a plain remote's URL) among `search_dir`'s immediate
+/// subfolders: the first one whose `origin` remote matches, found by its `.git` folder (a narrowed `findCheckouts` in
 /// `github.ts`, over one folder rather than every configured project folder).
 pub fn find_checkout(search_dir: &Path, github_repo: &str) -> Option<PathBuf> {
+    let wanted = remote_identity(github_repo);
     let entries = std::fs::read_dir(search_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.join(".git").exists() {
             continue;
         }
-        if origin_url(&path).as_deref().and_then(remote_repo).as_deref() == Some(github_repo) {
+        if origin_url(&path).as_deref().map(remote_identity).as_deref() == Some(wanted.as_str()) {
             return Some(path);
         }
     }
@@ -337,6 +375,23 @@ fn clone_github(github_repo: &str, dest: &Path) -> Result<()> {
     if !output.status.success() {
         bail!(
             "Couldn't clone {github_repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Clones a plain remote's `url` into `dest` with `git clone`.
+pub fn clone_remote(url: &str, dest: &Path) -> Result<()> {
+    let cwd = dest.parent().filter(|p| p.is_dir()).unwrap_or(Path::new("."));
+    let output = git(cwd)
+        .args(["clone", url])
+        .arg(dest)
+        .output()
+        .context("running git clone")?;
+    if !output.status.success() {
+        bail!(
+            "Couldn't clone {url}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -486,6 +541,48 @@ mod tests {
     fn remote_repo_is_none_for_a_plain_remote() {
         assert_eq!(remote_repo("https://example.com/Retaskable/retaskable-agent.git"), None);
         assert_eq!(remote_repo("/local/path/repo.git"), None);
+    }
+
+    #[test]
+    fn a_plain_remote_is_handled_with_git_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let info = repo_info(&repo);
+        assert_eq!(info.github_repo, None);
+        assert_eq!(info.default_branch.as_deref(), Some("main"));
+        assert!(remote_reachable(&repo));
+        let gone = tempfile::tempdir().unwrap();
+        let broken = repo_with_origin(gone.path());
+        git(&broken)
+            .args(["remote", "set-url", "origin"])
+            .arg(gone.path().join("missing.git"))
+            .output()
+            .unwrap();
+        assert!(!remote_reachable(&broken));
+    }
+
+    #[test]
+    fn clone_remote_makes_a_findable_checkout_with_no_problems() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let url = origin_url(&repo).unwrap();
+        let search = root.path().join("projects");
+        std::fs::create_dir(&search).unwrap();
+        let dest = search.join("clone");
+        clone_remote(&url, &dest).unwrap();
+        assert_eq!(origin_url(&dest).as_deref(), Some(url.as_str()));
+        assert_eq!(find_checkout(&search, &url), Some(dest.clone()));
+        assert_eq!(find_checkout(&search, &format!("{url}/")), Some(dest.clone()));
+        let check = RepoCheck {
+            is_git_repo: true,
+            github_repo: repo_info(&dest).github_repo,
+            code_host: Some(code_host(&url)),
+            ..RepoCheck::default()
+        };
+        assert!(repo_problems(&check, "main").is_empty());
+        assert!(backlog_on_origin(&dest, "main", "README.md").unwrap());
+        assert!(create_branch_if_missing(&dest, "dev/x", "main").unwrap());
+        assert!(clone_remote(&url, &dest).is_err());
     }
 
     #[test]
