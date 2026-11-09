@@ -100,3 +100,26 @@ fn repo_calls_refuse_an_undefined_owner_for_every_project() {
     assert!(format!("{err:#}").contains("gh was not run"), "{err:#}");
     refused(d.path(), "gh", "undefined");
 }
+
+#[test]
+fn implementer_and_draft_calls_refuse_an_undefined_argument() {
+    let d = tempfile::tempdir().unwrap();
+    let gh = fake(d.path(), "gh");
+    on(d.path());
+    let err = crate::implementer::publish::close_change(&gh, d.path(), "", "c");
+    assert!(err.unwrap_err().to_string().contains("was undefined"));
+    refused(d.path(), "gh", "--head");
+    let err = crate::implementer::abandon::abandon(&gh, &gh, d.path(), None, Some("undefined"));
+    assert!(err.unwrap_err().to_string().contains("was undefined"));
+    refused(d.path(), "gh", "undefined");
+}
+
+#[tokio::test]
+async fn release_notes_gather_refuses_an_empty_repo() {
+    let d = tempfile::tempdir().unwrap();
+    let gh = fake(d.path(), "gh");
+    on(d.path());
+    let err = crate::release_notes::gather::gather_merged_prs(&gh, d.path(), "", "main", "a", "b", 5).await;
+    assert!(err.unwrap_err().to_string().contains("was undefined"));
+    refused(d.path(), "gh", "--repo");
+}

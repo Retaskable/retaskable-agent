@@ -56,11 +56,14 @@ pub fn deletes_head(branch: &str) -> bool {
 
 /// `gh pr merge <pr> --squash [--delete-branch]`, run in the project's checkout.
 pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch: bool) -> Result<()> {
-    let mut cmd = Command::new(gh);
-    cmd.current_dir(dir).args(["pr", "merge", &pr.to_string(), method_flag]);
+    let n = pr.to_string();
+    let mut args = vec!["pr", "merge", n.as_str(), method_flag];
     if delete_branch {
-        cmd.arg("--delete-branch");
+        args.push("--delete-branch");
     }
+    crate::host_call::guard_program(gh, Some(dir), &args)?;
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(args);
     run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ())
 }
 
@@ -78,9 +81,11 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
 
 /// `gh pr close <pr> --delete-branch`, run in the project's checkout.
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
+    let n = pr.to_string();
+    let args = ["pr", "close", n.as_str(), "--delete-branch"];
+    crate::host_call::guard_program(gh, Some(dir), &args)?;
     let mut cmd = Command::new(gh);
-    cmd.current_dir(dir)
-        .args(["pr", "close", &pr.to_string(), "--delete-branch"]);
+    cmd.current_dir(dir).args(args);
     run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
 }
 

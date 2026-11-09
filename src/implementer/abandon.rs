@@ -11,13 +11,16 @@ use super::publish::run;
 /// Closes `pr_url`, or drops `branch` when there is no PR. `git` and `gh` are parameters so tests can fake them.
 pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url: Option<&str>) -> Result<()> {
     if let Some(pr) = pr_url {
+        let args = ["pr", "view", pr, "--json", "state", "--jq", ".state"];
+        crate::host_call::guard_program(gh, Some(repo), &args)?;
         let mut view = Command::new(gh);
-        view.current_dir(repo)
-            .args(["pr", "view", pr, "--json", "state", "--jq", ".state"]);
+        view.current_dir(repo).args(args);
         // Only an open PR is closed: a merged slice stays as it is, and a closed one needs nothing.
         if run(view, None, "gh pr view")?.trim() == "OPEN" {
+            let args = ["pr", "close", pr];
+            crate::host_call::guard_program(gh, Some(repo), &args)?;
             let mut close = Command::new(gh);
-            close.current_dir(repo).args(["pr", "close", pr]);
+            close.current_dir(repo).args(args);
             run(close, None, "gh pr close")?;
         }
         return Ok(());

@@ -44,8 +44,7 @@ pub(crate) fn run(mut cmd: Command, stdin: Option<&str>, what: &str) -> Result<S
 
 /// The first open PR for `branch`, if any.
 fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
-    let mut list = Command::new(gh);
-    list.current_dir(dir).args([
+    let args = [
         "pr",
         "list",
         "--head",
@@ -54,7 +53,10 @@ fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
         "open",
         "--json",
         "number,url",
-    ]);
+    ];
+    crate::host_call::guard_program(gh, Some(dir), &args)?;
+    let mut list = Command::new(gh);
+    list.current_dir(dir).args(args);
     let listed = run(list, None, "gh pr list")?;
     let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
     Ok(open.into_iter().next())
@@ -87,8 +89,7 @@ pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &s
             created: false,
         });
     }
-    let mut create = Command::new(gh);
-    create.current_dir(dir).args([
+    let args = [
         "pr",
         "create",
         "--base",
@@ -99,7 +100,10 @@ pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &s
         title,
         "--body-file",
         "-",
-    ]);
+    ];
+    crate::host_call::guard_program(gh, Some(dir), &args)?;
+    let mut create = Command::new(gh);
+    create.current_dir(dir).args(args);
     let made = run(create, Some(body), "gh pr create")?;
     let url = made
         .lines()
@@ -127,10 +131,11 @@ pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Resul
     let Some(pr) = open_change(gh, dir, branch)? else {
         return Ok(false);
     };
+    let n = pr.number.to_string();
+    let args = ["pr", "close", n.as_str(), "--comment", comment];
+    crate::host_call::guard_program(gh, Some(dir), &args)?;
     let mut close = Command::new(gh);
-    close
-        .current_dir(dir)
-        .args(["pr", "close", &pr.number.to_string(), "--comment", comment]);
+    close.current_dir(dir).args(args);
     run(close, None, "gh pr close")?;
     Ok(true)
 }
