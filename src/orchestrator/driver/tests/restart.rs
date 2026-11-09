@@ -421,48 +421,65 @@ async fn a_restart_readopts_the_other_needs_human_items() {
     }
 }
 
-/// A restart with Claude limited, the start rules On, and the resumed session's transcript starting `local`
-/// or not: the sessions the next pass started.
-async fn limited_restart(
-    local_session: bool,
+/// "a" restarted with Claude limited, the model `local` and `local-limit-fallback` as given;
+/// takeover exists. Its first transcript line names `model`. Returns what the pass started.
+async fn restarted_limited(
+    model: &str,
     fallback: bool,
-    model: crate::local_model::LocalModel,
+    local: crate::local_model::LocalModel,
+    rules: bool,
 ) -> Vec<StartRequest> {
     crate::tiers::set_local_ladder_for_test(true);
     crate::tiers::set_local_limit_fallback_for_test(fallback);
     let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
-    let _first = rig.go_live();
+    let fake = rig.go_live();
     rig.machine.pass().await;
     rig.machine.pass().await;
+    let session = fake.started.lock().unwrap()[0].session_id.clone();
     let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
     let mut rig = restarted(rig, &base);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
-    rig.machine.local = model;
-    rig.machine
-        .engine_limits
-        .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
-    let fake = rig.go_live();
-    fake.started_local.store(local_session, Ordering::SeqCst);
+    let dir = rig._dir.path().to_path_buf();
+    let runs = crate::paths::run_dir(&dir, "p0", "a");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join(format!("{session}.jsonl")),
+        format!("{{\"engine\":\"claude\",\"model\":\"{model}\"}}\n"),
+    )
+    .unwrap();
+    rig.lp(0).data_dir = Some(dir);
+    if rules {
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules", "engine-fall-over"]));
+    }
+    rig.machine.local = local;
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": ["claude", "claude"] })).unwrap();
+    let limited_until = std::time::Instant::now() + Duration::from_secs(600);
+    rig.machine.engine_limits.hit(EngineId::Claude, limited_until);
+    let fake_after = rig.go_live();
     rig.machine.pass().await;
-    #[allow(clippy::let_and_return)] // the guard must drop before `fake`
-    let started = fake.started.lock().unwrap().clone();
-    started
+    fake_after.started.lock().unwrap().clone()
 }
 
 #[tokio::test]
-async fn at_claudes_limit_a_session_that_started_local_resumes_and_an_anthropic_one_waits() {
+async fn at_the_limit_a_local_session_resumes_and_an_anthropic_one_waits() {
     use crate::local_model::LocalModel;
-    let local = limited_restart(true, true, LocalModel::up()).await;
+    let local = restarted_limited("local", true, LocalModel::up(), true).await;
     assert_eq!(local.len(), 1);
     assert!(local[0].resume);
     assert_eq!(local[0].engine, EngineId::Claude);
-    assert!(limited_restart(false, true, LocalModel::up()).await.is_empty());
+    assert_eq!(local[0].takeover, None);
+    // An Anthropic session is held until the reset, and never moves to the local model.
+    assert!(
+        restarted_limited("sonnet", true, LocalModel::up(), true)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
-async fn a_local_session_waits_at_claudes_limit_with_the_flag_off_or_the_model_down() {
+async fn with_the_flag_off_or_the_model_down_a_local_session_is_held_like_any_claude_one() {
     use crate::local_model::LocalModel;
-    assert!(limited_restart(true, false, LocalModel::up()).await.is_empty());
-    assert!(limited_restart(true, true, LocalModel::default()).await.is_empty());
+    for (fallback, local) in [(false, LocalModel::up()), (true, LocalModel::off())] {
+        assert!(restarted_limited("local", fallback, local, true).await.is_empty());
+    }
 }

@@ -2,7 +2,7 @@
 //! starting work for that project alone. The lanes and the sessions across every project are the
 //! [`super::Machine`]'s.
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -211,10 +211,6 @@ pub trait SessionStarter: Send + Sync {
     fn implementer_may_start(&self, _usage: Option<&serde_json::Value>, _pending: u32) -> bool {
         true
     }
-    /// Whether `session` of `item_id` started on the local model (`transcripts::started_on`; section 7.1).
-    fn started_local(&self, _project: &str, _item_id: &str, _session: &str) -> bool {
-        false
-    }
     /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
     /// no PR. A slice that was merged is never touched. An `Err` stops the Start over, leaving the item as it is.
     fn abandon(&self, _old: Abandon) -> BoxFuture<'static, Result<(), String>> {
@@ -268,6 +264,8 @@ pub struct ProjectLoop {
     pub(super) records: BTreeMap<String, RunRecord>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
+    /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
+    pub(super) data_dir: Option<PathBuf>,
     /// Whether the saved `state.usage` has been checked once against the weekly cutoff (`weekly-limit-reading`).
     pub(super) week_checked: bool,
     /// Claude sessions' usage readings that settled since the pacer last took them (`driver/auto.rs`).
@@ -392,6 +390,7 @@ impl ProjectLoop {
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
+            data_dir: None,
             week_checked: false,
             pace_readings: Vec::new(),
             pace_checked: false,
@@ -468,7 +467,8 @@ impl ProjectLoop {
             live,
             max_resume_context_tokens,
         )
-        .with_guard(guard))
+        .with_guard(guard)
+        .with_data_dir(dir))
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
@@ -894,7 +894,7 @@ impl ProjectLoop {
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
         let fall_over = self.flags.on("engine-fall-over").await;
-        let takeover = self.takeover(pool, shared, engine, fall_over);
+        let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine), fall_over);
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),

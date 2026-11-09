@@ -23,6 +23,35 @@ impl ProjectLoop {
         takeover_in(&self.project, pool, shared, started_on, any_engine)
     }
 
+    /// [`Self::takeover`], except for a session that stays on the local model.
+    pub(super) fn takeover_unless_local(
+        &self,
+        pool: &LanePool,
+        shared: &Shared<'_>,
+        (item_id, session, engine): (&str, &str, EngineId),
+        any_engine: bool,
+    ) -> Option<EngineId> {
+        let local = self.stays_local(shared, item_id, session, engine);
+        self.takeover(pool, shared, engine, any_engine).filter(|_| !local)
+    }
+
+    /// Keeps the data folder, where session transcripts are.
+    pub(super) fn with_data_dir(mut self, dir: &std::path::Path) -> Self {
+        self.data_dir = Some(dir.to_path_buf());
+        self
+    }
+
+    /// Whether `session` of `item_id` is a Claude session that started on the local model while `local-limit-fallback`
+    /// is in force with the model up: it resumes on the model whatever Claude's limit says (section 7.1).
+    pub(super) fn stays_local(&self, shared: &Shared<'_>, item_id: &str, session: &str, engine: EngineId) -> bool {
+        engine == EngineId::Claude
+            && Self::limit_fallback(shared)
+            && self.data_dir.as_deref().is_some_and(|dir| {
+                crate::engines::transcripts::started_on(dir, &self.id, item_id, session)
+                    .is_some_and(|s| s.model == crate::tiers::LOCAL)
+            })
+    }
+
     /// Resumes the sessions the first pass took back mid-run, each as its item's running step. One whose last
     /// known size is over `max_resume_context_tokens` starts fresh instead (06.2-implementer.md "A session
     /// that's grown starts fresh"), keeping its lane as-is. Left for a
@@ -39,7 +68,6 @@ impl ProjectLoop {
             return;
         }
         let fall_over = self.flags.on("engine-fall-over").await;
-        let fallback = Self::limit_fallback(shared);
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
             if let Some(RunRecord {
@@ -51,15 +79,11 @@ impl ProjectLoop {
             }) = record
             {
                 let lane_now = lane_engine(&shared.links.engine_choice, lane).map(program_of);
-                // Section 7.1: a session that started on the local model stays local, and Claude's limit doesn't hold it
-                // (`local-limit-fallback`). It waits for the slot in its own start; no other engine takes it over.
-                let local = fallback
-                    && impl_session_engine == EngineId::Claude
-                    && !self.fresh_launched.contains(&id)
-                    && starter.started_local(&self.id, &id, &session);
-                let takeover = (!local)
-                    .then(|| self.takeover(pool, shared, impl_session_engine, fall_over))
-                    .flatten();
+                // A session that started on the local model stays on it (section 7.1): Claude's limit doesn't hold it.
+                let local = self.stays_local(shared, &id, &session, impl_session_engine);
+                let takeover = self
+                    .takeover(pool, shared, impl_session_engine, fall_over)
+                    .filter(|_| !local);
                 let reason = fresh_for_engine(impl_session_engine, lane_now, takeover);
                 if let Some(gate) = gate.as_ref().filter(|_| !local) {
                     // The engine its session runs on now: the takeover's, or the one it started on.

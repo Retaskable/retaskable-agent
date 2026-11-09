@@ -122,11 +122,6 @@ impl SessionStarter for ClaudeStarter {
         )
     }
 
-    fn started_local(&self, project: &str, item_id: &str, session: &str) -> bool {
-        crate::engines::transcripts::started_on(&self.data_dir, project, item_id, session)
-            .is_some_and(|s| s.model == LOCAL)
-    }
-
     fn start(&self, request: StartRequest) -> Result<(), String> {
         let project = self
             .projects
