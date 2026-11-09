@@ -870,7 +870,6 @@ fn agent_settings_is_an_unknown_command_while_the_flag_is_off_and_writes_nothing
     assert!(!dir.path().join("config.json").exists());
 }
 
-<<<<<<< HEAD
 fn playtest_view() -> AgentView {
     let v = claiming();
     v.item_commands.set_flag("one", "playtest-answer-command", true);
@@ -966,7 +965,8 @@ fn playtest_is_nacked_for_an_item_held_in_another_state() {
         "ack"
     );
     assert_eq!(v.item_commands.take("one").len(), 2);
-=======
+}
+
 #[test]
 fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
     let mut v = view();
@@ -1030,5 +1030,4 @@ fn stop_play_stops_play_main_like_stop() {
     assert!(crate::play::running(id));
     assert_eq!(go("stop_play", &v)["type"], "ack");
     assert!(!crate::play::running(id));
->>>>>>> origin/main
 }
