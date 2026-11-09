@@ -10,7 +10,7 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
 //! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop,
-//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **gallery_index** / **gallery_image** (a gallery's last shoot, read off disk, behind the `gallery-read-commands` flag), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use std::collections::HashMap;
@@ -119,6 +119,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "ask" => ask(cmd, project, view, data_dir),
         "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
+        "gallery_index" | "gallery_image" if view.item_commands.flag_on(project, "gallery-read-commands") => {
+            gallery_read(cmd, project, data_dir)
+        }
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
@@ -608,6 +611,31 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
     }
 }
 
+/// The hub's cap on any one agent message.
+const MAX_MESSAGE_BYTES: usize = 1 << 20;
+
+/// `gallery_index { gallery }` and `gallery_image { gallery, file }` (tray/05.3 section 5.3.2): answered at once from
+/// the gallery's last shoot on disk. A whole ack over [`MAX_MESSAGE_BYTES`] is nacked instead.
+fn gallery_read(cmd: &Command, project: &str, data_dir: &Path) -> Value {
+    let arg = |k: &str| cmd.args.get(k).and_then(Value::as_str).unwrap_or("");
+    let answer = if cmd.name == "gallery_index" {
+        galleries::gallery_index(data_dir, project, arg("gallery")).map(|a| json!(a))
+    } else {
+        galleries::gallery_image(data_dir, project, arg("gallery"), arg("file")).map(|a| json!(a))
+    };
+    match answer {
+        Ok(answer) => {
+            let ack = json!({ "type": "ack", "id": cmd.id, "answer": answer });
+            if ack.to_string().len() > MAX_MESSAGE_BYTES {
+                nack(&cmd.id, "Too big to send from the machine.".into())
+            } else {
+                ack
+            }
+        }
+        Err(reason) => nack(&cmd.id, reason),
+    }
+}
+
 /// `draft_edit { id, path, content }` writes the person's file into the draft's worktree, commits and pushes it to
 /// the draft's PR branch, and answers with the files listed again (`answer.files`). Nothing on retaskable.com sends
 /// it yet. `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
@@ -692,9 +720,9 @@ fn audit_args(args: &Value) -> Value {
 }
 
 /// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
-/// ones and replays included, never a `read_file`'s content — moot so far, since no read command
-/// is ported yet. `answerBytes` and `auditArgs`'s release_edit/ci_link/picture-count sanitising
-/// (`agent/src/commands.ts`) aren't ported either, for the same reason: none of those commands are.
+/// ones and replays included, never an answer's content: a read command (`draft_files`, `gallery_image`) logs
+/// `answerBytes` only, so a picture's base64 never reaches the log. `auditArgs`'s release_edit/ci_link sanitising
+/// (`agent/src/commands.ts`) isn't ported, since those commands aren't.
 /// A write that fails is dropped silently, the same as the event log's.
 pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     let outcome = answer.get("type").and_then(Value::as_str).unwrap_or("nack");
