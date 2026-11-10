@@ -58,7 +58,7 @@ fn parse_line(line: &str) -> Option<Phone> {
     let serial = fields.next()?.to_string();
     let state = fields.next()?.to_string();
     let model = fields
-        .find_map(|f| f.strip_prefix("model:"))
+        .find_map(|f| f.strip_prefix("model:").filter(|m| !m.is_empty()))
         .map(|m| m.replace('_', " "))
         .unwrap_or_else(|| serial.clone());
     Some(Phone { serial, model, state })
@@ -349,6 +349,13 @@ mod tests {
         assert_eq!(phones.len(), 2);
         assert_eq!(phones[0].model, "Pixel 8");
         assert_eq!(phones[1].state, "offline");
+    }
+
+    #[test]
+    fn an_empty_model_field_falls_back_to_the_serial() {
+        let phones = parse_devices("List of devices attached\nAAA device model: transport_id:1\nBBB device model:\n");
+        assert_eq!(phones[0].model, "AAA");
+        assert_eq!(phones[1].model, "BBB");
     }
 
     // find_adb
