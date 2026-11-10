@@ -19,7 +19,7 @@ pub mod settings;
 pub mod suggestions;
 
 use crate::env::Env;
-use crate::text::non_blank;
+use crate::text::{non_blank, trim_url};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -53,11 +53,9 @@ pub fn clear_unlinked_on_site() {
 
 /// The store this agent reads: `RETASKABLE_BACKLOG_URL`, else the default. No trailing slash.
 pub fn url(env: &Env) -> String {
-    let raw = env
-        .get("RETASKABLE_BACKLOG_URL")
-        .and_then(|s| non_blank(&s).map(String::from))
-        .unwrap_or_else(|| DEFAULT_URL.to_string());
-    raw.trim_end_matches('/').to_string()
+    let raw = env.get("RETASKABLE_BACKLOG_URL");
+    let raw = non_blank(raw.as_deref().unwrap_or_default()).unwrap_or(DEFAULT_URL);
+    trim_url(raw).to_string()
 }
 
 /// Every agent on the shared backlog (installers/04-every-agent-on-the-shared-backlog-shared.md): starts the

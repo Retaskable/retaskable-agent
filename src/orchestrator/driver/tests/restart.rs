@@ -27,6 +27,7 @@ fn restarted(old: Rig, base: &str) -> Rig {
         bug_version: "test".into(),
     };
     let mut machine = Machine::new(2, 8, links);
+    machine.base_scope = "restart:".into();
     let store = Store::load(&_dir.path().join("0")).unwrap();
     let mut lp = ProjectLoop::new(
         "p0".into(),
