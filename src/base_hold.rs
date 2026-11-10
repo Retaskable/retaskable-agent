@@ -112,22 +112,22 @@ mod tests {
 
     #[test]
     fn a_put_off_sync_is_due_once_when_the_holder_drops() {
-        let shoot = hold_base("base-hold-t5", "a shoot").unwrap();
-        assert!(hold_base_for_sync("base-hold-t5").is_none());
-        assert!(!take_due_syncs("").contains("base-hold-t5"));
+        let shoot = hold_base("bh5:p", "a shoot").unwrap();
+        assert!(hold_base_for_sync("bh5:p").is_none());
+        assert!(!take_due_syncs("bh5:").contains("p"));
         drop(shoot);
-        assert!(take_due_syncs("").contains("base-hold-t5"));
-        assert!(!take_due_syncs("").contains("base-hold-t5"));
-        drop(hold_base("base-hold-t5", "a shoot").unwrap());
-        assert!(!take_due_syncs("").contains("base-hold-t5"));
+        assert!(take_due_syncs("bh5:").contains("p"));
+        assert!(!take_due_syncs("bh5:").contains("p"));
+        drop(hold_base("bh5:p", "a shoot").unwrap());
+        assert!(!take_due_syncs("bh5:").contains("p"));
     }
 
     #[test]
     fn a_put_off_sync_is_independent_of_other_projects() {
-        let _a = hold_base("base-hold-t6a", "a shoot").unwrap();
-        assert!(hold_base_for_sync("base-hold-t6a").is_none());
-        let b = hold_base_for_sync("base-hold-t6b").unwrap();
+        let _a = hold_base("bh6:a", "a shoot").unwrap();
+        assert!(hold_base_for_sync("bh6:a").is_none());
+        let b = hold_base_for_sync("bh6:b").unwrap();
         drop(b);
-        assert!(!take_due_syncs("").contains("base-hold-t6b"));
+        assert!(!take_due_syncs("bh6:").contains("b"));
     }
 }
