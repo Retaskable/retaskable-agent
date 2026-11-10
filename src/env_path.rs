@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 pub fn path_dirs(env: &Env) -> Vec<PathBuf> {
     let path = env.get("PATH").unwrap_or_default();
-    std::env::split_paths(&path).collect()
+    std::env::split_paths(&path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -22,10 +24,11 @@ mod tests {
     }
 
     #[test]
-    fn path_dirs_reads_as_a_single_empty_entry_when_path_is_missing() {
-        // `std::env::split_paths("")` yields one empty component, not zero; this just has to
-        // match that, since every existing `resolve_*_on_path` already relied on it.
-        let dirs = path_dirs(&Env::empty());
-        assert_eq!(dirs, vec![PathBuf::from("")]);
+    fn path_dirs_drops_empty_entries_so_nothing_is_looked_up_in_the_working_directory() {
+        assert!(path_dirs(&Env::empty()).is_empty());
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let joined = format!("{sep}/a{sep}{sep}/b{sep}");
+        let dirs = path_dirs(&Env::from_pairs([("PATH", joined)]));
+        assert_eq!(dirs, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }
 }
