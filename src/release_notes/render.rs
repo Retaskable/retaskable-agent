@@ -56,11 +56,8 @@ pub fn note_markdown(
         .filter(|(headline, _)| !is_blank(headline))
         .take(MAX_HIGHLIGHTS)
         .collect();
-    let also_new: Vec<String> = also_new
-        .iter()
-        .filter_map(|s| non_blank(s).map(str::to_string))
-        .collect();
-    let fixes: Vec<String> = fixes.iter().filter_map(|s| non_blank(s).map(str::to_string)).collect();
+    let also_new: Vec<String> = also_new.iter().filter_map(|s| non_blank(s).map(String::from)).collect();
+    let fixes: Vec<String> = fixes.iter().filter_map(|s| non_blank(s).map(String::from)).collect();
 
     if highlights.is_empty() && also_new.is_empty() && fixes.is_empty() {
         out.push(format!(

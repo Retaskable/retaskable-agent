@@ -47,7 +47,7 @@ fn specs(piece: &RunPiece) -> String {
     };
     let list: Vec<String> = list
         .into_iter()
-        .filter_map(|s| non_blank(&s).map(str::to_string))
+        .filter_map(|s| non_blank(&s).map(String::from))
         .collect();
     if list.is_empty() {
         "none (find them in `docs/specs`)".into()

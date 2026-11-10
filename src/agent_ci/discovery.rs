@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use super::priority::low_priority_tokio;
+use crate::text::non_blank;
 
 /// `git <args>` in `repo` at low priority: stdout on success, the trimmed stderr otherwise.
 pub async fn git(program: &OsStr, repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -26,9 +27,7 @@ pub async fn discover(program: &OsStr, repo: &Path, base: &str) -> Result<String
             .await
             .ok()
     };
-    let image = show("image")
-        .await
-        .and_then(|s| crate::text::non_blank(&s).map(str::to_string));
+    let image = show("image").await.and_then(|s| non_blank(&s).map(String::from));
     let checks = show("checks.sh").await;
     match (image, checks) {
         (Some(image), Some(_)) => Ok(image),
