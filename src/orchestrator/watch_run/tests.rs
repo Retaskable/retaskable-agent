@@ -53,8 +53,12 @@ esac
     path
 }
 
+/// Writes atomically (temp file, then rename), so a fake `gh` running meanwhile never reads a
+/// file `fs::write` has truncated but not yet filled.
 pub(crate) fn set(dir: &Path, name: &str, text: &str) {
-    std::fs::write(dir.join(name), text).unwrap();
+    let temp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&temp, text).unwrap();
+    std::fs::rename(temp, dir.join(name)).unwrap();
 }
 
 pub(crate) fn calls(dir: &Path) -> Vec<String> {
