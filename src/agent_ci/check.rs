@@ -308,3 +308,52 @@ pub async fn recover(docker: &std::ffi::OsStr, data_dir: &Path, project: &str) {
     }
     host::sweep(data_dir, project);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pr_key() -> CheckKey {
+        CheckKey {
+            pr: 7,
+            head: "abcdef1234567".into(),
+            main: "0123456789abc".into(),
+        }
+    }
+
+    #[test]
+    fn a_pull_request_key_text_is_short_head_then_short_main() {
+        assert_eq!(key_text(&pr_key()), "abcdef1-0123456");
+    }
+
+    #[test]
+    fn a_push_key_text_is_main_alone_short() {
+        assert_eq!(key_text(&CheckKey::push("0123456789abc")), "0123456");
+    }
+
+    #[test]
+    fn short_keeps_a_sha_shorter_than_seven_whole() {
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(short(""), "");
+    }
+
+    #[test]
+    fn the_status_context_depends_on_push_or_pr() {
+        assert_eq!(context_of(&pr_key()), report::PR_CONTEXT);
+        assert_eq!(context_of(&CheckKey::push("abc")), report::PUSH_CONTEXT);
+    }
+
+    #[test]
+    fn last_line_skips_trailing_blank_lines() {
+        assert_eq!(last_line("one\ntwo\n\n  \n"), "two");
+        assert_eq!(last_line("only"), "only");
+        assert_eq!(last_line(""), "");
+        assert_eq!(last_line("\n \n"), "");
+    }
+
+    #[test]
+    fn the_name_file_is_a_sibling_of_the_check_directory() {
+        let dir = Path::new("root").join("check-1");
+        assert_eq!(name_file(&dir), Path::new("root").join("check-1.name"));
+    }
+}
