@@ -2,7 +2,7 @@
 //! structured result, and reading that result into the `planned` result for `run_done`; and [`PlanRuns`], which
 //! runs the store's `plan` runs: one read-only planner session in the project's base checkout, one at a time on
 //! this computer.
-use crate::text::is_blank;
+use crate::text::{is_blank, non_blank};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -47,8 +47,7 @@ fn specs(piece: &RunPiece) -> String {
     };
     let list: Vec<String> = list
         .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(|s| non_blank(&s).map(str::to_string))
         .collect();
     if list.is_empty() {
         "none (find them in `docs/specs`)".into()

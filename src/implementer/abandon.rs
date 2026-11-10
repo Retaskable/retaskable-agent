@@ -29,7 +29,7 @@ pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url:
     listed
         .current_dir(repo)
         .args(["ls-remote", "--heads", "origin", &format!("refs/heads/{branch}")]);
-    if !run(listed, None, "git ls-remote")?.trim().is_empty() {
+    if !crate::text::is_blank(&run(listed, None, "git ls-remote")?) {
         let mut delete = Command::new(git);
         delete.current_dir(repo).args(["push", "origin", "--delete", branch]);
         run(delete, None, "git push --delete")?;

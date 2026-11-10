@@ -28,8 +28,7 @@ pub async fn discover(program: &OsStr, repo: &Path, base: &str) -> Result<String
     };
     let image = show("image")
         .await
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+        .and_then(|s| crate::text::non_blank(&s).map(str::to_string));
     let checks = show("checks.sh").await;
     match (image, checks) {
         (Some(image), Some(_)) => Ok(image),

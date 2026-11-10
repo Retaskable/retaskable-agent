@@ -538,7 +538,7 @@ fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
 /// string split on `+`, or `lanes=` with nothing after it) is a real empty list, not an invalid
 /// one. Used for `lanes` read from both the environment and the file.
 pub(crate) fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
-    if entries.len() == 1 && entries[0].trim().is_empty() {
+    if entries.len() == 1 && crate::text::is_blank(&entries[0]) {
         return Some(Vec::new());
     }
     let mut lanes = Vec::with_capacity(entries.len());

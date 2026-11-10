@@ -54,8 +54,7 @@ pub fn clear_unlinked_on_site() {
 pub fn url(env: &Env) -> String {
     let raw = env
         .get("RETASKABLE_BACKLOG_URL")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|s| crate::text::non_blank(&s).map(str::to_string))
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     raw.trim_end_matches('/').to_string()
 }
