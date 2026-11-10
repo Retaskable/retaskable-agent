@@ -1,6 +1,6 @@
 //! Turns a grouping (and the model's optional structured answer) into the note's final Markdown,
 //! and builds the `prompts/release-notes.md` prompt a release-notes session is run with.
-use crate::text::is_blank;
+use crate::text::{is_blank, non_blank};
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
@@ -56,16 +56,8 @@ pub fn note_markdown(
         .filter(|(headline, _)| !is_blank(headline))
         .take(MAX_HIGHLIGHTS)
         .collect();
-    let also_new: Vec<String> = also_new
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let fixes: Vec<String> = fixes
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let also_new: Vec<String> = also_new.iter().filter_map(|s| non_blank(s).map(String::from)).collect();
+    let fixes: Vec<String> = fixes.iter().filter_map(|s| non_blank(s).map(String::from)).collect();
 
     if highlights.is_empty() && also_new.is_empty() && fixes.is_empty() {
         out.push(format!(

@@ -19,6 +19,7 @@ pub mod settings;
 pub mod suggestions;
 
 use crate::env::Env;
+use crate::text::non_blank;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -54,8 +55,7 @@ pub fn clear_unlinked_on_site() {
 pub fn url(env: &Env) -> String {
     let raw = env
         .get("RETASKABLE_BACKLOG_URL")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|s| non_blank(&s).map(String::from))
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     raw.trim_end_matches('/').to_string()
 }
