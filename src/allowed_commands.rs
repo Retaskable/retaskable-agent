@@ -3,7 +3,6 @@
 //! `releases` parts. A store version that changes what runs waits (`CommandAllowing::waiting`) until `approve`;
 //! until then the allowed values run. Plain code: nothing here asks an LLM anything.
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
@@ -11,6 +10,7 @@ use serde_json::{Map as JsonMap, Value};
 use crate::config::{CheckConfig, GalleryConfig, ProjectConfig};
 use crate::fs_util::write_json_atomic;
 use crate::paths::project_dir;
+use crate::telemetry::events::now_ms;
 
 pub type Map = JsonMap<String, Value>;
 
@@ -67,12 +67,6 @@ pub fn commands_of(values: &Value) -> Map {
         out.insert(ROLLOUT.to_string(), rollout);
     }
     out
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// What this computer agreed to run: the store's command fields at `commands_version`.
