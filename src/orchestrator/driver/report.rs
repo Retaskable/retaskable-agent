@@ -4,7 +4,7 @@
 //! the store as `upsert_from_specs` (backlog.md section 6.4), and the items whose merge commits reached the
 //! default branch or production are sent as `landed` (section 6.5). Plain code: no model reads anything. A
 //! failure is only logged; the next fetch tries again.
-use crate::text::is_blank;
+use crate::text::{is_blank, trim_url};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -299,7 +299,7 @@ pub(super) async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
 
 /// `<url><versionPath>` (`/version.json` by default) for production with a URL, else `None`.
 pub(super) fn version_url(target: &DeployTarget) -> Option<String> {
-    let url = target.url.as_deref()?.trim().trim_end_matches('/');
+    let url = trim_url(target.url.as_deref()?);
     if url.is_empty() {
         return None;
     }

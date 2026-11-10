@@ -349,7 +349,7 @@ pub fn origin_url(repo_path: &Path) -> Option<String> {
 /// `/` and `.git` dropped (a plain remote).
 fn remote_identity(url: &str) -> String {
     remote_repo(url).unwrap_or_else(|| {
-        let u = url.trim().trim_end_matches('/');
+        let u = crate::text::trim_url(url);
         u.strip_suffix(".git").unwrap_or(u).to_string()
     })
 }

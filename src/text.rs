@@ -72,6 +72,11 @@ pub fn non_blank(s: &str) -> Option<&str> {
     Some(s.trim()).filter(|t| !is_blank(t))
 }
 
+/// `s` trimmed, then without any trailing `/`: a URL ready to have a path appended.
+pub fn trim_url(s: &str) -> &str {
+    s.trim().trim_end_matches('/')
+}
+
 /// `s` with its first character upper-cased.
 pub fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
@@ -84,6 +89,12 @@ pub fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_url_drops_whitespace_and_trailing_slashes() {
+        assert_eq!(trim_url(" https://a.b// \n"), "https://a.b");
+        assert_eq!(trim_url("https://a.b/c"), "https://a.b/c");
+    }
 
     #[test]
     fn non_blank_trims_and_drops_whitespace_only_text() {
