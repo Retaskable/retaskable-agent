@@ -28,7 +28,7 @@ export const triageSession = (): boolean => flags.on("triage-session");
 /** The `cursor-give-back` flag: give a Cursor-limited item with nothing pushed back to the shared backlog. Off until there is an answer. */
 export const cursorGiveBack = (): boolean => flags.on("cursor-give-back");
 
-/** The `cursor-allow-derive` flag: Cursor sessions get an allowlist derived from the project's checks, galleries and settings. Off until there is an answer. */
+/** The `cursor-allow-derive` flag: Cursor sessions get an allowlist derived from the project's checks and settings. Off until there is an answer. */
 export const cursorAllowDerive = (): boolean => flags.on("cursor-allow-derive");
 
 /** The `watchdog-anomaly-rules` flag: the watchdog's newer rules (restart_wait, and idle_lanes while a restart is pending). Off until there is an answer. */
@@ -39,12 +39,6 @@ export const engineSetupProbes = (): boolean => flags.on("engine-setup-probes");
 
 /** The `playtest-answer-command` flag: take a person's playtest answer from the site. Off until there is an answer. */
 export const playtestAnswerCommand = (): boolean => flags.on("playtest-answer-command");
-
-/** The `gallery-read-commands` flag: answer the site's requests for a gallery's pictures. Off until there is an answer. */
-export const galleryReadCommands = (): boolean => flags.on("gallery-read-commands");
-
-/** The `gallery-feedback-command` flag: take the site's gallery feedback and queue its spec draft. Off until there is an answer. */
-export const galleryFeedbackCommand = (): boolean => flags.on("gallery-feedback-command");
 
 /** The `step-events-complete` flag: each check's name, result and seconds in a `step_end`. Off until there is an answer. */
 export const stepEventsComplete = (): boolean => flags.on("step-events-complete");

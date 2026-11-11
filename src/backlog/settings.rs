@@ -7,12 +7,11 @@ use serde_json::{Value, json};
 use super::{BacklogError, Client};
 
 /// The settings fields whose values run on the computer (`COMMAND_FIELDS` there, by top-level name).
-const COMMAND_FIELDS: [&str; 10] = [
+const COMMAND_FIELDS: [&str; 9] = [
     "checks",
     "playCommand",
     "promptNotes",
     "ciCommand",
-    "galleries",
     "phone",
     "engines",
     "appsScript",

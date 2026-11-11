@@ -9,8 +9,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::config::{GalleryConfig, ProjectConfig, ProjectType};
-use crate::galleries;
+use crate::config::ProjectConfig;
 use crate::hello_settings::HelloSettings;
 
 mod cursor;
@@ -162,19 +161,6 @@ pub struct IdeaCommand {
     pub by: String,
 }
 
-/// A `gallery_feedback` waiting for the loop, which queues the request as a spec draft and answers command `command_id`.
-#[derive(Debug, Clone)]
-pub struct GalleryFeedbackCommand {
-    pub project: String,
-    pub command_id: String,
-    /// The rendered request (`galleries::feedback_request`) with the saved pictures' paths.
-    pub request: String,
-    /// Whether the draft goes on to be built (`intake.doNext`).
-    pub do_next: bool,
-    /// Who sent it.
-    pub by: String,
-}
-
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -187,7 +173,6 @@ pub struct ItemCommands {
     /// The `(project, flag)` pairs On, set by the loop each pass.
     flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
-    feedback: Arc<std::sync::Mutex<Vec<GalleryFeedbackCommand>>>,
     /// The number auto concurrency last allowed and why; `None` while it is Off or has not stepped yet.
     auto: Arc<std::sync::Mutex<Option<(u32, String)>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
@@ -283,20 +268,6 @@ impl ItemCommands {
     /// Removes and returns the `idea_accept`s queued for `project`, oldest first.
     pub fn take_ideas(&self, project: &str) -> Vec<IdeaCommand> {
         let mut queue = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|c| c.project == project);
-        *queue = rest;
-        mine
-    }
-
-    pub fn push_feedback(&self, command: GalleryFeedbackCommand) {
-        self.feedback.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Removes and returns the `gallery_feedback`s queued for `project`, oldest first.
-    pub fn take_feedback(&self, project: &str) -> Vec<GalleryFeedbackCommand> {
-        let mut queue = self.feedback.lock().unwrap_or_else(|e| e.into_inner());
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
@@ -468,16 +439,12 @@ pub struct ProjectView {
     pub id: String,
     pub github_repo: String,
     pub backlog_path: String,
-    /// What the Shoot command needs to run `galleries::shoot` (`commands.rs`): the base checkout's
-    /// own clone, where its worktrees go, which branch is the base, and the project's own galleries.
+    /// The base checkout's own clone, where its worktrees go, and which branch is the base.
     pub repo_path: PathBuf,
     pub worktrees_dir: PathBuf,
     pub base_branch: String,
-    pub galleries: Vec<GalleryConfig>,
     /// Play main's command (`commands.rs`'s `play`).
     pub play_command: String,
-    /// Picks the words of a gallery feedback request.
-    pub project_type: ProjectType,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -489,9 +456,7 @@ impl From<&ProjectConfig> for ProjectView {
             repo_path: PathBuf::from(&p.repo_path),
             worktrees_dir: PathBuf::from(&p.worktrees_dir),
             base_branch: p.base_branch.clone(),
-            galleries: p.galleries.clone(),
             play_command: p.play_command.clone(),
-            project_type: p.project_type,
         }
     }
 }
@@ -571,8 +536,7 @@ impl AgentView {
     }
 
     /// The project's snapshot (cloud.md section 5.2): every list the hub needs. Most are still
-    /// empty, since this agent runs no work yet, but a project's galleries report their real
-    /// status and last shoot (agent/09-web-ui.md section 9.2), and an orchestrator that says so.
+    /// empty, since this agent runs no work yet, and an orchestrator that says so.
     pub fn snapshot(&self, project: &str, data_dir: &Path) -> Value {
         let orchestrator = self.orchestrator_block(project);
         let mut state = json!({
@@ -583,7 +547,6 @@ impl AgentView {
                 "sessions": [],
                 "lanes": self.lanes_list(project),
                 "mainPlaying": self.settings.snapshot_reporting_on() && crate::play::running(project),
-                "galleries": self.galleries_list(project, data_dir),
                 "drafts": [],
                 "asks": [],
         });
@@ -692,21 +655,6 @@ impl AgentView {
             trial["prUrl"] = json!(url);
         }
         Some(trial)
-    }
-
-    /// The snapshot's galleries (tray/05.3-private-galleries-and-pictures-from.md section 5.3.1):
-    /// each of the project's own galleries' [`galleries::GalleryInfo`], none before Setup.
-    fn galleries_list(&self, project: &str, data_dir: &Path) -> Vec<Value> {
-        self.projects
-            .iter()
-            .find(|p| p.id == project)
-            .map(|p| {
-                p.galleries
-                    .iter()
-                    .map(|g| json!(galleries::info(data_dir, project, g)))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.

@@ -1,5 +1,5 @@
 //! A tiny local git repo with an `origin` remote, shared by this crate's own `#[cfg(test)]`
-//! modules that need real git plumbing to exercise (repo checks, galleries). Also a baseline
+//! modules that need real git plumbing to exercise (repo checks). Also a baseline
 //! `ProjectConfig` for the item-lifecycle state machine and its callers (`item_lifecycle`,
 //! `orchestrator`), since the derived `Default` leaves every round/slice cap at 0, which would
 //! escalate to `needs_human` on the very first failure or claim.
@@ -379,9 +379,7 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         repo_path: PathBuf::new(),
         worktrees_dir: PathBuf::new(),
         base_branch: String::new(),
-        galleries: vec![],
         play_command: String::new(),
-        project_type: Default::default(),
     }
 }
 

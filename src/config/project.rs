@@ -76,44 +76,6 @@ pub struct CheckConfig {
     pub timeout_sec: u64,
 }
 
-/// A tab of pictures the game takes of itself (spec section 6.8).
-#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GalleryConfig {
-    #[serde(default)]
-    pub name: String,
-    /// Run in the base checkout; writes pictures to out_dir, then exits. Empty: the game can't yet.
-    #[serde(default)]
-    pub command: String,
-    /// Relative to the repo root.
-    #[serde(default)]
-    pub out_dir: String,
-}
-
-impl GalleryConfig {
-    /// This gallery's slug (agent/09-web-ui.md section 9.1): its name in kebab case, the same way
-    /// a project's id is made from its folder name. Names its tab, its folder and the `gallery`
-    /// the hub's Shoot command names it by.
-    pub fn slug(&self) -> String {
-        kebab_case(&self.name.to_lowercase())
-    }
-}
-
-fn default_galleries() -> Vec<GalleryConfig> {
-    vec![
-        GalleryConfig {
-            name: "Models".to_string(),
-            command: String::new(),
-            out_dir: "target/models".to_string(),
-        },
-        GalleryConfig {
-            name: "UI".to_string(),
-            command: String::new(),
-            out_dir: "target/ui".to_string(),
-        },
-    ]
-}
-
 /// Scouts split the correctness scout above `max_scout_diff_lines`, and don't run below `min_scout_diff_lines`.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -392,8 +354,6 @@ pub struct ProjectConfig {
     pub checks: Vec<CheckConfig>,
     #[serde(default)]
     pub play_command: String,
-    #[serde(default = "default_galleries")]
-    pub galleries: Vec<GalleryConfig>,
     #[serde(default)]
     pub playtests: Playtests,
     #[serde(default)]
@@ -663,7 +623,6 @@ mod tests {
             worktrees_dir: String::new(),
             checks: Vec::new(),
             play_command: String::new(),
-            galleries: default_galleries(),
             playtests: Playtests::default(),
             plans: Plans::default(),
             chores: OnOff::default(),

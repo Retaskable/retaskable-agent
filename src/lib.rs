@@ -26,7 +26,6 @@ pub mod env;
 pub mod env_path;
 pub mod flags;
 pub mod fs_util;
-pub mod galleries;
 pub mod git_bin;
 pub mod hello_settings;
 pub mod host_call;
