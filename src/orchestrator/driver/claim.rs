@@ -104,6 +104,7 @@ impl ProjectLoop {
                 self.events.add_in(
                     &self.id,
                     Event::Claim(event::Claim {
+                        op: Some("claim_next".into()),
                         answer: Some(json!({ "waitingFor": waiting })),
                         ..Default::default()
                     }),
@@ -135,6 +136,7 @@ impl ProjectLoop {
         self.events.add_in(
             &self.id,
             Event::Claim(event::Claim {
+                op: Some("claim_next".into()),
                 answer: Some(json!(answer)),
                 ..Default::default()
             }),
