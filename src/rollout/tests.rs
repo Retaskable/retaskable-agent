@@ -25,6 +25,10 @@ struct State {
     items: Vec<Item>,
     ancestors: Vec<(String, String)>,
     served: Option<String>,
+    production_served: Option<String>,
+    /// `gh api` answers by path suffix; a path with none is an error.
+    gh: Vec<(String, Value)>,
+    gh_paths: Vec<String>,
     log: String,
 }
 
@@ -76,6 +80,22 @@ impl Deps for Fake {
     }
     async fn staging_served(&self) -> Result<Option<String>, String> {
         Ok(self.0.lock().unwrap().served.clone())
+    }
+    async fn production_served(&self) -> Result<String, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .production_served
+            .clone()
+            .ok_or("no address".into())
+    }
+    async fn gh_api(&self, path: String) -> Result<Value, String> {
+        let mut s = self.0.lock().unwrap();
+        s.gh_paths.push(path.clone());
+        s.gh.iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, v)| v.clone())
+            .ok_or("403".into())
     }
 }
 
@@ -306,7 +326,7 @@ async fn the_report_cuts_at_200_and_names_items_and_served() {
         s.served = Some(older.clone());
         s.ancestors.push((older.clone(), format!("{:040x}", 5)));
     }
-    let report = report::build(&f, "main", "staging").await.unwrap();
+    let report = report::build(&f, "main", Some("staging")).await.unwrap();
     let commits = report["commits"].as_array().unwrap();
     assert_eq!(commits.len(), 200);
     assert_eq!(report["production"], "p".repeat(40));
@@ -331,6 +351,89 @@ async fn the_report_is_sent_when_it_changes_and_not_when_git_fails() {
     tokio::time::sleep(REPORT_EVERY).await;
     r.cycle().await;
     assert_eq!(f.0.lock().unwrap().reports.len(), 1);
+}
+
+fn runs(conclusions: &[(&str, Option<&str>)]) -> Value {
+    json!({ "check_runs": conclusions.iter().map(|(s, c)| json!({ "status": s, "conclusion": c })).collect::<Vec<_>>() })
+}
+
+fn production_only(f: &Fake) -> Rollout<Fake> {
+    let log = f.0.clone();
+    Rollout::new(
+        f.clone(),
+        &cfg(false, Some(("t", "h"))),
+        Box::new(move |l| log.lock().unwrap().log.push_str(&format!("{l}\n"))),
+    )
+    .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn production_only_serves_up_to_the_newest_passing_commit() {
+    let f = Fake::default();
+    let sha = |i: usize| format!("{i:040x}");
+    {
+        let mut s = f.0.lock().unwrap();
+        s.production_served = Some("a".repeat(40));
+        s.gh = vec![
+            (format!("commits/{}/check-runs", sha(0)), runs(&[("in_progress", None)])),
+            (
+                format!("commits/{}/check-runs", sha(1)),
+                runs(&[("completed", Some("success")), ("queued", None)]),
+            ),
+            (
+                format!("commits/{}/check-runs", sha(2)),
+                runs(&[("completed", Some("success"))]),
+            ),
+        ];
+        s.served = Some(sha(0)); // a leftover smoke is not read
+    }
+    let report = report::build(&f, "main", None).await.unwrap();
+    assert_eq!(report["production"], "a".repeat(40));
+    let commits = report["commits"].as_array().unwrap();
+    let served: Vec<_> = commits.iter().take(4).map(|c| c["served"].clone()).collect();
+    assert_eq!(served, [json!(false), json!(false), json!(true), json!(true)]);
+    assert!(f.0.lock().unwrap().gh_paths.iter().all(|p| p.ends_with("check-runs")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn production_only_reads_statuses_only_when_check_runs_cant_be_read() {
+    let f = Fake::default();
+    {
+        let mut s = f.0.lock().unwrap();
+        s.production_served = Some("a".repeat(40));
+        s.gh = vec![(
+            format!("commits/{:040x}/status", 0),
+            json!({ "state": "success", "statuses": [{ "state": "success" }] }),
+        )];
+    }
+    let report = report::build(&f, "main", None).await.unwrap();
+    assert_eq!(report["commits"][0]["served"], true);
+    let paths = f.0.lock().unwrap().gh_paths.clone();
+    assert_eq!(paths[0], format!("commits/{:040x}/check-runs", 0));
+    assert_eq!(paths[1], format!("commits/{:040x}/status", 0));
+    // Nothing is reported while production's commit can't be read, and a commit with no checks serves nothing.
+    f.0.lock().unwrap().production_served = None;
+    assert!(report::build(&f, "main", None).await.is_err());
+    f.0.lock().unwrap().production_served = Some("a".repeat(40));
+    f.0.lock().unwrap().gh = vec![(format!("commits/{:040x}/check-runs", 0), runs(&[]))];
+    let report = report::build(&f, "main", None).await.unwrap();
+    assert!(
+        report["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["served"] == false)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn production_only_promote_succeeds_and_runs_nothing() {
+    let f = Fake::default();
+    let mut r = production_only(&f);
+    tell(&f, order("a", "promote", SHA, None));
+    r.step().await;
+    assert_eq!(r.kept.as_ref().unwrap().1, json!({ "id": "a", "ok": true }));
+    assert!(f.0.lock().unwrap().ran.is_empty());
 }
 
 #[test]
