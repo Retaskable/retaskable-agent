@@ -260,10 +260,7 @@ pub fn resets_in(usage: Option<&Value>, weekly: bool) -> Option<std::time::Durat
     {
         at = at.max(week["resetsAt"].as_u64());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let now = u64::try_from(crate::telemetry::now_secs()).ok()?;
     at?.checked_sub(now).map(std::time::Duration::from_secs)
 }
 
@@ -443,11 +440,7 @@ mod tests {
     use super::*;
 
     fn in_secs(n: u64) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + n
+        u64::try_from(crate::telemetry::now_secs()).unwrap() + n
     }
 
     fn secs(d: Option<std::time::Duration>) -> u64 {
