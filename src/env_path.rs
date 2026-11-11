@@ -11,7 +11,10 @@ pub fn path_dirs(env: &Env) -> Vec<PathBuf> {
         // current directory (a planted `claude.exe` or `git.exe` there). No PATH means no directories.
         return Vec::new();
     }
-    std::env::split_paths(&path).collect()
+    // An empty entry inside (`/a::/b`, or a trailing `:`) is the same current-directory lookup.
+    std::env::split_paths(&path)
+        .filter(|d| !d.as_os_str().is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -31,5 +34,13 @@ mod tests {
         // Not one empty entry: that would make every lookup search the current directory.
         assert!(path_dirs(&Env::empty()).is_empty());
         assert!(path_dirs(&Env::from_pairs([("PATH", "")])).is_empty());
+    }
+
+    #[test]
+    fn path_dirs_drops_empty_entries_between_separators() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let joined = format!("{sep}/a{sep}{sep}/b{sep}");
+        let dirs = path_dirs(&Env::from_pairs([("PATH", joined)]));
+        assert_eq!(dirs, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }
 }
