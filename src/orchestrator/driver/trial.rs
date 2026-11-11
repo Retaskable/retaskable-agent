@@ -1,5 +1,4 @@
-//! The trial plan's step (first-run-check.md section 3.3, "When it runs"): once per project, in `claim` mode, behind
-//! the `trial-plan-draft` release flag. A project with a repo, passing setup checks and an empty backlog takes a free
+//! The trial plan's step (first-run-check.md section 3.3, "When it runs"): once per project, in `claim` mode. A project with a repo, passing setup checks and an empty backlog takes a free
 //! lane (ahead of chores, never in front of roadmap work already holding lanes) and one session slot, saves `running`
 //! in its state, and runs [`TrialHost::run`]; a backlog with items saves `skipped` and never starts one later. On a
 //! later pass the end is taken in: `Opened` saves `open` with the PR's URL, `Dropped` saves `failed` and logs why in
@@ -20,9 +19,6 @@ use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::trial_host::{TrialEnd, TrialHost, TrialJob};
 use crate::telemetry::{Event, event};
 use crate::trial_plan::{Decision, TRIAL_BRANCH, TrialRecord, TrialState, should_start};
-
-/// The release flag that gates the whole step.
-const FLAG: &str = "trial-plan-draft";
 
 /// The trial session running now: its lane and task, in memory only.
 pub(super) struct RunningTrial {
@@ -99,7 +95,7 @@ impl ProjectLoop {
         if record.state == TrialState::Running {
             return self.trial_dropped("the agent restarted while the trial plan was running".into());
         }
-        if paused || *slots == 0 || shared.stopping || !self.flags.on(FLAG).await {
+        if paused || *slots == 0 || shared.stopping {
             return;
         }
         let gate = StartGate::new(self, pool, shared);

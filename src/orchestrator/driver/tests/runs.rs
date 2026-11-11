@@ -483,8 +483,11 @@ async fn watch_rig(dir: &std::path::Path, poll: Duration) -> (Rig, Shared_, Arc<
     use crate::orchestrator::watch_run::{WatchRuns, tests as w};
     let (mut rig, script) = setup(1).await;
     assert!(rig.machine.pool.claim_run("other", "x").is_some(), "the lane is busy");
-    rig.machine.projects[0].project.repo_path = w::repo_with_ci(dir).display().to_string();
+    let repo = w::repo_with_ci(dir).display().to_string();
+    rig.machine.projects[0].project.repo_path = repo.clone();
+    rig.machine.projects[0].file_project.repo_path = repo;
     rig.machine.projects[0].project.base_branch = "main".into();
+    rig.machine.projects[0].file_project.base_branch = "main".into();
     let mut take = run("w1", "watch");
     take["piece"]["change"] = json!({ "number": 7 });
     script.lock().unwrap().takes = VecDeque::from([take]);
@@ -673,7 +676,6 @@ async fn a_store_that_cant_be_asked_for_a_turn_starts_no_merge() {
 #[tokio::test]
 async fn a_failure_from_outside_the_work_says_outside_and_an_ordinary_one_does_not() {
     let (mut rig, script) = setup(2).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
     script.lock().unwrap().takes = VecDeque::from([run("a", "build"), run("b", "build")]);
@@ -686,19 +688,6 @@ async fn a_failure_from_outside_the_work_says_outside_and_an_ordinary_one_does_n
     assert_eq!(result("a")["outside"], true);
     assert_eq!(result("a")["why"], "connect ECONNREFUSED 127.0.0.1:443");
     assert!(result("b").get("outside").is_none());
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_failure_from_outside_the_work_sends_no_outside() {
-    let (mut rig, script) = setup(1).await;
-    let starter = FakeRuns::new(&[RunKind::Build]);
-    let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
-    pass(&mut rig, &starter, t0).await;
-    starter.finish("a", RunOutcome::Failed("connect ECONNREFUSED 127.0.0.1:443".into()));
-    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
-    let done = script.lock().unwrap().args("run_done");
-    assert!(done[0]["result"].get("outside").is_none());
 }
 
 fn check(ok: Option<bool>) -> crate::setup_check::SetupCheck {
@@ -778,8 +767,8 @@ fn chore_run(token: &str, kind: &str) -> Value {
 #[tokio::test]
 async fn chores_off_is_sent_and_a_stray_rotation_chore_is_given_back_but_fix_main_runs() {
     let (mut rig, script) = setup(2).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
     rig.lp(0).project.chores = crate::config::OnOff::Off;
+    rig.lp(0).file_project.chores = crate::config::OnOff::Off;
     let starter = FakeRuns::new(&[RunKind::Build]);
     script.lock().unwrap().takes = VecDeque::from([chore_run("tidy", "build"), chore_run("fix_main", "build")]);
     pass(&mut rig, &starter, Instant::now()).await;
@@ -795,7 +784,6 @@ async fn chores_off_is_sent_and_a_stray_rotation_chore_is_given_back_but_fix_mai
 #[tokio::test]
 async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     let (mut rig, script) = setup(1).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let mut r = chore_run("tidy", "build");
     r["chores"] = json!({ "today": 2, "limit": 3 });
@@ -821,18 +809,15 @@ async fn start_rules_pass(
     limited: &[crate::engines::EngineId],
     claude_signed_out: bool,
 ) {
-    start_pass_with(rig, starter, limited, claude_signed_out, &[]).await;
+    start_pass_with(rig, starter, limited, claude_signed_out).await;
 }
 
-/// `start_rules_pass`, with the release flags `more` On as well.
 async fn start_pass_with(
     rig: &mut Rig,
     starter: &dyn RunStarter,
     limited: &[crate::engines::EngineId],
     claude_signed_out: bool,
-    more: &[&str],
 ) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(more));
     let now = Instant::now();
     let limits = crate::orchestrator::fresh_start::EngineLimits::default();
     for e in limited {
@@ -895,7 +880,7 @@ async fn with_cursor_limited_run_take_leaves_out_cursor() {
 }
 
 /// A Cursor implementer whose Cursor is at its limit, on a computer whose planner runs Claude; one build is handed out.
-async fn cursor_limited_build(more: &[&str]) -> FakeRuns {
+async fn cursor_limited_build() -> FakeRuns {
     let (mut rig, script) = setup(1).await;
     both_engines(
         &mut rig,
@@ -903,14 +888,14 @@ async fn cursor_limited_build(more: &[&str]) -> FakeRuns {
     );
     script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
     let starter = FakeRuns::new(&[RunKind::Build]);
-    start_pass_with(&mut rig, &starter, &[crate::engines::EngineId::Cursor], false, more).await;
+    start_pass_with(&mut rig, &starter, &[crate::engines::EngineId::Cursor], false).await;
     starter
 }
 
 #[tokio::test]
 async fn a_build_started_while_cursor_is_limited_is_placed_on_claude() {
     use crate::engines::EngineId::Claude;
-    let starter = cursor_limited_build(&[]).await;
+    let starter = cursor_limited_build().await;
     let started = starter.started.lock().unwrap();
     assert_eq!(started[0].engine, Some(Claude));
     assert!(

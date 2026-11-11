@@ -1,11 +1,10 @@
 //! A chore and the local model's free slot (docs/specs/agent/07.2-local-model.md).
 use super::*;
 
-/// The model a `kind` chore's session is listed with, on a rig whose local model is `local` and `chore-rotation` On.
+/// The model a `kind` chore's session is listed with, on a rig whose local model is `local`.
 async fn model_of_chore(local: &crate::local_model::LocalModel, kind: &str) -> String {
     let (url, _log) = lock_store("free").await;
     let mut r = rig(&[&format!("sleep 1; {COMMIT}")], &answer("pr_opened", ""));
-    chore_rig(&mut r);
     Arc::get_mut(&mut r.starter).unwrap().local = local.clone();
     let (mut req, mut s) = request(&r, RunKind::Build, chore_piece(kind));
     on_store(&mut req, &url);

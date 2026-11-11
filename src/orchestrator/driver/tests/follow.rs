@@ -125,9 +125,10 @@ async fn an_approved_draft_tells_the_chat_how_it_moves_on_once_each() {
     let head = String::from_utf8(git(&repo).args(["rev-parse", "HEAD"]).output().unwrap().stdout).unwrap();
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude"]));
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = repo.to_string_lossy().into_owned();
     rig.lp(0).project.base_branch = "main".into();
+    rig.lp(0).file_project.base_branch = "main".into();
     rig.lp(0).project.deploy.staging = Some(DeployTarget {
         branch: "main".into(),
         url: Some(base.clone()),
@@ -135,6 +136,7 @@ async fn an_approved_draft_tells_the_chat_how_it_moves_on_once_each() {
         version_path: None,
         rollout: None,
     });
+    rig.lp(0).file_project.deploy.staging = rig.lp(0).project.deploy.staging.clone();
     rig.lp(0).seen.default_branch = Some("main".into());
     rig.machine.drafts = Some(Arc::new(Host));
     rig.machine.merge_wait = Duration::from_millis(1);

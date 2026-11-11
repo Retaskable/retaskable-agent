@@ -124,7 +124,7 @@ impl ProjectLoop {
                 self.claude_pending.contains(item_id),
                 self.triaging.contains(item_id),
             );
-            claude_on_it(&facts, self.triage_flag && self.project.triage == OnOff::On)
+            claude_on_it(&facts, self.project.triage == OnOff::On)
         })
     }
 
@@ -179,9 +179,7 @@ impl ProjectLoop {
                 .await;
             }
         }
-        // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
-        self.triage_flag = self.flags.on("triage-session").await;
-        if !self.triage_flag || self.project.triage != OnOff::On || shared.stopping {
+        if self.project.triage != OnOff::On || shared.stopping {
             return;
         }
         let gate = StartGate::new(self, pool, shared);

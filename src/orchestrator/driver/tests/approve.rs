@@ -148,8 +148,11 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = repo.to_string_lossy().into_owned();
     rig.lp(0).project.base_branch = "main".into();
+    rig.lp(0).file_project.base_branch = "main".into();
     rig.lp(0).project.github = setup.github.clone();
+    rig.lp(0).file_project.github = setup.github.clone();
     rig.lp(0).seen.default_branch = Some("main".into());
     rig.pause("p0", setup.paused);
     let host = Arc::new(Host {

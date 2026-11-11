@@ -1,7 +1,6 @@
 //! The daily deprecated-specs check (docs/specs/agent/06.7-chores-never-idle.md "Deprecated specs";
 //! `maybeCheck`/`check` in Retaskable.com's agent/src/deprecations.ts). Each minute
-//! [`super::Machine::deprecation_checks`] starts [`run`] for a project not already running one. With the
-//! `chore-deprecated-specs` flag On it asks the store for the project's day, and once a day reads the top-level
+//! [`super::Machine::deprecation_checks`] starts [`run`] for a project not already running one. It asks the store for the project's day, and once a day reads the top-level
 //! specs on `origin/<base>`; each deprecated spec past its `Remove after` day with no `remove-<name>` item gets one,
 //! added under the store's `deprecation-<name>` lock. Paused or not; no lane and no session.
 use std::collections::HashSet;
@@ -13,10 +12,8 @@ use super::playtest_round::Job;
 use super::report::spec_files;
 use crate::backlog::runs::LockTake;
 use crate::deprecations::{read_deprecations, removal_due, removal_id, removal_item};
-use crate::flags::Flags;
 use crate::jobs_due::DayAsker;
 
-const FLAG: &str = "chore-deprecated-specs";
 /// A failed check is tried again after this long.
 const RETRY_MS: u64 = 10 * 60_000;
 
@@ -44,16 +41,12 @@ impl State {
 
 pub(super) struct Daily {
     pub base: Job,
-    pub flags: Arc<Flags>,
     pub state: Arc<Mutex<State>>,
 }
 
-/// Checks today's deprecations when the flag is On and the store gives the day; does nothing otherwise.
+/// Checks today's deprecations when the store gives the day; does nothing otherwise.
 pub(super) async fn run(daily: Daily) {
-    let Daily { base, flags, state } = daily;
-    if !flags.on(FLAG).await {
-        return;
-    }
+    let Daily { base, state } = daily;
     let Some(repo) = base.repo else {
         return;
     };

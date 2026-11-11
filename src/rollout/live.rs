@@ -30,10 +30,6 @@ pub fn spawn_all(args: SpawnArgs) {
         if project.github_repo.is_empty() || project.repo_path.is_empty() {
             continue;
         }
-        if let Err(why) = uses_store(project) {
-            tracing::info!("{id}: rollout: {why}");
-            continue;
-        }
         let (paused, store_paused, commands) = (
             args.paused.clone(),
             args.store_paused.clone(),
@@ -49,28 +45,37 @@ pub fn spawn_all(args: SpawnArgs) {
             client: Client::new(args.backlog_url),
             repo_id: Mutex::new(None),
         };
-        let sink_id = id.clone();
-        let Ok(rollout) = Rollout::new(
-            live,
-            project,
-            Box::new(move |line| tracing::info!("{sink_id}: rollout: {line}")),
-        ) else {
-            continue;
-        };
         tokio::spawn(async move {
-            let mut rollout = rollout;
+            let (mut live, mut rollout, mut said) = (Some(live), None::<Rollout<Live>>, String::new());
             loop {
-                // This computer's own gate: not paused, and the commands approved.
+                // This computer's own gate: not paused, and a rollout in the commands as approved now. A project
+                // whose commands arrive later (from the store, or a saved settings change) starts then.
                 let allowed = commands.allowed_config(&id, &file_project);
-                let may = paused.reason(&id).is_none()
-                    && !matches!(store_paused.get(&id), StorePause::Paused(_))
-                    && uses_store(&allowed).is_ok();
-                if may {
-                    rollout.apply(&allowed);
-                    let wait = rollout.cycle().await;
-                    tokio::time::sleep(wait).await;
-                } else {
-                    tokio::time::sleep(super::WAIT).await;
+                let gate = match uses_store(&allowed) {
+                    _ if paused.reason(&id).is_some() => Err("paused"),
+                    _ if matches!(store_paused.get(&id), StorePause::Paused(_)) => Err("paused in the store"),
+                    Ok(_) => Ok(()),
+                    Err(why) => Err(why),
+                };
+                match gate {
+                    Ok(()) => {
+                        if rollout.is_none() {
+                            let sink_id = id.clone();
+                            let sink = Box::new(move |line: &str| tracing::info!("{sink_id}: rollout: {line}"));
+                            rollout = live.take().and_then(|l| Rollout::new(l, &allowed, sink).ok());
+                        }
+                        let Some(r) = rollout.as_mut() else { return };
+                        r.apply(&allowed);
+                        let wait = r.cycle().await;
+                        tokio::time::sleep(wait).await;
+                    }
+                    Err(why) => {
+                        if said != why {
+                            tracing::info!("{id}: rollout: not running: {why}");
+                            said = why.to_string();
+                        }
+                        tokio::time::sleep(super::WAIT).await;
+                    }
                 }
             }
         });

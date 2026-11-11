@@ -26,6 +26,7 @@ async fn run(on: bool) -> (bool, bool, Vec<Value>, Vec<String>) {
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.lp(0).events = EventLog::new();
     rig.lp(0).project.repo_path = dir.path().to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = dir.path().to_string_lossy().into_owned();
     rig.go_live();
     rig.machine.pass().await; // publishes the On repos
     let err = crate::ci_watch::gh_out(&gh, dir.path(), &["pr", "checks", "undefined"], &|_| {}).is_err();
@@ -82,6 +83,7 @@ async fn a_project_with_the_flag_off_keeps_today_s_behaviour_beside_one_that_is_
         rig.lp(i).flags = Arc::new(crate::flags::Flags::fixed(&[flag]));
         rig.lp(i).events = EventLog::new();
         rig.lp(i).project.repo_path = d.to_string_lossy().into_owned();
+        rig.lp(i).file_project.repo_path = d.to_string_lossy().into_owned();
     }
     rig.go_live();
     rig.machine.pass().await; // publishes the On repos

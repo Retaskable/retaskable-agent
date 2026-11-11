@@ -4,7 +4,7 @@ use serde_json::json;
 use super::Shared;
 use super::project::{ProjectLoop, SessionStarter};
 use super::start_gate::StartGate;
-use crate::backlog::{BacklogError, ClaimNextAgent, ClaimNextAnswer};
+use crate::backlog::{ClaimNextAgent, ClaimNextAnswer};
 use crate::item_lifecycle::ItemState;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
@@ -95,8 +95,7 @@ impl ProjectLoop {
                 self.claim_logged = None;
                 ("none".to_string(), false)
             }
-            // The wait is behind `claim-next-waiting`; Off, the answer is a failure to read an item, as it was.
-            Ok(ClaimNextAnswer::WaitingFor(waiting)) if self.flags.on("claim-next-waiting").await => {
+            Ok(ClaimNextAnswer::WaitingFor(waiting)) => {
                 self.claim_waiting = true;
                 // Logged once per change of the list, so a wake that finds the same list adds nothing.
                 if self.claim_logged.as_ref() == Some(&waiting) {
@@ -111,15 +110,6 @@ impl ProjectLoop {
                 );
                 self.claim_logged = Some(waiting);
                 return Some(("waiting".to_string(), false));
-            }
-            Ok(ClaimNextAnswer::WaitingFor(_)) => {
-                let e = BacklogError::BadAnswer {
-                    status: 200,
-                    code: None,
-                    message: "couldn't read the item it claimed: missing field `item`".into(),
-                };
-                self.store_error("claim_next", &e);
-                ("failed".to_string(), false)
             }
             // Handed out again while this computer still has it: it isn't taken twice.
             Ok(ClaimNextAnswer::Item { item, .. }) if self.runs.contains_key(&item.id) => {

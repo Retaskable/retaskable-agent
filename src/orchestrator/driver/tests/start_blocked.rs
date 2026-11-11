@@ -10,6 +10,8 @@ async fn idle_rig(flags: &[&str]) -> Rig {
     let mut rig = rig(2, &[&base]);
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.lp(0).project.tuning.idle_lanes_minutes = 0;
+    rig.lp(0).file_project.tuning.idle_lanes_minutes = 0;
+    rig.lp(0).file_project.tuning.idle_lanes_minutes = 0;
     rig.go_live();
     rig
 }

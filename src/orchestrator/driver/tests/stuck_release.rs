@@ -1,4 +1,4 @@
-//! `stuck-release-drop`: a release the store keeps refusing is dropped after 24 hours.
+//! A release the store keeps refusing is dropped after 24 hours.
 use super::settling::ended;
 use super::*;
 
@@ -14,12 +14,10 @@ fn error_events(rig: &mut Rig) -> usize {
         .count()
 }
 
-/// A stuck release (refused, listed at clock 1000) with `flag` and the clock moved `later` seconds.
-async fn stuck(flag: bool, later: i64) -> Rig {
+/// A stuck release (refused, listed at clock 1000) with the clock moved `later` seconds.
+async fn stuck(later: i64) -> Rig {
     let fail = Arc::new(AtomicBool::new(true));
     let (mut rig, _fake, _asked) = ended(SessionResult::Failed("x".into()), &fail).await;
-    let flags: &[&str] = if flag { &["stuck-release-drop"] } else { &[] };
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.lp(0).unreleased_since.insert("a".into(), 1000);
     rig.lp(0).clock = Some(1000 + later);
     rig.machine.pass().await;
@@ -28,7 +26,7 @@ async fn stuck(flag: bool, later: i64) -> Rig {
 
 #[tokio::test]
 async fn a_release_refused_for_a_day_is_dropped_with_one_error_event() {
-    let mut rig = stuck(true, DAY).await;
+    let mut rig = stuck(DAY).await;
     assert!(rig.lp(0).unreleased.is_empty());
     assert!(rig.lp(0).store.unreleased().is_empty());
     assert_eq!(error_events(&mut rig), 1);
@@ -38,14 +36,7 @@ async fn a_release_refused_for_a_day_is_dropped_with_one_error_event() {
 
 #[tokio::test]
 async fn a_release_refused_for_less_than_a_day_is_kept() {
-    let mut rig = stuck(true, DAY - 1).await;
-    assert_eq!(rig.lp(0).store.unreleased()["a"].0, "lease-1");
-    assert_eq!(error_events(&mut rig), 0);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_an_old_stuck_release_is_kept() {
-    let mut rig = stuck(false, DAY * 3).await;
+    let mut rig = stuck(DAY - 1).await;
     assert_eq!(rig.lp(0).store.unreleased()["a"].0, "lease-1");
     assert_eq!(error_events(&mut rig), 0);
 }

@@ -21,13 +21,10 @@ fn file(play: &str) -> ProjectConfig {
 }
 
 #[test]
-fn play_main_refuses_with_nothing_allowed_and_runs_the_allowed_command_with_the_flag_on() {
+fn play_main_refuses_with_nothing_allowed_and_runs_the_allowed_command() {
     let dir = tempfile::tempdir().unwrap();
     let commands = ItemCommands::default();
     commands.gates().open(dir.path(), "p");
-    // Off: as today.
-    assert_eq!(commands.allowed_view(&view("file play")).play_command, "file play");
-    commands.set_flag("p", FLAG, true);
     commands
         .gates()
         .consider("p", Some(&settings(1, "store play")), &file("file play"))

@@ -181,7 +181,7 @@ pub struct ProjectLoop {
     /// agent's `unreleased`).
     pub(super) unreleased: BTreeMap<String, (String, String)>,
     /// When each `unreleased` entry was first listed (epoch seconds), kept in the state file; a release that
-    /// keeps failing is dropped after [`super::settle::STUCK_RELEASE_SECS`] (behind `stuck-release-drop`).
+    /// keeps failing is dropped after [`super::settle::STUCK_RELEASE_SECS`].
     pub(super) unreleased_since: BTreeMap<String, i64>,
     /// The test's clock, as `Machine::clock` is.
     #[cfg(test)]
@@ -206,7 +206,7 @@ pub struct ProjectLoop {
     pub(super) data_dir: Option<PathBuf>,
     /// Whether the saved `state.usage` has been checked once against the weekly cutoff.
     pub(super) week_checked: bool,
-    /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
+    /// Items whose session the watchdog killed, by when it is resumed.
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
     /// Claude implementer starts made in this scheduling pass, which haven't taken a model slot yet.
     pub(super) claude_starts: u32,
@@ -226,7 +226,7 @@ pub struct ProjectLoop {
     pub(super) guard: Option<PortGuard>,
     pub(super) events: EventLog,
     pub(super) client: Arc<Client>,
-    /// The Retaskable release flags (`ask-claude` gates the draft step's chat messages).
+    /// The Retaskable release flags (the ones still read).
     pub(super) flags: Arc<crate::flags::Flags>,
     pub(super) live: LiveHandle,
     /// GitHub's numeric id of `project.github_repo`, asked of `gh` until it answers and then kept.
@@ -289,19 +289,14 @@ pub struct ProjectLoop {
     pub(super) second_due: Vec<(String, u32, super::triage_run::Held)>,
     /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
     pub(super) claude_pending: std::collections::BTreeSet<String>,
-    /// The `triage-session` flag as of the last pass.
-    pub(super) triage_flag: bool,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
     pub(super) backlog_items: usize,
-    /// The project as config.json has it; `project` is this with the allowed commands over it while
-    /// `approve-commands-gate` is On (`command_gate.rs`).
+    /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
     pub(super) file_project: ProjectConfig,
-    /// Whether `project` has the allowed commands over it.
-    pub(super) gated: bool,
 }
 
 impl ProjectLoop {
@@ -379,12 +374,10 @@ impl ProjectLoop {
             second_looking: Default::default(),
             second_due: Vec::new(),
             claude_pending: Default::default(),
-            triage_flag: false,
             asks: Default::default(),
             trial: None,
             backlog_items: 0,
             file_project,
-            gated: false,
         }
     }
 
@@ -415,20 +408,13 @@ impl ProjectLoop {
         .with_data_dir(dir))
     }
 
-    /// With `approve-commands-gate` On: takes this pass's `settings_get` (`None`: not asked; an error changes
-    /// nothing, so the allowed commands keep running) into the project's allowed commands, then lays them over
-    /// `file_project` as `project`. Off: `project` is config.json's.
+    /// Takes this pass's `settings_get` (`None`: not asked; an error changes nothing, so the allowed commands keep
+    /// running) into the project's allowed commands, then lays them over `file_project` as `project`.
     pub(super) fn take_allowed_commands(
         &mut self,
         commands: &ItemCommands,
         settings: Option<Result<Option<StoreSettings>, BacklogError>>,
     ) {
-        if !commands.flag_on(&self.id, crate::command_gate::FLAG) {
-            if std::mem::take(&mut self.gated) {
-                self.project = self.file_project.clone();
-            }
-            return;
-        }
         let gates = commands.gates();
         if let Some(dir) = &self.data_dir {
             gates.open(dir, &self.id);
@@ -443,7 +429,6 @@ impl ProjectLoop {
             None => {}
         }
         self.project = commands.allowed_config(&self.id, &self.file_project);
-        self.gated = true;
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
