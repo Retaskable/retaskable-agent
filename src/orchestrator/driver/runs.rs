@@ -447,6 +447,17 @@ impl ProjectLoop {
             .await
     }
 
+    /// Writes the `claim` event for what the store answered.
+    fn write_claim(&mut self, answer: Value) {
+        self.events.add_in(
+            &self.id,
+            Event::Claim(event::Claim {
+                answer: Some(answer),
+                ..Default::default()
+            }),
+        );
+    }
+
     /// One `merge_next` for a piece's merge, with its `claim` event. Whether a merge run started.
     async fn ask_merge(
         &mut self,
@@ -489,13 +500,7 @@ impl ProjectLoop {
                 }
             },
         };
-        self.events.add_in(
-            &self.id,
-            Event::Claim(event::Claim {
-                answer: Some(answer),
-                ..Default::default()
-            }),
-        );
+        self.write_claim(answer);
         more
     }
 
@@ -546,13 +551,7 @@ impl ProjectLoop {
                 (answer, more)
             }
         };
-        self.events.add_in(
-            &self.id,
-            Event::Claim(event::Claim {
-                answer: Some(answer),
-                ..Default::default()
-            }),
-        );
+        self.write_claim(answer);
         more
     }
 
