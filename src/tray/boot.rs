@@ -43,6 +43,8 @@ pub struct Boot<'a> {
     /// Card flag `terminal-menu`.
     pub terminal_menu: bool,
     pub link_backlog: Arc<dyn Fn() + Send + Sync>,
+    /// Keep this computer awake.
+    pub keep_awake: Option<Arc<crate::keep_awake::KeepAwake>>,
     /// Said (with why) when the helper stops after it started.
     pub on_stopped: Box<dyn FnOnce(String) + Send>,
 }
@@ -193,6 +195,7 @@ pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
         quit: quit.clone(),
         settings: b.settings,
         login,
+        keep_awake: b.keep_awake,
         log_file,
         windows: cfg!(windows),
         link_backlog: b.link_backlog,

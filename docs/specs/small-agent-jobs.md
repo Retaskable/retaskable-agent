@@ -17,15 +17,15 @@ Four small jobs the TypeScript agent does and the Rust agent does not: reread Cl
 - **[Decided]** **Native app facts.** For a project with `app/eas.json` on the base branch (else none): whether it builds for Android and iOS (the Expo config in `app/app.json`, else `app/app.config.js`, read as text and never run, or an `eas.json` build profile naming it), its version, and what changed since the last store build (the newest `submitted` line's sha in `testflight.log`): up to 100 changed paths and 50 commits touching `app/`, oldest first, each matched to an item by merge commit, an `Item:` trailer or the id its title starts with; the rest counted. Read-only, plain code and `git`; kept per base head and log stamp.
 - **[Decided]** **No half emoji.** A bug report's signature, title and details are cut by characters of whole emoji: a cut never leaves half a surrogate pair (in Rust, never inside a character).
 - **[Proposal]** The native-app read is only useful once a TestFlight lane exists ([testflight-restart-wait.md](testflight-restart-wait.md)); it is written first as a pure read the lane calls.
-- **[Proposal]** The Rust names: `src/usage_check.rs`, `src/keep_awake.rs`, `src/native_app.rs`, and `text::cut` used by `src/triage/bug_report.rs`.
+- **[Proposal]** The Rust names: `src/usage_check.rs`, `src/keep_awake.rs`, `src/native_app.rs`, and `text::truncate` (the first `max` characters, never inside one), which `src/triage/bug_report.rs` already uses for the signature, title and details.
 
 ## 3. Behavior, in build order
 
-1. **`cut`** and its use in the bug report (smallest; tests with emoji at the limit).
+1. **The cut** is `text::truncate`, used by the bug report.
 2. **Usage recheck**, called from the orchestrator tick.
-3. **Keep awake**, called from the tray's tick and from start-up; the command per OS is a pure function (`awake_command(os, pid)`) tested for each.
+3. **Keep awake** (`KeepAwake` in `src/keep_awake.rs`: `tick` starts or ends the child to match the choice file `keep-awake`, `set` records the choice), called at start-up and from the tray's refresh; the tray's menu item is *Keep this computer awake*, shown when the OS has a command; the command per OS is a pure function (`awake_command(os, pid)`) tested for each.
 4. **Native app facts**, a pure read over a repo and a ref.
-5. **Tests:** a usage reading from streamed lines (event, none but answered, none and refused); the 10-minute gap; keep awake's commands and its saved choice; the native-app read for an Expo app with each platform, none, more than 100 paths and 50 commits; the cut. Ends with `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+5. **Tests:** a usage reading from streamed lines (event, none but answered, none and refused); the 10-minute gap; keep awake's commands and its saved choice; the native-app read for an Expo app with each platform, none, more than 100 paths and 50 commits; the cut (`text::truncate` with an emoji at the limit). Ends with `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## 4. Acceptance
 

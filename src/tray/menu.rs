@@ -27,6 +27,7 @@ pub enum Action {
     Resume,
     Settings,
     ToggleStartAtLogin,
+    ToggleKeepAwake,
     OpenLog,
     QuitNow,
     QuitWhenIdle,
@@ -203,6 +204,12 @@ pub fn tray_menu(input: &TrayInput) -> Menu {
     .does(Action::ToggleStartAtLogin);
     login.checked = input.is_release && input.start_at_login;
     items.push(login);
+    let mut awake = Item::new("keep_awake", "Keep this computer awake")
+        .enabled_if(input.keep_awake.is_some())
+        .hidden_if(input.keep_awake.is_none())
+        .does(Action::ToggleKeepAwake);
+    awake.checked = input.keep_awake == Some(true);
+    items.push(awake);
     items.push(
         Item::new("open_log", "Open the log")
             .enabled_if(input.is_release)

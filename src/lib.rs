@@ -35,6 +35,7 @@ pub mod ideas;
 pub mod implementer;
 pub mod item_lifecycle;
 pub mod jobs_due;
+pub mod keep_awake;
 pub mod lane_pool;
 pub mod lanes;
 pub mod lighthouse;
