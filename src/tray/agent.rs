@@ -16,10 +16,10 @@ use anyhow::{Context, Result, bail};
 use super::menu::{Action, Menu, tray_menu};
 use super::state::{BacklogWait, CloudInput, Exit, IconState, LinkState, TrayInput, icon_state, tooltip};
 use crate::connector::{CloudHandle, CloudLink};
+use crate::keep_awake::KeepAwake;
 use crate::link::pending::{BacklogWaiting, Links};
 use crate::restart::RestartState;
 use crate::settings_server::SettingsServer;
-use crate::keep_awake::KeepAwake;
 use crate::start_at_login::StartAtLogin;
 use crate::view::AgentView;
 
