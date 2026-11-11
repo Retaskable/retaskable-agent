@@ -21,6 +21,7 @@ Only the specs whose subject is the computer itself:
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
 - [agent-ci.md](agent-ci.md): CI run on the agent computer, in Docker, on its own slot.
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
+- [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
 
 ## What was cut
 
@@ -36,6 +37,7 @@ Specs about the cloud, the store, the app or the site stay in Retaskable.com. Wh
 - Approved specs are committed to the user's repo, and spec content never goes to the store.
 - The port binds `127.0.0.1` and never takes a command.
 - Claude runs with `--permission-mode auto`.
+- The agent reads no release flag: a new feature ships On ([no-agent-flags.md](no-agent-flags.md)).
 - Every project has a shared backlog. There is no local mode, and the agent fails closed when it can't reach it.
 
 Synced with Retaskable.com PR #1848 at commit 844314cf172b71774ab5cff10229f6f10fdcdbbf (engine per lane).
