@@ -13,7 +13,7 @@ Kind: new
 ## 2. Decisions
 
 - **[Decided]** All the gaps in the request are planned as separate items, in the order of section 3.
-- **[Decided]** The flag decision (slice 10) must be made: with `own-failure-handling` Off every failure goes to a person.
+- **[Decided]** Every failure the loop can't settle itself goes to a person; there is no flag for it.
 - **[Proposal]** Turn `own-failure-handling` On for everyone, then delete the flag and its Off paths. The Off behavior is the bug 07.3 exists to fix ("Needs help" means a person is really needed), and nothing keeps a reason for it Off.
 - **[Proposal]** Exit code 75 stays the one restart signal for every way of relaunching.
 
@@ -28,7 +28,7 @@ Kind: new
 7. **The update to main command and Ask Claude's restart (`update-to-main`).** The **update to main** command (`src/commands.rs`) runs the slice 6 update on demand and answers with its line or its refusal reason (for the button's tooltip). Ask Claude's `restart` action always restarts after the update, even when it pulled nothing ("Up to date with main; restarting now"), and only after the ask's answer is saved and its other actions have run (`restartSoon`), so the restarted agent does not answer the ask again.
 8. **Close the spawn-to-join gap (`spawn-join-cut`).** Today a restart asked between `spawn` and the tree joining the registry misses the tree (07.4, "Two cuts at once"). **[Proposal]** Do as that note says: `spawn_and_read` reads `stopping()` right after joining and cuts its own tree if set. Then change the note from a Proposal to as built. Tests: a stop raised before the join leaves no child alive.
 9. **A crash must not leave the process group running (`crash-kills-group`).** On Windows the Job object's kill-on-close already does it. On Linux and macOS the group outlives an agent that crashes or is killed. **[Proposal]** Linux: set `PR_SET_PDEATHSIG` (`SIGKILL`) in the child before exec, and have the group's leader do the same; macOS has no such call, so each child is started through a tiny watcher thread/pipe: the child group is killed when the pipe from the agent closes, and a startup sweep kills groups left in the `live` records of a previous run. Tests: killing the agent with `SIGKILL` leaves no child (Linux, macOS CI only; skipped on Windows).
-10. **Decide the own-failure flag (`own-failure-flag-on`).** See section 2: **[Proposal]** make `own-failure-handling` always On, delete `Flags` checks for it in `settle.rs`, `item_commands.rs` and the tests that set it, and rewrite 07.3 and 07.4's Rust paragraphs from "behind the flag" to as built. A tweak: no new behavior, only the Off paths go.
+10. **Own-failure handling always on (`own-failure-flag-on`).** Built: `settle.rs` and `item_commands.rs` carry only the On path.
 
 ## 3.1 Details each slice settles
 
