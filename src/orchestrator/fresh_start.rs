@@ -2,7 +2,6 @@
 //! history gets for it, and the prompt the fresh session opens with (06.2-implementer.md "Fresh-start
 //! rules on resume" and "A session that's grown starts fresh").
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -35,12 +34,6 @@ pub const LIMIT_PAUSE: Duration = Duration::from_secs(30 * 60);
 #[derive(Debug, Clone, Default)]
 pub struct EngineLimits {
     until: Arc<Mutex<HashMap<EngineId, Instant>>>,
-    /// The `engine-limit-records` flag: when On, any session that ends at its engine's limit records it
-    /// ([`crate::orchestrator::live::sessions::record_session_end`]), whatever its role.
-    any_role: Arc<AtomicBool>,
-    /// The `weekly-cutoff` flag: when On, a Claude session's end at the weekly cutoff limits Claude to the week's
-    /// reset, whatever its role ([`crate::orchestrator::live::sessions::record_session_end`]).
-    week_cutoff: Arc<AtomicBool>,
     /// Until when Claude is held at the weekly cutoff ([`Self::cut_off_for_week`]).
     week_until: Arc<Mutex<Option<Instant>>>,
 }
@@ -68,26 +61,6 @@ impl EngineLimits {
     pub fn limited_until(&self, engine: EngineId, now: Instant) -> Option<Instant> {
         let map = self.until.lock().unwrap_or_else(PoisonError::into_inner);
         map.get(&engine).copied().filter(|until| *until > now)
-    }
-
-    /// Turns recording from every role's sessions on or off (the `engine-limit-records` flag).
-    pub fn record_any_role(&self, on: bool) {
-        self.any_role.store(on, Ordering::Relaxed);
-    }
-
-    /// Whether sessions of every role record their engine's limit.
-    pub fn records_any_role(&self) -> bool {
-        self.any_role.load(Ordering::Relaxed)
-    }
-
-    /// Turns the weekly cutoff on or off (the `weekly-cutoff` flag).
-    pub fn set_week_cutoff(&self, on: bool) {
-        self.week_cutoff.store(on, Ordering::Relaxed);
-    }
-
-    /// Whether the weekly cutoff is on.
-    pub fn week_cutoff_on(&self) -> bool {
-        self.week_cutoff.load(Ordering::Relaxed)
     }
 
     /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited until the week's reset, so nothing
@@ -304,21 +277,6 @@ mod tests {
         limits.hit(Cursor, now + Duration::from_secs(60));
         assert_eq!(limits.takeover(Claude, &[Claude, Cursor, Codex], now), Some(Codex));
         assert_eq!(limits.takeover(Claude, &[Cursor, Codex], now), Some(Codex));
-    }
-
-    #[test]
-    fn the_flags_start_off_and_can_be_turned_on_and_off() {
-        let limits = EngineLimits::default();
-        assert!(!limits.records_any_role());
-        assert!(!limits.week_cutoff_on());
-        limits.record_any_role(true);
-        limits.set_week_cutoff(true);
-        assert!(limits.clone().records_any_role());
-        assert!(limits.clone().week_cutoff_on());
-        limits.record_any_role(false);
-        limits.set_week_cutoff(false);
-        assert!(!limits.records_any_role());
-        assert!(!limits.week_cutoff_on());
     }
 
     #[test]

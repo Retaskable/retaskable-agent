@@ -196,7 +196,7 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
 
 /// The setup checks, plus the Docker line (agent-ci.md section 3.6) only with the `agent-ci` flag On.
 async fn checks_with_docker(env: &Env, flags: &crate::flags::Flags) -> setup_check::SetupChecks {
-    let mut checks = setup_check::run_setup_checks(env, flags.on("engine-setup-probes").await).await;
+    let mut checks = setup_check::run_setup_checks(env).await;
     if flags.on(crate::hello_settings::CI_FLAG).await {
         let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
         let image = image.as_deref().and_then(crate::text::non_blank);
@@ -220,14 +220,10 @@ pub fn setup_check_runner(env: Env, flags: Arc<crate::flags::Flags>) -> Arc<setu
 /// release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
 /// The runner keeps the latest result for the settings page's Now tab (agent-settings.md section
 /// 4.5) and runs again every ten minutes, quietly.
-pub fn spawn_setup_checks(
-    is_release: bool,
-    runner: &Arc<setup_check::SetupCheckRunner>,
-    flags: Arc<crate::flags::Flags>,
-) {
+pub fn spawn_setup_checks(is_release: bool, runner: &Arc<setup_check::SetupCheckRunner>) {
     runner.spawn(move |checks| {
         Box::pin(async move {
-            let report = setup_check::setup_check_report(&checks, flags.on("engine-setup-probes").await);
+            let report = setup_check::setup_check_report(&checks);
             if is_release {
                 tracing::info!("{report}");
             } else {

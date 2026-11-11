@@ -33,30 +33,18 @@ impl ProjectLoop {
         {
             return None;
         }
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
-            return None;
-        }
-        // With the start rules Off nothing else holds an engine's limit, so the weekly cutoff holds the claim.
-        if gate.is_none()
-            && self.flags.on("weekly-cutoff").await
-            && shared.engine_limits.week_cut_off(std::time::Instant::now())
-            && !Self::limit_fallback(shared)
-        {
-            return None;
-        }
-        let caps_on = self.flags.on("model-concurrency-caps").await;
+        let gate = StartGate::new(self, pool, shared);
         let mut last = None;
         // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
         for _ in 0..pool.rules().lanes {
-            let model_full = self.model_full(starter, caps_on) || self.local_queue_full(shared);
+            let model_full = self.model_full(starter) || self.local_queue_full(shared);
             let asks = self
-                .decide_gated(pool, shared, gate.as_ref(), model_full)
+                .decide_gated(pool, shared, &gate, model_full)
                 .contains(&Action::AskForWork);
             if *slots == 0 || !asks {
                 break;
             }
-            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared, caps_on).await else {
+            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared).await else {
                 break;
             };
             last = Some(answer);
@@ -74,7 +62,6 @@ impl ProjectLoop {
         slots: &mut u32,
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
-        caps_on: bool,
     ) -> Option<(String, bool)> {
         // Asked before every claim, so a TS agent started since is noticed at once.
         if let Some(guard) = self.guard.clone()
@@ -146,9 +133,9 @@ impl ProjectLoop {
             Ok(ClaimNextAnswer::Item { item, token }) => {
                 self.claim_logged = None;
                 self.take_lease(&item, token, ItemState::Queued);
-                let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-                let model_full = self.model_full(starter, caps_on);
-                let actions = self.decide_gated(pool, shared, gate.as_ref(), model_full);
+                let gate = StartGate::new(self, pool, shared);
+                let model_full = self.model_full(starter);
+                let actions = self.decide_gated(pool, shared, &gate, model_full);
                 *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
                 // A start refused hands the item back; asking again now could only be handed it again.
                 let kept = self.runs.contains_key(&item.id);

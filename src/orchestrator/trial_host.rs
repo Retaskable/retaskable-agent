@@ -12,9 +12,9 @@ use serde_json::Value;
 
 use super::session::watch_for;
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::cursor::with_project_or_gh;
+use crate::engines::cursor::with_project;
 use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
@@ -35,9 +35,7 @@ pub struct TrialJob {
     pub branch: String,
     pub session_id: String,
     pub usage: Option<Value>,
-    /// The `engine-placement` flag: Off, only a Claude trial runs.
-    pub placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the implementer's chosen one.
+    /// The engine to start on when it isn't the implementer's chosen one.
     pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
@@ -118,9 +116,6 @@ impl TrialHost for ClaudeTrial {
                 job.engine,
                 engine_for(&choice, project.engines.as_ref(), Role::Implementer, None),
             );
-            if chosen != Engine::Claude && !job.placement {
-                return dropped(format!("{chosen} sessions don't run yet"));
-            }
             let placed = match place(chosen, Role::Implementer, &env, &cursor_models) {
                 Ok(placed) => placed,
                 Err(why) => return dropped(why),
@@ -136,9 +131,9 @@ impl TrialHost for ClaudeTrial {
                 tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base)).await??;
             let item = trial_item();
             let now = crate::telemetry::now_ms() / 1000;
-            // Like an implementer: the local model only for a Claude session behind the `local-tier-ladder` flag,
-            // with its slot held until the session ends.
-            let ladder = placed.engine == crate::engines::EngineId::Claude && crate::tiers::local_ladder_on();
+            // Like an implementer: the local model only for a Claude session, with its slot held until the session
+            // ends.
+            let ladder = placed.engine == crate::engines::EngineId::Claude;
             let up = ladder && local.available();
             let tier = if up && placed.local {
                 LOCAL
@@ -166,7 +161,7 @@ impl TrialHost for ClaudeTrial {
                     budget_usd: project.budget.drafter_usd,
                     max_turns: None,
                     engine: Some(placed.engine),
-                    cursor: placed.cursor.clone().map(|c| with_project_or_gh(project, c)),
+                    cursor: placed.cursor.clone().map(|c| with_project(project, c)),
                     local: local_run.as_ref().map(|r| r.target.clone()),
                     sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                 },

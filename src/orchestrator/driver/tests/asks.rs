@@ -319,12 +319,10 @@ fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
 
-/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
 fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    let mut on = vec!["engine-start-rules", "engine-placement"];
-    on.extend(flags);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
     if cursor_out {
@@ -396,34 +394,25 @@ async fn an_ask_report_the_store_refuses_is_logged_as_a_store_error_for_the_ask(
     assert_eq!(logged[0]["item"], "k1");
 }
 
-/// `local-limit-fallback`: Claude at its usage limit holds an ask only when the flag is Off, the model is down or
-/// Claude is signed out; else the ask starts (on the local model), with the start rules On or Off.
+/// Claude at its usage limit holds an ask only when the model is down or Claude is signed out; else the ask starts
+/// (on the local model).
 #[tokio::test]
 async fn at_the_limit_an_ask_starts_with_the_fallback_and_waits_without_it() {
     use crate::local_model::LocalModel;
-    for rules in [false, true] {
-        for (fallback, model, signed_out, starts) in [
-            (true, LocalModel::up(), false, true),
-            (false, LocalModel::up(), false, false),
-            (true, LocalModel::off(), false, false),
-            (true, LocalModel::up(), true, false),
-        ] {
-            crate::tiers::set_local_ladder_for_test(true);
-            crate::tiers::set_local_limit_fallback_for_test(fallback);
-            let (mut rig, host, _asked) = rig_with_host().await;
-            let mut on = vec!["ask-claude", "watchdog-anomaly-rules"];
-            on.extend(rules.then_some("engine-start-rules"));
-            rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
-            rig.machine.local = model;
-            rig.machine.claude_signed_out_until =
-                signed_out.then(|| std::time::Instant::now() + Duration::from_secs(60));
-            rig.machine
-                .engine_limits
-                .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(3600));
-            push(&rig, ask("k1", "hello"));
-            quiet_passes(&mut rig).await;
-            let case = (rules, fallback, signed_out);
-            assert_eq!(host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
-        }
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
+    ] {
+        let (mut rig, host, _asked) = rig_with_host().await;
+        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude", "watchdog-anomaly-rules"]));
+        rig.machine.local = model;
+        rig.machine.claude_signed_out_until = signed_out.then(|| std::time::Instant::now() + Duration::from_secs(60));
+        rig.machine
+            .engine_limits
+            .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(3600));
+        push(&rig, ask("k1", "hello"));
+        quiet_passes(&mut rig).await;
+        assert_eq!(host.jobs.lock().unwrap().len(), usize::from(starts), "{signed_out}");
     }
 }

@@ -724,12 +724,10 @@ fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
 
-/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
 fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    let mut on = vec!["engine-start-rules", "engine-placement"];
-    on.extend(flags);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
     if cursor_out {
@@ -767,34 +765,25 @@ async fn a_triager_waits_when_no_engine_may_start() {
     assert!(engines.is_empty());
 }
 
-/// `local-limit-fallback`: Claude at its usage limit holds a triager only without the flag, the model, or sign-in.
+/// Claude at its usage limit holds a triager only without the model or sign-in.
 #[tokio::test]
 async fn at_the_limit_a_triager_starts_with_the_fallback_and_waits_without_it() {
     use crate::local_model::LocalModel;
-    for rules in [false, true] {
-        for (fallback, model, signed_out, starts) in [
-            (true, LocalModel::up(), false, true),
-            (false, LocalModel::up(), false, false),
-            (true, LocalModel::off(), false, false),
-            (true, LocalModel::up(), true, false),
-        ] {
-            crate::tiers::set_local_ladder_for_test(true);
-            crate::tiers::set_local_limit_fallback_for_test(fallback);
-            let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
-            start_rules(&mut rig, &["triage-session"], json!({}), signed_out, false);
-            if !rules {
-                let on = ["triage-session", "engine-placement"];
-                rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
-            }
-            rig.machine.local = model;
-            rig.machine
-                .engine_limits
-                .hit(crate::engines::EngineId::Claude, out_for(600));
-            for _ in 0..4 {
-                rig.machine.pass().await;
-            }
-            let case = (rules, fallback, signed_out);
-            assert_eq!(fake.triage.asked.lock().unwrap().len(), usize::from(starts), "{case:?}");
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
+    ] {
+        let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
+        start_rules(&mut rig, &["triage-session"], json!({}), signed_out, false);
+        rig.machine.local = model;
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Claude, out_for(600));
+        for _ in 0..4 {
+            rig.machine.pass().await;
         }
+        let case = signed_out;
+        assert_eq!(fake.triage.asked.lock().unwrap().len(), usize::from(starts), "{case:?}");
     }
 }

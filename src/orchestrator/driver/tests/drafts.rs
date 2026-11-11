@@ -468,12 +468,10 @@ fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
 
-/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
 fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    let mut on = vec!["engine-start-rules", "engine-placement"];
-    on.extend(flags);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
     if cursor_out {
@@ -576,18 +574,15 @@ async fn a_draft_report_the_store_refuses_is_logged_as_a_store_error_for_the_dra
     assert_eq!(logged[0]["code"], "boom");
 }
 
-/// `local-limit-fallback`: Claude at its usage limit holds a draft only without the flag, the model, or sign-in.
+/// Claude at its usage limit holds a draft only without the model or sign-in.
 #[tokio::test]
 async fn at_the_limit_a_draft_starts_with_the_fallback_and_waits_without_it() {
     use crate::local_model::LocalModel;
-    for (fallback, model, signed_out, starts) in [
-        (true, LocalModel::up(), false, true),
-        (false, LocalModel::up(), false, false),
-        (true, LocalModel::off(), false, false),
-        (true, LocalModel::up(), true, false),
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
     ] {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_local_limit_fallback_for_test(fallback);
         let (mut rig, host, _asked) = rig_with(claimed(), vec![charts()]).await;
         start_rules(&mut rig, &["ask-claude"], json!({}), signed_out, false);
         rig.machine.local = model;
@@ -598,7 +593,7 @@ async fn at_the_limit_a_draft_starts_with_the_fallback_and_waits_without_it() {
             rig.machine.pass().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let case = (fallback, signed_out);
+        let case = signed_out;
         assert_eq!(host.engines.lock().unwrap().len(), usize::from(starts), "{case:?}");
     }
 }

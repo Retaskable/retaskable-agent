@@ -14,7 +14,7 @@ use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
 use super::session::watch_for;
 use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
@@ -219,8 +219,6 @@ pub struct Roster {
     pub env: Env,
     pub models: ModelsConfig,
     pub cursor_models: CursorModels,
-    /// `engine-placement`: Off, only a role on Claude offers a run, as before.
-    pub flags: Arc<crate::flags::Flags>,
     /// The sessions running now: a plan or look lists itself while it runs.
     pub sessions: Sessions,
     /// The computer's local model, for the tier ladder.
@@ -242,17 +240,10 @@ pub(super) struct Job {
 }
 
 impl Roster {
-    fn on_claude(&self, role: Role, project: Option<&ProjectConfig>) -> bool {
-        let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.choice, engines, role, None) == Engine::Claude
-    }
-
-    /// `kind` when `slot` is free. With `engine-placement` On the role's engine (the machine's choice unless a
-    /// project overrides it) is placed by `begin`; Off, the role must be on Claude for the machine and every project.
-    pub(super) fn kinds(&self, role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
-        let any = self.flags.last("engine-placement")
-            || (self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p))));
-        if any && !slot.busy() { vec![kind] } else { Vec::new() }
+    /// `kind` when `slot` is free; the role's engine (the machine's choice unless a project overrides it) is placed
+    /// by `begin`.
+    pub(super) fn kinds(&self, _role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
+        if slot.busy() { Vec::new() } else { vec![kind] }
     }
 
     /// Takes `slot` and sets up the session of `request` for `role` on `model` (Claude's; Cursor's comes from the
@@ -274,11 +265,8 @@ impl Roster {
             request.engine,
             engine_for(&self.choice, project.engines.as_ref(), role, None),
         );
-        if !self.flags.last("engine-placement") && (!self.on_claude(role, Some(&project)) || engine != Engine::Claude) {
-            return Err("Claude alone starts sessions while engine-placement is off".into());
-        }
         let placed = place(engine, role, &self.env, &self.cursor_models)?;
-        // `local` only where the role is on Claude, the `local-tier-ladder` flag is On and the model is up.
+        // `local` only where the role is on Claude, the model is up.
         let tier = tier(self.local.ladder_for(placed.engine == EngineId::Claude));
         let model = tier.to_string();
         let guard = slot
@@ -329,15 +317,9 @@ impl RunStarter for PlanRuns {
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
         let models = &self.roster.models;
-        let flagged = tiers::local_ladder_on();
         let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
-            // Off, the planner stays on the chore tier as before.
-            if flagged {
-                let floored = tiers::limit_floor(None, self.roster.sessions.claude_at_limit(), local);
-                tiers::top_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, models, local)
-            } else {
-                tiers::chore_tier()
-            }
+            let floored = tiers::limit_floor(None, self.roster.sessions.claude_at_limit(), local);
+            tiers::top_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, models, local)
         })?;
         let cut = Cut::default();
         spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));

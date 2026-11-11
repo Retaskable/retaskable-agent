@@ -29,7 +29,6 @@
 //! **Skip** (`skip`, and a triage `skip` decision, `claude`) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
 //! run, frees its lane, gives the lease back with a note (`report`, `release`) and then skips the item in the store
 //! (`skip`), so no computer claims it again. Its branch and pull request are kept.
-use super::project::signed_out;
 use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
 use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
@@ -98,8 +97,7 @@ impl ProjectLoop {
                 queue.push((item, notes.filter(|n| !is_blank(n))));
             }
         }
-        let rules_on = self.flags.on("engine-start-rules").await;
-        if (!rules_on && signed_out(shared)) || shared.stopping {
+        if shared.stopping {
             return;
         }
         for (item, notes) in std::mem::take(&mut self.continuing) {
@@ -255,7 +253,7 @@ impl ProjectLoop {
         let Some(lane) = self.take_lane(pool, item_id) else {
             return false;
         };
-        if self.start_held(pool, shared, lane).await {
+        if self.start_held(pool, shared, lane) {
             self.give_back_lane(pool, item_id, lane);
             return false;
         }
@@ -409,7 +407,7 @@ impl ProjectLoop {
         let Some(lane) = self.take_lane(pool, item_id) else {
             return false;
         };
-        if !checks_only && self.start_held(pool, shared, lane).await {
+        if !checks_only && self.start_held(pool, shared, lane) {
             self.give_back_lane(pool, item_id, lane);
             return false;
         }
@@ -467,7 +465,7 @@ impl ProjectLoop {
         let Some(lane) = pool.claim(&self.want(item_id)) else {
             return false;
         };
-        if self.start_held(pool, shared, lane).await {
+        if self.start_held(pool, shared, lane) {
             self.give_back_lane(pool, item_id, lane);
             return false;
         }

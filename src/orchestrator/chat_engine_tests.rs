@@ -69,17 +69,11 @@ async fn empty_store() -> String {
     format!("http://{addr}")
 }
 
-async fn ask(root: &std::path::Path, choice: EngineChoiceConfig, env: Env, placement: bool) -> String {
-    ask_listed(root, choice, env, placement, Default::default()).await
+async fn ask(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> String {
+    ask_listed(root, choice, env, Default::default()).await
 }
 
-async fn ask_listed(
-    root: &std::path::Path,
-    choice: EngineChoiceConfig,
-    env: Env,
-    placement: bool,
-    sessions: Sessions,
-) -> String {
+async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env, sessions: Sessions) -> String {
     let base = empty_store().await;
     let repo = crate::test_support::repo_with_origin(root);
     let view = Arc::new(AgentView::blank());
@@ -115,7 +109,6 @@ async fn ask_listed(
         lanes: vec![],
         runs: Default::default(),
         events,
-        placement,
         sessions,
     };
     host.run(job).await.unwrap().answer
@@ -125,7 +118,7 @@ async fn ask_listed(
 async fn an_ask_on_cursor_runs_cursor_with_the_scout_model_and_returns_its_answer() {
     let dir = tempfile::tempdir().unwrap();
     let env = stubs(dir.path(), &cursor_says(r#"{"answer":"All good.","actions":[]}"#), &[]);
-    let answer = ask(dir.path(), chat_on(Engine::Cursor), env, true).await;
+    let answer = ask(dir.path(), chat_on(Engine::Cursor), env).await;
     assert_eq!(answer, "All good.");
     let calls = calls(dir.path());
     assert!(calls.len() == 1 && calls[0].starts_with("cursor-agent "), "{calls:?}");
@@ -137,7 +130,7 @@ async fn an_ask_on_codex_or_pi_runs_that_engine_not_the_claude_apology() {
     for (engine, program) in [(Engine::Codex, "codex"), (Engine::Pi, "pi")] {
         let dir = tempfile::tempdir().unwrap();
         let env = stubs(dir.path(), "", &[]);
-        let answer = ask(dir.path(), chat_on(engine), env, true).await;
+        let answer = ask(dir.path(), chat_on(engine), env).await;
         assert!(!answer.contains("Claude alone"), "{answer}");
         let calls = calls(dir.path());
         assert!(
@@ -151,7 +144,7 @@ async fn an_ask_on_codex_or_pi_runs_that_engine_not_the_claude_apology() {
 async fn an_ask_with_the_binary_missing_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let env = stubs(dir.path(), "", &["cursor-agent"]);
-    let answer = ask(dir.path(), chat_on(Engine::Cursor), env, true).await;
+    let answer = ask(dir.path(), chat_on(Engine::Cursor), env).await;
     assert!(
         answer.starts_with("Sorry, I couldn't answer that: the cursor-agent binary wasn't found ("),
         "{answer}"
@@ -189,7 +182,6 @@ fn triage_request_listed(sessions: Sessions) -> (TriageRequest, tokio::sync::mps
         lane: None,
         usage: None,
         outcomes,
-        placement: true,
         sessions,
     };
     (request, rx)
@@ -230,25 +222,6 @@ fn a_triage_with_the_binary_missing_names_it() {
     assert!(err.starts_with("the cursor-agent binary wasn't found ("), "{err}");
 }
 
-#[tokio::test]
-async fn with_placement_off_only_claude_answers() {
-    let dir = tempfile::tempdir().unwrap();
-    let env = stubs(dir.path(), "", &[]);
-    let answer = ask(dir.path(), chat_on(Engine::Cursor), env, false).await;
-    assert!(answer.contains("Claude alone starts sessions"), "{answer}");
-    assert!(calls(dir.path()).is_empty());
-}
-
-#[test]
-fn a_triage_with_placement_off_is_refused_on_another_engine() {
-    let dir = tempfile::tempdir().unwrap();
-    let env = stubs(dir.path(), "", &[]);
-    let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
-    let (mut request, _rx) = triage_request();
-    request.placement = false;
-    assert!(starter.start_triage(request).unwrap_err().contains("Claude alone"));
-}
-
 /// A claude that waits for `go` before it answers, so a test can look at what is listed meanwhile.
 fn held(root: &std::path::Path) -> (Env, PathBuf) {
     let go = root.join("go");
@@ -262,7 +235,7 @@ async fn an_ask_is_listed_with_no_lane_while_it_runs_and_not_after() {
     let (env, go) = held(dir.path());
     let sessions = Sessions::default();
     let (root, listed) = (dir.path().to_path_buf(), sessions.clone());
-    let task = tokio::spawn(async move { ask_listed(&root, EngineChoiceConfig::default(), env, true, listed).await });
+    let task = tokio::spawn(async move { ask_listed(&root, EngineChoiceConfig::default(), env, listed).await });
     let rows = sessions.rows_when_running().await;
     assert_eq!(rows.len(), 1);
     let info = &rows[0].info;

@@ -668,7 +668,6 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             attempt: 0,
             notes: None,
             takeover: None,
-            placement: false,
         }]
     );
     assert_eq!(

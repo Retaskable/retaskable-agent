@@ -39,9 +39,7 @@ pub struct TriageRequest {
     pub usage: Option<Value>,
     /// Where the session reports how it ended.
     pub outcomes: OutcomeSender,
-    /// The `engine-placement` release flag: Off, Claude alone runs it.
-    pub placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the triager's chosen one.
+    /// The engine to start on when it isn't the triager's chosen one.
     pub engine: Option<EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
@@ -59,8 +57,6 @@ pub struct SecondLookRequest {
     pub triager_reason: String,
     pub triager_suggest: TriageButton,
     pub triager_instructions: String,
-    /// The `engine-placement` release flag: Off, the second look runs on Claude.
-    pub placement: bool,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -185,24 +181,14 @@ impl ProjectLoop {
         }
         // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
         self.triage_flag = self.flags.on("triage-session").await;
-        self.placement_flag = self.flags.on("engine-placement").await;
         if !self.triage_flag || self.project.triage != OnOff::On || shared.stopping {
             return;
         }
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        let (engine, start_on) = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Triager, self.placement_flag) {
-                Some(Some(now)) => (now, Some(now)),
-                Some(None) => (self.triager_engine(shared), None),
-                None => return,
-            },
-            None => {
-                let engine = self.triager_engine(shared);
-                if super::project::signed_out(shared) || ProjectLoop::engine_limited(shared, engine) {
-                    return;
-                }
-                (engine, None)
-            }
+        let gate = StartGate::new(self, pool, shared);
+        let (engine, start_on) = match gate.role_start(self, shared, Role::Triager, true) {
+            Some(Some(now)) => (now, Some(now)),
+            Some(None) => (self.triager_engine(shared), None),
+            None => return,
         };
         let now = Utc::now();
         let wanted: Vec<String> = (self.records.iter())
@@ -249,7 +235,6 @@ impl ProjectLoop {
                 lane,
                 usage: self.store.usage(),
                 outcomes: self.outcomes.clone(),
-                placement: self.placement_flag,
                 engine: start_on,
                 sessions: self.live.sessions().clone(),
             };
@@ -336,7 +321,6 @@ impl ProjectLoop {
             triager_reason: held.reason.clone(),
             triager_suggest: held.suggest,
             triager_instructions: held.instructions.clone(),
-            placement: self.placement_flag,
             sessions: self.live.sessions().clone(),
         };
         self.events.add_in(

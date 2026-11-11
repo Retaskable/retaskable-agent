@@ -50,11 +50,8 @@ async fn main() -> Result<()> {
     // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
     // checks and exit without starting the server.
     if std::env::args().nth(1).as_deref() == Some("check") {
-        let probes = retaskable_agent::flags::Flags::from_env()
-            .on("engine-setup-probes")
-            .await;
-        let checks = setup_check::run_setup_checks(env, probes).await;
-        println!("{}", setup_check::setup_check_report(&checks, probes));
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
         std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
     }
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
@@ -361,7 +358,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         .cloned()
         .zip(connectors.iter().map(|c| c.handle()))
         .collect();
-    runtime::spawn_setup_checks(is_release, &checks, check_flags);
+    runtime::spawn_setup_checks(is_release, &checks);
     let latest_checks = checks.shared();
 
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
@@ -423,23 +420,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             // One plan or look at a time on this computer: both runners hold this slot.
             let plan_or_look = orchestrator::slot::Slot::default();
-            // One `engine-placement` answer for the plan and look roster and the piece starter, kept fresh in the
-            // background so a role on another engine is offered a run before any run has asked.
             let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
-            placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
-            orchestrator::session::keep_cursor_guard_fresh();
-            retaskable_agent::tiers::set_flags(placement.clone());
-            placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
-            placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
-            placement.keep_fresh("weekly-cutoff", std::time::Duration::from_secs(30));
-            placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-tier-ladder", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-chores-scouts", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-one-slot", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-limit-fallback", std::time::Duration::from_secs(30));
-            placement.keep_fresh("implementer-step-up", std::time::Duration::from_secs(30));
-            placement.keep_fresh("tier-kept-on-resume", std::time::Duration::from_secs(30));
-            placement.keep_fresh("cursor-allow-derive", std::time::Duration::from_secs(30));
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );
@@ -450,7 +431,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 env: env.clone(),
                 models: cfg.machine.models,
                 cursor_models: config::cursor_models(cfg, env),
-                flags: placement.clone(),
                 sessions: live.sessions().clone(),
                 local: local.clone(),
             };
@@ -581,11 +561,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // Card flag `settings-page`: Off keeps the Host check loopback-only. The flag client's `PROJECT_ID`
     // and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
     settings.set_settings_page_flag(retaskable_agent::flags::Flags::from_env().on("settings-page").await);
-    settings.set_cursor_allow_flag(
-        retaskable_agent::flags::Flags::from_env()
-            .on("cursor-allow-derive")
-            .await,
-    );
     settings.set_backlog_link_flag(
         retaskable_agent::flags::Flags::from_env()
             .on("backlog-link-route")

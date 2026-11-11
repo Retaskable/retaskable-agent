@@ -126,13 +126,10 @@ impl LocalModel {
         self.up.store(up, Ordering::SeqCst);
     }
 
-    /// True while it's turned on, a check has answered and the last one failed, and the `local-tier-ladder` flag
-    /// is On: what the snapshot reports as `usage.localDown`.
+    /// True while it's turned on, a check has answered and the last one failed: what the snapshot reports as
+    /// `usage.localDown`.
     pub fn down(&self) -> bool {
-        self.config.enabled
-            && self.checked.load(Ordering::SeqCst)
-            && !self.up.load(Ordering::SeqCst)
-            && crate::tiers::local_ladder_on()
+        self.config.enabled && self.checked.load(Ordering::SeqCst) && !self.up.load(Ordering::SeqCst)
     }
 
     /// Changes whenever `down()` does (as `watch` sees it), for a new snapshot.
@@ -192,10 +189,10 @@ impl LocalModel {
         self.waiting.load(Ordering::SeqCst)
     }
 
-    /// Whether a role on the tier ladder may be handed `local`: the `local-tier-ladder` flag is On and the model is
+    /// Whether a role on the tier ladder may be handed `local`: the model is
     /// available (section 7.1). A role's own slot waiting and engine checks come on top.
     pub fn ladder(&self) -> bool {
-        crate::tiers::local_ladder_on() && self.available()
+        self.available()
     }
 
     /// [`Self::ladder`] for a session on `engine`: only Claude Code runs on the local model.
@@ -342,7 +339,6 @@ mod tests {
 
     #[test]
     fn down_signals_only_when_its_value_changes() {
-        crate::tiers::set_local_ladder_for_test(true);
         let local = LocalModel::new(LocalModelConfig {
             enabled: true,
             base_url: "http://localhost:1".into(),
@@ -485,7 +481,6 @@ mod tests {
         use crate::tiers::{LOCAL, OPUS, SONNET, implementer_tier, mid_tier, top_tier};
         let m = crate::config::ModelsConfig::default();
         let usage = |used: f64| serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
-        crate::tiers::set_local_ladder_for_test(true);
         let up = LocalModel::up();
         let down = LocalModel::off();
         // (used, mid/asks tier with local up, with it down, top tier up, down)
@@ -509,18 +504,11 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_needs_the_model_up_and_the_flag_on() {
-        // No flags client is handed over in a unit test, so the flag reads Off.
-        assert!(!LocalModel::up().ladder());
-        let ladder = |on: bool, up: bool, claude: bool| {
-            crate::tiers::set_local_ladder_for_test(on);
-            let local = if up { LocalModel::up() } else { LocalModel::off() };
-            local.ladder_for(claude)
-        };
-        assert!(ladder(true, true, true));
-        assert!(!ladder(false, true, true), "flag Off");
-        assert!(!ladder(true, false, true), "local down");
-        assert!(!ladder(true, true, false), "not on Claude");
+    fn the_ladder_needs_the_model_up_and_a_claude_session() {
+        assert!(LocalModel::up().ladder());
+        assert!(LocalModel::up().ladder_for(true));
+        assert!(!LocalModel::up().ladder_for(false), "not on Claude");
+        assert!(!LocalModel::off().ladder_for(true), "local down");
         assert!(!LocalModel::off().ladder());
     }
 

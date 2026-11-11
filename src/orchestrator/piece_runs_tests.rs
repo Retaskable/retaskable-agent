@@ -489,10 +489,6 @@ async fn cutting_a_review_session_ends_the_run_interrupted() {
     assert!(comment(&r).is_empty());
 }
 
-fn placing(r: &mut Rig) {
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
-}
-
 /// Makes `RETASKABLE_<var>` a stub that appends its arguments to `<name>.log` and prints nothing.
 fn stub(r: &mut Rig, var: &str, name: &str) {
     let path = r
@@ -519,7 +515,6 @@ async fn a_piece_on_cursor_codex_or_pi_runs_that_binary() {
         ("pi", "RETASKABLE_PI"),
     ] {
         let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-        placing(&mut r);
         stub(&mut r, var, engine);
         let mut p = piece();
         p["engine"] = json!(engine);
@@ -534,8 +529,7 @@ async fn a_piece_on_cursor_codex_or_pi_runs_that_binary() {
 
 #[tokio::test]
 async fn an_unknown_engine_is_still_refused_with_placement_on() {
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    placing(&mut r);
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
     let mut p = piece();
     p["engine"] = json!("steam");
     let (req, mut s) = request(&r, RunKind::Build, p);
@@ -546,7 +540,6 @@ async fn an_unknown_engine_is_still_refused_with_placement_on() {
 #[tokio::test]
 async fn a_review_on_cursor_runs_scouts_on_the_scout_model_and_the_reviewer_on_top() {
     let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    placing(&mut r);
     stub(&mut r, "RETASKABLE_CURSOR", "cursor");
     {
         let starter = Arc::get_mut(&mut r.starter).unwrap();
@@ -603,7 +596,7 @@ fn with_flag(r: &mut Rig) {
 
 #[tokio::test]
 async fn a_piece_on_an_engine_this_agent_cannot_run_ends_failed_outside_with_nothing_run() {
-    for engine in ["cursor", "steam"] {
+    for engine in ["steam"] {
         let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
         with_flag(&mut r);
         let mut p = piece();
@@ -620,37 +613,15 @@ async fn a_piece_on_an_engine_this_agent_cannot_run_ends_failed_outside_with_not
     }
 }
 
-#[tokio::test]
-async fn with_the_flag_off_such_a_piece_is_given_back() {
-    let r = rig(&[COMMIT], &answer("pr_opened", ""));
-    let mut p = piece();
-    p["engine"] = json!("cursor");
-    let (req, mut s) = request(&r, RunKind::Build, p);
-    r.starter.start(req).unwrap();
-    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
-}
-
 fn role_is_cursor(r: &mut Rig) {
     let choice = serde_json::from_value(json!({ "default": "cursor" })).unwrap();
     Arc::get_mut(&mut r.starter).unwrap().choice = choice;
 }
 
 #[tokio::test]
-async fn a_piece_naming_claude_runs_on_claude_even_when_the_role_is_cursor() {
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    role_is_cursor(&mut r);
-    let mut p = piece();
-    p["engine"] = json!("claude");
-    let (req, mut s) = request(&r, RunKind::Build, p);
-    r.starter.start(req).unwrap();
-    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
-}
-
-#[tokio::test]
 async fn a_build_told_to_start_on_claude_while_the_role_is_cursor_runs_on_claude() {
     let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
     role_is_cursor(&mut r);
-    placing(&mut r);
     let (mut req, mut s) = request(&r, RunKind::Build, piece());
     req.engine = Some(crate::engines::EngineId::Claude);
     // The review roles get the same out set, so they follow.
@@ -666,8 +637,7 @@ async fn a_build_told_to_start_on_claude_while_the_role_is_cursor_runs_on_claude
 #[tokio::test]
 async fn a_pieces_own_engine_that_is_out_goes_to_the_one_that_takes_over() {
     use crate::engines::EngineId::{Claude, Cursor};
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    placing(&mut r);
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
     let mut p = piece();
     p["engine"] = json!("cursor");
     let (mut req, mut s) = request(&r, RunKind::Build, p);
@@ -681,28 +651,12 @@ async fn a_pieces_own_engine_that_is_out_goes_to_the_one_that_takes_over() {
 }
 
 #[tokio::test]
-async fn a_build_with_no_engine_told_places_it_as_chosen() {
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    role_is_cursor(&mut r);
-    with_flag(&mut r);
-    let (req, mut s) = request(&r, RunKind::Build, piece());
-    r.starter.start(req).unwrap();
-    assert!(matches!(end_of(&mut s.ends).await.outcome, RunOutcome::Failed(_)));
-    assert!(!r.root.join("prompt1.txt").exists());
-}
-
-#[tokio::test]
 async fn a_piece_with_no_engine_follows_the_role() {
     let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
     role_is_cursor(&mut r);
-    with_flag(&mut r);
-    let (req, mut s) = request(&r, RunKind::Build, piece());
-    r.starter.start(req).unwrap();
-    let end = end_of(&mut s.ends).await;
-    assert_eq!(
-        end.outcome,
-        RunOutcome::Failed("this computer can't run cursor sessions yet".into())
-    );
+    let (req, _s) = request(&r, RunKind::Build, piece());
+    let err = r.starter.start(req).unwrap_err();
+    assert!(err.starts_with("the cursor-agent binary wasn't found"), "{err}");
 }
 
 #[tokio::test]

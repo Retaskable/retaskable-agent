@@ -14,7 +14,6 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
-use super::project::signed_out;
 use super::start_gate::StartGate;
 use super::store_errors::WATCH;
 use super::{ProjectLoop, Shared};
@@ -74,8 +73,7 @@ struct Ctx {
     host: Arc<dyn DraftHost>,
     flags: Arc<crate::flags::Flags>,
     wait: Duration,
-    placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
+    /// The engine to start on when it isn't the drafter's chosen one.
     engine: Option<EngineId>,
     sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -180,7 +178,6 @@ impl Ctx {
             resume: true,
             follow_up: rebase_request(reason),
             usage: None,
-            placement: self.placement,
             engine: self.engine,
             sessions: self.sessions.clone(),
         };
@@ -366,20 +363,18 @@ impl ProjectLoop {
         if presses.is_empty() || shared.stopping {
             return;
         }
-        let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
+        let gate = StartGate::for_lanes(self, lanes, shared);
         // A rebase resumes the drafter's own session: it waits while that engine is out and never moves.
-        let engine = match &gate {
-            Some(gate) if gate.role_start(self, shared, Role::Drafter, false).is_none() => return,
-            None if signed_out(shared) => return,
-            _ => None,
-        };
+        if gate.role_start(self, shared, Role::Drafter, false).is_none() {
+            return;
+        }
+        let engine = None;
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let placement = self.flags.on("engine-placement").await;
         for press in presses {
             let (DraftCommand::Approve { draft, .. }
             | DraftCommand::Merge { draft, .. }
@@ -405,7 +400,6 @@ impl ProjectLoop {
                 host: host.clone(),
                 flags: self.flags.clone(),
                 wait,
-                placement,
                 engine,
                 sessions: self.live.sessions().clone(),
             };

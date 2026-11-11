@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
@@ -97,9 +97,6 @@ impl DraftHost for ClaudeDrafts {
                 Engine::Local => Engine::Claude,
                 other => other,
             };
-            if chosen != Engine::Claude && !job.placement {
-                return Err(anyhow!("{chosen} sessions don't run yet"));
-            }
             let placed = place(chosen, Role::Drafter, &env, &cursor_models).map_err(anyhow::Error::msg)?;
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
@@ -108,7 +105,7 @@ impl DraftHost for ClaudeDrafts {
             // A resumed Claude drafter stays on the backend its transcript's first line names (read before the new
             // session rewrites it): a local one goes back to the model while it's up, else to its Anthropic tier; an
             // Anthropic one, or one with no readable header, never goes local.
-            let resumed = job.resume && chosen == Engine::Claude && crate::tiers::tier_kept_on_resume_on();
+            let resumed = job.resume && chosen == Engine::Claude;
             let tier = if resumed
                 && up
                 && started_on_drafter(&data_dir, &project.id_or_derived(), &draft.id).is_some_and(|m| m == LOCAL)
@@ -264,7 +261,7 @@ mod tests {
             models,
             crate::local_model::LocalModel::off(),
         );
-        let job = |session_id: &str, resume: bool, placement: bool| DraftJob {
+        let job = |session_id: &str, resume: bool| DraftJob {
             engine: None,
             project: project_in(&root, &repo),
             draft: serde_json::from_value(serde_json::json!({ "id": "d1", "request": "Add charts" })).unwrap(),
@@ -274,13 +271,11 @@ mod tests {
             resume,
             follow_up: "Revise it.".into(),
             usage: None,
-            placement,
             sessions: Default::default(),
         };
-        assert!(host.run(job("fresh-id", false, false)).await.is_err());
-        let first = host.run(job("fresh-id", false, true)).await.unwrap();
+        let first = host.run(job("fresh-id", false)).await.unwrap();
         assert_eq!(first.session_id.as_deref(), Some("chat-1"));
-        host.run(job("chat-1", true, true)).await.unwrap();
+        host.run(job("chat-1", true)).await.unwrap();
         let args = std::fs::read_to_string(root.join("args")).unwrap();
         let (fresh, revision) = args.trim().split_once('\n').unwrap();
         assert!(
@@ -297,13 +292,7 @@ mod tests {
 
     /// Runs a resumed drafter whose earlier `drafter.jsonl` header names `header` (none when `None`) with the usage at
     /// 2% left, on `local`; returns the model the new transcript's header records and the claude stub's arguments.
-    async fn resumed_drafter(
-        header: Option<&str>,
-        local: crate::local_model::LocalModel,
-        kept: bool,
-    ) -> (String, String) {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_tier_kept_on_resume_for_test(kept);
+    async fn resumed_drafter(header: Option<&str>, local: crate::local_model::LocalModel) -> (String, String) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let repo = crate::test_support::repo_with_origin(&root);
@@ -334,7 +323,6 @@ mod tests {
             resume: true,
             follow_up: "Revise it.".into(),
             usage: Some(usage),
-            placement: true,
             sessions: Default::default(),
         })
         .await
@@ -347,11 +335,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_local_drafter_goes_back_to_the_model_while_it_is_up_and_to_anthropic_when_it_is_down() {
-        let (model, _) = resumed_drafter(Some("local"), crate::local_model::LocalModel::up(), true).await;
+        let (model, _) = resumed_drafter(Some("local"), crate::local_model::LocalModel::up()).await;
         assert_eq!(model, "local");
         let down = crate::local_model::LocalModel::up();
         down.set_up(false);
-        let (model, args) = resumed_drafter(Some("local"), down, true).await;
+        let (model, args) = resumed_drafter(Some("local"), down).await;
         assert_eq!(model, "sonnet");
         assert!(
             args.contains("--model sonnet") && args.contains("--resume chat-1"),
@@ -362,16 +350,9 @@ mod tests {
     #[tokio::test]
     async fn a_resumed_anthropic_drafter_or_one_with_no_header_never_takes_the_local_model() {
         for header in [Some("sonnet"), Some("opus"), None] {
-            let (model, _) = resumed_drafter(header, crate::local_model::LocalModel::up(), true).await;
+            let (model, _) = resumed_drafter(header, crate::local_model::LocalModel::up()).await;
             assert_ne!(model, "local", "{header:?}");
         }
-    }
-
-    #[tokio::test]
-    async fn a_resume_with_the_flag_off_picks_its_tier_as_before() {
-        // Flag Off: a resume with an Anthropic header lands on the local rows, as it did before.
-        let (model, _) = resumed_drafter(Some("sonnet"), crate::local_model::LocalModel::up(), false).await;
-        assert_eq!(model, "local");
     }
 
     #[tokio::test]
@@ -405,7 +386,6 @@ mod tests {
             resume: false,
             follow_up: String::new(),
             usage: None,
-            placement: true,
             sessions: sessions.clone(),
         };
         let task = tokio::spawn(host.run(job));

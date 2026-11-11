@@ -133,7 +133,7 @@ pub struct Machine {
     pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
     pub(super) concurrency: u32,
-    /// The computer's local model: its slot holder doesn't count toward `concurrency` (`local-one-slot`).
+    /// The computer's local model: its slot holder doesn't count toward `concurrency`.
     pub(super) local: crate::local_model::LocalModel,
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
@@ -195,14 +195,10 @@ impl Machine {
         self
     }
 
-    /// `concurrency` plus the session holding the local slot (already in the starter's counts), when `local-one-slot`
-    /// is On. Applied once, to the base number, so it can't be added back twice.
+    /// `concurrency` plus the session holding the local slot (already in the starter's counts). Applied once, to
+    /// the base number, so it can't be added back twice.
     fn room_total(&self, concurrency: u32) -> u32 {
-        if crate::tiers::local_one_slot_on() {
-            concurrency + self.local.holding()
-        } else {
-            concurrency
-        }
+        concurrency + self.local.holding()
     }
 
     /// [`process_tree::stopping`], unless a test has overridden it.
@@ -322,7 +318,6 @@ impl Machine {
             env: self.links.env.clone(),
             engine_choice: self.links.engine_choice.clone(),
             cursor_models: self.links.cursor_models.clone(),
-            flags: lp.flags.clone(),
             machine: self.links.machine.clone(),
             backlog_url: self.links.backlog_url.clone(),
             keychain: self.links.keychain.clone(),
@@ -560,9 +555,8 @@ impl Machine {
                 && self.live(&self.projects[i])
             {
                 self.projects[i].backlog_items = items.len();
-                let give_back = self.projects[i].flags.on("cursor-give-back").await;
                 let machine = self.links.machine.clone();
-                self.projects[i].readopt(items, &mut self.pool, give_back.then_some(machine.as_str()));
+                self.projects[i].readopt(items, &mut self.pool, machine.as_str());
                 self.projects[i].follow_drafts(items, &self.links).await;
             }
         }
@@ -575,7 +569,7 @@ impl Machine {
         for (((lp, items), paused), (actions, live)) in
             (self.projects.iter_mut().zip(read_items).zip(paused)).zip(scheduled)
         {
-            let cant_start = lp.start_blocked(&shared!(self, false), &self.pool).await;
+            let cant_start = lp.start_blocked(&shared!(self, false), &self.pool);
             lp.report_limit(cant_start, &self.engine_limits);
             match items {
                 Some(items) => steps.push(lp.record(items, paused, cant_start, actions, &self.pool, live).await),
@@ -594,10 +588,8 @@ impl Machine {
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
             if *ready && !lp.week_checked {
                 lp.week_checked = true;
-                if ProjectLoop::weekly_on(&lp.flags).await {
-                    for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
-                        ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
-                    }
+                for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
+                    ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
                 }
             }
         }

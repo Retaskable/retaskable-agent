@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
@@ -37,8 +37,6 @@ pub(super) struct Job {
     pub env: Env,
     pub engine_choice: EngineChoiceConfig,
     pub cursor_models: CursorModels,
-    /// `engine-placement`: Off, only a planner on Claude runs the round.
-    pub flags: Arc<crate::flags::Flags>,
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
@@ -86,13 +84,6 @@ pub(super) async fn run(job: Job) {
         return;
     }
     let engine = engine_for(&job.engine_choice, job.project.engines.as_ref(), Role::Planner, None);
-    if engine != Engine::Claude && !job.flags.on("engine-placement").await {
-        tracing::info!(
-            "{}: playtest grouping round skipped: engine-placement is off, so only a Claude planner session runs",
-            job.id
-        );
-        return;
-    }
     let placed = match place(engine, Role::Planner, &job.env, &job.cursor_models) {
         Ok(placed) => placed,
         Err(e) => {
@@ -359,7 +350,6 @@ mod tests {
             env,
             engine_choice: EngineChoiceConfig::default(),
             cursor_models: Default::default(),
-            flags: Arc::new(crate::flags::Flags::fixed(&["engine-placement"])),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
@@ -410,7 +400,7 @@ mod tests {
 
     /// A round whose planner is on Cursor, with a stub `cursor-agent` that records its arguments in `args.txt`.
     #[cfg(unix)]
-    async fn cursor_round(placement: bool) -> (Vec<String>, Option<String>) {
+    async fn cursor_round() -> (Vec<String>, Option<String>) {
         let waiting = json!([
             tryout("k1", false),
             tryout("k2", false),
@@ -428,26 +418,18 @@ mod tests {
         let mut j = job(&base, &bin, dir.path());
         let path = bin.to_string_lossy().into_owned();
         j.env = Env::new(move |k| (k == "RETASKABLE_CURSOR").then(|| path.clone()));
-        j.engine_choice.roles.planner = Some(Engine::Cursor);
+        j.engine_choice.roles.planner = Some(crate::config::Engine::Cursor);
         j.cursor_models.top = Some("gpt-top".into());
-        j.flags = Arc::new(crate::flags::Flags::fixed(if placement {
-            &["engine-placement"]
-        } else {
-            &[]
-        }));
         run(j).await;
         (ops(&seen), std::fs::read_to_string(dir.path().join("args.txt")).ok())
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_planner_on_cursor_runs_cursor_with_the_top_model_only_with_the_flag_on() {
-        let (ops, args) = cursor_round(true).await;
+    async fn a_planner_on_cursor_runs_cursor_with_the_top_model() {
+        let (ops, args) = cursor_round().await;
         assert!(ops.contains(&"chore_lock".to_string()), "{ops:?}");
         assert!(args.unwrap().contains("gpt-top"));
-        let (ops, args) = cursor_round(false).await;
-        assert_eq!(ops, vec!["tryouts_list"]);
-        assert!(args.is_none(), "{args:?}");
     }
 
     #[tokio::test]

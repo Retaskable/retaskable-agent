@@ -90,7 +90,6 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         attempt: 0,
         notes: None,
         takeover: None,
-        placement: true,
     };
     (request, rx)
 }
@@ -206,40 +205,7 @@ async fn a_missing_binary_hands_the_claim_back_without_starting() {
 }
 
 #[tokio::test]
-async fn another_engine_refuses_to_start_with_the_flag_off() {
-    let rig = rig(EngineChoiceConfig::default(), "", &[]);
-    let (mut request, mut rx) = request(EngineId::Cursor, false);
-    request.placement = false;
-    assert_eq!(
-        rig.starter.start(request),
-        Err("Claude alone starts sessions while engine-placement is off".to_string())
-    );
-    assert!(rx.try_recv().is_err());
-    assert!(calls(&rig).is_empty());
-}
-
-#[tokio::test]
-async fn a_fresh_start_stays_on_claude_with_the_flag_off() {
-    let choice = EngineChoiceConfig {
-        lanes: vec![LaneEngine::Cursor],
-        ..Default::default()
-    };
-    let rig = rig(choice, COMMIT_BIG, &[]);
-    let (mut request, mut rx) = request(EngineId::Claude, false);
-    request.placement = false;
-    rig.starter.start(request).unwrap();
-    tokio::time::timeout(Duration::from_secs(120), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let calls = calls(&rig);
-    assert!(calls.len() >= 2, "{calls:?}");
-    assert!(calls.iter().all(|c| c.starts_with("claude ")), "{calls:?}");
-}
-
-#[tokio::test]
-async fn a_start_over_job_starts_claude_on_opus_with_the_step_up_flag_on() {
-    crate::tiers::set_step_up_for_test(true);
+async fn a_start_over_job_starts_claude_on_opus() {
     let rig = rig(EngineChoiceConfig::default(), "", &[]);
     let (mut request, mut rx) = request(EngineId::Claude, false);
     request.attempt = 1;
