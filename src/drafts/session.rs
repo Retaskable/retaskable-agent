@@ -24,6 +24,8 @@ pub struct Session<'a> {
     pub titles: &'a str,
     pub branch: &'a str,
     pub base_branch: &'a str,
+    /// Appended to a fresh prompt when the draft is tried again after a failure ([`super::failure::retry_text`]).
+    pub retry: &'a str,
     /// The engine `engines::engine_for(…, Role::Drafter, None)` chose.
     pub engine: Engine,
     /// The implementer's tier from the usage reading (`tiers::implementer_tier`); the drafter runs
@@ -63,7 +65,11 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     let (session_start, prompt) = match start {
         Start::Fresh => (
             SessionStart::Fresh(new_session_id()),
-            build_prompt(s.template, s.request, s.titles, s.branch, s.base_branch)?,
+            format!(
+                "{}{}",
+                build_prompt(s.template, s.request, s.titles, s.branch, s.base_branch)?,
+                s.retry
+            ),
         ),
         Start::Resume {
             session_id,
@@ -204,6 +210,7 @@ mod tests {
             titles: "- Dark mode",
             branch: "retaskable/spec-1",
             base_branch: "main",
+            retry: "",
             engine: Engine::Claude,
             tier: "opus",
             budget,
