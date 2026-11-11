@@ -509,6 +509,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
     });
+    retaskable_agent::rollout::spawn_all(retaskable_agent::rollout::SpawnArgs {
+        dir,
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        item_commands: &view.item_commands,
+        machine: link::machine_name(env),
+    });
     // Card flag `agent-ci`: Off starts no CI loop (agent-ci.md section 3.1).
     if retaskable_agent::flags::Flags::from_env().on("agent-ci").await {
         let ci = retaskable_agent::agent_ci::CiLoop::new(

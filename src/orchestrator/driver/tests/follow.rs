@@ -134,6 +134,7 @@ async fn an_approved_draft_tells_the_chat_how_it_moves_on_once_each() {
         url: Some(base.clone()),
         smoke: None,
         version_path: None,
+        rollout: None,
     });
     rig.lp(0).file_project.deploy.staging = rig.lp(0).project.deploy.staging.clone();
     rig.lp(0).seen.default_branch = Some("main".into());

@@ -124,6 +124,7 @@ fn the_target_is_none_when_off_and_a_note_without_a_staging_url() {
     };
     assert!(matches!(lighthouse_target(&cfg), Some(LighthouseTarget::Note(n)) if n.contains("staging")));
     cfg.deploy.staging = Some(crate::config::DeployTarget {
+        rollout: None,
         branch: "staging".into(),
         url: Some("https://staging.example.com".into()),
         smoke: None,

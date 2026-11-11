@@ -26,6 +26,7 @@ fn cfg(test: &str) -> ProjectConfig {
         play_command: "old play".into(),
         deploy: crate::config::DeployConfig {
             staging: Some(DeployTarget {
+                rollout: None,
                 branch: "main".into(),
                 url: None,
                 smoke: Some("old".into()),
@@ -162,4 +163,19 @@ fn first_save_of_an_empty_set_moves_the_allowed_commands() {
         with_allowed(&cfg("npm test"), a.allowed.as_ref(), true).checks,
         cfg("npm test").checks
     );
+}
+
+#[test]
+fn the_rollout_approval_text_has_no_schedule_and_no_site() {
+    let rollout = |v: Value| {
+        let change = CommandChange {
+            field: "deploy.production.rollout".into(),
+            before: None,
+            after: Some(v),
+        };
+        commands_change_text(&[change])
+    };
+    let text = rollout(json!({"traffic": "t", "health": "h", "site": true}));
+    assert!(text.contains("traffic `t`, health `h`"), "{text}");
+    assert!(!text.contains("minutes") && !text.contains("retaskable.com"), "{text}");
 }

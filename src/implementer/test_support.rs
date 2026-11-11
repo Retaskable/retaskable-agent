@@ -4,6 +4,7 @@ use crate::config::CheckConfig;
 
 pub(crate) fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     Item {
+        merge_commit: None,
         id: "implementer-session".to_string(),
         title: "Have a session write the code".to_string(),
         status: ItemStatus::Building,
