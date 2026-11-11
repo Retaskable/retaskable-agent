@@ -7,7 +7,7 @@ One folder that runs the agent with nothing else installed but the tools it driv
 - **The agent's executable** (`retaskable.exe` on Windows, `retaskable` elsewhere): Node itself, built as a Node single executable application (SEA) with the agent's code inside. Node's version is `.node-version`'s.
 - **The agent's code**, bundled into one JavaScript file by esbuild at build time: no `tsx`, no TypeScript, no `node_modules` at run time.
 - **Native pieces beside it**: `@napi-rs/keyring`'s `.node` file and `systray2`'s prebuilt tray helper, each for its OS.
-- **No `sharp`.** It draws only the tray icons (`agent/src/trayIcons.ts`) and gallery pictures (`agent/src/galleries.ts`). The icons are drawn at build time and shipped as files (`.ico` on Windows, `.png` elsewhere); galleries go through a step of their own (section 3.5).
+- **No `sharp`.** It draws only the tray icons (`agent/src/trayIcons.ts`). The icons are drawn at build time and shipped as files (`.ico` on Windows, `.png` elsewhere).
 - **`build.json`**: the OS, the environment (`production` or `staging`), the version and the commit. In the desktop app it also has `shell`, `"electron"` ([desktop-app.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/desktop-app.md) section 3.10): `parseBuildInfo` refuses any other value, and a desktop build's `build.json` without it. The agent reads it at start; with it, the agent is a **release build** (tray.md section 8): its `cloud.url` and environment are fixed and **Link to ▸** offers only that environment.
 
 ### 3.2 No terminal window
@@ -20,8 +20,8 @@ How each OS starts it without one:
 
 And on every OS:
 
-- **Nothing it starts may open a window.** Every `spawn` and `execFile` in `agent/src` passes `windowsHide`: `true`, or `false` in the two places a person asked for a window (`lanePlay.ts`'s Play and `galleries.ts`'s renderer). `engines/cursor.ts`'s `create-chat` was the one without it, fixed in slice 1. A lint test (`agent/src/windowsHide.test.ts`) keeps it so: any call to `spawn`, `execFile`, `exec`, `fork` or their `Sync` forms imported from `node:child_process` in `agent/src` without `windowsHide` fails. (It matters only on Windows; elsewhere it's ignored.)
-- **[Proposal]** **In the Rust agent**, the same rule is `CREATE_NO_WINDOW` (`0x0800_0000`) in `creation_flags` on every child the agent spawns on Windows (`claude`, `cursor-agent`, `pi`, `codex`, `git`, `gh`/`glab`, `adb`, node, Gradle), through one shared helper that `Command` builders go through, so a child under the desktop app's `utilityProcess` never flashes a console. The two places a person asked for a window (Play and the gallery renderer) opt out, as `play.rs` already does. A lint-style test in `src/` fails any `Command::new` that doesn't go through the helper or the opt-out, as `windowsHide.test.ts` does for the TypeScript agent. The Windows subsystem PE header and `bin/bundle.rs`'s console are not this item's: on Windows the desktop app (section 1.1) is what a person runs, so a bare agent executable there is for developers and keeps its console.
+- **Nothing it starts may open a window.** Every `spawn` and `execFile` in `agent/src` passes `windowsHide`: `true`, or `false` in the one place a person asked for a window (`lanePlay.ts`'s Play). `engines/cursor.ts`'s `create-chat` was the one without it, fixed in slice 1. A lint test (`agent/src/windowsHide.test.ts`) keeps it so: any call to `spawn`, `execFile`, `exec`, `fork` or their `Sync` forms imported from `node:child_process` in `agent/src` without `windowsHide` fails. (It matters only on Windows; elsewhere it's ignored.)
+- **[Proposal]** **In the Rust agent**, the same rule is `CREATE_NO_WINDOW` (`0x0800_0000`) in `creation_flags` on every child the agent spawns on Windows (`claude`, `cursor-agent`, `pi`, `codex`, `git`, `gh`/`glab`, `adb`, node, Gradle), through one shared helper that `Command` builders go through, so a child under the desktop app's `utilityProcess` never flashes a console. The place a person asked for a window (Play) opts out, as `play.rs` already does. A lint-style test in `src/` fails any `Command::new` that doesn't go through the helper or the opt-out, as `windowsHide.test.ts` does for the TypeScript agent. The Windows subsystem PE header and `bin/bundle.rs`'s console are not this item's: on Windows the desktop app (section 1.1) is what a person runs, so a bare agent executable there is for developers and keeps its console.
 - **Output goes to a log file** (section 3.3), `retaskable.log`, rotated at 10 MB with 3 old ones kept (`.1` to `.3`). With stdout not a terminal, the terminal menu is never drawn (tray.md section 4.7) and `console.log` goes to the file.
 - **A crash before the tray is up** still has to be seen: the launcher shows a dialog ("Retaskable couldn't start: <reason>. The log is at <path>.") instead of failing silently: a message box on Windows, `osascript`'s `display dialog` on macOS, `zenity` or `kdialog` on Linux when either is there, else `notify-send`.
 - **The tray's menu gets "Open the log"** (opens the log in the default editor), since there is no terminal to read.
@@ -60,11 +60,11 @@ The agent today can lean on being inside this repo. Everything it reads at run t
 | `agent/package.json`'s version | `agentVersion` (`release.ts`) | Not read: a release build's version is `build.json`'s (built). |
 | `systray2`'s `traybin/` helper | `trayHelper.ts`, through `require.resolve` | Shipped beside the executable, in its `node_modules/`, and found there by the same `require.resolve` (built). |
 | `@napi-rs/keyring`'s `.node` | `credentials.ts` | Shipped beside the executable, in its `node_modules/` (built). |
-| `sharp` and its native binary | `trayIcons.ts` (icons drawn from SVG paths inline in it, not from `app/public/logo.svg`), `galleries.ts` | Icons drawn at build time (built); galleries below. |
+| `sharp` and its native binary | `trayIcons.ts` (icons drawn from SVG paths inline in it, not from `app/public/logo.svg`) | Icons drawn at build time (built). |
 | The checkout itself (`ROOT` as a git repo) | `selfUpdate.ts`, `orchestrator.ts`'s self-hosting check, `phone.ts`'s self-hosted build | Off in a release build: it has no checkout (section 3.6). |
 | `app/dist` (`APP_DIST`) | `localSite.ts`, only for `npm run launch` | Not in the bundle: a developer's tool. |
 
-Galleries and `lanePlay` read only the project's own files. Galleries' pictures, the one other user of `sharp`, are drawn by the project's own toolchain or ship `sharp`'s prebuilt binary for the OS beside the executable, whichever is smaller when the bundle is built.
+`lanePlay` reads only the project's own files.
 
 ### 3.6 Updating itself (agent-self-update)
 
@@ -106,7 +106,7 @@ What a release build does differently once it runs, with nothing changed for a c
 - **The executable** (`retaskable.exe`, or `retaskable`): Node's own, at the building Node's exact version (this Node's when the target is this machine's, else nodejs.org's download for it, cached in `node_modules/.cache/retaskable-bundle/`), with the code injected by `postject` (`useCodeCache` and `useSnapshot` off, so the blob runs on any OS). On Windows its PE header's subsystem is then set to Windows (2) from console (3) (`setWindowsSubsystem`), so no console ever opens; its Authenticode signature is stale (`postject` warns) until windows-release signs it. On macOS it's signed ad hoc when built on a Mac; built elsewhere it's left unsigned, with a warning, and macOS won't run it.
 - **Beside it**: `build.json` (`{ os: <target>, environment, version: agent/package.json's, commit: the short HEAD }`); `node_modules/@napi-rs/keyring/` (its `package.json` and `.js`) and `node_modules/@napi-rs/keyring-<platform>/` (installed here, or npm's tarball at the version `@napi-rs/keyring` pins); `node_modules/systray2/` (its `package.json` and the one `traybin/` helper); and `icons/<state>.ico` (Windows) or `.png`, drawn now by `drawIcon` (`trayIcons.ts`), which `trayIcon` reads in a release build instead of loading sharp. 87 MB on Windows.
 - **Checked**: the build starts this machine's target with `--version` and fails unless it prints `build.json`'s version.
-- **No sharp**: it is no longer loaded at start. `trayIcons.ts` and `galleries.ts` import it only when they draw; in a bundle, which doesn't carry it, a gallery's shoot fails with "Galleries need sharp, which this build doesn't have (…)." until section 3.5's galleries step.
+- **No sharp**: it is no longer loaded at start. `trayIcons.ts` imports it only when it draws, and a bundle doesn't carry it.
 
 Tried by hand (2026-10-18): the Windows build answers `--version` and, its data folder pointed at a scratch one holding a bad `config.json`, loads every module, logs its build line and the error to `retaskable.log` and exits 1; the Linux build, made on Windows, does the same in `node:22-bookworm`.
 
@@ -119,7 +119,7 @@ Tried by hand (2026-10-18): the Windows build answers `--version` and, its data 
 
 Tried (2026-10-18): the Windows build's start check passes on a developer's machine linked to Staging, saying not linked, and the machine's own link is untouched; the Linux build, started in `node:22-bookworm` with a scratch home and no tray, answers its health, logs "Links: staging.retaskable.com not linked, …" and writes nothing to its terminal.
 
-agent-bundle is built. Galleries' pictures in a bundle (section 3.5, `sharp` or the project's own toolchain) are a step of their own, not yet an item.
+agent-bundle is built.
 
 ### 3.11 Details (agent-self-update)
 
