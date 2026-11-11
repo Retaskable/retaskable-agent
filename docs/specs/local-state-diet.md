@@ -23,7 +23,7 @@ The agent keeps each project's own state in `.retaskable/projects/<id>/state.jso
 - **Compact JSON**:
   - `writeJsonAtomic(file, data, compact)` writes `JSON.stringify(data)` when `compact`, indented otherwise;
   - `Store.save` and `MachineStore.save` pass `compact`, so `state.json` and `machine.json` are compact; nothing reads them by line;
-  - every other file it writes (`config.json`, the `*.offered.json` files and the rest) stays indented.
+  - every other file it writes (`config.json` and the rest) stays indented.
 - **The one-off trim on load** (`Store`'s constructor):
   - after reading the file, a pure `trimState(data, now)` drops any item and draft records an older agent kept, answering whether it changed anything;
   - when it did, the store saves at once and logs "state.json trimmed from <a> MB to <b> MB (<file>)" to the agent's log;
