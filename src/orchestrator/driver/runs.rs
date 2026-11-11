@@ -436,7 +436,7 @@ impl ProjectLoop {
         if kinds.contains(&RunKind::Merge) {
             // A piece's merge comes from the store's queue, never from `run_take`.
             kinds.retain(|k| *k != RunKind::Merge);
-            if !self.run_loop.runs.merging() && self.ask_merge(repo, token, pool, starter, shared, now).await {
+            if !self.run_loop.runs.merging() && self.ask_merge((repo, token), pool, starter, (&start, now)).await {
                 return true;
             }
         }
@@ -461,14 +461,11 @@ impl ProjectLoop {
     /// One `merge_next` for a piece's merge, with its `claim` event. Whether a merge run started.
     async fn ask_merge(
         &mut self,
-        repo: u64,
-        token: Option<&str>,
+        (repo, token): (u64, Option<&str>),
         pool: &mut LanePool,
         starter: &dyn RunStarter,
-        shared: &Shared<'_>,
-        now: Instant,
+        (start, now): (&StartRules, Instant),
     ) -> bool {
-        let start = self.start_rules(pool, shared, now);
         let base = self.project.base_branch.clone();
         let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
             Err(e) => {
@@ -488,7 +485,7 @@ impl ProjectLoop {
                         piece,
                         other: turn.other,
                     };
-                    (answer, self.begin(repo, token, pool, starter, run, &start, now).await)
+                    (answer, self.begin(repo, token, pool, starter, run, start, now).await)
                 }
                 None => {
                     // A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
