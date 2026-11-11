@@ -426,11 +426,7 @@ fn snapshot_reporting_reports_todays_spend_and_the_daily_budget() {
 fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
-    let soon = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-        + 3600;
+    let soon = crate::telemetry::now_secs() + 3600;
     store.set_usage(json!({"utilization": 0.25, "status": "allowed", "resetsAt": soon}));
     store.set_week_usage(json!({"rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": soon}));
     store.save().unwrap();

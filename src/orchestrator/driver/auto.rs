@@ -46,7 +46,7 @@ impl Machine {
         if let Some(t) = self.clock {
             return t;
         }
-        crate::telemetry::now_ms() / 1000
+        crate::telemetry::now_secs()
     }
 
     /// How many sessions may run at once: the pacer's number with auto concurrency on, else `concurrency`.

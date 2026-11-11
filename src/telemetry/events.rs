@@ -331,6 +331,11 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Now, in epoch seconds.
+pub fn now_secs() -> i64 {
+    now_ms() / 1000
+}
+
 pub(crate) fn parse_iso_ms(s: &str) -> Option<i64> {
     // Accept `YYYY-MM-DDTHH:MM:SS.sssZ` (and without fractional seconds).
     let s = s.strip_suffix('Z').unwrap_or(s);

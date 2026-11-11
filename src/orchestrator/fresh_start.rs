@@ -94,9 +94,7 @@ impl EngineLimits {
     /// new starts while running sessions finish. Whether `usage` is at the cutoff.
     pub fn cut_off_for_week(&self, usage: &serde_json::Value) -> bool {
         let models = crate::config::ModelsConfig::default();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+        let now = crate::telemetry::now_secs();
         let Some(resets_at) = crate::tiers::week_cutoff_until(Some(usage), now, &models) else {
             return false;
         };
@@ -325,10 +323,7 @@ mod tests {
 
     #[test]
     fn the_weekly_cutoff_limits_claude_until_the_reset() {
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now_epoch = crate::telemetry::now_secs();
         let limits = EngineLimits::default();
         let now = Instant::now();
         let below =
