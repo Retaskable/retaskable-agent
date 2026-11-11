@@ -68,7 +68,6 @@ pub mod repo_gitlab;
 pub mod repo_local;
 pub mod repo_picker;
 pub mod restart;
-pub mod testflight;
 pub mod review_context;
 pub mod review_run;
 pub mod reviewer;
@@ -94,6 +93,7 @@ pub mod telemetry;
 pub mod terminal_menu;
 #[cfg(test)]
 mod test_support;
+pub mod testflight;
 pub mod text;
 pub mod tiers;
 pub mod tray;
