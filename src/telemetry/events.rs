@@ -339,7 +339,8 @@ pub(crate) fn parse_iso_ms(s: &str) -> Option<i64> {
     let y: i64 = digits(dparts.next()?)?;
     let mo: u32 = digits(dparts.next()?)?;
     let d: u32 = digits(dparts.next()?)?;
-    if dparts.next().is_some() || !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) {
+    // A year past four digits is no time a log holds, and a huge one overflows the day arithmetic below.
+    if y > 9999 || dparts.next().is_some() || !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) {
         return None;
     }
     let (hms, frac) = match time.split_once('.') {
@@ -419,6 +420,13 @@ fn ms_from_civil(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_iso_ms_rejects_a_year_too_big_to_compute_rather_than_overflowing() {
+        assert_eq!(parse_iso_ms("99999999999999999-01-01T00:00:00Z"), None);
+        assert_eq!(parse_iso_ms("10000-01-01T00:00:00Z"), None);
+        assert!(parse_iso_ms("9999-12-31T23:59:59Z").is_some());
+    }
 
     #[test]
     fn parse_iso_ms_rejects_times_that_do_not_exist() {
