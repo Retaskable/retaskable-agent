@@ -66,6 +66,20 @@ pub fn implementer_tier(
     }
 }
 
+/// The tier the server named for a claim (section 7.1, "How the tier arrives"): `opus`, `sonnet` or `local`.
+/// `None` when it named none; an unknown name is read as `sonnet` and logged.
+pub fn named_tier(name: Option<&str>) -> Option<&'static str> {
+    match name? {
+        "opus" => Some(OPUS),
+        "sonnet" => Some(SONNET),
+        "local" => Some(LOCAL),
+        other => {
+            tracing::warn!("the store named the unknown tier {other:?}; reading it as sonnet");
+            Some(SONNET)
+        }
+    }
+}
+
 /// `scoutTier` (section 7.1): never Opus; `local` (else `sonnet`) below `sonnetAbovePct` and on `allowed_warning`.
 pub fn scout_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, local_available: bool) -> &'static str {
     match band(usage, now_epoch, models) {
@@ -329,6 +343,14 @@ fn pct_left(utilization: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_named_tier_maps_and_an_unknown_one_is_sonnet() {
+        assert_eq!(super::named_tier(Some("opus")), Some("opus"));
+        assert_eq!(super::named_tier(Some("local")), Some("local"));
+        assert_eq!(super::named_tier(Some("gpt")), Some("sonnet"));
+        assert_eq!(super::named_tier(None), None);
+    }
+
     use serde_json::json;
 
     use super::*;
@@ -652,6 +674,7 @@ mod tests {
             red_sha: None,
             no_fix_sha: None,
             size: None,
+            tier: None,
         }
     }
 

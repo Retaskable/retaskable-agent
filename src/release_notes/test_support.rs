@@ -36,6 +36,7 @@ pub(crate) fn item(
         red_sha: None,
         no_fix_sha: None,
         size: None,
+        tier: None,
     }
 }
 

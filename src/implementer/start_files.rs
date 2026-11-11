@@ -322,6 +322,7 @@ mod tests {
             red_sha: None,
             no_fix_sha: None,
             size: None,
+            tier: None,
         }
     }
 
