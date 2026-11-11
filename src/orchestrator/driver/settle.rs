@@ -367,7 +367,7 @@ impl ProjectLoop {
         if let Some(t) = self.clock {
             return t;
         }
-        crate::telemetry::now_ms() / 1000
+        crate::telemetry::now_secs()
     }
 
     /// Lists a lease the store hasn't taken back yet; one already listed keeps the time it was first listed.
