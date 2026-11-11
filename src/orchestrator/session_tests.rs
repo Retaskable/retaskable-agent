@@ -120,6 +120,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         red_sha: None,
         no_fix_sha: None,
         size: None,
+        tier: None,
     }
 }
 

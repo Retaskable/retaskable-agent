@@ -429,6 +429,13 @@ async fn attempt(
             .is_some_and(|s| s.model == LOCAL);
     let tier = if up && (if resumed { was_local } else { job.wants_local }) {
         LOCAL
+    } else if let Some(named) = crate::tiers::named_tier(item.tier.as_deref()) {
+        // The store named the tier; `local` without the model up is `sonnet`.
+        if named == LOCAL && !(up && !resumed) {
+            crate::tiers::SONNET
+        } else {
+            named
+        }
     } else {
         // Claude at its limit reads as the floor tier for a fresh session only.
         let floored = crate::tiers::limit_floor(usage.as_ref(), !resumed && sessions.claude_at_limit(), up);

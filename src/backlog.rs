@@ -147,6 +147,10 @@ pub struct Item {
     /// The item's size (`S`, `M`, `L`, `XL`) when the store sends one; `L` and `XL` keep `opus` (`implementer_model`).
     #[serde(default)]
     pub size: Option<String>,
+    /// The tier the store names for the session this claim starts (`opus`, `sonnet` or `local`,
+    /// agent/07.1-model-tiers.md); set from the `claim_next` answer's `tier`, `None` when it sent none.
+    #[serde(default)]
+    pub tier: Option<String>,
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,
@@ -453,12 +457,17 @@ impl Client {
                 struct Answer {
                     item: Item,
                     token: String,
+                    #[serde(default)]
+                    tier: Option<String>,
                 }
-                let answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
+                let mut answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
                     status,
                     code: None,
                     message: format!("couldn't read the item it claimed: {e}"),
                 })?;
+                if answer.tier.is_some() {
+                    answer.item.tier = answer.tier;
+                }
                 Ok(ClaimNextAnswer::Item {
                     item: Box::new(answer.item),
                     token: answer.token,
