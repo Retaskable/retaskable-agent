@@ -15,7 +15,7 @@ const LONG_RUNNING: &str = "sleep 60";
 fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
     AgentView {
         machine: "pc".into(),
-        tags: vec![],
+        tags: Default::default(),
         projects: vec![ProjectView {
             id: project.into(),
             github_repo: "o/one".into(),
@@ -23,7 +23,6 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
             worktrees_dir: repo.join("worktrees"),
             repo_path: repo,
             base_branch: "main".into(),
-            galleries: vec![],
             play_command: command.into(),
         }],
         version: "9.9.9".into(),
@@ -31,11 +30,15 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         chore_lane: None,
         lane_sizes: Default::default(),
         paused: Default::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
         settings: Default::default(),
         local: Default::default(),
+        live: Default::default(),
+        checks: Default::default(),
+        owner: Default::default(),
     }
 }
 

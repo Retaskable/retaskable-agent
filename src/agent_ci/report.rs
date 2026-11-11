@@ -109,14 +109,18 @@ fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
 
 impl Host {
     pub(super) fn api(&self, method: &str, endpoint: &str, fields: &[(&str, &str)]) -> Result<String> {
+        let mut guarded = vec!["api", "-X", method, endpoint];
+        let fields: Vec<(&str, String)> = fields.iter().map(|(k, v)| (*k, format!("{k}={v}"))).collect();
+        guarded.extend(fields.iter().map(|(_, f)| f.as_str()));
+        crate::host_call::guard_program(&self.program, Some(&self.dir), &guarded)?;
         let mut command = Command::new(&self.program);
         command
             .current_dir(&self.dir)
             .arg("api")
             .args(["-X", method])
             .arg(endpoint);
-        for (k, v) in fields {
-            command.arg("-f").arg(format!("{k}={v}"));
+        for (_, f) in &fields {
+            command.arg("-f").arg(f);
         }
         let out = command
             .stdin(Stdio::null())

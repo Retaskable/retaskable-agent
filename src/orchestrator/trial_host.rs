@@ -14,7 +14,7 @@ use super::session::watch_for;
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::engine::CursorOptions;
+use crate::engines::cursor::with_project_or_gh;
 use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
@@ -143,10 +143,11 @@ impl TrialHost for ClaudeTrial {
             let tier = if up && placed.local {
                 LOCAL
             } else {
-                implementer_tier(job.usage.as_ref(), now, &models, up)
+                let floored = crate::tiers::limit_floor(job.usage.as_ref(), job.sessions.claude_at_limit(), up);
+                implementer_tier(floored.as_ref(), now, &models, up)
             };
             let local_run = if tier == LOCAL { Some(local.run().await) } else { None };
-            let model = implementer_model(tier, &item).to_string();
+            let model = implementer_model(tier, &item, 0).to_string();
             let mut spec = session_spec(
                 &Session {
                     template: TEMPLATE,
@@ -165,10 +166,7 @@ impl TrialHost for ClaudeTrial {
                     budget_usd: project.budget.drafter_usd,
                     max_turns: None,
                     engine: Some(placed.engine),
-                    cursor: placed.cursor.clone().map(|c| CursorOptions {
-                        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
-                        ..c
-                    }),
+                    cursor: placed.cursor.clone().map(|c| with_project_or_gh(project, c)),
                     local: local_run.as_ref().map(|r| r.target.clone()),
                     sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                 },

@@ -165,7 +165,7 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
             assert_eq!(item.id, "a");
             assert_eq!(token, "lease-1");
         }
-        ClaimNextAnswer::Nothing => panic!("expected an item"),
+        ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) => panic!("expected an item"),
     }
 }
 
@@ -191,6 +191,15 @@ async fn claim_next_reads_a_null_value_as_nothing_not_a_bad_answer() {
     let agent = test_agent();
     let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
     assert_eq!(answer, ClaimNextAnswer::Nothing);
+}
+
+#[tokio::test]
+async fn claim_next_reads_waiting_for_as_a_wait_not_an_error() {
+    let base = fake_store(post(|| async { Json(json!({ "value": { "waitingFor": ["gpu"] } })) })).await;
+
+    let agent = test_agent();
+    let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
+    assert_eq!(answer, ClaimNextAnswer::WaitingFor(json!(["gpu"])));
 }
 
 #[tokio::test]
@@ -303,6 +312,18 @@ async fn tryout_result_sends_the_key_outcome_and_notes() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn release_playtests_sends_its_op_with_an_empty_body() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["op"], "release_playtests");
+        assert_eq!(req["args"], json!({}));
+        Json(json!({}))
+    }))
+    .await;
+
+    Client::new(base).release_playtests(1, Some("tok")).await.unwrap();
 }
 
 #[tokio::test]
@@ -567,8 +588,13 @@ async fn fake_device_store(code: Value, tokens: Vec<Value>) -> String {
     format!("http://{addr}")
 }
 
+/// The flag is process-wide, so every test that sets, reads or relies on it takes this lock.
+static FLAG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn auto_link_starts_the_device_flow_against_v1_device_and_stores_the_refresh_token() {
+    let _flag = FLAG.lock().await;
+    set_unlinked_for_test(false);
     let base = fake_device_store(
         json!({ "device_code": "dc", "user_code": "WXYZ-2345", "verification_uri": "https://x/link",
                 "verification_uri_complete": "https://x/link?code=WXYZ-2345", "interval": 1, "expires_in": 900 }),
@@ -586,6 +612,55 @@ async fn auto_link_starts_the_device_flow_against_v1_device_and_stores_the_refre
     assert_eq!(id, Some(9));
     assert_eq!(shown.unwrap().user_code, "WXYZ-2345");
     assert_eq!(store.get(&base).unwrap().as_deref(), Some("r1"));
+    assert!(!unlinked_on_site(), "an approved link clears the flag");
+}
+
+fn set_unlinked_for_test(on: bool) {
+    UNLINKED_ON_SITE.store(on, Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn invalid_grant_to_a_call_with_a_token_sets_the_flag_and_still_errors() {
+    let _flag = FLAG.lock().await;
+    set_unlinked_for_test(false);
+    let (base, _) = store(401, json!({ "error": "invalid_grant" })).await;
+    let err = Client::new(base).list(1, Some("tok")).await.unwrap_err();
+    assert_eq!(err.code(), Some("invalid_grant"));
+    assert!(matches!(err, BacklogError::BadAnswer { status: 401, .. }));
+    assert!(unlinked_on_site());
+    clear_unlinked_on_site();
+    assert!(!unlinked_on_site());
+}
+
+#[tokio::test]
+async fn another_error_code_or_no_token_leaves_the_flag_alone() {
+    let _flag = FLAG.lock().await;
+    set_unlinked_for_test(false);
+    let (base, _) = store(401, json!({ "error": "unauthorized" })).await;
+    Client::new(base).list(1, Some("tok")).await.unwrap_err();
+    assert!(!unlinked_on_site());
+    let (base, _) = store(401, json!({ "error": "invalid_grant" })).await;
+    Client::new(base).list(1, None).await.unwrap_err();
+    assert!(!unlinked_on_site());
+}
+
+#[tokio::test]
+async fn auto_link_does_not_start_the_flow_while_unlinked_on_site() {
+    let _flag = FLAG.lock().await;
+    // An address nothing listens on: a request to /v1/device would fail, proving none was sent.
+    let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let env = Env::from_pairs([("RETASKABLE_BACKLOG_URL", format!("http://{addr}"))]);
+    let (_dir, store) = file_store();
+    set_unlinked_for_test(true);
+    let id = auto_link(store, reqwest::Client::new(), &env, "9.9.9", |_| {
+        panic!("no code expected")
+    })
+    .await
+    .unwrap();
+    set_unlinked_for_test(false);
+    assert_eq!(id, None);
 }
 
 #[tokio::test]
@@ -616,4 +691,17 @@ async fn auto_link_does_nothing_for_a_bad_backlog_url() {
     .await
     .unwrap();
     assert_eq!(id, None);
+}
+
+#[test]
+fn an_item_parses_with_and_without_a_size() {
+    let base = json!({"id": "a", "title": "A", "status": "todo", "rank": 1});
+    let none: Item = serde_json::from_value(base.clone()).unwrap();
+    assert_eq!(none.size, None);
+    let mut with = base;
+    with["size"] = json!("XL");
+    assert_eq!(
+        serde_json::from_value::<Item>(with).unwrap().size.as_deref(),
+        Some("XL")
+    );
 }

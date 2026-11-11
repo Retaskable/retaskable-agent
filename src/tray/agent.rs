@@ -254,7 +254,7 @@ impl TrayAgent {
         };
         TrayInput {
             clouds: self.deps.clouds.iter().map(|c| self.cloud_input(c)).collect(),
-            all_paused: projects.iter().all(|p| self.deps.view.paused.reason(&p.id).is_some()),
+            all_paused: projects.iter().all(|p| self.deps.view.pause_reason(&p.id).is_some()),
             sessions: (self.deps.sessions)(),
             has_project: !projects.is_empty(),
             exit,
@@ -267,7 +267,7 @@ impl TrayAgent {
             start_at_login: self.deps.login.as_ref().is_some_and(|l| l.is_on()),
             windows: self.deps.windows,
             machine: self.deps.view.machine.clone(),
-            tags: self.deps.view.tags.clone(),
+            tags: self.deps.view.tags.get(),
         }
     }
 

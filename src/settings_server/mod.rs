@@ -73,6 +73,9 @@ pub struct SettingsServer {
     settings_page_flag: std::sync::atomic::AtomicBool,
     /// Card flag `agent-ci`, read once at startup: Off hides the CI slots field and refuses a change to it.
     agent_ci_flag: std::sync::atomic::AtomicBool,
+    /// Card flag `backlog-link-route`, read once at startup: Off, `GET /api/backlog/link` is a 404.
+    backlog_link_flag: std::sync::atomic::AtomicBool,
+    cursor_allow_flag: std::sync::atomic::AtomicBool,
     /// Card flag `live-sessions-reporting`, read once at startup: Off keeps the Now tab's held-lane view.
     live_sessions_flag: std::sync::atomic::AtomicBool,
     /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
@@ -87,6 +90,8 @@ pub struct SettingsServer {
     status: OnceLock<StatusSource>,
     /// Fired after a save, so every project's connection sends a fresh hello (given once at start).
     saved: OnceLock<HelloSettings>,
+    /// The running agent's device-link state, for `GET /api/backlog/link`'s `waiting` (given once at start).
+    links: OnceLock<link::pending::Links>,
 }
 
 impl SettingsServer {
@@ -111,6 +116,8 @@ impl SettingsServer {
             env,
             settings_page_flag: std::sync::atomic::AtomicBool::new(false),
             agent_ci_flag: std::sync::atomic::AtomicBool::new(false),
+            backlog_link_flag: std::sync::atomic::AtomicBool::new(false),
+            cursor_allow_flag: std::sync::atomic::AtomicBool::new(false),
             live_sessions_flag: std::sync::atomic::AtomicBool::new(false),
             own_addresses: Box::new(|| {
                 if_addrs::get_if_addrs()
@@ -123,6 +130,7 @@ impl SettingsServer {
             state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
             saved: OnceLock::new(),
+            links: OnceLock::new(),
         }
     }
 
@@ -136,9 +144,19 @@ impl SettingsServer {
         self.live_sessions_flag.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Gives the card flag `cursor-allow-derive`'s answer (read once at start).
+    pub fn set_cursor_allow_flag(&self, on: bool) {
+        self.cursor_allow_flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Gives the card flag `agent-ci`'s answer (read once at start).
     pub fn set_agent_ci_flag(&self, on: bool) {
         self.agent_ci_flag.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Gives the card flag `backlog-link-route`'s answer (read once at start).
+    pub fn set_backlog_link_flag(&self, on: bool) {
+        self.backlog_link_flag.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn saver(&self) -> save::Saver<'_> {
@@ -151,6 +169,11 @@ impl SettingsServer {
     /// The signal a successful save fires.
     pub fn set_saved_signal(&self, signal: HelloSettings) {
         let _ = self.saved.set(signal);
+    }
+
+    /// Gives `GET /api/backlog/link` the running agent's device-link state; with none, `waiting` is null.
+    pub fn set_links(&self, links: link::pending::Links) {
+        let _ = self.links.set(links);
     }
 
     fn current_settings(&self) -> Result<Value> {
@@ -203,7 +226,31 @@ impl SettingsServer {
         if self.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
             settings["ciSlots"] = json!(config::ci_slots(&cfg, env));
         }
+        if self.cursor_allow_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            settings["cursorAllow"] = Self::cursor_allow_json(&cfg, env);
+        }
         Ok(settings)
+    }
+
+    /// Each project's `engines.allow`, the programs derived from its checks, and the
+    /// allowlist file Cursor follows there (engines/06-permissions-the-allowlist.md section 6.4).
+    fn cursor_allow_json(cfg: &config::ConfigFile, env: &Env) -> Value {
+        let rows = cfg.projects.iter().map(|p| {
+            let (line, problem) = crate::engines::cursor::allowlist_in_force(std::path::Path::new(&p.repo_path), env);
+            let allow = p
+                .engines
+                .as_ref()
+                .and_then(|e| e.get("allow"))
+                .cloned()
+                .unwrap_or(json!([]));
+            json!({
+                "project": p.id_or_derived(),
+                "allow": allow,
+                "commandShells": crate::engines::cursor::command_shells(&p.checks),
+                "inForce": { "line": line, "problem": problem },
+            })
+        });
+        Value::Array(rows.collect())
     }
 
     /// `GET /api/link`'s view of each of retaskable.com's three environments, and a custom
@@ -221,6 +268,19 @@ impl SettingsServer {
             })
             .collect();
         Ok(json!({ "environments": environments }))
+    }
+
+    /// `GET /api/backlog/link`: whether this machine holds a token for the shared backlog's store, the
+    /// store's address, and the approval page while a device-link code waits.
+    fn backlog_link_view(&self) -> Value {
+        let url = crate::backlog::url(&self.env);
+        let linked = matches!(self.keychain.get(&url), Ok(Some(_)));
+        let waiting = self
+            .links
+            .get()
+            .and_then(|l| l.backlog())
+            .map(|w| json!({ "url": w.page_url, "label": w.label }));
+        json!({ "linked": linked, "url": url, "waiting": waiting })
     }
 }
 
@@ -240,6 +300,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
+        .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(settings.clone(), security_envelope))
@@ -332,6 +393,9 @@ async fn post_settings(
     if update.ci_slots.is_some() && !settings.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
         return bad_request("Not a setting this agent can save yet: ciSlots.");
     }
+    if update.cursor_allow.is_some() && !settings.cursor_allow_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return bad_request("Not a setting this agent can save yet: cursorAllow.");
+    }
     match settings.saver().apply(&update) {
         Ok(()) => {
             if let Some(signal) = settings.saved.get() {
@@ -351,6 +415,16 @@ async fn get_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMa
         Ok(value) => Json(value).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+async fn get_backlog_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+    if !settings.backlog_link_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return not_found_response();
+    }
+    if settings.authenticate(&headers).is_none() {
+        return unauthorized("Sign in first.");
+    }
+    Json(settings.backlog_link_view()).into_response()
 }
 
 /// `GET /api/profile?fresh=1`: every read already calls `gh api user` fresh (no cache here for

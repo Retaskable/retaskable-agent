@@ -1,5 +1,5 @@
 //! A tiny local git repo with an `origin` remote, shared by this crate's own `#[cfg(test)]`
-//! modules that need real git plumbing to exercise (repo checks, galleries). Also a baseline
+//! modules that need real git plumbing to exercise (repo checks). Also a baseline
 //! `ProjectConfig` for the item-lifecycle state machine and its callers (`item_lifecycle`,
 //! `orchestrator`), since the derived `Default` leaves every round/slice cap at 0, which would
 //! escalate to `needs_human` on the very first failure or claim.
@@ -379,7 +379,50 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         repo_path: PathBuf::new(),
         worktrees_dir: PathBuf::new(),
         base_branch: String::new(),
-        galleries: vec![],
         play_command: String::new(),
     }
+}
+
+/// An `AgentView` with every part but these defaulted, for tests that read the snapshot.
+pub(crate) fn agent_view(
+    tags: Vec<String>,
+    projects: Vec<crate::view::ProjectView>,
+    version: &str,
+    lanes: u32,
+) -> crate::view::AgentView {
+    use crate::lane_pool::LaneSizes;
+    use crate::view::AgentView;
+    AgentView {
+        machine: "pc".into(),
+        tags: tags.into(),
+        projects,
+        version: version.into(),
+        lanes,
+        chore_lane: Some(lanes),
+        lane_sizes: LaneSizes::default(),
+        paused: Default::default(),
+        store_paused: Default::default(),
+        item_commands: Default::default(),
+        work: Default::default(),
+        restart: Default::default(),
+        settings: Default::default(),
+        local: Default::default(),
+        live: Default::default(),
+        checks: Default::default(),
+        owner: Default::default(),
+    }
+}
+
+/// A fake `gh` that creates the returned `ran` file when run, so a test can show a call was not made.
+pub(crate) fn fake_gh_that_marks(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let ran = dir.join("ran");
+    let gh = dir.join(if cfg!(windows) { "gh.cmd" } else { "gh.sh" });
+    let script = if cfg!(windows) {
+        format!("@echo off\r\necho x > \"{}\"\r\n", ran.display())
+    } else {
+        format!("#!/bin/sh\ntouch \"{}\"\n", ran.display())
+    };
+    write_executable(&gh, &script);
+    let _ = std::fs::remove_file(&ran); // the helper ran the script once
+    (gh, ran)
 }

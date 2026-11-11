@@ -76,18 +76,18 @@ impl DraftHost for Host {
 }
 
 /// A store whose `draft_take` hands out a draft waiting for approval with a PR.
-async fn store() -> (String, Asked) {
+async fn store(intake: Value) -> (String, Asked) {
     let asked: Asked = Default::default();
     let seen = asked.clone();
     let app = Router::new().route(
         "/v1/repos/{id}/ops",
         post(move |Json(body): Json<Value>| {
-            let seen = seen.clone();
+            let (seen, intake) = (seen.clone(), intake.clone());
             async move {
                 let (op, args) = (body["op"].as_str().unwrap_or("").to_string(), body["args"].clone());
                 seen.lock().unwrap().push((op.clone(), args.clone()));
                 let value = match op.as_str() {
-                    "draft_take" => json!({ "token": "lease-d", "draft": {
+                    "draft_take" => json!({ "token": "lease-d", "draft": { "intake": intake,
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval", "titles": ["Charts"],
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
                         "itemIds": ["charts-1"], "requestedBy": "ada", "sessionId": "sess-1" } }),
@@ -96,7 +96,7 @@ async fn store() -> (String, Asked) {
                     "list" => json!([]),
                     _ => Value::Null,
                 };
-                Json(json!({ "value": value }))
+                (axum::http::StatusCode::OK, Json(json!({ "value": value })))
             }
         }),
     );
@@ -113,6 +113,7 @@ struct Setup {
     merges: Vec<Result<(), &'static str>>,
     rebase: Option<bool>,
     rebases: Vec<bool>,
+    intake: Value,
 }
 
 impl Default for Setup {
@@ -127,6 +128,7 @@ impl Default for Setup {
             merges: Vec::new(),
             rebase: None,
             rebases: Vec::new(),
+            intake: json!({}),
         }
     }
 }
@@ -134,7 +136,7 @@ impl Default for Setup {
 /// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
 /// `draft_report` has gone (and, for a merge, the headers).
 async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
-    let (base, asked) = store().await;
+    let (base, asked) = store(setup.intake.clone()).await;
     let root = tempfile::tempdir().unwrap();
     let repo = repo_with_origin(root.path());
     let spec = "# Charts\n\nTheme: Hosting\n\nItems:\n- **charts-1**: Draw them. Depends on: none.\n";

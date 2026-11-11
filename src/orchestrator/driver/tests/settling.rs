@@ -1,7 +1,7 @@
 //! How sessions and steps that ended settle their item's lane and lease (`driver/settle.rs`).
 use super::*;
 use crate::engines::EngineId;
-use crate::orchestrator::driver::machine::poll_period;
+use crate::orchestrator::driver::spawn::poll_period;
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
 
@@ -11,7 +11,7 @@ fn done(result: ImplementerOutcome) -> SessionResult {
 
 /// A rig that has claimed "a" on lane 1 with its session ended by `result` (not yet read), the store
 /// refusing `release` while `fail_release` is set.
-async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
+pub(super) async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), fail_release.clone()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
@@ -366,7 +366,7 @@ async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
         fn active(&self) -> u32 {
             0
         }
-        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
             None
         }
     }

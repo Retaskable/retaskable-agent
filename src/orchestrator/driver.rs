@@ -24,25 +24,29 @@ mod deprecations;
 mod drafts;
 mod fix_main;
 mod follow;
+mod held_items;
+mod host_calls;
 mod idea_accept;
 mod item_commands;
 mod land;
 mod lane_play;
 mod main_sync;
 pub use lane_play::LanePlay;
-mod auto;
 mod claim;
-mod ideas_daily;
-mod ideas_round;
 mod machine;
+mod mode;
+mod panic;
+mod playtest_owed;
 mod playtest_round;
 mod project;
+mod read;
 mod report;
 mod resume;
 mod run_starters;
 mod runs;
 mod settle;
 mod signed_out;
+mod spawn;
 mod start_gate;
 mod step_events;
 mod store_errors;
@@ -50,20 +54,21 @@ mod triage_bug;
 mod triage_facts;
 mod triage_run;
 mod trial;
-mod vet_daily;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
 pub(crate) use machine::repo_id;
-pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
+pub use machine::{Links, Machine, Shared};
 use project::Launch;
 pub use project::{
     Abandon, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
 };
 pub use runs::{
-    BEAT_EVERY, FallOver, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id,
+    BEAT_EVERY, FallOver, RunContext, RunEnd, RunEndSender, RunEventSender, RunLoop, RunProcesses, RunRequest,
+    RunStarter, piece_id,
 };
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
+pub use spawn::{SpawnArgs, spawn_all};
 pub use triage_run::{LookFailure, SecondLookEnd, SecondLookRequest, TriageEnd, TriageRequest};
 
 #[cfg(test)]

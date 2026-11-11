@@ -35,8 +35,6 @@ pub struct DraftIntake {
     #[serde(default)]
     pub parsed: bool,
     #[serde(default)]
-    pub do_next: bool,
-    #[serde(default)]
     pub note: Option<String>,
 }
 

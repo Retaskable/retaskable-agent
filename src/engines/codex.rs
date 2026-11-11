@@ -22,7 +22,7 @@ use super::engine::{
 };
 use super::json_result::{check_schema, extract_json, fenced_json_instructions};
 use super::resolve::resolve_codex;
-use crate::text::clip;
+use crate::text::{clip, is_blank};
 
 /// Codex's own thread id for each of our session ids, learnt from `thread.started`, so a resume can
 /// find it.
@@ -283,7 +283,7 @@ impl EngineReader for CodexReader {
                 let item = ev.get("item");
                 if item.and_then(|i| i.get("type")).and_then(Value::as_str) == Some("agent_message") {
                     let text = text_of(item.and_then(|i| i.get("text")));
-                    if !text.trim().is_empty() {
+                    if !is_blank(&text) {
                         self.last_text = text;
                     }
                 }

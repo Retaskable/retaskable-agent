@@ -12,6 +12,7 @@ use super::driver::{
 use super::session::{ClaudeStarter, watch_for};
 use crate::config::{Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, TranscriptSink, engine_for, engine_of, place, run_session,
     start_engine,
@@ -114,11 +115,13 @@ impl ClaudeStarter {
                 .display()
                 .to_string(),
         );
+        let up = self.local.ladder_for(placed.engine == EngineId::Claude);
+        let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
         let tier = mid_tier(implementer_tier(
-            usage.as_ref(),
+            floored.as_ref(),
             crate::telemetry::now_ms() / 1000,
             &self.models,
-            self.local.ladder_for(placed.engine == EngineId::Claude),
+            up,
         ));
         let (model, local) = (tier.to_string(), self.local.clone());
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
@@ -139,7 +142,7 @@ impl ClaudeStarter {
                         model: claude_model_for(placed.engine, tier),
                         local: claimed.as_ref().map(|(_, target)| target.clone()),
                         engine: Some(placed.engine),
-                        cursor: placed.cursor.clone(),
+                        cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                         shell: true,
                     },
@@ -229,12 +232,9 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
-        let top = top_tier(
-            None,
-            0,
-            &self.models,
-            self.local.ladder_for(placed.engine == EngineId::Claude),
-        );
+        let up = self.local.ladder_for(placed.engine == EngineId::Claude);
+        let floored = crate::tiers::limit_floor(None, sessions.claude_at_limit(), up);
+        let top = top_tier(floored.as_ref(), 0, &self.models, up);
         let local = self.local.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top);
         tokio::spawn(async move {
@@ -252,7 +252,7 @@ impl ClaudeStarter {
                         model: claude_model_for(placed.engine, top),
                         local: claimed.as_ref().map(|(_, target)| target.clone()),
                         engine: Some(placed.engine),
-                        cursor: placed.cursor.clone(),
+                        cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
                         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                         shell: true,
                     },

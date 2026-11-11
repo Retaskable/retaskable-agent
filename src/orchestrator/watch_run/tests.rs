@@ -53,8 +53,12 @@ esac
     path
 }
 
+/// Writes atomically (temp file, then rename), so a fake `gh` running meanwhile never reads a
+/// file `fs::write` has truncated but not yet filled.
 pub(crate) fn set(dir: &Path, name: &str, text: &str) {
-    std::fs::write(dir.join(name), text).unwrap();
+    let temp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&temp, text).unwrap();
+    std::fs::rename(temp, dir.join(name)).unwrap();
 }
 
 pub(crate) fn calls(dir: &Path) -> Vec<String> {
@@ -86,6 +90,7 @@ pub(crate) fn lane_free_request(
         lane: None,
         engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         project: "p".into(),
         processes,
         stop: Default::default(),
@@ -203,4 +208,136 @@ async fn a_piece_with_no_change_ends_failed_without_asking_gh() {
         RunOutcome::Failed("The piece has no change to watch.".into())
     );
     assert!(calls(dir.path()).is_empty());
+}
+
+/// The `ci` events a watch of `dir`'s fake `gh` sends, as (state, ms), and how the run ended.
+async fn ci_events(
+    dir: &Path,
+    change_after: impl std::future::Future<Output = ()> + Send + 'static,
+) -> (Vec<(String, f64)>, RunEnd) {
+    let repo = repo_with_ci(dir);
+    let (mut request, mut rx) = request(&repo, json!({ "number": 7 }), 120);
+    let (events, mut events_rx) = crate::orchestrator::driver::RunEventSender::channel();
+    request.events = events;
+    tokio::spawn(change_after);
+    WatchRuns::with(fake_gh(dir), Duration::from_millis(5), Some(Duration::from_millis(1)))
+        .start(request)
+        .unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut seen = Vec::new();
+    while let Ok(crate::telemetry::Event::Ci(c)) = events_rx.try_recv() {
+        assert_eq!(c.item.as_deref(), Some("t"));
+        seen.push((c.state.unwrap(), c.ms.unwrap()));
+    }
+    (seen, end)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pending_reads_then_pass_send_two_ci_events_never_a_repeat() {
+    let dir = tempfile::tempdir().unwrap();
+    set(dir.path(), "checks", "t\tpending\t0\thttps://x/t\t\n");
+    set(dir.path(), "code", "8");
+    let d = dir.path().to_path_buf();
+    let (seen, end) = ci_events(dir.path(), async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        set(&d, "checks", "t\tpass\t1s\thttps://x/t\t\n");
+        set(&d, "code", "0");
+    })
+    .await;
+    assert_eq!(end.outcome, RunOutcome::Green);
+    let states: Vec<&str> = seen.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(states, ["pending", "pass"]);
+    assert!(seen[0].1 < seen[1].1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_red_run_ends_with_a_fail_event() {
+    let dir = tempfile::tempdir().unwrap();
+    set(dir.path(), "checks", "t\tfail\t1s\thttps://x/t\t\n");
+    set(dir.path(), "code", "1");
+    set(dir.path(), "log", "boom\n");
+    let (seen, end) = ci_events(dir.path(), async {}).await;
+    assert_eq!(end.outcome, RunOutcome::Red);
+    assert_eq!(seen.last().map(|(s, _)| s.as_str()), Some("fail"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gh_errors_send_no_ci_event() {
+    let dir = tempfile::tempdir().unwrap();
+    set(dir.path(), "error", "");
+    let (seen, end) = ci_events(dir.path(), async {}).await;
+    assert!(matches!(end.outcome, RunOutcome::Failed(_)));
+    assert!(seen.is_empty());
+}
+
+#[test]
+fn no_checks_or_a_green_with_the_no_ci_note_read_as_none() {
+    use crate::ci_watch::{Check, CheckState};
+    let check = |state| Check {
+        name: "t".into(),
+        state,
+        link: String::new(),
+        started: None,
+    };
+    let wait = Decision::Wait;
+    assert_eq!(ci_state(&[], &wait), "none");
+    assert_eq!(
+        ci_state(
+            &[check(CheckState::Pass)],
+            &Decision::Green {
+                note: Some("no CI".into())
+            }
+        ),
+        "none"
+    );
+    assert_eq!(
+        ci_state(&[check(CheckState::Pass), check(CheckState::Pending)], &wait),
+        "pending"
+    );
+    assert_eq!(
+        ci_state(&[check(CheckState::Pass), check(CheckState::Fail)], &wait),
+        "fail"
+    );
+    assert_eq!(
+        ci_state(&[check(CheckState::Pass), check(CheckState::Skipping)], &wait),
+        "pass"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_repo_with_no_ci_sends_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repo_with_ci(dir.path());
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git").args(args).current_dir(&repo).status();
+        assert!(ok.unwrap().success());
+    };
+    // The base branch's workflow is gone, so no CI covers it.
+    git(&["rm", "-rq", ".github"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]);
+    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    set(dir.path(), "checks", "");
+    let (mut request, mut rx) = request(&repo, json!({ "number": 7 }), 120);
+    let (events, mut events_rx) = crate::orchestrator::driver::RunEventSender::channel();
+    request.events = events;
+    WatchRuns::with(fake_gh(dir.path()), Duration::from_millis(5), None)
+        .start(request)
+        .unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(end.outcome, RunOutcome::Green);
+    let Ok(crate::telemetry::Event::Ci(c)) = events_rx.try_recv() else {
+        panic!("no ci event")
+    };
+    assert_eq!(c.state.as_deref(), Some("none"));
+    assert!(events_rx.try_recv().is_err());
 }

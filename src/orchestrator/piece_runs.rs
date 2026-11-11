@@ -20,6 +20,7 @@ use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
     EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked, start_engine,
@@ -120,6 +121,7 @@ impl PieceStarter {
         placement: Placement,
         placed: bool,
     ) -> Result<(), String> {
+        let cursor = placement.cursor.map(|c| with_project(&project, c));
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
@@ -134,7 +136,7 @@ impl PieceStarter {
             token: request.token.clone(),
             kind: request.kind,
             engine: placement.engine,
-            cursor: placement.cursor,
+            cursor,
             choice: self.choice.clone(),
             cursor_models: self.cursor_models.clone(),
             placed,
@@ -232,8 +234,17 @@ pub(super) fn piece_item(piece: &RunPiece) -> Item {
         id: piece_id(piece).to_string(),
         title: piece.title.clone(),
         status: ItemStatus::Building,
+        size: piece.other.get("size").and_then(Value::as_str).map(str::to_string),
         ..Item::default()
     }
+}
+
+/// Whether the piece has earlier failed attempts; one that ended `limited` counts none (pieces.md section 3.2).
+fn is_retry(piece: &RunPiece) -> bool {
+    piece
+        .attempts
+        .iter()
+        .any(|a| a.get("outcome").and_then(Value::as_str) != Some("limited"))
 }
 
 /// A chore holds its kind's store lock through the run (section 6.7): another holder leaves the chore to them
@@ -378,19 +389,22 @@ async fn session(
     let now = crate::telemetry::now_ms() / 1000;
     // With `chore-rotation` Off, a chore piece is run like any other.
     let chore = chore_for(job).await;
-    // Held until the session ends. Only a Claude session behind the `local-tier-ladder` flag may use the model.
+    // Held until the session ends. Only a Claude session may use the model: the free-slot grab for a chore is behind
+    // `local-chores-scouts`, the fallback rows behind `local-tier-ladder`.
     // Never on a resume (a gate round's fix): an Anthropic session isn't resumed against the local server.
-    let ladder =
-        job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && crate::tiers::local_ladder_on();
+    let flags = (crate::tiers::local_chores_scouts_on(), crate::tiers::local_ladder_on());
+    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && (flags.0 || flags.1);
     let (tier, local_run) = tier_for(
         chore.as_ref(),
         now,
         &job.models,
-        ladder.then_some(&job.local),
+        may.then_some(&job.local),
+        flags,
         job.wants_local,
+        !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
     )
     .await;
-    let model = model_for(chore.as_ref(), tier, &item).to_string();
+    let model = model_for(chore.as_ref(), tier, &item, is_retry(&job.piece)).to_string();
     let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
         &Session {
@@ -659,7 +673,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    s.and_then(crate::text::non_blank).map(str::to_string)
 }
 
 /// How many commits the lane's `HEAD` has that `base_ref` hasn't; 0 when git can't say.

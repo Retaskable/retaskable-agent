@@ -91,6 +91,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
         engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees })
@@ -577,7 +578,13 @@ async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
         .min_scout_diff_lines = 0;
     let (req, mut s) = request(&r, RunKind::Build, piece());
     r.starter.start(req).unwrap();
-    let rows = r.starter.sessions.rows_when_running().await;
+    let rows = loop {
+        let rows = r.starter.sessions.rows_when_running().await;
+        if !rows.is_empty() && rows.iter().all(|row| row.info.role == crate::engines::Role::Scout) {
+            break rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     let info = &rows[0].info;
     assert_eq!((info.project.as_str(), info.item_id.as_str()), ("p", "pc1"));
     assert_eq!(info.title.as_deref(), Some("Show the thing"));
@@ -943,42 +950,11 @@ async fn with_the_sync_flag_off_a_sync_piece_runs_like_any_other() {
     assert!(!prompt.contains("main sync"), "{prompt}");
 }
 
-/// The model a `kind` chore's session is listed with, on a rig whose local model is `local` and `chore-rotation` On.
-async fn model_of_chore(local: &crate::local_model::LocalModel, kind: &str) -> String {
-    crate::tiers::set_local_ladder_for_test(true);
-    let (url, _log) = lock_store("free").await;
-    let mut r = rig(&[&format!("sleep 1; {COMMIT}")], &answer("pr_opened", ""));
-    chore_rig(&mut r);
-    Arc::get_mut(&mut r.starter).unwrap().local = local.clone();
-    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece(kind));
-    on_store(&mut req, &url);
-    r.starter.start(req).unwrap();
-    let rows = crate::orchestrator::fake_session_tests::rows_once_running(&r.starter.sessions).await;
-    let model = rows[0].info.model.clone();
-    end_of(&mut s.ends).await;
-    model
-}
+#[path = "piece_runs_local_tests.rs"]
+mod local_tests;
 
-#[tokio::test]
-async fn a_tidy_chore_takes_a_free_local_slot() {
-    let local = crate::local_model::LocalModel::up();
-    assert_eq!(model_of_chore(&local, "tidy").await, "local");
-    assert!(local.try_take().is_some(), "the slot is free again after the chore");
-}
-
-#[tokio::test]
-async fn a_tidy_chore_with_the_local_slot_busy_runs_on_the_chore_tier_at_once() {
-    let local = crate::local_model::LocalModel::up();
-    let _held = local.take().await;
-    assert_eq!(model_of_chore(&local, "tidy").await, "sonnet");
-}
-
-#[tokio::test]
-async fn a_playtest_fix_never_takes_the_local_slot() {
-    let local = crate::local_model::LocalModel::up();
-    assert_ne!(model_of_chore(&local, "playtest_fix").await, "local");
-    assert!(local.try_take().is_some());
-}
+#[path = "piece_runs_model_tests.rs"]
+mod model_tests;
 
 #[path = "piece_runs_limit_tests.rs"]
 mod limit;

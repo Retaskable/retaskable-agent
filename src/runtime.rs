@@ -4,7 +4,7 @@
 use crate::env::Env;
 use crate::runs::RunWait;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::telemetry::event::{Event, RestartAsked, RestartExit, RestartWaiting};
@@ -196,44 +196,45 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
 
 /// The setup checks, plus the Docker line (agent-ci.md section 3.6) only with the `agent-ci` flag On.
 async fn checks_with_docker(env: &Env, flags: &crate::flags::Flags) -> setup_check::SetupChecks {
-    let mut checks = setup_check::run_setup_checks(env).await;
+    let mut checks = setup_check::run_setup_checks(env, flags.on("engine-setup-probes").await).await;
     if flags.on(crate::hello_settings::CI_FLAG).await {
         let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
-        let image = image.as_deref().map(str::trim).filter(|i| !i.is_empty());
+        let image = image.as_deref().and_then(crate::text::non_blank);
         let in_image = crate::agent_ci::docker::in_agent_image();
         checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
     }
     checks
 }
 
+/// The runner that does the setup checks (first-run-check.md section 3.1): `checks_with_docker`
+/// with this environment and these flags.
+pub fn setup_check_runner(env: Env, flags: Arc<crate::flags::Flags>) -> Arc<setup_check::SetupCheckRunner> {
+    Arc::new(setup_check::SetupCheckRunner::with_probe(Box::new(move || {
+        let (env, flags) = (env.clone(), flags.clone());
+        Box::pin(async move { checks_with_docker(&env, &flags).await })
+    })))
+}
+
 /// first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
 /// Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`. A
 /// release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
-/// The settings page's Now tab reads the latest result (agent-settings.md section 4.5), so it's
-/// kept and run again every ten minutes, quietly.
+/// The runner keeps the latest result for the settings page's Now tab (agent-settings.md section
+/// 4.5) and runs again every ten minutes, quietly.
 pub fn spawn_setup_checks(
     is_release: bool,
-    env: Env,
+    runner: &Arc<setup_check::SetupCheckRunner>,
     flags: Arc<crate::flags::Flags>,
-) -> Arc<Mutex<Option<setup_check::SetupChecks>>> {
-    let latest = Arc::new(Mutex::new(None));
-    let kept = latest.clone();
-    tokio::spawn(async move {
-        let checks = checks_with_docker(&env, &flags).await;
-        let report = setup_check::setup_check_report(&checks);
-        if is_release {
-            tracing::info!("{report}");
-        } else {
-            println!("{report}");
-        }
-        *kept.lock().unwrap() = Some(checks);
-        loop {
-            tokio::time::sleep(Duration::from_secs(600)).await;
-            let checks = checks_with_docker(&env, &flags).await;
-            *kept.lock().unwrap() = Some(checks);
-        }
+) {
+    runner.spawn(move |checks| {
+        Box::pin(async move {
+            let report = setup_check::setup_check_report(&checks, flags.on("engine-setup-probes").await);
+            if is_release {
+                tracing::info!("{report}");
+            } else {
+                println!("{report}");
+            }
+        })
     });
-    latest
 }
 
 /// installers/03-the-bundle-agent-bundle.md section 3.11/3.12: a release build has no checkout

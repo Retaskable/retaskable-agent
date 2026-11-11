@@ -4,7 +4,7 @@
 |---|---|---|
 | **1** | **Local, the same as the others** (the cloud's: [cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 9) (built) | |
 | **2** | **Requests**, the request kind of command (built, then retired 2026-10-22: commands run at once with the agent's own checks) | |
-| **3 to 6** | **The site's commands**: play, settings, galleries, release notes, pictures, Promote and Restart (built, section 5) | |
+| **3 to 6** | **The site's commands**: play, settings, release notes, pictures, Promote and Restart (built, section 5) | |
 | **7** | **The tray agent**: the helper, the icon, the menu, `--no-tray` (section 4) (built, section 4.6, with a connector per environment) | |
 | **8** | **No local UI**: the agent stops serving the app (`app/dist`, on its port and through the local site at 5173); the app's local mode goes; the README says run the agent, link from the tray, open retaskable.com, where the app is | 3, 4, 5, 6, 7 |
 
@@ -19,7 +19,7 @@ Step 8 (no-local-ui) is the last of this spec: once it's built, retaskable.com (
 
 #### 6.1.2 What stays at the machine on purpose
 
-The `remote` policy (edited in `.retaskable/config.json`), and editing a draft's files by hand (on the code host or by **Revise**, section 5). The leftover local routes each got a command the site sends instead (`team_sync`, `main_pr`, `release_status`, `phone_stop`, `gallery_draft`, `engines` in the settings command, `link_project`, `unlink_project`, section 5), except the item's whole log from disk, which is lost (section 7).
+The `remote` policy (edited in `.retaskable/config.json`), and editing a draft's files by hand (on the code host or by **Revise**, section 5). The leftover local routes each got a command the site sends instead (`team_sync`, `main_pr`, `release_status`, `phone_stop`, `engines` in the settings command, `link_project`, `unlink_project`, section 5), except the item's whole log from disk, which is lost (section 7).
 
 #### 6.1.3 What goes, and what the agent's port is
 

@@ -16,6 +16,7 @@ use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, Sta
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig};
+use crate::engines::cursor::with_project;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::Interrupted;
@@ -36,7 +37,6 @@ pub struct ClaudeAsks {
     daily_usd: f64,
     view: Arc<AgentView>,
     /// The computer's local model, for the tier ladder.
-    #[allow(dead_code)] // read by the tier ladder's later pieces
     local: crate::local_model::LocalModel,
 }
 
@@ -161,7 +161,7 @@ impl AskHost for ClaudeAsks {
                     })
                     .collect(),
                 status: "running".into(),
-                paused_reason: None,
+                paused_reason: view.pause_reason(&project.id_or_derived()),
                 spent_today_usd: facts.spent_today_usd,
                 daily_usd,
             };
@@ -194,7 +194,8 @@ impl AskHost for ClaudeAsks {
             };
             let repo_path = PathBuf::from(&project.repo_path);
             let up = local.ladder_for(chosen == Engine::Claude);
-            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
+            let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
+            let tier = implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
             // Held until the session ends.
             let claimed = local.claim(tier).await;
             let spec = match session_spec(&Session {
@@ -216,7 +217,7 @@ impl AskHost for ClaudeAsks {
                 budget: &project.budget,
                 cwd: &repo_path,
                 local: claimed.as_ref().map(|(_, target)| target.clone()),
-                cursor: placed.cursor.clone(),
+                cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
             }) {
                 Ok(spec) => spec,
                 Err(e) => return Ok(sorry(e)),

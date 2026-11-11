@@ -125,6 +125,15 @@ pub fn subscribe_trial_changes() -> tokio::sync::watch::Receiver<u64> {
     TRIAL_CHANGED.subscribe()
 }
 
+/// Counts every save of a state that holds a smoke, across projects.
+static SMOKE_SAVED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
+
+/// Subscribes to saves of a state holding a smoke (`set_smoke`, then `save`); the value only counts them.
+pub fn subscribe_smoke_changes() -> tokio::sync::watch::Receiver<u64> {
+    SMOKE_SAVED.subscribe()
+}
+
 impl Store {
     /// Loads `<dir>/state.json` (empty when there's none yet), trims any legacy item and draft
     /// records (local-state-diet.md section 3), and saves at once if that dropped anything,
@@ -158,7 +167,11 @@ impl Store {
     /// Writes the state file atomically (a temp file, then a rename), compact: no indentation,
     /// since nothing reads it by line (local-state-diet.md section 3).
     pub fn save(&self) -> Result<()> {
-        write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)
+        write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)?;
+        if self.data.contains_key("smoke") {
+            SMOKE_SAVED.send_modify(|n| *n += 1);
+        }
+        Ok(())
     }
 
     /// Replaces `state.usage` with a session's latest 5-hour usage reading
@@ -227,6 +240,29 @@ impl Store {
             .insert("unreleased".to_string(), serde_json::json!(unreleased));
     }
 
+    /// When each `unreleased` entry was first listed, in epoch seconds. An entry with no time (a state file
+    /// from before it was kept) counts as listed at `now`, so it gets a full day.
+    pub fn unreleased_since(&self, now: i64) -> std::collections::BTreeMap<String, i64> {
+        let saved: std::collections::BTreeMap<String, i64> = self
+            .data
+            .get("unreleased_since")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        self.unreleased()
+            .into_keys()
+            .map(|id| {
+                let at = saved.get(&id).copied().unwrap_or(now);
+                (id, at)
+            })
+            .collect()
+    }
+
+    /// Replaces `state.unreleased_since`. Doesn't save on its own; call `save` after.
+    pub fn set_unreleased_since(&mut self, since: &std::collections::BTreeMap<String, i64>) {
+        self.data
+            .insert("unreleased_since".to_string(), serde_json::json!(since));
+    }
+
     /// Items a person skipped here whose `skip` the store hasn't taken yet (sent after their `release`, again
     /// on later passes until it answers). Empty when missing.
     pub fn unskipped(&self) -> std::collections::BTreeSet<String> {
@@ -239,6 +275,40 @@ impl Store {
     /// Replaces `state.unskipped`. Doesn't save on its own; call `save` after.
     pub fn set_unskipped(&mut self, unskipped: &std::collections::BTreeSet<String>) {
         self.data.insert("unskipped".to_string(), serde_json::json!(unskipped));
+    }
+
+    /// A person's playtest answers for the store's try-out queue that the store hasn't taken yet: the id the
+    /// command named to (passed, notes). Sent again on later passes. Empty when missing.
+    pub fn unanswered(&self) -> std::collections::BTreeMap<String, (bool, Option<String>)> {
+        self.data
+            .get("unanswered")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.unanswered`. Doesn't save on its own; call `save` after.
+    pub fn set_unanswered(&mut self, unanswered: &std::collections::BTreeMap<String, (bool, Option<String>)>) {
+        self.data
+            .insert("unanswered".to_string(), serde_json::json!(unanswered));
+    }
+
+    /// The `playtests` value (config.json's) this project last saw, as its config name; `None` before the first pass.
+    pub fn playtests_seen(&self) -> Option<String> {
+        self.data
+            .get("playtestsSeen")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    /// Whether a `releasePlaytests` is owed to the store (`playtests` switched to off, not yet taken).
+    pub fn release_owed(&self) -> bool {
+        self.data.get("releaseOwed").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    /// Replaces `state.playtestsSeen` and `state.releaseOwed`. Doesn't save on its own; call `save` after.
+    pub fn set_playtests_seen(&mut self, seen: Option<&str>, owed: bool) {
+        self.data.insert("playtestsSeen".to_string(), serde_json::json!(seen));
+        self.data.insert("releaseOwed".to_string(), serde_json::json!(owed));
     }
 
     /// Leases let go while their item waits, which the store hasn't taken yet: item id to
@@ -369,6 +439,26 @@ mod tests {
         assert_eq!(again.trial(), TrialRecord::opened("https://x/pr/1"));
         assert!(read(dir.path()).contains(r#""other":{"a":1}"#));
         assert!(read(dir.path()).contains("\"trialPlan\""));
+    }
+
+    #[test]
+    fn an_old_unreleased_entry_without_a_time_reads_as_listed_now_and_a_saved_time_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"unreleased":{"a":["t","note"],"b":["u","n"]}}"#,
+        )
+        .unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(
+            store.unreleased_since(500),
+            [("a".to_string(), 500), ("b".to_string(), 500)].into()
+        );
+        store.set_unreleased_since(&[("a".to_string(), 100)].into());
+        store.save().unwrap();
+        let again = Store::load(dir.path()).unwrap();
+        let since = again.unreleased_since(500);
+        assert_eq!((since["a"], since["b"]), (100, 500));
     }
 
     #[test]

@@ -101,6 +101,26 @@ pub fn carries_week(usage: &Value) -> bool {
         || usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day")
 }
 
+/// The weekly window of a reading: `unifiedWindows.seven_day`, else the reading itself when its `rateLimitType` is
+/// `seven_day`.
+fn week_window(usage: &Value) -> Option<&Value> {
+    match usage.get("unifiedWindows").and_then(|w| w.get("seven_day")) {
+        Some(w) => Some(w),
+        None if usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day") => Some(usage),
+        None => None,
+    }
+}
+
+/// The week's `(utilization 0–1 read like `frac`, resetsAt)` of a reading, either shape (`week_window`); each is
+/// `None` when the reading doesn't carry it (a status-only reading), and the whole is `None` with no weekly window.
+pub fn week_reading(usage: &Value) -> Option<(Option<f64>, Option<i64>)> {
+    let w = week_window(usage)?;
+    Some((
+        w.get("utilization").and_then(Value::as_f64).map(frac),
+        w.get("resetsAt").and_then(Value::as_i64),
+    ))
+}
+
 /// Whether the `weekly-limit-reading` or `weekly-cutoff` flag was On at its last answer; Off until the flags
 /// client is handed over.
 pub fn weekly_reading_on() -> bool {
@@ -174,6 +194,78 @@ pub fn set_local_ladder_for_test(on: bool) {
     LADDER_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
+/// Whether the `local-limit-fallback` flag was On at its last answer; Off until the flags client is handed over.
+pub fn local_limit_fallback_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = LIMIT_FALLBACK_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("local-limit-fallback"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIMIT_FALLBACK_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-limit-fallback` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_local_limit_fallback_for_test(on: bool) {
+    LIMIT_FALLBACK_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
+/// Whether the `tier-kept-on-resume` flag was On at its last answer; Off until the flags client is handed over.
+pub fn tier_kept_on_resume_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = KEPT_ON_RESUME_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("tier-kept-on-resume"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static KEPT_ON_RESUME_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `tier-kept-on-resume` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_tier_kept_on_resume_for_test(on: bool) {
+    KEPT_ON_RESUME_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
+/// Whether the `cursor-allow-derive` flag was On at its last answer; Off until the flags client is handed over.
+pub fn cursor_allow_derive_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = ALLOW_DERIVE_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("cursor-allow-derive"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static ALLOW_DERIVE_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `cursor-allow-derive` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_cursor_allow_derive_for_test(on: bool) {
+    ALLOW_DERIVE_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
+/// The usage to read a Claude tier from (section 7.1's last row): when Claude is `at_limit` on this computer
+/// (`EngineLimits::claude_at_limit`), the `local-limit-fallback` flag is On and the model is `local_available`,
+/// a reading in the floor band whatever `state.usage` says; otherwise `usage` as it is.
+pub fn limit_floor(usage: Option<&Value>, at_limit: bool, local_available: bool) -> Option<Value> {
+    if at_limit && local_available && local_limit_fallback_on() {
+        return Some(
+            serde_json::json!({ "unifiedWindows": { "five_hour": { "utilization": 1.0, "resetsAt": i64::MAX } } }),
+        );
+    }
+    usage.cloned()
+}
+
 /// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
 /// environment maps onto the local model (section 7.2).
 pub fn claude_model(tier: &'static str) -> &'static str {
@@ -208,6 +300,26 @@ thread_local! {
 #[cfg(test)]
 pub fn set_local_one_slot_for_test(on: bool) {
     ONE_SLOT_FOR_TEST.with(|c| c.set(Some(on)));
+}
+
+/// Whether the `local-chores-scouts` flag was On at its last answer; Off until the flags client is handed over.
+pub fn local_chores_scouts_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = CHORES_SCOUTS_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("local-chores-scouts"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHORES_SCOUTS_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `local-chores-scouts` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_local_chores_scouts_for_test(on: bool) {
+    CHORES_SCOUTS_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
 /// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.
@@ -248,19 +360,43 @@ pub fn top_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, lo
 
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
 /// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
-/// kept for retries, reopened items and the bigger ones. Only a tier of `opus` is ever moved; a tier
-/// already below it (from a usage reading, section 7.1's table) is returned unchanged.
-///
-/// Not yet: the store's claimed item (backlog/06.1-an-item.md) carries no retry count and no size
-/// (estimates.md section 3.2 — sizing came from the TypeScript agent's own planner, removed before
-/// this rule existed, so an item from the store never has one), so both are read as a first try on
-/// a size below L until the store carries them; only `reopened`, which the store does send, can keep
-/// `opus` here today.
-pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
+/// kept for a reopened item and, behind the `implementer-step-up` flag, a retry (`attempt` over 0: this agent
+/// counts Start over from 0) and an item of size L or XL (any case). With the flag Off only `reopened` keeps
+/// `opus`. Only a tier of `opus` is ever moved; a tier already below it (from a usage reading, section 7.1's
+/// table, or `local`) is returned unchanged.
+pub fn implementer_model(tier: &'static str, item: &Item, attempt: u32) -> &'static str {
     if tier != OPUS {
         return tier;
     }
-    if item.reopened.is_some() { OPUS } else { SONNET }
+    let big = item
+        .size
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("L") || s.eq_ignore_ascii_case("XL"));
+    if item.reopened.is_some() || (step_up_on() && (attempt > 0 || big)) {
+        OPUS
+    } else {
+        SONNET
+    }
+}
+
+/// Whether the `implementer-step-up` flag was On at its last answer; Off until the flags client is handed over.
+fn step_up_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = STEP_UP_FOR_TEST.with(std::cell::Cell::get) {
+        return on;
+    }
+    FLAG.get().is_some_and(|f| f.last("implementer-step-up"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static STEP_UP_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turns the `implementer-step-up` flag on or off for the calling test's thread.
+#[cfg(test)]
+pub fn set_step_up_for_test(on: bool) {
+    STEP_UP_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
 /// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
@@ -326,18 +462,10 @@ pub(crate) fn frac(value: f64) -> f64 {
 /// weekly figure.
 pub fn week_cutoff_until(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig) -> Option<i64> {
     let usage = usage?;
-    let window = match usage.get("unifiedWindows").and_then(|w| w.get("seven_day")) {
-        Some(w) => w,
-        None if usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day") => usage,
-        None => return None,
-    };
-    let used = window
-        .get("utilization")
-        .and_then(Value::as_f64)
-        .map(|u| frac(u) * 100.0);
-    let cut = window.get("status").and_then(Value::as_str) == Some("rejected")
-        || used.is_some_and(|u| u >= f64::from(models.week_cutoff_pct));
-    let resets_at = window.get("resetsAt").and_then(Value::as_i64)?;
+    let (used, resets_at) = week_reading(usage)?;
+    let rejected = week_window(usage)?.get("status").and_then(Value::as_str) == Some("rejected");
+    let cut = rejected || used.is_some_and(|u| u * 100.0 >= f64::from(models.week_cutoff_pct));
+    let resets_at = resets_at?;
     (cut && resets_at > now_epoch).then_some(resets_at)
 }
 
@@ -627,8 +755,36 @@ mod tests {
     }
 
     #[test]
+    fn limited_claude_reads_the_floor_only_with_the_flag_and_the_model() {
+        let m = models();
+        let allowed = json!({"status": "allowed", "resetsAt": NOW + 100});
+        let tiers = |u: &Option<Value>, up| {
+            let u = u.as_ref();
+            [
+                implementer_tier(u, NOW, &m, up),
+                scout_tier(u, NOW, &m, up),
+                top_tier(u, NOW, &m, up),
+                mid_tier(implementer_tier(u, NOW, &m, up)),
+            ]
+        };
+        set_local_limit_fallback_for_test(true);
+        let floored = limit_floor(Some(&allowed), true, true);
+        assert_eq!(tiers(&floored, true), [LOCAL; 4]);
+        // Not limited, or the model down: today's tiers.
+        for (limited, up) in [(false, true), (true, false)] {
+            let u = limit_floor(Some(&allowed), limited, up);
+            assert_eq!(u.as_ref(), Some(&allowed));
+            assert_eq!(tiers(&u, up), [OPUS, SONNET, OPUS, SONNET]);
+        }
+        set_local_limit_fallback_for_test(false);
+        let u = limit_floor(Some(&allowed), true, true);
+        assert_eq!(u.as_ref(), Some(&allowed));
+        assert_eq!(tiers(&u, true), [OPUS, SONNET, OPUS, SONNET]);
+    }
+
+    #[test]
     fn implementer_model_keeps_local() {
-        assert_eq!(implementer_model(LOCAL, &item(true)), LOCAL);
+        assert_eq!(implementer_model(LOCAL, &item(true), 0), LOCAL);
     }
 
     fn item(reopened: bool) -> Item {
@@ -654,21 +810,53 @@ mod tests {
             }),
             red_sha: None,
             no_fix_sha: None,
+            size: None,
         }
     }
 
     #[test]
     fn a_first_try_at_a_full_window_runs_on_sonnet_not_opus() {
-        assert_eq!(implementer_model(OPUS, &item(false)), SONNET);
+        assert_eq!(implementer_model(OPUS, &item(false), 0), SONNET);
+    }
+
+    fn sized(size: Option<&str>) -> Item {
+        Item {
+            size: size.map(str::to_string),
+            ..item(false)
+        }
+    }
+
+    #[test]
+    fn with_the_step_up_flag_on_retries_and_big_items_keep_opus() {
+        set_step_up_for_test(true);
+        assert_eq!(implementer_model(OPUS, &sized(None), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(Some("M")), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(None), 1), OPUS);
+        assert_eq!(implementer_model(OPUS, &sized(Some("L")), 0), OPUS);
+        assert_eq!(implementer_model(OPUS, &sized(Some("xl")), 0), OPUS);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
+        for tier in [SONNET, LOCAL] {
+            for (it, attempt) in [(item(true), 0), (sized(Some("XL")), 0), (sized(None), 2)] {
+                assert_eq!(implementer_model(tier, &it, attempt), tier);
+            }
+        }
+    }
+
+    #[test]
+    fn with_the_step_up_flag_off_only_reopened_keeps_opus() {
+        set_step_up_for_test(false);
+        assert_eq!(implementer_model(OPUS, &sized(None), 1), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(Some("XL")), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
     }
 
     #[test]
     fn a_reopened_item_keeps_opus() {
-        assert_eq!(implementer_model(OPUS, &item(true)), OPUS);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
     }
 
     #[test]
     fn a_tier_already_below_opus_is_kept_whatever_the_item_is() {
-        assert_eq!(implementer_model(SONNET, &item(true)), SONNET);
+        assert_eq!(implementer_model(SONNET, &item(true), 0), SONNET);
     }
 }

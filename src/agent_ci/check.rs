@@ -1,6 +1,7 @@
 //! docs/specs/agent-ci.md sections 3.2 and 3.3: one claimed check end to end. The caller holds the slot's permit
 //! for the whole of it: pending, fetch (`host.rs`), a conflict fails it with no container, else run
 //! (`container.rs`), then success or failure (and on failure the comment), then the directory goes.
+use crate::text::is_blank;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -82,7 +83,7 @@ fn emit(j: &Job, state: &str, ms: u128) {
 
 /// The log's last non-empty line, for the failure status.
 fn last_line(tail: &str) -> &str {
-    tail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")
+    tail.lines().rev().find(|l| !is_blank(l)).unwrap_or("")
 }
 
 /// The check's directory has a sibling file naming its container, so a restart can remove a cut one.
@@ -299,11 +300,60 @@ pub async fn recover(docker: &std::ffi::OsStr, data_dir: &Path, project: &str) {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "name")
                 && let Ok(name) = std::fs::read_to_string(&p)
-                && !name.trim().is_empty()
+                && !is_blank(&name)
             {
                 container::remove_stale(docker, name.trim()).await;
             }
         }
     }
     host::sweep(data_dir, project);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pr_key() -> CheckKey {
+        CheckKey {
+            pr: 7,
+            head: "abcdef1234567".into(),
+            main: "0123456789abc".into(),
+        }
+    }
+
+    #[test]
+    fn a_pull_request_key_text_is_short_head_then_short_main() {
+        assert_eq!(key_text(&pr_key()), "abcdef1-0123456");
+    }
+
+    #[test]
+    fn a_push_key_text_is_main_alone_short() {
+        assert_eq!(key_text(&CheckKey::push("0123456789abc")), "0123456");
+    }
+
+    #[test]
+    fn short_keeps_a_sha_shorter_than_seven_whole() {
+        assert_eq!(short("abc"), "abc");
+        assert_eq!(short(""), "");
+    }
+
+    #[test]
+    fn the_status_context_depends_on_push_or_pr() {
+        assert_eq!(context_of(&pr_key()), report::PR_CONTEXT);
+        assert_eq!(context_of(&CheckKey::push("abc")), report::PUSH_CONTEXT);
+    }
+
+    #[test]
+    fn last_line_skips_trailing_blank_lines() {
+        assert_eq!(last_line("one\ntwo\n\n  \n"), "two");
+        assert_eq!(last_line("only"), "only");
+        assert_eq!(last_line(""), "");
+        assert_eq!(last_line("\n \n"), "");
+    }
+
+    #[test]
+    fn the_name_file_is_a_sibling_of_the_check_directory() {
+        let dir = Path::new("root").join("check-1");
+        assert_eq!(name_file(&dir), Path::new("root").join("check-1.name"));
+    }
 }

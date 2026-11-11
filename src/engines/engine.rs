@@ -163,8 +163,8 @@ impl EphemeralSessionConfig<'_> {
 pub struct CursorOptions {
     /// Cursor's own model name (e.g. "gpt-5", "sonnet-4.5"); empty or missing means "auto".
     pub model: Option<String>,
-    /// Extra allow entries for a writing session, beyond the fixed list (a project's checks,
-    /// galleries and `engines.allow`).
+    /// Extra allow entries for a writing session, beyond the fixed list (a project's checks
+    /// and `engines.allow`).
     pub allow: Vec<String>,
     /// The code host's CLI program to allow (`"gh"`, `"glab"`), or `None` for a project with no
     /// remote. Only meaningful when this `CursorOptions` itself is present — a `SessionSpec` with
@@ -260,10 +260,7 @@ pub fn resets_in(usage: Option<&Value>, weekly: bool) -> Option<std::time::Durat
     {
         at = at.max(week["resetsAt"].as_u64());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let now = u64::try_from(crate::telemetry::now_secs()).ok()?;
     at?.checked_sub(now).map(std::time::Duration::from_secs)
 }
 
@@ -443,11 +440,7 @@ mod tests {
     use super::*;
 
     fn in_secs(n: u64) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + n
+        u64::try_from(crate::telemetry::now_secs()).unwrap() + n
     }
 
     fn secs(d: Option<std::time::Duration>) -> u64 {

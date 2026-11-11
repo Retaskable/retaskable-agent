@@ -64,6 +64,7 @@ tokio::task_local! {
     static CURRENT: Stamp;
     static LIMITS: EngineLimits;
     static MACHINE_DIR: Option<Arc<PathBuf>>;
+    static PROJECT: String;
 }
 
 /// One writer at a time: load, change and save machine.json under this lock so concurrent sessions don't lose counts.
@@ -81,10 +82,8 @@ pub fn record_session_end(engine: EngineId, result: &SessionResult) {
         {
             limits.cut_off_for_week(usage);
         }
-        if !limits.records_any_role() {
-            return;
-        }
-        if result.limit_hit {
+        let records = limits.records_any_role();
+        if records && result.limit_hit {
             let wait = crate::engines::engine::resets_in(
                 result.usage.as_ref(),
                 crate::tiers::weekly_reading_on() || limits.week_cutoff_on(),
@@ -94,19 +93,24 @@ pub fn record_session_end(engine: EngineId, result: &SessionResult) {
         }
         let _ = MACHINE_DIR.try_with(|dir| {
             if let Some(dir) = dir {
-                record_machine(dir, engine, result);
+                record_machine(dir, engine, result, records);
             }
         });
     });
 }
 
-/// Adds the session's tokens (Cursor, Codex) and Cursor's limit stamp to machine.json; a failure is logged only.
-fn record_machine(dir: &std::path::Path, engine: EngineId, result: &SessionResult) {
+/// Adds the session's cost to its project's day, and (with `records`, the `engine-limit-records` flag On) its tokens
+/// (Cursor, Codex) and Cursor's limit stamp, to machine.json; a failure is logged only.
+fn record_machine(dir: &std::path::Path, engine: EngineId, result: &SessionResult, records: bool) {
     let tokens = result
         .tokens
-        .filter(|_| matches!(engine, EngineId::Cursor | EngineId::Codex));
-    let stamp = result.limit_hit && engine == EngineId::Cursor;
-    if tokens.is_none() && !stamp {
+        .filter(|_| records && matches!(engine, EngineId::Cursor | EngineId::Codex));
+    let stamp = records && result.limit_hit && engine == EngineId::Cursor;
+    let spend = result
+        .cost_usd
+        .filter(|c| *c > 0.0)
+        .and_then(|c| PROJECT.try_with(|p| (p.clone(), c)).ok());
+    if tokens.is_none() && !stamp && spend.is_none() {
         return;
     }
     let _lock = MACHINE_WRITE.lock().unwrap_or_else(PoisonError::into_inner);
@@ -121,6 +125,9 @@ fn record_machine(dir: &std::path::Path, engine: EngineId, result: &SessionResul
         }
         if stamp {
             machine.stamp_cursor_limit_at()?;
+        }
+        if let Some((project, cost)) = spend {
+            machine.add_spend(&project, cost)?;
         }
         Ok(())
     })();
@@ -146,9 +153,15 @@ impl Sessions {
         self.lock().limits.clone()
     }
 
+    /// Whether Claude is limited on this computer now (`EngineLimits::claude_at_limit`).
+    pub fn claude_at_limit(&self) -> bool {
+        self.lock().limits.claude_at_limit(Instant::now())
+    }
+
     /// Adds a row; it goes when the returned guard drops.
     pub fn register(&self, info: SessionInfo) -> SessionGuard {
         let now = Instant::now();
+        let project = info.project.clone();
         let stamp: Stamp = Arc::new(Mutex::new(now));
         let mut inner = self.lock();
         let id = inner.next;
@@ -158,6 +171,7 @@ impl Sessions {
             sessions: self.clone(),
             id,
             stamp,
+            project,
         }
     }
 
@@ -224,6 +238,7 @@ pub struct SessionGuard {
     sessions: Sessions,
     id: u64,
     stamp: Stamp,
+    project: String,
 }
 
 impl SessionGuard {
@@ -231,8 +246,12 @@ impl SessionGuard {
     pub async fn scope<F: Future>(&self, fut: F) -> F::Output {
         let limits = self.sessions.limits();
         let dir = self.sessions.lock().machine_dir.clone();
+        let current = CURRENT.scope(self.stamp.clone(), fut);
         LIMITS
-            .scope(limits, MACHINE_DIR.scope(dir, CURRENT.scope(self.stamp.clone(), fut)))
+            .scope(
+                limits,
+                MACHINE_DIR.scope(dir, PROJECT.scope(self.project.clone(), current)),
+            )
             .await
     }
 }
@@ -347,11 +366,7 @@ mod tests {
     async fn a_rejected_reading_sets_the_reset() {
         let s = Sessions::default();
         s.limits().record_any_role(true);
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
+        let at = u64::try_from(crate::telemetry::now_secs()).unwrap() + 600;
         let usage = serde_json::json!({"status": "rejected", "resetsAt": at});
         end_in_scope(&s, EngineId::Claude, ended(true, Some(usage))).await;
         let now = Instant::now();
@@ -367,11 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 86_400;
+        let at = u64::try_from(crate::telemetry::now_secs()).unwrap() + 86_400;
         let usage = |u: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": at}}});
         for (on, u, engine, limited) in [
             (true, 0.96, EngineId::Claude, true),
@@ -456,6 +467,39 @@ mod tests {
         end_in_scope(&s, EngineId::Codex, ended(false, None)).await;
         let m = machine(dir.path());
         assert!(m.cursor_today_tokens().is_none() && m.codex_today_tokens().is_none());
+    }
+
+    fn costing(usd: Option<f64>) -> SessionResult {
+        SessionResult {
+            cost_usd: usd,
+            ..ended(false, None)
+        }
+    }
+
+    async fn end_for(s: &Sessions, project: &str, result: SessionResult) {
+        let mut i = info("a");
+        i.project = project.into();
+        s.track(i, async { record_session_end(EngineId::Claude, &result) })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn costs_add_up_per_project_for_today_with_or_without_the_limit_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        for s in [
+            machine_sessions(dir.path()),
+            Sessions::default().with_machine_dir(dir.path().to_path_buf()),
+        ] {
+            end_for(&s, "a", costing(Some(0.25))).await;
+            end_for(&s, "a", costing(Some(0.5))).await;
+            end_for(&s, "b", costing(Some(1.0))).await;
+            end_for(&s, "a", costing(None)).await;
+        }
+        let m = machine(dir.path());
+        assert_eq!(
+            (m.spend_today("a"), m.spend_today("b"), m.spend_today("c")),
+            (1.5, 2.0, 0.0)
+        );
     }
 
     #[tokio::test]

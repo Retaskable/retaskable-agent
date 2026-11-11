@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use crate::config::CheckConfig;
 use crate::item_lifecycle::CheckOutcome;
 use crate::lanes;
+use crate::orchestrator::steps::CheckTime;
 use crate::proc;
 
 /// How much of a check's output stage 1 keeps (06.3-review.md: "the last ~200 lines").
@@ -34,6 +35,8 @@ pub struct CheckRun {
     pub output_tail: String,
     /// The check also fails on the base branch's commit (the baseline): not this change's fault.
     pub preexisting: bool,
+    /// How long the run took, in seconds.
+    pub seconds: f64,
 }
 
 impl CheckRun {
@@ -54,6 +57,17 @@ pub struct StageOneResult {
 }
 
 impl StageOneResult {
+    /// Each check's name, whether it passed and its seconds, for a `step_end`.
+    pub fn check_times(&self) -> Vec<CheckTime> {
+        (self.checks.iter())
+            .map(|c| CheckTime {
+                name: c.name.clone(),
+                ok: c.passed(),
+                sec: c.seconds,
+            })
+            .collect()
+    }
+
     /// The blocking checks that didn't pass, in the order they ran, except those that fail on main too.
     pub fn blocking_failures(&self) -> Vec<&CheckRun> {
         self.checks
@@ -159,7 +173,10 @@ fn run_timed(
     blocking: bool,
     timeout: Duration,
 ) -> CheckRun {
-    match runner(command, lane_dir, timeout) {
+    let began = std::time::Instant::now();
+    let result = runner(command, lane_dir, timeout);
+    let seconds = began.elapsed().as_secs_f64();
+    match result {
         Ok((exit_code, output, timed_out)) => CheckRun {
             name: name.to_string(),
             command: command.to_string(),
@@ -168,6 +185,7 @@ fn run_timed(
             timed_out,
             output_tail: proc::tail_lines(&output, TAIL_LINES),
             preexisting: false,
+            seconds,
         },
         // The command itself couldn't be started at all (e.g. the shell is missing), rather than
         // running and failing: still a failed check, not a reason to abort stage 1.
@@ -179,14 +197,14 @@ fn run_timed(
             timed_out: false,
             output_tail: format!("{e:#}"),
             preexisting: false,
+            seconds,
         },
     }
 }
 
 /// `checksSummary` (checks.ts): each check as "✓ name" or "✗ name (non-blocking)", one per line
 /// — the evidence a scout or the stage 3 reviewer reads for context, with " (fails on main)" for
-/// a `preexisting` failure. `CheckRun` doesn't track a duration, so this is simpler than the
-/// TypeScript original.
+/// a `preexisting` failure. The durations go to the event log instead.
 pub fn checks_summary(checks: &[CheckRun]) -> String {
     checks
         .iter()
@@ -323,6 +341,7 @@ mod tests {
         assert!(result.checks[0].blocking);
         assert!(!result.checks[0].passed());
         assert!(result.checks[0].output_tail.contains("boom"));
+        assert!(result.checks[0].seconds >= 0.0);
         assert_eq!(result.outcome(), CheckOutcome::Failed);
     }
 
@@ -339,6 +358,12 @@ mod tests {
         assert_eq!(result.checks.len(), 2);
         assert_eq!(result.checks[0].name, "npm install");
         assert_eq!(result.checks[1].name, "test");
+        assert!(result.checks[1].seconds >= 0.0);
+        let times = result.check_times();
+        assert_eq!(
+            times.iter().map(|t| (t.name.as_str(), t.ok)).collect::<Vec<_>>(),
+            [("npm install", true), ("test", true)]
+        );
         assert_eq!(result.outcome(), CheckOutcome::Passed);
     }
 
@@ -352,6 +377,7 @@ mod tests {
             timed_out: true,
             output_tail: String::new(),
             preexisting: false,
+            seconds: 0.0,
         };
         assert!(!run.passed());
     }
@@ -367,6 +393,7 @@ mod tests {
                 timed_out: false,
                 output_tail: String::new(),
                 preexisting: false,
+                seconds: 0.0,
             },
             CheckRun {
                 name: "lint".to_string(),
@@ -376,6 +403,7 @@ mod tests {
                 timed_out: false,
                 output_tail: String::new(),
                 preexisting: false,
+                seconds: 0.0,
             },
         ];
         assert_eq!(checks_summary(&checks), "✓ test\n✗ lint (non-blocking)");
@@ -391,6 +419,7 @@ mod tests {
             timed_out: false,
             output_tail: String::new(),
             preexisting: true,
+            seconds: 0.0,
         };
         let result = |c: &CheckRun| StageOneResult {
             checks: vec![c.clone()],

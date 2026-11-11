@@ -50,7 +50,7 @@ impl SessionStarter for Fake {
             .lock()
             .unwrap()
             .push((dir.to_path_buf(), command.into(), lane, closed.clone()));
-        Ok(Box::new(FakeGame(closed)))
+        Ok(Box::new(FakeGame(closed, self.stubborn_games.load(Ordering::SeqCst))))
     }
 
     fn abandon(&self, old: Abandon) -> BoxFuture<'static, Result<(), String>> {
@@ -59,7 +59,7 @@ impl SessionStarter for Fake {
         async move { fails.map_or(Ok(()), Err) }.boxed()
     }
 
-    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         let run = request.run;
         self.stepped.lock().unwrap().push(request);
         Some(self.step(run))

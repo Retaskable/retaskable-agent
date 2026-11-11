@@ -27,10 +27,6 @@ Written by the agent when a project is linked and when a change to its settings 
   "codeGates": { "maxFileLines": 1000, "dupLines": 8, "maxSpecChars": 40000 },
   "sandbox": "auto",
   "playCommand": "cargo run --release -- --play",
-  "galleries": [
-    { "name": "Models", "command": "cargo run --release -- --models --shoot", "outDir": "target/models" },
-    { "name": "UI", "command": "", "outDir": "target/ui" }
-  ],
   "playtests": "after_merge",
   "chores": "on",
   "triage": "on",
@@ -42,7 +38,7 @@ Written by the agent when a project is linked and when a change to its settings 
 }
 ```
 
-`budget.releaseNotesUsd` (default `0`, no cap, as every session's since 2026-10-11: on a subscription the usage window is the limit, and a dollar cap only stops a session short) caps each release notes session. Release notes are kept in the shared backlog, never in a folder on this computer ([backlog.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/backlog.md) section 8); an older repo's already-saved notes under `releasesDir` (`"docs/releases"`) are only ever moved from, once ([release-notes.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/release-notes.md) section 9).
+`budget.releaseNotesUsd` (default `0`, no cap, as every session's since 2026-10-11: on a subscription the usage window is the limit, and a dollar cap only stops a session short) caps each release notes session. Release notes are kept in the shared backlog, never in a folder on this computer ([backlog.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/backlog.md) section 8); the agent reads no notes from a folder in the repo and offers none to the store.
 
 (github-workflow) A new setup also writes `github` ([github-workflow.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/github-workflow.md) section 3): the pattern, the protected branch, how a pull request lands, and the rules. A new setup of this repo writes `github_flow` with `baseBranch` and `protectedBranch` both `main`. The example above has no `github` object, which is a project already running: when `baseBranch` is the default branch, that file keeps squash-merging into it, and startup does not add `github` or move the branch. Settings writes the object on the next save.
 
@@ -66,6 +62,5 @@ In Retaskable's own repo, `checks` are `npm run typecheck` and the tests. The te
 
 `engines` (optional, cursor-engine) chooses Claude Code or Cursor for the project and for each group of roles, and its `allow` adds entries to a writing Cursor session's allowlist ([engines.md](../engines.md) sections 3.1 and 6.2). Missing means Claude Code for every role. The site's project settings edit it. The machine's `cursor` (optional) holds Cursor's model per tier, `auto` when missing (engines.md section 3.2).
 
-`galleries` defaults to an empty Models (`target/models`) and UI (`target/ui`). In Retaskable's own repo, `npm run shoot:ui` is the UI gallery's command ([ui-shots.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/ui-shots.md)). Each one's slug (its name in kebab case) names its tab, its folder and its routes, so a gallery named Releases, two whose names make the same slug, or a name whose slug is empty is refused (`galleryErrors` in `shared/galleries.ts`).
 
 The `checks` above are what the scan would suggest for void-miner. `checks` commands run through the shell with the lane as cwd and `RETASKABLE_LANE` (and its old name, [retaskable.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/retaskable.md) section 7.3) set. `worktreesDir` defaults to `<parent of repoPath>/.retaskable-worktrees/<repo name>`. The lanes' folder from before the rename is moved there at start when nothing is running in it ([retaskable.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/retaskable.md) section 7.3). `backlogPath` is relative to the repo root and is stored with forward slashes (it's a git path), while `repoPath` and `worktreesDir` go through `path` APIs.

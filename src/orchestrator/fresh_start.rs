@@ -59,6 +59,17 @@ impl EngineLimits {
         map.get(&engine).is_some_and(|until| *until > now)
     }
 
+    /// Whether Claude is limited on this computer at `now`.
+    pub fn claude_at_limit(&self, now: Instant) -> bool {
+        self.is_limited(EngineId::Claude, now)
+    }
+
+    /// When `engine`'s limit lifts, if it is limited at `now`.
+    pub fn limited_until(&self, engine: EngineId, now: Instant) -> Option<Instant> {
+        let map = self.until.lock().unwrap_or_else(PoisonError::into_inner);
+        map.get(&engine).copied().filter(|until| *until > now)
+    }
+
     /// Turns recording from every role's sessions on or off (the `engine-limit-records` flag).
     pub fn record_any_role(&self, on: bool) {
         self.any_role.store(on, Ordering::Relaxed);
@@ -83,9 +94,7 @@ impl EngineLimits {
     /// new starts while running sessions finish. Whether `usage` is at the cutoff.
     pub fn cut_off_for_week(&self, usage: &serde_json::Value) -> bool {
         let models = crate::config::ModelsConfig::default();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+        let now = crate::telemetry::now_secs();
         let Some(resets_at) = crate::tiers::week_cutoff_until(Some(usage), now, &models) else {
             return false;
         };
@@ -267,6 +276,73 @@ mod tests {
         let later = now + Duration::from_secs(61);
         assert!(!limits.is_limited(Claude, later));
         assert_eq!(limits.takeover(Claude, &[Claude, Cursor], later), None);
+    }
+
+    #[test]
+    fn a_later_hit_never_shortens_a_limit_and_clones_share_it() {
+        use EngineId::*;
+        let now = Instant::now();
+        let limits = EngineLimits::default();
+        let clone = limits.clone();
+        limits.hit(Claude, now + Duration::from_secs(600));
+        clone.hit(Claude, now + Duration::from_secs(60));
+        assert_eq!(limits.limited_until(Claude, now), Some(now + Duration::from_secs(600)));
+        clone.hit(Claude, now + Duration::from_secs(900));
+        assert_eq!(limits.limited_until(Claude, now), Some(now + Duration::from_secs(900)));
+        assert!(limits.claude_at_limit(now));
+        assert!(!limits.is_limited(Cursor, now));
+        assert_eq!(limits.limited_until(Cursor, now), None);
+        assert_eq!(limits.limited_until(Claude, now + Duration::from_secs(900)), None);
+    }
+
+    #[test]
+    fn takeover_skips_the_engine_it_started_on_and_limited_candidates() {
+        use EngineId::*;
+        let now = Instant::now();
+        let limits = EngineLimits::default();
+        limits.hit(Claude, now + Duration::from_secs(60));
+        limits.hit(Cursor, now + Duration::from_secs(60));
+        assert_eq!(limits.takeover(Claude, &[Claude, Cursor, Codex], now), Some(Codex));
+        assert_eq!(limits.takeover(Claude, &[Cursor, Codex], now), Some(Codex));
+    }
+
+    #[test]
+    fn the_flags_start_off_and_can_be_turned_on_and_off() {
+        let limits = EngineLimits::default();
+        assert!(!limits.records_any_role());
+        assert!(!limits.week_cutoff_on());
+        limits.record_any_role(true);
+        limits.set_week_cutoff(true);
+        assert!(limits.clone().records_any_role());
+        assert!(limits.clone().week_cutoff_on());
+        limits.record_any_role(false);
+        limits.set_week_cutoff(false);
+        assert!(!limits.records_any_role());
+        assert!(!limits.week_cutoff_on());
+    }
+
+    #[test]
+    fn the_weekly_cutoff_limits_claude_until_the_reset() {
+        let now_epoch = crate::telemetry::now_secs();
+        let limits = EngineLimits::default();
+        let now = Instant::now();
+        let below =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.10, "resetsAt": now_epoch + 3600}}});
+        assert!(!limits.cut_off_for_week(&below));
+        assert!(!limits.claude_at_limit(now));
+        assert!(!limits.week_cut_off(now));
+        let over =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.99, "resetsAt": now_epoch + 3600}}});
+        assert!(limits.cut_off_for_week(&over));
+        assert!(limits.claude_at_limit(now));
+        assert!(limits.week_cut_off(now));
+        assert!(!limits.week_cut_off(now + Duration::from_secs(3700)));
+        assert!(!limits.claude_at_limit(now + Duration::from_secs(3700)));
+        // A shorter reset later doesn't pull the week's hold in.
+        let sooner =
+            serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.99, "resetsAt": now_epoch + 60}}});
+        assert!(limits.cut_off_for_week(&sooner));
+        assert!(limits.week_cut_off(now + Duration::from_secs(600)));
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub(crate) fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         reopened: None,
         red_sha: None,
         no_fix_sha: None,
+        size: None,
     }
 }
 
