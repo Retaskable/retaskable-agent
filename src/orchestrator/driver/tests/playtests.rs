@@ -75,7 +75,9 @@ fn live_rig(base: &str) -> Rig {
     rig.machine.links.env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| bin.clone()));
     let cwd = rig._dir.path().to_string_lossy().into_owned();
     rig.lp(0).project.repo_path = cwd;
+    rig.lp(0).file_project.repo_path = rig.lp(0).project.repo_path.clone();
     rig.lp(0).project.sandbox = crate::config::SandboxMode::Off;
+    rig.lp(0).file_project.sandbox = crate::config::SandboxMode::Off;
     rig
 }
 
@@ -122,6 +124,7 @@ async fn playtests_off_runs_no_round() {
     let (base, asked) = store(4, Duration::ZERO, false).await;
     let mut rig = live_rig(&base);
     rig.lp(0).project.playtests = Playtests::Off;
+    rig.lp(0).file_project.playtests = Playtests::Off;
     minute(&mut rig).await;
     settled_without_round(&asked).await;
 }
@@ -307,6 +310,7 @@ fn three_waiting(playtests: Playtests, flag: bool) -> (Rig, Arc<Fake>) {
     rig.queue(0, &["a", "b", "c"]);
     let lp = rig.lp(0);
     lp.project.playtests = playtests;
+    lp.file_project.playtests = playtests;
     if flag {
         lp.flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
     }

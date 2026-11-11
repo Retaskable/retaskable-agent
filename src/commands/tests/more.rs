@@ -71,9 +71,7 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
 }
 
 fn asking() -> AgentView {
-    let v = claiming();
-    v.item_commands.set_ask_on("one", true);
-    v
+    claiming()
 }
 
 fn ask_with(v: &AgentView, args: Value, dir: &Path) -> Value {
@@ -155,15 +153,6 @@ fn ask_is_refused_outside_claim_mode() {
     let v = view();
     let answer = ask_with(&v, json!({ "askId": "k", "text": "hi" }), &data_dir());
     assert_eq!(answer["type"], "nack");
-    assert!(v.item_commands.take_asks("one").is_empty());
-}
-
-#[test]
-fn ask_is_refused_while_the_flag_is_off() {
-    let v = claiming();
-    let answer = ask_with(&v, json!({ "askId": "k", "text": "hi" }), &data_dir());
-    assert_eq!(answer["type"], "nack");
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: ask");
     assert!(v.item_commands.take_asks("one").is_empty());
 }
 
@@ -484,6 +473,7 @@ fn stop_play_stops_play_main_like_stop() {
     let id = "cmd-stop-play";
     let mut v = view();
     v.projects[0].id = id.into();
+    v.item_commands.gates().open_unrecorded(id);
     v.projects[0].repo_path = crate::test_support::repo_with_origin(root.path());
     v.projects[0].worktrees_dir = root.path().join("worktrees");
     v.projects[0].base_branch = "main".into();

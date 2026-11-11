@@ -159,7 +159,6 @@ impl ProjectLoop {
         let session_id = claim.draft.session_id.clone().unwrap_or_else(new_session_id);
         let ctx = Ctx {
             client: self.client.clone(),
-            flags: self.flags.clone(),
             repo,
             token,
             lease: claim.token,
@@ -206,7 +205,6 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
 
 struct Ctx {
     client: std::sync::Arc<Client>,
-    flags: std::sync::Arc<crate::flags::Flags>,
     repo: u64,
     token: String,
     lease: String,
@@ -234,11 +232,7 @@ impl Ctx {
 
     /// Retaskable's own message in the chat about `draft`: into the ask that wanted it, or a new conversation. The draft's
     /// state is already reported, so a message the store doesn't take is only logged.
-    /// Only with the `ask-claude` flag On: Off is today's behaviour, no message.
     async fn say(&self, draft: &ClaimedDraft, text: &str) {
-        if !self.flags.on("ask-claude").await {
-            return;
-        }
         let posted = (self.client)
             .ask_post(self.repo, Some(&self.token), text, &draft.id, draft.ask_id.as_deref())
             .await;

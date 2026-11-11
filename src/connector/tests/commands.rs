@@ -15,7 +15,6 @@ async fn a_new_waiting_version_and_its_approval_each_send_a_snapshot() {
     let view = view(&[project]);
     let gates = view.item_commands.gates();
     gates.open(dir.path(), project);
-    view.item_commands.set_flag(project, crate::command_gate::FLAG, true);
     let c = start_connector(&url, st, &view, dir.path());
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello

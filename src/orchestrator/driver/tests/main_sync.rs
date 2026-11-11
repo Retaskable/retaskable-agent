@@ -48,10 +48,12 @@ async fn fixture(conflict: bool) -> Fixture {
     let mut rig = rig(1, &[&base]);
     let lp = &mut rig.machine.projects[0];
     lp.mode = OrchestratorMode::Runs;
-    lp.flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation", "chore-main-sync"]));
     lp.project.repo_path = repo.display().to_string();
+    lp.file_project.repo_path = repo.display().to_string();
     lp.project.worktrees_dir = root.path().join("wt").display().to_string();
+    lp.file_project.worktrees_dir = root.path().join("wt").display().to_string();
     lp.project.base_branch = "team".into();
+    lp.file_project.base_branch = "team".into();
     lp.seen.default_branch = Some("main".into());
     lp.run_loop.main_sync = crate::orchestrator::driver::main_sync::State::with_gh(fake_gh(root.path()));
     Fixture {
@@ -161,6 +163,7 @@ async fn an_open_sync_main_item_adds_nothing() {
 async fn the_base_being_the_default_branch_adds_nothing() {
     let mut f = fixture(false).await;
     f.rig.machine.projects[0].project.base_branch = "main".into();
+    f.rig.machine.projects[0].file_project.base_branch = "main".into();
     adds_nothing(f).await;
 }
 
@@ -168,6 +171,7 @@ async fn the_base_being_the_default_branch_adds_nothing() {
 async fn sync_main_off_adds_nothing() {
     let mut f = fixture(false).await;
     f.rig.machine.projects[0].project.sync_main = crate::config::SyncMain::Off;
+    f.rig.machine.projects[0].file_project.sync_main = crate::config::SyncMain::Off;
     adds_nothing(f).await;
 }
 
@@ -222,13 +226,4 @@ async fn a_skipped_sync_main_item_for_mains_head_adds_nothing() {
     assert!(f.script.lock().unwrap().args("lock_take").is_empty());
     assert!(adds(&f).is_empty());
     assert_eq!(remote_branches(&f), "");
-}
-
-#[tokio::test]
-async fn with_the_flag_off_nothing_happens() {
-    let mut f = fixture(false).await;
-    f.rig.machine.projects[0].flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
-    settle(&mut f).await;
-    assert!(f.script.lock().unwrap().args("list").is_empty());
-    assert!(adds(&f).is_empty());
 }

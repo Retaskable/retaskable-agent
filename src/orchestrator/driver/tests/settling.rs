@@ -434,6 +434,7 @@ async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_reco
     let (mut rig, _fake, _asked) = ended(SessionResult::NeedsHuman("first problem".into()), &Default::default()).await;
     // No triager here: its notes are the triage tests'.
     rig.lp(0).project.triage = crate::config::OnOff::Off;
+    rig.lp(0).file_project.triage = crate::config::OnOff::Off;
     rig.machine.pass().await;
     let lp = rig.lp(0);
     let r = lp.records["a"].clone();
@@ -535,16 +536,11 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
     }
 }
 
-/// A rig with `own-failure-handling` set as asked and "a" claimed on lane 1, its first session ended by a
+/// A rig with "a" claimed on lane 1, its first session ended by a
 /// watchdog kill (not yet read).
-async fn silenced(flag: bool) -> (Rig, Arc<Fake>, Asked) {
+async fn silenced() -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
-        &["own-failure-handling"]
-    } else {
-        &[]
-    }));
     let fake = rig.go_live();
     fake.script
         .lock()
@@ -563,7 +559,7 @@ pub(super) async fn resume_now(rig: &mut Rig, fake: &Fake, next: SessionResult) 
 
 #[tokio::test]
 async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() {
-    let (mut rig, _fake, asked) = silenced(true).await;
+    let (mut rig, _fake, asked) = silenced().await;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
@@ -584,7 +580,6 @@ async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() 
 async fn a_cursor_time_kill_is_settled_like_a_watchdog_kill() {
     let (base, _asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["own-failure-handling"]));
     let fake = rig.go_live();
     let kill = || SessionResult::Silenced("ran past its time limit and was killed".into(), "cursor_time");
     fake.script.lock().unwrap().push(kill());
@@ -614,7 +609,7 @@ async fn a_cursor_time_kill_is_settled_like_a_watchdog_kill() {
 
 #[tokio::test]
 async fn a_watchdog_kill_is_resumed_by_id_only_after_the_delay() {
-    let (mut rig, fake, _) = silenced(true).await;
+    let (mut rig, fake, _) = silenced().await;
     rig.machine.pass().await;
     assert_eq!(fake.started.lock().unwrap().len(), 1, "not resumed at once");
     resume_now(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
@@ -626,7 +621,7 @@ async fn a_watchdog_kill_is_resumed_by_id_only_after_the_delay() {
 
 #[tokio::test]
 async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
-    let (mut rig, fake, _) = silenced(true).await;
+    let (mut rig, fake, _) = silenced().await;
     rig.machine.pass().await;
     for _ in 0..2 {
         resume_now(
@@ -655,7 +650,7 @@ async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
 
 #[tokio::test]
 async fn an_answer_between_watchdog_kills_resets_the_count() {
-    let (mut rig, fake, _) = silenced(true).await;
+    let (mut rig, fake, _) = silenced().await;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).store.runs()["a"].silence_kills, 1);
     resume_now(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
@@ -665,37 +660,13 @@ async fn an_answer_between_watchdog_kills_resets_the_count() {
 
 #[tokio::test]
 async fn the_watchdog_kill_count_is_kept_across_a_reload() {
-    let (mut rig, _fake, _) = silenced(true).await;
+    let (mut rig, _fake, _) = silenced().await;
     rig.machine.pass().await;
     let saved = rig.lp(0).store.runs()["a"].clone();
     assert_eq!(saved.silence_kills, 1);
     let json = serde_json::to_string(&saved).unwrap();
     let back: crate::store::RunRecord = serde_json::from_str(&json).unwrap();
     assert_eq!(back.silence_kills, 1);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_watchdog_kill_gives_the_item_back_as_before() {
-    let (mut rig, _fake, asked) = silenced(false).await;
-    rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
-    assert!(rig.machine.claim_paused_until.is_some());
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_cursor_time_kill_gives_the_item_back_as_before() {
-    let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
-    let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    let fake = rig.go_live();
-    fake.script
-        .lock()
-        .unwrap()
-        .push(SessionResult::Silenced("ran past its time limit".into(), "cursor_time"));
-    rig.machine.pass().await;
-    rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
-    assert!(rig.machine.claim_paused_until.is_some());
 }
 
 /// Lanes 1-2 on Claude and 3-4 on Cursor, "a" waiting to be handed out.

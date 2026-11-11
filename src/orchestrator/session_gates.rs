@@ -27,7 +27,7 @@ pub(in crate::orchestrator) struct ChecksStage<'a> {
     pub backlog_path: &'a str,
     pub on_tree: std::sync::Arc<dyn Fn(std::sync::Arc<crate::process_tree::ProcessTree>) + Send + Sync>,
     pub result: &'a std::sync::Mutex<Option<crate::checks::StageOneResult>>,
-    /// Tells a failure that main has too from the change's own; `None` without `chore-rotation`.
+    /// Tells a failure that main has too from the change's own.
     pub baseline: Option<crate::orchestrator::baseline_wait::BaselineStage<'a>>,
 }
 

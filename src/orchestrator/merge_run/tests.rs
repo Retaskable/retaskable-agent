@@ -99,7 +99,6 @@ struct Rig {
     log: Log,
     request: RunRequest,
     ends: tokio::sync::mpsc::UnboundedReceiver<RunEnd>,
-    flags: Arc<crate::flags::Flags>,
 }
 
 async fn rig(held_by_other: bool) -> Rig {
@@ -122,7 +121,6 @@ async fn rig(held_by_other: bool) -> Rig {
         log,
         request,
         ends: rx,
-        flags: Arc::new(crate::flags::Flags::fixed(&["chore-rotation", "chore-main-sync"])),
     }
 }
 
@@ -134,7 +132,6 @@ impl Rig {
             "here".into(),
             Duration::from_millis(10),
             wait,
-            self.flags.clone(),
         );
         runner.start(self.request.clone()).unwrap();
         tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
@@ -294,7 +291,6 @@ fn start_runner(rig: &Rig) {
         "here".into(),
         Duration::from_millis(10),
         None,
-        rig.flags.clone(),
     );
     runner.start(rig.request.clone()).unwrap();
 }
@@ -399,18 +395,4 @@ async fn a_roadmap_piece_still_squashes_and_a_non_squash_project_still_refuses_i
     let mut rig = self::rig(false).await;
     assert_eq!(rig.run(None).await.outcome, RunOutcome::Merged);
     assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_sync_piece_merges_like_any_other() {
-    let mut rig = rig(false).await;
-    into_sync(&mut rig, "squash");
-    rig.flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
-    assert_eq!(rig.run(None).await.outcome, RunOutcome::Merged);
-    assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
-
-    let mut rig = self::rig(false).await;
-    into_sync(&mut rig, "rebase");
-    rig.flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    assert!(matches!(rig.run(None).await.outcome, RunOutcome::Failed(_)));
 }

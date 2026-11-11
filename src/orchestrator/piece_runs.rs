@@ -47,7 +47,6 @@ pub struct PieceStarter {
     pub env: Env,
     pub max_turns: u32,
     pub models: ModelsConfig,
-    pub flags: std::sync::Arc<crate::flags::Flags>,
     /// This computer, for a chore lock's note.
     pub machine: String,
     /// The sessions running now: a run's sessions list themselves while they run.
@@ -59,16 +58,12 @@ pub struct PieceStarter {
 impl PieceStarter {
     /// A run on an engine this agent can't run yet isn't refused (that would send it back `interrupted`, to bounce
     /// between computers): it ends `failed`, an outside cause, so the store gives it a look that can move the
-    /// piece's engine. With `run-limits-and-causes` Off it is given back as before.
+    /// piece's engine.
     fn cannot_run(&self, request: RunRequest, engine: String) -> Result<(), String> {
-        let (ends, token, flags) = (request.ends, request.token, self.flags.clone());
+        let (ends, token) = (request.ends, request.token);
         tokio::spawn(async move {
-            let (outcome, result) = if flags.on("run-limits-and-causes").await {
-                let why = format!("this computer can't run {engine} sessions yet");
-                (RunOutcome::Failed(why), json!({ "outside": true }))
-            } else {
-                (RunOutcome::Interrupted, json!({}))
-            };
+            let why = format!("this computer can't run {engine} sessions yet");
+            let (outcome, result) = (RunOutcome::Failed(why), json!({ "outside": true }));
             ends.send(RunEnd { token, outcome, result });
         });
         Ok(())
@@ -137,7 +132,6 @@ impl PieceStarter {
             env: self.env.clone(),
             piece: request.piece,
             processes: request.processes,
-            flags: self.flags.clone(),
             context: request.context,
             machine: self.machine.clone(),
             sessions: self.sessions.clone(),
@@ -179,7 +173,6 @@ pub(super) struct Job {
     pub(super) env: Env,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
-    pub(super) flags: std::sync::Arc<crate::flags::Flags>,
     pub(super) context: crate::orchestrator::driver::RunContext,
     pub(super) machine: String,
     pub(super) sessions: crate::orchestrator::live::sessions::Sessions,
@@ -241,12 +234,7 @@ fn is_retry(piece: &RunPiece) -> bool {
 /// (`interrupted`, nothing started), a store that can't be asked fails closed (`failed`, outside). The lock is
 /// dropped whatever the run's end. A roadmap piece and a playtest fix take none.
 async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
-    let chore = if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    };
-    let Some(name) = chore.and_then(|c| chore_lock_name(c.kind, &job.project.base_branch)) else {
+    let Some(name) = chore_of(&job.piece).and_then(|c| chore_lock_name(c.kind, &job.project.base_branch)) else {
         return run(job).await;
     };
     let ctx = job.context.clone();
@@ -288,7 +276,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         (_, Some(b)) => (b.to_string(), format!("origin/{b}")),
         (RunKind::Fix, None) => return failed("A fix run needs the piece's pushed branch, and the piece has none."),
         _ => (
-            match sync_of(&job).await.filter(|c| !c.sync_sha.is_empty()) {
+            match sync_of(&job).filter(|c| !c.sync_sha.is_empty()) {
                 Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
                 None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
             },
@@ -308,12 +296,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         Err(e) => failed(format!("{e:#}")),
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
-    let chore = if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    };
-    let Some(chore) = chore else {
+    let Some(chore) = chore_of(&job.piece) else {
         return (outcome, result);
     };
     let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
@@ -349,20 +332,9 @@ async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf
     .context("preparing the lane")
 }
 
-/// The piece's chore, with `chore-rotation` On; Off, a chore piece is run like any other.
-async fn chore_for(job: &Job) -> Option<Chore> {
-    if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    }
-}
-
-/// The piece's chore when it is a main sync and `chore-main-sync` is On (with `chore-rotation`); Off, a sync
-/// runs like any other piece.
-async fn sync_of(job: &Job) -> Option<Chore> {
-    let chore = chore_for(job).await.filter(|c| c.kind == ChoreKind::SyncMain)?;
-    job.flags.on("chore-main-sync").await.then_some(chore)
+/// The piece's chore when it is a main sync.
+fn sync_of(job: &Job) -> Option<Chore> {
+    chore_of(&job.piece).filter(|c| c.kind == ChoreKind::SyncMain)
 }
 
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
@@ -377,8 +349,7 @@ async fn session(
     let project = &job.project;
     let item = piece_item(&job.piece);
     let now = crate::telemetry::now_ms() / 1000;
-    // With `chore-rotation` Off, a chore piece is run like any other.
-    let chore = chore_for(job).await;
+    let chore = chore_of(&job.piece);
     // Held until the session ends. Only a Claude session may use the model, never on a resume (a gate round's fix):
     // an Anthropic session isn't resumed against the local server.
     let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. });
@@ -482,10 +453,8 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let where_to_start = start_files::render(
         &start_files::build(crate::git_bin::program(), cwd, &base_ref, &piece_item(&job.piece)).await,
     );
-    let sync = sync_of(job).await.is_some();
-    let chore = chore_for(job)
-        .await
-        .filter(|c| c.has_prompt() && (sync || c.kind != ChoreKind::SyncMain));
+    let sync = sync_of(job).is_some();
+    let chore = chore_of(&job.piece).filter(|c| c.has_prompt() && (sync || c.kind != ChoreKind::SyncMain));
     let start = match &chore {
         Some(chore) => Start::Chore {
             template: if sync { SYNC_TEMPLATE } else { CHORE_TEMPLATE },
@@ -516,7 +485,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         backlog_path: &job.project.backlog_path,
         on_tree,
         result: &stage_one,
-        baseline: job.flags.on("chore-rotation").await.then(|| BaselineStage {
+        baseline: Some(BaselineStage {
             project: &project_id,
             repo_path: &repo_path,
             worktrees_dir: &worktrees_dir,
@@ -562,7 +531,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
                 let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
                 // A main sync keeps its own title, not the session's.
-                let sync_main = sync_of(job).await.map(|c| c.main);
+                let sync_main = sync_of(job).map(|c| c.main);
                 let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
                 let (gh, dir, branch, base) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string(), base.clone());
                 let published = tokio::task::spawn_blocking(move || {
@@ -594,19 +563,8 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .ok()
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
-        // With `run-limits-and-causes` Off, a usage limit ends `failed` as before.
-        let limited_as = job
-            .flags
-            .on("run-limits-and-causes")
-            .await
-            .then(|| job.engine.to_string());
-        let (outcome, mut result) = end_from_answer(
-            a.answer,
-            pushed.as_ref(),
-            &decisions,
-            limited_as.as_deref(),
-            chrono::Utc::now(),
-        );
+        let engine = job.engine.to_string();
+        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, &engine, chrono::Utc::now());
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };

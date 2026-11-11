@@ -420,7 +420,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             // One plan or look at a time on this computer: both runners hold this slot.
             let plan_or_look = orchestrator::slot::Slot::default();
-            let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );
@@ -436,7 +435,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
-                orchestrator::merge_run::MergeRuns::new(link::machine_name(env), placement.clone())
+                orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
                     as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::plan_run::PlanRuns::new(
                     roster.clone(),
@@ -452,7 +451,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     env: env.clone(),
                     max_turns: cfg.machine.max_turns,
                     models: cfg.machine.models,
-                    flags: placement,
                     machine: link::machine_name(env),
                     sessions: live.sessions().clone(),
                     local: local.clone(),

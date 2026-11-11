@@ -71,7 +71,6 @@ struct Ctx {
     failures: crate::backlog::failures::Failures,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
-    flags: Arc<crate::flags::Flags>,
     wait: Duration,
     /// The engine to start on when it isn't the drafter's chosen one.
     engine: Option<EngineId>,
@@ -87,12 +86,9 @@ impl Ctx {
         }
     }
 
-    /// Retaskable's own message about `draft`'s landing, once, behind the `ask-claude` flag. The draft's state is already
+    /// Retaskable's own message about `draft`'s landing, once. The draft's state is already
     /// reported, so a message the store doesn't take is only logged.
     async fn say(&self, draft: &crate::backlog::drafts::ClaimedDraft, text: &str) {
-        if !self.flags.on("ask-claude").await {
-            return;
-        }
         let ask = draft.ask_id.as_deref();
         if let Err(e) = follow_up::post_once(&self.client, self.repo, &self.token, &draft.id, ask, text).await {
             tracing::warn!("a draft's chat message didn't reach the store: {e}");
@@ -398,7 +394,6 @@ impl ProjectLoop {
                 failures: self.failures.when(self.flags.on(WATCH).await),
                 project: self.project.clone(),
                 host: host.clone(),
-                flags: self.flags.clone(),
                 wait,
                 engine,
                 sessions: self.live.sessions().clone(),

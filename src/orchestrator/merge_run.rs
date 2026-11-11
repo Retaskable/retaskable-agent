@@ -14,7 +14,6 @@ use super::watch_run::{Trees, change_ref};
 use crate::backlog::runs::{LockTake, RunKind, RunOutcome};
 use crate::ci_watch::gh_out;
 use crate::drafts::land::workflow;
-use crate::flags::Flags;
 use crate::merge_update::{Behind, Update, behind, conflict_instruction, sync_conflict_instruction, update_from_base};
 use crate::process_tree::{ProcessTree, with_hook};
 use crate::runs::chore::{ChoreKind, chore_of};
@@ -33,20 +32,11 @@ pub struct MergeRuns {
     ask_every: Duration,
     /// How long the lock is asked for; `None` is the `merge` ceiling less its margin.
     wait: Option<Duration>,
-    /// The release flags (`chore-rotation` and `chore-main-sync` make a main sync merge with a merge commit).
-    flags: Arc<Flags>,
 }
 
 impl MergeRuns {
-    pub fn new(machine: String, flags: Arc<Flags>) -> Arc<Self> {
-        Self::with(
-            PathBuf::from("gh"),
-            crate::git_bin::command,
-            machine,
-            ASK_EVERY,
-            None,
-            flags,
-        )
+    pub fn new(machine: String) -> Arc<Self> {
+        Self::with(PathBuf::from("gh"), crate::git_bin::command, machine, ASK_EVERY, None)
     }
 
     pub fn with(
@@ -55,7 +45,6 @@ impl MergeRuns {
         machine: String,
         ask_every: Duration,
         wait: Option<Duration>,
-        flags: Arc<Flags>,
     ) -> Arc<Self> {
         Arc::new(Self {
             gh,
@@ -63,7 +52,6 @@ impl MergeRuns {
             machine,
             ask_every,
             wait,
-            flags,
         })
     }
 }
@@ -86,10 +74,9 @@ impl RunStarter for MergeRuns {
             request,
             sync: false,
         };
-        let flags = self.flags.clone();
         tokio::spawn(async move {
             let mut job = job;
-            job.sync = is_sync(&job.request, &flags).await;
+            job.sync = is_sync(&job.request);
             let token = job.request.token.clone();
             let ends = job.request.ends.clone();
             if let Some((outcome, result)) = job.run().await {
@@ -108,14 +95,12 @@ struct Job {
     wait: Duration,
     trees: Trees,
     request: RunRequest,
-    /// A main sync (`sync_main` chore, both flags On): merged with a merge commit, never rebased.
+    /// A main sync (`sync_main` chore): merged with a merge commit, never rebased.
     sync: bool,
 }
 
-async fn is_sync(request: &RunRequest, flags: &Flags) -> bool {
+fn is_sync(request: &RunRequest) -> bool {
     chore_of(&request.piece).is_some_and(|c| c.kind == ChoreKind::SyncMain)
-        && flags.on("chore-rotation").await
-        && flags.on("chore-main-sync").await
 }
 
 fn failed(why: impl Into<String>) -> Outcome {

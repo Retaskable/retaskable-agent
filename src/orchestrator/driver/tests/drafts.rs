@@ -116,7 +116,7 @@ async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (
     let (base, asked) = store_failing(draft, fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude", "watchdog-anomaly-rules"]));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
     let host = Arc::new(Host {
         answers: Mutex::new(answers),
         ..Default::default()
@@ -451,27 +451,13 @@ async fn a_draft_with_questions_says_so_in_the_chat() {
     assert_eq!(sent[0]["text"], crate::ask::follow_up::HAS_QUESTIONS);
 }
 
-#[tokio::test]
-async fn nothing_is_posted_while_the_ask_claude_flag_is_off() {
-    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
-    let (mut rig, _host, asked) = rig_with(draft, vec![written()]).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(posts(&asked).is_empty());
-}
-
 fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
 
 /// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
-fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
+fn start_rules(rig: &mut Rig, choice: Value, claude_out: bool, cursor_out: bool) {
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
     if cursor_out {
@@ -490,13 +476,7 @@ fn charts() -> Value {
 #[tokio::test]
 async fn with_claude_signed_out_a_draft_on_cursor_starts() {
     let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
-    start_rules(
-        &mut rig,
-        &["ask-claude"],
-        json!({"roles": {"drafter": "cursor"}}),
-        true,
-        false,
-    );
+    start_rules(&mut rig, json!({"roles": {"drafter": "cursor"}}), true, false);
     reports(&mut rig, &asked, 2).await;
     assert_eq!(*host.engines.lock().unwrap(), vec![None]);
 }
@@ -504,13 +484,7 @@ async fn with_claude_signed_out_a_draft_on_cursor_starts() {
 #[tokio::test]
 async fn a_draft_on_claude_with_claude_out_starts_on_cursor_used_here() {
     let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
-    start_rules(
-        &mut rig,
-        &["ask-claude"],
-        json!({"roles": {"planner": "cursor"}}),
-        true,
-        false,
-    );
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, false);
     reports(&mut rig, &asked, 2).await;
     assert_eq!(
         *host.engines.lock().unwrap(),
@@ -521,13 +495,7 @@ async fn a_draft_on_claude_with_claude_out_starts_on_cursor_used_here() {
 #[tokio::test]
 async fn a_draft_waits_when_no_engine_may_start() {
     let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
-    start_rules(
-        &mut rig,
-        &["ask-claude"],
-        json!({"roles": {"planner": "cursor"}}),
-        true,
-        true,
-    );
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, true);
     for _ in 0..3 {
         rig.machine.pass().await;
     }
@@ -539,13 +507,7 @@ async fn a_draft_waits_when_no_engine_may_start() {
 async fn a_draft_with_a_saved_session_waits_for_its_own_engine_instead_of_moving_to_cursor() {
     let draft = json!({"id": "d1", "request": "Add charts", "titles": [], "sessionId": "sess-9", "branch": "retaskable/spec-d1-x"});
     let (mut rig, host, asked) = rig_with(draft, vec![charts()]).await;
-    start_rules(
-        &mut rig,
-        &["ask-claude"],
-        json!({"roles": {"planner": "cursor"}}),
-        true,
-        false,
-    );
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, false);
     for _ in 0..3 {
         rig.machine.pass().await;
     }
@@ -584,7 +546,7 @@ async fn at_the_limit_a_draft_starts_with_the_fallback_and_waits_without_it() {
         (LocalModel::up(), true, false),
     ] {
         let (mut rig, host, _asked) = rig_with(claimed(), vec![charts()]).await;
-        start_rules(&mut rig, &["ask-claude"], json!({}), signed_out, false);
+        start_rules(&mut rig, json!({}), signed_out, false);
         rig.machine.local = model;
         rig.machine
             .engine_limits

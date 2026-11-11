@@ -115,9 +115,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "ask" => ask(cmd, project, view, data_dir),
         "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
-        "approve_commands" if view.item_commands.flag_on(project, crate::command_gate::FLAG) => {
-            approve_commands(cmd, project, view)
-        }
+        "approve_commands" => approve_commands(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
@@ -288,9 +286,6 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
 /// are saved like a message's pictures and their paths go in an "Attached images…" block; the ask is queued for the
 /// orchestrator loop, which answers it with `ask_report`. Refused outside `claim` mode, the only mode that runs sessions.
 fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
-    if !view.item_commands.ask_on(project) {
-        return nack(&cmd.id, "Not a command this agent takes yet: ask".into());
-    }
     let text_of = |key: &str| {
         let v = cmd.args.get(key);
         match v {
@@ -532,7 +527,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
     crate::play::restart(project, &p)
 }
 
-/// `approve_commands { version }` (behind `approve-commands-gate`): the owner, freshly signed in on the site, has the
+/// `approve_commands { version }` the owner, freshly signed in on the site, has the
 /// waiting commands run from now on. Nacked from anyone else, without a numeric `version`, or when that isn't the
 /// version waiting.
 fn approve_commands(cmd: &Command, project: &str, view: &AgentView) -> Value {
@@ -557,7 +552,7 @@ fn approve_commands(cmd: &Command, project: &str, view: &AgentView) -> Value {
     }
 }
 
-/// The project as the connector holds it, with the commands this computer may run (`approve-commands-gate`).
+/// The project as the connector holds it, with the commands this computer may run.
 fn allowed_project(view: &AgentView, project: &str) -> Option<crate::view::ProjectView> {
     let p = view.projects.iter().find(|p| p.id == project)?;
     Some(view.item_commands.allowed_view(p))

@@ -172,7 +172,7 @@ pub struct ItemCommands {
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
-    /// Each project's allowed commands (`approve-commands-gate`), kept by its loop.
+    /// Each project's allowed commands, kept by its loop.
     gates: crate::command_gate::CommandGates,
 }
 
@@ -192,23 +192,15 @@ impl ItemCommands {
         self.claim.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// A project's `cfg` as it may run: with the allowed commands over it while `approve-commands-gate` is On for
-    /// it, else as given. Everything that runs a project command takes its config through here.
+    /// A project's `cfg` as it may run: with the allowed commands over it. Everything that runs a project
+    /// command takes its config through here.
     pub fn allowed_config(&self, project: &str, cfg: &ProjectConfig) -> ProjectConfig {
-        if self.flag_on(project, crate::command_gate::FLAG) {
-            self.gates.config(project, cfg)
-        } else {
-            cfg.clone()
-        }
+        self.gates.config(project, cfg)
     }
 
     /// [`allowed_config`](Self::allowed_config) for a project as the connector holds it.
     pub fn allowed_view(&self, project: &ProjectView) -> ProjectView {
-        if self.flag_on(&project.id, crate::command_gate::FLAG) {
-            self.gates.view(project)
-        } else {
-            project.clone()
-        }
+        self.gates.view(project)
     }
 
     pub fn gates(&self) -> &crate::command_gate::CommandGates {
@@ -221,15 +213,6 @@ impl ItemCommands {
 
     pub fn push_draft(&self, command: DraftCommand) {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Set by the loop each pass: whether the `ask-claude` flag is On for `project`.
-    pub fn set_ask_on(&self, project: &str, on: bool) {
-        self.set_flag(project, "ask-claude", on);
-    }
-
-    pub fn ask_on(&self, project: &str) -> bool {
-        self.flag_on(project, "ask-claude")
     }
 
     /// Records whether `flag` is On for `project`; commands behind a flag are refused while it is Off.
@@ -562,11 +545,8 @@ impl AgentView {
     }
 
     /// The snapshot's `commandsWaiting`: the version of a shared project's commands that waits for the owner's
-    /// approval, with the text to show. Only with `approve-commands-gate` On; the values are never sent.
+    /// approval, with the text to show. The values are never sent.
     pub fn commands_waiting_json(&self, project: &str) -> Option<Value> {
-        if !self.item_commands.flag_on(project, crate::command_gate::FLAG) {
-            return None;
-        }
         let w = self.item_commands.gates().waiting(project)?;
         Some(json!({ "version": w.version, "text": w.text, "by": w.by }))
     }

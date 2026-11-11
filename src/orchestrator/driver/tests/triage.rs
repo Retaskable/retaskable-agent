@@ -58,7 +58,6 @@ impl Triager {
 async fn settling_ended(result: SessionResult) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["triage-session"]));
     let fake = rig.go_live();
     fake.script.lock().unwrap().push(result);
     rig.machine.pass().await;
@@ -151,7 +150,7 @@ async fn a_record_that_already_holds_a_finding_is_not_looked_at_again() {
 #[tokio::test]
 async fn triage_off_never_looks() {
     let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
-    rig.lp(0).project.triage = OnOff::Off;
+    rig.lp(0).file_project.triage = OnOff::Off;
     for _ in 0..3 {
         rig.machine.pass().await;
     }
@@ -255,18 +254,6 @@ async fn claude_is_on_the_item_while_the_look_runs_and_not_after() {
     assert_eq!(on_it_events(&mut rig).last(), Some(&Some(false)));
 }
 
-#[tokio::test]
-async fn with_the_triage_session_flag_off_nothing_looks_and_no_event_carries_claude_on_it() {
-    let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    rig.lp(0).triage_flag = false;
-    for _ in 0..3 {
-        rig.machine.pass().await;
-    }
-    assert_eq!(looks(&fake), 0);
-    assert!(on_it_events(&mut rig).is_empty());
-}
-
 fn decision(decision: TriageDecision, instructions: &str) -> TriageEnd {
     TriageEnd::Found {
         decision,
@@ -331,7 +318,6 @@ async fn a_start_over_decision_starts_a_new_attempt_with_the_instructions_in_its
 async fn a_skip_decision_skips_the_item_in_the_store() {
     let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["triage-session"]));
     let fake = rig.go_live();
     fake.script
         .lock()
@@ -697,7 +683,6 @@ async fn claude_is_on_the_item_throughout_the_second_look() {
 #[tokio::test]
 async fn a_continue_decision_with_nothing_to_continue_from_starts_over_and_says_why() {
     let (mut rig, fake) = stopped(vec![decision(TriageDecision::Continue, "Try again.")]).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["triage-session", "own-failure-handling"]));
     let r = rig.lp(0).records.get_mut("a").unwrap();
     (r.branch, r.impl_session_id) = (None, None);
     rig.machine.pass().await;
@@ -711,23 +696,13 @@ async fn a_continue_decision_with_nothing_to_continue_from_starts_over_and_says_
     ));
 }
 
-#[tokio::test]
-async fn with_own_failure_handling_off_the_redirect_keeps_the_plain_start_over_note() {
-    let (mut rig, _fake) = stopped(vec![decision(TriageDecision::Continue, "Try again.")]).await;
-    let r = rig.lp(0).records.get_mut("a").unwrap();
-    (r.branch, r.impl_session_id) = (None, None);
-    rig.machine.pass().await;
-    assert!(has_note(&mut rig, "Claude chose Start over"));
-}
-
 fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
 
 /// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
-fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
+fn start_rules(rig: &mut Rig, choice: Value, claude_out: bool, cursor_out: bool) {
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
     if cursor_out {
@@ -740,7 +715,7 @@ fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, c
 /// "a" stopped, the start rules On with `choice`, and the triager given three passes.
 async fn triaged_with(choice: Value, claude_out: bool, cursor_out: bool) -> Vec<Option<crate::engines::EngineId>> {
     let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
-    start_rules(&mut rig, &["triage-session"], choice, claude_out, cursor_out);
+    start_rules(&mut rig, choice, claude_out, cursor_out);
     for _ in 0..4 {
         rig.machine.pass().await;
     }
@@ -775,7 +750,7 @@ async fn at_the_limit_a_triager_starts_with_the_fallback_and_waits_without_it() 
         (LocalModel::up(), true, false),
     ] {
         let (mut rig, fake, _asked) = settling_ended(SessionResult::NeedsHuman("first problem".into())).await;
-        start_rules(&mut rig, &["triage-session"], json!({}), signed_out, false);
+        start_rules(&mut rig, json!({}), signed_out, false);
         rig.machine.local = model;
         rig.machine
             .engine_limits

@@ -308,10 +308,8 @@ impl ProjectLoop {
             }
         }
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
-        let outside_flag = self.flags.on("run-limits-and-causes").await;
         for mut end in due {
-            if outside_flag
-                && let RunOutcome::Failed(why) = &end.outcome
+            if let RunOutcome::Failed(why) = &end.outcome
                 && crate::runs::is_outside(why)
             {
                 if !end.result.is_object() {
@@ -434,7 +432,7 @@ impl ProjectLoop {
             tags: shared.links.tags.get(),
             engines: engines_here(shared.links, &start),
             uses: uses_here(shared.links, self.project.engines.as_ref(), &start),
-            chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
+            chores: self.chores_off().then_some(false),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
@@ -450,9 +448,7 @@ impl ProjectLoop {
                 (json!({ "waitingFor": waiting }), false)
             }
             Ok(RunTakeAnswer::Run(run)) => {
-                if let Some(count) = ChoreCount::read(&run.other)
-                    && self.flags.on("chore-rotation").await
-                {
+                if let Some(count) = ChoreCount::read(&run.other) {
                     self.live.set_chores(&self.id, count);
                 }
                 let answer = json!(run.piece.title);
@@ -515,8 +511,7 @@ impl ProjectLoop {
                     c.kind,
                     ChoreKind::Tidy | ChoreKind::Tests | ChoreKind::Bugs | ChoreKind::Specs
                 )
-            })
-            && self.flags.on("chore-rotation").await;
+            });
         if stray {
             let ended = self
                 .client

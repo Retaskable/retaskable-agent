@@ -63,11 +63,7 @@ async fn setup(mode: u8, own: bool) -> T {
     let (base, asked) = store(mode.clone()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
-    rig.lp(0).flags = Arc::new(Flags::fixed(&[
-        "obey-shared-pause",
-        "ask-claude",
-        "watchdog-anomaly-rules",
-    ]));
+    rig.lp(0).flags = Arc::new(Flags::fixed(&["obey-shared-pause", "watchdog-anomaly-rules"]));
     let (asks, drafts) = (Arc::new(AskHost::default()), Arc::new(DraftHost::default()));
     rig.machine.asks = Some(asks.clone());
     rig.machine.drafts = Some(drafts.clone());
