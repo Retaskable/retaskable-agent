@@ -478,23 +478,18 @@ mod tests {
     /// What each role does with the gate and the claim, as the drafter, triager, ask and second look call them.
     #[tokio::test]
     async fn each_role_is_local_only_in_its_rows_and_falls_back_with_local_down() {
-        use crate::tiers::{LOCAL, OPUS, SONNET, implementer_tier, mid_tier, top_tier};
-        let m = crate::config::ModelsConfig::default();
-        let usage = |used: f64| serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
+        use crate::tiers::{LOCAL, OPUS, SONNET, floor};
         let up = LocalModel::up();
         let down = LocalModel::off();
-        // (used, mid/asks tier with local up, with it down, top tier up, down)
-        for (used, mid_up, mid_down, top_up, top_down) in [
-            (0.2, SONNET, SONNET, OPUS, OPUS),
-            (0.9, LOCAL, SONNET, OPUS, OPUS),
-            (0.99, LOCAL, SONNET, LOCAL, OPUS),
-        ] {
-            let u = usage(used);
-            let tier = |l: &LocalModel| mid_tier(implementer_tier(Some(&u), 0, &m, l.ladder_for(true)));
-            assert_eq!(tier(&up), mid_up, "{used}");
-            assert_eq!(tier(&down), mid_down, "{used}");
-            assert_eq!(top_tier(Some(&u), 0, &m, up.ladder_for(true)), top_up, "{used}");
-            assert_eq!(top_tier(Some(&u), 0, &m, down.ladder_for(true)), top_down, "{used}");
+        // (Claude at its limit, mid/asks tier with local up, with it down, top tier up, down)
+        for (at_limit, mid_up, mid_down, top_up, top_down) in
+            [(false, SONNET, SONNET, OPUS, OPUS), (true, LOCAL, SONNET, LOCAL, OPUS)]
+        {
+            let tier = |l: &LocalModel| floor(SONNET, at_limit, l.ladder_for(true));
+            assert_eq!(tier(&up), mid_up, "{at_limit}");
+            assert_eq!(tier(&down), mid_down, "{at_limit}");
+            assert_eq!(floor(OPUS, at_limit, up.ladder_for(true)), top_up, "{at_limit}");
+            assert_eq!(floor(OPUS, at_limit, down.ladder_for(true)), top_down, "{at_limit}");
             // Above the limit nothing is claimed, so the free slot stays free.
             if mid_up != LOCAL {
                 assert!(up.claim(mid_up).await.is_none());

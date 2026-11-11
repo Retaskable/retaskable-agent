@@ -113,7 +113,7 @@ impl ProjectLoop {
     /// Whether the starter says the model a fresh implementer would run on has no slot free: Claude lanes then claim
     /// and start nothing new this pass.
     pub(super) fn model_full(&self, starter: &dyn super::project::SessionStarter) -> bool {
-        !starter.implementer_may_start(self.store.usage().as_ref(), self.claude_starts)
+        !starter.implementer_may_start(self.claude_starts)
     }
 }
 

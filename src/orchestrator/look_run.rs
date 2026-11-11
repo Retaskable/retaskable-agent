@@ -19,7 +19,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::{EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
 use crate::looks::{LookBrief, Looker, decide};
 use crate::process_tree::ProcessTree;
-use crate::tiers::{implementer_tier, mid_tier};
+use crate::tiers::{SONNET, floor};
 use crate::{lanes, paths};
 
 mod bug;
@@ -60,9 +60,8 @@ impl RunStarter for LookRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let models = &self.roster.models;
         let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, |local| {
-            mid_tier(implementer_tier(None, crate::telemetry::now_ms() / 1000, models, local))
+            floor(SONNET, self.roster.sessions.claude_at_limit(), local)
         })?;
         let cut = Cut::default();
         let work = look(job, request.clone(), cut.clone(), self.bugs.clone());

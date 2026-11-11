@@ -287,13 +287,8 @@ fn the_tier_is_offered_the_local_model_only_with_the_model_up_on_claude() {
 }
 
 #[test]
-fn the_planner_is_on_the_top_tier_and_stays_off_a_free_local_slot_above_the_limit() {
-    let m = ModelsConfig::default();
-    let usage =
-        |used: f64| json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
-    // 80%, 94% used: Opus even with local up; only below `pauseBelowPct` is it `local`.
-    assert_eq!(tiers::top_tier(Some(&usage(0.8)), 0, &m, true), tiers::OPUS);
-    assert_eq!(tiers::top_tier(Some(&usage(0.94)), 0, &m, true), tiers::OPUS);
-    assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, true), tiers::LOCAL);
-    assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, false), tiers::OPUS);
+fn the_planner_is_on_the_top_tier_and_local_only_at_the_limit_with_the_model_up() {
+    assert_eq!(tiers::floor(tiers::OPUS, false, true), tiers::OPUS);
+    assert_eq!(tiers::floor(tiers::OPUS, true, true), tiers::LOCAL);
+    assert_eq!(tiers::floor(tiers::OPUS, true, false), tiers::OPUS);
 }

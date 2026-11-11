@@ -28,7 +28,7 @@ pub struct Session<'a> {
     pub retry: &'a str,
     /// The engine `engines::engine_for(…, Role::Drafter, None)` chose.
     pub engine: Engine,
-    /// The implementer's tier from the usage reading (`tiers::implementer_tier`); the drafter runs
+    /// `sonnet`, or `local` at Claude's limit (`tiers::floor`); the drafter runs
     /// on [`mid_tier`] of it, so never Opus.
     pub tier: &'static str,
     pub budget: &'a ProjectBudget,
@@ -50,7 +50,7 @@ pub enum Start<'a> {
     },
 }
 
-/// The drafter's tier from the usage reading's `tier`: a `[Lighthouse]` draft runs on the chore tier, others on
+/// The drafter's tier from the given `tier`: a `[Lighthouse]` draft runs on the chore tier, others on
 /// the mid tier (never Opus; `local` stays `local`).
 pub fn drafter_tier(request: &str, tier: &'static str) -> &'static str {
     if is_lighthouse_request(request) {

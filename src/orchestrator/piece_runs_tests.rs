@@ -52,7 +52,6 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         cursor_models: Default::default(),
         env,
         max_turns: 50,
-        models: ModelsConfig::default(),
         machine: "pc".into(),
         sessions: Default::default(),
         local: crate::local_model::LocalModel::off(),

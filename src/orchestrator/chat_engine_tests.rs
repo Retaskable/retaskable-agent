@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::ClaudeStarter;
 use super::tests::project_in;
 use crate::backlog::Client;
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, RoleEngines};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, RoleEngines};
 use crate::env::Env;
 use crate::orchestrator::ask_host::ClaudeAsks;
 use crate::orchestrator::driver::{
@@ -81,7 +81,6 @@ async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env
         root.join("data"),
         choice,
         env,
-        ModelsConfig::default(),
         models(),
         0.0,
         view,
@@ -105,7 +104,6 @@ async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env
             token: "t".into(),
             failures: Default::default(),
         },
-        usage: None,
         lanes: vec![],
         runs: Default::default(),
         events,
@@ -159,7 +157,6 @@ fn starter(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> (Arc
         choice,
         env,
         50,
-        ModelsConfig::default(),
         150_000,
         models(),
         Default::default(),
@@ -175,12 +172,12 @@ fn triage_request() -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<Sess
 fn triage_request_listed(sessions: Sessions) -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let request = TriageRequest {
+        usage: None,
         engine: None,
         project: "p".into(),
         item_id: "x".into(),
         context: crate::test_support::triage_context(vec![], "bug"),
         lane: None,
-        usage: None,
         outcomes,
         sessions,
     };

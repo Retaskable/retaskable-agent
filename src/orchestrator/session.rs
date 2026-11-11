@@ -5,9 +5,8 @@
 //! A fresh session's prompt ends with "Where to start" ([`crate::implementer::start_files`]), built in
 //! the prepared lane; a resume or a follow-up restart gets none.
 //! Left out: Claude's sandbox, and the decisions a person already gave
-//! (the claimed item doesn't carry them). The usage-window model tier (section 7.1) is picked for the
-//! implementer ([`crate::tiers::implementer_tier`]), then moved off Opus for a first try
-//! ([`crate::tiers::implementer_model`]); the other roles it covers have no sessions here yet.
+//! (the claimed item doesn't carry them). The tier the store names on the claim (section 7.1, `sonnet` when it names none) is the
+//! implementer's, then moved off Opus for a first try ([`crate::tiers::implementer_model`]).
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -21,7 +20,7 @@ use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, Star
 use super::fresh_start::{MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::model_slots::ModelSlots;
@@ -39,7 +38,7 @@ use crate::implementer::{publish, start_files};
 use crate::item_lifecycle::ImplementerOutcome;
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
-use crate::tiers::{LOCAL, implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, floor, implementer_model, named_tier};
 use crate::{lanes, paths};
 pub(super) use gates::{ChecksStage, FreshRules, GateRounds, Gated, Step, gate_rounds};
 
@@ -52,7 +51,6 @@ pub struct ClaudeStarter {
     pub(super) choice: EngineChoiceConfig,
     pub(super) env: Env,
     max_turns: u32,
-    pub(super) models: ModelsConfig,
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
     /// The machine's Cursor model names, for placing a Cursor session.
@@ -73,7 +71,6 @@ impl ClaudeStarter {
         choice: EngineChoiceConfig,
         env: Env,
         max_turns: u32,
-        models: ModelsConfig,
         max_resume_context_tokens: u32,
         cursor_models: CursorModels,
         sessions: Sessions,
@@ -85,7 +82,6 @@ impl ClaudeStarter {
             choice,
             env,
             max_turns,
-            models,
             max_resume_context_tokens,
             cursor_models,
             running: Arc::new(AtomicU32::new(0)),
@@ -95,30 +91,16 @@ impl ClaudeStarter {
     }
 }
 
-/// Whether a fresh Claude implementer may start: the model [`implementer_tier`] gives for `usage` isn't capped and full.
-/// The item isn't known before it's claimed: on the `opus` tier a reopened item keeps `opus` and a first try runs on
-/// `sonnet` (`implementer_model`; a retry or an L/XL item keeps `opus`), so both need room; any other tier checks its own model. `pending` is the starts
-/// already made that haven't taken their slot yet.
-pub fn model_has_room(
-    slots: Option<&ModelSlots>,
-    usage: Option<&Value>,
-    now: i64,
-    models: &ModelsConfig,
-    pending: u32,
-) -> bool {
-    let tier = implementer_tier(usage, now, models, false);
-    slots.is_none_or(|s| s.has_room_after(tier, pending) && (tier != "opus" || s.has_room_after("sonnet", pending)))
+/// Whether a fresh Claude implementer may start: `sonnet`, what a claim with no tier (and a first try) runs on, isn't
+/// capped and full. The tier arrives with the claim, so it isn't known before it. `pending` is the starts already made
+/// that haven't taken their slot yet.
+pub fn model_has_room(slots: Option<&ModelSlots>, pending: u32) -> bool {
+    slots.is_none_or(|s| s.has_room_after(crate::tiers::SONNET, pending))
 }
 
 impl SessionStarter for ClaudeStarter {
-    fn implementer_may_start(&self, usage: Option<&Value>, pending: u32) -> bool {
-        model_has_room(
-            crate::engines::model_slots::global(),
-            usage,
-            crate::telemetry::now_ms() / 1000,
-            &self.models,
-            pending,
-        )
+    fn implementer_may_start(&self, pending: u32) -> bool {
+        model_has_room(crate::engines::model_slots::global(), pending)
     }
 
     fn start(&self, request: StartRequest) -> Result<(), String> {
@@ -150,7 +132,6 @@ impl SessionStarter for ClaudeStarter {
             lane,
             item,
             outcomes,
-            usage,
             session_id,
             engine: session_engine,
             resume,
@@ -176,8 +157,6 @@ impl SessionStarter for ClaudeStarter {
             max_turns: self.max_turns,
             lane,
             item,
-            usage,
-            models: self.models,
             max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             engine: session_engine,
@@ -317,9 +296,6 @@ struct Job {
     max_turns: u32,
     lane: u32,
     item: Item,
-    /// The latest `state.usage` reading, for picking the implementer's model tier.
-    usage: Option<Value>,
-    models: ModelsConfig,
     max_resume_context_tokens: u32,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
@@ -406,8 +382,6 @@ async fn attempt(
         max_turns,
         lane,
         item,
-        usage,
-        models,
         items,
         notes,
         attempt: attempt_no,
@@ -416,7 +390,6 @@ async fn attempt(
     } = job;
     let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
     let cursor = placed.cursor.map(|c| crate::engines::cursor::with_project(project, c));
-    let now = crate::telemetry::now_ms() / 1000;
     // Only a Claude session may use the local model; its slot is held until
     // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
     // A resume stays on the backend its first transcript line names: a local session goes back to the model while
@@ -429,17 +402,19 @@ async fn attempt(
             .is_some_and(|s| s.model == LOCAL);
     let tier = if up && (if resumed { was_local } else { job.wants_local }) {
         LOCAL
-    } else if let Some(named) = crate::tiers::named_tier(item.tier.as_deref()) {
-        // The store named the tier; `local` without the model up is `sonnet`.
+    } else {
+        // The store named the tier (none is `sonnet`); `local` without the model up is `sonnet`. Claude at its
+        // limit reads as the floor tier for a fresh session only.
+        let named = floor(
+            named_tier(item.tier.as_deref()),
+            !resumed && sessions.claude_at_limit(),
+            up && !resumed,
+        );
         if named == LOCAL && !(up && !resumed) {
             crate::tiers::SONNET
         } else {
             named
         }
-    } else {
-        // Claude at its limit reads as the floor tier for a fresh session only.
-        let floored = crate::tiers::limit_floor(usage.as_ref(), !resumed && sessions.claude_at_limit(), up);
-        implementer_tier(floored.as_ref(), now, models, up && !resumed)
     };
     let local_run = if tier == LOCAL {
         Some(job.local.run().await)

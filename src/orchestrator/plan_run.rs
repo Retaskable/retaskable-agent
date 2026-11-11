@@ -14,7 +14,7 @@ use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
 use super::session::watch_for;
 use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::config::{CursorModels, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
@@ -217,7 +217,6 @@ pub struct Roster {
     pub projects: Vec<ProjectConfig>,
     pub choice: EngineChoiceConfig,
     pub env: Env,
-    pub models: ModelsConfig,
     pub cursor_models: CursorModels,
     /// The sessions running now: a plan or look lists itself while it runs.
     pub sessions: Sessions,
@@ -316,10 +315,8 @@ impl RunStarter for PlanRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let models = &self.roster.models;
         let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
-            let floored = tiers::limit_floor(None, self.roster.sessions.claude_at_limit(), local);
-            tiers::top_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, models, local)
+            tiers::floor(tiers::OPUS, self.roster.sessions.claude_at_limit(), local)
         })?;
         let cut = Cut::default();
         spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));

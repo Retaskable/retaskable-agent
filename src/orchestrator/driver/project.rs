@@ -133,9 +133,8 @@ pub trait SessionStarter: Send + Sync {
     fn start(&self, request: StartRequest) -> Result<(), String>;
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
-    /// Whether a fresh Claude implementer start may begin now, given the project's `state.usage`: no when the model
-    /// it would run on has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet.
-    fn implementer_may_start(&self, _usage: Option<&serde_json::Value>, _pending: u32) -> bool {
+    /// Whether a fresh Claude implementer start may begin now: no when `sonnet`, the model a claim with no tier runs on, has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet.
+    fn implementer_may_start(&self, _pending: u32) -> bool {
         true
     }
     /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
