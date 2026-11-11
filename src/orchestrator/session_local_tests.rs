@@ -1,5 +1,5 @@
 //! The implementer's model tier (agent/07.1) and its `local` row (agent/07.2): the one slot, and the same reading
-//! with local down or the flag Off.
+//! with local down.
 use super::tests::{FINISHED, Rig, fake_name, request, rig, rig_with};
 use super::*;
 use crate::local_model::LocalModel;
