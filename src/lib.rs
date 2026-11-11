@@ -93,6 +93,7 @@ pub mod telemetry;
 pub mod terminal_menu;
 #[cfg(test)]
 mod test_support;
+pub mod testflight;
 pub mod text;
 pub mod tiers;
 pub mod tray;
