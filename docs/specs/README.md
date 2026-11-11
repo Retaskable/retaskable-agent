@@ -24,6 +24,10 @@ Only the specs whose subject is the computer itself:
 - [merge-queue-from-store.md](merge-queue-from-store.md): the store's queue decides whose turn it is to merge.
 - [ci-watch-through-store.md](ci-watch-through-store.md): the CI watcher sends facts to the store and runs what it answers; gentler on GitHub; Run now through the store.
 - [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
+- [plans-say-why.md](plans-say-why.md): failed, dropped and already-under-way plans.
+- [questions-and-triage.md](questions-and-triage.md): options for a question, triage tasks, the classifier, bugs typed as ideas.
+- [testflight-restart-wait.md](testflight-restart-wait.md): a restart waits for a TestFlight build.
+- [small-agent-jobs.md](small-agent-jobs.md): usage recheck, keep awake, native app facts, no half emoji.
 
 ## What was cut
 
