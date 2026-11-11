@@ -179,12 +179,8 @@ fn idea_accept(v: &AgentView, args: Value) -> Value {
 }
 
 #[test]
-fn idea_accept_is_queued_for_the_loop_behind_the_flag_and_answered_later() {
+fn idea_accept_is_queued_for_the_loop_and_answered_later() {
     let v = claiming();
-    let off = idea_accept(&v, json!({ "idea": "i1" }));
-    assert_eq!(off["type"], "nack");
-    assert!(off["reason"].as_str().unwrap().contains("idea_accept"));
-    v.item_commands.set_flag("one", "ideas-session", true);
     assert_eq!(
         idea_accept(&v, json!({ "idea": "i1" }))["type"],
         crate::commands::PENDING
@@ -200,7 +196,6 @@ fn idea_accept_is_queued_for_the_loop_behind_the_flag_and_answered_later() {
 #[test]
 fn idea_accept_needs_claim_mode_and_not_now_and_never_are_the_sites() {
     let v = view();
-    v.item_commands.set_flag("one", "ideas-session", true);
     assert_eq!(idea_accept(&v, json!({ "idea": "i1" }))["type"], "nack");
     for name in ["idea_later", "idea_never"] {
         let answer = run(
@@ -230,40 +225,17 @@ fn a_settled_answer_goes_up_the_projects_open_connection() {
 }
 
 #[test]
-fn ideas_generate_queues_a_round_and_nacks_when_paused_or_not_set_up() {
-    let v = view();
-    let noop = |_: i32| {};
-    let go = |args: Value, project: &str, v: &AgentView| {
-        run(
-            &cmd("ideas_generate", args),
-            project,
-            &mut Seen::default(),
-            v,
-            &noop,
-            &data_dir(),
-        )
-    };
-    assert_eq!(go(json!({}), "one", &v)["type"], "ack");
-    assert_eq!(go(json!({ "fresh": true }), "one", &v)["type"], "ack");
-    assert_eq!(
-        v.item_commands.take("one"),
-        vec![
-            ItemCommand::Ideas {
-                project: "one".into(),
-                fresh: false
-            },
-            ItemCommand::Ideas {
-                project: "one".into(),
-                fresh: true
-            },
-        ]
+fn ideas_generate_is_nacked_like_any_command_this_agent_doesnt_take() {
+    let v = claiming();
+    let answer = run(
+        &cmd("ideas_generate", json!({})),
+        "one",
+        &mut Seen::default(),
+        &v,
+        &|_: i32| {},
+        &data_dir(),
     );
-    assert_eq!(go(json!({}), "", &v)["reason"], "Finish setup first.");
-    v.paused.set("one", Some("test".into()));
-    assert_eq!(
-        go(json!({}), "one", &v)["reason"],
-        "The project is paused: resume it first."
-    );
+    assert_eq!(answer["type"], "nack");
     assert!(v.item_commands.take("one").is_empty());
 }
 

@@ -88,7 +88,7 @@ fn stop_and_wait(dir: &Path, own: &HashSet<u32>, excluded_lane_pids: &HashSet<u3
     }
 }
 
-/// Stops every other session (reviews, scouts, triage, drafts, chat, release notes, ideas, checks
+/// Stops every other session (reviews, scouts, triage, drafts, chat, release notes, checks
 /// and their installs, a shoot, a Play on phone build) still running in any project's main
 /// checkout, base checkout (`lanes::base_checkout_path`) or draft worktree, as a restart or Quit cuts them. Only
 /// the agent's own descendants are ever in scope (see the module docs above); a numbered lane's
