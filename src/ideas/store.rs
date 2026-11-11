@@ -80,7 +80,7 @@ pub struct StoreIdea {
     /// Set when a person added this idea themselves; a round leaves these alone (06.2-operations.md).
     #[serde(default, rename = "addedBy")]
     pub added_by: Option<Value>,
-    /// The plan (a draft) this idea was queued as, once someone pressed Build this.
+    /// The plan this idea is already written up as, when one is under way.
     #[serde(default, rename = "planId")]
     pub plan_id: Option<String>,
     /// Already marked a bug (`idea_mark_bug`, or typed as one).

@@ -22,6 +22,7 @@ use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
+use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
@@ -244,15 +245,19 @@ impl Ctx {
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
     /// failed on its retry waits for a person as `failed`.
     async fn failed(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
+        let report = DraftReport {
+            summary: Some(reason_or(report.summary.as_deref().unwrap_or(""), NO_REASON)),
+            ..report
+        };
+        let summary = report.summary.clone().unwrap_or_default();
         if self.retried {
             return self.needs_person(id, "failed", report).await;
         }
-        let summary = report.summary.as_deref().unwrap_or("it failed");
         self.report(
             id,
             DraftReport {
                 status: Some("queued".into()),
-                summary: Some(format!("Trying again by itself: {summary}")),
+                summary: Some(format!("{RETRY_PREFIX}{summary}")),
                 retried: Some(true),
                 ..Default::default()
             },
@@ -297,7 +302,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     )
     .await?;
     let failed = |why: String| DraftReport {
-        summary: Some(why),
+        summary: Some(error_reason(&why, "error")),
         ..Default::default()
     };
     let prepared = {
@@ -376,7 +381,10 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             ctx.say(&draft, follow_up::HAS_QUESTIONS).await;
             Ok(())
         }
-        (None, DrafterStatus::Failed) => ctx.failed(&id, failed(result.summary.clone())).await,
+        (None, DrafterStatus::Failed) => {
+            let why = reason_or(&result.summary, "The drafter stopped without giving a reason.");
+            ctx.failed(&id, failed(why)).await
+        }
         (None, _) => {
             let outcome = sorted.outcome;
             for fix in &sorted.fix_items {
@@ -443,7 +451,10 @@ async fn open_pr(
     let published = match published {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            let why = format!("The spec is committed but couldn't be published: {e:#}");
+            let why = format!(
+                "The spec is committed but couldn't be published: {}",
+                reason_or(&format!("{e:#}"), "no reason given")
+            );
             return ctx
                 .failed(
                     id,

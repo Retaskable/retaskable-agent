@@ -10,6 +10,7 @@ use futures_util::future::BoxFuture;
 use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
@@ -120,6 +121,12 @@ impl DraftHost for ClaudeDrafts {
                     implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, ladder),
                 )
             };
+            let retried = !job.resume && draft.other.get("retried").and_then(|v| v.as_bool()) == Some(true);
+            let retry = if retried {
+                retry_text(failure_reason(draft).as_deref())
+            } else {
+                String::new()
+            };
             // Held until the session ends.
             let claimed = local.claim(tier).await;
             let spec = session_spec(
@@ -129,6 +136,7 @@ impl DraftHost for ClaudeDrafts {
                     titles: &titles,
                     branch: &job.branch,
                     base_branch: &project.base_branch,
+                    retry: &retry,
                     engine: chosen,
                     tier,
                     budget: &project.budget,

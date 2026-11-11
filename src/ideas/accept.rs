@@ -127,6 +127,9 @@ pub async fn accept(ideas: &Ideas<'_>, id: &str, by: &str) -> Result<(), String>
         .iter()
         .find(|i| i.id == id)
         .ok_or("That idea isn't there any more.")?;
+    if row.plan_id.as_deref().is_some_and(|p| !p.trim().is_empty()) {
+        return Err("That idea is already being planned: its plan is in Plans.".into());
+    }
     if row.state != IdeaState::Waiting {
         let who = row.answer.as_ref().map_or(String::new(), |a| format!(" by @{}", a.by));
         return Err(format!("That idea was already answered{who}."));
@@ -275,6 +278,17 @@ mod tests {
         assert_eq!(seen.len(), 1);
         let (done, _) = run(waiting(vec![row("i1", "never", json!({}))]), 200, "i1").await;
         assert_eq!(done, Err("That idea was already answered.".into()));
+    }
+
+    #[tokio::test]
+    async fn an_idea_with_a_plan_under_way_is_refused_and_queues_nothing() {
+        let rows = vec![row("i1", "waiting", json!({ "planId": "d4" }))];
+        let (done, seen) = run(waiting(rows), 200, "i1").await;
+        assert_eq!(
+            done,
+            Err("That idea is already being planned: its plan is in Plans.".into())
+        );
+        assert_eq!(seen.len(), 1);
     }
 
     #[tokio::test]
