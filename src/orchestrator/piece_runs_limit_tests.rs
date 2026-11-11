@@ -20,7 +20,6 @@ fn cursor_review_at_its_limit(
         ),
     );
     let starter = Arc::get_mut(&mut r.starter).unwrap();
-    starter.flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
     starter.choice = serde_json::from_value(json!({ "roles": { "review": "cursor" } })).unwrap();
     starter.projects[0].review.min_scout_diff_lines = 0;
     r.fall = fall.then(|| crate::orchestrator::driver::FallOver {

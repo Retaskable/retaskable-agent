@@ -52,6 +52,9 @@ async fn stub() -> (String, Arc<Mutex<Vec<String>>>) {
         post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {
+                if body["op"] == "settings_get" {
+                    return Json(json!({ "value": null }));
+                }
                 seen.lock().unwrap().push(body["op"].as_str().unwrap_or("").to_string());
                 Json(json!({ "value": [{ "id": "a", "title": "A", "status": "todo", "rank": 0 }] }))
             }
@@ -160,6 +163,8 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
             150_000,
         );
         lp.repo = Some(7);
+        // The gate is open with nothing in the store: config.json's commands run as written.
+        machine.links.item_commands.gates().open_unrecorded(&lp.id);
         machine.add(lp);
     }
     Rig {
@@ -305,8 +310,8 @@ async fn an_unreachable_backlog_is_a_store_error_and_no_tick() {
     let mut rig = rig(2, &["http://127.0.0.1:1"]);
     assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
     let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(Entry::kind).collect();
-    assert_eq!(kinds, vec!["store_error"]);
-    assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "list");
+    assert_eq!(kinds, vec!["store_error", "store_error"]);
+    assert_eq!(rig.lp(0).events().recent()[1].to_value()["op"], "list");
 }
 
 #[tokio::test]
@@ -588,6 +593,9 @@ async fn claim_stub_failing(
             let (fail_release, fail_skip) = (fail_release.clone(), fail_skip.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
+                if op == "settings_get" {
+                    return (StatusCode::OK, Json(json!({ "value": null })));
+                }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 match (op.as_str(), claim) {
                     ("release" | "park", _) if fail_release.load(Ordering::SeqCst) => {

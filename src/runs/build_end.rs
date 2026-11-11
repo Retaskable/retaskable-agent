@@ -61,18 +61,18 @@ pub fn limited_end(err: &Error, engine: &str, now: DateTime<Utc>) -> Option<(Run
 }
 
 /// The run's end from the implementer's answer. `decisions` are the answers already on the piece; `engine` is the
-/// session's engine id, or `None` while `run-limits-and-causes` is Off, when a usage limit ends `failed`.
+/// session's engine id.
 pub fn end_from_answer(
     answer: Result<ImplementerResult, Error>,
     pushed: Option<&Pushed>,
     decisions: &[Decision],
-    engine: Option<&str>,
+    engine: &str,
     now: DateTime<Utc>,
 ) -> (RunOutcome, Value) {
     let r = match answer {
         Ok(r) => r,
-        Err(e) if engine.is_some_and(|engine| limited_end(&e, engine, now).is_some()) => {
-            return limited_end(&e, engine.unwrap_or_default(), now).expect("a LimitHit");
+        Err(e) if limited_end(&e, engine, now).is_some() => {
+            return limited_end(&e, engine, now).expect("a LimitHit");
         }
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return (RunOutcome::Interrupted, json!({})),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => {

@@ -5,8 +5,7 @@
 //! `start_over` as Start over, `skip` as Skip, `human` as leaving it alone, `person_steps` as
 //! waiting on a person's own steps.
 //!
-//! In `claim` mode the orchestrator loop runs it (`orchestrator::driver::triage_run`, behind the `triage-session`
-//! flag): a `needs_human` stop that `schedule::wants_triage` holds for gets one triager session, and every finding
+//! In `claim` mode the orchestrator loop runs it (`orchestrator::driver::triage_run`): a `needs_human` stop that `schedule::wants_triage` holds for gets one triager session, and every finding
 //! is carried out as `human` for now (its reason, and a `person_steps` answer's steps, are added to the item's).
 //! [`crate::commands`]'s
 //! **Continue** is carried out (queued, then done by the orchestrator loop in `claim` mode,

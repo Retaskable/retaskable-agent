@@ -6,7 +6,7 @@
 //! the smoke command in its own reused worktree ([`crate::lanes::prepare_smoke_checkout`]).
 //! Calling this on a timer after every real merge, queueing a `fix_main` chore on failure, and
 //! reporting [`SmokeState`] to the hub are not yet built here: those are the not-yet-built
-//! orchestrator-loop's, chore-rotation's and snapshot-reporting's jobs.
+//! orchestrator-loop's, the chore rotation's and snapshot-reporting's jobs.
 use std::path::Path;
 use std::time::Duration;
 

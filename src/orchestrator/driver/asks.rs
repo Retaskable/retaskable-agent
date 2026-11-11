@@ -111,8 +111,7 @@ impl ProjectLoop {
         self.asks.running.len() as u32
     }
 
-    /// Takes in the asks queued for this project and starts each one that may run, or reports it waiting. Behind the
-    /// `ask-claude` flag: Off is recorded for the command, which refuses `ask`.
+    /// Takes in the asks queued for this project and starts each one that may run, or reports it waiting.
     pub(super) async fn ask_pass(
         &mut self,
         paused: bool,
@@ -121,13 +120,7 @@ impl ProjectLoop {
         host: &Arc<dyn AskHost>,
         shared: &Shared<'_>,
     ) {
-        let on = self.flags.on("ask-claude").await;
-        shared.links.item_commands.set_ask_on(&self.id, on);
-        let queued = shared.links.item_commands.take_asks(&self.id);
-        if !on {
-            return; // Off is today's behaviour: `ask` is refused as a command this agent doesn't take.
-        }
-        self.asks.waiting.extend(queued);
+        self.asks.waiting.extend(shared.links.item_commands.take_asks(&self.id));
         if self.asks.waiting.is_empty() || shared.stopping {
             return;
         }

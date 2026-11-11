@@ -94,7 +94,6 @@ struct Rig {
     log: Log,
     request: RunRequest,
     ends: tokio::sync::mpsc::UnboundedReceiver<RunEnd>,
-    flags: Arc<crate::flags::Flags>,
 }
 
 async fn rig() -> Rig {
@@ -119,18 +118,12 @@ async fn rig() -> Rig {
         log,
         request,
         ends: rx,
-        flags: Arc::new(crate::flags::Flags::fixed(&["chore-rotation", "chore-main-sync"])),
     }
 }
 
 impl Rig {
     async fn run(&mut self) -> RunEnd {
-        let runner = MergeRuns::with(
-            fake_gh(self.dir.path()),
-            tgit,
-            Duration::from_millis(10),
-            self.flags.clone(),
-        );
+        let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, Duration::from_millis(10));
         runner.start(self.request.clone()).unwrap();
         tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
             .await
@@ -263,12 +256,7 @@ async fn a_turn_lost_before_landing_ends_interrupted_without_merging() {
 }
 
 fn start_runner(rig: &Rig) {
-    let runner = MergeRuns::with(
-        fake_gh(rig.dir.path()),
-        tgit,
-        Duration::from_millis(10),
-        rig.flags.clone(),
-    );
+    let runner = MergeRuns::with(fake_gh(rig.dir.path()), tgit, Duration::from_millis(10));
     runner.start(rig.request.clone()).unwrap();
 }
 
@@ -350,18 +338,4 @@ async fn a_roadmap_piece_still_squashes_and_a_non_squash_project_still_refuses_i
     let mut rig = self::rig().await;
     assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
     assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_sync_piece_merges_like_any_other() {
-    let mut rig = rig().await;
-    into_sync(&mut rig, "squash");
-    rig.flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
-    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
-    assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
-
-    let mut rig = self::rig().await;
-    into_sync(&mut rig, "rebase");
-    rig.flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
 }

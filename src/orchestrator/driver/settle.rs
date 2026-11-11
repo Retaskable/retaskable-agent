@@ -41,7 +41,7 @@ const MAX_OWN_FAILURES: u32 = 3;
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
 
-/// How long a release the store keeps refusing stays listed before it is dropped (behind `stuck-release-drop`):
+/// How long a release the store keeps refusing stays listed before it is dropped:
 /// the store has expired the lease by then.
 pub(super) const STUCK_RELEASE_SECS: i64 = 24 * 60 * 60;
 
@@ -68,15 +68,13 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
-    /// The session's process wouldn't start (the text says why), so nothing ran. Behind the
-    /// `own-failure-handling` flag the run keeps its lane and lease, claiming isn't paused, and the loop starts
-    /// the session again after [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure
-    /// goes to `needs_human`. With the flag Off it is a [`NeedsHuman`](Self::NeedsHuman).
+    /// The session's process wouldn't start (the text says why), so nothing ran. The run keeps
+    /// its lane and lease, claiming isn't paused, and the loop starts the session again after
+    /// [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure goes to `needs_human`.
     NotStarted(String),
-    /// The watchdog killed the session for printing nothing (the text says why). Behind the
-    /// `own-failure-handling` flag the run stays `implementing` with its lane and lease, nothing is posted to
-    /// the store, and the loop resumes the session by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row
-    /// goes to `needs_human`. With the flag Off it is a [`Failed`](Self::Failed).
+    /// The watchdog killed the session for printing nothing (the text says why). The run stays
+    /// `implementing` with its lane and lease, nothing is posted to the store, and the loop resumes the session
+    /// by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row goes to `needs_human`.
     /// The text says why; the second is the `session_end` subtype (`killed_for_silence`, or `cursor_time` for
     /// the Cursor time limit, which is handled the same way).
     Silenced(String, &'static str),
@@ -283,18 +281,12 @@ impl ProjectLoop {
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
             return;
         };
-        let note_rules = !self.unreleased.is_empty() && self.flags.on("give-back-note-rules").await;
         for (id, (lease, note)) in self.unreleased.clone() {
-            // With `give-back-note-rules`: the note is trimmed and cut at MAX_NOTE_CHARS, and a blank one sends
-            // the release alone.
-            let note = if note_rules {
-                crate::text::truncate(note.trim(), MAX_NOTE_CHARS)
-            } else {
-                note
-            };
+            // The note is trimmed and cut at MAX_NOTE_CHARS, and a blank one sends the release alone.
+            let note = crate::text::truncate(note.trim(), MAX_NOTE_CHARS);
             // report then release (section 7.5): the note lands in the item's history while the
             // lease still holds. A refusal of either keeps both for the next pass.
-            if !note_rules || !note.is_empty() {
+            if !note.is_empty() {
                 match self.client.report(repo, Some(&token), &id, &lease, &note).await {
                     Ok(()) => {}
                     Err(e) if e.code() == Some("stale_lease") => {}
@@ -372,13 +364,13 @@ impl ProjectLoop {
         self.unreleased.insert(id, (token, note));
     }
 
-    /// With `stuck-release-drop` On, drops an `unreleased` entry (and the skip owed after it) first listed
+    /// Drops an `unreleased` entry (and the skip owed after it) first listed
     /// [`STUCK_RELEASE_SECS`] or more ago, with one `error` event.
     async fn drop_if_stuck(&mut self, id: &str) {
         let Some(&since) = self.unreleased_since.get(id) else {
             return;
         };
-        if self.now_secs() - since < STUCK_RELEASE_SECS || !self.flags.on("stuck-release-drop").await {
+        if self.now_secs() - since < STUCK_RELEASE_SECS {
             return;
         }
         self.unreleased.remove(id);
@@ -422,9 +414,7 @@ impl ProjectLoop {
                     item: Some(item.to_string()),
                     from: Some(state_name(from).into()),
                     to: Some(state_name(to).into()),
-                    claude_on_it: (to == ItemState::NeedsHuman
-                        && self.triage_flag
-                        && self.project.triage == crate::config::OnOff::On)
+                    claude_on_it: (to == ItemState::NeedsHuman && self.project.triage == crate::config::OnOff::On)
                         .then(|| self.claude_on_it(item)),
                     ..Default::default()
                 }),
@@ -529,12 +519,9 @@ impl ProjectLoop {
             shared.engine_limits.hit(record.impl_session_engine, until);
         }
         let mut result = outcome.result;
-        let flag_on = self.flags.on("own-failure-handling").await;
         if let SessionResult::NotStarted(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
-            result = if !flag_on {
-                SessionResult::NeedsHuman(why)
-            } else if count < MAX_OWN_FAILURES {
+            result = if count < MAX_OWN_FAILURES {
                 self.own_failures.insert(item.clone(), count + 1);
                 self.silenced
                     .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
@@ -551,7 +538,7 @@ impl ProjectLoop {
                 record.not_started = false;
             }
         }
-        if flag_on && let SessionResult::Failed(why) = result {
+        if let SessionResult::Failed(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
             result = if count < MAX_OWN_FAILURES {
                 self.own_failures.insert(item.clone(), count + 1);
@@ -574,8 +561,6 @@ impl ProjectLoop {
         if let SessionResult::Silenced(why, subtype) = result {
             let record = self.records.get_mut(&item);
             result = match record {
-                // Off: today's behaviour, the item goes back to the queue.
-                _ if !self.flags.on("own-failure-handling").await => SessionResult::Failed(why),
                 Some(record) if record.silence_kills < MAX_SILENCE_RESUMES => {
                     record.silence_kills += 1;
                     self.silenced

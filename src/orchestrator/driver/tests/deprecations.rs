@@ -65,7 +65,7 @@ async fn store(mood: Mood) -> (String, Seen) {
 }
 
 /// A repo whose `origin/main` has `docs/specs/mobile.md`.
-fn rig_with_spec(base: &str, flag: bool, runs: bool) -> Rig {
+fn rig_with_spec(base: &str, runs: bool) -> Rig {
     let mut rig = rig(2, &[base]);
     rig.go_live();
     let repo = rig._dir.path().join("repo");
@@ -87,12 +87,9 @@ fn rig_with_spec(base: &str, flag: bool, runs: bool) -> Rig {
         );
     }
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = repo.to_string_lossy().into_owned();
     rig.lp(0).project.base_branch = "main".into();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
-        &["chore-deprecated-specs"]
-    } else {
-        &[]
-    }));
+    rig.lp(0).file_project.base_branch = "main".into();
     if runs {
         rig.lp(0).mode = OrchestratorMode::Runs;
     }
@@ -139,7 +136,7 @@ async fn a_passed_date_adds_one_removal_item_under_its_lock_and_the_same_day_add
         ..Default::default()
     })
     .await;
-    let mut rig = rig_with_spec(&base, true, false);
+    let mut rig = rig_with_spec(&base, false);
     minute(&mut rig).await;
     assert_eq!(names(&seen, MINE), ["chore_lock", "add", "chore_lock"]);
     let locks = ops(&seen, &["chore_lock"]);
@@ -160,7 +157,7 @@ async fn in_runs_mode_the_lock_is_taken_with_a_note_and_dropped_while_paused() {
         ..Default::default()
     })
     .await;
-    let mut rig = rig_with_spec(&base, true, true);
+    let mut rig = rig_with_spec(&base, true);
     rig.pause("p0", true);
     minute(&mut rig).await;
     assert_eq!(names(&seen, MINE), ["lock_take", "add", "lock_drop"]);
@@ -173,7 +170,7 @@ async fn in_runs_mode_the_lock_is_taken_with_a_note_and_dropped_while_paused() {
 }
 
 #[tokio::test]
-async fn nothing_is_added_when_not_due_existing_held_flag_off_or_no_day() {
+async fn nothing_is_added_when_not_due_existing_held_or_no_day() {
     let cases = [
         Mood {
             day: "2026-10-01",
@@ -197,19 +194,11 @@ async fn nothing_is_added_when_not_due_existing_held_flag_off_or_no_day() {
     ];
     for mood in cases {
         let (base, seen) = store(mood).await;
-        let mut rig = rig_with_spec(&base, true, false);
+        let mut rig = rig_with_spec(&base, false);
         minute(&mut rig).await;
         assert!(ops(&seen, &["add"]).is_empty());
         assert!(ops(&seen, &["lock_drop"]).is_empty());
     }
-    let (base, seen) = store(Mood {
-        day: "2026-10-02",
-        ..Default::default()
-    })
-    .await;
-    let mut rig = rig_with_spec(&base, false, false);
-    minute(&mut rig).await;
-    assert!(names(&seen, &["jobs_due", "add", "chore_lock"]).is_empty());
 }
 
 #[tokio::test]
@@ -220,7 +209,7 @@ async fn a_conflict_on_add_counts_as_done() {
         ..Default::default()
     })
     .await;
-    let mut rig = rig_with_spec(&base, true, false);
+    let mut rig = rig_with_spec(&base, false);
     minute(&mut rig).await;
     rig.lp(0).deprecations.lock().unwrap().forget_asker();
     minute(&mut rig).await;
@@ -237,7 +226,7 @@ async fn a_failed_check_is_retried_only_after_ten_minutes() {
         ..Default::default()
     };
     let (base, seen) = store(mood).await;
-    let mut rig = rig_with_spec(&base, true, false);
+    let mut rig = rig_with_spec(&base, false);
     minute(&mut rig).await;
     assert_eq!(names(&seen, &["add"]).len(), 1);
     fail.store(false, Ordering::SeqCst);

@@ -341,7 +341,6 @@ impl Machine {
                     lp.deprecations_running.clone(),
                     deprecations::Daily {
                         base: self.round_job(lp),
-                        flags: lp.flags.clone(),
                         state: lp.deprecations.clone(),
                     },
                 )
@@ -465,7 +464,6 @@ impl Machine {
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
         self.write_host_calls().await;
-        let mut gate_on = Vec::new();
         let asked: Vec<_> = self
             .projects
             .iter()
@@ -473,9 +471,6 @@ impl Machine {
             .collect();
         let mut obey_on = Vec::new();
         for (id, flags) in asked {
-            let on = flags.on(crate::command_gate::FLAG).await;
-            self.links.item_commands.set_flag(&id, crate::command_gate::FLAG, on);
-            gate_on.push(on);
             let obey = flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
             self.links
                 .item_commands
@@ -485,8 +480,8 @@ impl Machine {
         let jobs: Vec<_> = self
             .projects
             .iter()
-            .zip(gate_on.iter().zip(&obey_on))
-            .map(|(lp, (&on, &facts))| {
+            .zip(&obey_on)
+            .map(|(lp, &facts)| {
                 tokio::spawn(read(
                     lp.client.clone(),
                     lp.id.clone(),
@@ -494,7 +489,6 @@ impl Machine {
                     lp.repo,
                     self.links.backlog_url.clone(),
                     self.links.keychain.clone(),
-                    on,
                     facts,
                 ))
             })

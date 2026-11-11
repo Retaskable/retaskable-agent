@@ -1,8 +1,7 @@
-//! `approve_commands` (flag `approve-commands-gate`): the owner approves the waiting commands of a project.
+//! `approve_commands` : the owner approves the waiting commands of a project.
 use super::*;
 use crate::allowed_commands::{NOT_WAITING, allowed_commands_file};
 use crate::backlog::settings::StoreSettings;
-use crate::command_gate::FLAG;
 use crate::config::ProjectConfig;
 
 fn store(version: u64, command: &str) -> StoreSettings {
@@ -15,10 +14,10 @@ fn store(version: u64, command: &str) -> StoreSettings {
 }
 
 /// A view with the gate open for "one", the owner "jc", and 1's `old` allowed; version 2 (`new`) waits.
-fn gated(dir: &Path, flag: bool) -> AgentView {
-    let v = view();
+fn gated(dir: &Path) -> AgentView {
+    let mut v = view();
+    v.item_commands = Default::default();
     v.owner.set("jc".into()).unwrap();
-    v.item_commands.set_flag("one", FLAG, flag);
     let gates = v.item_commands.gates();
     gates.open(dir, "one");
     let file = ProjectConfig::default();
@@ -47,7 +46,7 @@ fn nacked(answer: &Value) -> String {
 #[test]
 fn the_owner_approves_a_waiting_change_and_the_new_command_runs() {
     let dir = tempfile::tempdir().unwrap();
-    let v = gated(dir.path(), true);
+    let v = gated(dir.path());
     assert_eq!(checks(&v), vec!["old"]);
     assert_eq!(
         approve(&v, "jc", json!({ "version": 2 })),
@@ -59,7 +58,7 @@ fn the_owner_approves_a_waiting_change_and_the_new_command_runs() {
 #[test]
 fn a_stale_version_or_nothing_waiting_is_a_nack() {
     let dir = tempfile::tempdir().unwrap();
-    let v = gated(dir.path(), true);
+    let v = gated(dir.path());
     assert_eq!(nacked(&approve(&v, "jc", json!({ "version": 1 }))), NOT_WAITING);
     assert_eq!(checks(&v), vec!["old"]);
     approve(&v, "jc", json!({ "version": 2 }));
@@ -69,7 +68,7 @@ fn a_stale_version_or_nothing_waiting_is_a_nack() {
 #[test]
 fn a_missing_or_non_numeric_version_is_a_nack() {
     let dir = tempfile::tempdir().unwrap();
-    let v = gated(dir.path(), true);
+    let v = gated(dir.path());
     nacked(&approve(&v, "jc", json!({})));
     nacked(&approve(&v, "jc", json!({ "version": "2" })));
     assert_eq!(checks(&v), vec!["old"]);
@@ -78,23 +77,15 @@ fn a_missing_or_non_numeric_version_is_a_nack() {
 #[test]
 fn someone_other_than_the_owner_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let v = gated(dir.path(), true);
+    let v = gated(dir.path());
     nacked(&approve(&v, "mallory", json!({ "version": 2 })));
     assert_eq!(checks(&v), vec!["old"]);
 }
 
 #[test]
-fn with_the_flag_off_it_is_not_a_command_yet() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = gated(dir.path(), false);
-    let reason = nacked(&approve(&v, "jc", json!({ "version": 2 })));
-    assert!(reason.starts_with("Not a command this agent takes yet"), "{reason}");
-}
-
-#[test]
 fn a_restart_keeps_the_approved_commands() {
     let dir = tempfile::tempdir().unwrap();
-    let v = gated(dir.path(), true);
+    let v = gated(dir.path());
     approve(&v, "jc", json!({ "version": 2 }));
     let again = crate::allowed_commands::CommandAllowing::new(allowed_commands_file(dir.path(), "one"));
     assert_eq!(again.allowed.unwrap().commands_version, 2);

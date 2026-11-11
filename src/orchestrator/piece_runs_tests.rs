@@ -53,7 +53,6 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         env,
         max_turns: 50,
         models: ModelsConfig::default(),
-        flags: Arc::new(crate::flags::Flags::fixed(&[])),
         machine: "pc".into(),
         sessions: Default::default(),
         local: crate::local_model::LocalModel::off(),
@@ -290,7 +289,10 @@ async fn end_with(r: &Rig) -> RunEnd {
     end_of(&mut s.ends).await
 }
 
-const FIXED: &str = "touch fixed.txt; git add -A; git -c user.name=t -c user.email=t@t commit -qm fixed";
+/// A commit that breaks `BROKEN_BY_BAD` (it passes on the base branch, where the baseline runs it) and one that fixes it.
+const BAD: &str = "touch bad.txt; git add -A; git -c user.name=t -c user.email=t@t commit -qm bad";
+const FIXED: &str = "git rm -q bad.txt; git -c user.name=t -c user.email=t@t commit -qm fixed";
+const BROKEN_BY_BAD: &str = "test ! -f bad.txt";
 
 #[tokio::test]
 async fn passing_checks_let_the_run_end_pr_opened_with_their_evidence() {
@@ -303,13 +305,13 @@ async fn passing_checks_let_the_run_end_pr_opened_with_their_evidence() {
 
 #[tokio::test]
 async fn a_blocking_failure_goes_back_to_the_session_and_a_second_round_passes() {
-    let c = check("needs-fix", "echo still-broken; test -f fixed.txt", true);
-    let r = rig_checked(&[COMMIT, FIXED], vec![c], 3);
+    let c = check("needs-fix", &format!("echo still-broken; {BROKEN_BY_BAD}"), true);
+    let r = rig_checked(&[BAD, FIXED], vec![c], 3);
     let end = end_with(&r).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened);
     let prompt = std::fs::read_to_string(r.root.join("prompt2.txt")).unwrap();
     assert!(
-        prompt.contains("still-broken") && prompt.contains("test -f fixed.txt"),
+        prompt.contains("still-broken") && prompt.contains(BROKEN_BY_BAD),
         "{prompt}"
     );
     assert_eq!(end.result["checks_summary"], "✓ needs-fix");
@@ -327,11 +329,11 @@ async fn a_non_blocking_failure_does_not_block() {
 #[tokio::test]
 async fn failing_past_max_check_rounds_fails_naming_the_checks() {
     let checks = vec![
-        check("unit", "false", true),
-        check("types", "false", true),
-        check("lint", "false", false),
+        check("unit", BROKEN_BY_BAD, true),
+        check("types", BROKEN_BY_BAD, true),
+        check("lint", BROKEN_BY_BAD, false),
     ];
-    let r = rig_checked(&[COMMIT, "true"], checks, 1);
+    let r = rig_checked(&[BAD, "true"], checks, 1);
     let end = end_with(&r).await;
     let RunOutcome::Failed(why) = end.outcome else {
         panic!("{:?}", end.outcome)
@@ -528,13 +530,16 @@ async fn a_piece_on_cursor_codex_or_pi_runs_that_binary() {
 }
 
 #[tokio::test]
-async fn an_unknown_engine_is_still_refused_with_placement_on() {
+async fn an_unknown_engine_is_refused_and_fails_the_run() {
     let r = rig(&[COMMIT], &answer("pr_opened", ""));
     let mut p = piece();
     p["engine"] = json!("steam");
     let (req, mut s) = request(&r, RunKind::Build, p);
     r.starter.start(req).unwrap();
-    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
+    assert_eq!(
+        end_of(&mut s.ends).await.outcome,
+        RunOutcome::Failed("this computer can't run steam sessions yet".into())
+    );
 }
 
 #[tokio::test]
@@ -590,15 +595,10 @@ async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-fn with_flag(r: &mut Rig) {
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
-}
-
 #[tokio::test]
 async fn a_piece_on_an_engine_this_agent_cannot_run_ends_failed_outside_with_nothing_run() {
     for engine in ["steam"] {
-        let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-        with_flag(&mut r);
+        let r = rig(&[COMMIT], &answer("pr_opened", ""));
         let mut p = piece();
         p["engine"] = json!(engine);
         let (req, mut s) = request(&r, RunKind::Build, p);
@@ -661,11 +661,10 @@ async fn a_piece_with_no_engine_follows_the_role() {
 
 #[tokio::test]
 async fn a_limit_ends_limited_naming_the_pieces_engine() {
-    let mut r = rig(
+    let r = rig(
         &[":"],
         r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"limit","session_id":"s"}"#,
     );
-    with_flag(&mut r);
     let mut p = piece();
     p["engine"] = json!("claude");
     let (req, mut s) = request(&r, RunKind::Build, p);
@@ -681,8 +680,7 @@ async fn a_limit_ends_limited_naming_the_pieces_engine() {
 #[tokio::test]
 async fn a_chore_that_asks_questions_ends_failed_and_its_change_is_closed() {
     let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
-    let mut r = rig(&[COMMIT], &answer("needs_clarification", q));
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
+    let r = rig(&[COMMIT], &answer("needs_clarification", q));
     std::fs::write(r.root.join("gh_list"), r#"[{"number":7,"url":"https://x/pull/7"}]"#).unwrap();
     let mut p = piece();
     p["chore"] = json!({ "kind": "tidy" });
@@ -736,10 +734,6 @@ fn ops(log: &Arc<Mutex<Vec<Value>>>) -> Vec<String> {
         .collect()
 }
 
-fn chore_rig(r: &mut Rig) {
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
-}
-
 fn chore_piece(kind: &str) -> Value {
     let mut p = piece();
     p["chore"] = json!({ "kind": kind });
@@ -753,11 +747,10 @@ fn on_store(req: &mut RunRequest, url: &str) {
 #[tokio::test]
 async fn a_tidy_chore_takes_its_lock_then_runs_then_drops_it() {
     let (url, log) = lock_store("free").await;
-    let mut r = rig(
+    let r = rig(
         &[COMMIT],
         &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
     );
-    chore_rig(&mut r);
     let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("tidy"));
     on_store(&mut req, &url);
     let locks = req.context.locks.clone();
@@ -775,8 +768,7 @@ async fn a_tidy_chore_takes_its_lock_then_runs_then_drops_it() {
 #[tokio::test]
 async fn a_lock_held_by_another_ends_interrupted_with_no_session() {
     let (url, log) = lock_store("held").await;
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    chore_rig(&mut r);
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
     let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("tests"));
     on_store(&mut req, &url);
     r.starter.start(req).unwrap();
@@ -789,8 +781,7 @@ async fn a_lock_held_by_another_ends_interrupted_with_no_session() {
 #[tokio::test]
 async fn a_store_error_ends_failed_outside_with_nothing_started() {
     let (url, log) = lock_store("error").await;
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    chore_rig(&mut r);
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
     let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("bugs"));
     on_store(&mut req, &url);
     r.starter.start(req).unwrap();
@@ -806,11 +797,10 @@ async fn a_lock_lost_mid_run_stops_the_push() {
     use crate::backlog::runs::BeatVerdict;
     let (url, log) = lock_store("free").await;
     let wait = format!("touch started; while [ ! -f go ]; do sleep 0.1; done; {COMMIT}");
-    let mut r = rig(
+    let r = rig(
         &[&wait],
         &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
     );
-    chore_rig(&mut r);
     let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("specs"));
     on_store(&mut req, &url);
     let locks = req.context.locks.clone();
@@ -831,21 +821,16 @@ async fn a_lock_lost_mid_run_stops_the_push() {
 async fn a_roadmap_piece_and_a_playtest_fix_send_no_lock_take() {
     for p in [piece(), chore_piece("playtest_fix")] {
         let (url, log) = lock_store("free").await;
-        let mut r = rig(
+        let r = rig(
             &[COMMIT],
             &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
         );
-        chore_rig(&mut r);
         let (mut req, mut s) = request(&r, RunKind::Build, p);
         on_store(&mut req, &url);
         r.starter.start(req).unwrap();
         end_of(&mut s.ends).await;
         assert!(ops(&log).is_empty(), "{:?}", ops(&log));
     }
-}
-
-fn sync_rig(r: &mut Rig, flags: &[&str]) {
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(flags));
 }
 
 fn sync_piece() -> Value {
@@ -866,8 +851,7 @@ async fn sync_run(r: &Rig) -> RunEnd {
 
 #[tokio::test]
 async fn a_main_sync_runs_on_its_own_branch_and_ends_pr_opened_without_a_review() {
-    let mut r = rig(&[COMMIT], &answer("pr_opened", r#","change_title":"Resolved it""#));
-    sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
+    let r = rig(&[COMMIT], &answer("pr_opened", r#","change_title":"Resolved it""#));
     let end = sync_run(&r).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened);
     let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap();
@@ -887,21 +871,8 @@ async fn a_main_sync_runs_on_its_own_branch_and_ends_pr_opened_without_a_review(
 #[tokio::test]
 async fn a_main_sync_that_asks_questions_ends_questions() {
     let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
-    let mut r = rig(&[COMMIT], &answer("needs_clarification", q));
-    sync_rig(&mut r, &["chore-rotation", "chore-main-sync"]);
+    let r = rig(&[COMMIT], &answer("needs_clarification", q));
     assert_eq!(sync_run(&r).await.outcome, RunOutcome::Questions);
-}
-
-#[tokio::test]
-async fn with_the_sync_flag_off_a_sync_piece_runs_like_any_other() {
-    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-    sync_rig(&mut r, &["chore-rotation"]);
-    let end = sync_run(&r).await;
-    assert_eq!(end.outcome, RunOutcome::PrOpened);
-    assert!(origin_has(&r, BRANCH));
-    assert!(r.root.join("reviewer1.txt").exists(), "reviewed as before");
-    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
-    assert!(!prompt.contains("main sync"), "{prompt}");
 }
 
 #[path = "piece_runs_local_tests.rs"]

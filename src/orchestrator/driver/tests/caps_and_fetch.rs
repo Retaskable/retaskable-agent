@@ -59,7 +59,9 @@ async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
     let repos = tempfile::tempdir().unwrap();
     let repo = crate::test_support::repo_with_origin(repos.path());
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = repo.to_string_lossy().into_owned();
     rig.lp(1).project.repo_path = repos.path().join("missing").to_string_lossy().into_owned();
+    rig.lp(1).file_project.repo_path = repos.path().join("missing").to_string_lossy().into_owned();
     rig.machine.fetch().await;
     assert!(rig.lp(1).events().recent().is_empty(), "a dry project isn't fetched");
     rig.go_live();

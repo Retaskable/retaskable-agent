@@ -395,9 +395,8 @@ impl ProjectLoop {
         let session = record.and_then(|r| r.impl_session_id.as_deref());
         if !at_limit && nothing_to_continue(branch, pr_url, session) {
             tracing::info!("{}: {item_id} has nothing to continue from; starting it over", self.id);
-            let redirected = self.flags.on("own-failure-handling").await;
             return self
-                .start_over(item_id, (notes.as_deref(), redirected), (pool, starter), (room, shared))
+                .start_over(item_id, (notes.as_deref(), true), (pool, starter), (room, shared))
                 .await;
         }
         let checks_only = notes.is_none() && !at_limit;
@@ -446,7 +445,7 @@ impl ProjectLoop {
         true
     }
 
-    /// Carries out one Start over (`redirected`: it's a Continue with nothing to continue from and `own-failure-handling` is On, so the note says so).
+    /// Carries out one Start over (`redirected`: it's a Continue with nothing to continue from, so the note says so).
     /// False when it must wait for a lane or a session slot.
     async fn start_over(
         &mut self,
