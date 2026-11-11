@@ -2,7 +2,7 @@
 //! beat the live ones every minute, and end them. It is reached only through [`ProjectLoop::run_pass`]; the claim
 //! path in `project.rs` is separate. What runs and how they are kept live is `crate::runs`; the work of a run
 //! is the [`RunStarter`]'s.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,8 +14,10 @@ use tokio::sync::mpsc;
 use super::project::ProjectLoop;
 use super::{Links, Shared};
 use crate::backlog::Client;
+use crate::backlog::merge::{MergeNext, MergeOutcome};
 use crate::backlog::runs::{
-    ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
+    BeatVerdict, ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer,
+    RunTakeUses, RunWant,
 };
 use crate::config::ProjectConfig;
 use crate::config::{Engine, EngineChoiceConfig, OnOff};
@@ -306,6 +308,19 @@ impl ProjectLoop {
                     Err(e) => self.store_error("run_beat", &e),
                 }
             }
+            let mut verdicts = HashMap::new();
+            for turn in self.run_loop.runs.merge_tokens() {
+                match self.client.merge_beat(repo, token, &turn, "merge").await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        verdicts.insert(turn, BeatVerdict::Stop);
+                    }
+                    Err(e) => self.store_error("merge_beat", &e),
+                }
+            }
+            if !verdicts.is_empty() {
+                self.run_loop.runs.apply_beat(pool, &verdicts, now);
+            }
         }
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
         for mut end in due {
@@ -317,13 +332,25 @@ impl ProjectLoop {
                 }
                 end.result["outside"] = json!(true);
             }
-            let answer = self
-                .client
-                .run_done(repo, token, &end.token, &end.outcome, end.result)
-                .await;
-            if let Err(RunDoneError::Other(e)) = &answer {
-                self.store_error("run_done", e);
-            }
+            let answer = if end.merge {
+                let outcome = MergeOutcome::of_run(&end.outcome, &end.result);
+                match self.client.merge_result(repo, token, &end.token, &outcome).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        self.store_error("merge_result", &e);
+                        Err(RunDoneError::Other(e))
+                    }
+                }
+            } else {
+                let answer = self
+                    .client
+                    .run_done(repo, token, &end.token, &end.outcome, end.result)
+                    .await;
+                if let Err(RunDoneError::Other(e)) = &answer {
+                    self.store_error("run_done", e);
+                }
+                answer
+            };
             self.run_loop.runs.end_sent(&end.token, answer, now);
         }
         self.run_loop.idle = false;
@@ -399,16 +426,77 @@ impl ProjectLoop {
         let start = self.start_rules(pool, shared, now);
         let want = pool.run_want(&self.id, "");
         let lane_free = pool.claim_lane_where(&want, |k| start.lane_may_start(k)).is_some();
-        let kinds: Vec<RunKind> = starter
+        let mut kinds: Vec<RunKind> = starter
             .kinds()
             .into_iter()
             .filter(|k| (lane_free || !needs_lane(*k)) && start.kind_may_start(*k))
             .collect();
+        if kinds.contains(&RunKind::Merge) {
+            // A piece's merge comes from the store's queue, never from `run_take`.
+            kinds.retain(|k| *k != RunKind::Merge);
+            if !self.run_loop.runs.merging() && self.ask_merge((repo, token), pool, starter, (&start, now)).await {
+                return true;
+            }
+        }
         if kinds.is_empty() {
             return false;
         }
         self.ask(repo, token, pool, starter, shared, RunWant::Kinds(&kinds), now)
             .await
+    }
+
+    /// Writes the `claim` event for what the store answered.
+    fn write_claim(&mut self, answer: Value) {
+        self.events.add_in(
+            &self.id,
+            Event::Claim(event::Claim {
+                answer: Some(answer),
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// One `merge_next` for a piece's merge, with its `claim` event. Whether a merge run started.
+    async fn ask_merge(
+        &mut self,
+        (repo, token): (u64, Option<&str>),
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        (start, now): (&StartRules, Instant),
+    ) -> bool {
+        let base = self.project.base_branch.clone();
+        let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
+            Err(e) => {
+                self.store_error("merge_next", &e);
+                (json!("failed"), false)
+            }
+            Ok(MergeNext::Nothing) => (json!("none"), false),
+            Ok(MergeNext::Waiting { place, ahead }) => {
+                (json!({ "waiting": { "place": place, "ahead": ahead } }), false)
+            }
+            Ok(MergeNext::Turn(turn)) => match turn.piece {
+                Some(piece) => {
+                    let answer = json!(piece.title);
+                    let run = Run {
+                        token: turn.token,
+                        kind: RunKind::Merge,
+                        piece,
+                        other: turn.other,
+                    };
+                    (answer, self.begin(repo, token, pool, starter, run, start, now).await)
+                }
+                None => {
+                    // A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
+                    let outcome = MergeOutcome::Released;
+                    if let Err(e) = self.client.merge_result(repo, token, &turn.token, &outcome).await {
+                        self.store_error("merge_result", &e);
+                    }
+                    (json!("passed"), false)
+                }
+            },
+        };
+        self.write_claim(answer);
+        more
     }
 
     /// One `run_take` for `want`, with its `claim` event. Whether a run was handed out and started.
@@ -456,13 +544,7 @@ impl ProjectLoop {
                 (answer, more)
             }
         };
-        self.events.add_in(
-            &self.id,
-            Event::Claim(event::Claim {
-                answer: Some(answer),
-                ..Default::default()
-            }),
-        );
+        self.write_claim(answer);
         more
     }
 
@@ -538,6 +620,10 @@ impl ProjectLoop {
             }
             return false;
         }
+        if run.kind == RunKind::Merge {
+            let name = format!("merge-{}", self.project.base_branch);
+            self.run_loop.runs.locks().add_turn(&run.token, &name, now);
+        }
         if run.kind == RunKind::Merge
             && let Some(pr) = run
                 .piece
@@ -591,6 +677,7 @@ impl ProjectLoop {
         };
         if let Err(why) = starter.start(request) {
             tracing::warn!("{}: the run {} didn't start: {why}", self.id, run.token);
+            self.run_loop.runs.locks().remove(&run.token);
             self.run_loop
                 .runs
                 .end(pool, &run.token, RunOutcome::Interrupted, json!({}), now);

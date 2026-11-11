@@ -1,25 +1,26 @@
-//! The `merge` run (docs/specs/pieces.md sections 3.2 and 3.4): it takes no lane. Under the project's `merge-<base>`
-//! lock it brings the change up to date with its base (`merge_update`), or lands it with `gh pr merge`, and ends
-//! `merged`, `updated`, `conflict` or `failed`. A lock lost before it acts ends the run `interrupted`.
+//! The `merge` run (docs/specs/pieces.md sections 3.2 and 3.4): it takes no lane. The loop starts it with the
+//! store's merge turn (`merge_next`, docs/specs/merge-queue-from-store.md), its token the turn's. It brings the
+//! change up to date with its base (`merge_update`), or lands it with `gh pr merge`, and ends `merged`, `updated`,
+//! `conflict` or `failed`; the loop reports that as `merge_result`. A turn lost before it acts ends the run
+//! `interrupted`.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter};
 use super::watch_run::{Trees, change_ref};
-use crate::backlog::runs::{LockTake, RunKind, RunOutcome};
+use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_watch::gh_out;
 use crate::drafts::land::workflow;
 use crate::merge_update::{Behind, Update, behind, conflict_instruction, sync_conflict_instruction, update_from_base};
 use crate::process_tree::{ProcessTree, with_hook};
 use crate::runs::chore::{ChoreKind, chore_of};
-use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
 
-/// How often a lock another computer holds is asked for again (and a PR GitHub hasn't worked out is read again).
+/// How often a PR GitHub hasn't worked out is read again.
 pub const ASK_EVERY: Duration = Duration::from_secs(15);
 
 type Outcome = Option<(RunOutcome, Value)>;
@@ -27,32 +28,16 @@ type Outcome = Option<(RunOutcome, Value)>;
 pub struct MergeRuns {
     gh: PathBuf,
     git: fn(&Path) -> Command,
-    /// This computer, for the lock's note.
-    machine: String,
     ask_every: Duration,
-    /// How long the lock is asked for; `None` is the `merge` ceiling less its margin.
-    wait: Option<Duration>,
 }
 
 impl MergeRuns {
-    pub fn new(machine: String) -> Arc<Self> {
-        Self::with(PathBuf::from("gh"), crate::git_bin::command, machine, ASK_EVERY, None)
+    pub fn new() -> Arc<Self> {
+        Self::with(PathBuf::from("gh"), crate::git_bin::command, ASK_EVERY)
     }
 
-    pub fn with(
-        gh: PathBuf,
-        git: fn(&Path) -> Command,
-        machine: String,
-        ask_every: Duration,
-        wait: Option<Duration>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            gh,
-            git,
-            machine,
-            ask_every,
-            wait,
-        })
+    pub fn with(gh: PathBuf, git: fn(&Path) -> Command, ask_every: Duration) -> Arc<Self> {
+        Arc::new(Self { gh, git, ask_every })
     }
 }
 
@@ -65,18 +50,12 @@ impl RunStarter for MergeRuns {
         let job = Job {
             gh: self.gh.clone(),
             git: self.git,
-            machine: self.machine.clone(),
             ask_every: self.ask_every,
-            wait: self
-                .wait
-                .unwrap_or_else(|| ceiling(RunKind::Merge).saturating_sub(CEILING_MARGIN)),
             trees: Trees::default(),
+            sync: is_sync(&request),
             request,
-            sync: false,
         };
         tokio::spawn(async move {
-            let mut job = job;
-            job.sync = is_sync(&job.request);
             let token = job.request.token.clone();
             let ends = job.request.ends.clone();
             if let Some((outcome, result)) = job.run().await {
@@ -90,9 +69,7 @@ impl RunStarter for MergeRuns {
 struct Job {
     gh: PathBuf,
     git: fn(&Path) -> Command,
-    machine: String,
     ask_every: Duration,
-    wait: Duration,
     trees: Trees,
     request: RunRequest,
     /// A main sync (`sync_main` chore): merged with a merge commit, never rebased.
@@ -174,48 +151,11 @@ impl Job {
         let Some(branch) = self.request.piece.branch.clone() else {
             return failed("The piece has no branch to merge.");
         };
-        let name = format!("merge-{}", ctx.config.base_branch);
         let piece = super::driver::piece_id(&self.request.piece).to_string();
-        let lock = match self.take_lock(&name, &format!("{piece} on {}", self.machine)).await {
-            Ok(token) => token,
-            Err(end) => return end,
-        };
-        let end = self.land(&lock, &pr, &branch, &piece).await;
-        let _ = ctx.client.lock_drop(ctx.repo, Some(ctx.token.as_str()), &lock).await;
-        ctx.locks.remove(&lock);
+        let turn = self.request.token.clone();
+        let end = self.land(&turn, &pr, &branch, &piece).await;
+        ctx.locks.remove(&turn);
         end
-    }
-
-    /// The lock's token, or how the run ends without it.
-    async fn take_lock(&self, name: &str, note: &str) -> Result<String, Outcome> {
-        let ctx = &self.request.context;
-        let start = Instant::now();
-        loop {
-            if self.stopped() {
-                return Err(None);
-            }
-            let held = ctx
-                .client
-                .lock_take(ctx.repo, Some(ctx.token.as_str()), name, Some(note))
-                .await;
-            match held {
-                Ok(LockTake::Held(token)) => {
-                    ctx.locks.add(&token, name, Instant::now());
-                    return Ok(token);
-                }
-                Ok(LockTake::HeldBy { by, note }) => {
-                    if start.elapsed() >= self.wait {
-                        let note = note.map(|n| format!(" ({n})")).unwrap_or_default();
-                        return Err(failed(format!("The {name} lock stayed held by {by}{note}.")));
-                    }
-                }
-                Err(e) => return Err(failed(format!("Couldn't take the {name} lock: {e}"))),
-            }
-            if winding_down() {
-                return Err(Some((RunOutcome::Interrupted, json!({}))));
-            }
-            tokio::time::sleep(self.ask_every).await;
-        }
     }
 
     /// The loop has ended the run: a beat's `stop` or the ceiling, seen whether or not a process was running.

@@ -187,11 +187,11 @@ pub struct ProjectLoop {
     #[cfg(test)]
     pub(super) clock: Option<i64>,
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
-    /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in the state file.
+    /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in memory only: a restart forgets it and the store still lists the item for a person to skip again.
     pub(super) unskipped: std::collections::BTreeSet<String>,
-    /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`.
+    /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`. In memory only.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
-    /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`.
+    /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`. In memory only.
     pub(super) playtests_seen: Option<String>,
     pub(super) release_owed: bool,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
@@ -326,10 +326,10 @@ impl ProjectLoop {
             unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
             #[cfg(test)]
             clock: None,
-            unskipped: store.unskipped(),
-            unanswered: store.unanswered(),
-            playtests_seen: store.playtests_seen(),
-            release_owed: store.release_owed(),
+            unskipped: Default::default(),
+            unanswered: Default::default(),
+            playtests_seen: None,
+            release_owed: false,
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
@@ -589,10 +589,6 @@ impl ProjectLoop {
         self.store.set_unreleased(&self.unreleased);
         self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
         self.store.set_unreleased_since(&self.unreleased_since);
-        self.store.set_unskipped(&self.unskipped);
-        self.store.set_unanswered(&self.unanswered);
-        self.store
-            .set_playtests_seen(self.playtests_seen.as_deref(), self.release_owed);
         self.store.set_unparked(&self.unparked);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);

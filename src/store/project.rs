@@ -19,10 +19,18 @@ use crate::vet::VetRecord;
 const STATE_FILE: &str = "state.json";
 
 /// Top-level keys an older agent kept locally; items and drafts live only in the shared backlog
-/// store now (local-state-diet.md section 1), so these are dropped wherever found. There's no
+/// store now (local-state-diet.md section 1), and so do answers and skips owed to it (they are kept in
+/// memory only), so these are dropped wherever found. There's no
 /// time-based trimming left to do here (timelines and merged drafts' files are the store's), so,
 /// unlike the TypeScript `trimState(data, now)`, this takes no `now`.
-const LEGACY_KEYS: [&str; 2] = ["items", "drafts"];
+const LEGACY_KEYS: [&str; 6] = [
+    "items",
+    "drafts",
+    "unskipped",
+    "unanswered",
+    "playtestsSeen",
+    "releaseOwed",
+];
 
 /// One leased item's run, as the TS agent's item record keeps it (`state`, `lane`, `implSessionId`,
 /// `branch`, `slice`): enough to take the item back after a restart.
@@ -263,54 +271,6 @@ impl Store {
             .insert("unreleased_since".to_string(), serde_json::json!(since));
     }
 
-    /// Items a person skipped here whose `skip` the store hasn't taken yet (sent after their `release`, again
-    /// on later passes until it answers). Empty when missing.
-    pub fn unskipped(&self) -> std::collections::BTreeSet<String> {
-        self.data
-            .get("unskipped")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
-    }
-
-    /// Replaces `state.unskipped`. Doesn't save on its own; call `save` after.
-    pub fn set_unskipped(&mut self, unskipped: &std::collections::BTreeSet<String>) {
-        self.data.insert("unskipped".to_string(), serde_json::json!(unskipped));
-    }
-
-    /// A person's playtest answers for the store's try-out queue that the store hasn't taken yet: the id the
-    /// command named to (passed, notes). Sent again on later passes. Empty when missing.
-    pub fn unanswered(&self) -> std::collections::BTreeMap<String, (bool, Option<String>)> {
-        self.data
-            .get("unanswered")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
-    }
-
-    /// Replaces `state.unanswered`. Doesn't save on its own; call `save` after.
-    pub fn set_unanswered(&mut self, unanswered: &std::collections::BTreeMap<String, (bool, Option<String>)>) {
-        self.data
-            .insert("unanswered".to_string(), serde_json::json!(unanswered));
-    }
-
-    /// The `playtests` value (config.json's) this project last saw, as its config name; `None` before the first pass.
-    pub fn playtests_seen(&self) -> Option<String> {
-        self.data
-            .get("playtestsSeen")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    }
-
-    /// Whether a `releasePlaytests` is owed to the store (`playtests` switched to off, not yet taken).
-    pub fn release_owed(&self) -> bool {
-        self.data.get("releaseOwed").and_then(|v| v.as_bool()).unwrap_or(false)
-    }
-
-    /// Replaces `state.playtestsSeen` and `state.releaseOwed`. Doesn't save on its own; call `save` after.
-    pub fn set_playtests_seen(&mut self, seen: Option<&str>, owed: bool) {
-        self.data.insert("playtestsSeen".to_string(), serde_json::json!(seen));
-        self.data.insert("releaseOwed".to_string(), serde_json::json!(owed));
-    }
-
     /// Leases let go while their item waits, which the store hasn't taken yet: item id to
     /// (lease token, what it waits for, the item's state). Sent again on later passes.
     pub fn unparked(&self) -> std::collections::BTreeMap<String, (String, String, String)> {
@@ -528,6 +488,18 @@ mod tests {
         let twice = read(dir.path());
         assert_eq!(once, twice);
         assert_eq!(once, r#"{"kept":true}"#);
+    }
+
+    #[test]
+    fn keys_that_cached_what_the_store_holds_are_dropped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"unskipped":["a"],"unanswered":{"7":[true,null]},"playtestsSeen":"off","releaseOwed":true,"usage":{"pct":1}}"#,
+        )
+        .unwrap();
+        Store::load(dir.path()).unwrap();
+        assert_eq!(read(dir.path()), r#"{"usage":{"pct":1}}"#);
     }
 
     #[test]

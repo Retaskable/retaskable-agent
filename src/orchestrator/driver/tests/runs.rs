@@ -12,6 +12,10 @@ struct Script {
     log: Vec<Value>,
     drop_fails: bool,
     takes: VecDeque<Value>,
+    /// What `merge_next` answers, in turn (`null` once spent).
+    merges: VecDeque<Value>,
+    /// `merge_beat` says the turn is no longer held.
+    turn_lost: bool,
     beat: Value,
     /// A refusal code for `run_done`.
     done_refused: Option<&'static str>,
@@ -46,6 +50,9 @@ async fn store() -> (String, Shared_) {
                     "runs_drop" if s.drop_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
                     "run_take" => ok(s.takes.pop_front().unwrap_or(Value::Null)),
                     "run_beat" => ok(s.beat.clone()),
+                    "merge_next" => ok(s.merges.pop_front().unwrap_or(Value::Null)),
+                    "merge_beat" => ok(json!({ "held": !s.turn_lost })),
+                    "merge_result" => ok(json!({ "held": true })),
                     "lock_take" => ok(json!({ "held": true, "token": "L1" })),
                     "run_done" if s.done_refused.is_some() => {
                         let code = s.done_refused.unwrap();
@@ -570,38 +577,100 @@ async fn a_beat_stop_between_polls_ends_the_run_and_starts_no_more_gh() {
     assert_eq!(done[0]["outcome"], json!("interrupted"));
 }
 
+fn turn(token: &str) -> Value {
+    json!({ "turn": { "token": token, "leaseMs": 300000, "entry": "e",
+        "piece": { "id": format!("piece-{token}"), "title": token } } })
+}
+
 #[tokio::test]
-async fn a_merge_run_is_asked_for_with_no_lane_free_and_its_lock_beats_with_it() {
+async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_with_merge_beat() {
     let (mut rig, script) = setup(1).await;
     let starter = FakeRuns::new(&[RunKind::Build, RunKind::Merge]);
     let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([run("b1", "build"), run("m1", "merge")]);
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
+    script.lock().unwrap().merges = VecDeque::from([turn("m1")]);
     pass(&mut rig, &starter, t0).await;
     pass(&mut rig, &starter, t0).await;
-    let takes = script.lock().unwrap().args("run_take");
-    assert_eq!(takes[1]["kinds"], json!(["merge"]), "the build's lane is the only one");
-    assert_eq!(starter.started(), vec!["b1", "m1"]);
-
-    // The merge run takes its lock through the handle the loop gave it.
-    let context = starter.started.lock().unwrap()[1].context.clone();
-    let taken = context
-        .client
-        .lock_take(
-            context.repo,
-            Some(&context.token),
-            "merge-main",
-            Some("piece-m1 on here"),
-        )
-        .await
-        .unwrap();
-    let crate::backlog::runs::LockTake::Held(lock) = taken else {
-        panic!("{taken:?}")
-    };
-    context.locks.add(&lock, "merge-main", Instant::now());
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(s.args("merge_next")[0], json!({ "base": "", "piece": true }));
+        assert!(s.args("run_take").iter().all(|t| t["kinds"] != json!(["merge"])));
+        assert_eq!(
+            s.args("run_take")[0]["kinds"],
+            json!(["build"]),
+            "run_take never asks for a merge"
+        );
+    }
+    assert_eq!(starter.started(), vec!["m1", "b1"]);
+    let context = starter.started.lock().unwrap()[0].context.clone();
+    assert!(context.locks.held("m1"), "the turn is in the run's locks");
 
     pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
-    let beats = script.lock().unwrap().args("run_beat");
-    assert_eq!(beats, vec![json!({ "tokens": ["b1", "m1", "L1"] })]);
+    let s = script.lock().unwrap();
+    assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["b1"] })]);
+    assert_eq!(s.args("merge_beat"), vec![json!({ "token": "m1", "phase": "merge" })]);
+    assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
+}
+
+#[tokio::test]
+async fn a_waiting_answer_starts_nothing_and_is_asked_again() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    let t0 = Instant::now();
+    script.lock().unwrap().merges = VecDeque::from([json!({ "waiting": { "place": 2, "ahead": 1 } }), turn("m1")]);
+    pass(&mut rig, &starter, t0).await;
+    assert!(starter.started().is_empty());
+    pass(&mut rig, &starter, t0 + Duration::from_secs(15)).await;
+    assert_eq!(starter.started(), vec!["m1"]);
+}
+
+#[tokio::test]
+async fn a_lost_turn_stops_the_run_and_a_finished_one_ends_with_merge_result_not_run_done() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    let t0 = Instant::now();
+    script.lock().unwrap().merges = VecDeque::from([turn("m1"), turn("m2")]);
+    pass(&mut rig, &starter, t0).await;
+    script.lock().unwrap().turn_lost = true;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
+    let context = starter.started.lock().unwrap()[0].context.clone();
+    assert!(!context.locks.held("m1"));
+    assert!(starter.started.lock().unwrap()[0].stop.stopped());
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(
+            s.args("merge_result"),
+            vec![json!({ "token": "m1", "outcome": "released" })]
+        );
+        assert!(s.args("run_done").is_empty());
+    }
+
+    script.lock().unwrap().turn_lost = false;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(61)).await;
+    let request = starter.started.lock().unwrap()[1].clone();
+    request.ends.send(RunEnd {
+        token: "m2".into(),
+        outcome: RunOutcome::Merged,
+        result: json!({ "commit": "abc" }),
+    });
+    pass(&mut rig, &starter, t0 + Duration::from_secs(62)).await;
+    let s = script.lock().unwrap();
+    let results = s.args("merge_result");
+    assert_eq!(
+        results[1],
+        json!({ "token": "m2", "outcome": "merged", "mergeCommit": "abc" })
+    );
+    assert!(s.args("run_done").is_empty());
+}
+
+#[tokio::test]
+async fn a_store_that_cant_be_asked_for_a_turn_starts_no_merge() {
+    let (rig_, script) = setup(1).await;
+    let mut rig = rig_;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    script.lock().unwrap().merges = VecDeque::from([json!({ "oops": 1 })]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    assert!(starter.started().is_empty());
 }
 
 #[tokio::test]

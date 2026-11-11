@@ -1,6 +1,7 @@
 //! `merge` runs against a fake store, a fake `gh` and temp git repos (a bare origin and a clone).
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use axum::{Json, Router, extract::State, routing::post};
 
@@ -13,21 +14,15 @@ use crate::test_support::{git as tgit, repo_with_origin, run as trun, write_exec
 
 type Log = Arc<Mutex<(Vec<Value>, bool)>>;
 
-/// A store whose `lock_take` gives token `L1`, or says `other-pc` holds it when the flag is set.
-async fn store(held_by_other: bool) -> (String, Log) {
-    let log: Log = Arc::new(Mutex::new((Vec::new(), held_by_other)));
+/// A store that answers every op with null, recording each request.
+async fn store() -> (String, Log) {
+    let log: Log = Arc::new(Mutex::new((Vec::new(), false)));
     let app = Router::new()
         .route(
             "/v1/repos/{id}/ops",
             post(|State(s): State<Log>, Json(body): Json<Value>| async move {
-                let mut s = s.lock().unwrap();
-                s.0.push(body.clone());
-                let value = match body["op"].as_str().unwrap() {
-                    "lock_take" if s.1 => json!({ "held": false, "by": "other-pc", "note": "piece-x" }),
-                    "lock_take" => json!({ "held": true, "token": "L1" }),
-                    _ => Value::Null,
-                };
-                Json(json!({ "value": value }))
+                s.lock().unwrap().0.push(body);
+                Json(json!({ "value": Value::Null }))
             }),
         )
         .with_state(log.clone());
@@ -101,11 +96,11 @@ struct Rig {
     ends: tokio::sync::mpsc::UnboundedReceiver<RunEnd>,
 }
 
-async fn rig(held_by_other: bool) -> Rig {
+async fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let repo = repo_with_feat(dir.path());
     set(dir.path(), "view", MERGEABLE);
-    let (url, log) = store(held_by_other).await;
+    let (url, log) = store().await;
     let (ends, rx) = RunEndSender::channel();
     let config = ProjectConfig {
         repo_path: repo.display().to_string(),
@@ -115,6 +110,8 @@ async fn rig(held_by_other: bool) -> Rig {
     };
     let piece = serde_json::from_value(json!({ "id": "p1", "title": "t", "branch": "feat", "change": 7 })).unwrap();
     let request = lane_free_request("M1", RunKind::Merge, piece, config, &url, ends);
+    // The loop records the turn it started the run with.
+    request.context.locks.add_turn("M1", "merge-main", Instant::now());
     Rig {
         dir,
         repo,
@@ -125,14 +122,8 @@ async fn rig(held_by_other: bool) -> Rig {
 }
 
 impl Rig {
-    async fn run(&mut self, wait: Option<Duration>) -> RunEnd {
-        let runner = MergeRuns::with(
-            fake_gh(self.dir.path()),
-            tgit,
-            "here".into(),
-            Duration::from_millis(10),
-            wait,
-        );
+    async fn run(&mut self) -> RunEnd {
+        let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, Duration::from_millis(10));
         runner.start(self.request.clone()).unwrap();
         tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
             .await
@@ -140,10 +131,12 @@ impl Rig {
             .unwrap()
     }
 
-    fn assert_lock_dropped(&self) {
-        let drops = ops(&self.log, "lock_drop");
-        assert_eq!(drops.len(), 1);
-        assert_eq!(drops[0]["args"]["token"], "L1");
+    /// The turn is let go of here and no lock is taken or dropped: the loop reports `merge_result`.
+    fn assert_turn_released(&self) {
+        assert_eq!(self.request.context.locks.count(), 0);
+        for op in ["lock_take", "lock_drop", "run_done", "run_beat"] {
+            assert!(ops(&self.log, op).is_empty(), "{op}");
+        }
     }
 
     fn origin_head(&self, branch: &str) -> String {
@@ -158,8 +151,8 @@ impl Rig {
 
 #[tokio::test]
 async fn a_mergeable_up_to_date_change_is_squash_merged_and_ends_merged_with_the_commit() {
-    let mut rig = rig(false).await;
-    let end = rig.run(None).await;
+    let mut rig = rig().await;
+    let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Merged);
     assert_eq!(end.result, json!({ "commit": "abc123" }));
     let calls = calls(rig.dir.path());
@@ -167,165 +160,115 @@ async fn a_mergeable_up_to_date_change_is_squash_merged_and_ends_merged_with_the
         calls.contains(&"pr merge 7 --squash --delete-branch".to_string()),
         "{calls:?}"
     );
-    let take = &ops(&rig.log, "lock_take")[0]["args"];
-    assert_eq!(take["name"], "merge-main");
-    assert_eq!(take["note"], "p1 on here");
-    rig.assert_lock_dropped();
+    rig.assert_turn_released();
 }
 
 #[tokio::test]
 async fn a_behind_change_is_updated_and_pushed_without_asking_gh() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     commit(&rig.repo, "base.txt", "base");
     trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
     let before = rig.origin_head("feat");
-    let end = rig.run(None).await;
+    let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Updated);
     let after = rig.origin_head("feat");
     assert_ne!(before, after);
     assert_eq!(end.result["head"], after);
     assert!(calls(rig.dir.path()).is_empty());
-    rig.assert_lock_dropped();
+    rig.assert_turn_released();
 }
 
 #[tokio::test]
 async fn a_conflicting_change_ends_conflict_with_the_instruction() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     trun(tgit(&rig.repo).args(["checkout", "-q", "main"]));
     commit(&rig.repo, "feat.txt", "main's");
     trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
-    let end = rig.run(None).await;
+    let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Conflict);
     let text = end.result["instruction"].as_str().unwrap();
     assert!(
         text.contains("Merge origin/main") && text.contains("- feat.txt"),
         "{text}"
     );
-    rig.assert_lock_dropped();
+    rig.assert_turn_released();
 }
 
 #[tokio::test]
 async fn a_conflict_gh_sees_and_a_refusal_to_merge_both_update_the_change() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     set(
         rig.dir.path(),
         "view",
         r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","state":"OPEN"}"#,
     );
     // Nothing to merge in, so the update is a no-op push: `updated`.
-    assert_eq!(rig.run(None).await.outcome, RunOutcome::Updated);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Updated);
 
-    let mut rig = self::rig(false).await;
+    let mut rig = self::rig().await;
     set(rig.dir.path(), "merge-code", "1");
     set(
         rig.dir.path(),
         "merge-err",
         "Head branch is not up to date with the base branch",
     );
-    assert_eq!(rig.run(None).await.outcome, RunOutcome::Updated);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Updated);
     assert!(calls(rig.dir.path()).iter().any(|c| c.starts_with("pr merge")));
 }
 
 #[tokio::test]
 async fn an_already_merged_change_ends_merged_and_a_closed_one_fails() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     set(
         rig.dir.path(),
         "view",
         r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","state":"MERGED"}"#,
     );
-    let end = rig.run(None).await;
+    let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Merged);
     assert!(!calls(rig.dir.path()).iter().any(|c| c.starts_with("pr merge")));
 
-    let mut rig = self::rig(false).await;
+    let mut rig = self::rig().await;
     set(
         rig.dir.path(),
         "view",
         r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","state":"CLOSED"}"#,
     );
-    assert!(matches!(rig.run(None).await.outcome, RunOutcome::Failed(_)));
-    rig.assert_lock_dropped();
+    assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
+    rig.assert_turn_released();
 }
 
 #[tokio::test]
-async fn a_lock_held_by_another_computer_is_asked_for_again_then_fails_naming_who_holds_it() {
-    let mut rig = rig(true).await;
-    let end = rig.run(Some(Duration::from_millis(100))).await;
-    let RunOutcome::Failed(why) = end.outcome else {
-        panic!("{:?}", end.outcome)
-    };
-    assert!(why.contains("other-pc") && why.contains("piece-x"), "{why}");
-    assert!(ops(&rig.log, "lock_take").len() >= 2);
-    assert!(calls(rig.dir.path()).is_empty());
-    assert!(ops(&rig.log, "lock_drop").is_empty(), "there was no lock to drop");
-}
-
-#[tokio::test]
-async fn a_lock_lost_before_landing_ends_interrupted_without_merging() {
-    let mut rig = rig(false).await;
+async fn a_turn_lost_before_landing_ends_interrupted_without_merging() {
+    let mut rig = rig().await;
     set(rig.dir.path(), "slow", "");
     let locks = rig.request.context.locks.clone();
     let stopper = tokio::spawn(async move {
-        loop {
-            if let Some(token) = locks.tokens().first() {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                locks.apply_beat(&[(token.clone(), BeatVerdict::Stop)].into());
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        locks.apply_beat(&[("M1".to_string(), BeatVerdict::Stop)].into());
     });
-    let end = rig.run(None).await;
+    let end = rig.run().await;
     stopper.await.unwrap();
     assert_eq!(end.outcome, RunOutcome::Interrupted);
     assert!(!calls(rig.dir.path()).iter().any(|c| c.starts_with("pr merge")));
-    rig.assert_lock_dropped();
+    rig.assert_turn_released();
     assert_eq!(rig.request.context.locks.count(), 0);
 }
 
 fn start_runner(rig: &Rig) {
-    let runner = MergeRuns::with(
-        fake_gh(rig.dir.path()),
-        tgit,
-        "here".into(),
-        Duration::from_millis(10),
-        None,
-    );
+    let runner = MergeRuns::with(fake_gh(rig.dir.path()), tgit, Duration::from_millis(10));
     runner.start(rig.request.clone()).unwrap();
 }
 
 #[tokio::test]
-async fn a_stop_while_waiting_for_the_lock_takes_nothing_and_merges_nothing() {
-    let mut rig = rig(true).await;
-    start_runner(&rig);
-    while ops(&rig.log, "lock_take").len() < 2 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    // The loop ended the run (no process of it was running), and then the other computer let the lock go.
-    rig.request.stop.set();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let asked = ops(&rig.log, "lock_take").len();
-    rig.log.lock().unwrap().1 = false;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(ops(&rig.log, "lock_take").len() <= asked + 1);
-    assert_eq!(rig.request.context.locks.count(), 0, "no lock was taken");
-    assert!(calls(rig.dir.path()).is_empty(), "no gh ran");
-    assert!(rig.ends.try_recv().is_err(), "the loop already ended the run");
-}
-
-#[tokio::test]
-async fn a_stop_between_processes_drops_the_lock_and_merges_nothing() {
-    let mut rig = rig(false).await;
+async fn a_stop_between_processes_lets_the_turn_go_and_merges_nothing() {
+    let mut rig = rig().await;
     set(rig.dir.path(), "slow", "");
     start_runner(&rig);
-    while rig.request.context.locks.count() == 0 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
     rig.request.stop.set();
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(!calls(rig.dir.path()).iter().any(|c| c.starts_with("pr merge")));
-    rig.assert_lock_dropped();
+    rig.assert_turn_released();
     assert_eq!(rig.request.context.locks.count(), 0);
     assert!(rig.ends.try_recv().is_err());
 }
@@ -342,9 +285,9 @@ fn into_sync(rig: &mut Rig, method: &str) {
 #[tokio::test]
 async fn a_main_sync_merges_with_a_merge_commit_whatever_the_projects_method() {
     for method in ["squash", "rebase"] {
-        let mut rig = rig(false).await;
+        let mut rig = rig().await;
         into_sync(&mut rig, method);
-        let end = rig.run(None).await;
+        let end = rig.run().await;
         assert_eq!(end.outcome, RunOutcome::Merged, "{method}");
         let calls = calls(rig.dir.path());
         assert!(
@@ -356,7 +299,7 @@ async fn a_main_sync_merges_with_a_merge_commit_whatever_the_projects_method() {
 
 #[tokio::test]
 async fn a_refusal_of_merge_commits_ends_waiting_on_a_person() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     into_sync(&mut rig, "squash");
     set(rig.dir.path(), "merge-code", "1");
     set(
@@ -364,20 +307,20 @@ async fn a_refusal_of_merge_commits_ends_waiting_on_a_person() {
         "merge-err",
         "Merge commits are not allowed on this repository.",
     );
-    let end = rig.run(None).await;
+    let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Questions);
     let q = end.result["questions"][0]["question"].as_str().unwrap();
     assert_eq!(q, "Allow merge commits in the repo's settings, or sync by hand");
-    rig.assert_lock_dropped();
+    rig.assert_turn_released();
 }
 
 #[tokio::test]
 async fn a_conflicting_sync_is_told_to_merge_the_base_in_again_never_to_rebase() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     into_sync(&mut rig, "squash");
     commit(&rig.repo, "feat.txt", "main's");
     trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
-    let end = rig.run(None).await;
+    let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Conflict);
     let text = end.result["instruction"].as_str().unwrap();
     assert!(
@@ -388,11 +331,11 @@ async fn a_conflicting_sync_is_told_to_merge_the_base_in_again_never_to_rebase()
 
 #[tokio::test]
 async fn a_roadmap_piece_still_squashes_and_a_non_squash_project_still_refuses_it() {
-    let mut rig = rig(false).await;
+    let mut rig = rig().await;
     rig.request.context.config.github = Some(json!({ "mergeMethod": "rebase" }));
-    assert!(matches!(rig.run(None).await.outcome, RunOutcome::Failed(_)));
+    assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
     assert!(calls(rig.dir.path()).is_empty());
-    let mut rig = self::rig(false).await;
-    assert_eq!(rig.run(None).await.outcome, RunOutcome::Merged);
+    let mut rig = self::rig().await;
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
     assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
 }

@@ -434,7 +434,7 @@ async fn a_first_run_already_off_sends_nothing() {
 }
 
 #[tokio::test]
-async fn a_failed_release_is_sent_again_then_stops_and_survives_a_restart() {
+async fn a_failed_release_is_sent_again_then_stops_and_is_not_kept_in_the_state_file() {
     let (base, state) = release_store(1, 3).await;
     let mut rig = live_rig(&base);
     rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
@@ -444,9 +444,8 @@ async fn a_failed_release_is_sent_again_then_stops_and_survives_a_restart() {
     rig.machine.pass().await;
     assert_eq!(state.lock().unwrap().0, 1);
     assert!(rig.lp(0).release_owed);
-    let reloaded = Store::load(&rig._dir.path().join("0")).unwrap();
-    assert!(reloaded.release_owed(), "the owed release is in the state file");
-    assert_eq!(reloaded.playtests_seen().as_deref(), Some("off"));
+    let saved = std::fs::read_to_string(rig._dir.path().join("0").join("state.json")).unwrap_or_default();
+    assert!(!saved.contains("releaseOwed") && !saved.contains("playtestsSeen"));
     rig.machine.pass().await;
     assert_eq!(state.lock().unwrap().0, 2);
     assert!(!rig.lp(0).release_owed);
