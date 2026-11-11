@@ -68,6 +68,7 @@ pub mod repo_gitlab;
 pub mod repo_local;
 pub mod repo_picker;
 pub mod restart;
+pub mod testflight;
 pub mod review_context;
 pub mod review_run;
 pub mod reviewer;
