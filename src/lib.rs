@@ -85,6 +85,7 @@ pub mod smoke;
 pub mod spec_items;
 pub mod spec_parts;
 pub mod spec_split;
+pub mod keep_awake;
 pub mod start_at_login;
 pub mod store;
 mod sync;

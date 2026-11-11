@@ -289,3 +289,15 @@ fn no_hideable_item_has_a_submenu() {
         }
     }
 }
+
+#[test]
+fn keep_awake_is_shown_ticked_only_where_the_computer_can_be_held() {
+    let mut i = input(vec![cloud("Staging", LinkState::NotLinked)]);
+    assert!(get(&tray_menu(&i), "keep_awake").hidden);
+    i.keep_awake = Some(false);
+    let m = tray_menu(&i);
+    assert!(!get(&m, "keep_awake").hidden && !get(&m, "keep_awake").checked);
+    assert_eq!(get(&m, "keep_awake").action, Some(Action::ToggleKeepAwake));
+    i.keep_awake = Some(true);
+    assert!(get(&tray_menu(&i), "keep_awake").checked);
+}

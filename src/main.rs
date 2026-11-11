@@ -608,6 +608,9 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     }
     // Card flag `tray-icon-menu`: Off keeps today's console-only agent.
     let quit_now = Arc::new(tokio::sync::Notify::new());
+    // tray.md section 4.2: Keep this computer awake comes back as it was left.
+    let keep_awake = Arc::new(retaskable_agent::keep_awake::KeepAwake::new(dir));
+    keep_awake.tick();
     if retaskable_agent::flags::Flags::from_env().on("tray-icon-menu").await {
         let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
         let backlog_url = backlog::url(env);
@@ -628,6 +631,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             exit: exit.clone(),
             quit_now: quit_now.clone(),
             terminal_menu: retaskable_agent::flags::Flags::from_env().on("terminal-menu").await,
+            keep_awake: Some(keep_awake.clone()),
             link_backlog: Arc::new(move || {
                 tokio::spawn(auto_link_backlog(
                     backlog_links.clone(),

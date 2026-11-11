@@ -88,6 +88,7 @@ async fn up(on_stopped: impl FnOnce(String) + Send + 'static) -> Up {
         quit: quits.clone(),
         settings: Arc::new(Nothing),
         login: None,
+        keep_awake: None,
         log_file: None,
         windows: false,
         link_backlog: Arc::new(|| {}),

@@ -186,6 +186,7 @@ pub(crate) fn rig(release: bool) -> Rig {
         quit: quit.clone(),
         settings: Arc::new(FakeSettings(AtomicUsize::new(0))),
         login: release.then(|| login.clone() as Arc<dyn Login>),
+        keep_awake: None,
         log_file: release.then(|| PathBuf::from("agent.log")),
         windows: false,
         link_backlog: Arc::new(move || {
