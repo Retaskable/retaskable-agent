@@ -14,7 +14,9 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::project::ProjectLoop;
+use super::signed_out::signed_out;
 use super::start_gate::StartGate;
+use crate::ask::classify::Classified;
 use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
@@ -26,6 +28,8 @@ use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::engines::Role;
+use crate::ideas::Ideas;
+use crate::ideas::bug_sort::sort;
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
@@ -72,6 +76,10 @@ pub trait DraftHost: Send + Sync {
     fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
+    /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
+    fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
+        Box::pin(async { Classified::Unavailable })
+    }
 }
 
 /// The draft this project is drafting: only ids, never the draft itself.
@@ -142,7 +150,19 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
+        let mut claim = claim;
         let resume = claim.draft.session_id.is_some();
+        // A person's idea that is really a bug is moved to Bugs and planned as a fix; never blocks the draft.
+        if !resume && !signed_out(shared) {
+            let ideas = Ideas {
+                client: &self.client,
+                repo_id: repo,
+                token: Some(&token),
+            };
+            let project = self.project.clone();
+            let host = host.clone();
+            sort(&ideas, &mut claim.draft, |text| host.classify(&project, text)).await;
+        }
         // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
         let engine = if resume { None } else { engine };
         if resume && gate.role_start(self, shared, Role::Drafter, false).is_none() {

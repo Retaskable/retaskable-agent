@@ -190,14 +190,13 @@ impl Store {
         self.data.insert("usage".to_string(), usage);
     }
 
-    /// The last-saved `state.usage`, if any (`None` when there's no reading yet, which
-    /// [`crate::tiers::implementer_tier`] treats as a full window).
+    /// The last-saved `state.usage`, if any (`None` when there's no reading yet).
     pub fn usage(&self) -> Option<Value> {
         self.data.get("usage").cloned()
     }
 
     /// Replaces `state.weekUsage`, the last reading that carried the weekly window (kept apart from `usage`,
-    /// which `implementer_tier` reads). Doesn't save on its own; call `save` after.
+    /// which is the one sent up). Doesn't save on its own; call `save` after.
     pub fn set_week_usage(&mut self, usage: Value) {
         self.data.insert("weekUsage".to_string(), usage);
     }

@@ -39,7 +39,6 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
         choice,
         env,
         50,
-        ModelsConfig::default(),
         150_000,
         cursor_models,
         Default::default(),
@@ -211,6 +210,7 @@ async fn a_start_over_job_starts_claude_on_opus() {
     let rig = rig(EngineChoiceConfig::default(), "", &[]);
     let (mut request, mut rx) = request(EngineId::Claude, false);
     request.attempt = 1;
+    request.item.tier = Some("opus".into());
     rig.starter.start(request).unwrap();
     tokio::time::timeout(Duration::from_secs(120), rx.recv())
         .await

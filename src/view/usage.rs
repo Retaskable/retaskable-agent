@@ -8,7 +8,6 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::AgentView;
-use crate::config::ModelsConfig;
 use crate::paths;
 use crate::store::Store;
 use crate::tiers;
@@ -35,17 +34,7 @@ fn five_hour(usage: &Value) -> Option<&Value> {
 }
 
 /// The window fields, tiers and flags of `usage` at `now` (epoch seconds).
-pub(super) fn usage_view(
-    five: Option<&Value>,
-    week: Option<&Value>,
-    models: &ModelsConfig,
-    now: i64,
-    local_up: Option<bool>,
-    at_limit: bool,
-) -> Value {
-    let local = local_up == Some(true);
-    let floored = tiers::limit_floor(five, at_limit, local);
-    let tier_usage = floored.as_ref();
+pub(super) fn usage_view(five: Option<&Value>, week: Option<&Value>, now: i64, local_up: Option<bool>) -> Value {
     let window = five.and_then(five_hour);
     let resets_at = window.and_then(|w| w.get("resetsAt")).and_then(Value::as_i64);
     let fresh = resets_at.is_some_and(|r| r > now);
@@ -71,9 +60,6 @@ pub(super) fn usage_view(
         "resetsAt": iso_if_future(resets_at, now),
         "weekUsedPct": week_used.filter(|_| week_live).map(|u| (u * 100.0).round()),
         "weekResetsAt": iso_if_future(week_resets, now),
-        "tier": tiers::implementer_tier(tier_usage, now, models, local),
-        "scoutTier": tiers::scout_tier(tier_usage, now, models, local),
-        "topTier": tiers::top_tier(tier_usage, now, models, local),
         "localUp": local_up,
         "subscription": tiers::on_subscription(five, now),
     })
@@ -86,18 +72,13 @@ impl AgentView {
             return None;
         }
         let store = Store::load(&paths::project_dir(data_dir, project)).ok();
-        let models = crate::config::load(data_dir)
-            .map(|c| c.machine.models)
-            .unwrap_or_default();
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let local_up = self.local.enabled().then(|| self.local.available());
         Some(usage_view(
             store.as_ref().and_then(Store::usage).as_ref(),
             store.as_ref().and_then(Store::week_usage).as_ref(),
-            &models,
             now,
             local_up,
-            self.live.sessions().claude_at_limit(),
         ))
     }
 }
@@ -109,14 +90,7 @@ mod tests {
     const NOW: i64 = 1_700_000_000;
 
     fn view(five: Option<Value>, week: Option<Value>, local_up: Option<bool>) -> Value {
-        usage_view(
-            five.as_ref(),
-            week.as_ref(),
-            &ModelsConfig::default(),
-            NOW,
-            local_up,
-            false,
-        )
+        usage_view(five.as_ref(), week.as_ref(), NOW, local_up)
     }
 
     fn five(left_used: f64, resets: i64) -> Value {
@@ -135,10 +109,6 @@ mod tests {
         assert_eq!(v["resetsAt"], "2023-11-14T23:13:20Z");
         assert_eq!(v["weekUsedPct"], 40.0);
         assert_eq!(v["weekResetsAt"], "2023-11-15T22:13:20Z");
-        assert_eq!(
-            (v["tier"].as_str(), v["scoutTier"].as_str(), v["topTier"].as_str()),
-            (Some("opus"), Some("sonnet"), Some("opus"))
-        );
         assert_eq!(v["localUp"], Value::Null);
         assert_eq!(v["subscription"], true);
     }
@@ -176,7 +146,6 @@ mod tests {
         ] {
             assert_eq!(v[key], Value::Null, "{key}");
         }
-        assert_eq!(v["tier"], "opus");
         assert_eq!(v["subscription"], false);
     }
 
@@ -187,12 +156,5 @@ mod tests {
         assert_eq!(v["leftPct"], Value::Null);
         assert_eq!(v["localUp"], true);
         assert_eq!(view(None, None, Some(false))["localUp"], false);
-    }
-
-    #[test]
-    fn a_low_window_picks_the_local_tier_only_while_it_is_up() {
-        let low = Some(five(0.97, NOW + 3600));
-        assert_eq!(view(low.clone(), None, Some(true))["tier"], "local");
-        assert_eq!(view(low, None, Some(false))["tier"], "sonnet");
     }
 }

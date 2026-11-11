@@ -86,9 +86,6 @@ pub struct LanePool {
     /// How much of the 5-hour window is used, in percent; `None` until it's known (then every lane takes work).
     used_pct: Option<f64>,
     held: BTreeMap<u32, Holder>,
-    /// The item holding the merge turn while it waits for a lane (section 5 `merging`): the next free lane is kept
-    /// for it, from everything else.
-    merge_turn: Option<Want>,
     /// The lane each piece's last run took here, by project and piece: in memory only, never sent or saved.
     run_lanes: BTreeMap<(String, String), u32>,
 }
@@ -112,11 +109,6 @@ impl LanePool {
 
     pub fn set_used_pct(&mut self, used_pct: Option<f64>) {
         self.used_pct = used_pct;
-    }
-
-    /// Sets or clears the item holding the merge turn that waits for a lane.
-    pub fn set_merge_turn(&mut self, want: Option<Want>) {
-        self.merge_turn = want;
     }
 
     pub fn holder(&self, lane: u32) -> Option<&Holder> {
@@ -151,24 +143,15 @@ impl LanePool {
     }
 
     /// `freeLane`: a free lane, `prefer` if it's free (an item's last lane), otherwise the first. With a chore lane,
-    /// `side` asks for that lane and otherwise it's never offered; without one every lane is the same. `for_item`
-    /// is the item asking (`project`, `item`), so the lane kept for the merge turn is offered to that item alone.
+    /// `side` asks for that lane and otherwise it's never offered; without one every lane is the same.
     /// `may` leaves out lanes whose own engine can't start now.
-    pub fn free_lane(
-        &self,
-        side: bool,
-        prefer: Option<u32>,
-        for_item: Option<(&str, &str)>,
-        may: impl Fn(u32) -> bool,
-    ) -> Option<u32> {
+    pub fn free_lane(&self, side: bool, prefer: Option<u32>, may: impl Fn(u32) -> bool) -> Option<u32> {
         let r = &self.rules;
         let chore = r.chore_lane.filter(|c| (1..=r.lanes).contains(c));
-        let kept = self.lane_for_merge(for_item);
-        let open = |k: u32| !self.held.contains_key(&k) && Some(k) != kept && may(k);
+        let open = |k: u32| !self.held.contains_key(&k) && may(k);
         let limit = self.limit();
         let exempt = |k: u32| r.other_engine_lanes.contains(&k);
-        let busy =
-            self.held.keys().filter(|k| !exempt(**k)).count() as u32 + u32::from(kept.is_some_and(|k| !exempt(k)));
+        let busy = self.held.keys().filter(|k| !exempt(**k)).count() as u32;
         let full = busy >= limit;
         if full && r.other_engine_lanes.is_empty() {
             return None;
@@ -197,10 +180,9 @@ impl LanePool {
     /// `claim_lane`, leaving out lanes `may` refuses (those whose own engine can't start now), the chore-lane
     /// fallback included.
     pub fn claim_lane_where(&self, want: &Want, may: impl Fn(u32) -> bool) -> Option<u32> {
-        let me = Some((want.project.as_str(), want.item.as_str()));
-        self.free_lane(want.chore, want.last_lane, me, &may).or_else(|| {
+        self.free_lane(want.chore, want.last_lane, &may).or_else(|| {
             (!want.chore && !want.fix_queued)
-                .then(|| self.free_lane(true, None, me, &may))
+                .then(|| self.free_lane(true, None, &may))
                 .flatten()
         })
     }
@@ -234,18 +216,7 @@ impl LanePool {
         Some(k)
     }
 
-    /// `laneForMerge`: the free lane kept for the item holding the merge turn; `None` when nothing waits for one,
-    /// none is free, or `for_item` is that item.
-    pub fn lane_for_merge(&self, for_item: Option<(&str, &str)>) -> Option<u32> {
-        let want = self.merge_turn.as_ref()?;
-        if for_item == Some((want.project.as_str(), want.item.as_str())) {
-            return None;
-        }
-        // Asked as that item itself, so it doesn't keep a lane from itself.
-        self.claim_lane(want)
-    }
-
-    /// Picks `want`'s lane and takes it, in one step. Once the merge turn's item has its lane, it no longer waits.
+    /// Picks `want`'s lane and takes it, in one step.
     pub fn claim(&mut self, want: &Want) -> Option<u32> {
         self.claim_where(want, |_| true)
     }
@@ -260,9 +231,6 @@ impl LanePool {
                 item: want.item.clone(),
             },
         );
-        if self.merge_turn.as_ref() == Some(want) {
-            self.merge_turn = None;
-        }
         Some(k)
     }
 

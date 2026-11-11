@@ -9,7 +9,8 @@ use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::ask::classify::{Classified, Options, classify};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
@@ -18,7 +19,7 @@ use crate::engines::cursor::with_project;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
-use crate::tiers::{LOCAL, implementer_tier};
+use crate::tiers::{LOCAL, SONNET, floor};
 use crate::{draft_worktree, paths};
 
 const TEMPLATE: &str = include_str!("../../prompts/drafter.md");
@@ -27,7 +28,6 @@ pub struct ClaudeDrafts {
     data_dir: PathBuf,
     choice: EngineChoiceConfig,
     env: Env,
-    models: ModelsConfig,
     cursor_models: CursorModels,
     /// The computer's local model, for the tier ladder.
     local: crate::local_model::LocalModel,
@@ -38,7 +38,6 @@ impl ClaudeDrafts {
         data_dir: PathBuf,
         choice: EngineChoiceConfig,
         env: Env,
-        models: ModelsConfig,
         cursor_models: CursorModels,
         local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
@@ -46,7 +45,6 @@ impl ClaudeDrafts {
             data_dir,
             choice,
             env,
-            models,
             cursor_models,
             local,
         })
@@ -80,11 +78,10 @@ impl DraftHost for ClaudeDrafts {
     }
 
     fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
-        let (data_dir, choice, env, models, cursor_models, local) = (
+        let (data_dir, choice, env, cursor_models, local) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
-            self.models,
             self.cursor_models.clone(),
             self.local.clone(),
         );
@@ -114,11 +111,9 @@ impl DraftHost for ClaudeDrafts {
                 LOCAL
             } else {
                 let ladder = up && !resumed;
-                let floored =
-                    crate::tiers::limit_floor(job.usage.as_ref(), !resumed && job.sessions.claude_at_limit(), ladder);
                 drafter_tier(
                     draft.request.as_deref().unwrap_or(""),
-                    implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, ladder),
+                    floor(SONNET, !resumed && job.sessions.claude_at_limit(), ladder),
                 )
             };
             let retried = !job.resume && draft.other.get("retried").and_then(|v| v.as_bool()) == Some(true);
@@ -230,6 +225,30 @@ impl DraftHost for ClaudeDrafts {
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
     }
+
+    fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
+        let (env, models, project) = (self.env.clone(), self.cursor_models.clone(), project.clone());
+        Box::pin(async move {
+            let Ok(placed) = place(Engine::Claude, Role::Assistant, &env, &models) else {
+                return Classified::Unavailable;
+            };
+            let opts = Options::new(true, false, project.budget.ask_usd, 0.0);
+            let cwd = std::env::temp_dir();
+            classify(&text, &opts, &cwd, |spec| async move {
+                let engine = engine_of(spec.engine)?;
+                run_session(
+                    engine.as_ref(),
+                    &placed.bin,
+                    &spec,
+                    "classify",
+                    None,
+                    Default::default(),
+                )
+                .await
+            })
+            .await
+        })
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -265,7 +284,6 @@ mod tests {
             root.join("data"),
             choice,
             env,
-            ModelsConfig::default(),
             models,
             crate::local_model::LocalModel::off(),
         );
@@ -312,14 +330,7 @@ mod tests {
             let meta = serde_json::json!({ "type": "retaskable_meta", "model": model, "engine": "claude", "at": 1 });
             std::fs::write(run.join("drafter.jsonl"), format!("{meta}\n")).unwrap();
         }
-        let host = ClaudeDrafts::new(
-            root.join("data"),
-            Default::default(),
-            env,
-            ModelsConfig::default(),
-            Default::default(),
-            local,
-        );
+        let host = ClaudeDrafts::new(root.join("data"), Default::default(), env, Default::default(), local);
         let usage = serde_json::json!({ "status": "allowed", "utilization": 0.98, "resetsAt": 4_000_000_000_i64 });
         host.run(DraftJob {
             engine: None,
@@ -376,7 +387,6 @@ mod tests {
             root.join("data"),
             Default::default(),
             env,
-            ModelsConfig::default(),
             Default::default(),
             crate::local_model::LocalModel::off(),
         );

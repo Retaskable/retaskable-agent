@@ -47,7 +47,10 @@ payload!(Lease {
     change: String,
     state: String
 });
-payload!(Claim { answer: Value });
+payload!(Claim {
+    op: String,
+    answer: Value
+});
 payload!(StoreError {
     item: String,
     op: String,

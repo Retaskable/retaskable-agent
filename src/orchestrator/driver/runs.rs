@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use super::project::ProjectLoop;
 use super::{Links, Shared};
 use crate::backlog::Client;
-use crate::backlog::merge::{MergeNext, MergeOutcome};
+use crate::backlog::merge::{MergeNext, MergeOutcome, MergeTurn};
 use crate::backlog::runs::{
     BeatVerdict, ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer,
     RunTakeUses, RunWant,
@@ -193,6 +193,8 @@ pub struct RunLoop {
     runs: Runs,
     /// `runs_drop` went through, so asking is allowed.
     dropped: bool,
+    /// `merge_open` was answered after `runs_drop`.
+    opened: bool,
     /// The store said it waits for something this computer lacks: no asking until `work_available`.
     waiting: bool,
     last_beat: Option<Instant>,
@@ -218,6 +220,7 @@ impl RunLoop {
         Self {
             runs: Runs::new(project),
             dropped: false,
+            opened: false,
             waiting: false,
             last_beat: None,
             idle: false,
@@ -276,6 +279,10 @@ impl ProjectLoop {
             return;
         };
         let token = Some(token.as_str());
+        let merges = starter.kinds().contains(&RunKind::Merge);
+        if merges && !self.run_loop.opened && !self.open_turn((repo, token), pool, starter, shared, now).await {
+            return;
+        }
         self.hear_work_wake(shared).await;
         while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
             if !self.run_loop.runs.add_process(&run, tree.clone()) {
@@ -334,7 +341,12 @@ impl ProjectLoop {
             let answer = if end.merge {
                 let outcome = MergeOutcome::of_run(&end.outcome, &end.result);
                 match self.client.merge_result(repo, token, &end.token, &outcome).await {
-                    Ok(_) => Ok(()),
+                    Ok(answer) => {
+                        if !answer.held && !matches!(outcome, MergeOutcome::Merged { .. }) {
+                            tracing::info!(turn = %end.token, "the store dropped a merge result: the turn was no longer held");
+                        }
+                        Ok(())
+                    }
                     Err(e) => {
                         self.store_error("merge_result", &e);
                         Err(RunDoneError::Other(e))
@@ -445,14 +457,76 @@ impl ProjectLoop {
     }
 
     /// Writes the `claim` event for what the store answered.
-    fn write_claim(&mut self, answer: Value) {
+    fn write_claim(&mut self, op: &str, answer: Value) {
         self.events.add_in(
             &self.id,
             Event::Claim(event::Claim {
+                op: Some(op.into()),
                 answer: Some(answer),
                 ..Default::default()
             }),
         );
+    }
+
+    /// Starts the merge run for a turn the store handed out (or still holds), with the answer for its `claim` event.
+    /// A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
+    async fn start_turn(
+        &mut self,
+        (repo, token): (u64, Option<&str>),
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        (start, now): (&StartRules, Instant),
+        turn: MergeTurn,
+    ) -> (Value, bool) {
+        let Some(piece) = turn.piece else {
+            if let Err(e) = self
+                .client
+                .merge_result(repo, token, &turn.token, &MergeOutcome::Released)
+                .await
+            {
+                self.store_error("merge_result", &e);
+            }
+            return (json!("passed"), false);
+        };
+        let answer = json!(piece.title);
+        let run = Run {
+            token: turn.token,
+            kind: RunKind::Merge,
+            piece,
+            other: turn.other,
+        };
+        (answer, self.begin(repo, token, pool, starter, run, start, now).await)
+    }
+
+    /// Once after `runs_drop`, before any `run_take` (docs/specs/merge-queue-from-store.md section 3.5):
+    /// `merge_open` for the turn this computer still holds. A held turn's run starts again and reads the change on
+    /// the host before it pushes or merges (`merge_run`: merged → `merged`, head moved → carries on from there);
+    /// with no turn (or a lease gone) it goes back to `merge_next`. Nothing is rebuilt from `state.json`. False when
+    /// the store couldn't say: nothing more is asked this pass.
+    async fn open_turn(
+        &mut self,
+        access: (u64, Option<&str>),
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        shared: &Shared<'_>,
+        now: Instant,
+    ) -> bool {
+        let (repo, token) = access;
+        match self.client.merge_open(repo, token).await {
+            Err(e) => {
+                self.store_error("merge_open", &e);
+                false
+            }
+            Ok(held) => {
+                self.run_loop.opened = true;
+                if let Some(turn) = held {
+                    let start = self.start_rules(pool, shared, now);
+                    let (answer, _) = self.start_turn(access, pool, starter, (&start, now), turn).await;
+                    self.write_claim("merge_open", answer);
+                }
+                true
+            }
+        }
     }
 
     /// One `merge_next` for a piece's merge, with its `claim` event. Whether a merge run started.
@@ -473,28 +547,9 @@ impl ProjectLoop {
             Ok(MergeNext::Waiting { place, ahead }) => {
                 (json!({ "waiting": { "place": place, "ahead": ahead } }), false)
             }
-            Ok(MergeNext::Turn(turn)) => match turn.piece {
-                Some(piece) => {
-                    let answer = json!(piece.title);
-                    let run = Run {
-                        token: turn.token,
-                        kind: RunKind::Merge,
-                        piece,
-                        other: turn.other,
-                    };
-                    (answer, self.begin(repo, token, pool, starter, run, start, now).await)
-                }
-                None => {
-                    // A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
-                    let outcome = MergeOutcome::Released;
-                    if let Err(e) = self.client.merge_result(repo, token, &turn.token, &outcome).await {
-                        self.store_error("merge_result", &e);
-                    }
-                    (json!("passed"), false)
-                }
-            },
+            Ok(MergeNext::Turn(turn)) => self.start_turn((repo, token), pool, starter, (start, now), *turn).await,
         };
-        self.write_claim(answer);
+        self.write_claim("merge_next", answer);
         more
     }
 
@@ -543,7 +598,7 @@ impl ProjectLoop {
                 (answer, more)
             }
         };
-        self.write_claim(answer);
+        self.write_claim("run_take", answer);
         more
     }
 

@@ -46,7 +46,6 @@ fn rig(answer: &str, gh_fails: bool, claude_missing: bool) -> Rig {
         root.join("data"),
         EngineChoiceConfig::default(),
         env,
-        ModelsConfig::default(),
         Default::default(),
         crate::local_model::LocalModel::off(),
     );
@@ -171,7 +170,6 @@ async fn the_trial_runs_on_the_implementers_chosen_engine() {
         rig.root.join("data"),
         choice,
         env,
-        ModelsConfig::default(),
         Default::default(),
         crate::local_model::LocalModel::off(),
     );

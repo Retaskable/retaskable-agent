@@ -46,8 +46,6 @@ pub struct AskJob {
     pub project: ProjectConfig,
     pub ask: AskCommand,
     pub store: AskStore,
-    /// The project's latest `state.usage` reading, for the session's model tier.
-    pub usage: Option<Value>,
     /// The lanes this project holds.
     pub lanes: Vec<StateLane>,
     /// The runs this computer holds, by item id.
@@ -173,7 +171,6 @@ impl ProjectLoop {
                 project: self.project.clone(),
                 ask,
                 store: store(),
-                usage: self.store.usage(),
                 lanes: self.ask_lanes(pool),
                 runs: self.records.clone(),
                 events,

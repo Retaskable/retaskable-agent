@@ -17,9 +17,6 @@ fn recording_claude(rig: &Rig, sleep: u32) {
 }
 
 /// A reading with 10% of the 5-hour limit left: below `sonnetAbovePct`, above `pauseBelowPct`.
-fn low_usage() -> Option<Value> {
-    Some(serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": i64::MAX}}}))
-}
 
 #[cfg(unix)]
 #[tokio::test]
@@ -29,7 +26,7 @@ async fn below_sonnet_above_pct_with_local_up_the_implementer_runs_on_the_local_
     recording_claude(&rig, 1);
     let held = local.take().await;
     let (mut request, mut rx) = request();
-    request.usage = low_usage();
+    request.item.tier = Some("local".into());
     rig.starter.start(request).unwrap();
     // Waits for the slot: nothing has started.
     tokio::time::sleep(Duration::from_millis(700)).await;
@@ -61,7 +58,7 @@ async fn with_local_down_the_same_reading_gives_plain_sonnet() {
     let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local.clone());
     recording_claude(&rig, 0);
     let (mut request, mut rx) = request();
-    request.usage = low_usage();
+    request.item.tier = Some("local".into());
     rig.starter.start(request).unwrap();
     rx.recv().await.unwrap();
     let args = std::fs::read_to_string(&rig.args).unwrap();
@@ -81,10 +78,10 @@ async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
 }
 
 #[tokio::test]
-async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
+async fn a_reopened_item_the_store_named_opus_starts_on_opus() {
     let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
     let (mut request, mut rx) = request();
-    request.usage = None;
+    request.item.tier = Some("opus".into());
     request.item.reopened = Some(crate::backlog::Reopened {
         notes: Some("The list is empty".into()),
         at: Some("2026-10-29T00:00:00Z".into()),
@@ -140,7 +137,7 @@ async fn an_engine_set_to_local_starts_on_the_local_target_even_with_a_full_wind
 async fn an_engine_set_to_local_with_local_down_runs_on_the_roles_tier() {
     let rig = local_engine_rig(&LocalModel::off());
     let (mut request, mut rx) = request();
-    request.usage = None;
+    request.item.tier = Some("opus".into());
     request.item.reopened = Some(crate::backlog::Reopened {
         notes: Some("x".into()),
         at: Some("2026-10-29T00:00:00Z".into()),
@@ -179,7 +176,7 @@ async fn resume_limited(first: Option<&str>, local: LocalModel, limited: bool) -
             .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
     }
     let (mut request, mut rx) = request();
-    request.usage = low_usage();
+    request.item.tier = Some("local".into());
     request.resume = true;
     rig.starter.start(request).unwrap();
     rx.recv().await.unwrap();
@@ -217,13 +214,13 @@ async fn an_anthropic_or_missing_transcript_resumes_on_sonnet_never_locally() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_start_over_job_on_a_full_window_starts_on_opus() {
+async fn a_start_over_job_the_store_named_opus_starts_on_opus() {
     for (attempt, model) in [(1, "--model opus"), (0, "--model sonnet")] {
         let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
         recording_claude(&rig, 0);
         let (mut request, mut rx) = request();
         request.attempt = attempt;
-        request.usage = None;
+        request.item.tier = Some("opus".into());
         rig.starter.start(request).unwrap();
         tokio::time::timeout(Duration::from_secs(120), rx.recv())
             .await

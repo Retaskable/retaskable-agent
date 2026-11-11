@@ -350,7 +350,6 @@ fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
         (&u["leftPct"], &u["status"], &u["weekUsedPct"]),
         (&json!(75.0), &json!("allowed"), &json!(40.0))
     );
-    assert_eq!(u["tier"], "opus");
     assert!(u["resetsAt"].is_string() && u["weekResetsAt"].is_string());
 }
 

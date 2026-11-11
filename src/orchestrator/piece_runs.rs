@@ -18,7 +18,7 @@ use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds,
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{CursorModels, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
@@ -46,7 +46,6 @@ pub struct PieceStarter {
     pub cursor_models: CursorModels,
     pub env: Env,
     pub max_turns: u32,
-    pub models: ModelsConfig,
     /// This computer, for a chore lock's note.
     pub machine: String,
     /// The sessions running now: a run's sessions list themselves while they run.
@@ -121,7 +120,6 @@ impl PieceStarter {
                 .get("RETASKABLE_GH")
                 .map_or_else(|| PathBuf::from("gh"), PathBuf::from),
             max_turns: self.max_turns,
-            models: self.models,
             lane,
             token: request.token.clone(),
             kind: request.kind,
@@ -162,7 +160,6 @@ pub(super) struct Job {
     pub(super) bin: PathBuf,
     pub(super) gh: PathBuf,
     pub(super) max_turns: u32,
-    pub(super) models: ModelsConfig,
     pub(super) lane: PathBuf,
     pub(super) token: String,
     pub(super) kind: RunKind,
@@ -348,15 +345,12 @@ async fn session(
 ) -> Result<Attempt> {
     let project = &job.project;
     let item = piece_item(&job.piece);
-    let now = crate::telemetry::now_ms() / 1000;
     let chore = chore_of(&job.piece);
     // Held until the session ends. Only a Claude session may use the model, never on a resume (a gate round's fix):
     // an Anthropic session isn't resumed against the local server.
     let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. });
     let (tier, local_run) = tier_for(
         chore.as_ref(),
-        now,
-        &job.models,
         may.then_some(&job.local),
         job.wants_local,
         !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
@@ -582,18 +576,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             }
             return Ok((outcome, result));
         }
-        match review_change(
-            job,
-            cwd,
-            pushed,
-            &description,
-            playtest.as_ref(),
-            &checks,
-            &mut review,
-            a.usage.as_ref(),
-        )
-        .await?
-        {
+        match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
             Reviewed::Approved => {
                 if let Some(stage) = stage {
                     result["checks_summary"] = json!(checks);
