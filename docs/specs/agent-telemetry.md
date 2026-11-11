@@ -60,7 +60,7 @@ Nothing here decides anything: the watchdog only reports. The orchestrator's con
 | `item_state` | any item's state changes. Recorded in one place, `Store.update`, which compares the state before and after | `item`, `from`, `to`, `note` (the timeline note that came with it), `lane`, `claudeOnIt` (on an item at `needs_human`: whether Claude is looking into it or about to, 06.9) |
 | `lane_taken`, `lane_freed` | `laneItems` changes (compared on each save of the state, and each minute) | `lane`, `item`, `why` (the item's state, and its last note) |
 | `lease` | an item's lease in the shared backlog changes (also in `Store.update`) | `item`, `change`: `taken`, `parked`, `released` or `lost` |
-| `claim` | a `run_take` (or the old `claim_next`) to the store is answered | `op`; `answer`: the item id, `none`, `passed`, `waiting_for_needs`, or `failed` |
+| `claim` | a `run_take`, a `merge_next` for a piece's merge (or the old `claim_next`) to the store is answered | `op`; `answer`: the item id, `none`, `passed`, `waiting_for_needs`, or `failed` |
 | `store_error` | any operation on the backlog store fails (`HostedBacklog.op`) | `op`, `item` (its `id` argument), `code`, `error` |
 | `session_start` | a session starts | `item`, `lane`, `role`, `scout`, `engine`, `model`, `session`, `detached`, `attached` (picked up again after a restart) |
 | `session_end` | a session ends | the same, plus `ms`, `cost`, `ok`, `subtype`, `error`, `limitHit` |

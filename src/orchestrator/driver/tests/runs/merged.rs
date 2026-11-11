@@ -1,11 +1,12 @@
 //! The `merged` event a merge run writes when it lands (`ci-merged-events`).
 use super::*;
 
+/// The store's turn for a merge: the piece the run is on.
 fn merge_run(token: &str, change: Value, chore: bool) -> Value {
-    let mut r = run(token, "merge");
-    r["piece"]["change"] = change;
+    let mut r = turn(token);
+    r["turn"]["piece"]["change"] = change;
     if chore {
-        r["piece"]["chore"] = json!({ "kind": "tidy" });
+        r["turn"]["piece"]["chore"] = json!({ "kind": "tidy" });
     }
     r
 }
@@ -24,7 +25,7 @@ async fn merge_ends(flag_on: bool, change: Value, chore: bool, outcome: RunOutco
     }
     let starter = FakeRuns::new(&[RunKind::Merge]);
     let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([merge_run("m1", change, chore)]);
+    script.lock().unwrap().merges = VecDeque::from([merge_run("m1", change, chore)]);
     pass(&mut rig, &starter, t0).await;
     for _ in 0..ends {
         starter.finish("m1", outcome.clone());

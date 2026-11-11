@@ -14,6 +14,7 @@
 pub mod asks;
 pub mod drafts;
 pub mod failures;
+pub mod merge;
 pub mod runs;
 pub mod settings;
 pub mod suggestions;
