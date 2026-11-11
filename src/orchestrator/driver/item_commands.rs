@@ -57,11 +57,6 @@ impl ProjectLoop {
             .links
             .item_commands
             .set_flag(&self.id, "playtest-answer-command", on);
-        let on = self.flags.on("gallery-read-commands").await;
-        shared
-            .links
-            .item_commands
-            .set_flag(&self.id, "gallery-read-commands", on);
         for command in shared.links.item_commands.take(&self.id) {
             if let ItemCommand::Continue { item, .. }
             | ItemCommand::StartOver { item, .. }

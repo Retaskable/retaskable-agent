@@ -94,18 +94,7 @@ impl ProjectLoop {
             main,
         };
         match upsert(&ctx, &mut self.seen, &mut self.landing).await {
-            Ok(done) => {
-                tracing::debug!("{}: Items headers: {done}", self.id);
-                if done == "sent" {
-                    // The store has the items now: a feedback draft's asks to be done next, once.
-                    for id in self.landing.take_do_next() {
-                        if let Err(e) = self.client.do_next(ctx.repo, Some(&ctx.token), &id, true).await {
-                            tracing::warn!("{}: marking {id} do next failed: {e}", self.id);
-                            self.store_failure("do_next", &id, &e).await;
-                        }
-                    }
-                }
-            }
+            Ok(done) => tracing::debug!("{}: Items headers: {done}", self.id),
             Err(e) => tracing::warn!("{}: sending the Items headers failed: {e:#}", self.id),
         }
         match land(&ctx, &mut self.seen, self.project.deploy.production.as_ref()).await {

@@ -683,7 +683,6 @@ impl Machine {
                     stopping,
                 };
                 lp.idea_pass(&shared).await;
-                lp.gallery_feedback_pass(&shared).await;
             }
         }
         // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.

@@ -21,6 +21,12 @@ Only the specs whose subject is the computer itself:
 - [daily-lighthouse.md](daily-lighthouse.md) and [compliance-scan.md](compliance-scan.md): the Lighthouse and scan runs (raw results only).
 - [agent-ci.md](agent-ci.md): CI run on the agent computer, in Docker, on its own slot.
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
+- [merge-queue-from-store.md](merge-queue-from-store.md): the store's queue decides whose turn it is to merge.
+- [ci-watch-through-store.md](ci-watch-through-store.md): the CI watcher sends facts to the store and runs what it answers; gentler on GitHub; Run now through the store.
+- [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
+- [restart-and-self-update.md](restart-and-self-update.md): restart and self-update.
+
+- Where the server now decides, the agent copies keep only what the agent sends and runs, and link the server-side spec in Retaskable.com: [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md), [merge-queue-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/merge-queue-on-server.md), [chores-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/chores-on-server.md), [jobs-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/jobs-on-server.md) and [rollout-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/rollout-on-server.md).
 
 ## What was cut
 
@@ -36,6 +42,7 @@ Specs about the cloud, the store, the app or the site stay in Retaskable.com. Wh
 - Approved specs are committed to the user's repo, and spec content never goes to the store.
 - The port binds `127.0.0.1` and never takes a command.
 - Claude runs with `--permission-mode auto`.
+- The agent reads no release flag: a new feature ships On ([no-agent-flags.md](no-agent-flags.md)).
 - Every project has a shared backlog. There is no local mode, and the agent fails closed when it can't reach it.
 
 Synced with Retaskable.com PR #1848 at commit 844314cf172b71774ab5cff10229f6f10fdcdbbf (engine per lane).
@@ -45,3 +52,5 @@ Synced with Retaskable.com PR #1850 at commit c825f06e15c8ce4025715208a57666ecc8
 Synced with Retaskable.com PR #1860 at commit 8a682e8c8ea5f8badc1289933563e43eba926540 (Cursor's token use on the Usage card).
 
 Synced with Retaskable.com PR #2008 at commit ee32ff7bf3c4cc5962904ce0af07aefb23741ad6 (triage: a second look that can carry out a clear suggestion, bug-report dedup via `sameAs`, not retrying a slice blocked on another item's unbuilt infrastructure, and retrying a failed triage look before waiting for a human).
+
+Synced with Retaskable.com at commit a47f5a426 (2026-11-11), for the specs the server now owns (pools and pacing, the merge queue, chores, scheduled jobs and triage, rollout): the agent sections, agent-settings and agent-telemetry were read against Retaskable.com's changes of 2026-11-09 and 2026-11-10 and brought up to date. Other specs stay as of the earlier syncs above.

@@ -7,10 +7,9 @@
 //! So far this runs **idea_accept** (queued for the loop, answered later), **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
 //! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
-//! reaching a computer, agent/09-web-ui.md section 9.3) and **Shoot** (fire-and-forget: the ack
-//! comes once `galleries::shoot` has started on its own thread, tray.md section 5.3.3) and
+//! reaching a computer, agent/09-web-ui.md section 9.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop, `restart_play` too,
-//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **gallery_index** / **gallery_image** (a gallery's last shoot, read off disk, behind the `gallery-read-commands` flag), **gallery_feedback** (a gallery's feedback, queued for the loop as a spec draft, behind the `gallery-feedback-command` flag, `orchestrator::driver::gallery_feedback`), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]).
 
 use crate::text::is_blank;
@@ -19,8 +18,6 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use crate::galleries;
-use crate::paths;
 use crate::telemetry::events::{iso_utc_millis, now_ms};
 use crate::view::{AgentView, AskCommand, DraftCommand, Exit, ItemCommand};
 
@@ -80,7 +77,7 @@ fn refusal(cmd: &Command, project: &str, seen: &mut Seen, now: i64) -> Option<St
 
 /// Runs `cmd` against `project` (empty before Setup) if every check passes, and answers it.
 /// `seen` and `view.paused` persist for the project's connection, across reconnects. `data_dir` is
-/// the agent's own data directory, where Shoot writes a gallery's converted pictures.
+/// the agent's own data directory.
 pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, data_dir: &Path) -> Value {
     if let Some(reason) = refusal(cmd, project, seen, now_ms()) {
         return nack(&cmd.id, reason);
@@ -108,7 +105,6 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
         "setup_check" if view.settings.setup_checks_now() => setup_check(cmd, project, view),
-        "shoot" => shoot(cmd, project, view, data_dir),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
@@ -119,14 +115,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "ask" => ask(cmd, project, view, data_dir),
         "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
-        "gallery_index" | "gallery_image" if view.item_commands.flag_on(project, "gallery-read-commands") => {
-            gallery_read(cmd, project, data_dir)
-        }
         "approve_commands" if view.item_commands.flag_on(project, crate::command_gate::FLAG) => {
             approve_commands(cmd, project, view)
-        }
-        "gallery_feedback" if view.item_commands.flag_on(project, "gallery-feedback-command") => {
-            gallery_feedback(cmd, project, view, data_dir)
         }
         "draft_edit" => draft_change(cmd, project, view),
         "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
@@ -460,42 +450,6 @@ fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
     answer(cmd, skip_item(view, project, id))
 }
 
-/// Finds `cmd`'s gallery by its `gallery` slug (`GalleryConfig::slug`) among `project`'s own, runs
-/// [`galleries::shoot_refusal`]'s checks, then spawns [`galleries::shoot`] on its own thread and
-/// acks at once (tray.md section 5.3.3: "the ack comes once the shoot has started").
-fn shoot(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
-    let slug = cmd.args.get("gallery").and_then(Value::as_str).unwrap_or("");
-    let not_found = || nack(&cmd.id, format!("No gallery called {slug}."));
-    let Some(p) = allowed_project(view, project) else {
-        return not_found();
-    };
-    let Some(gallery) = p.galleries.iter().find(|g| g.slug() == slug) else {
-        return not_found();
-    };
-    if let Some(reason) = galleries::shoot_refusal(project, gallery) {
-        return nack(&cmd.id, reason);
-    }
-    let project = project.to_string();
-    let slug = slug.to_string();
-    let gallery = gallery.clone();
-    let repo_path = p.repo_path.clone();
-    let worktrees_dir = p.worktrees_dir.clone();
-    let base_branch = p.base_branch.clone();
-    let dest = paths::gallery_dir(data_dir, &project, &slug);
-    std::thread::spawn(move || {
-        let _ = galleries::shoot(
-            &project,
-            &slug,
-            &gallery,
-            &repo_path,
-            &worktrees_dir,
-            &base_branch,
-            &dest,
-        );
-    });
-    ack(&cmd.id)
-}
-
 /// `play { lane }` / `stop { lane }` (also `stop_play`) / `restart_play { lane }`.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     if matches!(cmd.name.as_str(), "restart_play" | "stop_play")
@@ -641,73 +595,6 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
     }
 }
 
-/// The hub's cap on any one agent message.
-const MAX_MESSAGE_BYTES: usize = 1 << 20;
-
-/// `gallery_index { gallery }` and `gallery_image { gallery, file }` (tray/05.3 section 5.3.2): answered at once from
-/// the gallery's last shoot on disk. A whole ack over [`MAX_MESSAGE_BYTES`] is nacked instead.
-fn gallery_read(cmd: &Command, project: &str, data_dir: &Path) -> Value {
-    let arg = |k: &str| cmd.args.get(k).and_then(Value::as_str).unwrap_or("");
-    let answer = if cmd.name == "gallery_index" {
-        galleries::gallery_index(data_dir, project, arg("gallery")).map(|a| json!(a))
-    } else {
-        galleries::gallery_image(data_dir, project, arg("gallery"), arg("file")).map(|a| json!(a))
-    };
-    match answer {
-        Ok(answer) => {
-            let ack = json!({ "type": "ack", "id": cmd.id, "answer": answer });
-            if ack.to_string().len() > MAX_MESSAGE_BYTES {
-                nack(&cmd.id, "Too big to send from the machine.".into())
-            } else {
-                ack
-            }
-        }
-        Err(reason) => nack(&cmd.id, reason),
-    }
-}
-
-/// `gallery_feedback { gallery, picture?, notes, pictures?, doNext? }` (tray/05.3 section 5.3.4): the pictures are saved, the
-/// request rendered (`galleries::feedback_request`) and queued for the loop, which queues it as a spec draft and answers.
-fn gallery_feedback(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
-    if let Err(reason) = claim_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    let text = |k: &str| cmd.args.get(k).and_then(Value::as_str).unwrap_or("");
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
-        return nack(&cmd.id, "Finish setup first.".to_string());
-    };
-    let picture = Some(text("picture")).filter(|s| !s.is_empty());
-    let render = |notes: &str| {
-        galleries::feedback_request(
-            data_dir,
-            project,
-            &p.galleries,
-            p.project_type,
-            text("gallery"),
-            picture,
-            notes,
-        )
-    };
-    // Refused before any picture is saved; then rendered again with the saved pictures' paths in the notes.
-    let request = render(text("notes")).and_then(|_| {
-        let notes = notes_with_pictures(&cmd.args, data_dir)?;
-        render(&notes.unwrap_or_default())
-    });
-    match request {
-        Ok(request) => {
-            view.item_commands.push_feedback(crate::view::GalleryFeedbackCommand {
-                project: project.to_string(),
-                command_id: cmd.id.clone(),
-                request,
-                do_next: cmd.args.get("doNext").and_then(Value::as_bool) != Some(false),
-                by: cmd.issued_by.clone(),
-            });
-            json!({ "type": PENDING, "id": cmd.id })
-        }
-        Err(reason) => nack(&cmd.id, reason),
-    }
-}
-
 /// `draft_edit { id, path, content }` writes the person's file into the draft's worktree, commits and pushes it to
 /// the draft's PR branch, and answers with the files listed again (`answer.files`). Nothing on retaskable.com sends
 /// it yet. `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
@@ -784,10 +671,10 @@ fn sized(value: &Value) -> Value {
 }
 
 /// A command's args for the log, the one place that decides what each command may leave in `remote.log`
-/// (cloud.md section 6.3, tray/05.3 section 5.3.4). Per command name: text a person typed (`notes`, `text`, a draft file's
+/// (cloud.md section 6.3). Per command name: text a person typed (`notes`, `text`, a draft file's
 /// `content`) as `{ bytes }`; `pictureIds` as a count; `pictures` (for any command) as `{ count, bytes }`, never their data.
 /// A command with no entry logs its args unchanged.
-// TODO: gallery feedback, `read_file`, `release_edit` and `ci_link` aren't commands this agent takes yet; shape each like
+// TODO: `read_file`, `release_edit` and `ci_link` aren't commands this agent takes yet; shape each like
 // TypeScript's `auditArgs` (`shared/cloudCommands.ts`) when it is ported.
 fn audit_args(name: &str, args: &Value) -> Value {
     let mut args = args.clone();
@@ -816,7 +703,7 @@ fn audit_args(name: &str, args: &Value) -> Value {
 }
 
 /// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
-/// ones and replays included, never an answer's content: a read command (`draft_files`, `gallery_image`) logs
+/// ones and replays included, never an answer's content: a read command (`draft_files`) logs
 /// `answerBytes` only, so a picture's base64 never reaches the log. The args go through [`audit_args`], which
 /// keeps typed text, picture data and ids out of the line.
 /// A write that fails is dropped silently, the same as the event log's.

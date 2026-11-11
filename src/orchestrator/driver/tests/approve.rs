@@ -76,7 +76,7 @@ impl DraftHost for Host {
 }
 
 /// A store whose `draft_take` hands out a draft waiting for approval with a PR.
-async fn store(intake: Value, fail_do_next: bool) -> (String, Asked) {
+async fn store(intake: Value) -> (String, Asked) {
     let asked: Asked = Default::default();
     let seen = asked.clone();
     let app = Router::new().route(
@@ -86,12 +86,6 @@ async fn store(intake: Value, fail_do_next: bool) -> (String, Asked) {
             async move {
                 let (op, args) = (body["op"].as_str().unwrap_or("").to_string(), body["args"].clone());
                 seen.lock().unwrap().push((op.clone(), args.clone()));
-                if op == "do_next" && fail_do_next {
-                    return (
-                        axum::http::StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": "not_found" })),
-                    );
-                }
                 let value = match op.as_str() {
                     "draft_take" => json!({ "token": "lease-d", "draft": { "intake": intake,
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval", "titles": ["Charts"],
@@ -120,8 +114,6 @@ struct Setup {
     rebase: Option<bool>,
     rebases: Vec<bool>,
     intake: Value,
-    fail_do_next: bool,
-    flag: bool,
 }
 
 impl Default for Setup {
@@ -137,8 +129,6 @@ impl Default for Setup {
             rebase: None,
             rebases: Vec::new(),
             intake: json!({}),
-            fail_do_next: false,
-            flag: true,
         }
     }
 }
@@ -146,7 +136,7 @@ impl Default for Setup {
 /// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
 /// `draft_report` has gone (and, for a merge, the headers).
 async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
-    let (base, asked) = store(setup.intake.clone(), setup.fail_do_next).await;
+    let (base, asked) = store(setup.intake.clone()).await;
     let root = tempfile::tempdir().unwrap();
     let repo = repo_with_origin(root.path());
     let spec = "# Charts\n\nTheme: Hosting\n\nItems:\n- **charts-1**: Draw them. Depends on: none.\n";
@@ -159,9 +149,6 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     rig.go_live();
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
     rig.lp(0).project.base_branch = "main".into();
-    if setup.flag {
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["gallery-feedback-command"]));
-    }
     rig.lp(0).project.github = setup.github.clone();
     rig.lp(0).seen.default_branch = Some("main".into());
     rig.pause("p0", setup.paused);
@@ -380,55 +367,4 @@ async fn a_third_conflict_after_two_hand_backs_waits_for_approval_with_the_reaso
     );
     let why = sent[0]["summary"].as_str().unwrap();
     assert!(why.contains("conflicts with main") && why.contains("2 times"), "{why}");
-}
-
-fn do_nexts(asked: &Asked) -> Vec<Value> {
-    (asked.lock().unwrap().iter())
-        .filter(|(op, _)| op == "do_next")
-        .map(|(_, a)| a.clone())
-        .collect()
-}
-
-#[tokio::test]
-async fn a_merged_feedback_draft_marks_its_item_do_next_once_after_the_headers() {
-    let (_host, asked, _sent, _root) = press(Setup {
-        intake: json!({ "doNext": true }),
-        ..Default::default()
-    })
-    .await;
-    for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(do_nexts(&asked), [json!({ "id": "charts-1", "on": true })]);
-    let ops = ops(&asked);
-    let up = ops.iter().position(|o| o == "upsert_from_specs").unwrap();
-    assert!(up < ops.iter().position(|o| o == "do_next").unwrap(), "{ops:?}");
-}
-
-#[tokio::test]
-async fn a_draft_without_do_next_sends_none() {
-    let (_host, asked, _sent, _root) = press(Setup::default()).await;
-    assert!(do_nexts(&asked).is_empty());
-}
-
-#[tokio::test]
-async fn a_refused_do_next_is_not_retried() {
-    let (_host, asked, _sent, _root) = press(Setup {
-        intake: json!({ "doNext": true }),
-        fail_do_next: true,
-        ..Default::default()
-    })
-    .await;
-    assert_eq!(do_nexts(&asked).len(), 1);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_nothing_is_marked_do_next() {
-    let (_host, asked, _sent, _root) = press(Setup {
-        intake: json!({ "doNext": true }),
-        flag: false,
-        ..Default::default()
-    })
-    .await;
-    assert!(do_nexts(&asked).is_empty());
 }

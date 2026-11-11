@@ -8,9 +8,7 @@ fn project(id: &str, repo: &str) -> ProjectView {
         repo_path: PathBuf::new(),
         worktrees_dir: PathBuf::new(),
         base_branch: "main".into(),
-        galleries: vec![],
         play_command: String::new(),
-        project_type: Default::default(),
     }
 }
 
@@ -206,7 +204,7 @@ fn snapshot_before_setup_says_setup() {
         snap["state"]["orchestrator"],
         json!({ "status": "setup", "machine": "pc" })
     );
-    assert_eq!(snap["state"]["galleries"], json!([]));
+    assert!(snap["state"].get("galleries").is_none());
 }
 
 #[test]
@@ -726,19 +724,6 @@ fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
     let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
     assert_eq!(ids, ["a", "c"]);
     assert_eq!(q.take_ideas("two").len(), 1);
-
-    let fb = |p: &str, id: &str| GalleryFeedbackCommand {
-        project: p.into(),
-        command_id: id.into(),
-        request: "r".into(),
-        do_next: true,
-        by: "me".into(),
-    };
-    q.push_feedback(fb("two", "x"));
-    q.push_feedback(fb("one", "y"));
-    assert_eq!(q.take_feedback("one").len(), 1);
-    assert!(q.take_feedback("one").is_empty());
-    assert_eq!(q.take_feedback("two")[0].command_id, "x");
 }
 
 #[test]

@@ -705,14 +705,3 @@ fn an_item_parses_with_and_without_a_size() {
         Some("XL")
     );
 }
-
-#[tokio::test]
-async fn do_next_sends_the_item_and_the_switch() {
-    let (base, seen) = store(200, json!({ "value": null })).await;
-    Client::new(base).do_next(1, None, "x", true).await.unwrap();
-    let body = seen.lock().unwrap()[0].clone();
-    assert_eq!(
-        (body["op"].as_str(), &body["args"]),
-        (Some("do_next"), &json!({ "id": "x", "on": true }))
-    );
-}

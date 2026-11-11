@@ -64,7 +64,7 @@ fn commands_of_picks_command_fields_and_drops_machine() {
 fn with_allowed_empties_without_allowed_and_keeps_without_record() {
     let c = cfg("npm test");
     let e = with_allowed(&c, None, true);
-    assert!(e.checks.is_empty() && e.play_command.is_empty() && e.galleries.is_empty());
+    assert!(e.checks.is_empty() && e.play_command.is_empty());
     assert_eq!(e.deploy.staging.unwrap().smoke, None);
     assert_eq!(with_allowed(&c, None, false), c);
 }
