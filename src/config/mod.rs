@@ -192,9 +192,9 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
         .iter()
         .flat_map(|p| [p.get("lanes"), p.get("migrated").and_then(|m| m.get("lanes"))])
         .filter_map(|v| v.and_then(Value::as_u64))
+        .filter_map(|n| u32::try_from(n).ok())
         .filter(|&n| n >= 1)
         .max()
-        .map(|n| n as u32)
         .unwrap_or_else(|| MachineConfig::default().lanes)
 }
 
@@ -508,5 +508,16 @@ mod tests {
         assert_eq!(data_dir(&Env::empty()), PathBuf::from(".retaskable"));
         let env = Env::from_pairs([("RETASKABLE_DATA_DIR", "x")]);
         assert_eq!(data_dir(&env), PathBuf::from("x"));
+    }
+
+    #[test]
+    fn a_lanes_count_too_big_for_u32_is_ignored_not_wrapped_to_a_small_one() {
+        // 2^32 + 1 used to wrap to 1 lane.
+        let projects = [json!({ "lanes": 4_294_967_297u64 }), json!({ "lanes": 3 })];
+        assert_eq!(fallback_lanes(&projects), 3);
+        assert_eq!(
+            fallback_lanes(&[json!({ "lanes": 4_294_967_297u64 })]),
+            MachineConfig::default().lanes
+        );
     }
 }
