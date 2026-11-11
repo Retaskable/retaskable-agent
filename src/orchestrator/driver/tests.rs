@@ -896,7 +896,6 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
 
 mod approve;
 mod asks;
-mod auto_concurrency;
 mod caps_and_fetch;
 mod ci_events;
 mod claim_waiting;

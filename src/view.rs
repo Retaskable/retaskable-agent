@@ -188,8 +188,6 @@ pub struct ItemCommands {
     flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
     feedback: Arc<std::sync::Mutex<Vec<GalleryFeedbackCommand>>>,
-    /// The number auto concurrency last allowed and why; `None` while it is Off or has not stepped yet.
-    auto: Arc<std::sync::Mutex<Option<(u32, String)>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands (`approve-commands-gate`), kept by its loop.
@@ -265,15 +263,6 @@ impl ItemCommands {
     pub fn flag_on(&self, project: &str, flag: &'static str) -> bool {
         let set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
         set.contains(&(project.to_string(), flag))
-    }
-
-    /// Set by the loop (`driver/auto.rs`) for the snapshot's `usage.autoConcurrency`.
-    pub fn set_auto(&self, auto: Option<(u32, String)>) {
-        *self.auto.lock().unwrap_or_else(|e| e.into_inner()) = auto;
-    }
-
-    pub fn auto(&self) -> Option<(u32, String)> {
-        self.auto.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn push_idea(&self, command: IdeaCommand) {
@@ -599,9 +588,6 @@ impl AgentView {
         }
         if let Some(cursor) = self.cursor_usage() {
             state["usage"]["cursor"] = cursor;
-        }
-        if let Some((allowed, reason)) = self.item_commands.auto() {
-            state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
         }
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;

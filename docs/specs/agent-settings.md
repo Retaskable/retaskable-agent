@@ -35,14 +35,14 @@ A project's own settings stay in Project settings on retaskable.com, as before.
 | Cursor's models | setup, `RETASKABLE_CURSOR_MODELS`, the settings page | `config.json` `cursor.models` |
 | Network access to the settings page, and its password | setup, `RETASKABLE_NETWORK_PASSWORD`, the settings page | `machine.json` `network` (the password as a scrypt hash) |
 | Daily budget | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `budget.dailyUsd` |
-| Sessions at once (concurrency, auto, per model) | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `concurrency`, `autoConcurrency`, `modelConcurrency` |
+| Sessions at once (concurrency, per model) | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `concurrency`, `modelConcurrency` |
 | Model thresholds | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `models` |
 
 ### 2.1 The owner's settings: `agent_settings`
 
-- **The command** ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1): `agent_settings { dailyUsd?, concurrency?, autoConcurrency?, modelConcurrency?, models? }`, each checked as Setup checks it (a budget from 0 to 100000, sessions whole numbers from 1 to 64, percentages from 0 to 100). Nothing else: a tag, the local model or how often it checks is no part of it, and the agent refuses one as "Not a command this agent takes".
+- **The command** ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1): `agent_settings { dailyUsd?, concurrency?, modelConcurrency?, models? }`, each checked as Setup checks it (a budget from 0 to 100000, sessions whole numbers from 1 to 64, percentages from 0 to 100). Nothing else: a tag, the local model or how often it checks is no part of it, and the agent refuses one as "Not a command this agent takes".
 - **The hub** takes it only from the person who linked the computer; the agent trusts that check and re-checks nothing about who sent it. Who may send it, the owner's name in the refusal and MCP's exclusion are the hub's ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1).
-- **The agent** (`agent/src/commands.ts`) saves it at once, with no one at the computer to allow it: `saveAgentSettings` (`agent/src/siteSettings.ts`) writes the file through `saveConfigFile` (`withAgentSettings`: what isn't named stays; "Name a change." for none, thresholds out of order and auto's least above its most refused in Setup's words), then `pool.configure` and a new hello on every project, so the page shows the new values.
+- **The agent** (`agent/src/commands.ts`) saves it at once, with no one at the computer to allow it: `saveAgentSettings` (`agent/src/siteSettings.ts`) writes the file through `saveConfigFile` (`withAgentSettings`: what isn't named stays; "Name a change." for none, thresholds out of order refused in Setup's words), then `pool.configure` and a new hello on every project, so the page shows the new values.
 - **The old ways go.** The agent refuses `computer_tags` and a `settings_request` naming a computer-only setting (`pollIntervalSec`, `local`, `cursorModels`, engines): neither command's schema has them any more.
 - **An older agent** doesn't know `agent_settings` and refuses it. An agent that does says so in its hello (`capabilities` has `agent_settings`, `AGENT_SETTINGS_CAPABILITY`).
 

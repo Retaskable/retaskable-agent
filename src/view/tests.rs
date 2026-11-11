@@ -19,18 +19,6 @@ fn view(projects: Vec<ProjectView>) -> AgentView {
 }
 
 #[test]
-fn snapshot_reports_the_paced_number_and_reason_only_while_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = view(vec![]);
-    let usage = || v.snapshot("", dir.path())["state"]["usage"].clone();
-    assert_eq!(usage(), json!({}));
-    v.item_commands.set_auto(Some((2, "On pace".into())));
-    assert_eq!(usage(), json!({"autoConcurrency": {"allowed": 2, "reason": "On pace"}}));
-    v.item_commands.set_auto(None);
-    assert_eq!(usage(), json!({}));
-}
-
-#[test]
 fn snapshot_says_local_down_only_while_the_model_is_on_and_down_and_the_flag_is_on() {
     let dir = tempfile::tempdir().unwrap();
     let local_down = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("localDown").cloned();
@@ -114,7 +102,7 @@ async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its
     let hello = v.hello("").await;
     let s = &hello["settings"];
     assert_eq!(s["concurrency"], 1);
-    assert_eq!(s["autoConcurrency"]["enabled"], true);
+    assert!(s.get("autoConcurrency").is_none());
     assert_eq!(s["models"]["opusAbovePct"], 50);
     assert_eq!(s["port"], 4700);
     assert_eq!(s["lanes"], 2);
@@ -389,12 +377,6 @@ fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
     );
     v.paused.set("a", None);
     v.live.set_limit("a", None);
-    v.item_commands.set_auto(Some((2, "On pace".into())));
-    assert_eq!(
-        orch(&v)["concurrency"],
-        2,
-        "auto concurrency's number once it has stepped"
-    );
     assert_eq!(
         v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
         "setup"
