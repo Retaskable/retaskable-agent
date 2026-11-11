@@ -54,6 +54,7 @@ mod triage_bug;
 mod triage_facts;
 mod triage_run;
 mod trial;
+mod usage_recheck;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};

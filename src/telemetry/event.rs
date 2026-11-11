@@ -114,6 +114,7 @@ payload!(TrialOpened {
     pr_url: String
 });
 payload!(TrialDropped { reason: String });
+payload!(UsageRechecked { reading: String });
 payload!(HostCallUndefined {
     cmd: String,
     args: Value
@@ -174,6 +175,7 @@ pub enum Event {
     Anomaly(Anomaly),
     TrialOpened(TrialOpened),
     TrialDropped(TrialDropped),
+    UsageRechecked(UsageRechecked),
 }
 
 fn extra_item(extra: &Map<String, Value>) -> Option<&str> {
@@ -207,6 +209,7 @@ impl Event {
             Event::RestartBack(e) => return extra_item(&e.extra),
             Event::TrialOpened(e) => return extra_item(&e.extra),
             Event::TrialDropped(e) => return extra_item(&e.extra),
+            Event::UsageRechecked(e) => return extra_item(&e.extra),
         };
         own.as_deref()
     }

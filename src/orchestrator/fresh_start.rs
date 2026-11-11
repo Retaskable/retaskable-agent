@@ -78,6 +78,15 @@ impl EngineLimits {
         true
     }
 
+    /// A reading says Claude has room: the hold on it ends (the usage recheck).
+    pub fn clear_claude(&self) {
+        self.until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&EngineId::Claude);
+        *self.week_until.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
     /// Whether Claude is held at the weekly cutoff at `now`.
     pub fn week_cut_off(&self, now: Instant) -> bool {
         let week = self.week_until.lock().unwrap_or_else(PoisonError::into_inner);
@@ -153,6 +162,19 @@ pub fn picking_up_prompt(has_pr: bool, base_branch: &str, follow_up: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_claude_ends_its_hold_and_the_weeks() {
+        let limits = EngineLimits::default();
+        let later = Instant::now() + Duration::from_secs(3600);
+        limits.hit(EngineId::Claude, later);
+        limits.hit(EngineId::Codex, later);
+        *limits.week_until.lock().unwrap() = Some(later);
+        limits.clear_claude();
+        let now = Instant::now();
+        assert!(!limits.claude_at_limit(now) && !limits.week_cut_off(now));
+        assert!(limits.is_limited(EngineId::Codex, now));
+    }
 
     #[test]
     fn each_reason_has_its_history_line() {
