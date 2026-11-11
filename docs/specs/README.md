@@ -25,6 +25,7 @@ Only the specs whose subject is the computer itself:
 - [rollout-on-server.md](rollout-on-server.md): the computer reports, polls and runs what the store's rollout tells it.
 - [ci-watch-through-store.md](ci-watch-through-store.md): the CI watcher sends facts to the store and runs what it answers; gentler on GitHub; Run now through the store.
 - [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
+- [pools.md](pools.md): polling the pool for tasks (an item's whole chain) and reporting them.
 - [restart-and-self-update.md](restart-and-self-update.md): restart and self-update.
 
 - Where the server now decides, the agent copies keep only what the agent sends and runs, and link the server-side spec in Retaskable.com: [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md), [merge-queue-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/merge-queue-on-server.md), [chores-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/chores-on-server.md), [jobs-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/jobs-on-server.md) and [rollout-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/rollout-on-server.md).
