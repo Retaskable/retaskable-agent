@@ -398,6 +398,7 @@ mod tests {
 
     fn target(url: Option<&str>, version_path: Option<&str>) -> DeployTarget {
         DeployTarget {
+            rollout: None,
             branch: "main".into(),
             url: url.map(str::to_string),
             smoke: None,

@@ -259,6 +259,21 @@ pub struct DeployTarget {
     pub smoke: Option<String>,
     #[serde(default)]
     pub version_path: Option<String>,
+    /// `deploy.production.rollout` (rollout-on-server.md section 3): the commands the store's rollout has this
+    /// computer run. A saved `site` flag is not read.
+    #[serde(default)]
+    pub rollout: Option<RolloutConfig>,
+}
+
+/// The two commands of a rollout: `traffic <percent>` sets the share of traffic on the new version, `health` says
+/// whether it is well.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolloutConfig {
+    #[serde(default)]
+    pub traffic: Option<String>,
+    #[serde(default)]
+    pub health: Option<String>,
 }
 
 /// Play on phone (play-on-phone.md section 2): builds the Android app and installs it on a phone over adb.

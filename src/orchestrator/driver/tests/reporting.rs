@@ -162,6 +162,7 @@ async fn production_lands_what_its_branch_or_its_deploy_serves() {
     let merged = push(&repo, "src.txt", "merged");
     *awaiting.lock().unwrap() = json!([{ "id": "z", "status": "on_main", "mergeCommit": merged }]);
     let production = |url: Option<String>| DeployTarget {
+        rollout: None,
         branch: "prod".into(),
         url,
         smoke: None,

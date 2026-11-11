@@ -161,6 +161,9 @@ pub struct Item {
     /// On a `fix_main` item that ended without a merge: the commit fixing found nothing to fix.
     #[serde(default)]
     pub no_fix_sha: Option<String>,
+    /// The commit the item's change merged as (`merge_commit`); the rollout report matches it against git.
+    #[serde(default)]
+    pub merge_commit: Option<String>,
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the

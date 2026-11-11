@@ -98,6 +98,9 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
             if let Some(s) = out.deploy.staging.as_mut() {
                 s.smoke = None;
             }
+            if let Some(p) = out.deploy.production.as_mut() {
+                p.rollout = None;
+            }
             return out;
         }
         None => return cfg.clone(),
@@ -111,6 +114,11 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
             SMOKE => {
                 if let Some(s) = out.deploy.staging.as_mut() {
                     s.smoke = value.as_str().map(str::to_string);
+                }
+            }
+            ROLLOUT => {
+                if let Some(p) = out.deploy.production.as_mut() {
+                    p.rollout = serde_json::from_value(value.clone()).ok();
                 }
             }
             _ => {}

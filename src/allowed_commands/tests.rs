@@ -26,6 +26,7 @@ fn cfg(test: &str) -> ProjectConfig {
         play_command: "old play".into(),
         deploy: crate::config::DeployConfig {
             staging: Some(DeployTarget {
+                rollout: None,
                 branch: "main".into(),
                 url: None,
                 smoke: Some("old".into()),

@@ -224,6 +224,7 @@ mod tests {
             url: Some("https://staging.example.com".to_string()),
             smoke: smoke.map(str::to_string),
             version_path: None,
+            rollout: None,
         }
     }
 
@@ -499,6 +500,7 @@ mod tests {
             url: Some(url),
             smoke: Some(smoke_command.to_string()),
             version_path: None,
+            rollout: None,
         };
 
         let state = run(&repo, &worktrees, &target, &sha).unwrap();
@@ -520,6 +522,7 @@ mod tests {
             url: Some(url),
             smoke: Some(smoke_command.to_string()),
             version_path: None,
+            rollout: None,
         };
 
         let state = run(&repo, &worktrees, &target, &sha).unwrap();
@@ -541,6 +544,7 @@ mod tests {
             url: Some(format!("http://127.0.0.1:{port}")),
             smoke: Some("true".to_string()),
             version_path: None,
+            rollout: None,
         };
         let http = reqwest::blocking::Client::new();
 
