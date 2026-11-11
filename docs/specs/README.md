@@ -22,6 +22,7 @@ Only the specs whose subject is the computer itself:
 - [agent-ci.md](agent-ci.md): CI run on the agent computer, in Docker, on its own slot.
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
 - [merge-queue-from-store.md](merge-queue-from-store.md): the store's queue decides whose turn it is to merge.
+- [rollout-on-server.md](rollout-on-server.md): the computer reports, polls and runs what the store's rollout tells it.
 - [ci-watch-through-store.md](ci-watch-through-store.md): the CI watcher sends facts to the store and runs what it answers; gentler on GitHub; Run now through the store.
 - [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
 - [restart-and-self-update.md](restart-and-self-update.md): restart and self-update.
