@@ -28,9 +28,11 @@
 //! failure) back onto the triager's own answer with [`second_look::resolve`] before the caller
 //! carries anything out.
 pub mod bug_report;
+pub mod options_fill;
 pub mod record;
 pub mod schedule;
 pub mod second_look;
+pub mod task;
 
 use std::future::Future;
 

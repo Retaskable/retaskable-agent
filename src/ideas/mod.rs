@@ -2,6 +2,7 @@
 //! holds as a spec draft and answers it `accept` there. This agent generates no ideas; the store's idea queue is the
 //! store's own. `store` holds the `ideas_list` / `idea_answer` calls and the types they read.
 pub(crate) mod accept;
+pub mod bug_sort;
 mod store;
 
 pub use accept::accept;

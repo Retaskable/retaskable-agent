@@ -695,6 +695,17 @@ impl Client {
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
     /// answering its `value` read as `T` (`what` names it when it can't be read). A refusal keeps the
     /// store's own `error` code (`bad_request`, `not_found`, ...) so a caller can tell them apart.
+    /// An op whose answer says nothing the caller reads: only that the store took it.
+    pub async fn op_done(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(), BacklogError> {
+        self.send(repo_id, token, op, args).await.map(|_| ())
+    }
+
     pub async fn op<T: DeserializeOwned>(
         &self,
         repo_id: u64,
