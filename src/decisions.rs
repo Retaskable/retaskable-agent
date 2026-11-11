@@ -1,9 +1,9 @@
 //! What a person has answered for an item (docs/specs/agent/05-item-lifecycle.md, the
-//! `needs_clarification` row): kept on the item for good rather than in one message to one
-//! session. Every implementer session is told about them, and a question asked again goes back
+//! `needs_clarification` row): the store keeps them on the item for good and sends them with it;
+//! this agent keeps none of its own. Every implementer session is told about them, and a question asked again goes back
 //! to the session with its answer instead of to the person (2026-10-07: github-workflow asked the
 //! same three questions three times; each answer reached one session once, and the next asked
-//! again). Pure: no store, no DB; `item_lifecycle.rs`'s `reasks` counter is what caps how many
+//! again). Pure; `item_lifecycle.rs`'s `reasks` counter is what caps how many
 //! times that can happen before the item needs a human after all.
 
 /// One question a person has answered for an item, kept for good.
@@ -24,28 +24,6 @@ pub const MAX_REASKS: u32 = 2;
 /// asked again in slightly different words still matches.
 fn same(s: &str) -> String {
     crate::text::squish(&s.to_lowercase())
-}
-
-/// The decisions after answering `questions` with `answers` at `at`: a question answered again
-/// replaces its old answer. A blank answer isn't a decision.
-pub fn with_answers(decisions: &[Decision], questions: &[String], answers: &[String], at: &str) -> Vec<Decision> {
-    let mut out = decisions.to_vec();
-    for (question, answer) in questions.iter().zip(answers.iter()) {
-        let answer = answer.trim();
-        if answer.is_empty() {
-            continue;
-        }
-        let decision = Decision {
-            question: question.clone(),
-            answer: answer.to_string(),
-            at: at.to_string(),
-        };
-        match out.iter().position(|d| same(&d.question) == same(question)) {
-            Some(i) => out[i] = decision,
-            None => out.push(decision),
-        }
-    }
-    out
 }
 
 /// The asked `questions` split into those already answered (with the answer) and those still open.
@@ -84,37 +62,17 @@ mod tests {
         s.to_string()
     }
 
-    #[test]
-    fn answers_are_kept_by_question_and_a_new_answer_replaces_the_old_one() {
-        let one = with_answers(
-            &[],
-            &[q("Squash or merge?"), q("Keep the old way?")],
-            &[q("Squash"), q("Yes")],
-            "t1",
-        );
-        assert_eq!(
-            one.iter()
-                .map(|d| (d.question.as_str(), d.answer.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("Squash or merge?", "Squash"), ("Keep the old way?", "Yes")]
-        );
-
-        let two = with_answers(&one, &[q("squash  or MERGE?")], &[q("Merge")], "t2");
-        assert_eq!(
-            two.iter().map(|d| d.answer.as_str()).collect::<Vec<_>>(),
-            vec!["Merge", "Yes"],
-            "the same question, however it's spaced or cased"
-        );
-    }
-
-    #[test]
-    fn a_blank_answer_is_not_a_decision() {
-        assert_eq!(with_answers(&[], &[q("A?")], &[q("")], "t").len(), 0);
+    fn decided(question: &str, answer: &str) -> Decision {
+        Decision {
+            question: q(question),
+            answer: q(answer),
+            at: q("t"),
+        }
     }
 
     #[test]
     fn asked_questions_split_into_those_answered_and_those_still_open() {
-        let decisions = with_answers(&[], &[q("Squash or merge?")], &[q("Squash")], "t");
+        let decisions = [decided("Squash or merge?", "Squash")];
         let (answered, open) = split_asked(&[q("Squash or merge?"), q("Which branch?")], &decisions);
         assert_eq!(
             answered.iter().map(|d| d.answer.as_str()).collect::<Vec<_>>(),
@@ -126,7 +84,7 @@ mod tests {
     #[test]
     fn the_prompt_section_lists_them_and_is_empty_without_any() {
         assert_eq!(decisions_text(&[]), "");
-        let decisions = with_answers(&[], &[q("Squash or merge?")], &[q("Squash")], "t");
+        let decisions = [decided("Squash or merge?", "Squash")];
         let text = decisions_text(&decisions);
         assert!(text.contains("Already decided by a person"));
         assert!(text.contains("Q: Squash or merge?\n  A: Squash"));
