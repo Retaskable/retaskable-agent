@@ -503,13 +503,6 @@ impl Client {
         Ok(())
     }
 
-    /// `do_next`: marks item `id` do next (`on`), or takes the mark off.
-    pub async fn do_next(&self, repo_id: u64, token: Option<&str>, id: &str, on: bool) -> Result<(), BacklogError> {
-        self.send(repo_id, token, "do_next", json!({ "id": id, "on": on }))
-            .await?;
-        Ok(())
-    }
-
     /// `park` (`HostedWork.park` in the TS agent): lets go of the lease on item `id` while it waits for
     /// `waits_for` (`answer`, `help`, `ci`, `tryout` or `merge`), staying its owner so it isn't handed out
     /// to another computer. The item is claimed back by name when the wait ends here.

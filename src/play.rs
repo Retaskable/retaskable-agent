@@ -1,8 +1,8 @@
 //! Play main (docs/specs/agent/04-architecture.md "Play main", 09-web-ui.md section 9.3): the
 //! project's `playCommand` run in the base checkout at `origin/<baseBranch>`, in a visible window
 //! and outside any sandbox (the orchestrator's own commands are never sandboxed, 04.2). It holds
-//! the base checkout ([`crate::base_hold::hold_base`]) for as long as it runs, so Shoot is refused meanwhile,
-//! and it is refused while Shoot holds it. `stop` kills its process tree.
+//! the base checkout ([`crate::base_hold::hold_base`]) for as long as it runs, so the baseline is refused meanwhile,
+//! and it is refused while another holds it. `stop` kills its process tree.
 
 use crate::text::is_blank;
 use std::collections::HashMap;

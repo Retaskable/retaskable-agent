@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::config::{CheckConfig, GalleryConfig, ProjectConfig};
+use crate::config::{CheckConfig, ProjectConfig};
 use crate::engines::engine::CursorOptions;
 
 use super::allowlist::{DENY, outside_write};
@@ -60,13 +60,9 @@ pub(super) fn command_program(cmd: &str) -> Option<String> {
         .filter(|w| !w.is_empty())
 }
 
-/// `Shell(<program>)` for each check's then each gallery's command, once each, without denied
-/// programs, shells or launchers.
-pub(crate) fn command_shells(checks: &[CheckConfig], galleries: &[GalleryConfig]) -> Vec<String> {
-    let commands = checks
-        .iter()
-        .map(|c| &c.command)
-        .chain(galleries.iter().map(|g| &g.command));
+/// `Shell(<program>)` for each check's command, once each, without denied programs, shells or launchers.
+pub(crate) fn command_shells(checks: &[CheckConfig]) -> Vec<String> {
+    let commands = checks.iter().map(|c| &c.command);
     let mut out: Vec<String> = Vec::new();
     for program in commands.filter_map(|c| command_program(c.as_str())) {
         if is_denied(&program) || is_launcher(&program) {
@@ -140,7 +136,7 @@ pub fn with_project(project: &ProjectConfig, base: CursorOptions) -> CursorOptio
     if !crate::tiers::cursor_allow_derive_on() {
         return base;
     }
-    let mut allow = command_shells(&project.checks, &project.galleries);
+    let mut allow = command_shells(&project.checks);
     let typed = project
         .engines
         .as_ref()
