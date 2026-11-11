@@ -1,6 +1,6 @@
 # Retaskable — Spec
 
-Status: v0.6 (backlog `drop-game-pictures`), trimmed for the agent: this is a copy of Retaskable.com's agent spec with what belongs to the store, the hub and the app cut out. See [TRIMMED.md](TRIMMED.md) for each cut and [README.md](README.md) for the other specs in this folder.
+Status: v0.7 (backlog `server-picks-tier`; before it `drop-game-pictures`), trimmed for the agent: this is a copy of Retaskable.com's agent spec with what belongs to the store, the hub and the app cut out. See [TRIMMED.md](TRIMMED.md) for each cut and [README.md](README.md) for the other specs in this folder.
 
 Theme: Orchestration
 
