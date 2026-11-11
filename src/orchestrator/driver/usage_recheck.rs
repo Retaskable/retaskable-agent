@@ -3,6 +3,8 @@
 //! would be, so a hold that no longer applies ends on the next tick.
 use std::time::Instant;
 
+use serde_json::Value;
+
 use super::machine::Machine;
 use super::project::ProjectLoop;
 use crate::telemetry::event::{self, Event};
@@ -20,22 +22,37 @@ impl Machine {
         }
     }
 
-    fn apply_reading(&mut self, reading: Reading) {
+    pub(super) fn apply_reading(&mut self, reading: Reading) {
+        let was_waiting = self.engine_limits.claude_at_limit(Instant::now());
+        let (status, left_pct) = match &reading {
+            Reading::Unread => return,
+            Reading::Answered => ("allowed".to_string(), None),
+            Reading::Event(usage) => (
+                usage["status"].as_str().unwrap_or("allowed").to_string(),
+                five_hour_left_pct(usage),
+            ),
+        };
+        if let Reading::Event(usage) = &reading {
+            self.record(usage);
+        } else {
+            self.engine_limits.clear_claude();
+        }
+        let waiting = self.engine_limits.claude_at_limit(Instant::now());
         for lp in &mut self.projects {
             lp.events.add_in(
                 &lp.id,
                 Event::UsageRechecked(event::UsageRechecked {
-                    reading: Some(reading.word().into()),
+                    status: Some(status.clone()),
+                    left_pct,
+                    was_waiting: Some(was_waiting),
+                    waiting: Some(waiting),
                     ..Default::default()
                 }),
             );
         }
-        let Reading::Event(usage) = &reading else {
-            if reading == Reading::Answered {
-                self.engine_limits.clear_claude();
-            }
-            return;
-        };
+    }
+
+    fn record(&mut self, usage: &Value) {
         let week = crate::tiers::carries_week(usage);
         let five_hour = crate::tiers::is_usage_reading(usage);
         if five_hour {
@@ -64,4 +81,12 @@ impl Machine {
                 .hit(crate::engines::EngineId::Claude, Instant::now() + left);
         }
     }
+}
+
+/// The 5-hour window's share left, in whole percent, when the reading carries one.
+fn five_hour_left_pct(usage: &Value) -> Option<i64> {
+    let used = usage["unifiedWindows"]["five_hour"]["utilization"]
+        .as_f64()
+        .or_else(|| usage["utilization"].as_f64())?;
+    Some(((1.0 - crate::tiers::frac(used)) * 100.0).round() as i64)
 }

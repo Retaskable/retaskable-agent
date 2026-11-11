@@ -114,7 +114,14 @@ payload!(TrialOpened {
     pr_url: String
 });
 payload!(TrialDropped { reason: String });
-payload!(UsageRechecked { reading: String });
+payload!(UsageRechecked {
+    status: String,
+    #[serde(rename = "leftPct")]
+    left_pct: i64,
+    #[serde(rename = "wasWaiting")]
+    was_waiting: bool,
+    waiting: bool
+});
 payload!(HostCallUndefined {
     cmd: String,
     args: Value

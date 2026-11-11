@@ -27,16 +27,7 @@ pub enum Reading {
     Unread,
 }
 
-impl Reading {
-    /// The word the `usage_rechecked` event carries.
-    pub fn word(&self) -> &'static str {
-        match self {
-            Reading::Event(_) => "event",
-            Reading::Answered => "answered",
-            Reading::Unread => "unread",
-        }
-    }
-}
+impl Reading {}
 
 /// Reads the `stream-json` lines of the question.
 pub fn read(stdout: &str) -> Reading {
@@ -54,7 +45,12 @@ pub fn read(stdout: &str) -> Reading {
     }
     match (info, result) {
         (Some(info), _) => Reading::Event(info),
-        (None, Some(r)) if r.get("is_error").and_then(Value::as_bool) != Some(true) => Reading::Answered,
+        (None, Some(r))
+            if r.get("is_error").and_then(Value::as_bool) != Some(true)
+                && r.get("api_error_status").is_none_or(Value::is_null) =>
+        {
+            Reading::Answered
+        }
         _ => Reading::Unread,
     }
 }
@@ -72,6 +68,11 @@ fn args() -> Vec<String> {
         "stream-json",
         "--verbose",
         "--no-session-persistence",
+        "--permission-mode",
+        "auto",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "project",
     ]
     .map(String::from)
     .to_vec()
@@ -79,7 +80,11 @@ fn args() -> Vec<String> {
 
 async fn ask(claude: PathBuf) -> Reading {
     let mut cmd = Command::new(claude);
+    // Like a Haiku session, run away from any project: no user connectors, and the temp folder has no settings.
     cmd.args(args())
+        .current_dir(std::env::temp_dir())
+        .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
+        .env("CLAUDE_CODE_SUBAGENT_MODEL", "haiku")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -153,6 +158,8 @@ mod tests {
             Reading::Unread
         );
         assert_eq!(read(""), Reading::Unread);
+        let api = json!({"type": "result", "is_error": false, "api_error_status": 429});
+        assert_eq!(read(&api.to_string()), Reading::Unread);
     }
 
     #[test]
