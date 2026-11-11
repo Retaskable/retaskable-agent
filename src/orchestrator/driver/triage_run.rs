@@ -529,3 +529,31 @@ impl ProjectLoop {
         self.look_note(item_id, line);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::add_to_reason;
+
+    #[test]
+    fn a_missing_reason_becomes_the_text() {
+        let mut reason = None;
+        add_to_reason(&mut reason, "first");
+        assert_eq!(reason.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn an_empty_reason_is_replaced_not_prefixed() {
+        let mut reason = Some(String::new());
+        add_to_reason(&mut reason, "first");
+        assert_eq!(reason.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn an_existing_reason_keeps_the_text_under_it() {
+        let mut reason = Some("old".to_string());
+        add_to_reason(&mut reason, "new");
+        assert_eq!(reason.as_deref(), Some("old\n\nnew"));
+        add_to_reason(&mut reason, "newer");
+        assert_eq!(reason.as_deref(), Some("old\n\nnew\n\nnewer"));
+    }
+}
