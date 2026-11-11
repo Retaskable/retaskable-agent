@@ -16,6 +16,9 @@ pub(super) struct Host {
     published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
+    /// What the classifier answers: a confident bug when set.
+    bug: AtomicBool,
+    requests: Mutex<Vec<Option<String>>>,
 }
 
 impl DraftHost for Host {
@@ -28,6 +31,7 @@ impl DraftHost for Host {
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
         self.engines.lock().unwrap().push(job.engine);
+        self.requests.lock().unwrap().push(job.draft.request.clone());
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);
         async move {
@@ -63,6 +67,22 @@ impl DraftHost for Host {
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
     }
+    fn classify(&self, _: &ProjectConfig, _: String) -> BoxFuture<'static, crate::ask::classify::Classified> {
+        use crate::ask::classify::{Classified, Kind, Sorted};
+        let kind = if self.bug.load(Ordering::SeqCst) {
+            Kind::Bug
+        } else {
+            Kind::Idea
+        };
+        async move {
+            Classified::Sorted(Sorted {
+                kind,
+                confidence: 0.9,
+                title: None,
+            })
+        }
+        .boxed()
+    }
 }
 
 /// A store whose `draft_claim_next` hands out `draft` once; every op is recorded.
@@ -85,6 +105,9 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "ideas_list" => json!({ "round": null, "ideas": [{
+                        "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
+                        "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
                     "draft_take" => json!({ "token": "lease-t", "draft": {
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
@@ -558,4 +581,29 @@ async fn at_the_limit_a_draft_starts_with_the_fallback_and_waits_without_it() {
         let case = signed_out;
         assert_eq!(host.engines.lock().unwrap().len(), usize::from(starts), "{case:?}");
     }
+}
+
+fn idea_plan() -> Value {
+    json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"], "intake": { "kinds": ["feature"] } })
+}
+
+#[tokio::test]
+async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_claim() {
+    let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
+    host.bug.store(true, Ordering::SeqCst);
+    reports(&mut rig, &asked, 2).await;
+    assert!(ops(&asked).contains(&"idea_mark_bug".to_string()), "{:?}", ops(&asked));
+    let requests = host.requests.lock().unwrap();
+    assert!(
+        requests[0].as_deref().unwrap().contains("Plan it as a fix"),
+        "{requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
+    let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
+    reports(&mut rig, &asked, 2).await;
+    assert!(!ops(&asked).contains(&"idea_mark_bug".to_string()));
+    assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }

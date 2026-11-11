@@ -9,6 +9,7 @@ use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
+use crate::ask::classify::{Classified, Options, classify};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
@@ -223,6 +224,30 @@ impl DraftHost for ClaudeDrafts {
 
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
+    }
+
+    fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
+        let (env, models, project) = (self.env.clone(), self.cursor_models.clone(), project.clone());
+        Box::pin(async move {
+            let Ok(placed) = place(Engine::Claude, Role::Assistant, &env, &models) else {
+                return Classified::Unavailable;
+            };
+            let opts = Options::new(true, false, project.budget.ask_usd, 0.0);
+            let cwd = std::env::temp_dir();
+            classify(&text, &opts, &cwd, |spec| async move {
+                let engine = engine_of(spec.engine)?;
+                run_session(
+                    engine.as_ref(),
+                    &placed.bin,
+                    &spec,
+                    "classify",
+                    None,
+                    Default::default(),
+                )
+                .await
+            })
+            .await
+        })
     }
 }
 
