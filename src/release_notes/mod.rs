@@ -9,7 +9,7 @@
 //! [`gather`]/[`group`], it builds the read-only, ephemeral `writer` session (`release_notes_result_schema()`,
 //! `build_prompt(...)`, `budget.release_notes_usd`, [`writer_model`] of the scouts' tier) and runs it through the
 //! caller's [`crate::engines::runner::run_session`], falling back to the plain list when it fails. `saved` reads the
-//! notes the store keeps (`releases_get`), offering it the repo's `docs/releases` files once first. Nothing calls
+//! notes the store keeps (`releases_get`); it offers the store nothing. Nothing calls
 //! any of it yet: the command that asks for a note, the tier and whether the local model is free come with the
 //! orchestrator loop and the cloud link's commands. The playtest-fix split waits for the agent's own chores.
 //!
@@ -37,8 +37,5 @@ pub use model::{
     SpecLink, release_notes_result_schema,
 };
 pub use render::{MAX_HIGHLIGHTS, build_prompt, empty_note, front_matter_lines, local_day, markdown, note_markdown};
-pub use saved::{
-    RELEASE_BODY_MAX_BYTES, RELEASE_TITLE_MAX, RELEASES_DIR, ReleaseFile, ReleaseOffer, SavedReleases, StoreRelease,
-    offered_file, read_release_files, release_of_file,
-};
+pub use saved::{SavedReleases, StoreRelease};
 pub use write::{Writer, Written, check_range, session_spec, write_note, writer_model};
