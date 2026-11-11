@@ -9,24 +9,15 @@ use serde_json::{Map, Value, json};
 
 use crate::config;
 
-/// `agent_settings { dailyUsd?, concurrency?, autoConcurrency?, modelConcurrency?, models? }`. Any other key
+/// `agent_settings { dailyUsd?, concurrency?, modelConcurrency?, models? }`. Any other key
 /// (a tag, `pollIntervalSec`, `local`, `cursorModels`, engines) is refused when parsing.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AgentSettings {
     pub daily_usd: Option<f64>,
     pub concurrency: Option<f64>,
-    pub auto_concurrency: Option<AutoChange>,
     pub model_concurrency: Option<ModelCaps>,
     pub models: Option<ModelsChange>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AutoChange {
-    pub enabled: Option<bool>,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -70,8 +61,7 @@ fn current(obj: &Map<String, Value>, group: &str, key: &str) -> Option<u32> {
 }
 
 /// Checks `change` and patches `obj` (the top level of `config.json`) with it. Nothing is changed when it is
-/// refused: "Name a change." for an empty one, a field out of range, thresholds out of order, or auto's least
-/// above its most.
+/// refused: "Name a change." for an empty one, a field out of range, thresholds out of order, or a key the command doesn't take.
 pub fn with_agent_settings(obj: &mut Map<String, Value>, change: &AgentSettings) -> Result<()> {
     let mut patch: Vec<(&str, Option<&str>, Value)> = Vec::new();
     if let Some(usd) = change.daily_usd {
@@ -82,23 +72,6 @@ pub fn with_agent_settings(obj: &mut Map<String, Value>, change: &AgentSettings)
     }
     if let Some(n) = change.concurrency {
         patch.push(("concurrency", None, json!(sessions("Sessions at once", n)?)));
-    }
-    if let Some(a) = &change.auto_concurrency {
-        if let Some(on) = a.enabled {
-            patch.push(("autoConcurrency", Some("enabled"), json!(on)));
-        }
-        let min = a.min.map(|v| sessions("Auto's least", v)).transpose()?;
-        let max = a.max.map(|v| sessions("Auto's most", v)).transpose()?;
-        let least = min.or_else(|| current(obj, "autoConcurrency", "min")).unwrap_or(1);
-        let most = max.or_else(|| current(obj, "autoConcurrency", "max")).unwrap_or(8);
-        if (min.is_some() || max.is_some()) && least > most {
-            return Err(anyhow!("Auto's least can't be above its most."));
-        }
-        for (key, v) in [("min", min), ("max", max)] {
-            if let Some(v) = v {
-                patch.push(("autoConcurrency", Some(key), json!(v)));
-            }
-        }
     }
     if let Some(m) = &change.model_concurrency {
         for (key, v, name) in [

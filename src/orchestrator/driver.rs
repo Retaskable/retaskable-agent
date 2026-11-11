@@ -32,7 +32,6 @@ mod land;
 mod lane_play;
 mod main_sync;
 pub use lane_play::LanePlay;
-mod auto;
 mod claim;
 mod machine;
 mod mode;

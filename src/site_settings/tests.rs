@@ -32,12 +32,6 @@ fn each_field_is_saved_and_the_rest_stays() {
     assert_eq!(obj["budget"], json!({ "dailyUsd": 12.5, "plannerUsd": 1.5 }));
     apply(&mut obj, json!({ "concurrency": 4 })).unwrap();
     assert_eq!(obj["concurrency"], 4);
-    apply(
-        &mut obj,
-        json!({ "autoConcurrency": { "enabled": false, "min": 2, "max": 6 } }),
-    )
-    .unwrap();
-    assert_eq!(obj["autoConcurrency"], json!({ "enabled": false, "min": 2, "max": 6 }));
     apply(&mut obj, json!({ "modelConcurrency": { "opus": 1 } })).unwrap();
     apply(&mut obj, json!({ "modelConcurrency": { "sonnet": 3 } })).unwrap();
     assert_eq!(obj["modelConcurrency"], json!({ "opus": 1, "sonnet": 3 }));
@@ -67,9 +61,6 @@ fn range_edges() {
     assert!(ok(json!({ "modelConcurrency": { "opus": 64, "sonnet": 1 } })));
     assert!(!ok(json!({ "modelConcurrency": { "opus": 0 } })));
     assert!(!ok(json!({ "modelConcurrency": { "sonnet": 65 } })));
-    assert!(ok(json!({ "autoConcurrency": { "min": 1, "max": 64 } })));
-    assert!(!ok(json!({ "autoConcurrency": { "max": 65 } })));
-    assert!(!ok(json!({ "autoConcurrency": { "min": 0 } })));
     assert!(ok(
         json!({ "models": { "pauseBelowPct": 0, "sonnetAbovePct": 1, "opusAbovePct": 100 } })
     ));
@@ -81,7 +72,10 @@ fn range_edges() {
 #[test]
 fn an_empty_change_is_refused_in_setups_words() {
     assert_eq!(refused(json!({})), "Name a change.");
-    assert_eq!(refused(json!({ "autoConcurrency": {} })), "Name a change.");
+    assert!(
+        AgentSettings::parse(&json!({ "autoConcurrency": { "max": 2 } })).is_err(),
+        "pacing is the server's now"
+    );
     assert_eq!(refused(json!({ "models": {} })), "Name a change.");
 }
 
@@ -90,16 +84,6 @@ fn thresholds_out_of_order_are_refused() {
     assert!(refused(json!({ "models": { "opusAbovePct": 10 } })).contains("Thresholds"));
     assert!(refused(json!({ "models": { "pauseBelowPct": 20 } })).contains("Thresholds"));
     assert!(refused(json!({ "models": { "sonnetAbovePct": 60, "opusAbovePct": 50 } })).contains("Thresholds"));
-}
-
-#[test]
-fn autos_least_above_its_most_is_refused() {
-    assert!(refused(json!({ "autoConcurrency": { "min": 5, "max": 3 } })).contains("least"));
-    // Against the saved side: the default most is 8.
-    assert!(refused(json!({ "autoConcurrency": { "min": 9 } })).contains("least"));
-    let mut obj = base();
-    apply(&mut obj, json!({ "autoConcurrency": { "min": 3, "max": 4 } })).unwrap();
-    assert!(apply(&mut obj, json!({ "autoConcurrency": { "max": 2 } })).is_err());
 }
 
 #[test]

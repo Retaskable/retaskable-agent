@@ -36,7 +36,7 @@ A project's own settings stay in Project settings on retaskable.com, as before.
 | Cursor's models | setup, `RETASKABLE_CURSOR_MODELS`, the settings page | `config.json` `cursor.models` |
 | Network access to the settings page, and its password | setup, `RETASKABLE_NETWORK_PASSWORD`, the settings page | `machine.json` `network` (the password as a scrypt hash) |
 | Daily budget | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store, in that computer's pool record (`dailyUsd`) |
-| Sessions at once (`limit`, auto concurrency) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`limit`, `autoConcurrency`) |
+| Sessions at once (`limit`) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`limit`) |
 | Model thresholds (`opusAbovePct`, `pauseBelowPct`) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`models`) |
 
 ### 2.1 The owner's settings: `pool_settings` (changed 2026-11-09)

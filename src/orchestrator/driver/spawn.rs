@@ -7,7 +7,7 @@ use tokio::time::MissedTickBehavior;
 
 use super::{OrchestratorMode, ProjectLoop, RunStarter, SessionStarter};
 use crate::backlog::Client;
-use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::env::Env;
 use crate::link::TokenStore;
 use crate::orchestrator::guard::PortGuard;
@@ -25,8 +25,6 @@ pub struct SpawnArgs<'a> {
     pub concurrency: u32,
     /// The computer's local model, shared with the session starters.
     pub local: crate::local_model::LocalModel,
-    /// `autoConcurrency`.
-    pub auto_concurrency: AutoConcurrency,
     /// `pollIntervalSec`: how often the loop steps between the minute's passes.
     pub poll_every: Duration,
     pub backlog_url: &'a str,
@@ -103,10 +101,7 @@ pub fn spawn_all(args: SpawnArgs) {
         },
     );
     machine.engine_limits = limits;
-    machine = machine
-        .with_local(args.local)
-        .with_auto(args.auto_concurrency)
-        .with_machine_dir(args.dir);
+    machine = machine.with_local(args.local);
     if args.live.snapshot().mode == OrchestratorMode::Runs {
         machine = machine.with_run_starters(args.run_starters);
         let kinds = machine.run_starters.kinds();

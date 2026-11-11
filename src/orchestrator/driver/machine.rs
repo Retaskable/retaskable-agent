@@ -1,7 +1,6 @@
 //! The computer's orchestrator: one shared lane pool and every project's state, and what starts the
 //! whole loop running (`spawn_all`).
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -17,7 +16,7 @@ use super::{
 };
 use crate::backlog::Item;
 use crate::base_hold;
-use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests};
+use crate::config::{CursorModels, EngineChoiceConfig, Playtests};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -136,8 +135,6 @@ pub struct Machine {
     pub(super) concurrency: u32,
     /// The computer's local model: its slot holder doesn't count toward `concurrency` (`local-one-slot`).
     pub(super) local: crate::local_model::LocalModel,
-    /// Auto concurrency's pacer and the number it allows (`driver/auto.rs`).
-    pub(super) auto: super::auto::Auto,
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
     pub(super) outcome_sender: OutcomeSender,
@@ -146,9 +143,6 @@ pub struct Machine {
     /// tests, always: production always reads the real flag.
     #[cfg(test)]
     pub(super) stopping_override: Option<bool>,
-    /// A test's clock, in epoch seconds, for the pacer.
-    #[cfg(test)]
-    pub(super) clock: Option<i64>,
 }
 
 /// A [`Shared`] borrowing the machine's fields (not its projects), so a loop over `self.projects` can build one.
@@ -188,16 +182,10 @@ impl Machine {
             run_starters: RunStarters::default(),
             concurrency,
             local: crate::local_model::LocalModel::off(),
-            auto: super::auto::Auto::new(AutoConcurrency {
-                enabled: false,
-                ..Default::default()
-            }),
             outcomes,
             outcome_sender: OutcomeSender(sender),
             #[cfg(test)]
             stopping_override: None,
-            #[cfg(test)]
-            clock: None,
         }
     }
 
@@ -215,18 +203,6 @@ impl Machine {
         } else {
             concurrency
         }
-    }
-
-    /// Paces sessions with auto concurrency (behind the `auto-concurrency` flag) when `cfg.enabled`.
-    pub fn with_auto(mut self, cfg: AutoConcurrency) -> Self {
-        self.auto = super::auto::Auto::new(cfg);
-        self
-    }
-
-    /// Keeps the pacer's number across a restart in `<dir>/machine.json`.
-    pub fn with_machine_dir(mut self, dir: &Path) -> Self {
-        self.auto.dir = Some(dir.to_path_buf());
-        self
     }
 
     /// [`process_tree::stopping`], unless a test has overridden it.
@@ -633,8 +609,7 @@ impl Machine {
         if starter.is_some() {
             self.settle_outcomes().await;
         }
-        self.pace_step(ready, &live).await;
-        let concurrency = self.room_total(self.report_concurrency());
+        let concurrency = self.room_total(self.concurrency);
         if let Some(starter) = starter.as_deref() {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
@@ -756,7 +731,6 @@ impl Machine {
             claude_starts = lp.claude_starts;
             scheduled.push((actions, answer));
         }
-        self.auto.work_waiting = slots == 0 && starter.is_some() && self.work_waits(&live, paused);
         scheduled
     }
 }
