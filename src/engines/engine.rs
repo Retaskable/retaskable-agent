@@ -415,6 +415,22 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
 /// A `SessionResult` test fixture shared by `write_note`'s and `run_round`'s own tests: a result
 /// with a cost, and nothing else interesting. Callers set `ok`, `subtype`, `structured` and `error`.
 #[cfg(test)]
+/// A read-only session config for tests: sonnet, $1, no engine, local or cursor settings.
+#[cfg(test)]
+pub(crate) fn test_config() -> EphemeralSessionConfig<'static> {
+    EphemeralSessionConfig {
+        cwd: std::path::Path::new("."),
+        budget_usd: 1.0,
+        model: "sonnet".into(),
+        local: None,
+        engine: None,
+        cursor: None,
+        sandbox: false,
+        shell: true,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
     SessionResult {
         ok,

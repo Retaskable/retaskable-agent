@@ -174,10 +174,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
-    use crate::engines::engine::test_result;
+    use crate::engines::engine::{test_config, test_result};
 
     fn task() -> Task<'static> {
         Task {
@@ -186,16 +184,7 @@ mod tests {
             project_type: ProjectType::Web,
             github_repo: "x/y",
             max_automatic_decisions: 2,
-            session: EphemeralSessionConfig {
-                cwd: Path::new("."),
-                budget_usd: 1.0,
-                model: "sonnet".into(),
-                local: None,
-                engine: None,
-                cursor: None,
-                sandbox: false,
-                shell: true,
-            },
+            session: test_config(),
         }
     }
 

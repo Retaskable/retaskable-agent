@@ -186,10 +186,8 @@ pub fn next(ended: Ended, current: Option<&[Question]>, tries: u32) -> Next {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
-    use crate::engines::engine::test_result;
+    use crate::engines::engine::{test_config, test_result};
 
     fn q(text: &str, options: &[&str]) -> Question {
         Question {
@@ -200,16 +198,7 @@ mod tests {
     }
 
     fn cfg() -> EphemeralSessionConfig<'static> {
-        EphemeralSessionConfig {
-            cwd: Path::new("."),
-            budget_usd: 1.0,
-            model: "sonnet".into(),
-            local: None,
-            engine: None,
-            cursor: None,
-            sandbox: false,
-            shell: true,
-        }
+        test_config()
     }
 
     fn result(v: Value) -> SessionResult {
