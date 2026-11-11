@@ -51,11 +51,6 @@ impl ProjectLoop {
         mut room: u32,
         shared: &mut Shared<'_>,
     ) {
-        let on = self.flags.on("playtest-answer-command").await;
-        shared
-            .links
-            .item_commands
-            .set_flag(&self.id, "playtest-answer-command", on);
         for command in shared.links.item_commands.take(&self.id) {
             if let ItemCommand::Continue { item, .. }
             | ItemCommand::StartOver { item, .. }
@@ -116,9 +111,7 @@ impl ProjectLoop {
                 self.starting_over.push((item, notes));
             }
         }
-        if self.flags.on("release-playtests-off").await {
-            self.release_playtests();
-        }
+        self.release_playtests();
         for (item, message) in std::mem::take(&mut self.playtest_fails) {
             if !self
                 .resume_after_playtest(

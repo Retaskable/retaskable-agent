@@ -241,27 +241,27 @@ impl RunLoop {
 impl ProjectLoop {
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
-    /// With `tags-reread-on-save` On a wake ends a wait only when the tag list changed since the ask that got
-    /// the wait (`tags_seen`, set at each ask); otherwise it is used up and nothing is asked.
+    /// A wake ends a wait only when the tag list changed since the ask that got the wait (`tags_seen`, set at
+    /// each ask); otherwise it is used up and nothing is asked.
     pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>) {
         // A re-read that changed the tags ends the waits too: the next ask carries the new list.
         let generation = shared.links.tags.generation();
         let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
-        let woke = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
-        let wake_counts = woke && !self.flags.on("tags-reread-on-save").await;
-        if tags_changed | wake_counts {
+        // A wake is used up once read.
+        shared.links.work.signal(&self.id).notified().now_or_never();
+        if tags_changed {
             self.run_loop.waiting = false;
             self.claim_waiting = false;
         }
     }
 
-    /// Writes the events the runs' tasks sent. Behind `ci-merged-events`: Off, they are dropped.
+    /// Writes the events the runs' tasks sent.
     pub(super) async fn write_run_events(&mut self) {
         let mut sent = Vec::new();
         while let Ok(event) = self.run_loop.events_rx.try_recv() {
             sent.push(event);
         }
-        if sent.is_empty() || !self.flags.on("ci-merged-events").await {
+        if sent.is_empty() {
             return;
         }
         for event in sent {
@@ -288,7 +288,6 @@ impl ProjectLoop {
             let merged = self.run_loop.merges.remove(&end.token);
             if let Some(merged) = merged
                 && end.outcome == RunOutcome::Merged
-                && self.flags.on("ci-merged-events").await
             {
                 self.events.add_in(&self.id, Event::Merged(merged));
             }

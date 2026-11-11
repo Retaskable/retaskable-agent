@@ -85,6 +85,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "facts_get" => json!({ "paused": false }),
                     "draft_take" => json!({ "token": "lease-t", "draft": {
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
@@ -116,7 +117,6 @@ async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (
     let (base, asked) = store_failing(draft, fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
     let host = Arc::new(Host {
         answers: Mutex::new(answers),
         ..Default::default()

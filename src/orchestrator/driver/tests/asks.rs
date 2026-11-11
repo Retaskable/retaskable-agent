@@ -86,7 +86,11 @@ async fn store_failing(fail: &'static str) -> (String, Asked) {
                         Json(json!({ "error": "boom" })),
                     );
                 }
-                let value = if op == "list" { json!([]) } else { Value::Null };
+                let value = match op.as_str() {
+                    "list" => json!([]),
+                    "facts_get" => json!({ "paused": false }),
+                    _ => Value::Null,
+                };
                 (axum::http::StatusCode::OK, Json(json!({ "value": value })))
             }
         }),
@@ -105,7 +109,6 @@ async fn rig_failing(fail: &'static str) -> (Rig, Arc<Host>, Asked) {
     let (base, asked) = store_failing(fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
     let host = Arc::new(Host::default());
     rig.machine.asks = Some(host.clone());
     (rig, host, asked)
@@ -375,7 +378,6 @@ async fn at_the_limit_an_ask_starts_with_the_fallback_and_waits_without_it() {
         (LocalModel::up(), true, false),
     ] {
         let (mut rig, host, _asked) = rig_with_host().await;
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
         rig.machine.local = model;
         rig.machine.claude_signed_out_until = signed_out.then(|| std::time::Instant::now() + Duration::from_secs(60));
         rig.machine

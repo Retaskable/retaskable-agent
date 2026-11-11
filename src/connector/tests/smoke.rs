@@ -3,12 +3,8 @@ use super::*;
 use crate::store::{SmokeState, SmokeStatus, Store};
 
 fn on(view: &mut Arc<AgentView>, dir: &std::path::Path) {
-    Arc::get_mut(view).unwrap().settings = crate::hello_settings::HelloSettings::new(
-        dir.to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        Arc::new(crate::flags::Flags::fixed(&["snapshot-reporting"])),
-    );
+    Arc::get_mut(view).unwrap().settings =
+        crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
 }
 
 fn state(status: SmokeStatus, tail: Option<&str>) -> SmokeState {
@@ -27,13 +23,11 @@ fn save(dir: &std::path::Path, project: &str, smoke: &SmokeState) {
     store.save().unwrap();
 }
 
-async fn first_snapshot(project: &str, flag: bool, smoke: Option<SmokeState>) -> Value {
+async fn first_snapshot(project: &str, smoke: Option<SmokeState>) -> Value {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let mut view = view(&[project]);
-    if flag {
-        on(&mut view, dir.path());
-    }
+    on(&mut view, dir.path());
     if let Some(s) = &smoke {
         save(dir.path(), project, s);
     }
@@ -47,22 +41,20 @@ async fn first_snapshot(project: &str, flag: bool, smoke: Option<SmokeState>) ->
 
 #[tokio::test]
 async fn a_passed_smoke_is_sent_without_a_tail_and_a_failed_one_with_it() {
-    let passed = first_snapshot("smoke-passed", true, Some(state(SmokeStatus::Passed, Some("old")))).await;
+    let passed = first_snapshot("smoke-passed", Some(state(SmokeStatus::Passed, Some("old")))).await;
     assert_eq!(
         passed["state"]["smoke"],
         json!({ "sha": "abc123", "status": "passed", "at": "2026-11-08T00:00:00.000Z", "url": "https://staging.example.com" })
     );
-    let failed = first_snapshot("smoke-failed", true, Some(state(SmokeStatus::Failed, Some("boom")))).await;
+    let failed = first_snapshot("smoke-failed", Some(state(SmokeStatus::Failed, Some("boom")))).await;
     assert_eq!(failed["state"]["smoke"]["status"], "failed");
     assert_eq!(failed["state"]["smoke"]["tail"], "boom");
 }
 
 #[tokio::test]
-async fn no_smoke_or_the_flag_off_sends_no_smoke() {
-    let none = first_snapshot("smoke-none", true, None).await;
+async fn no_smoke_state_sends_no_smoke() {
+    let none = first_snapshot("smoke-none", None).await;
     assert!(none["state"].get("smoke").is_none());
-    let off = first_snapshot("smoke-off", false, Some(state(SmokeStatus::Passed, None))).await;
-    assert!(off["state"].get("smoke").is_none());
 }
 
 #[tokio::test]

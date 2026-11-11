@@ -12,8 +12,8 @@ async fn stub(fail_report: Arc<AtomicBool>, fail_release: Arc<AtomicBool>) -> (S
             let (seen, fail_report, fail_release) = (seen.clone(), fail_report.clone(), fail_release.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
-                if op == "settings_get" {
-                    return (StatusCode::OK, Json(json!({ "value": null })));
+                if op == "settings_get" || op == "facts_get" {
+                    return (StatusCode::OK, Json(json!({ "value": if op == "facts_get" { json!({ "paused": false }) } else { Value::Null } })));
                 }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let refuse = (op == "report" && fail_report.load(Ordering::SeqCst))

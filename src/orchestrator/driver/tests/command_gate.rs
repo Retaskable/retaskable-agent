@@ -18,6 +18,7 @@ async fn store(settings: Arc<Mutex<Option<Value>>>) -> (String, Arc<Mutex<Vec<St
                 match (op.as_str(), settings.lock().unwrap().clone()) {
                     ("settings_get", None) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                     ("settings_get", Some(v)) => Json(json!({ "value": v })).into_response(),
+                    ("facts_get", _) => Json(json!({ "value": { "paused": false } })).into_response(),
                     _ => Json(json!({ "value": [] })).into_response(),
                 }
             }

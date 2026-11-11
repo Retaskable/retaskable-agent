@@ -172,7 +172,6 @@ mod tests {
     fn a_merge_with_an_undefined_argument_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
         let (gh, ran) = crate::test_support::fake_gh_that_marks(dir.path());
-        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
         let err = merge_pr(&gh, dir.path(), 7, "", true).unwrap_err();
         assert!(err.to_string().contains("was not run"), "{err}");
         assert!(!ran.exists());
@@ -180,7 +179,6 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].cmd, "gh");
         assert_eq!(got[0].args[..3], ["pr", "merge", "7"]);
-        crate::host_call::set_on_for(vec![]);
     }
 
     #[test]

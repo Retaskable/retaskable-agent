@@ -16,7 +16,6 @@ use tokio::task::JoinHandle;
 use super::Shared;
 use super::project::ProjectLoop;
 use super::start_gate::StartGate;
-use super::store_errors::WATCH;
 use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
 use crate::backlog::asks::AskReport;
@@ -130,7 +129,7 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let failures = self.failures.when(self.flags.on(WATCH).await);
+        let failures = self.failures.clone();
         let store = || AskStore {
             client: self.client.clone(),
             repo,

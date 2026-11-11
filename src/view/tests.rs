@@ -89,12 +89,7 @@ async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its
     let dir = tempfile::tempdir().unwrap();
     let env = crate::env::Env::from_pairs([("RETASKABLE_POLL_SEC", "30")]);
     let mut v = view(vec![]);
-    v.settings = HelloSettings::new(
-        dir.path().to_path_buf(),
-        env,
-        4700,
-        Arc::new(crate::flags::Flags::fixed(&["machine-settings"])),
-    );
+    v.settings = HelloSettings::new(dir.path().to_path_buf(), env, 4700);
     let hello = v.hello("").await;
     let s = &hello["settings"];
     assert_eq!(s["concurrency"], 1);
@@ -109,16 +104,6 @@ async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its
     assert_eq!(s["envVars"]["RETASKABLE_POLL_SEC"], true);
     assert_eq!(s["envVars"]["RETASKABLE_LANES"], false);
     assert_eq!(hello["capabilities"], json!(["agent_settings"]));
-    // Off, the hello has no settings at all.
-    v.settings = HelloSettings::new(
-        dir.path().to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        Arc::new(crate::flags::Flags::fixed(&[])),
-    );
-    let off = v.hello("").await;
-    assert!(off.get("settings").is_none());
-    assert_eq!(off["capabilities"], json!([]));
     // The name is there, but the value 30 shows only as the computed pollIntervalSec, never as the variable's.
     assert!(!s["envVars"].to_string().contains("30"));
 }
@@ -144,24 +129,9 @@ async fn hello_names_the_project_or_null_before_setup_or_without_a_repo() {
     assert!(v.hello("unknown").await["project"].is_null());
 }
 
-fn view_with_checks_flag(on: bool) -> AgentView {
-    let mut v = view(vec![project("a", "o/a")]);
-    v.settings = crate::hello_settings::HelloSettings::new(
-        PathBuf::new(),
-        crate::env::Env::empty(),
-        0,
-        Arc::new(crate::flags::Flags::fixed(if on {
-            &["setup-check-command"]
-        } else {
-            &[]
-        })),
-    );
-    v
-}
-
 #[tokio::test]
 async fn hello_has_no_checks_until_the_first_run_then_carries_them_with_node() {
-    let v = view_with_checks_flag(true);
+    let v = view(vec![project("a", "o/a")]);
     for id in ["", "a"] {
         assert!(v.hello(id).await.get("checks").is_none());
     }
@@ -171,15 +141,6 @@ async fn hello_has_no_checks_until_the_first_run_then_carries_them_with_node() {
         assert_eq!(checks["node"]["ok"], true);
         assert!(checks["ghInstalled"].is_object());
         assert!(checks["claudeSignedIn"].is_object());
-    }
-}
-
-#[tokio::test]
-async fn hello_has_no_checks_while_the_setup_check_command_flag_is_off() {
-    let v = view_with_checks_flag(false);
-    v.checks.run_now().await;
-    for id in ["", "a"] {
-        assert!(v.hello(id).await.get("checks").is_none());
     }
 }
 
@@ -219,25 +180,16 @@ fn snapshot_reports_the_pause_reason_or_the_default_one() {
     assert_eq!(orch(&v)["status"], "paused");
     assert_eq!(orch(&v)["pausedReason"], NO_WORK_YET);
     v.paused.set("a", Some("Paused from the site".into()));
-    assert_eq!(orch(&v)["pausedReason"], "Paused from the site");
+    assert_eq!(orch(&v)["pausedReason"], "This computer is paused");
 }
 
-fn reporting_view(on: bool) -> AgentView {
-    reporting_view_in(on, PathBuf::new())
+fn reporting_view() -> AgentView {
+    reporting_view_in(PathBuf::new())
 }
 
-fn reporting_view_in(on: bool, dir: PathBuf) -> AgentView {
+fn reporting_view_in(dir: PathBuf) -> AgentView {
     let mut v = view(vec![project("a", "o/a")]);
-    v.settings = HelloSettings::new(
-        dir,
-        crate::env::Env::empty(),
-        4700,
-        Arc::new(crate::flags::Flags::fixed(if on {
-            &[SNAPSHOT_REPORTING_FLAG]
-        } else {
-            &[]
-        })),
-    );
+    v.settings = HelloSettings::new(dir, crate::env::Env::empty(), 4700);
     v
 }
 
@@ -255,7 +207,7 @@ fn snapshot_reporting_shows_each_lanes_item_branch_and_game() {
         branch: Some(format!("retaskable/i{lane}-s1")),
         playing,
     };
-    let v = reporting_view(true);
+    let v = reporting_view();
     v.live.register("a");
     v.live.ticked(
         "a",
@@ -278,11 +230,6 @@ fn snapshot_reporting_shows_each_lanes_item_branch_and_game() {
     assert_eq!(lanes[1]["playing"], true);
     assert!(lanes[2].get("itemId").is_none() && lanes[2]["playing"] == false);
     assert_eq!(lanes[3]["itemId"], "i5");
-    // Flag Off: as before.
-    let off = reporting_view(false);
-    off.live.register("a");
-    off.live.ticked("a", false, "t".into(), vec![held(1, true)], "d".into());
-    assert_eq!(lanes_of(&off)[0], json!({ "k": 1, "diskGb": 0.0, "playing": false }));
 }
 
 #[test]
@@ -302,7 +249,7 @@ fn snapshot_reporting_lists_the_items_held_and_the_chores_milestone() {
         let s = v.snapshot("a", Path::new("."))["state"].clone();
         (s["items"].clone(), s["milestones"].clone())
     };
-    let v = reporting_view(true);
+    let v = reporting_view();
     v.live.register("a");
     assert_eq!(of(&v), (json!([]), json!([])));
     v.live.set_items("a", vec![held("x", false)]);
@@ -317,9 +264,6 @@ fn snapshot_reporting_lists_the_items_held_and_the_chores_milestone() {
     assert_eq!(of(&v).1, json!([{ "id": "chores", "title": "Chores" }]));
     v.live.set_items("a", vec![]);
     assert_eq!(of(&v), (json!([]), json!([])));
-    let off = reporting_view(false);
-    off.live.set_items("a", vec![held("x", true)]);
-    assert_eq!(of(&off), (json!([]), json!([])));
 }
 
 #[test]
@@ -334,19 +278,18 @@ fn main_playing_is_true_while_play_main_runs() {
         "sleep 60"
     }
     .into();
-    let v = reporting_view(true);
+    let v = reporting_view();
     let main_playing = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["mainPlaying"].clone();
     assert_eq!(main_playing(&v), false);
     crate::play::start("a", &p).unwrap();
     assert_eq!(main_playing(&v), true);
-    assert_eq!(main_playing(&reporting_view(false)), false);
     crate::play::stop("a").unwrap();
     assert_eq!(main_playing(&v), false);
 }
 
 #[test]
 fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
-    let v = reporting_view(true);
+    let v = reporting_view();
     let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
     assert_eq!(orch(&v)["pausedReason"], NO_WORK_YET, "no loop running");
     assert_eq!(orch(&v)["status"], "paused");
@@ -369,7 +312,7 @@ fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
     let o = orch(&v);
     assert_eq!(
         (&o["status"], &o["pausedReason"]),
-        (&json!("paused"), &json!("Paused from the site"))
+        (&json!("paused"), &json!("This computer is paused"))
     );
     v.paused.set("a", None);
     v.live.set_limit("a", None);
@@ -389,15 +332,9 @@ fn snapshot_reporting_reports_todays_spend_and_the_daily_budget() {
     .unwrap();
     let mut machine = crate::store::MachineStore::load(dir.path()).unwrap();
     machine.add_spend("a", 1.25).unwrap();
-    for on in [true, false] {
-        let v = reporting_view_in(on, dir.path().to_path_buf());
-        let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
-        assert_eq!(o.get("spendTodayUsd").is_some(), on);
-        assert_eq!(o.get("dailyUsd").is_some(), on);
-        if on {
-            assert_eq!((&o["spendTodayUsd"], &o["dailyUsd"]), (&json!(1.25), &json!(20.0)));
-        }
-    }
+    let v = reporting_view_in(dir.path().to_path_buf());
+    let o = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+    assert_eq!((&o["spendTodayUsd"], &o["dailyUsd"]), (&json!(1.25), &json!(20.0)));
 }
 
 #[test]
@@ -408,27 +345,13 @@ fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
     store.set_usage(json!({"utilization": 0.25, "status": "allowed", "resetsAt": soon}));
     store.set_week_usage(json!({"rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": soon}));
     store.save().unwrap();
-    let usage = |on| reporting_view(on).snapshot("a", dir.path())["state"]["usage"].clone();
-    let u = usage(true);
+    let u = reporting_view().snapshot("a", dir.path())["state"]["usage"].clone();
     assert_eq!(
         (&u["leftPct"], &u["status"], &u["weekUsedPct"]),
         (&json!(75.0), &json!("allowed"), &json!(40.0))
     );
     assert_eq!(u["tier"], "opus");
     assert!(u["resetsAt"].is_string() && u["weekResetsAt"].is_string());
-    assert_eq!(usage(false), json!({}), "flag Off");
-}
-
-#[test]
-fn snapshot_reporting_off_leaves_the_orchestrator_block_as_it_was() {
-    let v = reporting_view(false);
-    v.live.register("a");
-    v.live.set_concurrency(3);
-    let orch = v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
-    assert_eq!(
-        orch,
-        json!({ "status": "paused", "machine": "pc", "pausedReason": NO_WORK_YET })
-    );
 }
 
 fn open(id: &str, since_ms: i64, text: &str, details: Value) -> crate::telemetry::debounce::OpenAnomaly {
@@ -444,7 +367,7 @@ fn open(id: &str, since_ms: i64, text: &str, details: Value) -> crate::telemetry
 
 #[test]
 fn snapshot_sends_open_anomalies_oldest_first_with_their_project_and_drops_ended_ones() {
-    let v = reporting_view(true);
+    let v = reporting_view();
     let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
     v.live.register("a");
     assert!(orch(&v).get("anomalies").is_none(), "none open: the key is left out");
@@ -464,7 +387,7 @@ fn snapshot_sends_open_anomalies_oldest_first_with_their_project_and_drops_ended
 
 #[test]
 fn snapshot_caps_anomalies_at_twenty_and_cleans_their_text_and_details() {
-    let v = reporting_view(true);
+    let v = reporting_view();
     v.live.register("a");
     let many = (0..25).map(|i| open(&format!("id{i:02}"), i, "t", json!({}))).collect();
     v.live.set_anomalies("a", many);
@@ -492,34 +415,21 @@ fn snapshot_caps_anomalies_at_twenty_and_cleans_their_text_and_details() {
 }
 
 #[test]
-fn snapshot_reporting_off_sends_no_anomalies() {
-    let v = reporting_view(false);
-    v.live.register("a");
-    v.live.set_anomalies("a", vec![open("x", 0, "stuck", json!({}))]);
-    assert!(
-        v.snapshot("a", Path::new("."))["state"]["orchestrator"]
-            .get("anomalies")
-            .is_none()
-    );
-}
-
-#[test]
-fn snapshot_reports_cursor_tokens_only_when_there_are_some_and_the_flag_is_on() {
+fn snapshot_reports_cursor_tokens_only_when_there_are_some_() {
     let dir = tempfile::tempdir().unwrap();
-    let mk = |on: bool| reporting_view_in(on, dir.path().to_path_buf());
+    let mk = || reporting_view_in(dir.path().to_path_buf());
     let cursor = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("cursor").cloned();
-    assert_eq!(cursor(&mk(true)), None, "no tokens yet");
+    assert_eq!(cursor(&mk()), None, "no tokens yet");
     let mut m = crate::store::MachineStore::load(dir.path()).unwrap();
     m.add_cursor_tokens(30, 4).unwrap();
     m.add_cursor_tokens(1, 2).unwrap();
     m.stamp_cursor_limit_at().unwrap();
-    let got = cursor(&mk(true)).unwrap();
+    let got = cursor(&mk()).unwrap();
     assert_eq!(
         (&got["todayTokens"], &got["weekInputTokens"], &got["weekOutputTokens"]),
         (&json!(37), &json!(31), &json!(6))
     );
     assert!(got["limitHitAt"].is_string());
-    assert_eq!(cursor(&mk(false)), None, "flag Off");
 }
 
 #[test]
@@ -571,12 +481,11 @@ fn snapshot_carries_commands_waiting_only_while_one_waits() {
     assert_eq!(waiting(), None, "approved");
 }
 
-fn pause_block(live: bool, obey: bool, store: StorePause, computer: bool) -> Value {
-    let v = reporting_view(true);
+fn pause_block(live: bool, store: StorePause, computer: bool) -> Value {
+    let v = reporting_view();
     if live {
         v.live.register("a");
     }
-    v.item_commands.set_flag("a", OBEY_SHARED_PAUSE_FLAG, obey);
     v.store_paused.set("a", store);
     v.paused
         .set("a", computer.then(|| "Paused from retaskable.com by sam".to_string()));
@@ -584,43 +493,34 @@ fn pause_block(live: bool, obey: bool, store: StorePause, computer: bool) -> Val
 }
 
 #[test]
-fn obey_shared_pause_reports_which_pause_is_on_in_both_blocks() {
+fn shared_pause_reports_which_pause_is_on_in_both_blocks() {
     let words = || StorePause::Paused("Paused by @james for everyone".into());
     for live in [true, false] {
         let reason = |b: Value| b["pausedReason"].clone();
         assert_eq!(
-            reason(pause_block(live, true, words(), false)),
+            reason(pause_block(live, words(), false)),
             "Paused by @james for everyone"
         );
         assert_eq!(
-            reason(pause_block(live, true, StorePause::NotPaused, true)),
+            reason(pause_block(live, StorePause::NotPaused, true)),
             "This computer is paused"
         );
         assert_eq!(
-            reason(pause_block(live, true, words(), true)),
+            reason(pause_block(live, words(), true)),
             "Paused by @james for everyone"
         );
         assert_eq!(
-            reason(pause_block(live, true, StorePause::Unknown, true)),
+            reason(pause_block(live, StorePause::Unknown, true)),
             "This computer is paused"
         );
-        let neither = pause_block(live, true, StorePause::NotPaused, false);
-        let unknown = pause_block(live, true, StorePause::Unknown, false);
+        let neither = pause_block(live, StorePause::NotPaused, false);
+        let unknown = pause_block(live, StorePause::Unknown, false);
         assert_eq!(neither, unknown, "an unknown store pause alone isn't paused");
         if live {
             assert_eq!(neither["status"], "running");
         } else {
             assert_eq!(reason(neither), NO_WORK_YET);
         }
-        // Off: the old output, the store's pause ignored and this computer's own reason kept.
-        assert_eq!(
-            reason(pause_block(live, false, words(), true)),
-            "Paused from retaskable.com by sam"
-        );
-        assert_eq!(
-            pause_block(live, false, words(), false).get("pausedReason").is_some(),
-            !live
-        );
     }
 }
 
@@ -702,18 +602,6 @@ fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
     let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
     assert_eq!(ids, ["a", "c"]);
     assert_eq!(q.take_ideas("two").len(), 1);
-}
-
-#[test]
-fn flags_are_per_project_and_per_flag_and_can_be_turned_off() {
-    let q = ItemCommands::default();
-    assert!(!q.flag_on("one", "some-flag"));
-    q.set_flag("one", "some-flag", true);
-    assert!(q.flag_on("one", "some-flag"));
-    assert!(!q.flag_on("two", "some-flag"));
-    assert!(!q.flag_on("one", "other-flag"));
-    q.set_flag("one", "some-flag", false);
-    assert!(!q.flag_on("one", "some-flag"));
 }
 
 #[test]

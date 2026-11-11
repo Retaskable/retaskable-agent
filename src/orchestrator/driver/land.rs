@@ -15,7 +15,6 @@ use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::start_gate::StartGate;
-use super::store_errors::WATCH;
 use super::{ProjectLoop, Shared};
 use crate::ask::follow_up;
 use crate::backlog::Client;
@@ -391,7 +390,7 @@ impl ProjectLoop {
                 repo,
                 token: token.clone(),
                 lease: taken.token.clone(),
-                failures: self.failures.when(self.flags.on(WATCH).await),
+                failures: self.failures.clone(),
                 project: self.project.clone(),
                 host: host.clone(),
                 wait,

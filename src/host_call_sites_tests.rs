@@ -2,7 +2,7 @@
 //! program is not run, the site's own error comes back and the sink holds the entry.
 use std::path::{Path, PathBuf};
 
-use crate::host_call::{self, Sink};
+use crate::host_call::Sink;
 use crate::test_support::write_executable;
 
 /// A program called `name` that leaves a `ran` file beside it when it runs.
@@ -14,9 +14,8 @@ pub(crate) fn fake(dir: &Path, name: &str) -> PathBuf {
     p
 }
 
-/// Flag On for `dir`, sink empty.
-pub(crate) fn on(dir: &Path) {
-    host_call::set_on_for(vec![dir.to_path_buf()]);
+/// Sink empty.
+pub(crate) fn on(_dir: &Path) {
     Sink::global().take();
 }
 

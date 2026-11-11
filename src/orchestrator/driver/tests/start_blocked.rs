@@ -1,14 +1,13 @@
 //! What stops new work from starting keeps the watchdog's `idle_lanes` and `no_progress` quiet
-//! (`ProjectLoop::start_blocked`, docs/specs/agent-telemetry.md section 4), behind `watchdog-anomaly-rules`.
+//! (`ProjectLoop::start_blocked`, docs/specs/agent-telemetry.md section 4).
 use super::*;
 use crate::engines::EngineId;
 use crate::telemetry::Event;
 
-/// A live rig with two lanes, `idle_lanes` shown at once, and these flags On.
-async fn idle_rig(flags: &[&str]) -> Rig {
+/// A live rig with two lanes, `idle_lanes` shown at once.
+async fn idle_rig() -> Rig {
     let (base, _asked) = claim_stub(json!([]), None).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     rig.lp(0).project.tuning.idle_lanes_minutes = 0;
     rig.lp(0).file_project.tuning.idle_lanes_minutes = 0;
     rig.lp(0).file_project.tuning.idle_lanes_minutes = 0;
@@ -31,20 +30,12 @@ fn pause_claims(rig: &mut Rig) {
 
 #[tokio::test]
 async fn a_claim_pause_keeps_idle_lanes_quiet_until_it_clears() {
-    let mut rig = idle_rig(&["watchdog-anomaly-rules"]).await;
+    let mut rig = idle_rig().await;
     pause_claims(&mut rig);
     rig.machine.pass().await;
     rig.machine.pass().await;
     assert_eq!(idle_starts(&mut rig), 0);
     rig.machine.claim_paused_until = None;
-    rig.machine.pass().await;
-    assert_eq!(idle_starts(&mut rig), 1);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_claim_pause_does_not_silence_idle_lanes() {
-    let mut rig = idle_rig(&[]).await;
-    pause_claims(&mut rig);
     rig.machine.pass().await;
     assert_eq!(idle_starts(&mut rig), 1);
 }
@@ -68,7 +59,7 @@ fn in_a_minute() -> std::time::Instant {
 
 #[tokio::test]
 async fn a_lane_that_can_fall_over_or_use_another_engine_is_not_blocked() {
-    let mut rig = idle_rig(&[]).await;
+    let mut rig = idle_rig().await;
     rig.machine.links.engine_choice =
         serde_json::from_value(json!({ "default": "claude", "lanes": ["claude", "cursor"] })).unwrap();
     // Claude signed out, Cursor free: the Cursor lane may start.
@@ -81,7 +72,7 @@ async fn a_lane_that_can_fall_over_or_use_another_engine_is_not_blocked() {
 
 #[tokio::test]
 async fn a_limited_claude_falls_over_to_the_other_engine_in_use() {
-    let mut rig = idle_rig(&[]).await;
+    let mut rig = idle_rig().await;
     rig.machine.links.engine_choice =
         serde_json::from_value(json!({ "default": "claude", "lanes": ["claude", "cursor"] })).unwrap();
     rig.machine.engine_limits.hit(EngineId::Claude, in_a_minute());

@@ -20,7 +20,7 @@ pub(super) struct Read {
     pub(super) items: Result<Vec<Item>, Fail>,
     /// The project's settings, read every pass; an error keeps what runs.
     pub(super) settings: Option<Result<Option<StoreSettings>, BacklogError>>,
-    /// The project's facts (its pause), read only with `obey-shared-pause` On and the items read.
+    /// The project's facts (its pause), read once the items are read.
     pub(super) facts: Option<Result<ProjectFacts, BacklogError>>,
 }
 
@@ -34,7 +34,6 @@ pub(super) async fn read(
     cached: Option<u64>,
     backlog_url: String,
     keychain: Arc<dyn TokenStore>,
-    want_facts: bool,
 ) -> Read {
     let repo = match cached {
         Some(repo) => Some(repo),
@@ -76,7 +75,7 @@ pub(super) async fn read(
         None => None,
     };
     let facts = match &token {
-        Some(token) if want_facts && items.is_ok() => Some(client.project_facts(repo_id, Some(token)).await),
+        Some(token) if items.is_ok() => Some(client.project_facts(repo_id, Some(token)).await),
         _ => None,
     };
     Read {

@@ -723,9 +723,6 @@ impl ProjectLoop {
     /// Takes in the steps that ended: each item's run as its step left it, then what its new state means
     /// ([`moved`](Self::moved)). A step that panicked is an `error` event and leaves the run as it was.
     pub(super) async fn take_finished(&mut self, pool: &mut LanePool, links: &Links) {
-        // Keeps `watchdog-anomaly-rules` fresh for `step_started`, which can't wait on a request.
-        self.flags.on("watchdog-anomaly-rules").await;
-        self.flags.on("step-events-complete").await;
         for (item, after) in self.running.finished() {
             let outcome = after.as_ref().map_or("panicked", |a| state_name(a.run.state));
             let detail = after.as_ref().map(|a| &a.detail);

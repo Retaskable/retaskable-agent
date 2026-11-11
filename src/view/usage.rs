@@ -80,9 +80,9 @@ pub(super) fn usage_view(
 }
 
 impl AgentView {
-    /// The `usage` windows for `project`, when `snapshot-reporting` is On and the project is set up.
+    /// The `usage` windows for `project`, when the project is set up.
     pub(super) fn usage_block(&self, project: &str, data_dir: &Path) -> Option<Value> {
-        if !self.settings.snapshot_reporting_on() || !self.projects.iter().any(|p| p.id == project) {
+        if !self.projects.iter().any(|p| p.id == project) {
             return None;
         }
         let store = Store::load(&paths::project_dir(data_dir, project)).ok();

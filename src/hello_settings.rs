@@ -9,7 +9,6 @@ use tokio::sync::watch;
 
 use crate::config;
 use crate::env::Env;
-use crate::flags::Flags;
 use crate::settings_server::engine_choice_json;
 use crate::store::MachineStore;
 use crate::tags;
@@ -46,22 +45,11 @@ pub struct HelloSettings {
     source: Option<Source>,
 }
 
-/// The release flag that shows the settings in the hello; Off leaves the hello as it was.
-pub const FLAG: &str = "machine-settings";
-
-/// The release flag that shows the CI slots setting (agent-ci.md); Off leaves the hello and the page as they were.
-pub const CI_FLAG: &str = "agent-ci";
-
-/// The release flag that sends the setup checks in the hello (first-run-check.md section 3.1); Off leaves the hello as it was.
-/// The flag client's `PROJECT_ID` and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
-pub const CHECKS_FLAG: &str = "setup-check-command";
-
 #[derive(Clone)]
 struct Source {
     dir: PathBuf,
     env: Env,
     default_port: u16,
-    flags: Arc<Flags>,
 }
 
 impl std::fmt::Debug for HelloSettings {
@@ -87,14 +75,9 @@ impl PartialEq for HelloSettings {
 
 impl HelloSettings {
     /// Reads the config in `dir` with `env` over it, as the settings page does.
-    pub fn new(dir: PathBuf, env: Env, default_port: u16, flags: Arc<Flags>) -> Self {
+    pub fn new(dir: PathBuf, env: Env, default_port: u16) -> Self {
         Self {
-            source: Some(Source {
-                dir,
-                env,
-                default_port,
-                flags,
-            }),
+            source: Some(Source { dir, env, default_port }),
             ..Self::default()
         }
     }
@@ -102,39 +85,6 @@ impl HelloSettings {
     /// Makes every open connection send a fresh hello.
     pub fn fire(&self) {
         self.saved.send_modify(|n| *n += 1);
-    }
-
-    /// Whether the `machine-settings` flag is On, asking again when the last answer is stale; no source means Off.
-    pub async fn on(&self) -> bool {
-        match &self.source {
-            Some(s) => s.flags.on(FLAG).await,
-            None => false,
-        }
-    }
-
-    /// Whether the `setup-check-command` flag is On, asking again when the last answer is stale; no source means Off.
-    pub async fn setup_checks_on(&self) -> bool {
-        match &self.source {
-            Some(s) => s.flags.on(CHECKS_FLAG).await,
-            None => false,
-        }
-    }
-
-    /// The `setup-check-command` flag at the last answer, without asking; Off until there is one.
-    pub fn setup_checks_now(&self) -> bool {
-        self.source.as_ref().is_some_and(|s| s.flags.last(CHECKS_FLAG))
-    }
-
-    /// The same from the last answer, without asking (for code that isn't async); Off until there is one.
-    pub fn on_now(&self) -> bool {
-        self.source.as_ref().is_some_and(|s| s.flags.last(FLAG))
-    }
-
-    /// Whether the `snapshot-reporting` flag was On at the last answer, without asking; Off until there is one.
-    pub fn snapshot_reporting_on(&self) -> bool {
-        self.source
-            .as_ref()
-            .is_some_and(|s| s.flags.last(crate::view::SNAPSHOT_REPORTING_FLAG))
     }
 
     /// What `project` has cost today on this computer, and the machine's `budget.dailyUsd` (0 when unset).
@@ -156,19 +106,14 @@ impl HelloSettings {
         self.saved.subscribe()
     }
 
-    /// The hello's `settings`: `None` while the flag is Off or when nothing says where to read them.
+    /// The hello's `settings`: `None` when nothing says where to read them.
     pub async fn json(&self) -> Option<Value> {
         let s = self.source.as_ref()?;
-        if !s.flags.on(FLAG).await {
-            return None;
-        }
         let (mut out, ci_slots) = match config::load(&s.dir) {
             Ok(cfg) => (from_config(&cfg, s), Some(config::ci_slots(&cfg, &s.env))),
             Err(_) => (Map::new(), None),
         };
-        if let Some(n) = ci_slots
-            && s.flags.on(CI_FLAG).await
-        {
+        if let Some(n) = ci_slots {
             out.insert("ciSlots".into(), json!(n));
         }
         out.insert("envVars".into(), env_vars_json(&s.env));
@@ -233,13 +178,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_source_everything_is_off_and_nothing_is_read() {
+    async fn without_a_source_nothing_is_read() {
         let h = HelloSettings::default();
-        assert!(!h.on().await);
-        assert!(!h.setup_checks_on().await);
-        assert!(!h.setup_checks_now());
-        assert!(!h.on_now());
-        assert!(!h.snapshot_reporting_on());
         assert!(h.dir().is_none());
         assert!(h.json().await.is_none());
         assert_eq!(h.spend_today("any"), (0.0, 0.0));

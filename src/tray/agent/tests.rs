@@ -373,9 +373,6 @@ fn a_project_paused_by_the_store_counts_as_paused() {
     let r = rig(false);
     for p in ["a", "b"] {
         r.agent_view
-            .item_commands
-            .set_flag(p, crate::view::OBEY_SHARED_PAUSE_FLAG, true);
-        r.agent_view
             .store_paused
             .set(p, crate::view::StorePause::Paused("Paused for everyone".into()));
     }

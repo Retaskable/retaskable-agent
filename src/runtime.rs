@@ -194,24 +194,22 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
     }
 }
 
-/// The setup checks, plus the Docker line (agent-ci.md section 3.6) only with the `agent-ci` flag On.
-async fn checks_with_docker(env: &Env, flags: &crate::flags::Flags) -> setup_check::SetupChecks {
+/// The setup checks, plus the Docker line (agent-ci.md section 3.6) .
+async fn checks_with_docker(env: &Env) -> setup_check::SetupChecks {
     let mut checks = setup_check::run_setup_checks(env).await;
-    if flags.on(crate::hello_settings::CI_FLAG).await {
-        let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
-        let image = image.as_deref().and_then(crate::text::non_blank);
-        let in_image = crate::agent_ci::docker::in_agent_image();
-        checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
-    }
+    let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
+    let image = image.as_deref().and_then(crate::text::non_blank);
+    let in_image = crate::agent_ci::docker::in_agent_image();
+    checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
     checks
 }
 
 /// The runner that does the setup checks (first-run-check.md section 3.1): `checks_with_docker`
-/// with this environment and these flags.
-pub fn setup_check_runner(env: Env, flags: Arc<crate::flags::Flags>) -> Arc<setup_check::SetupCheckRunner> {
+/// with this environment.
+pub fn setup_check_runner(env: Env) -> Arc<setup_check::SetupCheckRunner> {
     Arc::new(setup_check::SetupCheckRunner::with_probe(Box::new(move || {
-        let (env, flags) = (env.clone(), flags.clone());
-        Box::pin(async move { checks_with_docker(&env, &flags).await })
+        let env = env.clone();
+        Box::pin(async move { checks_with_docker(&env).await })
     })))
 }
 

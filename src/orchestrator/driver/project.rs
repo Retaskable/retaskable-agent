@@ -226,8 +226,6 @@ pub struct ProjectLoop {
     pub(super) guard: Option<PortGuard>,
     pub(super) events: EventLog,
     pub(super) client: Arc<Client>,
-    /// The Retaskable release flags (the ones still read).
-    pub(super) flags: Arc<crate::flags::Flags>,
     pub(super) live: LiveHandle,
     /// GitHub's numeric id of `project.github_repo`, asked of `gh` until it answers and then kept.
     pub(super) repo: Option<u64>,
@@ -348,7 +346,6 @@ impl ProjectLoop {
             guard: None,
             events,
             client: Arc::new(client),
-            flags: Arc::new(crate::flags::Flags::from_env()),
             live,
             repo: None,
             running: Running::default(),
@@ -478,12 +475,7 @@ impl ProjectLoop {
                 _ => None,
             })
             .collect();
-        // Behind the `live-sessions-reporting` release flag: Off keeps `sessions` at 0.
-        let sessions = if self.flags.on("live-sessions-reporting").await {
-            self.live.sessions().snapshot().len()
-        } else {
-            0
-        };
+        let sessions = self.live.sessions().snapshot().len();
         let payload = tick_payload(paused, pool, sessions);
         let would: Vec<String> = actions.iter().map(super::start_gate::describe).collect();
         let decision = match actions.first() {
@@ -519,9 +511,7 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
-        let anomaly_rules = self.flags.on("watchdog-anomaly-rules").await;
-        let cant_start = cant_start.filter(|_| anomaly_rules);
-        self.check_watchdog(paused, cant_start, &actions, pool, anomaly_rules);
+        self.check_watchdog(paused, cant_start, &actions, pool);
         Step::Ticked { would }
     }
 
@@ -539,14 +529,7 @@ impl ProjectLoop {
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    fn check_watchdog(
-        &mut self,
-        paused: bool,
-        cant_start: Option<&str>,
-        actions: &[Action],
-        pool: &LanePool,
-        anomaly_rules: bool,
-    ) {
+    fn check_watchdog(&mut self, paused: bool, cant_start: Option<&str>, actions: &[Action], pool: &LanePool) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -570,11 +553,7 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
-            anomaly_rules,
-            // Behind `watchdog-anomaly-rules`: Off, no restart reaches the rules.
-            restart: anomaly_rules
-                .then(|| watchdog::RestartView::of(crate::restart::state()))
-                .flatten(),
+            restart: watchdog::RestartView::of(crate::restart::state()),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
             idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
             no_progress_minutes: self.project.tuning.no_progress_minutes,

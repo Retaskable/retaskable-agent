@@ -24,6 +24,7 @@ async fn store(waiting: usize, lock_delay: Duration, fail_list: bool) -> (String
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "facts_get" => json!({ "paused": false }),
                     "tryouts_list" => {
                         let waiting: Vec<Value> = (1..=waiting)
                             .map(|n| json!({"key": format!("k{n}"), "itemId": "1", "title": "T", "what": "W", "steps": ["S"]}))
@@ -189,6 +190,7 @@ async fn runs_store(beat: Value) -> (String, Arc<Mutex<Vec<(String, Value)>>>) {
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "facts_get" => json!({ "paused": false }),
                     "tryouts_list" => {
                         let waiting: Vec<Value> = (1..=4)
                             .map(|n| json!({"key": format!("k{n}"), "itemId": "1", "title": "T", "what": "W", "steps": ["S"]}))
@@ -304,16 +306,13 @@ async fn a_lock_lost_to_a_beat_stop_sends_no_grouping() {
 }
 
 /// A rig whose items "a", "b", "c" wait for a playtest, each with a queued failure and an owed answer.
-fn three_waiting(playtests: Playtests, flag: bool) -> (Rig, Arc<Fake>) {
+fn three_waiting(playtests: Playtests) -> (Rig, Arc<Fake>) {
     let mut rig = rig(2, &["http://127.0.0.1:1"]);
     let fake = rig.go_live();
     rig.queue(0, &["a", "b", "c"]);
     let lp = rig.lp(0);
     lp.project.playtests = playtests;
     lp.file_project.playtests = playtests;
-    if flag {
-        lp.flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
-    }
     for id in ["a", "b", "c"] {
         lp.runs.get_mut(id).unwrap().state = ItemState::AwaitingPlaytest;
         lp.playtest_fails.push((id.into(), Some("broken".into())));
@@ -334,7 +333,7 @@ fn released_events(rig: &mut Rig) -> usize {
 
 #[tokio::test]
 async fn playtests_off_release_every_waiting_run_once() {
-    let (mut rig, fake) = three_waiting(Playtests::Off, true);
+    let (mut rig, fake) = three_waiting(Playtests::Off);
     rig.machine.poll().await;
     for id in ["a", "b", "c"] {
         assert_eq!(rig.lp(0).runs[id].state, ItemState::Merging);
@@ -350,7 +349,7 @@ async fn playtests_off_release_every_waiting_run_once() {
 #[tokio::test]
 async fn playtests_on_or_after_merge_leave_waiting_runs_alone() {
     for playtests in [Playtests::On, Playtests::AfterMerge] {
-        let (mut rig, _fake) = three_waiting(playtests, true);
+        let (mut rig, _fake) = three_waiting(playtests);
         rig.lp(0).playtest_fails.clear();
         rig.machine.poll().await;
         for id in ["a", "b", "c"] {
@@ -358,14 +357,6 @@ async fn playtests_on_or_after_merge_leave_waiting_runs_alone() {
         }
         assert_eq!(released_events(&mut rig), 0);
     }
-}
-
-#[tokio::test]
-async fn playtests_off_with_the_flag_off_release_nothing() {
-    let (mut rig, _fake) = three_waiting(Playtests::Off, false);
-    rig.lp(0).playtest_fails.clear();
-    rig.machine.poll().await;
-    assert_eq!(rig.lp(0).runs["a"].state, ItemState::AwaitingPlaytest);
 }
 
 /// A store counting `release_playtests` calls: the first `fail` of them are refused with a 500, and a taken one
@@ -410,7 +401,6 @@ fn set_playtests(rig: &mut Rig, value: Playtests) {
 async fn switching_to_off_releases_once_and_later_passes_send_nothing() {
     let (base, state) = release_store(0, 3).await;
     let mut rig = live_rig(&base);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
     set_playtests(&mut rig, Playtests::AfterMerge);
     rig.machine.pass().await;
     assert_eq!(state.lock().unwrap().0, 0);
@@ -426,7 +416,6 @@ async fn switching_to_off_releases_once_and_later_passes_send_nothing() {
 async fn a_first_run_already_off_sends_nothing() {
     let (base, state) = release_store(0, 3).await;
     let mut rig = live_rig(&base);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
     set_playtests(&mut rig, Playtests::Off);
     rig.machine.pass().await;
     rig.machine.pass().await;
@@ -437,7 +426,6 @@ async fn a_first_run_already_off_sends_nothing() {
 async fn a_failed_release_is_sent_again_then_stops_and_is_not_kept_in_the_state_file() {
     let (base, state) = release_store(1, 3).await;
     let mut rig = live_rig(&base);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
     set_playtests(&mut rig, Playtests::On);
     rig.machine.pass().await;
     set_playtests(&mut rig, Playtests::Off);
@@ -457,7 +445,6 @@ async fn a_failed_release_is_sent_again_then_stops_and_is_not_kept_in_the_state_
 async fn off_then_on_then_off_sends_twice() {
     let (base, state) = release_store(0, 3).await;
     let mut rig = live_rig(&base);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["release-playtests-off"]));
     set_playtests(&mut rig, Playtests::On);
     rig.machine.pass().await;
     for value in [Playtests::Off, Playtests::On, Playtests::Off] {
@@ -465,15 +452,4 @@ async fn off_then_on_then_off_sends_twice() {
         rig.machine.pass().await;
     }
     assert_eq!(state.lock().unwrap().0, 2);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_nothing_is_sent() {
-    let (base, state) = release_store(0, 3).await;
-    let mut rig = live_rig(&base);
-    set_playtests(&mut rig, Playtests::On);
-    rig.machine.pass().await;
-    set_playtests(&mut rig, Playtests::Off);
-    rig.machine.pass().await;
-    assert_eq!(*state.lock().unwrap(), (0, 3));
 }
