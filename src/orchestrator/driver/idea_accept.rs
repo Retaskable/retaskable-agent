@@ -1,5 +1,5 @@
 //! The `idea_accept` step of a project's loop (docs/specs/agent/09-web-ui.md section 9.3, "Ideas"): behind the
-//! `ideas-session` flag, which this records for the command each pass (it also records `restart-play-command` for `restart_play` / `stop_play`). A queued Build this is written up as a draft in
+//! command asks for it (the pass also records the `restart-play-command` flag for `restart_play` / `stop_play`). A queued Build this is written up as a draft in
 //! the shared backlog (`ideas::accept`) and the command is answered once it has been: `ack` after the draft is queued,
 //! otherwise `nack` with why. A store that can't be reached fails closed: nothing is queued.
 use serde_json::json;
@@ -11,9 +11,7 @@ use crate::ideas::{self, Ideas};
 
 impl ProjectLoop {
     pub(super) async fn idea_pass(&mut self, shared: &Shared<'_>) {
-        let on = self.flags.on("ideas-session").await;
         let queue = &shared.links.item_commands;
-        queue.set_flag(&self.id, "ideas-session", on);
         queue.set_flag(
             &self.id,
             "restart-play-command",

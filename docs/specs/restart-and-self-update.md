@@ -30,6 +30,53 @@ Kind: new
 9. **A crash must not leave the process group running (`crash-kills-group`).** On Windows the Job object's kill-on-close already does it. On Linux and macOS the group outlives an agent that crashes or is killed. **[Proposal]** Linux: set `PR_SET_PDEATHSIG` (`SIGKILL`) in the child before exec, and have the group's leader do the same; macOS has no such call, so each child is started through a tiny watcher thread/pipe: the child group is killed when the pipe from the agent closes, and a startup sweep kills groups left in the `live` records of a previous run. Tests: killing the agent with `SIGKILL` leaves no child (Linux, macOS CI only; skipped on Windows).
 10. **Decide the own-failure flag (`own-failure-flag-on`).** See section 2: **[Proposal]** make `own-failure-handling` always On, delete `Flags` checks for it in `settle.rs`, `item_commands.rs` and the tests that set it, and rewrite 07.3 and 07.4's Rust paragraphs from "behind the flag" to as built. A tweak: no new behavior, only the Off paths go.
 
+## 3.1 Details each slice settles
+
+What the code does today (read from `src/restart.rs`, `src/runtime.rs` and `src/commands.rs`), and the details the slices in section 3 still need. Everything below that is not a description of the code is a **[Proposal]**.
+
+**Where the code is today**
+
+- `restart.rs` already has the hold: `RestartState::hold(what)` gives a `Guard` that frees it on drop (an error or a panic included), `held()` lists what is held, and `finish_first` waits for the list to empty, 2 minutes at most (`FINISH_FIRST`), polling every 100 ms and setting the step to `waiting` with what it waits on, then `now`. After the 2 minutes the restart goes anyway and `restart_waiting` records how long it waited. What is missing for slice 3 is the callers: only tests take the hold today, so no merge, promote or update holds a restart yet.
+- `runtime::cut_every_session_then_exit` runs, in this order: wait for the runs (pieces.md section 3.1), `finish_first`, `process_tree::cut_all`, `shutdown::stop_other_sessions`, the update install or the release relaunch, the link flush, `restart_exit`, `exit`. The flush is handed `restart::FLUSH` (2 seconds), but the closure `restart_handler` passes sleeps at most 200 ms and does not look at the link, which is what slice 2 replaces.
+- Nothing starts the agent again on a checkout: a release build falls back to `relaunch`, a checkout stays down (slice 1).
+
+**Slice 1, the supervisor**
+
+- It passes the agent's own arguments through unchanged and relaunches the same binary path, so a `cargo build` made while the agent ran is the one that starts.
+- A relaunch waits 1 second first, so the port and the single-instance lock are free.
+- It gives up after 5 restarts (exit 75) within 60 seconds, logs why on its own stderr and exits 1: a build that restarts itself on start must not spin. A restart after a longer run counts from zero.
+- A signal (Ctrl-C, a terminal closing) stops the child and the supervisor together and is never read as a restart. On Windows the child is in a Job object the supervisor holds, so killing the supervisor takes the agent with it.
+- The settings page shows nothing about it: the agent does not know whether it was supervised. If it is run bare on a checkout, Restart still exits 75 and stays down, and the page's line for that is a later question (agent-settings.md section 4).
+
+**Slice 2, the flush**
+
+- The ceiling is 5 seconds, replacing both `FLUSH` (2 s) and the 200 ms stub. The wait ends as soon as the link reports its queue empty, which for the restart command's own answer means that answer was written to the socket.
+- With no link (a computer not yet linked) the flush returns at once.
+- `restart_exit`'s `drainMs` still counts from the request to the exit, the flush included, so a slow link shows in the log.
+
+**Slice 3, who holds**
+
+- The labels are the ones the progress line says: `a merge`, `a plan's merge`, `an update`, `a promote`. The merge and promote labels already exist in tests and are kept.
+- The hold is taken in the code that starts the git work, not around the whole item, so a restart never waits for an implementer, only for the few seconds of a merge, and 2 minutes is a ceiling never meant to be reached.
+- A restart that runs out of its 2 minutes and goes mid-merge leaves a half-done merge; the next start's usual clean-up of the base checkout is what undoes it, and the `restart_waiting` event names what was still held.
+
+**Slice 4, "its own code changed"**
+
+- A checkout's identity is one hash over the files under `src/` and `prompts/` plus `Cargo.lock` and `Cargo.toml`, each path (relative, with `/` separators on every platform, so the hash agrees across them) hashed with its bytes, in sorted path order. `target/`, `docs/` and anything git ignores are left out, so a spec-only merge never restarts the agent.
+- It is compared only after an update that moved the checkout, never on a timer, and at most once per `HEAD` commit, so a failed restart cannot loop.
+- A release build compares versions as the release updater already does (installers/03-the-bundle-agent-bundle.md section 3.12) and takes no hash.
+- The restart reason is `update`, and the snapshot's progress line says "restarting for an update".
+
+**Slice 5, the gate**
+
+- The gate holds new claims and starts, never a session already running or a resume: those finish, and the restart waits for the runs as section 3.1 of pieces.md says. A runs-mode run is not started either, so the restart is not held up by one that began a second ago.
+- A `restart` that is not an update clears nothing: if an update restart was already pending its reason stays `update`, the first request's, as `RestartState::ask` keeps.
+
+**Acceptance for this section**
+
+- A person can read from this spec what a supervised restart, a flush and a hold each wait for, and the longest each can take (1 s, 5 s, 2 min).
+- A slice's tests name the numbers above, not "a while".
+
 ## 4. Slices and acceptance
 
 Each numbered piece in section 3 is one reviewable pull request, built in that order except that 8, 9 and 10 depend on nothing and can go any time.

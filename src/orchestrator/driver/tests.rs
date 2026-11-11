@@ -896,7 +896,6 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
 
 mod approve;
 mod asks;
-mod auto_concurrency;
 mod caps_and_fetch;
 mod ci_events;
 mod claim_waiting;
@@ -909,8 +908,6 @@ mod fix_main;
 mod follow;
 mod host_call_undefined;
 mod idea_accept;
-mod ideas;
-mod ideas_daily;
 mod lane_play;
 mod local_limit_fallback;
 mod local_one_slot;
@@ -932,5 +929,4 @@ mod store_pause;
 mod stuck_release;
 mod triage;
 mod trial;
-mod vet_daily;
 mod weekly_cutoff;

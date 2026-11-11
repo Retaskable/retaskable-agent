@@ -28,6 +28,9 @@ Only the specs whose subject is the computer itself:
 - [questions-and-triage.md](questions-and-triage.md): options for a question, triage tasks, the classifier, bugs typed as ideas.
 - [testflight-restart-wait.md](testflight-restart-wait.md): a restart waits for a TestFlight build.
 - [small-agent-jobs.md](small-agent-jobs.md): usage recheck, keep awake, native app facts, no half emoji.
+- [restart-and-self-update.md](restart-and-self-update.md): restart and self-update.
+
+- Where the server now decides, the agent copies keep only what the agent sends and runs, and link the server-side spec in Retaskable.com: [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md), [merge-queue-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/merge-queue-on-server.md), [chores-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/chores-on-server.md), [jobs-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/jobs-on-server.md) and [rollout-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/rollout-on-server.md).
 
 ## What was cut
 
@@ -53,3 +56,5 @@ Synced with Retaskable.com PR #1850 at commit c825f06e15c8ce4025715208a57666ecc8
 Synced with Retaskable.com PR #1860 at commit 8a682e8c8ea5f8badc1289933563e43eba926540 (Cursor's token use on the Usage card).
 
 Synced with Retaskable.com PR #2008 at commit ee32ff7bf3c4cc5962904ce0af07aefb23741ad6 (triage: a second look that can carry out a clear suggestion, bug-report dedup via `sameAs`, not retrying a slice blocked on another item's unbuilt infrastructure, and retrying a failed triage look before waiting for a human).
+
+Synced with Retaskable.com at commit a47f5a426 (2026-11-11), for the specs the server now owns (pools and pacing, the merge queue, chores, scheduled jobs and triage, rollout): the agent sections, agent-settings and agent-telemetry were read against Retaskable.com's changes of 2026-11-09 and 2026-11-10 and brought up to date. Other specs stay as of the earlier syncs above.

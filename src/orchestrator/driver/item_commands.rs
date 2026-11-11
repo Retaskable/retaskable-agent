@@ -71,10 +71,6 @@ impl ProjectLoop {
                     self.skip_stopped(pool, &item, false, shared).await;
                     continue;
                 }
-                ItemCommand::Ideas { fresh, .. } => {
-                    self.ideas_command(fresh, shared.links).await;
-                    continue;
-                }
                 ItemCommand::Playtest { id, passed, notes, .. } => {
                     if self.runs.contains_key(&id) {
                         self.playtest_answer(&id, passed, notes);

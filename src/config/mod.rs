@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-pub use concurrency::{AutoConcurrency, ModelConcurrency};
+pub use concurrency::ModelConcurrency;
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
     ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
