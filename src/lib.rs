@@ -24,7 +24,6 @@ pub mod drafts;
 pub mod engines;
 pub mod env;
 pub mod env_path;
-pub mod flags;
 pub mod fs_util;
 pub mod git_bin;
 pub mod hello_settings;
@@ -45,6 +44,8 @@ pub mod looks;
 pub mod main_sync;
 pub mod merge_update;
 pub mod network;
+#[cfg(test)]
+mod no_flags;
 pub mod notify;
 pub mod orchestrator;
 pub mod package;

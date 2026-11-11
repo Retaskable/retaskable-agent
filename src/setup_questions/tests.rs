@@ -11,7 +11,7 @@ struct Run {
     dir: tempfile::TempDir,
 }
 
-fn run_with(dir: tempfile::TempDir, env: &Env, is_terminal: bool, flag_on: bool, input: &str) -> Run {
+fn run_with(dir: tempfile::TempDir, env: &Env, is_terminal: bool, input: &str) -> Run {
     let mut reader = Cursor::new(input.to_string());
     let mut out = Vec::new();
     let mut secret = |r: &mut dyn BufRead| {
@@ -25,7 +25,7 @@ fn run_with(dir: tempfile::TempDir, env: &Env, is_terminal: bool, flag_on: bool,
         out: &mut out,
         secret: &mut secret,
     };
-    run(dir.path(), env, 4700, flag_on, &mut term).unwrap();
+    run(dir.path(), env, 4700, &mut term).unwrap();
     Run {
         out: String::from_utf8(out).unwrap(),
         dir,
@@ -33,7 +33,7 @@ fn run_with(dir: tempfile::TempDir, env: &Env, is_terminal: bool, flag_on: bool,
 }
 
 fn fresh(env: &Env, input: &str) -> Run {
-    run_with(tempfile::tempdir().unwrap(), env, true, true, input)
+    run_with(tempfile::tempdir().unwrap(), env, true, input)
 }
 
 fn files(run: &Run) -> (String, String) {
@@ -115,7 +115,7 @@ fn network_access_on_with_no_password_stays_off() {
 
 #[test]
 fn without_a_terminal_nothing_is_asked() {
-    let run = run_with(tempfile::tempdir().unwrap(), &Env::empty(), false, true, "4800\n");
+    let run = run_with(tempfile::tempdir().unwrap(), &Env::empty(), false, "4800\n");
     assert_eq!(run.out, "");
     assert_eq!(files(&run), (String::new(), String::new()));
 }
@@ -127,11 +127,4 @@ fn none_clears_the_tags() {
     let machine = files(&run).1;
     let saved: Value = serde_json::from_str(&machine).unwrap();
     assert_eq!(saved["tags"]["removed"].as_array().unwrap().len(), found.len());
-}
-
-#[test]
-fn with_the_flag_off_nothing_is_asked() {
-    let run = run_with(tempfile::tempdir().unwrap(), &Env::empty(), true, false, "4800\n");
-    assert_eq!(run.out, "");
-    assert_eq!(files(&run), (String::new(), String::new()));
 }

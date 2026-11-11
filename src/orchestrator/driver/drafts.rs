@@ -16,7 +16,6 @@ use super::Shared;
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
-use super::store_errors::WATCH;
 use crate::ask::classify::Classified;
 use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
@@ -183,7 +182,7 @@ impl ProjectLoop {
             repo,
             token,
             lease: claim.token,
-            failures: self.failures.when(self.flags.on(WATCH).await),
+            failures: self.failures.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),

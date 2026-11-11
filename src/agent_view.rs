@@ -17,9 +17,6 @@ pub fn agent_view(
     local: &local_model::LocalModel,
     checks: Arc<retaskable_agent::setup_check::SetupCheckRunner>,
 ) -> view::AgentView {
-    let flags = Arc::new(retaskable_agent::flags::Flags::from_env());
-    // The snapshot reads the flag synchronously, so something has to keep asking.
-    flags.keep_fresh(view::SNAPSHOT_REPORTING_FLAG, std::time::Duration::from_secs(30));
     view::AgentView {
         machine: link::machine_name(env),
         tags,
@@ -34,7 +31,7 @@ pub fn agent_view(
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
-        settings: hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone(), default_port, flags),
+        settings: hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone(), default_port),
         live: Default::default(),
         checks,
         owner: Default::default(),

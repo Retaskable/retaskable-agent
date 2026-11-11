@@ -104,16 +104,14 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
-        "setup_check" if view.settings.setup_checks_now() => setup_check(cmd, project, view),
+        "setup_check" => setup_check(cmd, project, view),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
-        "playtest" if view.item_commands.flag_on(project, "playtest-answer-command") => {
-            playtest(cmd, project, view, data_dir)
-        }
+        "playtest" => playtest(cmd, project, view, data_dir),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
-        "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
+        "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
         "draft_edit" => draft_change(cmd, project, view),
@@ -447,11 +445,6 @@ fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
 
 /// `play { lane }` / `stop { lane }` (also `stop_play`) / `restart_play { lane }`.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    if matches!(cmd.name.as_str(), "restart_play" | "stop_play")
-        && !view.item_commands.flag_on(project, "restart-play-command")
-    {
-        return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
-    }
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
     let result = if cmd.name == "restart_play" {
         restart_lane(view, project, lane)

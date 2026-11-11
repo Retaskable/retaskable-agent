@@ -199,9 +199,7 @@ impl SettingsServer {
         let Ok(ip) = literal.parse::<IpAddr>() else {
             return false;
         };
-        self.settings_page_flag.load(std::sync::atomic::Ordering::Relaxed)
-            && self.network_on()
-            && (self.own_addresses)().contains(&ip)
+        self.network_on() && (self.own_addresses)().contains(&ip)
     }
 }
 

@@ -15,18 +15,10 @@ pub struct Failure {
 
 /// A shared list of [`Failure`]s; clones share it.
 #[derive(Debug, Clone, Default)]
-pub struct Failures(Arc<Mutex<Vec<Failure>>>, bool);
+pub struct Failures(Arc<Mutex<Vec<Failure>>>);
 
 impl Failures {
-    /// This list as a task should hold it: with `on` false (the `watchdog-anomaly-rules` flag Off) it keeps nothing.
-    pub fn when(&self, on: bool) -> Self {
-        Self(self.0.clone(), on)
-    }
-
     pub fn add(&self, op: &str, item: &str, e: &BacklogError) {
-        if !self.1 {
-            return;
-        }
         let failure = Failure {
             op: op.into(),
             item: item.into(),

@@ -233,12 +233,7 @@ const SEED: &str = r#"{ "version": 2, "projects": [], "pollIntervalSec": 30, "cu
 /// A view whose settings read `dir`, with the new-hello signal's receiver.
 fn settings_view(dir: &Path) -> (AgentView, tokio::sync::watch::Receiver<u64>) {
     let mut v = view();
-    v.settings = crate::hello_settings::HelloSettings::new(
-        dir.to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        std::sync::Arc::new(crate::flags::Flags::fixed(&["machine-settings"])),
-    );
+    v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
     let mut seen = v.settings.subscribe();
     seen.mark_unchanged();
     (v, seen)
@@ -306,25 +301,8 @@ fn computer_tags_and_settings_request_are_refused() {
     assert!(!seen.has_changed().unwrap());
 }
 
-#[test]
-fn agent_settings_is_an_unknown_command_while_the_flag_is_off_and_writes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut v = view();
-    v.settings = crate::hello_settings::HelloSettings::new(
-        dir.path().to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        std::sync::Arc::new(crate::flags::Flags::fixed(&[])),
-    );
-    let answer = send(&v, "agent_settings", json!({ "dailyUsd": 12 }));
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: agent_settings");
-    assert!(!dir.path().join("config.json").exists());
-}
-
 fn playtest_view() -> AgentView {
-    let v = claiming();
-    v.item_commands.set_flag("one", "playtest-answer-command", true);
-    v
+    claiming()
 }
 
 fn answer_playtest(v: &AgentView, args: Value, dir: &Path) -> Value {
@@ -383,14 +361,8 @@ fn playtest_is_nacked_for_bad_arguments_and_modes() {
         assert_eq!(answer_playtest(&v, args, &d)["type"], "nack");
     }
     let off = view();
-    off.item_commands.set_flag("one", "playtest-answer-command", true);
     let answer = answer_playtest(&off, json!({ "id": "a", "result": "pass" }), &d);
     assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
-    let flagless = claiming();
-    assert_eq!(
-        answer_playtest(&flagless, json!({ "id": "a", "result": "pass" }), &d)["type"],
-        "nack"
-    );
     assert!(v.item_commands.take("one").is_empty() && off.item_commands.take("one").is_empty());
 }
 
@@ -444,13 +416,6 @@ fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
     v.lanes = 2;
     let noop = |_: i32| {};
     let go = |name, args, v: &AgentView| run(&cmd(name, args), "one", &mut Seen::default(), v, &noop, &data_dir());
-    for name in ["restart_play", "stop_play"] {
-        assert_eq!(
-            go(name, json!({ "lane": 0 }), &v)["reason"],
-            format!("Not a command this agent takes yet: {name}")
-        );
-    }
-    v.item_commands.set_flag("one", "restart-play-command", true);
     assert_eq!(
         go("restart_play", json!({}), &v)["reason"],
         "restart_play needs a lane."
@@ -482,7 +447,6 @@ fn stop_play_stops_play_main_like_stop() {
     #[cfg(not(windows))]
     let long = "sleep 60";
     v.projects[0].play_command = long.into();
-    v.item_commands.set_flag(id, "restart-play-command", true);
     let noop = |_: i32| {};
     let go = |name, v: &AgentView| {
         run(
@@ -505,7 +469,6 @@ fn stop_play_stops_play_main_like_stop() {
 fn restart_play_of_a_lane_is_queued_in_claim_mode_and_nacked_otherwise() {
     let mut v = view();
     v.lanes = 2;
-    v.item_commands.set_flag("one", "restart-play-command", true);
     v.projects[0].play_command = "the-game".into();
     let go = |v: &AgentView, lane| {
         run(

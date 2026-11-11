@@ -220,20 +220,19 @@ impl Machine {
         self.starter.is_some() && lp.mode == OrchestratorMode::Claim
     }
 
-    /// Whether each project holds new work: this computer's pause is on, or, with `obey-shared-pause` On, the
+    /// Whether each project holds new work: this computer's pause is on, or the
     /// store's is on or unknown (fails closed; work already running carries on).
     fn paused(&self) -> impl std::future::Future<Output = Vec<bool>> + Send + 'static {
         let projects: Vec<_> = (self.projects.iter())
             .map(|lp| {
                 let own = self.links.paused.reason(&lp.id).is_some();
-                (own, self.links.store_paused.get(&lp.id), lp.flags.clone())
+                (own, self.links.store_paused.get(&lp.id))
             })
             .collect();
         async move {
             let mut out = Vec::new();
-            for (own, store, flags) in projects {
-                let obey = !own && flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
-                out.push(own || (obey && store != StorePause::NotPaused));
+            for (own, store) in projects {
+                out.push(own || store != StorePause::NotPaused);
             }
             out
         }
@@ -463,25 +462,11 @@ impl Machine {
     /// One pass over every project, in the order added. A project whose read fails (or panics) is skipped
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
-        self.write_host_calls().await;
-        let asked: Vec<_> = self
-            .projects
-            .iter()
-            .map(|lp| (lp.id.clone(), lp.flags.clone()))
-            .collect();
-        let mut obey_on = Vec::new();
-        for (id, flags) in asked {
-            let obey = flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
-            self.links
-                .item_commands
-                .set_flag(&id, crate::view::OBEY_SHARED_PAUSE_FLAG, obey);
-            obey_on.push(obey);
-        }
+        self.write_host_calls();
         let jobs: Vec<_> = self
             .projects
             .iter()
-            .zip(&obey_on)
-            .map(|(lp, &facts)| {
+            .map(|lp| {
                 tokio::spawn(read(
                     lp.client.clone(),
                     lp.id.clone(),
@@ -489,7 +474,6 @@ impl Machine {
                     lp.repo,
                     self.links.backlog_url.clone(),
                     self.links.keychain.clone(),
-                    facts,
                 ))
             })
             .collect();
@@ -505,7 +489,7 @@ impl Machine {
                 }
             });
             lp.repo = done.repo;
-            // Off: nothing was read, so nothing is held. A failed read, of the items or the facts, is unknown.
+            // A failed read, of the items or the facts, is unknown.
             let pause = match (&done.items, done.facts) {
                 (Ok(_), Some(Ok(facts))) if facts.paused => {
                     StorePause::Paused(facts.paused_reason.unwrap_or_else(|| "Paused for everyone".to_string()))

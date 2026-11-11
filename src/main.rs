@@ -190,12 +190,9 @@ async fn main() -> Result<()> {
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
-    // Card flag `machine-settings`: Off keeps today's behaviour (the keys ignored, silently, and left in the file).
-    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await {
-        config::set_retiring_project_lanes(true);
-        if let Some(note) = config::retired_keys_note(&dir) {
-            tracing::info!("{note}");
-        }
+    config::set_retiring_project_lanes(true);
+    if let Some(note) = config::retired_keys_note(&dir) {
+        tracing::info!("{note}");
     }
     // agent-settings.md section 3.1: which program runs each kind of work (engines.md section
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
@@ -319,8 +316,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let check_flags = Arc::new(retaskable_agent::flags::Flags::from_env());
-    let checks = runtime::setup_check_runner(env.clone(), check_flags.clone());
+    let checks = runtime::setup_check_runner(env.clone());
     let view = Arc::new(agent_view(
         cfg,
         tag_list.clone(),
@@ -335,7 +331,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
-    // Card flag `tray-icon-menu`: the tray, when it runs, is told to exit before a restart ends the process.
+    // The tray, when it runs, is told to exit before a restart ends the process.
     let tray_slot: Arc<std::sync::OnceLock<tray::boot::Shutdown>> = Arc::default();
     let tray_down = tray_slot.clone();
     let exit = runtime::restart_handler(
@@ -513,23 +509,21 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         item_commands: &view.item_commands,
         machine: link::machine_name(env),
     });
-    // Card flag `agent-ci`: Off starts no CI loop (agent-ci.md section 3.1).
-    if retaskable_agent::flags::Flags::from_env().on("agent-ci").await {
-        let ci = retaskable_agent::agent_ci::CiLoop::new(
-            Default::default(),
-            live.clone(),
-            retaskable_agent::agent_ci::docker::in_agent_image(),
-        )
-        .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
-            retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
-        )));
-        tokio::spawn(retaskable_agent::agent_ci::run(
-            ci,
-            dir.to_path_buf(),
-            env.clone(),
-            view.item_commands.clone(),
-        ));
-    }
+    // agent-ci.md section 3.1.
+    let ci = retaskable_agent::agent_ci::CiLoop::new(
+        Default::default(),
+        live.clone(),
+        retaskable_agent::agent_ci::docker::in_agent_image(),
+    )
+    .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
+        retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
+    )));
+    tokio::spawn(retaskable_agent::agent_ci::run(
+        ci,
+        dir.to_path_buf(),
+        env.clone(),
+        view.item_commands.clone(),
+    ));
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
@@ -559,30 +553,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         },
         keychain.clone(),
     ));
-    // Card flag `settings-page`: Off keeps the Host check loopback-only. The flag client's `PROJECT_ID`
-    // and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
-    settings.set_settings_page_flag(retaskable_agent::flags::Flags::from_env().on("settings-page").await);
-    settings.set_backlog_link_flag(
-        retaskable_agent::flags::Flags::from_env()
-            .on("backlog-link-route")
-            .await,
-    );
-    settings.set_agent_ci_flag(retaskable_agent::flags::Flags::from_env().on("agent-ci").await);
-    settings.set_live_sessions_flag(
-        retaskable_agent::flags::Flags::from_env()
-            .on("live-sessions-reporting")
-            .await,
-    );
     settings.set_saved_signal(view.settings.clone());
     settings.set_links(links.clone());
-    // `tags-reread-on-save`: a save on the settings page changes the list the next ask carries.
+    // A save on the settings page changes the list the next ask carries.
     {
         let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
-        let flags = retaskable_agent::flags::Flags::from_env();
         let mut saved = view.settings.subscribe();
         tokio::spawn(async move {
             while saved.changed().await.is_ok() {
-                if tags.on_save(&flags, &dir, &env).await {
+                if tags.reread(&dir, &env) {
                     log_tags(&tags.get());
                 }
             }
@@ -594,62 +573,56 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         checks: latest_checks,
         live,
     });
-    // agent-settings.md section 4.4, behind the `machine-settings` flag (Off keeps today's behaviour).
-    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await
-        && let Err(e) = settings.open_on_first_run(is_release, link::open_url)
-    {
+    // agent-settings.md section 4.4.
+    if let Err(e) = settings.open_on_first_run(is_release, link::open_url) {
         tracing::warn!("first-run settings page: {e:#}");
     }
-    // Card flag `tray-icon-menu`: Off keeps today's console-only agent.
     let quit_now = Arc::new(tokio::sync::Notify::new());
     // tray.md section 4.2: Keep this computer awake comes back as it was left.
     let keep_awake = Arc::new(retaskable_agent::keep_awake::KeepAwake::new(dir));
     keep_awake.tick();
-    if retaskable_agent::flags::Flags::from_env().on("tray-icon-menu").await {
-        let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
-        let backlog_url = backlog::url(env);
-        let (backlog_links, backlog_keys, backlog_http, backlog_env) =
-            (links.clone(), keychain.clone(), http.clone(), env.clone());
-        let backlog_version = version.to_string();
-        let tray = tray::boot::boot(tray::boot::Boot {
-            args: &std::env::args().skip(1).collect::<Vec<_>>(),
-            env,
-            build,
-            exe: exe_path.as_deref(),
-            view: view.clone(),
-            clouds: cloud_handles,
-            links: links.clone(),
-            settings: settings.clone(),
-            sessions: Arc::new(move || tray_sessions.snapshot().len()),
-            restart: view.restart.clone(),
-            exit: exit.clone(),
-            quit_now: quit_now.clone(),
-            terminal_menu: retaskable_agent::flags::Flags::from_env().on("terminal-menu").await,
-            keep_awake: Some(keep_awake.clone()),
-            link_backlog: Arc::new(move || {
-                tokio::spawn(auto_link_backlog(
-                    backlog_links.clone(),
-                    backlog_keys.clone(),
-                    backlog_http.clone(),
-                    backlog_env.clone(),
-                    backlog_version.clone(),
-                ));
-            }),
-            on_stopped: Box::new(move |why| {
-                tracing::warn!("Tray: the tray stopped ({why}); running headless.");
-                tracing::info!(
-                    "{}",
-                    link::links_line(&stopped_urls, &backlog_url, |url| matches!(
-                        stopped_keys.get(url),
-                        Ok(Some(_))
-                    ))
-                );
-            }),
-        })
-        .await;
-        if let Some(tray) = tray {
-            let _ = tray_slot.set(tray);
-        }
+    let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
+    let backlog_url = backlog::url(env);
+    let (backlog_links, backlog_keys, backlog_http, backlog_env) =
+        (links.clone(), keychain.clone(), http.clone(), env.clone());
+    let backlog_version = version.to_string();
+    let tray = tray::boot::boot(tray::boot::Boot {
+        args: &std::env::args().skip(1).collect::<Vec<_>>(),
+        env,
+        build,
+        exe: exe_path.as_deref(),
+        view: view.clone(),
+        clouds: cloud_handles,
+        links: links.clone(),
+        settings: settings.clone(),
+        sessions: Arc::new(move || tray_sessions.snapshot().len()),
+        restart: view.restart.clone(),
+        exit: exit.clone(),
+        quit_now: quit_now.clone(),
+        keep_awake: Some(keep_awake.clone()),
+        link_backlog: Arc::new(move || {
+            tokio::spawn(auto_link_backlog(
+                backlog_links.clone(),
+                backlog_keys.clone(),
+                backlog_http.clone(),
+                backlog_env.clone(),
+                backlog_version.clone(),
+            ));
+        }),
+        on_stopped: Box::new(move |why| {
+            tracing::warn!("Tray: the tray stopped ({why}); running headless.");
+            tracing::info!(
+                "{}",
+                link::links_line(&stopped_urls, &backlog_url, |url| matches!(
+                    stopped_keys.get(url),
+                    Ok(Some(_))
+                ))
+            );
+        }),
+    })
+    .await;
+    if let Some(tray) = tray {
+        let _ = tray_slot.set(tray);
     }
     axum::serve(
         listener,

@@ -220,12 +220,12 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
         2,
         "a beat doesn't end the wait"
     );
-    rig.machine.links.work.wake(&rig.machine.projects[0].id);
+    rig.machine.links.tags.set(vec!["gpu".to_string()]);
     pass(&mut rig, &starter, t0 + Duration::from_secs(62)).await;
     assert_eq!(
         script.lock().unwrap().args("run_take").len(),
         3,
-        "work_available asks again in the same pass"
+        "a change of tags asks again in the same pass"
     );
 
     let claim = rig
@@ -243,9 +243,8 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
 }
 
 #[tokio::test]
-async fn with_the_tags_flag_on_a_wake_ends_a_run_wait_only_when_the_tags_changed() {
+async fn a_wake_ends_a_run_wait_only_when_the_tags_changed() {
     let (mut rig, script) = setup(2).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["tags-reread-on-save"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
     script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] })]);

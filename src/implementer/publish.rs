@@ -211,7 +211,6 @@ mod tests {
     fn an_undefined_branch_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
         let gh = fake_gh(dir.path(), "[]");
-        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
         let err = open_or_create(&gh, dir.path(), "", "main", "t", "b").unwrap_err();
         assert!(err.to_string().contains("argument 4 was undefined"), "{err}");
         assert!(close_change(&gh, dir.path(), "undefined", "c").is_err());
@@ -220,10 +219,6 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].cmd, "gh");
         assert_eq!(got[0].args[..4], ["pr", "list", "--head", ""]);
-        // With the flag Off the call runs as before.
-        crate::host_call::set_on_for(vec![]);
-        assert!(close_change(&gh, dir.path(), "", "c").is_ok());
-        assert_eq!(calls(dir.path()).len(), 1);
     }
 
     #[test]

@@ -340,9 +340,9 @@ async fn with_claude_signed_out_and_the_start_rules_on_a_claude_session_waits_th
     assert!(started[0].resume);
 }
 
-/// A held item saved at `needs_human` for `reason`, the computer restarted with `flags` on and the store
+/// A held item saved at `needs_human` for `reason`, the computer restarted and the store
 /// listing "a" with `pr_url`; the first pass is returned.
-async fn held_needs_human(reason: &str, flags: &[&str], pr_url: Option<&str>) -> (Rig, Arc<Fake>, Asked) {
+async fn held_needs_human(reason: &str, pr_url: Option<&str>) -> (Rig, Arc<Fake>, Asked) {
     let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     let _fake = rig.go_live();
@@ -360,7 +360,6 @@ async fn held_needs_human(reason: &str, flags: &[&str], pr_url: Option<&str>) ->
     }
     let (base, asked) = claim_stub(json!([listed]), Some(Value::Null)).await;
     let mut rig = restarted(rig, &base);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     let fake = rig.go_live();
     rig.machine.pass().await;
     (rig, fake, asked)
@@ -370,7 +369,7 @@ const LIMIT: &str = crate::orchestrator::driver::settle::CURSOR_LIMIT_STOP;
 
 #[tokio::test]
 async fn a_restart_gives_back_an_item_held_only_for_cursors_limit() {
-    let (mut rig, _fake, asked) = held_needs_human(LIMIT, &[], None).await;
+    let (mut rig, _fake, asked) = held_needs_human(LIMIT, None).await;
     let sent = ops(&asked);
     let at = sent.iter().position(|o| o == "report").unwrap();
     assert_eq!(sent[at + 1], "release");
@@ -391,11 +390,11 @@ async fn a_restart_gives_back_an_item_held_only_for_cursors_limit() {
 
 #[tokio::test]
 async fn a_restart_readopts_the_other_needs_human_items() {
-    for (reason, flags, pr) in [
-        (LIMIT, &[][..], Some("https://github.com/o/p/pull/3")),
-        ("Review escalated", &[][..], None),
+    for (reason, pr) in [
+        (LIMIT, Some("https://github.com/o/p/pull/3")),
+        ("Review escalated", None),
     ] {
-        let (mut rig, _fake, asked) = held_needs_human(reason, flags, pr).await;
+        let (mut rig, _fake, asked) = held_needs_human(reason, pr).await;
         assert!(!ops(&asked).iter().any(|o| o == "release"));
         assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
     }

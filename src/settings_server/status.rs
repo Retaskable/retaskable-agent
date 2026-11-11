@@ -67,19 +67,9 @@ pub struct Lane {
     pub state: &'static str,
     pub state_text: &'static str,
     pub note: String,
-    /// The item holding it, when the orchestrator loop does.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub item: Option<LaneItem>,
-    /// The session on it, with live sessions on.
+    /// The session on it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionRow>,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-pub struct LaneItem {
-    pub id: String,
-    pub title: String,
-    pub project: String,
 }
 
 /// A running session with no lane (or, on a lane, the session on it).
@@ -89,7 +79,7 @@ pub struct SessionRow {
     pub id: String,
     pub project: String,
     pub title: String,
-    /// Only with live sessions on: what the session does, and on what.
+    /// What the session does, and on what.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,19 +93,6 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
-    fn drafting(id: &str, project: &str) -> Self {
-        Self {
-            id: id.into(),
-            project: project.into(),
-            title: group_word("drafter").into(),
-            role: None,
-            engine: None,
-            model: None,
-            run_sec: None,
-            quiet_sec: None,
-        }
-    }
-
     fn live(r: &SessionRowLive) -> Self {
         let i = &r.info;
         Self {
@@ -305,8 +282,6 @@ pub struct Settled {
     pub lanes: u32,
     pub codex_tokens: Option<u64>,
     pub cursor_tokens: Option<u64>,
-    /// Card flag `live-sessions-reporting`: show the session registry's rows.
-    pub live_sessions: bool,
 }
 
 /// `computerStatus`: builds the snapshot. Pure, so it's tested without a server.
@@ -338,17 +313,12 @@ pub fn build(
                 state: "free",
                 state_text: "Free",
                 note: note.to_string(),
-                item: None,
                 session: None,
             }
         })
         .collect();
     let mut lanes_busy = 0;
-    let rows = if settled.live_sessions {
-        source.live.sessions().snapshot()
-    } else {
-        Vec::new()
-    };
+    let rows = source.live.sessions().snapshot();
     let mut lane_less = Vec::new();
     for r in &rows {
         let Some(lane) = r.info.lane.and_then(|k| lanes.iter_mut().find(|l| l.k == k)) else {
@@ -360,22 +330,6 @@ pub fn build(
         lane.state_text = "Busy";
         lane.note = format!("Running for {}", r.info.project);
         lane.session = Some(SessionRow::live(r));
-    }
-    for (project, p) in live.projects.iter().filter(|_| !settled.live_sessions) {
-        for held in &p.held {
-            let Some(lane) = lanes.iter_mut().find(|l| l.k == held.lane) else {
-                continue;
-            };
-            lanes_busy += 1;
-            lane.state = "busy";
-            lane.state_text = "Busy";
-            lane.note = format!("Held for {project}");
-            lane.item = Some(LaneItem {
-                id: held.item_id.clone(),
-                title: held.title.clone().unwrap_or_else(|| held.item_id.clone()),
-                project: project.clone(),
-            });
-        }
     }
 
     let mut alerts = Vec::new();
@@ -437,13 +391,7 @@ pub fn build(
         },
         alerts,
         lanes,
-        sessions: if settled.live_sessions {
-            lane_less
-        } else {
-            (live.projects.iter())
-                .filter_map(|(project, p)| p.drafting.as_ref().map(|id| SessionRow::drafting(id, project)))
-                .collect()
-        },
+        sessions: lane_less,
         engines,
         orchestrator: Orchestrator {
             mode: live.mode.name(),
@@ -579,7 +527,6 @@ impl SettingsServer {
                 lanes: config::lanes(&cfg, env),
                 codex_tokens: machine.codex_today_tokens(),
                 cursor_tokens: machine.cursor_today_tokens(),
-                live_sessions: self.live_sessions_flag.load(std::sync::atomic::Ordering::Relaxed),
             };
             let checks = source.checks.lock().unwrap().clone();
             Ok(build(&settled, source, checks.as_ref(), &source.live.snapshot()))

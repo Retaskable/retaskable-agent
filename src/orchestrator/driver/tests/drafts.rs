@@ -105,6 +105,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "facts_get" => json!({ "paused": false }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
                         "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
@@ -139,7 +140,6 @@ async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (
     let (base, asked) = store_failing(draft, fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
     let host = Arc::new(Host {
         answers: Mutex::new(answers),
         ..Default::default()

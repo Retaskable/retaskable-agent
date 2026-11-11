@@ -47,16 +47,6 @@ impl ProjectLoop {
     /// Writes the `step_start` for `run`'s step and remembers it as open.
     pub(super) fn step_started(&mut self, item: &str, run: &ItemRun) {
         let step = state_name(run.state).to_string();
-        // Behind `watchdog-anomaly-rules`; Off, the event is as it always was and no `step_end` follows.
-        if !self.flags.last("watchdog-anomaly-rules") {
-            let start = event::StepStart {
-                item: Some(item.into()),
-                step: Some(step),
-                ..Default::default()
-            };
-            self.events.add_in(&self.id, Event::StepStart(start));
-            return;
-        }
         let key = key_of(run);
         let again = open_in_log(self.events.recent(), item, &step, &key);
         let start = event::StepStart {
@@ -82,8 +72,7 @@ impl ProjectLoop {
         let Some(open) = self.open_steps.remove(item) else {
             return;
         };
-        let with_checks = self.flags.last("step-events-complete");
-        let review = detail.filter(|_| with_checks && open.step == "reviewing");
+        let review = detail.filter(|_| open.step == "reviewing");
         let end = event::StepEnd {
             item: Some(item.into()),
             step: Some(open.step),
@@ -91,7 +80,7 @@ impl ProjectLoop {
             ms: Some(open.began.elapsed().as_millis() as f64),
             ok: Some(ok),
             outcome: Some(outcome.into()),
-            checks: detail.filter(|d| with_checks && !d.checks.is_empty()).map(|d| {
+            checks: detail.filter(|d| !d.checks.is_empty()).map(|d| {
                 (d.checks.iter())
                     .map(|c| event::Check {
                         name: Some(c.name.clone()),

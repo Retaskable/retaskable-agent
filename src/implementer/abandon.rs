@@ -49,7 +49,6 @@ mod tests {
     fn an_undefined_pr_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
         let (gh, ran) = crate::test_support::fake_gh_that_marks(dir.path());
-        crate::host_call::set_on_for(vec![dir.path().to_path_buf()]);
         let err = abandon(Path::new("git"), &gh, dir.path(), None, Some("undefined")).unwrap_err();
         assert!(err.to_string().contains("was not run"), "{err}");
         assert!(!ran.exists());
@@ -57,6 +56,5 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].cmd, "gh");
         assert_eq!(got[0].args[..3], ["pr", "view", "undefined"]);
-        crate::host_call::set_on_for(vec![]);
     }
 }

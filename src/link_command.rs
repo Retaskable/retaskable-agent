@@ -63,11 +63,7 @@ pub async fn link_command(
         Ok(id) => {
             println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
             // agent-settings.md section 5: the computer-only settings, asked only at a terminal.
-            // Behind the `machine-settings` flag (Off: nothing is asked, as before). The flag client's
-            // `PROJECT_ID` (src/flags.rs) and `RETASKABLE_FLAG_KEY` are placeholders the owner fills
-            // in from Settings -> Project settings -> Release flags.
-            let flag_on = retaskable_agent::flags::Flags::from_env().on("machine-settings").await;
-            if let Err(e) = ask_setup_questions(dir, env, release::default_port(build), flag_on) {
+            if let Err(e) = ask_setup_questions(dir, env, release::default_port(build)) {
                 eprintln!("Couldn't ask or save the settings: {e:#}");
             }
             // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
@@ -90,7 +86,7 @@ pub async fn link_command(
 }
 
 /// Asks the computer-only settings on the real terminal (`setup_questions`).
-fn ask_setup_questions(dir: &Path, env: &Env, default_port: u16, flag_on: bool) -> Result<()> {
+fn ask_setup_questions(dir: &Path, env: &Env, default_port: u16) -> Result<()> {
     use std::io::IsTerminal;
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
@@ -103,7 +99,7 @@ fn ask_setup_questions(dir: &Path, env: &Env, default_port: u16, flag_on: bool) 
         out: &mut out,
         secret: &mut secret,
     };
-    setup_questions::run(dir, env, default_port, flag_on, &mut term)
+    setup_questions::run(dir, env, default_port, &mut term)
 }
 
 /// Runs one device-flow link against `target` at `url` in the terminal, storing the refresh token.
