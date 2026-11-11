@@ -22,6 +22,8 @@ fn idea(title: &str, state: IdeaState) -> StoreIdea {
         answer: None,
         added_by: None,
         plan_id: None,
+        bug: false,
+        pictures: vec![],
     }
 }
 

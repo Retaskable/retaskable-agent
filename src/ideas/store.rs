@@ -83,6 +83,11 @@ pub struct StoreIdea {
     /// The plan this idea is already written up as, when one is under way.
     #[serde(default, rename = "planId")]
     pub plan_id: Option<String>,
+    /// Already marked a bug (`idea_mark_bug`, or typed as one).
+    #[serde(default)]
+    pub bug: bool,
+    #[serde(default)]
+    pub pictures: Vec<String>,
 }
 
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
@@ -116,6 +121,14 @@ impl Ideas<'_> {
     pub async fn list(&self) -> Result<StoreIdeas, BacklogError> {
         self.client
             .op(self.repo_id, self.token, "ideas_list", json!({}), "ideas")
+            .await
+    }
+
+    /// `idea_mark_bug { id }` (agents only, the Bugs spec section 5): moves a waiting idea to Bugs. The store refuses
+    /// with `not_found` or `conflict` once it is gone, a bug already, or its plan has started.
+    pub async fn mark_bug(&self, id: &str) -> Result<(), BacklogError> {
+        self.client
+            .op_done(self.repo_id, self.token, "idea_mark_bug", json!({ "id": id }))
             .await
     }
 

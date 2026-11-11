@@ -19,7 +19,7 @@ Four read-only jobs the computer does on a model, each deciding nothing the stor
 - **[Decided]** **Classify.** One structured call on Haiku sorts a message into `bug`, `idea`, `question` or `other` with a confidence; a bug or idea at 0.8 or above counts as confident. Not called when Claude is signed out or the day's ask budget is spent; any failure or a 20-second timeout is "unavailable", never an error.
 - **[Decided]** **Bug typed as an idea.** When this computer first claims the plan queued for a person's idea (not a hand-off, move, answer or send-back; the idea has no bug mark and no pictures), the idea's text is classified once. A confident bug marks the idea a bug and the plan's request is rewritten as a fix. Anything else, or any error, leaves it an idea; it never blocks the draft.
 - **[Decided]** **Chat messages name the item.** A Retaskable chat message about one item (`building:`, `needs:`, `merged:`, `built:`) carries that item's id as `itemId`; the draft-level ones carry none.
-- **[Proposal]** The Rust names: `src/triage/options_fill.rs`, `src/triage/task.rs`, `src/ask/classify.rs`, `src/ideas/bug_sort.rs`.
+- **[Decided]** The Rust names: `src/triage/options_fill.rs` (what to ask, how to read the answer, and `next`: leave, wait for the limit, retry or save), `src/triage/task.rs` (`run` answers `{ triage }` or `{ check }`, or a failure with `noRetry` and the limit), `src/ask/classify.rs`, `src/ideas/bug_sort.rs` (`sort`, with the pure `should_sort` and `first_claim`; `idea_mark_bug` is `Ideas::mark_bug`). Each takes the session as a closure over `run_session`, so the caller picks the engine, tier and place.
 
 ## 3. Behavior, in build order
 
