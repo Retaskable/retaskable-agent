@@ -43,6 +43,7 @@ pub mod local_model;
 pub mod looks;
 pub mod main_sync;
 pub mod merge_update;
+pub mod native_app;
 pub mod network;
 #[cfg(test)]
 mod no_flags;
@@ -101,6 +102,7 @@ pub mod tiers;
 pub mod tray;
 pub mod triage;
 pub mod trial_plan;
+pub mod usage_check;
 pub mod vet;
 pub mod view;
 pub mod work_signal;

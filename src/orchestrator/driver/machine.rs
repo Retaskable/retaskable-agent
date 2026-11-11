@@ -112,6 +112,8 @@ pub struct Machine {
     /// Which engines are at their usage limit and until when, from a session's `limit_hit`: a resume of a
     /// session on one starts fresh on another engine that can take it (engines/03 section 3.5). In memory only.
     pub(super) engine_limits: EngineLimits,
+    /// The pace of the usage recheck while Claude's limit holds the computer.
+    pub(super) usage_check: crate::usage_check::UsageCheck,
     pub(super) projects: Vec<ProjectLoop>,
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
@@ -170,6 +172,7 @@ impl Machine {
             claim_paused_until: None,
             claude_signed_out_until: None,
             engine_limits: EngineLimits::default(),
+            usage_check: Default::default(),
             projects: Vec::new(),
             last_served: None,
             links,
@@ -563,6 +566,7 @@ impl Machine {
     /// session slots left (`concurrency` less the starter's `active`), and the live ones apply them and ask the
     /// store for the lanes and slots still free. Each project's actions, and for a live one its claim answer.
     async fn schedule(&mut self, ready: &[bool], paused: &[bool]) -> Vec<(Vec<Action>, Option<Option<String>>)> {
+        self.recheck_usage().await;
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
             if *ready && !lp.week_checked {
                 lp.week_checked = true;
