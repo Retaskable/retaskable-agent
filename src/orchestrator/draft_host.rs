@@ -228,11 +228,14 @@ impl DraftHost for ClaudeDrafts {
 
     fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
         let (env, models, project) = (self.env.clone(), self.cursor_models.clone(), project.clone());
+        // What the project's sessions cost today on this computer, so a spent day's budget skips the call.
+        let spent =
+            crate::store::MachineStore::load(&self.data_dir).map_or(0.0, |m| m.spend_today(&project.id_or_derived()));
         Box::pin(async move {
             let Ok(placed) = place(Engine::Claude, Role::Assistant, &env, &models) else {
                 return Classified::Unavailable;
             };
-            let opts = Options::new(true, false, project.budget.ask_usd, 0.0);
+            let opts = Options::new(true, false, project.budget.ask_usd, spent);
             let cwd = std::env::temp_dir();
             classify(&text, &opts, &cwd, |spec| async move {
                 let engine = engine_of(spec.engine)?;
