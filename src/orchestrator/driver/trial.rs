@@ -109,7 +109,7 @@ impl ProjectLoop {
                 self.save_trial(TrialRecord::skip());
             }
             Decision::Start => {
-                let Some(lane) = pool.free_lane(false, None, None, |_| true) else {
+                let Some(lane) = pool.free_lane(false, None, |_| true) else {
                     return;
                 };
                 if !pool.take(lane, self.holder()) || !self.save_trial(TrialRecord::started()) {

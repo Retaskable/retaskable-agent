@@ -16,6 +16,11 @@ struct Script {
     merges: VecDeque<Value>,
     /// `merge_beat` says the turn is no longer held.
     turn_lost: bool,
+    /// What `merge_open` answers (`null`: no turn held), and whether it fails.
+    open: Value,
+    open_fails: bool,
+    /// `merge_result` fails while this is set (the store can't be reached).
+    result_fails: bool,
     beat: Value,
     /// A refusal code for `run_done`.
     done_refused: Option<&'static str>,
@@ -51,6 +56,9 @@ async fn store() -> (String, Shared_) {
                     "run_take" => ok(s.takes.pop_front().unwrap_or(Value::Null)),
                     "run_beat" => ok(s.beat.clone()),
                     "merge_next" => ok(s.merges.pop_front().unwrap_or(Value::Null)),
+                    "merge_open" if s.open_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+                    "merge_open" => ok(json!({ "turn": s.open.clone() })),
+                    "merge_result" if s.result_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
                     "merge_beat" => ok(json!({ "held": !s.turn_lost })),
                     "merge_result" => ok(json!({ "held": true })),
                     "lock_take" => ok(json!({ "held": true, "token": "L1" })),
@@ -980,3 +988,4 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
 }
 
 mod merged;
+mod restart;
