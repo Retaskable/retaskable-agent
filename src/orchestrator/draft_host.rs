@@ -121,9 +121,12 @@ impl DraftHost for ClaudeDrafts {
                     implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, ladder),
                 )
             };
-            let retry = (!job.resume && draft.other.get("retried").and_then(|v| v.as_bool()) == Some(true))
-                .then(|| retry_text(failure_reason(draft).as_deref()))
-                .unwrap_or_default();
+            let retried = !job.resume && draft.other.get("retried").and_then(|v| v.as_bool()) == Some(true);
+            let retry = if retried {
+                retry_text(failure_reason(draft).as_deref())
+            } else {
+                String::new()
+            };
             // Held until the session ends.
             let claimed = local.claim(tier).await;
             let spec = session_spec(
