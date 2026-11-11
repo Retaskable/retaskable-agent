@@ -117,3 +117,47 @@ fn the_helper_is_placed_executable() {
     assert_eq!(std::fs::read(&path).unwrap(), b"ELF");
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
 }
+
+#[test]
+fn an_os_without_a_helper_has_no_file_name_and_can_neither_unpack_nor_place_one() {
+    assert_eq!(helper_file_name(OsKind::Other), None);
+    let tgz = tarball("tray_linux_release", b"ELF");
+    let err = unpack_helper(&tgz, &sha(&tgz), OsKind::Other).unwrap_err();
+    assert!(err.contains("no tray helper"), "{err}");
+    let dir = tempfile::tempdir().unwrap();
+    let err = place_helper(dir.path(), b"ELF", OsKind::Other).unwrap_err();
+    assert!(err.contains("no tray helper"), "{err}");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing is written");
+}
+
+#[test]
+fn the_pinned_hash_matches_whatever_its_letter_case() {
+    let tgz = tarball("tray_linux_release", b"ELF");
+    assert_eq!(
+        unpack_helper(&tgz, &sha(&tgz).to_uppercase(), OsKind::Linux).unwrap(),
+        b"ELF"
+    );
+}
+
+#[test]
+fn a_tarball_without_the_helper_is_refused_naming_where_it_looked() {
+    let tgz = tarball("tray_darwin_release", b"MACH");
+    let err = unpack_helper(&tgz, &sha(&tgz), OsKind::Linux).unwrap_err();
+    assert!(err.contains("has no") && err.contains("tray_linux_release"), "{err}");
+}
+
+#[test]
+fn bytes_that_are_not_a_tarball_are_refused_once_the_hash_matches() {
+    let junk = b"not a tarball";
+    let err = unpack_helper(junk, &sha(junk), OsKind::Linux).unwrap_err();
+    assert!(err.contains("systray2 tarball"), "{err}");
+}
+
+#[test]
+fn the_helper_comes_from_the_pinned_systray2_version() {
+    assert_eq!(
+        tarball_url(),
+        format!("https://registry.npmjs.org/systray2/-/systray2-{SYSTRAY2_VERSION}.tgz")
+    );
+    assert_eq!(helper_file_name(OsKind::Windows), Some("tray_windows_release.exe"));
+}
