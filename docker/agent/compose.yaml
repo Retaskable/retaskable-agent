@@ -15,6 +15,9 @@ services:
       - CLAUDE_CODE_OAUTH_TOKEN
       - RETASKABLE_WOODPECKER_TOKEN
       - GITLAB_TOKEN
+      # Section 3.3: the computer that runs retaskable.com's rollouts (empty when unset).
+      - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
       # Section 3.4: this container's name wherever the agent says it, instead of its random
       # container hostname.
       - RETASKABLE_MACHINE
