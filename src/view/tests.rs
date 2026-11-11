@@ -647,3 +647,127 @@ fn obey_shared_pause_reports_which_pause_is_on_in_both_blocks() {
         );
     }
 }
+
+fn item_play(project: &str, lane: u32) -> ItemCommand {
+    ItemCommand::Play {
+        project: project.into(),
+        lane,
+    }
+}
+
+fn item_skip(project: &str, item: &str) -> ItemCommand {
+    ItemCommand::Skip {
+        project: project.into(),
+        item: item.into(),
+    }
+}
+
+#[test]
+fn take_and_take_lane_split_a_projects_queue_and_leave_other_projects_alone() {
+    let q = ItemCommands::default();
+    q.push(item_skip("one", "a"));
+    q.push(item_play("one", 2));
+    q.push(item_skip("two", "x"));
+    q.push(ItemCommand::Stop {
+        project: "one".into(),
+        lane: 2,
+    });
+    q.push(item_skip("one", "b"));
+    assert_eq!(q.take("one"), vec![item_skip("one", "a"), item_skip("one", "b")]);
+    assert!(q.take("one").is_empty());
+    assert_eq!(
+        q.take_lane("one"),
+        vec![
+            item_play("one", 2),
+            ItemCommand::Stop {
+                project: "one".into(),
+                lane: 2
+            }
+        ]
+    );
+    assert_eq!(q.take("two"), vec![item_skip("two", "x")]);
+    assert!(q.take_lane("two").is_empty());
+}
+
+#[test]
+fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
+    let q = ItemCommands::default();
+    let draft = |p: &str, d: &str| DraftCommand::Discard {
+        project: p.into(),
+        draft: d.into(),
+    };
+    q.push_draft(draft("one", "1"));
+    q.push_draft(draft("two", "2"));
+    q.push_draft(DraftCommand::Merge {
+        project: "one".into(),
+        draft: "3".into(),
+    });
+    assert_eq!(
+        q.take_drafts("one"),
+        vec![
+            draft("one", "1"),
+            DraftCommand::Merge {
+                project: "one".into(),
+                draft: "3".into()
+            }
+        ]
+    );
+    assert_eq!(q.take_drafts("two"), vec![draft("two", "2")]);
+
+    let idea = |p: &str, id: &str| IdeaCommand {
+        project: p.into(),
+        command_id: id.into(),
+        idea: "i".into(),
+        by: "me".into(),
+    };
+    q.push_idea(idea("one", "a"));
+    q.push_idea(idea("two", "b"));
+    q.push_idea(idea("one", "c"));
+    let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
+    assert_eq!(ids, ["a", "c"]);
+    assert_eq!(q.take_ideas("two").len(), 1);
+
+    let fb = |p: &str, id: &str| GalleryFeedbackCommand {
+        project: p.into(),
+        command_id: id.into(),
+        request: "r".into(),
+        do_next: true,
+        by: "me".into(),
+    };
+    q.push_feedback(fb("two", "x"));
+    q.push_feedback(fb("one", "y"));
+    assert_eq!(q.take_feedback("one").len(), 1);
+    assert!(q.take_feedback("one").is_empty());
+    assert_eq!(q.take_feedback("two")[0].command_id, "x");
+}
+
+#[test]
+fn flags_are_per_project_and_per_flag_and_can_be_turned_off() {
+    let q = ItemCommands::default();
+    assert!(!q.flag_on("one", "some-flag"));
+    q.set_flag("one", "some-flag", true);
+    assert!(q.flag_on("one", "some-flag"));
+    assert!(!q.flag_on("two", "some-flag"));
+    assert!(!q.flag_on("one", "other-flag"));
+    assert!(!q.ask_on("one"));
+    q.set_ask_on("one", true);
+    assert!(q.ask_on("one"));
+    q.set_flag("one", "some-flag", false);
+    assert!(!q.flag_on("one", "some-flag"));
+    assert!(q.ask_on("one"));
+}
+
+#[test]
+fn answer_goes_up_the_projects_connection_and_is_dropped_once_it_is_gone() {
+    let q = ItemCommands::default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    q.answer("one", json!({"n": 0})); // no connection yet: dropped, no panic
+    q.set_out("one", Some(tx));
+    q.answer("one", json!({"n": 1}));
+    q.answer("two", json!({"n": 2}));
+    assert_eq!(rx.try_recv().unwrap(), json!({"n": 1}));
+    assert!(rx.try_recv().is_err());
+    q.set_out("one", None);
+    q.answer("one", json!({"n": 3}));
+    assert!(rx.try_recv().is_err());
+}
