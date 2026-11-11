@@ -40,6 +40,25 @@ pub trait Deps: Send + Sync {
     /// The commit staging serves: with a smoke the last one that passed (`None`: none has), else what its version
     /// path answers, else `origin/<staging branch>`.
     fn staging_served(&self) -> impl Future<Output = Result<Option<String>, String>> + Send;
+    /// The commit production serves, from its version path (Production only).
+    fn production_served(&self) -> impl Future<Output = Result<String, String>> + Send;
+    /// `gh api repos/<repo>/<path>`: the JSON it prints, an error when it can't be read.
+    fn gh_api(&self, path: String) -> impl Future<Output = Result<Value, String>> + Send;
+}
+
+/// The commit a deploy target's version path answers.
+async fn served_by(target: &crate::config::DeployTarget, url: &str) -> Result<String, String> {
+    let path = target.version_path.as_deref().unwrap_or("/version.json");
+    let body = reqwest::Client::new()
+        .get(format!("{url}{path}"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::smoke::parse_deployed_sha(&body).ok_or_else(|| format!("{url}{path} named no commit"))
 }
 
 /// The real thing, for one project.
@@ -172,18 +191,31 @@ impl Deps for Live {
                 .await?;
             return Ok(Some(sha.trim().to_string()));
         };
-        let path = staging.version_path.as_deref().unwrap_or("/version.json");
-        let body = reqwest::Client::new()
-            .get(format!("{url}{path}"))
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .text()
-            .await
-            .map_err(|e| e.to_string())?;
-        crate::smoke::parse_deployed_sha(&body)
-            .map(Some)
-            .ok_or_else(|| format!("{url}{path} named no commit"))
+        served_by(staging, url).await.map(Some)
+    }
+
+    async fn production_served(&self) -> Result<String, String> {
+        let target = self.project.deploy.production.as_ref().ok_or("no production branch")?;
+        let url = target.url.as_deref().filter(|u| !u.is_empty());
+        served_by(target, url.ok_or("production has no address")?).await
+    }
+
+    async fn gh_api(&self, path: String) -> Result<Value, String> {
+        let (repo, endpoint) = (self.repo(), format!("repos/{}/{path}", self.project.github_repo));
+        tokio::task::spawn_blocking(move || {
+            let args = ["api", endpoint.as_str()];
+            crate::host_call::guard_program("gh", Some(&repo), &args).map_err(|e| e.to_string())?;
+            let out = std::process::Command::new("gh")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            }
+            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 }

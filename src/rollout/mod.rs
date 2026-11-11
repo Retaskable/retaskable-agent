@@ -182,11 +182,8 @@ impl<D: Deps> Rollout<D> {
     }
 
     async fn report(&mut self) {
-        let Some(staging) = self.staging.clone() else {
-            return self.log("report", "nothing reported: the project has no staging branch".into());
-        };
         let built = match self.deps.fetch().await {
-            Ok(()) => report::build(&self.deps, &self.production, &staging).await,
+            Ok(()) => report::build(&self.deps, &self.production, self.staging.as_deref()).await,
             Err(e) => Err(e),
         };
         let report = match built {
@@ -280,6 +277,8 @@ impl<D: Deps> Rollout<D> {
                     None => return self.finish(i, failed(&i.id, "no health command")),
                 }
             }
+            // Production only: the merge is the release and its build is uploaded already.
+            "promote" if self.staging.is_none() => return self.finish(i, result(&i.id, true, None, None)),
             "promote" => return self.finish(i, failed(&i.id, "this computer can't promote yet")),
             other => return self.finish(i, failed(&i.id, &format!("unknown instruction {other}"))),
         };
