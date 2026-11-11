@@ -29,7 +29,6 @@ pub struct ClaudeDrafts {
     models: ModelsConfig,
     cursor_models: CursorModels,
     /// The computer's local model, for the tier ladder.
-    #[allow(dead_code)] // read by the tier ladder's later pieces
     local: crate::local_model::LocalModel,
 }
 
