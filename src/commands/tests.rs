@@ -12,9 +12,7 @@ fn view() -> AgentView {
             repo_path: PathBuf::new(),
             worktrees_dir: PathBuf::new(),
             base_branch: String::new(),
-            galleries: vec![],
             play_command: String::new(),
-            project_type: Default::default(),
         }],
         version: "9.9.9".into(),
         ..AgentView::blank()
@@ -203,93 +201,20 @@ fn play_and_stop_of_a_lane_are_queued_for_the_loop_and_refused_past_lanes() {
 }
 
 #[test]
-fn shoot_nacks_an_unknown_gallery() {
+fn the_gallery_names_are_no_command() {
     let v = view();
     let noop = |_: i32| {};
-    let answer = run(
-        &cmd("shoot", json!({ "gallery": "intro" })),
-        "one",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &data_dir(),
-    );
-    assert_eq!(answer["reason"], "No gallery called intro.");
-}
-
-#[test]
-fn shoot_nacks_a_gallery_with_no_command_set() {
-    let mut v = view();
-    v.projects[0].galleries = vec![crate::config::GalleryConfig {
-        name: "Intro".into(),
-        command: String::new(),
-        out_dir: "shots".into(),
-    }];
-    let noop = |_: i32| {};
-    let answer = run(
-        &cmd("shoot", json!({ "gallery": "intro" })),
-        "one",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &data_dir(),
-    );
-    assert_eq!(answer["reason"], "No command set for this gallery.");
-}
-
-#[cfg(windows)]
-fn copy_fixture_command() -> String {
-    "mkdir shots && copy fixture.png shots\\01-first.png".to_string()
-}
-#[cfg(not(windows))]
-fn copy_fixture_command() -> String {
-    "mkdir -p shots && cp fixture.png shots/01-first.png".to_string()
-}
-
-#[test]
-fn shoot_acks_at_once_and_runs_the_gallery_in_the_background() {
-    let root = tempfile::tempdir().unwrap();
-    let repo = crate::test_support::repo_with_origin(root.path());
-    image::DynamicImage::ImageRgb8(image::RgbImage::new(100, 20))
-        .save(repo.join("fixture.png"))
-        .unwrap();
-    crate::test_support::run(crate::test_support::git(&repo).args(["add", "fixture.png"]));
-    crate::test_support::run(crate::test_support::git(&repo).args(["commit", "--quiet", "-m", "fixture"]));
-    crate::test_support::run(crate::test_support::git(&repo).args(["push", "--quiet", "origin", "main"]));
-
-    let mut v = view();
-    v.projects[0].id = "commands-shoot-happy-path".into();
-    v.projects[0].repo_path = repo.clone();
-    v.projects[0].worktrees_dir = root.path().join("worktrees");
-    v.projects[0].base_branch = "main".into();
-    v.projects[0].galleries = vec![crate::config::GalleryConfig {
-        name: "Models".into(),
-        command: copy_fixture_command(),
-        out_dir: "shots".into(),
-    }];
-    let noop = |_: i32| {};
-    let dir = root.path().join("data");
-
-    let answer = run(
-        &cmd("shoot", json!({ "gallery": "models" })),
-        "commands-shoot-happy-path",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &dir,
-    );
-    assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
-
-    let index = dir.join("projects/commands-shoot-happy-path/galleries/models/index.json");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    while !index.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    for name in ["shoot", "gallery_index", "gallery_image", "gallery_feedback"] {
+        let answer = run(
+            &cmd(name, json!({ "gallery": "intro" })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], format!("Not a command this agent takes yet: {name}"));
     }
-    assert!(index.exists());
-    assert_eq!(
-        galleries::status("commands-shoot-happy-path", "models"),
-        galleries::GalleryStatus::Idle
-    );
 }
 
 fn claiming() -> AgentView {

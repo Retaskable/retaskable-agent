@@ -22,6 +22,7 @@ A project's own settings stay in Project settings on retaskable.com, as before.
 - **[Decided]** The page changes settings only. It never runs a command, and it never shows or changes a project's settings or the owner's.
 - **[Decided]** (2026-10-22) The human: daily budget, sessions at once and model thresholds are agent settings changed on the site, "only changeable by the owner of the agent" (the person who linked it). Everything else about a computer (links, port, local model, how often it checks, tags, Cursor settings, network access) is set only at the computer, never from the site.
 - **[Decided]** (2026-10-22) The owner's settings need no fresh sign-in: they run no code. They cost money, so they stay the owner's alone.
+- **[Decided]** (2026-11-09, [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md)) The owner's three settings moved from the computer to the server: they are kept in the project's store, in the pool record of each computer that has reported to it, and written by `pool_settings`, not by the `agent_settings` command, which is gone. The computer does not read them back; the store applies them when it sends work (the number of sessions at once, the daily budget, the tier thresholds). Settings start from the defaults (1 session, no daily cap, auto on with 1 to 8 at 75%, Opus above 50%, wait below 5%); nothing is read from an old `config.json`. There is no per-model sessions setting and no Sonnet threshold any more. The keys stay in `config.json` and the agent's own scheduling still reads them until the agent's own pool is deleted (not built), so the numbers on the computer no longer show anywhere.
 
 | Setting | Where it's changed | Kept in |
 |---|---|---|
@@ -34,17 +35,16 @@ A project's own settings stay in Project settings on retaskable.com, as before.
 | Engines (which program runs each kind of work: Claude Code, Cursor, pi, Codex or the local model) | setup, `RETASKABLE_ENGINES`, the settings page | `config.json` `engineChoice` |
 | Cursor's models | setup, `RETASKABLE_CURSOR_MODELS`, the settings page | `config.json` `cursor.models` |
 | Network access to the settings page, and its password | setup, `RETASKABLE_NETWORK_PASSWORD`, the settings page | `machine.json` `network` (the password as a scrypt hash) |
-| Daily budget | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `budget.dailyUsd` |
-| Sessions at once (concurrency, per model) | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `concurrency`, `modelConcurrency` |
-| Model thresholds | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `models` |
+| Daily budget | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store, in that computer's pool record (`dailyUsd`) |
+| Sessions at once (`limit`) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`limit`) |
+| Model thresholds (`opusAbovePct`, `pauseBelowPct`) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`models`) |
 
-### 2.1 The owner's settings: `agent_settings`
+### 2.1 The owner's settings: `pool_settings` (changed 2026-11-09)
 
-- **The command** ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1): `agent_settings { dailyUsd?, concurrency?, modelConcurrency?, models? }`, each checked as Setup checks it (a budget from 0 to 100000, sessions whole numbers from 1 to 64, percentages from 0 to 100). Nothing else: a tag, the local model or how often it checks is no part of it, and the agent refuses one as "Not a command this agent takes".
-- **The hub** takes it only from the person who linked the computer; the agent trusts that check and re-checks nothing about who sent it. Who may send it, the owner's name in the refusal and MCP's exclusion are the hub's ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1).
-- **The agent** (`agent/src/commands.ts`) saves it at once, with no one at the computer to allow it: `saveAgentSettings` (`agent/src/siteSettings.ts`) writes the file through `saveConfigFile` (`withAgentSettings`: what isn't named stays; "Name a change." for none, thresholds out of order refused in Setup's words), then `pool.configure` and a new hello on every project, so the page shows the new values.
-- **The old ways go.** The agent refuses `computer_tags` and a `settings_request` naming a computer-only setting (`pollIntervalSec`, `local`, `cursorModels`, engines): neither command's schema has them any more.
-- **An older agent** doesn't know `agent_settings` and refuses it. An agent that does says so in its hello (`capabilities` has `agent_settings`, `AGENT_SETTINGS_CAPABILITY`).
+- **The op** (`shared/backlogPoolOps.ts`, [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md) section 5.4): `pool_settings { agent, limit?, dailyUsd?, autoConcurrency?, models? }`, checked in the ranges of `shared/pools.ts`, saved in the project's store at once. `pool_get` reads them with `allowed` and the reason to wait. The store takes `pool_settings` only from the computer's owner, who is the login of its first `health`; so it is refused until the computer has reported once to that project, and the Agents tab shows the defaults read-only until then.
+- **The site** sends it through the shown project's store (a computer that serves several projects has one pool per store, so the tab shows the shown project's). Only the keys that changed are sent. The old `agent_settings` command, its schema, the hello capability and the agent's write (`saveAgentSettings`) are gone, and the hub refuses an old page's `agent_settings` with "...saved in the project, not on the computer", the owner too.
+- **The old ways stay gone.** The hub still refuses `computer_tags` and a `settings_request` naming one of these settings or one set at the computer (`pollIntervalSec`, `local`, `cursorModels`, `lanes`), in plain words (`retiredRefusal`).
+- **A one-time note**, a dismissible banner kept on the device (`retaskable.poolSettingsNote`), says the settings moved and start from the defaults.
 
 The Agents page on the site (one card per computer, which settings are editable by the owner or read-only with how to change them at the computer, the Sample's made-up computer) is the app's: [expo.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/expo.md). The agent sends what it needs in its hello: the settings and, for the secrets, only each environment variable's name and whether it is set, never a value.
 
@@ -129,7 +129,7 @@ The page has two tabs, **Now** (the first) and **Settings**, kept in the address
 
 ## 6. Tested
 
-The agent part: `agent/src/commands.test.ts` (`agent_settings` saved at once, nothing waits at the machine, and its wire takes only the owner's fields; the old `computer_tags` and computer-only fields refused), `agent/src/siteSettings.test.ts` (`withAgentSettings`, and neither schema carrying what's set at the computer).
+The agent part (changed 2026-11-09: the agent no longer writes the owner's settings): `agent/src/commands.test.ts` (the wire takes none of the owner's fields; the old `computer_tags`, `agent_settings` and computer-only fields refused), `agent/src/siteSettings.test.ts` (neither schema carrying what's set at the computer).
 
 The computer part:
 

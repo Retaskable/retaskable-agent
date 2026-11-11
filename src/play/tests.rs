@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::config::GalleryConfig;
 use crate::test_support::repo_with_origin;
 
 #[cfg(windows)]
@@ -18,9 +17,7 @@ fn project(id: &str, root: &std::path::Path, command: &str) -> ProjectView {
         repo_path: repo_with_origin(root),
         worktrees_dir: root.join("worktrees"),
         base_branch: "main".into(),
-        galleries: vec![],
         play_command: command.into(),
-        project_type: Default::default(),
     }
 }
 
@@ -59,23 +56,18 @@ fn play_holds_the_base_checkout_until_stop_ends_its_process_tree() {
     wait_for(|| marker.exists() && std::fs::read_to_string(&marker).is_ok_and(|s| s.trim() == "play"));
 
     assert_eq!(start(id, &p).unwrap_err(), "Play main is already running.");
-    let gallery = GalleryConfig {
-        name: "Intro".into(),
-        command: "true".into(),
-        out_dir: "shots".into(),
-    };
     assert_eq!(
-        crate::galleries::shoot_refusal(id, &gallery).unwrap(),
+        crate::base_hold::hold_base(id, "a check").err().unwrap(),
         "The base checkout is busy: Play main is using it."
     );
 
     stop(id).unwrap();
     wait_for(|| !running(id) && crate::base_hold::base_holder(id).is_none());
-    assert!(crate::galleries::shoot_refusal(id, &gallery).is_none());
+    assert!(crate::base_hold::hold_base(id, "a check").is_ok());
 }
 
 #[test]
-fn play_is_refused_while_a_shoot_holds_the_base_checkout() {
+fn play_is_refused_while_another_holds_the_base_checkout() {
     let root = tempfile::tempdir().unwrap();
     let id = "play-vs-shoot";
     let p = project(id, root.path(), LONG_RUNNING);

@@ -3,10 +3,9 @@
 //! one access token for that cloud. Each says hello, sends a snapshot, and says it's alive in a quiet minute; it
 //! reconnects with backoff. Outbound only: nothing listens on a public port.
 //!
-//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, its
-//! galleries' real status and last shoot, and an orchestrator that runs no work yet (`AgentView`). A command from
-//! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause, Resume
-//! and Shoot — and refused otherwise.
+//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, and an orchestrator that runs no work yet (`AgentView`). A command from
+//! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause and Resume
+//! — and refused otherwise.
 pub mod bug_link;
 #[cfg(test)]
 mod tests;
@@ -28,7 +27,6 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 
 use self::bug_link::BugLink;
 use crate::commands::{self, Seen};
-use crate::galleries;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name};
 use crate::text::truncate;
 use crate::view::{AgentView, Exit};
@@ -403,7 +401,7 @@ async fn session(
     }
     let t = cloud.timing;
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
-    // The snapshot just sent has the sizes, pause and galleries as they are now; a later change sends it again.
+    // The snapshot just sent has the sizes and pause as they are now; a later change sends it again.
     let mut sizes = view.lane_sizes.subscribe();
     sizes.mark_unchanged();
     let mut paused = view.paused.subscribe();
@@ -433,10 +431,7 @@ async fn session(
     let mut commands_changed = view.item_commands.gates().subscribe();
     commands_changed.mark_unchanged();
     let mut commands_sent = view.commands_waiting_json(project);
-    let mut gallery_status = galleries::subscribe_status_changes();
-    gallery_status.mark_unchanged();
     let mut pending = HashMap::new();
-    let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
@@ -494,15 +489,6 @@ async fn session(
                 let now = view.commands_waiting_json(project);
                 if now != commands_sent {
                     commands_sent = now;
-                    Some(view.snapshot(project, &cloud.dir))
-                } else {
-                    None
-                }
-            },
-            Ok(()) = gallery_status.changed() => {
-                let count = gallery_status.borrow().get(project).copied().unwrap_or(0);
-                if count != gallery_changes {
-                    gallery_changes = count;
                     Some(view.snapshot(project, &cloud.dir))
                 } else {
                     None

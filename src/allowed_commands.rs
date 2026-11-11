@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
-use crate::config::{CheckConfig, GalleryConfig, ProjectConfig};
+use crate::config::{CheckConfig, ProjectConfig};
 use crate::fs_util::write_json_atomic;
 use crate::paths::project_dir;
 use crate::telemetry::events::now_ms;
@@ -24,22 +24,13 @@ pub const COMMAND_LABELS: &[(&str, &str)] = &[
     ("playCommand", "the play command"),
     ("promptNotes", "the notes for the agent's prompts"),
     ("ciCommand", "the CI command"),
-    ("galleries", "galleries"),
     ("phone", "the phone build"),
     ("engines", "what Cursor may run"),
     ("deploy.staging.smoke", "the staging smoke test"),
     ("deploy.production.rollout", "automatic rollout"),
 ];
 
-const COMMAND_FIELDS: &[&str] = &[
-    "checks",
-    "playCommand",
-    "promptNotes",
-    "ciCommand",
-    "galleries",
-    "phone",
-    "engines",
-];
+const COMMAND_FIELDS: &[&str] = &["checks", "playCommand", "promptNotes", "ciCommand", "phone", "engines"];
 const SMOKE: &str = "deploy.staging.smoke";
 const ROLLOUT: &str = "deploy.production.rollout";
 /// Minutes an automatic rollout takes (`FIXED_MINUTES` in `shared/rolloutSetting.ts`).
@@ -102,7 +93,6 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
         None if store_has_record => {
             out.checks = Vec::new();
             out.play_command = String::new();
-            out.galleries = Vec::new();
             out.phone = None;
             out.engines = None;
             if let Some(s) = out.deploy.staging.as_mut() {
@@ -116,9 +106,6 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
         match field.as_str() {
             "checks" => out.checks = serde_json::from_value::<Vec<CheckConfig>>(value.clone()).unwrap_or_default(),
             "playCommand" => out.play_command = value.as_str().unwrap_or_default().to_string(),
-            "galleries" => {
-                out.galleries = serde_json::from_value::<Vec<GalleryConfig>>(value.clone()).unwrap_or_default()
-            }
             "phone" => out.phone = serde_json::from_value(value.clone()).ok(),
             "engines" => out.engines = (!value.is_null()).then(|| value.clone()),
             SMOKE => {
@@ -172,7 +159,7 @@ fn command_text(field: &str, value: Option<&Value>) -> String {
     };
     let s = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     match field {
-        "checks" | "galleries" => {
+        "checks" => {
             let list: Vec<String> = v
                 .as_array()
                 .map(|a| {
