@@ -19,7 +19,7 @@ use crate::engines::{
 };
 use crate::implementer::new_session_id;
 use crate::orchestrator::live::sessions::{SessionInfo, model_name};
-use crate::tiers::{claude_model_for, implementer_tier, mid_tier, top_tier};
+use crate::tiers::{OPUS, SONNET, claude_model_for, floor};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
 use crate::triage::{Triager, decide};
@@ -86,7 +86,6 @@ impl ClaudeStarter {
             item_id,
             mut context,
             lane,
-            usage,
             outcomes,
             sessions,
             ..
@@ -97,13 +96,7 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let up = self.local.ladder_for(placed.engine == EngineId::Claude);
-        let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
-        let tier = mid_tier(implementer_tier(
-            floored.as_ref(),
-            crate::telemetry::now_ms() / 1000,
-            &self.models,
-            up,
-        ));
+        let tier = floor(SONNET, sessions.claude_at_limit(), up);
         let (model, local) = (tier.to_string(), self.local.clone());
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let info = triager_info(&project_id, &item_id, lane, &placed, &model);
@@ -214,8 +207,7 @@ impl ClaudeStarter {
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let up = self.local.ladder_for(placed.engine == EngineId::Claude);
-        let floored = crate::tiers::limit_floor(None, sessions.claude_at_limit(), up);
-        let top = top_tier(floored.as_ref(), 0, &self.models, up);
+        let top = floor(OPUS, sessions.claude_at_limit(), up);
         let local = self.local.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top);
         tokio::spawn(async move {

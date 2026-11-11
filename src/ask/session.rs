@@ -18,7 +18,7 @@ pub struct Session<'a> {
     pub input: AssistantInput<'a>,
     /// The engine `engines::engine_for(…, Role::Ask, None)` chose.
     pub engine: Engine,
-    /// The implementer's tier from the usage reading (`tiers::implementer_tier`), used as it is.
+    /// `sonnet`, or `local` at Claude's limit (`tiers::floor`), used as it is.
     pub tier: &'static str,
     pub budget: &'a ProjectBudget,
     /// The project's base checkout, on the base branch.

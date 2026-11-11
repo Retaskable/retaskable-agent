@@ -1,9 +1,5 @@
-//! Picking the implementer's model from the 5-hour usage limit still left
-//! (docs/specs/agent/07-orchestrator-loop.md section 7.1, `agent/src/tiers.ts` in the TypeScript
-//! agent). The implementer, scout, mid and top tiers are built here; the local model is chosen
-//! only where `local_available` is true, and no caller passes that yet. Below `pauseBelowPct`
-//! (or `rejected`) the implementer and scouts stay on `sonnet` without it, because no
-//! "waiting for the limit" state exists in this agent yet.
+//! Tier names and models (docs/specs/agent/07.1-model-tiers.md). The server names the tier; this maps it to a
+//! model, and keeps the weekly cutoff and the usage readings it reports. No tier is worked out from usage here.
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::Value;
@@ -15,81 +11,28 @@ pub const OPUS: &str = "opus";
 pub const SONNET: &str = "sonnet";
 pub const LOCAL: &str = "local";
 
-/// Which row of section 7.1's tables a usage reading falls on.
-#[derive(Clone, Copy, PartialEq)]
-enum Band {
-    /// At or above `opusAbovePct` left (also no reading, and `allowed`).
-    Full,
-    /// At or above `sonnetAbovePct`.
-    Mid,
-    /// At or above `pauseBelowPct`.
-    Low,
-    /// Below `pauseBelowPct`, or `rejected`.
-    Floor,
-    /// `allowed_warning` with a status and no percentage.
-    Warning,
-}
-
-fn band(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig) -> Band {
-    let Some(usage) = usage else { return Band::Full };
-    if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
-        return band_from_five_hour_window(window, now_epoch, models);
-    }
-    if let Some(pct_left) = top_level_pct_left(usage, now_epoch) {
-        return band_from_pct_left(pct_left, models);
-    }
-    match fresh_status(usage, now_epoch) {
-        Some("allowed_warning") => Band::Warning,
-        Some("rejected") => Band::Floor,
-        _ => Band::Full,
-    }
-}
-
-/// `local` when the local model is available, else `fallback`.
-fn local_or(local_available: bool, fallback: &'static str) -> &'static str {
-    if local_available { LOCAL } else { fallback }
-}
-
-/// The model `ClaudeStarter` passes `--model` for a fresh implementer session, from the latest
-/// 5-hour usage reading kept in `state.usage` (`None` when there's none yet, which "is treated as
-/// full", i.e. `opus`). Below `sonnetAbovePct` it is `local` when `local_available`, else `sonnet`.
-pub fn implementer_tier(
-    usage: Option<&Value>,
-    now_epoch: i64,
-    models: &ModelsConfig,
-    local_available: bool,
-) -> &'static str {
-    match band(usage, now_epoch, models) {
-        Band::Full => OPUS,
-        Band::Mid | Band::Warning => SONNET,
-        Band::Low | Band::Floor => local_or(local_available, SONNET),
-    }
-}
-
 /// The tier the server named for a claim (section 7.1, "How the tier arrives"): `opus`, `sonnet` or `local`.
-/// `None` when it named none; an unknown name is read as `sonnet` and logged.
-pub fn named_tier(name: Option<&str>) -> Option<&'static str> {
-    match name? {
-        "opus" => Some(OPUS),
-        "sonnet" => Some(SONNET),
-        "local" => Some(LOCAL),
-        other => {
+/// A missing name is `sonnet`; an unknown one is `sonnet` too, and logged.
+pub fn named_tier(name: Option<&str>) -> &'static str {
+    match name {
+        None | Some("sonnet") => SONNET,
+        Some("opus") => OPUS,
+        Some("local") => LOCAL,
+        Some(other) => {
             tracing::warn!("the store named the unknown tier {other:?}; reading it as sonnet");
-            Some(SONNET)
+            SONNET
         }
     }
 }
 
-/// `scoutTier` (section 7.1): never Opus; `local` (else `sonnet`) below `sonnetAbovePct` and on `allowed_warning`.
-pub fn scout_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, local_available: bool) -> &'static str {
-    match band(usage, now_epoch, models) {
-        Band::Full | Band::Mid => SONNET,
-        Band::Low | Band::Floor | Band::Warning => local_or(local_available, SONNET),
-    }
+/// `tier`, or `local` when Claude is `at_limit` on this computer (`EngineLimits::claude_at_limit`) and the local
+/// model is `local_available` (section 7.1: the floor row, never with the model down).
+pub fn floor(tier: &'static str, at_limit: bool, local_available: bool) -> &'static str {
+    if at_limit && local_available { LOCAL } else { tier }
 }
 
 /// Whether a `rate_limit_info` reading is one to keep as the usage reading (`parseRateLimit` in the TypeScript
-/// agent): the 5-hour window `implementer_tier` reads, or a
+/// agent): the 5-hour window kept as `state.usage`, or a
 /// weekly rejection. Most builds report one window per event with no `rateLimitType` at all, a build that labels
 /// its window keeps `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts, whatever its own
 /// `rateLimitType` says. A reading labeled `"seven_day"` whose `status` is `rejected` counts too:
@@ -192,18 +135,6 @@ pub fn note_usage(usage: &Value) {
     }
 }
 
-/// The usage to read a Claude tier from (section 7.1's last row): when Claude is `at_limit` on this computer
-/// (`EngineLimits::claude_at_limit`), the model is `local_available`,
-/// a reading in the floor band whatever `state.usage` says; otherwise `usage` as it is.
-pub fn limit_floor(usage: Option<&Value>, at_limit: bool, local_available: bool) -> Option<Value> {
-    if at_limit && local_available {
-        return Some(
-            serde_json::json!({ "unifiedWindows": { "five_hour": { "utilization": 1.0, "resetsAt": i64::MAX } } }),
-        );
-    }
-    usage.cloned()
-}
-
 /// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
 /// environment maps onto the local model (section 7.2).
 pub fn claude_model(tier: &'static str) -> &'static str {
@@ -237,17 +168,8 @@ pub fn chore_tier() -> &'static str {
     SONNET
 }
 
-/// `topTier` (section 7.1): the planner, the final reviewer and the triager's second look stay on Opus
-/// down to `pauseBelowPct`; below it (or `rejected`) they run `local` when available, else stay on Opus.
-pub fn top_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, local_available: bool) -> &'static str {
-    match band(usage, now_epoch, models) {
-        Band::Floor => local_or(local_available, OPUS),
-        _ => OPUS,
-    }
-}
-
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
-/// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
+/// the tier is `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
 /// kept for a reopened item, a retry (`attempt` over 0: this agent
 /// counts Start over from 0) and an item of size L or XL (any case). Only a tier of `opus` is ever moved; a tier already below it (from a usage reading, section 7.1's
 /// table, or `local`) is returned unchanged.
@@ -263,56 +185,6 @@ pub fn implementer_model(tier: &'static str, item: &Item, attempt: u32) -> &'sta
         OPUS
     } else {
         SONNET
-    }
-}
-
-/// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
-/// its own `resetsAt`, missing or at or before `now`, makes it a full window (`opus`) on its own —
-/// the same as a missing `resetsAt` already does for `top_level_pct_left` and `fresh_status` below.
-/// The top-level `status` is never consulted once this window exists, since it can belong to a
-/// later, unrelated reading (`is_usage_reading`, settled in `src/orchestrator/driver/settle.rs`).
-fn band_from_five_hour_window(window: &Value, now_epoch: i64, models: &ModelsConfig) -> Band {
-    match window.get("resetsAt").and_then(Value::as_i64) {
-        Some(resets_at) if resets_at > now_epoch => {}
-        _ => return Band::Full,
-    }
-    match window.get("utilization").and_then(Value::as_f64) {
-        Some(utilization) => band_from_pct_left(pct_left(utilization), models),
-        None => Band::Full,
-    }
-}
-
-/// The older, flat `rate_limit_info.utilization` (`parseRateLimit`'s `frac(info.utilization)` in
-/// the TypeScript agent), read against the top-level `resetsAt`, when there's no
-/// `unifiedWindows.five_hour` to read instead. `None` when there's no fresh percentage to read —
-/// `implementer_tier` then falls back to `fresh_status`.
-fn top_level_pct_left(usage: &Value, now_epoch: i64) -> Option<f64> {
-    let resets_at = usage.get("resetsAt")?.as_i64()?;
-    if resets_at <= now_epoch {
-        return None;
-    }
-    let utilization = usage.get("utilization")?.as_f64()?;
-    Some(pct_left(utilization))
-}
-
-/// The old-format `rate_limit_info.status`, when its own `resetsAt` hasn't passed yet.
-fn fresh_status(usage: &Value, now_epoch: i64) -> Option<&str> {
-    let resets_at = usage.get("resetsAt")?.as_i64()?;
-    if resets_at <= now_epoch {
-        return None;
-    }
-    usage.get("status")?.as_str()
-}
-
-fn band_from_pct_left(pct_left: f64, models: &ModelsConfig) -> Band {
-    if pct_left >= f64::from(models.opus_above_pct) {
-        Band::Full
-    } else if pct_left >= f64::from(models.sonnet_above_pct) {
-        Band::Mid
-    } else if pct_left >= f64::from(models.pause_below_pct) {
-        Band::Low
-    } else {
-        Band::Floor
     }
 }
 
@@ -336,19 +208,14 @@ pub fn week_cutoff_until(usage: Option<&Value>, now_epoch: i64, models: &ModelsC
     (cut && resets_at > now_epoch).then_some(resets_at)
 }
 
-/// The percentage of a 5-hour window still left, from its `utilization` (see `frac`).
-fn pct_left(utilization: f64) -> f64 {
-    (1.0 - frac(utilization)).max(0.0) * 100.0
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn a_named_tier_maps_and_an_unknown_one_is_sonnet() {
-        assert_eq!(super::named_tier(Some("opus")), Some("opus"));
-        assert_eq!(super::named_tier(Some("local")), Some("local"));
-        assert_eq!(super::named_tier(Some("gpt")), Some("sonnet"));
-        assert_eq!(super::named_tier(None), None);
+        assert_eq!(super::named_tier(Some("opus")), "opus");
+        assert_eq!(super::named_tier(Some("local")), "local");
+        assert_eq!(super::named_tier(Some("gpt")), "sonnet");
+        assert_eq!(super::named_tier(None), "sonnet");
     }
 
     use serde_json::json;
@@ -399,10 +266,6 @@ mod tests {
         assert_eq!(week_cutoff_until(Some(&w(0.79)), NOW, &m), None);
     }
 
-    fn models() -> ModelsConfig {
-        ModelsConfig::default()
-    }
-
     #[test]
     fn on_subscription_reads_a_recent_five_hour_window() {
         let w = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 10}}});
@@ -425,224 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn no_reading_is_treated_as_a_full_window() {
-        assert_eq!(implementer_tier(None, NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn a_window_that_already_reset_is_treated_as_full() {
-        let usage = json!({"status": "rejected", "resetsAt": NOW - 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn five_hour_utilization_at_or_above_opus_above_pct_left_is_opus() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 1}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn five_hour_utilization_below_opus_above_pct_left_is_sonnet() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.85, "resetsAt": NOW + 1}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), SONNET);
-    }
-
-    #[test]
-    fn a_custom_opus_above_pct_moves_the_boundary() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 1}}});
-        let mut models = models();
-        models.opus_above_pct = 80;
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models, false), SONNET);
-    }
-
-    #[test]
-    fn status_allowed_is_opus() {
-        let usage = json!({"status": "allowed", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn status_allowed_warning_is_sonnet() {
-        let usage = json!({"status": "allowed_warning", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), SONNET);
-    }
-
-    #[test]
-    fn status_rejected_is_sonnet_for_now_rather_than_waiting() {
-        let usage = json!({"status": "rejected", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), SONNET);
-    }
-
-    #[test]
-    fn an_unrecognized_status_is_treated_as_full() {
-        let usage = json!({"status": "something_new", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn a_flat_top_level_utilization_with_no_unified_windows_is_read_too() {
-        let usage = json!({"status": "allowed", "utilization": 0.9, "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), SONNET);
-    }
-
-    #[test]
-    fn a_utilization_given_as_a_whole_number_percentage_is_normalized_not_clamped() {
-        // Clamped to 1.0 (fully used), this would wrongly read as sonnet; as 10% used it's opus.
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 10, "resetsAt": NOW + 1}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn a_reset_five_hour_window_is_full_even_when_the_top_level_status_is_not() {
-        let usage = json!({
-            "status": "allowed_warning",
-            "resetsAt": NOW + 1,
-            "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": NOW - 1}},
-        });
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn a_five_hour_window_with_no_resets_at_is_treated_as_full() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.9}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), OPUS);
-    }
-
-    #[test]
-    fn a_reading_with_no_rate_limit_type_is_a_five_hour_reading() {
-        assert!(is_usage_reading(&json!({"status": "allowed"})));
-    }
-
-    #[test]
-    fn a_reading_labeled_five_hour_is_a_five_hour_reading() {
-        assert!(is_usage_reading(
-            &json!({"status": "allowed", "rateLimitType": "five_hour"})
-        ));
-    }
-
-    #[test]
-    fn a_reading_labeled_something_else_with_no_unified_five_hour_window_is_not() {
-        assert!(!is_usage_reading(
-            &json!({"status": "allowed", "rateLimitType": "seven_day"})
-        ));
-        assert!(!is_usage_reading(
-            &json!({"status": "rejected", "rateLimitType": "overage"})
-        ));
-    }
-
-    #[test]
-    fn a_lone_weekly_rejection_is_kept_and_reads_as_sonnet() {
-        let usage = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": NOW + 100});
-        assert!(is_usage_reading(&usage));
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), SONNET);
-    }
-
-    #[test]
-    fn a_reading_with_a_unified_five_hour_window_counts_whatever_its_own_type_says() {
-        let usage = json!({
-            "rateLimitType": "seven_day",
-            "unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": NOW + 1}},
-        });
-        assert!(is_usage_reading(&usage));
-    }
-
-    fn windowed(utilization: f64) -> Value {
-        json!({"unifiedWindows": {"five_hour": {"utilization": utilization, "resetsAt": NOW + 1}}})
-    }
-
-    #[test]
-    fn every_row_of_the_percentage_table_for_every_tier() {
-        // (pct left, implementer, scout, top) with local available / not available.
-        let rows = [
-            (0.4, OPUS, SONNET, OPUS),   // 60% left
-            (0.7, SONNET, SONNET, OPUS), // 30% left
-            (0.9, LOCAL, LOCAL, OPUS),   // 10% left
-            (0.98, LOCAL, LOCAL, LOCAL), // 2% left
-        ];
-        for (used, imp, scout, top) in rows {
-            let u = windowed(used);
-            let m = models();
-            assert_eq!(implementer_tier(Some(&u), NOW, &m, true), imp, "{used}");
-            assert_eq!(scout_tier(Some(&u), NOW, &m, true), scout, "{used}");
-            assert_eq!(top_tier(Some(&u), NOW, &m, true), top, "{used}");
-            assert_eq!(
-                mid_tier(implementer_tier(Some(&u), NOW, &m, true)),
-                if imp == OPUS { SONNET } else { imp }
-            );
-            let down = |t: &'static str| if t == LOCAL { SONNET } else { t };
-            assert_eq!(implementer_tier(Some(&u), NOW, &m, false), down(imp), "{used}");
-            assert_eq!(scout_tier(Some(&u), NOW, &m, false), down(scout), "{used}");
-            assert_eq!(
-                top_tier(Some(&u), NOW, &m, false),
-                if top == LOCAL { OPUS } else { top },
-                "{used}"
-            );
-            assert_eq!(
-                mid_tier(implementer_tier(Some(&u), NOW, &m, false)),
-                down(if imp == OPUS { SONNET } else { imp })
-            );
-        }
-    }
-
-    #[test]
-    fn custom_sonnet_above_and_pause_below_move_the_rows() {
-        let mut m = models();
-        m.sonnet_above_pct = 40;
-        m.pause_below_pct = 30;
-        let u = windowed(0.65); // 35% left
-        assert_eq!(implementer_tier(Some(&u), NOW, &m, true), LOCAL);
-        assert_eq!(top_tier(Some(&u), NOW, &m, true), OPUS);
-        let u = windowed(0.75); // 25% left
-        assert_eq!(implementer_tier(Some(&u), NOW, &m, true), LOCAL);
-        assert_eq!(top_tier(Some(&u), NOW, &m, true), LOCAL);
-        let u = windowed(0.5); // 50% left
-        assert_eq!(implementer_tier(Some(&u), NOW, &m, true), OPUS);
-        let u = windowed(0.55); // 45% left
-        assert_eq!(implementer_tier(Some(&u), NOW, &m, true), SONNET);
-    }
-
-    #[test]
-    fn every_row_of_the_status_only_table() {
-        let st = |s: &str| json!({"status": s, "resetsAt": NOW + 1});
-        let m = models();
-        for avail in [true, false] {
-            let local = |t: &'static str| if avail { t } else { SONNET };
-            let allowed = st("allowed");
-            assert_eq!(implementer_tier(Some(&allowed), NOW, &m, avail), OPUS);
-            assert_eq!(scout_tier(Some(&allowed), NOW, &m, avail), SONNET);
-            assert_eq!(top_tier(Some(&allowed), NOW, &m, avail), OPUS);
-            let warn = st("allowed_warning");
-            assert_eq!(implementer_tier(Some(&warn), NOW, &m, avail), SONNET);
-            assert_eq!(scout_tier(Some(&warn), NOW, &m, avail), local(LOCAL));
-            assert_eq!(top_tier(Some(&warn), NOW, &m, avail), OPUS);
-            let rej = st("rejected");
-            assert_eq!(implementer_tier(Some(&rej), NOW, &m, avail), local(LOCAL));
-            assert_eq!(scout_tier(Some(&rej), NOW, &m, avail), local(LOCAL));
-            assert_eq!(top_tier(Some(&rej), NOW, &m, avail), if avail { LOCAL } else { OPUS });
-        }
-    }
-
-    #[test]
-    fn limited_claude_reads_the_floor_only_with_the_model() {
-        let m = models();
-        let allowed = json!({"status": "allowed", "resetsAt": NOW + 100});
-        let tiers = |u: &Option<Value>, up| {
-            let u = u.as_ref();
-            [
-                implementer_tier(u, NOW, &m, up),
-                scout_tier(u, NOW, &m, up),
-                top_tier(u, NOW, &m, up),
-                mid_tier(implementer_tier(u, NOW, &m, up)),
-            ]
-        };
-        let floored = limit_floor(Some(&allowed), true, true);
-        assert_eq!(tiers(&floored, true), [LOCAL; 4]);
-        // Not limited, or the model down: today's tiers.
-        for (limited, up) in [(false, true), (true, false)] {
-            let u = limit_floor(Some(&allowed), limited, up);
-            assert_eq!(u.as_ref(), Some(&allowed));
-            assert_eq!(tiers(&u, up), [OPUS, SONNET, OPUS, SONNET]);
-        }
+    fn a_limited_claude_reads_the_floor_only_with_the_model() {
+        assert_eq!(floor(OPUS, true, true), LOCAL);
+        assert_eq!(floor(SONNET, true, true), LOCAL);
+        assert_eq!(floor(OPUS, false, true), OPUS);
+        assert_eq!(floor(OPUS, true, false), OPUS);
     }
 
     #[test]

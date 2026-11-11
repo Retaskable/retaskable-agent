@@ -12,13 +12,13 @@ use serde_json::Value;
 
 use super::session::watch_for;
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{CursorModels, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
-use crate::tiers::{LOCAL, implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, SONNET, floor, implementer_model};
 use crate::trial_plan::{TRIAL_ID, TRIAL_TEXT};
 use crate::{lanes, paths};
 
@@ -59,7 +59,6 @@ pub struct ClaudeTrial {
     choice: EngineChoiceConfig,
     data_dir: PathBuf,
     env: Env,
-    models: ModelsConfig,
     cursor_models: CursorModels,
     local: crate::local_model::LocalModel,
 }
@@ -69,7 +68,6 @@ impl ClaudeTrial {
         data_dir: PathBuf,
         choice: EngineChoiceConfig,
         env: Env,
-        models: ModelsConfig,
         cursor_models: CursorModels,
         local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
@@ -77,7 +75,6 @@ impl ClaudeTrial {
             choice,
             data_dir,
             env,
-            models,
             cursor_models,
             local,
         })
@@ -102,11 +99,10 @@ fn trial_item() -> Item {
 
 impl TrialHost for ClaudeTrial {
     fn run(&self, job: TrialJob) -> BoxFuture<'static, Result<TrialEnd>> {
-        let (choice, data_dir, env, models, cursor_models, local) = (
+        let (choice, data_dir, env, cursor_models, local) = (
             self.choice.clone(),
             self.data_dir.clone(),
             self.env.clone(),
-            self.models,
             self.cursor_models.clone(),
             self.local.clone(),
         );
@@ -130,7 +126,6 @@ impl TrialHost for ClaudeTrial {
             let cwd =
                 tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base)).await??;
             let item = trial_item();
-            let now = crate::telemetry::now_ms() / 1000;
             // Like an implementer: the local model only for a Claude session, with its slot held until the session
             // ends.
             let ladder = placed.engine == crate::engines::EngineId::Claude;
@@ -138,8 +133,7 @@ impl TrialHost for ClaudeTrial {
             let tier = if up && placed.local {
                 LOCAL
             } else {
-                let floored = crate::tiers::limit_floor(job.usage.as_ref(), job.sessions.claude_at_limit(), up);
-                implementer_tier(floored.as_ref(), now, &models, up)
+                floor(SONNET, job.sessions.claude_at_limit(), up)
             };
             let local_run = if tier == LOCAL { Some(local.run().await) } else { None };
             let model = implementer_model(tier, &item, 0).to_string();

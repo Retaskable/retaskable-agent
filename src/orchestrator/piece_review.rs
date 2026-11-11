@@ -29,7 +29,7 @@ use crate::review_run::{StageInput, review_lane};
 use crate::reviewer::{Reviewer, ReviewerResult};
 use crate::runs::Pushed;
 use crate::scouts::{Scouts, parse_scout_info};
-use crate::tiers::{LOCAL, scout_tier, top_tier};
+use crate::tiers::{LOCAL, OPUS, SONNET, floor};
 
 const SCOUT_TEMPLATE: &str = include_str!("../../prompts/scout.md");
 const SCOUT_INFO: &str = include_str!("../../prompts/scouts.json");
@@ -77,23 +77,9 @@ fn placement(job: &Job, role: Role, hit: &BTreeSet<EngineId>) -> Result<Placemen
     place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
 }
 
-/// The models the scouts and the final reviewer start on: `scout_tier` and `top_tier`, each given whether the local model can run that role (`up`: scouts, reviewer).
-fn review_models(
-    usage: Option<&Value>,
-    now: i64,
-    models: &crate::config::ModelsConfig,
-    up: (bool, bool),
-    at_limit: bool,
-) -> (&'static str, &'static str) {
-    // Claude at its limit reads as the floor for a role the model can run.
-    let (s, t) = (
-        crate::tiers::limit_floor(usage, at_limit, up.0),
-        crate::tiers::limit_floor(usage, at_limit, up.1),
-    );
-    (
-        scout_tier(s.as_ref(), now, models, up.0),
-        top_tier(t.as_ref(), now, models, up.1),
-    )
+/// The models the scouts (`sonnet`) and the final reviewer (`opus`) start on, each given whether the local model can run that role (`up`: scouts, reviewer). Claude at its limit reads as the floor for a role the model can run.
+fn review_models(up: (bool, bool), at_limit: bool) -> (&'static str, &'static str) {
+    (floor(SONNET, at_limit, up.0), floor(OPUS, at_limit, up.1))
 }
 
 /// The local model's slot for a review session, if it runs there: a session already set to `local`
@@ -209,7 +195,6 @@ pub(super) async fn review(
     playtest: Option<&Playtest>,
     checks: &str,
     state: &mut ReviewState,
-    usage: Option<&Value>,
 ) -> Result<Reviewed> {
     let project = &job.project;
     let item = piece_item(&job.piece);
@@ -233,13 +218,7 @@ pub(super) async fn review(
         );
         let info = parse_scout_info(SCOUT_INFO)?;
         let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
-        let (scout_model, top_model) = review_models(
-            usage,
-            crate::telemetry::now_ms() / 1000,
-            &job.models,
-            (up(&scout_at), up(&reviewer_at)),
-            job.sessions.claude_at_limit(),
-        );
+        let (scout_model, top_model) = review_models((up(&scout_at), up(&reviewer_at)), job.sessions.claude_at_limit());
         let input = StageInput {
             base_branch: &project.base_branch,
             review: project.review,
@@ -413,21 +392,11 @@ mod tests {
         assert_eq!((spec.model.as_str(), took), (LOCAL, true));
     }
 
-    fn reading(utilization: f64) -> Value {
-        json!({"unifiedWindows": {"five_hour": {"utilization": utilization, "resetsAt": 1_000_100}}})
-    }
-
     #[test]
-    fn the_reviewer_is_local_only_below_the_pause_line_and_only_when_local_can_run_it() {
-        let m = crate::config::ModelsConfig::default();
-        let now = 1_000_000;
-        let (low, full) = (reading(0.99), reading(0.1));
-        assert_eq!(review_models(Some(&low), now, &m, (true, true), false).1, LOCAL);
-        assert_eq!(review_models(Some(&low), now, &m, (true, false), false).1, OPUS); // a Cursor reviewer
-        assert_eq!(
-            review_models(Some(&low), now, &m, (false, false), false),
-            (SONNET, OPUS)
-        ); // local down
-        assert_eq!(review_models(Some(&full), now, &m, (true, true), false), (SONNET, OPUS));
+    fn the_reviewer_is_local_only_at_the_limit_and_only_when_local_can_run_it() {
+        assert_eq!(review_models((true, true), true), (LOCAL, LOCAL));
+        assert_eq!(review_models((true, false), true), (LOCAL, OPUS)); // a Cursor reviewer
+        assert_eq!(review_models((false, false), true), (SONNET, OPUS)); // local down
+        assert_eq!(review_models((true, true), false), (SONNET, OPUS));
     }
 }
