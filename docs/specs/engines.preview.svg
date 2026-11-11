@@ -7,7 +7,7 @@
 <rect x="64" y="136" width="640" height="76" rx="4" fill="#fafafa" stroke="#a1a1aa"/>
 <text x="76" y="162" fill="#71717a">Shell(make), Write(src/**), Shell(/bin/bash)</text>
 <text x="64" y="236" fill="#dc2626">Shell(/bin/bash) would allow every command</text>
-<text x="64" y="266" fill="#52525b">Already allowed, from your checks and galleries: Shell(npm), Shell(cargo)</text>
+<text x="64" y="266" fill="#52525b">Already allowed, from your checks: Shell(npm), Shell(cargo)</text>
 <text x="64" y="296" fill="#52525b">Cursor follows the list Retaskable writes for each session.</text>
 <rect x="64" y="312" width="80" height="32" rx="4" fill="#2563eb"/>
 <text x="86" y="333" fill="#fff">Save</text>
