@@ -20,30 +20,32 @@ fn cursor_limited() -> SessionResult {
     }
 }
 
-/// "a" claimed on a Cursor lane with `cursor-limit-retry` as asked, its first session ended at Cursor's limit.
-async fn cursor_hit(flag: bool, engine: &str) -> (Rig, Arc<Fake>, Asked) {
-    limit_hit(flag, [engine, engine], None).await
+/// "a" claimed on a Cursor lane, its first session ended at Cursor's limit with a pull request open.
+async fn cursor_hit(engine: &str) -> (Rig, Arc<Fake>, Asked) {
+    limit_hit([engine, engine], None).await
 }
 
 /// Like [`cursor_hit`] on lanes with these engines, `out` already limited when the session ends.
-async fn limit_hit(flag: bool, lanes: [&str; 2], out: Option<EngineId>) -> (Rig, Arc<Fake>, Asked) {
+async fn limit_hit(lanes: [&str; 2], out: Option<EngineId>) -> (Rig, Arc<Fake>, Asked) {
     let choice = json!({ "default": lanes[0], "lanes": lanes });
-    let flags: &[&str] = if flag { &["cursor-limit-retry"] } else { &[] };
-    hit_with(flags, choice, out, false).await
+    hit_with(choice, out, false, true).await
 }
 
-/// "a" on a lane of `choice`, the flags as given, its first session ended at Cursor's limit.
-async fn hit_with(flags: &[&str], choice: Value, out: Option<EngineId>, signed_out: bool) -> (Rig, Arc<Fake>, Asked) {
+/// "a" on a lane of `choice`, its first session ended at Cursor's limit, with a pull request open when `pushed`
+/// (else nothing is pushed and Cursor's limit gives the item back).
+async fn hit_with(choice: Value, out: Option<EngineId>, signed_out: bool, pushed: bool) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     if let Some(engine) = out {
         rig.machine.engine_limits.hit(engine, out_for(3600));
     }
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     let fake = rig.go_live();
     fake.script.lock().unwrap().push(cursor_limited());
     rig.machine.pass().await;
+    if pushed {
+        rig.lp(0).items.get_mut("a").unwrap().pr_url = Some("https://github.com/o/p/pull/3".into());
+    }
     // Claude signs out after the session started, before its limit is read.
     rig.machine.claude_signed_out_until = signed_out.then(|| out_for(600));
     rig.machine.pass().await;
@@ -52,7 +54,7 @@ async fn hit_with(flags: &[&str], choice: Value, out: Option<EngineId>, signed_o
 
 #[tokio::test]
 async fn a_cursor_limit_keeps_the_item_implementing_and_resumes_it_after_30_minutes() {
-    let (mut rig, fake, asked) = cursor_hit(true, "cursor").await;
+    let (mut rig, fake, asked) = cursor_hit("cursor").await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
@@ -70,7 +72,7 @@ async fn a_cursor_limit_keeps_the_item_implementing_and_resumes_it_after_30_minu
 
 #[tokio::test]
 async fn the_fourth_cursor_limit_in_a_row_goes_to_a_person() {
-    let (mut rig, fake, _) = cursor_hit(true, "cursor").await;
+    let (mut rig, fake, _) = cursor_hit("cursor").await;
     for _ in 0..2 {
         wait_over(&mut rig, &fake, cursor_limited()).await;
         rig.machine.pass().await;
@@ -90,7 +92,7 @@ async fn the_fourth_cursor_limit_in_a_row_goes_to_a_person() {
 
 #[tokio::test]
 async fn an_answer_between_cursor_limits_resets_the_count_and_it_survives_a_reload() {
-    let (mut rig, fake, _) = cursor_hit(true, "cursor").await;
+    let (mut rig, fake, _) = cursor_hit("cursor").await;
     let saved = rig.lp(0).store.runs()["a"].clone();
     let back: crate::store::RunRecord = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
     assert_eq!(back.cursor_limit_hits, 1);
@@ -100,7 +102,7 @@ async fn an_answer_between_cursor_limits_resets_the_count_and_it_survives_a_relo
 }
 
 async fn carries_on(lanes: [&str; 2], from: EngineId, to: EngineId, line: &str) {
-    let (mut rig, fake, _) = limit_hit(true, lanes, None).await;
+    let (mut rig, fake, _) = limit_hit(lanes, None).await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
     assert!(!rig.lp(0).silenced.contains_key("a"), "not held for 30 minutes");
@@ -143,27 +145,23 @@ async fn a_claude_limit_with_cursor_free_carries_on_with_cursor_at_once() {
 
 #[tokio::test]
 async fn a_cursor_limit_with_the_other_engine_limited_too_waits_30_minutes() {
-    let (mut rig, _fake, _) = limit_hit(true, ["cursor", "claude"], Some(EngineId::Claude)).await;
+    let (mut rig, _fake, _) = limit_hit(["cursor", "claude"], Some(EngineId::Claude)).await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
     assert!(rig.lp(0).silenced.contains_key("a"));
 }
 
 #[tokio::test]
-async fn a_claude_limit_or_the_flag_off_goes_to_a_person_as_before() {
-    for (flag, engine) in [(true, "claude"), (false, "cursor")] {
-        let (mut rig, _fake, _) = cursor_hit(flag, engine).await;
-        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman, "{flag} {engine}");
-        assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
-    }
+async fn a_claude_limit_goes_to_a_person_as_before() {
+    let (mut rig, _fake, _) = cursor_hit("claude").await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
 }
 
-const FALL_OVER: &[&str] = &["cursor-limit-retry", "engine-fall-over"];
-
 #[tokio::test]
-async fn fall_over_on_carries_on_with_claude_used_only_by_another_role() {
+async fn fall_over_carries_on_with_claude_used_only_by_another_role() {
     let choice = json!({ "default": "cursor", "lanes": ["cursor", "cursor"], "roles": { "planner": "claude" } });
-    let (mut rig, fake, _) = hit_with(FALL_OVER, choice, None, false).await;
+    let (mut rig, fake, _) = hit_with(choice, None, false, true).await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 0);
     assert!(!rig.lp(0).silenced.contains_key("a"));
@@ -181,19 +179,11 @@ async fn fall_over_on_carries_on_with_claude_used_only_by_another_role() {
 }
 
 #[tokio::test]
-async fn fall_over_off_ignores_claude_used_only_by_another_role() {
-    let choice = json!({ "default": "cursor", "lanes": ["cursor", "cursor"], "roles": { "planner": "claude" } });
-    let (mut rig, _fake, _) = hit_with(&["cursor-limit-retry"], choice, None, false).await;
-    assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1, "waits as before");
-    assert!(rig.lp(0).silenced.contains_key("a"));
-}
-
-#[tokio::test]
-async fn fall_over_on_waits_30_minutes_while_claude_is_signed_out() {
+async fn fall_over_waits_30_minutes_while_claude_is_signed_out() {
     let (mut rig, _fake, _) = hit_with(
-        FALL_OVER,
         json!({ "default": "cursor", "lanes": ["cursor", "claude"] }),
         None,
+        true,
         true,
     )
     .await;
@@ -203,12 +193,12 @@ async fn fall_over_on_waits_30_minutes_while_claude_is_signed_out() {
 }
 
 #[tokio::test]
-async fn fall_over_on_with_only_cursor_still_waits_and_goes_to_a_person_after_three() {
+async fn fall_over_with_only_cursor_still_waits_and_goes_to_a_person_after_three() {
     let (mut rig, fake, _) = hit_with(
-        FALL_OVER,
         json!({ "default": "cursor", "lanes": ["cursor", "cursor"] }),
         None,
         false,
+        true,
     )
     .await;
     assert_eq!(rig.lp(0).store.runs()["a"].cursor_limit_hits, 1);
@@ -220,15 +210,13 @@ async fn fall_over_on_with_only_cursor_still_waits_and_goes_to_a_person_after_th
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
 }
 
-const GIVE_BACK: &[&str] = &["cursor-limit-retry", "cursor-give-back"];
-
 fn cursor_choice() -> Value {
     json!({ "default": "cursor", "lanes": ["cursor", "cursor"] })
 }
 
 #[tokio::test]
 async fn a_cursor_limit_with_nothing_pushed_gives_the_item_back_at_once() {
-    let (mut rig, fake, asked) = hit_with(GIVE_BACK, cursor_choice(), None, false).await;
+    let (mut rig, fake, asked) = hit_with(cursor_choice(), None, false, false).await;
     let machine = rig.machine.links.machine.clone();
     let sent = ops(&asked);
     let at = sent.iter().position(|o| o == "report").unwrap();
@@ -258,7 +246,6 @@ async fn a_cursor_limit_with_a_pull_request_keeps_the_retries_even_with_give_bac
     let (base, _asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     rig.machine.links.engine_choice = serde_json::from_value(cursor_choice()).unwrap();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(GIVE_BACK));
     let fake = rig.go_live();
     fake.script.lock().unwrap().push(cursor_limited());
     rig.machine.pass().await;
@@ -278,7 +265,7 @@ async fn a_cursor_limit_with_a_pull_request_keeps_the_retries_even_with_give_bac
 #[tokio::test]
 async fn a_cursor_limit_with_claude_free_carries_on_instead_of_giving_back() {
     let choice = json!({ "default": "cursor", "lanes": ["cursor", "claude"] });
-    let (mut rig, _fake, asked) = hit_with(GIVE_BACK, choice, None, false).await;
+    let (mut rig, _fake, asked) = hit_with(choice, None, false, false).await;
     assert!(!ops(&asked).iter().any(|o| o == "release"));
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
 }

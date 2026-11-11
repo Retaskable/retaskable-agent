@@ -465,7 +465,6 @@ async fn the_token_lines_show_what_ended_sessions_added() {
     use crate::engines::engine::{EngineId, SessionResult, Tokens};
     let dir = tempfile::tempdir().unwrap();
     let sessions = crate::orchestrator::live::sessions::Sessions::default().with_machine_dir(dir.path().to_path_buf());
-    sessions.limits().record_any_role(true);
     let result = |input, output| SessionResult {
         ok: true,
         subtype: String::new(),

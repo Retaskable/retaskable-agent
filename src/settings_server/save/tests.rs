@@ -485,8 +485,7 @@ fn saved_engines(dir: &std::path::Path) -> Value {
 async fn engines_allow_refuses_bad_entries_saving_nothing_and_saves_valid_ones() {
     let dir = tempfile::tempdir().unwrap();
     write_project_config(dir.path());
-    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    settings.set_cursor_allow_flag(true);
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
     let before = saved_engines(dir.path());
 
     for (typed, reason) in [
@@ -535,7 +534,6 @@ async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived
     let dir = tempfile::tempdir().unwrap();
     write_project_config(dir.path());
     let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    settings.set_cursor_allow_flag(true);
     let ok = post_setting(
         &app,
         &cookie,
@@ -555,24 +553,6 @@ async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived
 }
 
 #[tokio::test]
-async fn cursor_allow_is_absent_and_refused_with_the_flag_off() {
-    let dir = tempfile::tempdir().unwrap();
-    write_project_config(dir.path());
-    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    let before = saved_engines(dir.path());
-    assert!(signed_in_settings(&settings).await.get("cursorAllow").is_none());
-    let res = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({"cursorAllow": {"project": "app", "allow": "Shell(just)"}}),
-    )
-    .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(saved_engines(dir.path()), before);
-}
-
-#[tokio::test]
 async fn cursor_allow_on_a_version_1_config_is_an_error_not_a_silent_no_save() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -580,8 +560,7 @@ async fn cursor_allow_on_a_version_1_config_is_an_error_not_a_silent_no_save() {
         json!({"repoPath": "/nowhere/app"}).to_string(),
     )
     .unwrap();
-    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    settings.set_cursor_allow_flag(true);
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
     let res = post_setting(
         &app,
         &cookie,

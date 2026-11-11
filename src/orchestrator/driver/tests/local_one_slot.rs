@@ -1,10 +1,9 @@
-//! `local-one-slot`: the session holding the local model's slot doesn't use up a `concurrency` slot.
+//! The session holding the local model's slot doesn't use up a `concurrency` slot.
 use super::*;
 use crate::local_model::LocalModel;
 
 /// One session already running (`active` 1), `concurrency` 1, two queued items and a local model that is up.
-async fn rig_with(on: bool) -> (Rig, Arc<Fake>, LocalModel) {
-    crate::tiers::set_local_one_slot_for_test(on);
+async fn rig_with() -> (Rig, Arc<Fake>, LocalModel) {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(4, &[&base]);
     let fake = rig.go_live();
@@ -21,24 +20,16 @@ fn started(fake: &Fake) -> usize {
 }
 
 #[tokio::test]
-async fn with_the_flag_on_the_local_holder_leaves_room_for_another_session() {
-    let (mut rig, fake, local) = rig_with(true).await;
+async fn the_local_holder_leaves_room_for_another_session() {
+    let (mut rig, fake, local) = rig_with().await;
     let _held = local.try_take().unwrap();
     rig.machine.poll().await;
     assert_eq!(started(&fake), 1);
 }
 
 #[tokio::test]
-async fn with_the_flag_off_the_local_holder_still_counts() {
-    let (mut rig, fake, local) = rig_with(false).await;
-    let _held = local.try_take().unwrap();
-    rig.machine.poll().await;
-    assert_eq!(started(&fake), 0);
-}
-
-#[tokio::test]
 async fn a_session_only_waiting_for_the_slot_still_counts() {
-    let (mut rig, fake, local) = rig_with(true).await;
+    let (mut rig, fake, local) = rig_with().await;
     let other = local.try_take().unwrap();
     let waiter = local.clone();
     let wait = tokio::spawn(async move { waiter.take().await });

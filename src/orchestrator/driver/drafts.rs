@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::Shared;
-use super::project::{ProjectLoop, signed_out};
+use super::project::ProjectLoop;
 use super::start_gate::StartGate;
 use super::store_errors::WATCH;
 use crate::ask::follow_up;
@@ -45,9 +45,7 @@ pub struct DraftJob {
     pub follow_up: String,
     /// The project's latest `state.usage` reading, for the drafter's model tier.
     pub usage: Option<Value>,
-    /// The `engine-placement` flag: Off, only a Claude drafter runs.
-    pub placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
+    /// The engine to start on when it isn't the drafter's chosen one.
     pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
@@ -128,15 +126,9 @@ impl ProjectLoop {
         if self.drafting() || *slots == 0 || shared.stopping {
             return;
         }
-        let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
-        let placement = self.flags.on("engine-placement").await;
-        let engine = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Drafter, placement) {
-                Some(engine) => engine,
-                None => return,
-            },
-            None if signed_out(shared) => return,
-            None => None,
+        let gate = StartGate::for_lanes(self, lanes, shared);
+        let Some(engine) = gate.role_start(self, shared, Role::Drafter, true) else {
+            return;
         };
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
@@ -153,11 +145,7 @@ impl ProjectLoop {
         let resume = claim.draft.session_id.is_some();
         // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
         let engine = if resume { None } else { engine };
-        if resume
-            && gate
-                .as_ref()
-                .is_some_and(|g| g.role_start(self, shared, Role::Drafter, false).is_none())
-        {
+        if resume && gate.role_start(self, shared, Role::Drafter, false).is_none() {
             let released = self
                 .client
                 .draft_release(repo, Some(&token), &claim.draft.id, &claim.token);
@@ -347,7 +335,6 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         session_id,
         resume,
         usage: ctx.usage.clone(),
-        placement: ctx.flags.on("engine-placement").await,
         engine: ctx.engine,
         sessions: ctx.sessions.clone(),
     };

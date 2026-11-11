@@ -140,11 +140,6 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
-    /// Whether the weekly window is read: `weekly-limit-reading` or `weekly-cutoff` is On.
-    pub(super) async fn weekly_on(flags: &crate::flags::Flags) -> bool {
-        flags.on("weekly-limit-reading").await || flags.on("weekly-cutoff").await
-    }
-
     /// At the weekly cutoff Claude counts limited on this computer until the week's reset
     /// ([`EngineLimits::cut_off_for_week`](crate::orchestrator::fresh_start::EngineLimits::cut_off_for_week)).
     pub(super) fn cut_off_for_week(
@@ -207,7 +202,7 @@ impl ProjectLoop {
     }
 
     /// Gives a Cursor-limited item with nothing pushed back to the shared backlog at once (engines/03 section
-    /// 3.2, behind `cursor-give-back`): the run and its record are dropped, the lane freed and the lease moved to
+    /// 3.2): the run and its record are dropped, the lane freed and the lease moved to
     /// `unreleased` with the note and released. The computer's limit, not an own failure: no claim pause and no
     /// `error` event (Cursor's own stamp in `engine_limits` already keeps Cursor lanes from claiming).
     async fn give_back(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
@@ -481,19 +476,11 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        let weekly = ProjectLoop::weekly_on(&self.flags).await;
-        if weekly && let Some(usage) = &outcome.usage {
+        if let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
-        let keep_week = weekly;
-        let week = outcome
-            .usage
-            .clone()
-            .filter(|u| keep_week && crate::tiers::carries_week(u));
-        let five_hour = outcome
-            .usage
-            .clone()
-            .filter(|u| crate::tiers::is_usage_reading(u, weekly));
+        let week = outcome.usage.clone().filter(crate::tiers::carries_week);
+        let five_hour = outcome.usage.clone().filter(crate::tiers::is_usage_reading);
         if week.is_some() || five_hour.is_some() {
             if let Some(usage) = week {
                 self.store.set_week_usage(usage);
@@ -607,18 +594,13 @@ impl ProjectLoop {
             record.silence_kills = 0;
         }
         // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
-        let cursor_flag = self.flags.on("cursor-limit-retry").await;
-        let give_back_flag = self.flags.on("cursor-give-back").await;
         let mut give_back = false;
         // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
-        let fall_over = self.flags.on("engine-fall-over").await;
         let carry_on = match self.records.get(&item) {
             Some(record)
-                if cursor_flag
-                    && matches!(result, SessionResult::Limited { .. })
-                    && record.impl_session_engine != EngineId::Pi =>
+                if matches!(result, SessionResult::Limited { .. }) && record.impl_session_engine != EngineId::Pi =>
             {
-                takeover_in(&self.project, pool, shared, record.impl_session_engine, fall_over)
+                takeover_in(&self.project, pool, shared, record.impl_session_engine)
                     .map(|to| (record.impl_session_engine, to))
             }
             _ => None,
@@ -646,13 +628,11 @@ impl ProjectLoop {
                 }),
             );
         } else if let Some(record) = self.records.get_mut(&item) {
-            let cursor_hit = matches!(result, SessionResult::Limited { .. })
-                && cursor_flag
-                && record.impl_session_engine == EngineId::Cursor;
+            let cursor_hit =
+                matches!(result, SessionResult::Limited { .. }) && record.impl_session_engine == EngineId::Cursor;
             if !cursor_hit {
                 record.cursor_limit_hits = 0;
-            } else if give_back_flag
-                && self.mode == super::OrchestratorMode::Claim
+            } else if self.mode == super::OrchestratorMode::Claim
                 && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none()
             {
                 give_back = true;

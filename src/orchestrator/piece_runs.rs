@@ -18,7 +18,7 @@ use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds,
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
+use crate::config::{CursorModels, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
@@ -89,7 +89,7 @@ impl RunStarter for PieceStarter {
             .clone();
         let lane = request.lane.clone().ok_or("the run has no lane")?;
         // The piece's own engine wins; an unknown name is an engine this agent can't run, not Claude.
-        // With `engine-fall-over` On, one that is out goes to the engine that takes over.
+        // One that is out goes to the engine that takes over.
         let chosen = match request.piece.other.get("engine").and_then(Value::as_str) {
             Some(name) => parse_engine(name)
                 .map(|e| request.context.engine_now(e))
@@ -99,16 +99,12 @@ impl RunStarter for PieceStarter {
                 engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None),
             )),
         };
-        // With `engine-placement` Off, Claude alone runs; any other engine is refused as before.
-        let placed = self.flags.last("engine-placement");
         let engine = match chosen {
-            Ok(Engine::Claude) => Engine::Claude,
-            Ok(other) if placed => other,
-            Ok(other) => return self.cannot_run(request, other.to_string()),
+            Ok(engine) => engine,
             Err(name) => return self.cannot_run(request, name),
         };
         let placement = place(engine, Role::Implementer, &self.env, &self.cursor_models)?;
-        self.run(request, project, lane, placement, placed)
+        self.run(request, project, lane, placement)
     }
 }
 
@@ -119,7 +115,6 @@ impl PieceStarter {
         project: ProjectConfig,
         lane: PathBuf,
         placement: Placement,
-        placed: bool,
     ) -> Result<(), String> {
         let cursor = placement.cursor.map(|c| with_project(&project, c));
         let job = Job {
@@ -139,7 +134,6 @@ impl PieceStarter {
             cursor,
             choice: self.choice.clone(),
             cursor_models: self.cursor_models.clone(),
-            placed,
             env: self.env.clone(),
             piece: request.piece,
             processes: request.processes,
@@ -155,8 +149,6 @@ impl PieceStarter {
         let token = request.token;
         // The inner task is joined, so even a panic in it ends in exactly one end.
         tokio::spawn(async move {
-            // Keeps the flag's answer fresh for the next run's start.
-            job.flags.on("engine-placement").await;
             let (outcome, result) = match tokio::spawn(run_locked(job)).await {
                 Ok(end) => end,
                 Err(e) => (RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({})),
@@ -184,8 +176,6 @@ pub(super) struct Job {
     pub(super) cursor: Option<CursorOptions>,
     pub(super) choice: EngineChoiceConfig,
     pub(super) cursor_models: CursorModels,
-    /// `engine-placement` was On when the run started.
-    pub(super) placed: bool,
     pub(super) env: Env,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
@@ -389,17 +379,14 @@ async fn session(
     let now = crate::telemetry::now_ms() / 1000;
     // With `chore-rotation` Off, a chore piece is run like any other.
     let chore = chore_for(job).await;
-    // Held until the session ends. Only a Claude session may use the model: the free-slot grab for a chore is behind
-    // `local-chores-scouts`, the fallback rows behind `local-tier-ladder`.
-    // Never on a resume (a gate round's fix): an Anthropic session isn't resumed against the local server.
-    let flags = (crate::tiers::local_chores_scouts_on(), crate::tiers::local_ladder_on());
-    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. }) && (flags.0 || flags.1);
+    // Held until the session ends. Only a Claude session may use the model, never on a resume (a gate round's fix):
+    // an Anthropic session isn't resumed against the local server.
+    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. });
     let (tier, local_run) = tier_for(
         chore.as_ref(),
         now,
         &job.models,
         may.then_some(&job.local),
-        flags,
         job.wants_local,
         !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
     )

@@ -17,16 +17,15 @@ fn view(projects: Vec<ProjectView>) -> AgentView {
 }
 
 #[test]
-fn snapshot_says_local_down_only_while_the_model_is_on_and_down_and_the_flag_is_on() {
+fn snapshot_says_local_down_only_while_the_model_is_on_and_down() {
     let dir = tempfile::tempdir().unwrap();
     let local_down = |v: &AgentView| v.snapshot("", dir.path())["state"]["usage"].get("localDown").cloned();
-    let on = |up: bool, ladder: bool| {
+    let on = |up: bool| {
         let local = crate::local_model::LocalModel::new(crate::config::LocalModelConfig {
             enabled: true,
             base_url: "http://localhost:1".into(),
             model: "m".into(),
         });
-        crate::tiers::set_local_ladder_for_test(ladder);
         if up {
             local.mark_up_for_test();
         } else {
@@ -36,9 +35,8 @@ fn snapshot_says_local_down_only_while_the_model_is_on_and_down_and_the_flag_is_
         v.local = local;
         v
     };
-    assert_eq!(local_down(&on(false, true)), Some(json!(true)));
-    assert_eq!(local_down(&on(true, true)), None, "up");
-    assert_eq!(local_down(&on(false, false)), None, "flag Off");
+    assert_eq!(local_down(&on(false)), Some(json!(true)));
+    assert_eq!(local_down(&on(true)), None, "up");
     assert_eq!(local_down(&view(vec![])), None, "model off");
 }
 

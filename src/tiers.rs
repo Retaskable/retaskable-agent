@@ -75,20 +75,20 @@ pub fn scout_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, 
 }
 
 /// Whether a `rate_limit_info` reading is one to keep as the usage reading (`parseRateLimit` in the TypeScript
-/// agent): the 5-hour window `implementer_tier` reads, or, with `weekly` (the `weekly-limit-reading` flag), a
+/// agent): the 5-hour window `implementer_tier` reads, or a
 /// weekly rejection. Most builds report one window per event with no `rateLimitType` at all, a build that labels
 /// its window keeps `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts, whatever its own
-/// `rateLimitType` says. With `weekly`, a reading labeled `"seven_day"` whose `status` is `rejected` counts too:
+/// `rateLimitType` says. A reading labeled `"seven_day"` whose `status` is `rejected` counts too:
 /// it is what turned the session away, and its reset is the week's. Anything else — an older build's lone
 /// non-rejected `seven_day` event, say — would otherwise overwrite a usable 5-hour reading with one this agent
 /// can't read a tier from, each time Claude Code happens to report it. A weekly reading dropped here is still
 /// saved, as `state.weekUsage` (`carries_week`), so a restart keeps the weekly cutoff.
-pub fn is_usage_reading(usage: &Value, weekly: bool) -> bool {
+pub fn is_usage_reading(usage: &Value) -> bool {
     if usage.get("unifiedWindows").and_then(|w| w.get("five_hour")).is_some() {
         return true;
     }
     match usage.get("rateLimitType").and_then(Value::as_str) {
-        Some("seven_day") => weekly && usage["status"] == "rejected",
+        Some("seven_day") => usage["status"] == "rejected",
         Some(rate_limit_type) => rate_limit_type == "five_hour",
         None => true,
     }
@@ -121,13 +121,6 @@ pub fn week_reading(usage: &Value) -> Option<(Option<f64>, Option<i64>)> {
     ))
 }
 
-/// Whether the `weekly-limit-reading` or `weekly-cutoff` flag was On at its last answer; Off until the flags
-/// client is handed over.
-pub fn weekly_reading_on() -> bool {
-    FLAG.get()
-        .is_some_and(|f| f.last("weekly-limit-reading") || f.last("weekly-cutoff"))
-}
-
 /// Whether a window's `utilization` is full, read like `frac` (a whole number over 1 is a percentage).
 pub fn utilization_full(utilization: f64) -> bool {
     frac(utilization) >= 1.0
@@ -158,107 +151,38 @@ fn five_hour_resets_at(usage: &Value) -> Option<i64> {
 }
 
 /// The computer's latest five-hour reset across every project's saved usage (0 when none). One signal for the whole
-/// machine: a project's reading counts for every session (`subscription-zero-budget`).
+/// machine: a project's reading counts for every session.
+#[cfg(not(test))]
 static LATEST_FIVE_HOUR_RESET: AtomicI64 = AtomicI64::new(0);
-static FLAG: std::sync::OnceLock<std::sync::Arc<crate::flags::Flags>> = std::sync::OnceLock::new();
+
+// Per test thread under test, so one test's saved reading doesn't drop another test's budget.
+#[cfg(test)]
+thread_local! {
+    static LATEST_FIVE_HOUR_RESET: AtomicI64 = const { AtomicI64::new(0) };
+}
+
+fn latest_reset() -> i64 {
+    #[cfg(test)]
+    return LATEST_FIVE_HOUR_RESET.with(|a| a.load(Ordering::Relaxed));
+    #[cfg(not(test))]
+    LATEST_FIVE_HOUR_RESET.load(Ordering::Relaxed)
+}
 
 /// Notes a project's saved usage reading in the machine-wide signal.
 pub fn note_usage(usage: &Value) {
     if let Some(resets_at) = five_hour_resets_at(usage) {
+        #[cfg(test)]
+        LATEST_FIVE_HOUR_RESET.with(|a| a.fetch_max(resets_at, Ordering::Relaxed));
+        #[cfg(not(test))]
         LATEST_FIVE_HOUR_RESET.fetch_max(resets_at, Ordering::Relaxed);
     }
 }
 
-/// Hands over the Retaskable flags client the `subscription-zero-budget` flag is read from.
-pub fn set_flags(flags: std::sync::Arc<crate::flags::Flags>) {
-    let _ = FLAG.set(flags);
-}
-
-/// Whether the `local-tier-ladder` flag was On at its last answer; Off until the flags client is handed over.
-pub fn local_ladder_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = LADDER_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("local-tier-ladder"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static LADDER_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `local-tier-ladder` flag on or off for the calling test's thread (each test runs on its own).
-#[cfg(test)]
-pub fn set_local_ladder_for_test(on: bool) {
-    LADDER_FOR_TEST.with(|c| c.set(Some(on)));
-}
-
-/// Whether the `local-limit-fallback` flag was On at its last answer; Off until the flags client is handed over.
-pub fn local_limit_fallback_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = LIMIT_FALLBACK_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("local-limit-fallback"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static LIMIT_FALLBACK_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `local-limit-fallback` flag on or off for the calling test's thread.
-#[cfg(test)]
-pub fn set_local_limit_fallback_for_test(on: bool) {
-    LIMIT_FALLBACK_FOR_TEST.with(|c| c.set(Some(on)));
-}
-
-/// Whether the `tier-kept-on-resume` flag was On at its last answer; Off until the flags client is handed over.
-pub fn tier_kept_on_resume_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = KEPT_ON_RESUME_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("tier-kept-on-resume"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static KEPT_ON_RESUME_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `tier-kept-on-resume` flag on or off for the calling test's thread.
-#[cfg(test)]
-pub fn set_tier_kept_on_resume_for_test(on: bool) {
-    KEPT_ON_RESUME_FOR_TEST.with(|c| c.set(Some(on)));
-}
-
-/// Whether the `cursor-allow-derive` flag was On at its last answer; Off until the flags client is handed over.
-pub fn cursor_allow_derive_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = ALLOW_DERIVE_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("cursor-allow-derive"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static ALLOW_DERIVE_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `cursor-allow-derive` flag on or off for the calling test's thread.
-#[cfg(test)]
-pub fn set_cursor_allow_derive_for_test(on: bool) {
-    ALLOW_DERIVE_FOR_TEST.with(|c| c.set(Some(on)));
-}
-
 /// The usage to read a Claude tier from (section 7.1's last row): when Claude is `at_limit` on this computer
-/// (`EngineLimits::claude_at_limit`), the `local-limit-fallback` flag is On and the model is `local_available`,
+/// (`EngineLimits::claude_at_limit`), the model is `local_available`,
 /// a reading in the floor band whatever `state.usage` says; otherwise `usage` as it is.
 pub fn limit_floor(usage: Option<&Value>, at_limit: bool, local_available: bool) -> Option<Value> {
-    if at_limit && local_available && local_limit_fallback_on() {
+    if at_limit && local_available {
         return Some(
             serde_json::json!({ "unifiedWindows": { "five_hour": { "utilization": 1.0, "resetsAt": i64::MAX } } }),
         );
@@ -282,59 +206,9 @@ pub fn claude_model_for(engine: crate::engines::engine::EngineId, tier: &str) ->
     .to_string()
 }
 
-/// Whether the `local-one-slot` flag was On at its last answer; Off until the flags client is handed over.
-pub fn local_one_slot_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = ONE_SLOT_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("local-one-slot"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static ONE_SLOT_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `local-one-slot` flag on or off for the calling test's thread.
-#[cfg(test)]
-pub fn set_local_one_slot_for_test(on: bool) {
-    ONE_SLOT_FOR_TEST.with(|c| c.set(Some(on)));
-}
-
-/// Whether the `local-chores-scouts` flag was On at its last answer; Off until the flags client is handed over.
-pub fn local_chores_scouts_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = CHORES_SCOUTS_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("local-chores-scouts"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static CHORES_SCOUTS_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `local-chores-scouts` flag on or off for the calling test's thread.
-#[cfg(test)]
-pub fn set_local_chores_scouts_for_test(on: bool) {
-    CHORES_SCOUTS_FOR_TEST.with(|c| c.set(Some(on)));
-}
-
-/// Whether the `model-concurrency-caps` flag was On at its last answer; Off until the flags client is handed over.
-pub fn model_caps_on() -> bool {
-    FLAG.get().is_some_and(|f| f.last("model-concurrency-caps"))
-}
-
-/// Whether sessions run with no dollar cap right now: the flag is On and the computer is on a subscription.
-pub fn machine_on_subscription(now_epoch: i64) -> bool {
-    FLAG.get().is_some_and(|f| f.last("subscription-zero-budget")) && signal_on(now_epoch)
-}
-
 /// The machine-wide signal alone: some project has saved a five-hour reading from the last week.
 pub fn signal_on(now_epoch: i64) -> bool {
-    let resets_at = LATEST_FIVE_HOUR_RESET.load(Ordering::Relaxed);
+    let resets_at = latest_reset();
     on_subscription(Some(&serde_json::json!({"resetsAt": resets_at})), now_epoch)
 }
 
@@ -360,9 +234,8 @@ pub fn top_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig, lo
 
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
 /// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
-/// kept for a reopened item and, behind the `implementer-step-up` flag, a retry (`attempt` over 0: this agent
-/// counts Start over from 0) and an item of size L or XL (any case). With the flag Off only `reopened` keeps
-/// `opus`. Only a tier of `opus` is ever moved; a tier already below it (from a usage reading, section 7.1's
+/// kept for a reopened item, a retry (`attempt` over 0: this agent
+/// counts Start over from 0) and an item of size L or XL (any case). Only a tier of `opus` is ever moved; a tier already below it (from a usage reading, section 7.1's
 /// table, or `local`) is returned unchanged.
 pub fn implementer_model(tier: &'static str, item: &Item, attempt: u32) -> &'static str {
     if tier != OPUS {
@@ -372,31 +245,11 @@ pub fn implementer_model(tier: &'static str, item: &Item, attempt: u32) -> &'sta
         .size
         .as_deref()
         .is_some_and(|s| s.eq_ignore_ascii_case("L") || s.eq_ignore_ascii_case("XL"));
-    if item.reopened.is_some() || (step_up_on() && (attempt > 0 || big)) {
+    if item.reopened.is_some() || attempt > 0 || big {
         OPUS
     } else {
         SONNET
     }
-}
-
-/// Whether the `implementer-step-up` flag was On at its last answer; Off until the flags client is handed over.
-fn step_up_on() -> bool {
-    #[cfg(test)]
-    if let Some(on) = STEP_UP_FOR_TEST.with(std::cell::Cell::get) {
-        return on;
-    }
-    FLAG.get().is_some_and(|f| f.last("implementer-step-up"))
-}
-
-#[cfg(test)]
-thread_local! {
-    static STEP_UP_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Turns the `implementer-step-up` flag on or off for the calling test's thread.
-#[cfg(test)]
-pub fn set_step_up_for_test(on: bool) {
-    STEP_UP_FOR_TEST.with(|c| c.set(Some(on)));
 }
 
 /// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
@@ -635,37 +488,30 @@ mod tests {
 
     #[test]
     fn a_reading_with_no_rate_limit_type_is_a_five_hour_reading() {
-        assert!(is_usage_reading(&json!({"status": "allowed"}), false));
+        assert!(is_usage_reading(&json!({"status": "allowed"})));
     }
 
     #[test]
     fn a_reading_labeled_five_hour_is_a_five_hour_reading() {
         assert!(is_usage_reading(
-            &json!({"status": "allowed", "rateLimitType": "five_hour"}),
-            true
+            &json!({"status": "allowed", "rateLimitType": "five_hour"})
         ));
     }
 
     #[test]
     fn a_reading_labeled_something_else_with_no_unified_five_hour_window_is_not() {
         assert!(!is_usage_reading(
-            &json!({"status": "allowed", "rateLimitType": "seven_day"}),
-            true
+            &json!({"status": "allowed", "rateLimitType": "seven_day"})
         ));
         assert!(!is_usage_reading(
-            &json!({"status": "rejected", "rateLimitType": "seven_day"}),
-            false
-        ));
-        assert!(!is_usage_reading(
-            &json!({"status": "rejected", "rateLimitType": "overage"}),
-            true
+            &json!({"status": "rejected", "rateLimitType": "overage"})
         ));
     }
 
     #[test]
-    fn a_lone_weekly_rejection_is_kept_with_the_flag_and_reads_as_sonnet() {
+    fn a_lone_weekly_rejection_is_kept_and_reads_as_sonnet() {
         let usage = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": NOW + 100});
-        assert!(is_usage_reading(&usage, true));
+        assert!(is_usage_reading(&usage));
         assert_eq!(implementer_tier(Some(&usage), NOW, &models(), false), SONNET);
     }
 
@@ -675,7 +521,7 @@ mod tests {
             "rateLimitType": "seven_day",
             "unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": NOW + 1}},
         });
-        assert!(is_usage_reading(&usage, false));
+        assert!(is_usage_reading(&usage));
     }
 
     fn windowed(utilization: f64) -> Value {
@@ -755,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn limited_claude_reads_the_floor_only_with_the_flag_and_the_model() {
+    fn limited_claude_reads_the_floor_only_with_the_model() {
         let m = models();
         let allowed = json!({"status": "allowed", "resetsAt": NOW + 100});
         let tiers = |u: &Option<Value>, up| {
@@ -767,7 +613,6 @@ mod tests {
                 mid_tier(implementer_tier(u, NOW, &m, up)),
             ]
         };
-        set_local_limit_fallback_for_test(true);
         let floored = limit_floor(Some(&allowed), true, true);
         assert_eq!(tiers(&floored, true), [LOCAL; 4]);
         // Not limited, or the model down: today's tiers.
@@ -776,10 +621,6 @@ mod tests {
             assert_eq!(u.as_ref(), Some(&allowed));
             assert_eq!(tiers(&u, up), [OPUS, SONNET, OPUS, SONNET]);
         }
-        set_local_limit_fallback_for_test(false);
-        let u = limit_floor(Some(&allowed), true, true);
-        assert_eq!(u.as_ref(), Some(&allowed));
-        assert_eq!(tiers(&u, true), [OPUS, SONNET, OPUS, SONNET]);
     }
 
     #[test]
@@ -827,8 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn with_the_step_up_flag_on_retries_and_big_items_keep_opus() {
-        set_step_up_for_test(true);
+    fn retries_and_big_items_keep_opus() {
         assert_eq!(implementer_model(OPUS, &sized(None), 0), SONNET);
         assert_eq!(implementer_model(OPUS, &sized(Some("M")), 0), SONNET);
         assert_eq!(implementer_model(OPUS, &sized(None), 1), OPUS);
@@ -840,14 +680,6 @@ mod tests {
                 assert_eq!(implementer_model(tier, &it, attempt), tier);
             }
         }
-    }
-
-    #[test]
-    fn with_the_step_up_flag_off_only_reopened_keeps_opus() {
-        set_step_up_for_test(false);
-        assert_eq!(implementer_model(OPUS, &sized(None), 1), SONNET);
-        assert_eq!(implementer_model(OPUS, &sized(Some("XL")), 0), SONNET);
-        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
     }
 
     #[test]

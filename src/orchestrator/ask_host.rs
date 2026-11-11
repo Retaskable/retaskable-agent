@@ -111,7 +111,6 @@ impl AskHost for ClaudeAsks {
                 lanes,
                 runs,
                 events,
-                placement,
                 engine,
                 sessions,
             } = job;
@@ -183,11 +182,6 @@ impl AskHost for ClaudeAsks {
                 Engine::Local => Engine::Claude,
                 other => other,
             };
-            if !placement && chosen != Engine::Claude {
-                return Ok(reply(
-                    "Sorry, I couldn't answer that: Claude alone starts sessions while engine-placement is off.".into(),
-                ));
-            }
             let placed = match place(chosen, Role::Assistant, &env, &cursor_models) {
                 Ok(placed) => placed,
                 Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),

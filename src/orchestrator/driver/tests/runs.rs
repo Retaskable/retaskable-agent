@@ -664,24 +664,13 @@ fn checks_with(claude_signed_in: Option<bool>, cursor: bool) -> crate::setup_che
     }
 }
 
-/// Like `agent_with`, with `engine-placement` On.
+/// Like `agent_with`, .
 async fn placed_agent_with(checks: Option<crate::setup_check::SetupChecks>) -> Value {
     let (mut rig, script) = setup(1).await;
     *rig.machine.links.checks.lock().unwrap() = checks;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
     pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), Instant::now()).await;
     let takes = script.lock().unwrap().args("run_take");
     takes[0]["agent"].clone()
-}
-
-#[tokio::test]
-async fn run_take_sends_claude_only_with_placement_off() {
-    let signed_in = agent_with(Some(checks_with(Some(true), true)), Default::default()).await;
-    assert_eq!(signed_in["engines"], json!(["claude"]));
-    let signed_out = agent_with(Some(checks_with(Some(false), true)), Default::default()).await;
-    assert_eq!(signed_out["engines"], json!([]));
-    let none_yet = agent_with(None, Default::default()).await;
-    assert_eq!(none_yet["engines"], json!([]));
 }
 
 #[tokio::test]
@@ -756,7 +745,7 @@ async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     assert_eq!((c.today, c.limit), (2, 3));
 }
 
-/// A pass with `engine-start-rules` On, Claude signed out for a minute and `limited` engines at their limit.
+/// A pass with Claude signed out for a minute and `limited` engines at their limit.
 async fn start_rules_pass(
     rig: &mut Rig,
     starter: &dyn RunStarter,
@@ -774,8 +763,7 @@ async fn start_pass_with(
     claude_signed_out: bool,
     more: &[&str],
 ) {
-    let on = [&["engine-placement", "engine-start-rules"], more].concat();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(more));
     let now = Instant::now();
     let limits = crate::orchestrator::fresh_start::EngineLimits::default();
     for e in limited {
@@ -851,9 +839,9 @@ async fn cursor_limited_build(more: &[&str]) -> FakeRuns {
 }
 
 #[tokio::test]
-async fn with_engine_fall_over_a_build_started_while_cursor_is_limited_is_placed_on_claude() {
+async fn a_build_started_while_cursor_is_limited_is_placed_on_claude() {
     use crate::engines::EngineId::Claude;
-    let starter = cursor_limited_build(&["engine-fall-over"]).await;
+    let starter = cursor_limited_build(&[]).await;
     let started = starter.started.lock().unwrap();
     assert_eq!(started[0].engine, Some(Claude));
     assert!(
@@ -865,13 +853,6 @@ async fn with_engine_fall_over_a_build_started_while_cursor_is_limited_is_placed
             .out
             .contains(&crate::engines::EngineId::Cursor)
     );
-}
-
-#[tokio::test]
-async fn without_engine_fall_over_a_build_is_placed_as_chosen() {
-    let starter = cursor_limited_build(&[]).await;
-    let started = starter.started.lock().unwrap();
-    assert_eq!((started[0].engine, started[0].context.fall.is_none()), (None, true));
 }
 
 #[tokio::test]
@@ -913,27 +894,24 @@ async fn a_build_takes_a_cursor_lane_when_claude_is_signed_out_and_claude_lanes_
     assert!(lane(&rig, &starter), "Claude's lane first");
 }
 
-/// `local-limit-fallback`: Claude at its usage limit holds a plan or build only without the flag, the model, or
+/// Claude at its usage limit holds a plan or build only without the model or
 /// sign-in; with it they are asked for like any run (they start on the local model).
 #[tokio::test]
 async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it() {
     use crate::engines::EngineId::Claude;
     use crate::local_model::LocalModel;
-    for (fallback, model, signed_out, asks) in [
-        (true, LocalModel::up(), false, true),
-        (false, LocalModel::up(), false, false),
-        (true, LocalModel::off(), false, false),
-        (true, LocalModel::up(), true, false),
+    for (model, signed_out, asks) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
     ] {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_local_limit_fallback_for_test(fallback);
         let (mut rig, script) = setup(1).await;
         both_engines(&mut rig, json!({ "default": "claude" }));
         rig.machine.local = model;
         let starter = FakeRuns::new(&[RunKind::Build, RunKind::Plan]);
         start_rules_pass(&mut rig, &starter, &[Claude], signed_out).await;
         let takes = script.lock().unwrap().args("run_take");
-        let case = (fallback, signed_out);
+        let case = signed_out;
         assert_eq!(takes.is_empty(), !asks, "{case:?}");
         if asks {
             assert_eq!(takes[0]["kinds"], json!(["build", "plan"]));

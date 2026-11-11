@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-pub use super::cursor_guard::keep_cursor_guard_fresh;
 pub(crate) use super::cursor_guard::watch_for;
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
 use super::fresh_start::{MAX_TURNS_FOLLOW_UP, picking_up_prompt};
@@ -98,7 +97,7 @@ impl ClaudeStarter {
 
 /// Whether a fresh Claude implementer may start: the model [`implementer_tier`] gives for `usage` isn't capped and full.
 /// The item isn't known before it's claimed: on the `opus` tier a reopened item keeps `opus` and a first try runs on
-/// `sonnet` (`implementer_model`; a retry or an L/XL item keeps `opus` behind `implementer-step-up`), so both need room; any other tier checks its own model. `pending` is the starts
+/// `sonnet` (`implementer_model`; a retry or an L/XL item keeps `opus`), so both need room; any other tier checks its own model. `pending` is the starts
 /// already made that haven't taken their slot yet.
 pub fn model_has_room(
     slots: Option<&ModelSlots>,
@@ -129,9 +128,6 @@ impl SessionStarter for ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        if !request.placement && request.engine != EngineId::Claude {
-            return Err("Claude alone starts sessions while engine-placement is off".into());
-        }
         // Fail before anything starts when the engine's binary isn't there: the claim goes back.
         place(
             config_engine(request.engine),
@@ -157,7 +153,6 @@ impl SessionStarter for ClaudeStarter {
             usage,
             session_id,
             engine: session_engine,
-            placement,
             resume,
             follow_up,
             items,
@@ -186,7 +181,6 @@ impl SessionStarter for ClaudeStarter {
             max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             engine: session_engine,
-            placement,
             lane_engine: lane_engine(&self.choice, lane).map(program_of),
             takeover,
             resume,
@@ -331,8 +325,6 @@ struct Job {
     session_id: String,
     /// The engine the session runs on (`StartRequest::engine`).
     engine: EngineId,
-    /// The `engine-placement` flag: Off keeps a fresh start on `engine`.
-    placement: bool,
     /// The engine the lane now has of its own, if any: a send-back resumes only if it matches `engine`.
     lane_engine: Option<EngineId>,
     takeover: Option<EngineId>,
@@ -423,15 +415,13 @@ async fn attempt(
         ..
     } = job;
     let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
-    let cursor = placed
-        .cursor
-        .map(|c| crate::engines::cursor::with_project_or_gh(project, c));
+    let cursor = placed.cursor.map(|c| crate::engines::cursor::with_project(project, c));
     let now = crate::telemetry::now_ms() / 1000;
-    // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
+    // Only a Claude session may use the local model; its slot is held until
     // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
     // A resume stays on the backend its first transcript line names: a local session goes back to the model while
     // it's up (else its Anthropic tier), an Anthropic one (or one with no readable transcript) never goes local.
-    let ladder = placed.engine == EngineId::Claude && crate::tiers::local_ladder_on();
+    let ladder = placed.engine == EngineId::Claude;
     let up = ladder && job.local.available();
     let resumed = matches!(start, Start::Resume { .. });
     let was_local = resumed
@@ -440,7 +430,7 @@ async fn attempt(
     let tier = if up && (if resumed { was_local } else { job.wants_local }) {
         LOCAL
     } else {
-        // Claude at its limit reads as the floor tier for a fresh session only (`local-limit-fallback`).
+        // Claude at its limit reads as the floor tier for a fresh session only.
         let floored = crate::tiers::limit_floor(usage.as_ref(), !resumed && sessions.claude_at_limit(), up);
         implementer_tier(floored.as_ref(), now, models, up && !resumed)
     };
@@ -598,9 +588,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
                 true,
             ),
             Step::FixFresh(f, to) => {
-                if job.placement {
-                    engine = to.unwrap_or(engine);
-                }
+                engine = to.unwrap_or(engine);
                 (picking_up_prompt(false, &job.project.base_branch, f), true)
             }
             Step::Fix(f) => (f.clone(), false),

@@ -14,14 +14,14 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::Shared;
-use super::project::{ProjectLoop, signed_out};
+use super::project::ProjectLoop;
 use super::start_gate::StartGate;
 use super::store_errors::WATCH;
 use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
 use crate::backlog::asks::AskReport;
 use crate::config::ProjectConfig;
-use crate::engines::{EventKind, Role, SessionEvent, engine_for, program_of};
+use crate::engines::{EventKind, Role, SessionEvent};
 use crate::lane_pool::{Holder, LanePool};
 use crate::store::RunRecord;
 use crate::view::AskCommand;
@@ -55,9 +55,7 @@ pub struct AskJob {
     pub runs: BTreeMap<String, RunRecord>,
     /// Where the host sends the session's summarized events as they happen; the loop reports them as progress.
     pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
-    /// The `engine-placement` release flag: Off, Claude alone answers.
-    pub placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the assistant's chosen one.
+    /// The engine to start on when it isn't the assistant's chosen one.
     pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
@@ -146,28 +144,10 @@ impl ProjectLoop {
             token: token.clone(),
             failures: failures.clone(),
         };
-        let engine = program_of(engine_for(
-            &shared.links.engine_choice,
-            self.project.engines.as_ref(),
-            Role::Assistant,
-            None,
-        ));
-        let gate = StartGate::for_lanes(
-            self.flags.on("engine-start-rules").await,
-            self,
-            pool.rules().lanes,
-            shared,
-        );
-        let placement = self.flags.on("engine-placement").await;
-        let (mut hold, start_on) = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Assistant, placement) {
-                Some(engine) => (paused, engine),
-                None => (true, None),
-            },
-            None => (
-                paused || signed_out(shared) || ProjectLoop::engine_limited(shared, engine),
-                None,
-            ),
+        let gate = StartGate::for_lanes(self, pool.rules().lanes, shared);
+        let (mut hold, start_on) = match gate.role_start(self, shared, Role::Assistant, true) {
+            Some(engine) => (paused, engine),
+            None => (true, None),
         };
         if !hold {
             hold = match host.blocked(&store()).await {
@@ -205,7 +185,6 @@ impl ProjectLoop {
                 lanes: self.ask_lanes(pool),
                 runs: self.records.clone(),
                 events,
-                placement: self.flags.on("engine-placement").await,
                 engine: start_on,
                 sessions: self.live.sessions().clone(),
             };

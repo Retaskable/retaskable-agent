@@ -322,15 +322,12 @@ pub async fn run_session_tracked(
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 ) -> Result<SessionResult> {
     // A Claude session is held to its model's slot until it ends; Cursor, pi and Codex count toward `concurrency` only.
-    let slots = (cfg!(test) || crate::tiers::model_caps_on())
-        .then(super::model_slots::global)
-        .flatten();
-    let _slot = match slots {
+    let _slot = match super::model_slots::global() {
         Some(slots) if spec.engine.unwrap_or_default() == EngineId::Claude => Some(slots.acquire(&spec.model).await),
         _ => None,
     };
     // On a Claude subscription the usage window is the limit, so no session carries a dollar cap.
-    let uncapped = uncapped_on(spec, crate::tiers::machine_on_subscription(now_ms() / 1000));
+    let uncapped = uncapped_on(spec, crate::tiers::signal_on(now_ms() / 1000));
     let spec = uncapped.as_ref().unwrap_or(spec);
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;

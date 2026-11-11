@@ -20,7 +20,7 @@ pub struct Placement {
     /// Only on Cursor: the role's model name.
     pub cursor: Option<CursorOptions>,
     /// The engine was set to `local`: the session takes the local model while it's available (and the
-    /// `local-tier-ladder` flag is On), else runs on the role's tier.
+    /// local ladder is on), else runs on the role's tier.
     pub local: bool,
 }
 

@@ -12,13 +12,12 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::report;
-pub(super) use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
 use crate::backlog::settings::StoreSettings;
 use crate::backlog::{BacklogError, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
-use crate::engines::{EngineId, Role, engine_for, program_of};
+use crate::engines::EngineId;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
@@ -74,8 +73,6 @@ pub struct StartRequest {
     pub session_id: String,
     /// The engine the session runs on: the one it started on when `resume`, else the lane's.
     pub engine: EngineId,
-    /// The `engine-placement` release flag: Off, only a Claude session starts, and a fresh start stays on Claude.
-    pub placement: bool,
     /// Whether to resume `session_id` (a restart cut it off) rather than start it.
     pub resume: bool,
     /// Where the session reports how it ended; the loop reads it on its next wake.
@@ -137,7 +134,7 @@ pub trait SessionStarter: Send + Sync {
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
     /// Whether a fresh Claude implementer start may begin now, given the project's `state.usage`: no when the model
-    /// it would run on has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet. Asked only while `model-concurrency-caps` is On.
+    /// it would run on has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet. Asked only while  is On.
     fn implementer_may_start(&self, _usage: Option<&serde_json::Value>, _pending: u32) -> bool {
         true
     }
@@ -207,7 +204,7 @@ pub struct ProjectLoop {
     pub(super) to_resume: Vec<String>,
     /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
     pub(super) data_dir: Option<PathBuf>,
-    /// Whether the saved `state.usage` has been checked once against the weekly cutoff (`weekly-limit-reading`).
+    /// Whether the saved `state.usage` has been checked once against the weekly cutoff.
     pub(super) week_checked: bool,
     /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
@@ -294,8 +291,6 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The `triage-session` flag as of the last pass.
     pub(super) triage_flag: bool,
-    /// The `engine-placement` release flag, read with `triage_flag`.
-    pub(super) placement_flag: bool,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
@@ -385,7 +380,6 @@ impl ProjectLoop {
             second_due: Vec::new(),
             claude_pending: Default::default(),
             triage_flag: false,
-            placement_flag: false,
             asks: Default::default(),
             trial: None,
             backlog_items: 0,
@@ -547,22 +541,12 @@ impl ProjectLoop {
     }
 
     /// Why no new work can start on this computer right now, for the watchdog, by the same rules `claim` uses:
-    /// a claim pause; with the start rules Off, Claude signed out or the weekly cutoff; with them On, no lane
-    /// whose engine (after fall-over) may start.
-    pub(super) async fn start_blocked(&mut self, shared: &Shared<'_>, pool: &LanePool) -> Option<&'static str> {
+    /// a claim pause, or no lane whose engine (after fall-over) may start.
+    pub(super) fn start_blocked(&self, shared: &Shared<'_>, pool: &LanePool) -> Option<&'static str> {
         if shared.claim_paused_until.is_some_and(|u| std::time::Instant::now() < u) {
             return Some("claim paused");
         }
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        if Self::claim_held_by_sign_out(shared, gate.as_ref()) {
-            return Some("Claude signed out");
-        }
-        let Some(gate) = gate else {
-            let week = self.flags.on("weekly-cutoff").await
-                && shared.engine_limits.week_cut_off(std::time::Instant::now())
-                && !Self::limit_fallback(shared);
-            return week.then_some("weekly limit");
-        };
+        let gate = StartGate::new(self, pool, shared);
         let lanes = pool.rules().lanes;
         (lanes > 0 && !(1..=lanes).any(|k| gate.lane_may_start(self, shared, k))).then_some("usage limit")
     }
@@ -660,11 +644,10 @@ impl ProjectLoop {
     /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
     /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
     /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
-    /// holds no lease and isn't here: the store hands it back when it is answered. With `give_back_on` (the
-    /// `cursor-give-back` flag) and this computer's name, a needs_human item held only for Cursor's limit with
+    /// holds no lease and isn't here: the store hands it back when it is answered. With this computer's name (`machine`), a needs_human item held only for Cursor's limit with
     /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
     /// give-back note, for `flush_owed` to send.
-    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, give_back_on: Option<&str>) {
+    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, machine: &str) {
         if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
             return;
         }
@@ -674,8 +657,7 @@ impl ProjectLoop {
                 tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
                 continue;
             };
-            if let Some(machine) = give_back_on
-                && item.pr_url.is_none()
+            if item.pr_url.is_none()
                 && record.as_ref().is_some_and(|r| {
                     r.state == "needs_human"
                         && r.needs_human_reason.as_deref() == Some(super::settle::CURSOR_LIMIT_STOP)
@@ -862,15 +844,7 @@ impl ProjectLoop {
                 .map(|r| r.impl_session_engine)
                 .unwrap_or_default(),
             None if let Some(to) = on_engine => to,
-            None => match StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared) {
-                Some(gate) => gate.engine_now(self, shared, lane),
-                None => program_of(engine_for(
-                    &shared.links.engine_choice,
-                    self.project.engines.as_ref(),
-                    Role::Implementer,
-                    Some(lane),
-                )),
-            },
+            None => StartGate::new(self, pool, shared).engine_now(self, shared, lane),
         };
         // A resumed session keeps its last known size; a fresh or picking-up one starts with none of its own yet.
         let context_tokens = resume
@@ -879,8 +853,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
-        let fall_over = self.flags.on("engine-fall-over").await;
-        let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine), fall_over);
+        let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine));
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
@@ -889,7 +862,6 @@ impl ProjectLoop {
             item,
             session_id,
             engine,
-            placement: self.flags.on("engine-placement").await,
             resume: resume.is_some(),
             outcomes: self.outcomes.clone(),
             usage: self.store.usage(),
@@ -935,9 +907,7 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> u32 {
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        let blocked_from_starting = gate.is_none() && signed_out(shared) || shared.stopping;
-        let caps_on = self.flags.on("model-concurrency-caps").await;
+        let gate = StartGate::new(self, pool, shared);
         let mut started = 0;
         let mut todo = actions.to_vec();
         // Starts the model cap held off a Claude lane are placed again on the lanes it leaves (a Cursor lane).
@@ -945,10 +915,10 @@ impl ProjectLoop {
             let mut capped = 0;
             for action in todo.iter().filter(|a| **a != Action::AskForWork) {
                 if let Action::StartImplementer { lane, .. } = action {
-                    if blocked_from_starting || gate.as_ref().is_some_and(|g| g.holds(self, shared, *lane)) {
+                    if shared.stopping || gate.holds(self, shared, *lane) {
                         continue;
                     }
-                    if self.runs_claude(shared, gate.as_ref(), *lane) && self.model_full(starter, caps_on) {
+                    if self.runs_claude(shared, &gate, *lane) && self.model_full(starter) {
                         capped += 1;
                         continue;
                     }
@@ -957,7 +927,7 @@ impl ProjectLoop {
                     continue;
                 }
                 if let Action::StartImplementer { item_id, lane } = action {
-                    let on_claude = self.runs_claude(shared, gate.as_ref(), *lane);
+                    let on_claude = self.runs_claude(shared, &gate, *lane);
                     let ok = self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await;
                     started += u32::from(ok);
                     self.claude_starts += u32::from(ok && on_claude);
@@ -967,7 +937,7 @@ impl ProjectLoop {
                 break;
             }
             todo = self
-                .decide_gated(pool, shared, gate.as_ref(), true)
+                .decide_gated(pool, shared, &gate, true)
                 .into_iter()
                 .filter(|a| matches!(a, Action::StartImplementer { .. }))
                 .take(capped)

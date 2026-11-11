@@ -378,17 +378,16 @@ async fn with_own_failure_handling_off_a_persons_continue_with_nothing_to_contin
     assert!(notes.iter().any(|n| n == "a person chose Start over"), "{notes:?}");
 }
 
-/// `stopped`, lanes on `engines`, `engine-start-rules` On and Claude signed out for ten minutes.
+/// `stopped`, lanes on `engines`, and Claude signed out for ten minutes.
 fn stopped_claude_out(engines: serde_json::Value) -> (Rig, Arc<Fake>) {
     let (mut rig, fake) = stopped(2, Some("s1"));
     rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": engines })).unwrap();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-start-rules"]));
     rig.machine.claude_signed_out_until = Some(std::time::Instant::now() + Duration::from_secs(600));
     (rig, fake)
 }
 
 #[tokio::test]
-async fn with_the_start_rules_on_a_continue_on_a_cursor_lane_is_carried_out_while_claude_is_signed_out() {
+async fn a_continue_on_a_cursor_lane_is_carried_out_while_claude_is_signed_out() {
     let (mut rig, fake) = stopped_claude_out(json!(["cursor", "cursor"]));
     continue_a(&rig, "a", Some("Use the other API."));
     rig.machine.poll().await;
@@ -398,7 +397,7 @@ async fn with_the_start_rules_on_a_continue_on_a_cursor_lane_is_carried_out_whil
 }
 
 #[tokio::test]
-async fn with_the_start_rules_on_a_continue_and_a_start_over_on_claude_only_wait_while_claude_is_signed_out() {
+async fn a_continue_and_a_start_over_on_claude_only_wait_while_claude_is_signed_out() {
     let (mut rig, fake) = stopped_claude_out(json!(["claude", "claude"]));
     continue_a(&rig, "a", Some("Use the other API."));
     rig.machine.poll().await;

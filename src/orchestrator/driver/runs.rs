@@ -109,8 +109,8 @@ pub struct RunContext {
     pub token: String,
     /// Where the run takes and drops store locks; the loop beats them.
     pub locks: RunLocks,
-    /// With `engine-fall-over` On: the engines out and the ones this computer uses, so a run's own sessions (a
-    /// piece's `engine`, the review roles) go to the engine that takes over. `None` places them as chosen.
+    /// The engines out and the ones this computer uses, so a run's own sessions (a
+    /// piece's `engine`, the review roles) go to the engine that takes over. `None` (no run context) places them as chosen.
     pub fall: Option<FallOver>,
 }
 
@@ -170,7 +170,7 @@ pub struct RunRequest {
     pub other: serde_json::Map<String, serde_json::Value>,
     /// The folder of the lane the run holds; `None` for a kind that runs in none.
     pub lane: Option<PathBuf>,
-    /// With `engine-fall-over` On: the engine the run's session starts on when its chosen one is out.
+    /// The engine the run's session starts on when its chosen one is out.
     pub engine: Option<EngineId>,
     pub ends: RunEndSender,
     /// Events the run's task has the loop write to the project's log.
@@ -398,17 +398,13 @@ impl ProjectLoop {
         shared: &Shared<'_>,
         now: Instant,
     ) -> bool {
-        let start = self.start_rules(pool, shared, now).await;
+        let start = self.start_rules(pool, shared, now);
         let want = pool.run_want(&self.id, "");
-        let lane_free = match &start {
-            Some(s) => pool.claim_lane_where(&want, |k| s.lane_may_start(k)),
-            None => pool.claim_lane(&want),
-        }
-        .is_some();
+        let lane_free = pool.claim_lane_where(&want, |k| start.lane_may_start(k)).is_some();
         let kinds: Vec<RunKind> = starter
             .kinds()
             .into_iter()
-            .filter(|k| (lane_free || !needs_lane(*k)) && start.as_ref().is_none_or(|s| s.kind_may_start(*k)))
+            .filter(|k| (lane_free || !needs_lane(*k)) && start.kind_may_start(*k))
             .collect();
         if kinds.is_empty() {
             return false;
@@ -429,15 +425,15 @@ impl ProjectLoop {
         want: RunWant<'_>,
         now: Instant,
     ) -> bool {
-        let start = self.start_rules(pool, shared, now).await;
+        let start = self.start_rules(pool, shared, now);
         self.tags_seen = shared.links.tags.generation();
         let agent = RunTakeAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.get(),
-            engines: engines_here(shared.links, self.flags.on("engine-placement").await, start.as_ref()),
-            uses: uses_here(shared.links, self.project.engines.as_ref(), start.as_ref()),
+            engines: engines_here(shared.links, &start),
+            uses: uses_here(shared.links, self.project.engines.as_ref(), &start),
             chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
@@ -460,7 +456,7 @@ impl ProjectLoop {
                     self.live.set_chores(&self.id, count);
                 }
                 let answer = json!(run.piece.title);
-                let more = self.begin(repo, token, pool, starter, *run, start.as_ref(), now).await;
+                let more = self.begin(repo, token, pool, starter, *run, &start, now).await;
                 (answer, more)
             }
         };
@@ -474,12 +470,9 @@ impl ProjectLoop {
         more
     }
 
-    /// With `engine-start-rules` On: which engines are out now and which this computer runs
-    /// (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5). `None` is today's behaviour.
-    async fn start_rules(&mut self, pool: &LanePool, shared: &Shared<'_>, now: Instant) -> Option<StartRules> {
-        if !self.flags.on("engine-start-rules").await {
-            return None;
-        }
+    /// Which engines are out now and which this computer runs
+    /// (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5).
+    fn start_rules(&self, pool: &LanePool, shared: &Shared<'_>, now: Instant) -> StartRules {
         let mut out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
         if Self::limit_fallback(shared) {
             // Claude's usage limit holds nothing: its runs start on the local model.
@@ -490,12 +483,12 @@ impl ProjectLoop {
             self.project.engines.as_ref(),
             pool.rules().lanes,
         );
-        Some(StartRules {
+        StartRules {
             out,
             used,
             choice: shared.links.engine_choice.clone(),
             project_engines: self.project.engines.clone(),
-        })
+        }
     }
 
     fn chores_off(&self) -> bool {
@@ -511,13 +504,9 @@ impl ProjectLoop {
         pool: &mut LanePool,
         starter: &dyn RunStarter,
         run: Run,
-        start: Option<&StartRules>,
+        start: &StartRules,
         now: Instant,
     ) -> bool {
-        let fall = match start {
-            Some(s) if self.flags.on("engine-fall-over").await => Some(s),
-            _ => None,
-        };
         let piece_id = piece_id(&run.piece).to_string();
         // An older store may hand out a rotation chore though chores are off: given back before any lane work.
         let stray = self.chores_off()
@@ -542,9 +531,7 @@ impl ProjectLoop {
         let started = self
             .run_loop
             .runs
-            .start_where(pool, &run.token, run.kind, &piece_id, now, |k| {
-                start.is_none_or(|s| s.lane_may_start(k))
-            });
+            .start_where(pool, &run.token, run.kind, &piece_id, now, |k| start.lane_may_start(k));
         if let Err(NoLane) = started {
             // Not queued: the run never held anything here, so its end is sent now, once.
             let ended = self
@@ -591,7 +578,7 @@ impl ProjectLoop {
             piece: run.piece,
             other: run.other,
             lane,
-            engine: fall.and_then(|s| s.takes_over(run.kind)),
+            engine: start.takes_over(run.kind),
             ends: self.run_loop.ends_tx.clone(),
             events: self.run_loop.events_tx.clone(),
             context: RunContext {
@@ -601,9 +588,9 @@ impl ProjectLoop {
                 repo,
                 token: token.unwrap_or_default().to_string(),
                 locks: self.run_loop.runs.locks(),
-                fall: fall.map(|s| FallOver {
-                    out: s.out.clone(),
-                    used: s.used.clone(),
+                fall: Some(FallOver {
+                    out: start.out.clone(),
+                    used: start.used.clone(),
                 }),
             },
         };
@@ -618,7 +605,7 @@ impl ProjectLoop {
     }
 }
 
-/// The engines out now, the ones this computer uses and its choices, for `engine-start-rules`.
+/// The engines out now, the ones this computer uses and its choices, for the start rules.
 struct StartRules {
     out: BTreeSet<EngineId>,
     used: Vec<EngineId>,
@@ -661,9 +648,8 @@ fn role_of(kind: RunKind) -> Option<Role> {
 }
 
 /// The engines this computer tells the store it has: the latest setup checks' (Claude when installed and signed
-/// in, Cursor, Pi and Codex when present and passing). With `engine-placement` Off, Claude alone is reported, as
-/// every starter then refuses another engine. Empty until the checks have run.
-fn engines_here(links: &Links, placement: bool, start: Option<&StartRules>) -> Vec<String> {
+/// in, Cursor, Pi and Codex when present and passing). Empty until the checks have run.
+fn engines_here(links: &Links, start: &StartRules) -> Vec<String> {
     let guard = links.checks.lock().unwrap();
     let Some(c) = guard.as_ref() else { return Vec::new() };
     let pass = |s: &Option<crate::setup_check::SetupCheck>| s.as_ref().is_some_and(|s| s.ok == Some(true));
@@ -677,20 +663,20 @@ fn engines_here(links: &Links, placement: bool, start: Option<&StartRules>) -> V
         ("codex", pass(&c.codex)),
     ];
     all.into_iter()
-        .filter(|(id, ok)| {
-            *ok && (placement || *id == "claude") && start.is_none_or(|s| !s.out.iter().any(|e| e.to_string() == *id))
-        })
+        .filter(|(id, ok)| *ok && !start.out.iter().any(|e| e.to_string() == *id))
         .map(|(id, _)| id.to_string())
         .collect()
 }
 
-/// The engine each kind's role runs on here; with `engine-start-rules` On, the one it would start on now.
-fn uses_here(links: &Links, project_engines: Option<&Value>, start: Option<&StartRules>) -> RunTakeUses {
+/// The engine each kind's role runs on here: the one it would start on now.
+fn uses_here(links: &Links, project_engines: Option<&Value>, start: &StartRules) -> RunTakeUses {
     let on = |role| {
         let chosen = engine_for(&links.engine_choice, project_engines, role, None);
-        match start.map(|s| s.engine_now(role)) {
-            Some(now) if now != program_of(chosen) => now.to_string(),
-            _ => chosen.to_string(),
+        let now = start.engine_now(role);
+        if now != program_of(chosen) {
+            now.to_string()
+        } else {
+            chosen.to_string()
         }
     };
     RunTakeUses {

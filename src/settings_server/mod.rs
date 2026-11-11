@@ -75,7 +75,6 @@ pub struct SettingsServer {
     agent_ci_flag: std::sync::atomic::AtomicBool,
     /// Card flag `backlog-link-route`, read once at startup: Off, `GET /api/backlog/link` is a 404.
     backlog_link_flag: std::sync::atomic::AtomicBool,
-    cursor_allow_flag: std::sync::atomic::AtomicBool,
     /// Card flag `live-sessions-reporting`, read once at startup: Off keeps the Now tab's held-lane view.
     live_sessions_flag: std::sync::atomic::AtomicBool,
     /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
@@ -117,7 +116,6 @@ impl SettingsServer {
             settings_page_flag: std::sync::atomic::AtomicBool::new(false),
             agent_ci_flag: std::sync::atomic::AtomicBool::new(false),
             backlog_link_flag: std::sync::atomic::AtomicBool::new(false),
-            cursor_allow_flag: std::sync::atomic::AtomicBool::new(false),
             live_sessions_flag: std::sync::atomic::AtomicBool::new(false),
             own_addresses: Box::new(|| {
                 if_addrs::get_if_addrs()
@@ -142,11 +140,6 @@ impl SettingsServer {
     /// Gives the card flag `live-sessions-reporting`'s answer (read once at start).
     pub fn set_live_sessions_flag(&self, on: bool) {
         self.live_sessions_flag.store(on, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Gives the card flag `cursor-allow-derive`'s answer (read once at start).
-    pub fn set_cursor_allow_flag(&self, on: bool) {
-        self.cursor_allow_flag.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Gives the card flag `agent-ci`'s answer (read once at start).
@@ -226,9 +219,7 @@ impl SettingsServer {
         if self.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
             settings["ciSlots"] = json!(config::ci_slots(&cfg, env));
         }
-        if self.cursor_allow_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            settings["cursorAllow"] = Self::cursor_allow_json(&cfg, env);
-        }
+        settings["cursorAllow"] = Self::cursor_allow_json(&cfg, env);
         Ok(settings)
     }
 
@@ -392,9 +383,6 @@ async fn post_settings(
     }
     if update.ci_slots.is_some() && !settings.agent_ci_flag.load(std::sync::atomic::Ordering::Relaxed) {
         return bad_request("Not a setting this agent can save yet: ciSlots.");
-    }
-    if update.cursor_allow.is_some() && !settings.cursor_allow_flag.load(std::sync::atomic::Ordering::Relaxed) {
-        return bad_request("Not a setting this agent can save yet: cursorAllow.");
     }
     match settings.saver().apply(&update) {
         Ok(()) => {

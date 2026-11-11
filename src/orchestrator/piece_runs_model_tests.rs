@@ -12,8 +12,7 @@ fn model_of(piece: &RunPiece) -> &'static str {
 }
 
 #[test]
-fn with_the_step_up_flag_on_a_retried_or_big_piece_keeps_opus() {
-    crate::tiers::set_step_up_for_test(true);
+fn a_retried_or_big_piece_keeps_opus() {
     assert_eq!(model_of(&build_piece(json!({}))), "sonnet");
     let failed = json!({ "attempts": [{ "kind": "build", "outcome": "failed" }] });
     assert_eq!(model_of(&build_piece(failed)), "opus");
@@ -26,11 +25,4 @@ fn with_the_step_up_flag_on_a_retried_or_big_piece_keeps_opus() {
         model_for(Some(&tidy), crate::tiers::OPUS, &item, true),
         crate::tiers::chore_tier()
     );
-}
-
-#[test]
-fn with_the_step_up_flag_off_every_piece_stays_on_sonnet() {
-    crate::tiers::set_step_up_for_test(false);
-    let failed = json!({ "attempts": [{ "kind": "build", "outcome": "failed" }], "size": "XL" });
-    assert_eq!(model_of(&build_piece(failed)), "sonnet");
 }

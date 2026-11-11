@@ -116,10 +116,6 @@ fn project(repo: &std::path::Path, remote: Option<&str>, engines: serde_json::Va
 
 /// The `permissions.allow` of the `.cursor/cli.json` a session on `project` gets in a fresh lane.
 fn written(project: &ProjectConfig, readonly: bool) -> Vec<String> {
-    written_with(project, readonly, true)
-}
-
-fn written_with(project: &ProjectConfig, readonly: bool, on: bool) -> Vec<String> {
     use crate::engines::engine::Engine;
     let lane = tempfile::tempdir().unwrap();
     std::process::Command::new("git")
@@ -127,7 +123,6 @@ fn written_with(project: &ProjectConfig, readonly: bool, on: bool) -> Vec<String
         .current_dir(lane.path())
         .output()
         .unwrap();
-    crate::tiers::set_cursor_allow_derive_for_test(on);
     let mut spec = super::super::base_spec(lane.path());
     spec.readonly = readonly;
     spec.cursor = Some(with_project(project, CursorOptions::default()));
@@ -186,30 +181,4 @@ fn a_config_change_between_sessions_shows_in_the_second() {
     assert!(!written(&p, false).iter().any(|e| e == "Shell(make)"));
     p.engines = Some(serde_json::json!({"allow": ["Shell(make)"]}));
     assert!(written(&p, false).iter().any(|e| e == "Shell(make)"));
-}
-
-#[test]
-fn with_the_flag_off_the_options_are_todays() {
-    let repo = tempfile::tempdir().unwrap();
-    let p = project(
-        repo.path(),
-        Some("git@gitlab.com:o/r.git"),
-        serde_json::json!({"allow": ["Shell(make)"]}),
-    );
-    let w = written_with(&p, false, false);
-    assert!(
-        !w.iter()
-            .any(|e| ["Shell(npm)", "Shell(cargo)", "Shell(make)", "Shell(glab)"].contains(&e.as_str()))
-    );
-    assert!(!w.iter().any(|e| e == "Shell(gh)"), "placed options carry no cli");
-    // The implementer and trial sessions keep gh-by-repo.
-    crate::tiers::set_cursor_allow_derive_for_test(false);
-    let mut named = p.clone();
-    named.github_repo = "o/r".into();
-    assert_eq!(
-        with_project_or_gh(&named, CursorOptions::default()).cli.as_deref(),
-        Some("gh")
-    );
-    assert_eq!(with_project_or_gh(&p, CursorOptions::default()).cli, None);
-    assert!(with_project_or_gh(&named, CursorOptions::default()).allow.is_empty());
 }
