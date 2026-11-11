@@ -1,8 +1,7 @@
 //! A tiny shared helper for locking a `Mutex` that this agent never wants to propagate a
 //! poison from: every lock here only ever guards plain in-memory state (a status map, a
 //! picture cache, a fetch timestamp), so a prior panic while holding one shouldn't poison it
-//! for every later caller. Recovering the guard is what every call site in galleries.rs and
-//! lanes.rs did by hand before this was pulled out.
+//! for every later caller. Recovering the guard is what every call site in lanes.rs did by hand before this was pulled out.
 use std::sync::{Mutex, MutexGuard};
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

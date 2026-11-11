@@ -189,8 +189,6 @@ fn from_config(cfg: &config::ConfigFile, s: &Source) -> Map<String, Value> {
     let Value::Object(out) = json!({
         "dailyUsd": m.budget.daily_usd,
         "concurrency": m.concurrency,
-        "autoConcurrency": { "enabled": m.auto_concurrency.enabled, "min": m.auto_concurrency.min, "max": m.auto_concurrency.max,
-            "targetPct": m.auto_concurrency.target_pct, "weekMarginPct": m.auto_concurrency.week_margin_pct, "weekFloor": m.auto_concurrency.week_floor },
         "modelConcurrency": { "opus": m.model_concurrency.opus, "sonnet": m.model_concurrency.sonnet },
         "models": {
             "opusAbovePct": m.models.opus_above_pct,

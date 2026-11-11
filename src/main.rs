@@ -397,7 +397,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         lane_count,
         concurrency: cfg.machine.concurrency,
         local: local.clone(),
-        auto_concurrency: cfg.machine.auto_concurrency,
         poll_every: std::time::Duration::from_secs(config::poll_interval_sec(cfg, env).into()),
         backlog_url: &backlog::url(env),
         keychain: &keychain,

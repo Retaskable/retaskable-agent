@@ -27,7 +27,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "alloc", "std"] }
 gethostname = { version = "1.1.0", default-features = false }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = "4"
 rand = "0.10.3"
 regex = "1.13.1"
@@ -60,6 +59,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 http-body-util = "0.1.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 

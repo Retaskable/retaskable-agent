@@ -8,26 +8,12 @@ fn project(id: &str, repo: &str) -> ProjectView {
         repo_path: PathBuf::new(),
         worktrees_dir: PathBuf::new(),
         base_branch: "main".into(),
-        galleries: vec![],
         play_command: String::new(),
-        project_type: Default::default(),
     }
 }
 
 fn view(projects: Vec<ProjectView>) -> AgentView {
     crate::test_support::agent_view(vec!["windows".into()], projects, "1.2.3", 3)
-}
-
-#[test]
-fn snapshot_reports_the_paced_number_and_reason_only_while_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = view(vec![]);
-    let usage = || v.snapshot("", dir.path())["state"]["usage"].clone();
-    assert_eq!(usage(), json!({}));
-    v.item_commands.set_auto(Some((2, "On pace".into())));
-    assert_eq!(usage(), json!({"autoConcurrency": {"allowed": 2, "reason": "On pace"}}));
-    v.item_commands.set_auto(None);
-    assert_eq!(usage(), json!({}));
 }
 
 #[test]
@@ -114,7 +100,7 @@ async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its
     let hello = v.hello("").await;
     let s = &hello["settings"];
     assert_eq!(s["concurrency"], 1);
-    assert_eq!(s["autoConcurrency"]["enabled"], true);
+    assert!(s.get("autoConcurrency").is_none());
     assert_eq!(s["models"]["opusAbovePct"], 50);
     assert_eq!(s["port"], 4700);
     assert_eq!(s["lanes"], 2);
@@ -206,7 +192,7 @@ fn snapshot_before_setup_says_setup() {
         snap["state"]["orchestrator"],
         json!({ "status": "setup", "machine": "pc" })
     );
-    assert_eq!(snap["state"]["galleries"], json!([]));
+    assert!(snap["state"].get("galleries").is_none());
 }
 
 #[test]
@@ -389,12 +375,6 @@ fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
     );
     v.paused.set("a", None);
     v.live.set_limit("a", None);
-    v.item_commands.set_auto(Some((2, "On pace".into())));
-    assert_eq!(
-        orch(&v)["concurrency"],
-        2,
-        "auto concurrency's number once it has stepped"
-    );
     assert_eq!(
         v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
         "setup"
@@ -726,19 +706,6 @@ fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
     let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
     assert_eq!(ids, ["a", "c"]);
     assert_eq!(q.take_ideas("two").len(), 1);
-
-    let fb = |p: &str, id: &str| GalleryFeedbackCommand {
-        project: p.into(),
-        command_id: id.into(),
-        request: "r".into(),
-        do_next: true,
-        by: "me".into(),
-    };
-    q.push_feedback(fb("two", "x"));
-    q.push_feedback(fb("one", "y"));
-    assert_eq!(q.take_feedback("one").len(), 1);
-    assert!(q.take_feedback("one").is_empty());
-    assert_eq!(q.take_feedback("two")[0].command_id, "x");
 }
 
 #[test]

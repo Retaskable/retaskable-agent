@@ -232,7 +232,7 @@ impl SettingsServer {
         Ok(settings)
     }
 
-    /// Each project's `engines.allow`, the programs derived from its checks and galleries, and the
+    /// Each project's `engines.allow`, the programs derived from its checks, and the
     /// allowlist file Cursor follows there (engines/06-permissions-the-allowlist.md section 6.4).
     fn cursor_allow_json(cfg: &config::ConfigFile, env: &Env) -> Value {
         let rows = cfg.projects.iter().map(|p| {
@@ -246,7 +246,7 @@ impl SettingsServer {
             json!({
                 "project": p.id_or_derived(),
                 "allow": allow,
-                "commandShells": crate::engines::cursor::command_shells(&p.checks, &p.galleries),
+                "commandShells": crate::engines::cursor::command_shells(&p.checks),
                 "inForce": { "line": line, "problem": problem },
             })
         });

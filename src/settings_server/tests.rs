@@ -696,7 +696,7 @@ async fn the_page_has_the_cursor_may_also_run_box_hidden_until_a_role_is_on_curs
     let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     assert!(body.contains(r#"id="cursorAllowGroup" hidden"#));
     assert!(body.contains("Cursor may also run"));
-    assert!(body.contains("Already allowed, from your checks and galleries: "));
+    assert!(body.contains("Already allowed, from your checks: "));
     // Shown only when the settings carry cursorAllow (flag On) and some role or lane picks Cursor.
     assert!(body.contains("group.hidden = !rows || !usesCursor(s.engineChoice)"));
     assert!(body.contains(r#"JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } })"#));

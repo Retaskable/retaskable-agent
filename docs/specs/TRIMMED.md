@@ -8,7 +8,7 @@ Where it belongs:
 - **hub**: the cloud hub (Worker and Durable Objects, [cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md)): commands, notifications, routing, anything the server answers without a computer.
 - **app**: the Expo app ([expo.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/expo.md)), which is the only UI.
 
-Count by destination (the first one named in each row): store op 35, hub 23, app 64. Total 122.
+Count by destination (the first one named in each row): store op 39, hub 24, app 64. Total 127 (the five rows at the end of the table were added by the sync of 2026-11-11).
 
 Store op names are the ones Retaskable.com's specs use. A few (for example do_next, 	ryout_groups) were inferred from the text and need checking against the store before the agent is thinned.
 
@@ -136,7 +136,16 @@ Store op names are the ones Retaskable.com's specs use. A few (for example do_ne
 | tray/05.4-this-computer-s-settings-on-the-site.md | 5.4 This computer's settings on the site | Whole section: `ComputerView` in hello, secrets-by-name view, This computer page, Ask for a change flow, Tags panel, "same machine: not detected" | app: Expo app Settings -> Agents; hub: hello schema; file not copied (superseded by agent-settings.md) |
 | tray/06-build-order.md | 6.1.1, 6.1.3, 6.1.4, 6.1.5 app-side | The app's local mode (`agentClient.ts`, `LiveProvider`, Setup files, `Source`, saved "This computer" choice, Getting started wording, demo's Use this computer), the slice plan for the app and the app's acceptance | app: Expo app (expo.md) |
 | tray/06-build-order.md | 6.1.2 What the site must do first | The table of local-only routes and their site twins (Link project, engines, team branch, release notes reads, phone stop, gallery draft, item log) | app: Expo app Settings and tabs; hub: cloud commands |
+| pools-on-server.md | whole (not copied) | The pool records, pacing (`paceOnReport` in `shared/pools.ts`), `pool_get`, `pool_settings` validation, the order the server hands tasks out in, `health` and `task_end` answering. The copies keep only what the agent sends and obeys: [agent/07](agent/07-orchestrator-loop.md), [agent-settings.md](agent-settings.md) section 2.1 | store op: pools (`health`, `task_end`, `pool_get`, `pool_settings`) |
+| merge-queue-on-server.md | whole (not copied) | The queue's record and ops, the turn's lease and its limits, the order of the queue and the board's place in line. The copies keep what the agent does with a turn: [merge-queue-from-store.md](merge-queue-from-store.md), [agent/05](agent/05-item-lifecycle.md), [pieces.md](pieces.md) | store op: `merge_enqueue`, `merge_next`, `merge_open`, `merge_beat`, `merge_result` |
+| chores-on-server.md | whole (not copied) | The store's rotation, its day count and limit, the `chore_trigger` kinds, the task ids and the locks. The copies keep what the computer does with a task: [agent/06.7](agent/06.7-chores-never-idle.md) | store op: `health` tasks, `chore_trigger`, `chore_nofix` |
+| jobs-on-server.md | 6.7 triage, the jobs one at a time (not copied) | The rules of triage (`shared/triage.ts`): who gets the task, the second look's order, the retries and applying the answer; the daily jobs' due check. The copy keeps what the agent runs and answers: [agent/06.9](agent/06.9-triage-claude-looks-at-needs-you-first.md), [ci-watch-through-store.md](ci-watch-through-store.md) | store op: `jobs_due`, `triage` tasks |
+| rollout-on-server.md, auto-rollout.md, any-computer-releases.md | whole (not copied) | The rollout engine and its schedule, any-computer releases and the waiting line: all the server's; the agent has no rollout code (Rust agent catch-up piece P8) | hub: rollout commands and the store's rollout row |
 
 ## Removed: galleries
 
 The agent takes no pictures of the game and uploads no galleries (Rust agent catch-up piece P1; TypeScript agent #3231, #3252, #3287, #3291, #3330). Section 6.8 of agent.md (the shoot, the picture folder and the feedback boxes) is gone, and so are tray.md section 5.3's gallery halves, the `galleries` config, the gallery settings and the gallery programs in the Cursor allowlist. The names `shoot`, `gallery_index`, `gallery_image` and `gallery_feedback` are no command: the agent refuses each as an unknown command ("Not a command this agent takes yet"). Pictures sent with a message stay (tray.md section 5.3).
+
+## Synced: 2026-11-11 (Rust agent catch-up piece P15)
+
+The agent-facing parts of Retaskable.com's server-side specs of 2026-11-09 and 2026-11-10 are copied: the pools (the server hands out the work, the owner's settings as `pool_settings` in the project's store), the merge queue and its turn, chores as store tasks, triage on the server, and the telemetry rows. The server-side specs themselves are not copied; the README links them. The rollout is the server's, and the agent has none.

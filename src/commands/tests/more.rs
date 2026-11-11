@@ -179,12 +179,8 @@ fn idea_accept(v: &AgentView, args: Value) -> Value {
 }
 
 #[test]
-fn idea_accept_is_queued_for_the_loop_behind_the_flag_and_answered_later() {
+fn idea_accept_is_queued_for_the_loop_and_answered_later() {
     let v = claiming();
-    let off = idea_accept(&v, json!({ "idea": "i1" }));
-    assert_eq!(off["type"], "nack");
-    assert!(off["reason"].as_str().unwrap().contains("idea_accept"));
-    v.item_commands.set_flag("one", "ideas-session", true);
     assert_eq!(
         idea_accept(&v, json!({ "idea": "i1" }))["type"],
         crate::commands::PENDING
@@ -200,7 +196,6 @@ fn idea_accept_is_queued_for_the_loop_behind_the_flag_and_answered_later() {
 #[test]
 fn idea_accept_needs_claim_mode_and_not_now_and_never_are_the_sites() {
     let v = view();
-    v.item_commands.set_flag("one", "ideas-session", true);
     assert_eq!(idea_accept(&v, json!({ "idea": "i1" }))["type"], "nack");
     for name in ["idea_later", "idea_never"] {
         let answer = run(
@@ -230,40 +225,17 @@ fn a_settled_answer_goes_up_the_projects_open_connection() {
 }
 
 #[test]
-fn ideas_generate_queues_a_round_and_nacks_when_paused_or_not_set_up() {
-    let v = view();
-    let noop = |_: i32| {};
-    let go = |args: Value, project: &str, v: &AgentView| {
-        run(
-            &cmd("ideas_generate", args),
-            project,
-            &mut Seen::default(),
-            v,
-            &noop,
-            &data_dir(),
-        )
-    };
-    assert_eq!(go(json!({}), "one", &v)["type"], "ack");
-    assert_eq!(go(json!({ "fresh": true }), "one", &v)["type"], "ack");
-    assert_eq!(
-        v.item_commands.take("one"),
-        vec![
-            ItemCommand::Ideas {
-                project: "one".into(),
-                fresh: false
-            },
-            ItemCommand::Ideas {
-                project: "one".into(),
-                fresh: true
-            },
-        ]
+fn ideas_generate_is_nacked_like_any_command_this_agent_doesnt_take() {
+    let v = claiming();
+    let answer = run(
+        &cmd("ideas_generate", json!({})),
+        "one",
+        &mut Seen::default(),
+        &v,
+        &|_: i32| {},
+        &data_dir(),
     );
-    assert_eq!(go(json!({}), "", &v)["reason"], "Finish setup first.");
-    v.paused.set("one", Some("test".into()));
-    assert_eq!(
-        go(json!({}), "one", &v)["reason"],
-        "The project is paused: resume it first."
-    );
+    assert_eq!(answer["type"], "nack");
     assert!(v.item_commands.take("one").is_empty());
 }
 
@@ -567,211 +539,4 @@ fn restart_play_of_a_lane_is_queued_in_claim_mode_and_nacked_otherwise() {
     v.projects[0].play_command = " ".into();
     assert_eq!(go(&v, 1)["reason"], "No play command set for this project.");
     assert!(v.item_commands.take_lane("one").is_empty());
-}
-
-mod gallery_read {
-    use super::*;
-    use image::{ImageBuffer, Rgb};
-
-    fn setup(files: &[(&str, Vec<u8>)]) -> (tempfile::TempDir, AgentView) {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = paths::gallery_dir(tmp.path(), "one", "shots");
-        std::fs::create_dir_all(&dir).unwrap();
-        let images: Vec<Value> = files.iter().map(|(f, _)| json!({ "file": f, "title": f })).collect();
-        let index = json!({ "name": "Shots", "shotAt": "2026-01-01T00:00:00Z", "sha": "abc", "images": images });
-        std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
-        for (f, b) in files {
-            std::fs::write(dir.join(f), b).unwrap();
-        }
-        let v = view();
-        v.item_commands.set_flag("one", "gallery-read-commands", true);
-        (tmp, v)
-    }
-
-    fn ask(v: &AgentView, tmp: &Path, name: &str, args: Value) -> Value {
-        run(&cmd(name, args), "one", &mut Seen::default(), v, &|_| {}, tmp)
-    }
-
-    fn noisy_jpeg() -> Vec<u8> {
-        let img = ImageBuffer::from_fn(2400, 1800, |x, y| {
-            let n = x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503);
-            Rgb([(n >> 3) as u8, (n >> 11) as u8, (n >> 19) as u8])
-        });
-        let mut out = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 98)
-            .encode_image(&img)
-            .unwrap();
-        out
-    }
-
-    #[test]
-    fn index_and_image_are_acked() {
-        use base64::Engine;
-        let bytes = vec![0xff, 0xd8, 1, 2, 3];
-        let (tmp, v) = setup(&[("a.jpg", bytes.clone())]);
-        let idx = ask(&v, tmp.path(), "gallery_index", json!({ "gallery": "shots" }));
-        assert_eq!(idx["type"], "ack", "{idx}");
-        assert_eq!(idx["answer"]["name"], "Shots");
-        assert_eq!(idx["answer"]["shotAt"], "2026-01-01T00:00:00Z");
-        assert_eq!(idx["answer"]["sha"], "abc");
-        assert_eq!(idx["answer"]["images"][0]["file"], "a.jpg");
-        let img = ask(
-            &v,
-            tmp.path(),
-            "gallery_image",
-            json!({ "gallery": "shots", "file": "a.jpg" }),
-        );
-        assert_eq!(img["type"], "ack", "{img}");
-        assert_eq!(img["answer"]["file"], "a.jpg");
-        assert_eq!(img["answer"]["type"], "image/jpeg");
-        let data = img["answer"]["data"].as_str().unwrap();
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(data).unwrap(), bytes);
-    }
-
-    #[test]
-    fn bad_requests_are_nacked() {
-        let (tmp, v) = setup(&[("a.jpg", vec![1])]);
-        for (name, args) in [
-            ("gallery_index", json!({ "gallery": "nope" })),
-            ("gallery_index", json!({ "gallery": "../x" })),
-            ("gallery_index", json!({})),
-            ("gallery_image", json!({ "gallery": "nope", "file": "a.jpg" })),
-            ("gallery_image", json!({ "gallery": "../x", "file": "a.jpg" })),
-            ("gallery_image", json!({ "gallery": "shots", "file": "b.jpg" })),
-            ("gallery_image", json!({ "gallery": "shots", "file": "../a.jpg" })),
-            ("gallery_image", json!({ "gallery": "shots", "file": "x/a.jpg" })),
-            ("gallery_image", json!({ "gallery": "shots" })),
-        ] {
-            let answer = ask(&v, tmp.path(), name, args.clone());
-            assert_eq!(answer["type"], "nack", "{name} {args}: {answer}");
-        }
-    }
-
-    #[test]
-    fn an_off_flag_leaves_the_commands_unported() {
-        let (tmp, v) = setup(&[]);
-        v.item_commands.set_flag("one", "gallery-read-commands", false);
-        let answer = ask(&v, tmp.path(), "gallery_index", json!({ "gallery": "shots" }));
-        assert!(answer["reason"].as_str().unwrap().starts_with("Not a command"));
-    }
-
-    #[test]
-    fn a_big_picture_is_shrunk_and_the_log_holds_no_base64() {
-        let bytes = noisy_jpeg();
-        assert!(bytes.len().div_ceil(3) * 4 > galleries::MAX_PICTURE_BASE64);
-        let (tmp, v) = setup(&[("big.jpg", bytes.clone())]);
-        let c = cmd("gallery_image", json!({ "gallery": "shots", "file": "big.jpg" }));
-        let answer = run(&c, "one", &mut Seen::default(), &v, &|_| {}, tmp.path());
-        assert_eq!(answer["type"], "ack", "{answer}");
-        assert!(answer["answer"]["data"].as_str().unwrap().len() <= galleries::MAX_PICTURE_BASE64);
-        assert!(answer.to_string().len() < MAX_MESSAGE_BYTES);
-        let on_disk = paths::gallery_dir(tmp.path(), "one", "shots").join("big.jpg");
-        assert_eq!(std::fs::read(on_disk).unwrap(), bytes);
-
-        audit(tmp.path(), &c, &answer, "wss://x");
-        let log = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
-        assert!(log.contains("\"answerBytes\":"));
-        assert!(!log.contains(answer["answer"]["data"].as_str().unwrap()));
-        assert!(log.len() < 1000);
-    }
-
-    #[test]
-    fn a_replayed_or_expired_read_is_refused() {
-        let (tmp, v) = setup(&[("a.jpg", vec![1])]);
-        let c = cmd("gallery_image", json!({ "gallery": "shots", "file": "a.jpg" }));
-        let mut seen = Seen::default();
-        let go = |c: &Command, seen: &mut Seen| run(c, "one", seen, &v, &|_| {}, tmp.path());
-        assert_eq!(go(&c, &mut seen)["type"], "ack");
-        assert_eq!(go(&c, &mut seen)["reason"], "Already received: a command runs once.");
-        let mut old = cmd("gallery_index", json!({ "gallery": "shots" }));
-        old.id = "c2".into();
-        old.issued_at = now_ms() - 61_000;
-        old.expires_at = old.issued_at + 60_000;
-        assert!(go(&old, &mut seen)["reason"].as_str().unwrap().starts_with("Expired"));
-    }
-}
-
-/// A view whose project has a "Models" gallery, shot once into `dir`, with the flag On.
-fn feedback_view(dir: &Path, flag: bool) -> AgentView {
-    let mut v = claiming();
-    v.projects[0].galleries = vec![
-        crate::config::GalleryConfig {
-            name: "Models".into(),
-            command: "x".into(),
-            out_dir: "shots".into(),
-        },
-        crate::config::GalleryConfig {
-            name: "UI".into(),
-            command: "x".into(),
-            out_dir: "shots".into(),
-        },
-    ];
-    let shot = paths::gallery_dir(dir, "one", "models");
-    std::fs::create_dir_all(&shot).unwrap();
-    let index = json!({ "name": "Models", "shotAt": "2026-01-01T00:00:00Z", "sha": "abc", "images": [] });
-    std::fs::write(shot.join("index.json"), index.to_string()).unwrap();
-    v.item_commands.set_flag("one", "gallery-feedback-command", flag);
-    v
-}
-
-fn feedback(v: &AgentView, args: Value, dir: &Path) -> Value {
-    run(
-        &cmd("gallery_feedback", args),
-        "one",
-        &mut Seen::default(),
-        v,
-        &|_| {},
-        dir,
-    )
-}
-
-fn nothing_saved(dir: &Path) -> bool {
-    !dir.join("attachments").exists() || std::fs::read_dir(dir.join("attachments")).unwrap().count() == 0
-}
-
-#[test]
-fn gallery_feedback_is_an_unknown_command_while_the_flag_is_off() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = feedback_view(dir.path(), false);
-    let a = feedback(&v, json!({ "gallery": "models", "notes": "Darker" }), dir.path());
-    assert_eq!(a["reason"], "Not a command this agent takes yet: gallery_feedback");
-    assert!(v.item_commands.take_feedback("one").is_empty());
-}
-
-#[test]
-fn gallery_feedback_refusals_queue_nothing_and_save_no_picture() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = feedback_view(dir.path(), true);
-    let bad = json!([picture(10), { "type": "text/plain", "data": "x" }]);
-    for args in [
-        json!({ "gallery": "nope", "notes": "x", "pictures": [picture(10)] }),
-        json!({ "gallery": "ui", "notes": "x", "pictures": [picture(10)] }),
-        json!({ "gallery": "models", "notes": "  ", "pictures": [picture(10)] }),
-        json!({ "gallery": "models", "notes": "x", "pictures": bad }),
-    ] {
-        assert_eq!(feedback(&v, args, dir.path())["type"], "nack");
-    }
-    assert!(nothing_saved(dir.path()));
-    assert!(v.item_commands.take_feedback("one").is_empty());
-}
-
-#[test]
-fn a_good_gallery_feedback_is_pending_and_queued_with_the_pictures_paths() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = feedback_view(dir.path(), true);
-    let args = json!({ "gallery": "models", "notes": "Darker", "pictures": [picture(10)] });
-    assert_eq!(feedback(&v, args, dir.path())["type"], crate::commands::PENDING);
-    let off = json!({ "gallery": "models", "notes": "Darker", "doNext": false });
-    assert_eq!(feedback(&v, off, dir.path())["type"], crate::commands::PENDING);
-    let queued = v.item_commands.take_feedback("one");
-    assert_eq!(queued.len(), 2);
-    assert!(queued[0].do_next && !queued[1].do_next);
-    assert_eq!((queued[0].by.as_str(), queued[0].command_id.as_str()), ("jc", "c1"));
-    let saved = std::fs::read_dir(dir.path().join("attachments"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap();
-    assert!(queued[0].request.contains(&saved.path().display().to_string()));
-    assert!(queued[0].request.contains("Darker"));
 }

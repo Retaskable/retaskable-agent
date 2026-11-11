@@ -481,22 +481,11 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        if let Some(usage) = &outcome.usage
-            && self
-                .records
-                .get(&item)
-                .is_none_or(|r| r.impl_session_engine == EngineId::Claude)
-        {
-            self.pace_readings.push(usage.clone());
-        }
         let weekly = ProjectLoop::weekly_on(&self.flags).await;
         if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
-        let keep_week = weekly
-            || (self.auto_enabled
-                && self.flags.on("auto-concurrency").await
-                && self.flags.on("auto-concurrency-week").await);
+        let keep_week = weekly;
         let week = outcome
             .usage
             .clone()
@@ -846,7 +835,6 @@ impl Machine {
             let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
                 Some(lp) => {
-                    lp.auto_enabled = self.auto.cfg.enabled;
                     lp.settle(
                         outcome,
                         &mut self.pool,
