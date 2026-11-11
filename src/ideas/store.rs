@@ -1,12 +1,9 @@
-//! The shared backlog's own copy of the ideas queue (backlog/06.2-operations.md): [`Ideas::list`],
-//! [`Ideas::round`] and [`Ideas::answer`] are `ideas_list`, `ideas_round` and `idea_answer`;
-//! [`queue_from_store`] folds a read into [`Queue`].
+//! The shared backlog's own copy of the ideas queue (backlog/06.2-operations.md): [`Ideas::list`] and
+//! [`Ideas::answer`] are `ideas_list` and `idea_answer`.
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::backlog::{BacklogError, Client};
-
-use super::model::{Idea, Queue};
 
 /// Waiting for an answer, written up (`accepted`), set aside for now (`later`: it may come back), or
 /// turned down for good (`never`) — `IDEA_STATES`, shared/storeIdeas.ts.
@@ -94,7 +91,7 @@ pub struct IdeasRoundInfo {
     pub login: String,
 }
 
-/// `ideas_list`'s and `ideas_round`'s answer (backlog/06.2-operations.md): the waiting ideas first,
+/// `ideas_list`'s answer (backlog/06.2-operations.md): the waiting ideas first,
 /// oldest first, then the answered ones, newest answer first.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,69 +100,8 @@ pub struct StoreIdeas {
     pub ideas: Vec<StoreIdea>,
 }
 
-/// [`refilled`](super::model::refilled)'s [`Queue`], folded from the store's own rows (`asList`,
-/// shared/storeIdeas.ts): a person's own waiting idea (`addedBy` set) is left out of `ideas`, since a
-/// round must leave those alone (backlog/06.2-operations.md).
-pub fn queue_from_store(s: &StoreIdeas) -> Queue {
-    let of = |i: &StoreIdea| {
-        let body = i.idea.clone().unwrap_or_default();
-        Idea {
-            id: i.id.clone(),
-            title: i.title.clone(),
-            experience: body.experience,
-            why: body.why,
-            why_now: body.why_now,
-            for_profiles: body.for_profiles,
-            feature: body.feature,
-            new_feature: body.new_feature,
-            waited: body.waited,
-        }
-    };
-    Queue {
-        ideas: s
-            .ideas
-            .iter()
-            .filter(|i| i.state == IdeaState::Waiting && i.added_by.is_none())
-            .map(of)
-            .collect(),
-        accepted_titles: s
-            .ideas
-            .iter()
-            .filter(|i| i.state == IdeaState::Accepted)
-            .map(|i| i.title.clone())
-            .collect(),
-        never: s
-            .ideas
-            .iter()
-            .filter(|i| i.state == IdeaState::Never)
-            .map(|i| i.title.clone())
-            .collect(),
-    }
-}
-
-/// `idea` as `ideas_round`'s own `Idea` JSON shape (shared/moreTypes.ts) sends it.
-fn idea_json(idea: &Idea) -> Value {
-    let mut v = json!({
-        "id": idea.id,
-        "title": idea.title,
-        "experience": idea.experience,
-        "why": idea.why,
-        "whyNow": idea.why_now,
-        "for": idea.for_profiles,
-        "waited": idea.waited,
-    });
-    if let Some(feature) = &idea.feature {
-        v["feature"] = json!(feature);
-    }
-    if let Some(new_feature) = &idea.new_feature {
-        v["newFeature"] = json!(new_feature);
-    }
-    v
-}
-
 /// This project's ideas on the shared backlog (backlog/06.2-operations.md): [`list`](Ideas::list) the
-/// current round, [`round`](Ideas::round) to replace the waiting ideas after a session runs, and
-/// [`answer`](Ideas::answer) a waiting one (Accept/Not now/Never).
+/// current round and [`answer`](Ideas::answer) a waiting one.
 pub struct Ideas<'a> {
     pub client: &'a Client,
     pub repo_id: u64,
@@ -177,18 +113,6 @@ impl Ideas<'_> {
     pub async fn list(&self) -> Result<StoreIdeas, BacklogError> {
         self.client
             .op(self.repo_id, self.token, "ideas_list", json!({}), "ideas")
-            .await
-    }
-
-    /// `ideas_round { ideas, after? }`: at most [`QUEUE`](super::model::QUEUE) ideas, from
-    /// [`refilled`](super::model::refilled).
-    pub async fn round(&self, ideas: &[Idea], after: Option<&str>) -> Result<StoreIdeas, BacklogError> {
-        let mut args = json!({ "ideas": ideas.iter().map(idea_json).collect::<Vec<_>>() });
-        if let Some(after) = after {
-            args["after"] = json!(after);
-        }
-        self.client
-            .op(self.repo_id, self.token, "ideas_round", args, "ideas")
             .await
     }
 
@@ -217,66 +141,6 @@ impl Ideas<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn store_idea(id: &str, title: &str, state: IdeaState, idea: Option<StoreIdeaBody>) -> StoreIdea {
-        StoreIdea {
-            id: id.to_string(),
-            title: title.to_string(),
-            state,
-            idea,
-            at: 0,
-            answer: None,
-            added_by: None,
-        }
-    }
-
-    #[test]
-    fn queue_from_store_folds_waiting_accepted_and_never_rows() {
-        let s = StoreIdeas {
-            round: None,
-            ideas: vec![
-                store_idea(
-                    "1",
-                    "Waiting",
-                    IdeaState::Waiting,
-                    Some(StoreIdeaBody {
-                        experience: "You see it.".to_string(),
-                        why: "Because.".to_string(),
-                        why_now: "Now.".to_string(),
-                        for_profiles: vec!["shopper".to_string()],
-                        feature: Some("inbox".to_string()),
-                        new_feature: None,
-                        waited: 2,
-                    }),
-                ),
-                store_idea("2", "No body yet", IdeaState::Waiting, None),
-                store_idea("3", "Taken", IdeaState::Accepted, None),
-                store_idea("4", "Turned down", IdeaState::Never, None),
-                store_idea("5", "Set aside", IdeaState::Later, None),
-                StoreIdea {
-                    added_by: Some(json!({ "login": "owner" })),
-                    ..store_idea("6", "A person's own idea", IdeaState::Waiting, None)
-                },
-            ],
-        };
-        let q = queue_from_store(&s);
-        assert_eq!(
-            q.ideas.len(),
-            2,
-            "only the waiting rows nobody added themselves become ideas"
-        );
-        assert_eq!(q.ideas[0].title, "Waiting");
-        assert_eq!(q.ideas[0].why_now, "Now.");
-        assert_eq!(q.ideas[0].feature, Some("inbox".to_string()));
-        assert_eq!(q.ideas[0].waited, 2);
-        assert_eq!(
-            q.ideas[1].title, "No body yet",
-            "a row with no idea body still waits, empty"
-        );
-        assert_eq!(q.ideas[1].experience, "");
-        assert_eq!(q.accepted_titles, vec!["Taken".to_string()]);
-        assert_eq!(q.never, vec!["Turned down".to_string()]);
-    }
 
     async fn fake_store(handler: axum::routing::MethodRouter) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -310,38 +174,6 @@ mod tests {
         assert_eq!(s.round.unwrap().login, "owner");
         assert_eq!(s.ideas[0].id, "1");
         assert_eq!(s.ideas[0].state, IdeaState::Waiting);
-    }
-
-    #[tokio::test]
-    async fn round_sends_the_ideas_and_after_and_reads_the_new_round() {
-        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
-            assert_eq!(req["op"], "ideas_round");
-            assert_eq!(req["args"]["after"], "Chores");
-            let sent = &req["args"]["ideas"][0];
-            assert_eq!(sent["id"], "t-0");
-            assert_eq!(sent["feature"], "inbox");
-            assert!(sent.get("newFeature").is_none());
-            axum::Json(json!({ "value": { "round": null, "ideas": [] } }))
-        }))
-        .await;
-        let client = Client::new(base);
-        let ideas = Ideas {
-            client: &client,
-            repo_id: 1,
-            token: Some("tok"),
-        };
-        let idea = Idea {
-            id: "t-0".to_string(),
-            title: "A".to_string(),
-            experience: "x".to_string(),
-            why: "y".to_string(),
-            why_now: "z".to_string(),
-            for_profiles: vec!["shopper".to_string()],
-            feature: Some("inbox".to_string()),
-            new_feature: None,
-            waited: 0,
-        };
-        ideas.round(&[idea], Some("Chores")).await.unwrap();
     }
 
     #[tokio::test]

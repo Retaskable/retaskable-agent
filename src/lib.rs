@@ -3,6 +3,7 @@
 //! before the orchestrator loop that will call it exists: a `pub` item here is this crate's own
 //! API, not dead code just because `main` doesn't reach it yet.
 pub mod agent_ci;
+pub mod allowed_commands;
 pub mod api;
 pub mod app_menu;
 pub mod ask;
@@ -12,6 +13,7 @@ pub mod baseline;
 pub mod checks;
 pub mod ci_coverage;
 pub mod ci_watch;
+pub mod command_gate;
 pub mod commands;
 pub mod config;
 pub mod connector;
@@ -24,9 +26,11 @@ pub mod env;
 pub mod env_path;
 pub mod flags;
 pub mod fs_util;
-pub mod galleries;
 pub mod git_bin;
 pub mod hello_settings;
+pub mod host_call;
+#[cfg(all(test, unix))]
+mod host_call_sites_tests;
 pub mod ideas;
 pub mod implementer;
 pub mod item_lifecycle;
@@ -42,7 +46,6 @@ pub mod merge_update;
 pub mod network;
 pub mod notify;
 pub mod orchestrator;
-pub mod pace;
 pub mod package;
 pub mod password;
 pub mod paths;
@@ -61,6 +64,9 @@ pub mod release_update;
 pub mod release_upload;
 pub mod reopen;
 pub mod repo;
+pub mod repo_gitlab;
+pub mod repo_local;
+pub mod repo_picker;
 pub mod restart;
 pub mod review_context;
 pub mod review_run;

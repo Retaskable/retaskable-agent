@@ -366,3 +366,18 @@ fn the_notification_fires_once_per_wait() {
     r.agent.click("request.backlog.do"); // Link again
     assert_eq!(r.backlog_links.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn a_project_paused_by_the_store_counts_as_paused() {
+    let r = rig(false);
+    for p in ["a", "b"] {
+        r.agent_view
+            .item_commands
+            .set_flag(p, crate::view::OBEY_SHARED_PAUSE_FLAG, true);
+        r.agent_view
+            .store_paused
+            .set(p, crate::view::StorePause::Paused("Paused for everyone".into()));
+    }
+    r.agent.refresh();
+    assert!(last(&r).menu.flatten().iter().any(|i| i.text == "Resume this computer"));
+}

@@ -18,10 +18,14 @@ use serde_json::Value;
 use super::engine::{Engine, EngineId, EngineReader, SessionEvent, SessionSpec, SessionStart};
 use super::json_result::fenced_json_instructions;
 
+mod allow;
+pub use allow::{with_project, with_project_or_gh};
 mod allowlist;
 mod reader;
 mod result;
 
+pub(crate) use allow::{command_shells, engines_allow_error, split_allow_entries};
+pub(crate) use allowlist::allowlist_in_force;
 use reader::CursorReader;
 
 /// `cursorArgs(spec)`: print mode, `stream-json` out, trusted (never asked to approve), the

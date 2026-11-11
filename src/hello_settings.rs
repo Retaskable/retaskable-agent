@@ -52,6 +52,10 @@ pub const FLAG: &str = "machine-settings";
 /// The release flag that shows the CI slots setting (agent-ci.md); Off leaves the hello and the page as they were.
 pub const CI_FLAG: &str = "agent-ci";
 
+/// The release flag that sends the setup checks in the hello (first-run-check.md section 3.1); Off leaves the hello as it was.
+/// The flag client's `PROJECT_ID` and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
+pub const CHECKS_FLAG: &str = "setup-check-command";
+
 #[derive(Clone)]
 struct Source {
     dir: PathBuf,
@@ -106,6 +110,19 @@ impl HelloSettings {
             Some(s) => s.flags.on(FLAG).await,
             None => false,
         }
+    }
+
+    /// Whether the `setup-check-command` flag is On, asking again when the last answer is stale; no source means Off.
+    pub async fn setup_checks_on(&self) -> bool {
+        match &self.source {
+            Some(s) => s.flags.on(CHECKS_FLAG).await,
+            None => false,
+        }
+    }
+
+    /// The `setup-check-command` flag at the last answer, without asking; Off until there is one.
+    pub fn setup_checks_now(&self) -> bool {
+        self.source.as_ref().is_some_and(|s| s.flags.last(CHECKS_FLAG))
     }
 
     /// The same from the last answer, without asking (for code that isn't async); Off until there is one.
@@ -172,8 +189,6 @@ fn from_config(cfg: &config::ConfigFile, s: &Source) -> Map<String, Value> {
     let Value::Object(out) = json!({
         "dailyUsd": m.budget.daily_usd,
         "concurrency": m.concurrency,
-        "autoConcurrency": { "enabled": m.auto_concurrency.enabled, "min": m.auto_concurrency.min, "max": m.auto_concurrency.max,
-            "targetPct": m.auto_concurrency.target_pct, "weekMarginPct": m.auto_concurrency.week_margin_pct, "weekFloor": m.auto_concurrency.week_floor },
         "modelConcurrency": { "opus": m.model_concurrency.opus, "sonnet": m.model_concurrency.sonnet },
         "models": {
             "opusAbovePct": m.models.opus_above_pct,
@@ -192,4 +207,59 @@ fn from_config(cfg: &config::ConfigFile, s: &Source) -> Map<String, Value> {
         unreachable!()
     };
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_vars_json_lists_every_name_with_whether_it_is_set_never_the_value() {
+        let env = Env::from_pairs([("RETASKABLE_PORT", "4567"), ("RETASKABLE_NETWORK_PASSWORD", "hunter2")]);
+        let v = env_vars_json(&env);
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), AGENT_ENV_VARS.len());
+        for name in AGENT_ENV_VARS {
+            let set = name == "RETASKABLE_PORT" || name == "RETASKABLE_NETWORK_PASSWORD";
+            assert_eq!(obj[name], Value::Bool(set), "{name}");
+        }
+        assert!(!v.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn env_vars_json_is_all_false_for_an_empty_env() {
+        let v = env_vars_json(&Env::empty());
+        assert!(v.as_object().unwrap().values().all(|b| *b == Value::Bool(false)));
+    }
+
+    #[tokio::test]
+    async fn without_a_source_everything_is_off_and_nothing_is_read() {
+        let h = HelloSettings::default();
+        assert!(!h.on().await);
+        assert!(!h.setup_checks_on().await);
+        assert!(!h.setup_checks_now());
+        assert!(!h.on_now());
+        assert!(!h.snapshot_reporting_on());
+        assert!(h.dir().is_none());
+        assert!(h.json().await.is_none());
+        assert_eq!(h.spend_today("any"), (0.0, 0.0));
+    }
+
+    #[test]
+    fn fire_wakes_subscribers_of_every_clone() {
+        let h = HelloSettings::default();
+        let clone = h.clone();
+        let mut rx = h.subscribe();
+        assert!(!rx.has_changed().unwrap());
+        clone.fire();
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), 1);
+        h.fire();
+        assert_eq!(*rx.borrow_and_update(), 2);
+    }
+
+    #[test]
+    fn all_hello_settings_compare_equal() {
+        assert_eq!(HelloSettings::default(), HelloSettings::default());
+    }
 }

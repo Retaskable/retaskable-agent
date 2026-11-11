@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-pub use concurrency::{AutoConcurrency, ModelConcurrency};
+pub use concurrency::ModelConcurrency;
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
     ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
@@ -28,8 +28,8 @@ pub(crate) use machine::{
     valid_local_url, valid_model_name,
 };
 pub use project::{
-    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, LighthouseConfig, OnOff, Plans, Playtests,
-    ProjectBudget, ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
+    CheckConfig, CodeGates, DeployConfig, DeployTarget, LighthouseConfig, OnOff, Plans, Playtests, ProjectBudget,
+    ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
@@ -62,7 +62,7 @@ pub fn load(dir: &Path) -> Result<ConfigFile> {
 /// from an empty version 2 file rather than an empty object: an empty object has no `"version"`
 /// key, so `parse` would read it back as a version 1 single project with an empty `repoPath`,
 /// conjuring a phantom project out of the first setting anyone saves. Used by the settings page's
-/// save paths, which change only the machine's own settings.
+/// save paths, which change the machine's own settings and a project's `engines.allow`.
 pub fn save_machine_settings(dir: &Path, patch: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
     save_with(dir, RETIRE_PROJECT_LANES.load(Ordering::Relaxed), patch)
 }
@@ -192,9 +192,9 @@ fn fallback_lanes(projects: &[Value]) -> u32 {
         .iter()
         .flat_map(|p| [p.get("lanes"), p.get("migrated").and_then(|m| m.get("lanes"))])
         .filter_map(|v| v.and_then(Value::as_u64))
+        .filter_map(|n| u32::try_from(n).ok())
         .filter(|&n| n >= 1)
         .max()
-        .map(|n| n as u32)
         .unwrap_or_else(|| MachineConfig::default().lanes)
 }
 
@@ -446,14 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn galleries_default_to_models_and_ui_and_other_optional_fields_take_their_defaults() {
+    fn optional_fields_take_their_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.json"), r#"{"repoPath":"C:/code/x"}"#).unwrap();
         let cfg = load(dir.path()).unwrap();
         let p = &cfg.projects[0];
-        assert_eq!(p.galleries.len(), 2);
-        assert_eq!(p.galleries[0].name, "Models");
-        assert_eq!(p.galleries[1].name, "UI");
         assert_eq!(p.max_conflict_rounds, 5);
         assert_eq!(p.max_check_rounds, 3);
         assert!(!p.require_ci);
@@ -508,5 +505,16 @@ mod tests {
         assert_eq!(data_dir(&Env::empty()), PathBuf::from(".retaskable"));
         let env = Env::from_pairs([("RETASKABLE_DATA_DIR", "x")]);
         assert_eq!(data_dir(&env), PathBuf::from("x"));
+    }
+
+    #[test]
+    fn a_lanes_count_too_big_for_u32_is_ignored_not_wrapped_to_a_small_one() {
+        // 2^32 + 1 used to wrap to 1 lane.
+        let projects = [json!({ "lanes": 4_294_967_297u64 }), json!({ "lanes": 3 })];
+        assert_eq!(fallback_lanes(&projects), 3);
+        assert_eq!(
+            fallback_lanes(&[json!({ "lanes": 4_294_967_297u64 })]),
+            MachineConfig::default().lanes
+        );
     }
 }

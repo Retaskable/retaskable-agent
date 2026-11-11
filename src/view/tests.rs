@@ -8,25 +8,12 @@ fn project(id: &str, repo: &str) -> ProjectView {
         repo_path: PathBuf::new(),
         worktrees_dir: PathBuf::new(),
         base_branch: "main".into(),
-        galleries: vec![],
         play_command: String::new(),
     }
 }
 
 fn view(projects: Vec<ProjectView>) -> AgentView {
     crate::test_support::agent_view(vec!["windows".into()], projects, "1.2.3", 3)
-}
-
-#[test]
-fn snapshot_reports_the_paced_number_and_reason_only_while_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let v = view(vec![]);
-    let usage = || v.snapshot("", dir.path())["state"]["usage"].clone();
-    assert_eq!(usage(), json!({}));
-    v.item_commands.set_auto(Some((2, "On pace".into())));
-    assert_eq!(usage(), json!({"autoConcurrency": {"allowed": 2, "reason": "On pace"}}));
-    v.item_commands.set_auto(None);
-    assert_eq!(usage(), json!({}));
 }
 
 #[test]
@@ -113,7 +100,7 @@ async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its
     let hello = v.hello("").await;
     let s = &hello["settings"];
     assert_eq!(s["concurrency"], 1);
-    assert_eq!(s["autoConcurrency"]["enabled"], true);
+    assert!(s.get("autoConcurrency").is_none());
     assert_eq!(s["models"]["opusAbovePct"], 50);
     assert_eq!(s["port"], 4700);
     assert_eq!(s["lanes"], 2);
@@ -159,6 +146,45 @@ async fn hello_names_the_project_or_null_before_setup_or_without_a_repo() {
     assert!(v.hello("unknown").await["project"].is_null());
 }
 
+fn view_with_checks_flag(on: bool) -> AgentView {
+    let mut v = view(vec![project("a", "o/a")]);
+    v.settings = crate::hello_settings::HelloSettings::new(
+        PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        Arc::new(crate::flags::Flags::fixed(if on {
+            &["setup-check-command"]
+        } else {
+            &[]
+        })),
+    );
+    v
+}
+
+#[tokio::test]
+async fn hello_has_no_checks_until_the_first_run_then_carries_them_with_node() {
+    let v = view_with_checks_flag(true);
+    for id in ["", "a"] {
+        assert!(v.hello(id).await.get("checks").is_none());
+    }
+    v.checks.run_now().await;
+    for id in ["", "a"] {
+        let checks = &v.hello(id).await["checks"];
+        assert_eq!(checks["node"]["ok"], true);
+        assert!(checks["ghInstalled"].is_object());
+        assert!(checks["claudeSignedIn"].is_object());
+    }
+}
+
+#[tokio::test]
+async fn hello_has_no_checks_while_the_setup_check_command_flag_is_off() {
+    let v = view_with_checks_flag(false);
+    v.checks.run_now().await;
+    for id in ["", "a"] {
+        assert!(v.hello(id).await.get("checks").is_none());
+    }
+}
+
 #[test]
 fn snapshot_before_setup_says_setup() {
     let snap = view(vec![]).snapshot("", Path::new("."));
@@ -166,7 +192,7 @@ fn snapshot_before_setup_says_setup() {
         snap["state"]["orchestrator"],
         json!({ "status": "setup", "machine": "pc" })
     );
-    assert_eq!(snap["state"]["galleries"], json!([]));
+    assert!(snap["state"].get("galleries").is_none());
 }
 
 #[test]
@@ -349,12 +375,6 @@ fn snapshot_reporting_gives_the_orchestrator_status_from_the_loop() {
     );
     v.paused.set("a", None);
     v.live.set_limit("a", None);
-    v.item_commands.set_auto(Some((2, "On pace".into())));
-    assert_eq!(
-        orch(&v)["concurrency"],
-        2,
-        "auto concurrency's number once it has stepped"
-    );
     assert_eq!(
         v.snapshot("", Path::new("."))["state"]["orchestrator"]["status"],
         "setup"
@@ -386,11 +406,7 @@ fn snapshot_reporting_reports_todays_spend_and_the_daily_budget() {
 fn snapshot_reporting_adds_the_usage_windows_from_the_projects_state() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
-    let soon = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-        + 3600;
+    let soon = crate::telemetry::now_secs() + 3600;
     store.set_usage(json!({"utilization": 0.25, "status": "allowed", "resetsAt": soon}));
     store.set_week_usage(json!({"rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": soon}));
     store.save().unwrap();
@@ -530,4 +546,195 @@ fn project_view_derives_its_id_from_the_config() {
         ..ProjectConfig::default()
     };
     assert_eq!(ProjectView::from(&cfg).id, "custom");
+}
+
+#[test]
+fn snapshot_carries_commands_waiting_only_while_one_waits_and_the_flag_is_on() {
+    use crate::backlog::settings::StoreSettings;
+    let dir = tempfile::tempdir().unwrap();
+    let v = view(vec![]);
+    let waiting = || v.snapshot("p", dir.path())["state"].get("commandsWaiting").cloned();
+    let store = |version: u64, play: &str| -> StoreSettings {
+        serde_json::from_value(json!({
+            "version": version, "commandsVersion": version, "updatedBy": "ann",
+            "values": { "playCommand": play },
+        }))
+        .unwrap()
+    };
+    let file = crate::config::ProjectConfig::default();
+    let gates = v.item_commands.gates();
+    gates.open(dir.path(), "p");
+    gates.consider("p", Some(&store(1, "run it")), &file).unwrap();
+    assert_eq!(waiting(), None, "flag Off");
+    v.item_commands.set_flag("p", crate::command_gate::FLAG, true);
+    let w = waiting().expect("waiting");
+    assert_eq!((w["version"].clone(), w["by"].clone()), (json!(1), json!("ann")));
+    assert!(w["text"].as_str().unwrap().contains("run it"), "{w}");
+    assert!(w.get("values").is_none());
+    gates.approve("p", 1).unwrap();
+    assert_eq!(waiting(), None, "approved");
+}
+
+fn pause_block(live: bool, obey: bool, store: StorePause, computer: bool) -> Value {
+    let v = reporting_view(true);
+    if live {
+        v.live.register("a");
+    }
+    v.item_commands.set_flag("a", OBEY_SHARED_PAUSE_FLAG, obey);
+    v.store_paused.set("a", store);
+    v.paused
+        .set("a", computer.then(|| "Paused from retaskable.com by sam".to_string()));
+    v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone()
+}
+
+#[test]
+fn obey_shared_pause_reports_which_pause_is_on_in_both_blocks() {
+    let words = || StorePause::Paused("Paused by @james for everyone".into());
+    for live in [true, false] {
+        let reason = |b: Value| b["pausedReason"].clone();
+        assert_eq!(
+            reason(pause_block(live, true, words(), false)),
+            "Paused by @james for everyone"
+        );
+        assert_eq!(
+            reason(pause_block(live, true, StorePause::NotPaused, true)),
+            "This computer is paused"
+        );
+        assert_eq!(
+            reason(pause_block(live, true, words(), true)),
+            "Paused by @james for everyone"
+        );
+        assert_eq!(
+            reason(pause_block(live, true, StorePause::Unknown, true)),
+            "This computer is paused"
+        );
+        let neither = pause_block(live, true, StorePause::NotPaused, false);
+        let unknown = pause_block(live, true, StorePause::Unknown, false);
+        assert_eq!(neither, unknown, "an unknown store pause alone isn't paused");
+        if live {
+            assert_eq!(neither["status"], "running");
+        } else {
+            assert_eq!(reason(neither), NO_WORK_YET);
+        }
+        // Off: the old output, the store's pause ignored and this computer's own reason kept.
+        assert_eq!(
+            reason(pause_block(live, false, words(), true)),
+            "Paused from retaskable.com by sam"
+        );
+        assert_eq!(
+            pause_block(live, false, words(), false).get("pausedReason").is_some(),
+            !live
+        );
+    }
+}
+
+fn item_play(project: &str, lane: u32) -> ItemCommand {
+    ItemCommand::Play {
+        project: project.into(),
+        lane,
+    }
+}
+
+fn item_skip(project: &str, item: &str) -> ItemCommand {
+    ItemCommand::Skip {
+        project: project.into(),
+        item: item.into(),
+    }
+}
+
+#[test]
+fn take_and_take_lane_split_a_projects_queue_and_leave_other_projects_alone() {
+    let q = ItemCommands::default();
+    q.push(item_skip("one", "a"));
+    q.push(item_play("one", 2));
+    q.push(item_skip("two", "x"));
+    q.push(ItemCommand::Stop {
+        project: "one".into(),
+        lane: 2,
+    });
+    q.push(item_skip("one", "b"));
+    assert_eq!(q.take("one"), vec![item_skip("one", "a"), item_skip("one", "b")]);
+    assert!(q.take("one").is_empty());
+    assert_eq!(
+        q.take_lane("one"),
+        vec![
+            item_play("one", 2),
+            ItemCommand::Stop {
+                project: "one".into(),
+                lane: 2
+            }
+        ]
+    );
+    assert_eq!(q.take("two"), vec![item_skip("two", "x")]);
+    assert!(q.take_lane("two").is_empty());
+}
+
+#[test]
+fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
+    let q = ItemCommands::default();
+    let draft = |p: &str, d: &str| DraftCommand::Discard {
+        project: p.into(),
+        draft: d.into(),
+    };
+    q.push_draft(draft("one", "1"));
+    q.push_draft(draft("two", "2"));
+    q.push_draft(DraftCommand::Merge {
+        project: "one".into(),
+        draft: "3".into(),
+    });
+    assert_eq!(
+        q.take_drafts("one"),
+        vec![
+            draft("one", "1"),
+            DraftCommand::Merge {
+                project: "one".into(),
+                draft: "3".into()
+            }
+        ]
+    );
+    assert_eq!(q.take_drafts("two"), vec![draft("two", "2")]);
+
+    let idea = |p: &str, id: &str| IdeaCommand {
+        project: p.into(),
+        command_id: id.into(),
+        idea: "i".into(),
+        by: "me".into(),
+    };
+    q.push_idea(idea("one", "a"));
+    q.push_idea(idea("two", "b"));
+    q.push_idea(idea("one", "c"));
+    let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
+    assert_eq!(ids, ["a", "c"]);
+    assert_eq!(q.take_ideas("two").len(), 1);
+}
+
+#[test]
+fn flags_are_per_project_and_per_flag_and_can_be_turned_off() {
+    let q = ItemCommands::default();
+    assert!(!q.flag_on("one", "some-flag"));
+    q.set_flag("one", "some-flag", true);
+    assert!(q.flag_on("one", "some-flag"));
+    assert!(!q.flag_on("two", "some-flag"));
+    assert!(!q.flag_on("one", "other-flag"));
+    assert!(!q.ask_on("one"));
+    q.set_ask_on("one", true);
+    assert!(q.ask_on("one"));
+    q.set_flag("one", "some-flag", false);
+    assert!(!q.flag_on("one", "some-flag"));
+    assert!(q.ask_on("one"));
+}
+
+#[test]
+fn answer_goes_up_the_projects_connection_and_is_dropped_once_it_is_gone() {
+    let q = ItemCommands::default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    q.answer("one", json!({"n": 0})); // no connection yet: dropped, no panic
+    q.set_out("one", Some(tx));
+    q.answer("one", json!({"n": 1}));
+    q.answer("two", json!({"n": 2}));
+    assert_eq!(rx.try_recv().unwrap(), json!({"n": 1}));
+    assert!(rx.try_recv().is_err());
+    q.set_out("one", None);
+    q.answer("one", json!({"n": 3}));
+    assert!(rx.try_recv().is_err());
 }

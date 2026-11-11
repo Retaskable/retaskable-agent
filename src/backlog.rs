@@ -15,10 +15,13 @@ pub mod asks;
 pub mod drafts;
 pub mod failures;
 pub mod runs;
+pub mod settings;
 pub mod suggestions;
 
 use crate::env::Env;
+use crate::text::{non_blank, trim_url};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -34,14 +37,25 @@ pub const DEFAULT_URL: &str = "https://backlog.retaskable.com";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// `BacklogStore.unlinkedOnSite()`: set when a store call made with this machine's own token answers
+/// `invalid_grant` (the site unlinked it). Held in memory only and never saved, so a restart links again.
+static UNLINKED_ON_SITE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the store has answered `invalid_grant` since the last link (or since this process started).
+pub fn unlinked_on_site() -> bool {
+    UNLINKED_ON_SITE.load(Ordering::SeqCst)
+}
+
+/// A link is approved or asked for by the person: forget any `invalid_grant`.
+pub fn clear_unlinked_on_site() {
+    UNLINKED_ON_SITE.store(false, Ordering::SeqCst);
+}
+
 /// The store this agent reads: `RETASKABLE_BACKLOG_URL`, else the default. No trailing slash.
 pub fn url(env: &Env) -> String {
-    let raw = env
-        .get("RETASKABLE_BACKLOG_URL")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_URL.to_string());
-    raw.trim_end_matches('/').to_string()
+    let raw = env.get("RETASKABLE_BACKLOG_URL");
+    let raw = non_blank(raw.as_deref().unwrap_or_default()).unwrap_or(DEFAULT_URL);
+    trim_url(raw).to_string()
 }
 
 /// Every agent on the shared backlog (installers/04-every-agent-on-the-shared-backlog-shared.md): starts the
@@ -65,6 +79,9 @@ pub async fn auto_link(
     if matches!(store.get(&backlog_url), Ok(Some(_))) {
         return Ok(None); // already linked
     }
+    if unlinked_on_site() {
+        return Ok(None); // the site unlinked this machine: wait for the person's `retaskable link backlog`
+    }
     let flow = link::Link {
         http,
         store: store.as_ref(),
@@ -72,7 +89,9 @@ pub async fn auto_link(
         target: link::BACKLOG_TARGET,
         second: Duration::from_secs(1),
     };
-    flow.run(&backlog_url, on_code).await.map(Some)
+    let id = flow.run(&backlog_url, on_code).await?;
+    clear_unlinked_on_site();
+    Ok(Some(id))
 }
 
 /// backlog/06.1-an-item.md: an item's status in the store.
@@ -183,8 +202,14 @@ pub struct ClaimNextAgent {
 /// to claim right now (paused, or nothing ready).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimNextAnswer {
-    Item { item: Box<Item>, token: String },
+    Item {
+        item: Box<Item>,
+        token: String,
+    },
     Nothing,
+    /// Tags the project needs that this computer lacks (`{ waitingFor }`): nothing is handed out until
+    /// `work_available`.
+    WaitingFor(Value),
 }
 
 /// What `tryout_add` sends for a merged slice's after-merge try-out (backlog/06-data-and-operations.md
@@ -419,6 +444,9 @@ impl Client {
             .await?;
         match body.value {
             None | Some(Value::Null) => Ok(ClaimNextAnswer::Nothing),
+            Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
+                Ok(ClaimNextAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
+            }
             Some(value) => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
@@ -542,6 +570,13 @@ impl Client {
             json!({ "key": key, "result": outcome, "notes": notes }),
         )
         .await?;
+        Ok(())
+    }
+
+    /// `release_playtests`: playtests were switched off, so the store lets go of every try-out in its queue and
+    /// every item it holds in `awaiting_playtest` (docs/specs/agent/06.4-playtests.md).
+    pub async fn release_playtests(&self, repo_id: u64, token: Option<&str>) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "release_playtests", json!({})).await?;
         Ok(())
     }
 
@@ -684,6 +719,9 @@ impl Client {
         let status = res.status();
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
+            if token.is_some() && body.error.as_deref() == Some("invalid_grant") {
+                UNLINKED_ON_SITE.store(true, Ordering::SeqCst);
+            }
             let message = body
                 .message
                 .or_else(|| body.error.clone())

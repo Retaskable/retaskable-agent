@@ -28,6 +28,10 @@ fn stop(project: String, lane: u32) -> ItemCommand {
     ItemCommand::Stop { project, lane }
 }
 
+fn restart(project: String, lane: u32) -> ItemCommand {
+    ItemCommand::RestartPlay { project, lane }
+}
+
 fn want() -> Want {
     Want {
         project: "p0".into(),
@@ -132,5 +136,105 @@ async fn stop_works_while_paused_and_a_play_queued_while_paused_starts_nothing()
     send(&rig, play, 1);
     rig.machine.poll().await;
     assert!(rig.machine.pool.holder(1).is_none());
+    assert_eq!(fake.games.lock().unwrap().len(), 1, "no second game");
+}
+
+#[tokio::test]
+async fn restart_stops_the_game_holds_the_lane_and_plays_again_once_it_has_closed() {
+    let (mut rig, fake) = idle(1);
+    fake.stubborn_games.store(true, Ordering::SeqCst);
+    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::AwaitingPlaytest;
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 1);
+    assert!(
+        rig.machine.pool.holder(1).is_some(),
+        "the lane stays held while the game closes"
+    );
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 1, "still waiting");
+
+    fake.games.lock().unwrap()[0].3.store(true, Ordering::SeqCst);
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 2, "the second game started");
+    assert!(matches!(rig.machine.pool.holder(1), Some(Holder::Play { .. })));
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 2, "only one restart");
+}
+
+#[tokio::test]
+async fn restart_of_an_idle_lane_plays_and_of_an_empty_or_busy_lane_starts_nothing() {
+    let (mut rig, fake) = idle(2);
+    send(&rig, restart, 2); // nothing last used it
+    rig.machine.poll().await;
+    assert!(fake.games.lock().unwrap().is_empty());
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 1);
+
+    let (mut rig, fake) = idle(1);
+    let building = Holder::Item {
+        project: "p0".into(),
+        item: "a".into(),
+    };
+    assert!(rig.machine.pool.take(1, building));
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    assert!(fake.games.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn restart_while_paused_stops_the_game_and_starts_no_new_one() {
+    let (mut rig, fake) = idle(1);
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    rig.pause("p0", true);
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    rig.machine.poll().await;
+    assert!(rig.machine.pool.holder(1).is_none());
+    assert_eq!(fake.games.lock().unwrap().len(), 1);
+    rig.pause("p0", false);
+    rig.machine.poll().await;
+    assert_eq!(
+        fake.games.lock().unwrap().len(),
+        1,
+        "the paused restart isn't remembered"
+    );
+}
+
+#[tokio::test]
+async fn a_restart_whose_game_never_closes_is_dropped_after_the_limit() {
+    let (mut rig, fake) = idle(1);
+    fake.stubborn_games.store(true, Ordering::SeqCst);
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    let old = std::time::Instant::now() - crate::play::STOP_LIMIT - std::time::Duration::from_secs(1);
+    rig.lp(0).restarting.insert(1, old);
+    rig.machine.poll().await;
+    assert!(rig.lp(0).restarting.is_empty());
+    fake.games.lock().unwrap()[0].3.store(true, Ordering::SeqCst);
+    rig.machine.poll().await;
+    assert_eq!(fake.games.lock().unwrap().len(), 1, "no second game");
+}
+
+#[tokio::test]
+async fn a_stop_after_a_restart_cancels_it() {
+    let (mut rig, fake) = idle(1);
+    fake.stubborn_games.store(true, Ordering::SeqCst);
+    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::AwaitingPlaytest;
+    send(&rig, play, 1);
+    rig.machine.poll().await;
+    send(&rig, restart, 1);
+    rig.machine.poll().await;
+    send(&rig, stop, 1);
+    rig.machine.poll().await;
+    fake.games.lock().unwrap()[0].3.store(true, Ordering::SeqCst);
+    rig.machine.poll().await;
+    rig.machine.poll().await;
     assert_eq!(fake.games.lock().unwrap().len(), 1, "no second game");
 }

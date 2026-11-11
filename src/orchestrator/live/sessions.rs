@@ -153,6 +153,11 @@ impl Sessions {
         self.lock().limits.clone()
     }
 
+    /// Whether Claude is limited on this computer now (`EngineLimits::claude_at_limit`).
+    pub fn claude_at_limit(&self) -> bool {
+        self.lock().limits.claude_at_limit(Instant::now())
+    }
+
     /// Adds a row; it goes when the returned guard drops.
     pub fn register(&self, info: SessionInfo) -> SessionGuard {
         let now = Instant::now();
@@ -361,11 +366,7 @@ mod tests {
     async fn a_rejected_reading_sets_the_reset() {
         let s = Sessions::default();
         s.limits().record_any_role(true);
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600;
+        let at = u64::try_from(crate::telemetry::now_secs()).unwrap() + 600;
         let usage = serde_json::json!({"status": "rejected", "resetsAt": at});
         end_in_scope(&s, EngineId::Claude, ended(true, Some(usage))).await;
         let now = Instant::now();
@@ -381,11 +382,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 86_400;
+        let at = u64::try_from(crate::telemetry::now_secs()).unwrap() + 86_400;
         let usage = |u: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": at}}});
         for (on, u, engine, limited) in [
             (true, 0.96, EngineId::Claude, true),

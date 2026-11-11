@@ -2,6 +2,7 @@
 //! Credential Manager, macOS Keychain, the Secret Service on Linux), or, on a machine with none that works, such as
 //! a Docker container (docker.md section 4), one file in the data folder readable by this user only.
 use crate::env::Env;
+use crate::text::is_blank;
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ pub fn credentials_file(data_dir: &Path) -> PathBuf {
 /// credential store when it works, else in the data folder's file. The override keeps an agent started to check a
 /// build off this computer's own link (credentials.ts `credentialsFileOverride`).
 pub fn keychain(data_dir: &Path, env: &Env) -> Arc<dyn TokenStore> {
-    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !f.trim().is_empty()) {
+    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !is_blank(f)) {
         return Arc::new(FileStore::new(PathBuf::from(file.trim()), KEYCHAIN_SERVICE));
     }
     if os_store_works() {
@@ -41,7 +42,7 @@ pub fn keychain(data_dir: &Path, env: &Env) -> Arc<dyn TokenStore> {
 
 /// The line at start on a machine using a file, else None (credentials.ts `credentialFileNote`).
 pub fn credential_file_note(data_dir: &Path, env: &Env) -> Option<String> {
-    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !f.trim().is_empty()) {
+    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !is_blank(f)) {
         return Some(format!(
             "Link tokens and keys are kept in {} (RETASKABLE_CREDENTIALS_FILE), not the OS credential store.",
             file.trim()

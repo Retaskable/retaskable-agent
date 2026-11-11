@@ -9,9 +9,9 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 
 /// What the fake host was asked, and what it answers.
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     answers: Mutex<Vec<Value>>,
-    jobs: Mutex<Vec<(String, bool, String)>>,
+    pub(super) jobs: Mutex<Vec<(String, bool, String)>>,
     engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
     published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
@@ -574,4 +574,31 @@ async fn a_draft_report_the_store_refuses_is_logged_as_a_store_error_for_the_dra
     assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
     assert_eq!(logged[0]["item"], "d1");
     assert_eq!(logged[0]["code"], "boom");
+}
+
+/// `local-limit-fallback`: Claude at its usage limit holds a draft only without the flag, the model, or sign-in.
+#[tokio::test]
+async fn at_the_limit_a_draft_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for (fallback, model, signed_out, starts) in [
+        (true, LocalModel::up(), false, true),
+        (false, LocalModel::up(), false, false),
+        (true, LocalModel::off(), false, false),
+        (true, LocalModel::up(), true, false),
+    ] {
+        crate::tiers::set_local_ladder_for_test(true);
+        crate::tiers::set_local_limit_fallback_for_test(fallback);
+        let (mut rig, host, _asked) = rig_with(claimed(), vec![charts()]).await;
+        start_rules(&mut rig, &["ask-claude"], json!({}), signed_out, false);
+        rig.machine.local = model;
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Claude, out_for(600));
+        for _ in 0..4 {
+            rig.machine.pass().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let case = (fallback, signed_out);
+        assert_eq!(host.engines.lock().unwrap().len(), usize::from(starts), "{case:?}");
+    }
 }

@@ -37,7 +37,7 @@ use crate::implementer::{
     new_session_id, run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
-use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
+use crate::item_lifecycle::ImplementerOutcome;
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
 use crate::tiers::{LOCAL, implementer_model, implementer_tier};
@@ -283,7 +283,7 @@ impl SessionStarter for ClaudeStarter {
     }
 
     /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
-    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         None
     }
 }
@@ -423,10 +423,9 @@ async fn attempt(
         ..
     } = job;
     let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
-    let cursor = placed.cursor.map(|c| crate::engines::engine::CursorOptions {
-        cli: (!project.github_repo.is_empty()).then(|| "gh".to_string()),
-        ..c
-    });
+    let cursor = placed
+        .cursor
+        .map(|c| crate::engines::cursor::with_project_or_gh(project, c));
     let now = crate::telemetry::now_ms() / 1000;
     // Only a Claude session behind the `local-tier-ladder` flag may use the local model; its slot is held until
     // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
@@ -441,7 +440,9 @@ async fn attempt(
     let tier = if up && (if resumed { was_local } else { job.wants_local }) {
         LOCAL
     } else {
-        implementer_tier(usage.as_ref(), now, models, up && !resumed)
+        // Claude at its limit reads as the floor tier for a fresh session only (`local-limit-fallback`).
+        let floored = crate::tiers::limit_floor(usage.as_ref(), !resumed && sessions.claude_at_limit(), up);
+        implementer_tier(floored.as_ref(), now, models, up && !resumed)
     };
     let local_run = if tier == LOCAL {
         Some(job.local.run().await)

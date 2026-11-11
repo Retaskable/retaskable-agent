@@ -9,8 +9,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::config::{GalleryConfig, ProjectConfig};
-use crate::galleries;
+use crate::config::ProjectConfig;
 use crate::hello_settings::HelloSettings;
 
 mod cursor;
@@ -37,7 +36,7 @@ pub struct AgentView {
     /// `link::machine_name`.
     pub machine: String,
     /// This computer's tags (computer-tags.md section 3.1).
-    pub tags: Vec<String>,
+    pub tags: crate::tags::LiveTags,
     /// The projects, the first first; none before Setup.
     pub projects: Vec<ProjectView>,
     /// This crate's version in a checkout, or a release build's `build.json` one
@@ -51,6 +50,9 @@ pub struct AgentView {
     /// Each paused project's reason, Pause and Resume's (orchestrator.ts's `paused`/`pausedReason`); a change
     /// sends that project's snapshot again, as a lane-size change does.
     pub paused: PauseState,
+    /// Each project's pause as the shared backlog's store says it (`obey-shared-pause`); a change sends that
+    /// project's snapshot again.
+    pub store_paused: StorePauseState,
     /// Item commands (Continue) the connector's thread hands to the orchestrator loop.
     pub item_commands: ItemCommands,
     /// Each project's `work_available` wake-up for its run loop.
@@ -63,6 +65,10 @@ pub struct AgentView {
     pub local: crate::local_model::LocalModel,
     /// What the orchestrator loops are doing, for the snapshot's orchestrator block.
     pub live: crate::orchestrator::live::LiveHandle,
+    /// The setup checks' runner (first-run-check.md section 3.1), for `hello` and commands.
+    pub checks: Arc<crate::setup_check::SetupCheckRunner>,
+    /// The GitHub login of this computer's `gh`: the owner `approve_commands` is checked against. Read once.
+    pub owner: Arc<std::sync::OnceLock<String>>,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
@@ -81,19 +87,28 @@ pub enum ItemCommand {
         item: String,
         notes: Option<String>,
     },
+    /// A person's answer to the playtest of item `id`; `notes` carry any picture paths.
+    Playtest {
+        project: String,
+        id: String,
+        passed: bool,
+        notes: Option<String>,
+        /// When the item merged, for a deferred playtest's try-out key `<id>@<mergedAt>`.
+        merged_at: Option<String>,
+    },
     /// **Skip** on a stopped item: it's let go and skipped in the store, its branch kept.
     Skip { project: String, item: String },
     /// **Play** in lane `lane` (> 0), decided by the loop, which owns the lanes.
     Play { project: String, lane: u32 },
     /// **Stop** the game in lane `lane`.
     Stop { project: String, lane: u32 },
-    /// **Generate ideas** (`ideas_generate { fresh }`): one non-quiet ideas round; `fresh` drops the waiting ideas first.
-    Ideas { project: String, fresh: bool },
+    /// **Restart** the game in lane `lane`: stop it if one runs, then play again.
+    RestartPlay { project: String, lane: u32 },
 }
 
 impl ItemCommand {
     fn is_lane(&self) -> bool {
-        matches!(self, Self::Play { .. } | Self::Stop { .. })
+        matches!(self, Self::Play { .. } | Self::Stop { .. } | Self::RestartPlay { .. })
     }
 
     fn project(&self) -> &str {
@@ -101,9 +116,10 @@ impl ItemCommand {
             Self::Continue { project, .. }
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
+            | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
-            | Self::Ideas { project, .. } => project,
+            | Self::RestartPlay { project, .. } => project,
         }
     }
 }
@@ -154,10 +170,10 @@ pub struct ItemCommands {
     /// The `(project, flag)` pairs On, set by the loop each pass.
     flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
-    /// The number auto concurrency last allowed and why; `None` while it is Off or has not stepped yet.
-    auto: Arc<std::sync::Mutex<Option<(u32, String)>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
+    /// Each project's allowed commands (`approve-commands-gate`), kept by its loop.
+    gates: crate::command_gate::CommandGates,
 }
 
 impl PartialEq for ItemCommands {
@@ -174,6 +190,29 @@ impl ItemCommands {
 
     pub fn claim(&self) -> bool {
         self.claim.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A project's `cfg` as it may run: with the allowed commands over it while `approve-commands-gate` is On for
+    /// it, else as given. Everything that runs a project command takes its config through here.
+    pub fn allowed_config(&self, project: &str, cfg: &ProjectConfig) -> ProjectConfig {
+        if self.flag_on(project, crate::command_gate::FLAG) {
+            self.gates.config(project, cfg)
+        } else {
+            cfg.clone()
+        }
+    }
+
+    /// [`allowed_config`](Self::allowed_config) for a project as the connector holds it.
+    pub fn allowed_view(&self, project: &ProjectView) -> ProjectView {
+        if self.flag_on(&project.id, crate::command_gate::FLAG) {
+            self.gates.view(project)
+        } else {
+            project.clone()
+        }
+    }
+
+    pub fn gates(&self) -> &crate::command_gate::CommandGates {
+        &self.gates
     }
 
     pub fn push(&self, command: ItemCommand) {
@@ -206,15 +245,6 @@ impl ItemCommands {
     pub fn flag_on(&self, project: &str, flag: &'static str) -> bool {
         let set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
         set.contains(&(project.to_string(), flag))
-    }
-
-    /// Set by the loop (`driver/auto.rs`) for the snapshot's `usage.autoConcurrency`.
-    pub fn set_auto(&self, auto: Option<(u32, String)>) {
-        *self.auto.lock().unwrap_or_else(|e| e.into_inner()) = auto;
-    }
-
-    pub fn auto(&self) -> Option<(u32, String)> {
-        self.auto.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn push_idea(&self, command: IdeaCommand) {
@@ -335,18 +365,70 @@ impl PauseState {
     }
 }
 
+/// The release flag that has the loop read the shared backlog's pause each pass.
+pub const OBEY_SHARED_PAUSE_FLAG: &str = "obey-shared-pause";
+
+/// What the store says about a project's own pause.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum StorePause {
+    NotPaused,
+    /// Paused, in the store's own words.
+    Paused(String),
+    /// The store wasn't reached, or wasn't asked.
+    #[default]
+    Unknown,
+}
+
+/// Each project's [`StorePause`], kept and watched like [`PauseState`]: a change resends the project's snapshot.
+/// A project with nothing recorded is [`StorePause::Unknown`].
+#[derive(Debug, Clone)]
+pub struct StorePauseState(Arc<watch::Sender<BTreeMap<String, StorePause>>>);
+
+impl Default for StorePauseState {
+    fn default() -> Self {
+        Self(Arc::new(watch::Sender::new(BTreeMap::new())))
+    }
+}
+
+impl PartialEq for StorePauseState {
+    fn eq(&self, other: &Self) -> bool {
+        *self.0.borrow() == *other.0.borrow()
+    }
+}
+
+impl StorePauseState {
+    pub fn get(&self, project: &str) -> StorePause {
+        self.0.borrow().get(project).cloned().unwrap_or_default()
+    }
+
+    pub fn set(&self, project: &str, pause: StorePause) {
+        self.0.send_if_modified(|all| {
+            if pause == StorePause::Unknown {
+                return all.remove(project).is_some();
+            }
+            if all.get(project) == Some(&pause) {
+                return false;
+            }
+            all.insert(project.to_string(), pause);
+            true
+        });
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<BTreeMap<String, StorePause>> {
+        self.0.subscribe()
+    }
+}
+
 /// A project as its hub knows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectView {
     pub id: String,
     pub github_repo: String,
     pub backlog_path: String,
-    /// What the Shoot command needs to run `galleries::shoot` (`commands.rs`): the base checkout's
-    /// own clone, where its worktrees go, which branch is the base, and the project's own galleries.
+    /// The base checkout's own clone, where its worktrees go, and which branch is the base.
     pub repo_path: PathBuf,
     pub worktrees_dir: PathBuf,
     pub base_branch: String,
-    pub galleries: Vec<GalleryConfig>,
     /// Play main's command (`commands.rs`'s `play`).
     pub play_command: String,
 }
@@ -360,7 +442,6 @@ impl From<&ProjectConfig> for ProjectView {
             repo_path: PathBuf::from(&p.repo_path),
             worktrees_dir: PathBuf::from(&p.worktrees_dir),
             base_branch: p.base_branch.clone(),
-            galleries: p.galleries.clone(),
             play_command: p.play_command.clone(),
         }
     }
@@ -372,20 +453,32 @@ impl AgentView {
     pub(crate) fn blank() -> Self {
         Self {
             machine: "pc".into(),
-            tags: vec![],
+            tags: Default::default(),
             projects: vec![],
             version: "1".into(),
             lanes: 1,
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            store_paused: Default::default(),
             item_commands: Default::default(),
             work: Default::default(),
             restart: Default::default(),
             settings: Default::default(),
             local: Default::default(),
             live: Default::default(),
+            checks: Default::default(),
+            owner: Default::default(),
         }
+    }
+
+    /// This computer's owner (`repo::github_login`), read on first use; `None` while `gh` can't say.
+    pub fn owner(&self) -> Option<String> {
+        if let Some(o) = self.owner.get() {
+            return Some(o.clone());
+        }
+        let login = crate::repo::github_login()?;
+        Some(self.owner.get_or_init(|| login).clone())
     }
 
     /// The hubs to connect to: each project's by its id, or the agent's own ("") before the first project.
@@ -412,7 +505,7 @@ impl AgentView {
             "capabilities": [],
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
-            "tags": self.tags,
+            "tags": self.tags.get(),
         });
         if self.settings.on().await {
             hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
@@ -420,12 +513,16 @@ impl AgentView {
         if let Some(settings) = self.settings.json().await {
             hello["settings"] = settings;
         }
+        if self.settings.setup_checks_on().await
+            && let Some(checks) = self.checks.latest()
+        {
+            hello["checks"] = checks.to_json();
+        }
         hello
     }
 
     /// The project's snapshot (cloud.md section 5.2): every list the hub needs. Most are still
-    /// empty, since this agent runs no work yet, but a project's galleries report their real
-    /// status and last shoot (agent/09-web-ui.md section 9.2), and an orchestrator that says so.
+    /// empty, since this agent runs no work yet, and an orchestrator that says so.
     pub fn snapshot(&self, project: &str, data_dir: &Path) -> Value {
         let orchestrator = self.orchestrator_block(project);
         let mut state = json!({
@@ -436,7 +533,6 @@ impl AgentView {
                 "sessions": [],
                 "lanes": self.lanes_list(project),
                 "mainPlaying": self.settings.snapshot_reporting_on() && crate::play::running(project),
-                "galleries": self.galleries_list(project, data_dir),
                 "drafts": [],
                 "asks": [],
         });
@@ -453,16 +549,26 @@ impl AgentView {
         if let Some(cursor) = self.cursor_usage() {
             state["usage"]["cursor"] = cursor;
         }
-        if let Some((allowed, reason)) = self.item_commands.auto() {
-            state["usage"]["autoConcurrency"] = json!({ "allowed": allowed, "reason": reason });
-        }
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
         }
         if let Some(smoke) = self.smoke_json(project, data_dir) {
             state["smoke"] = smoke;
         }
+        if let Some(waiting) = self.commands_waiting_json(project) {
+            state["commandsWaiting"] = waiting;
+        }
         json!({ "type": "snapshot", "state": state })
+    }
+
+    /// The snapshot's `commandsWaiting`: the version of a shared project's commands that waits for the owner's
+    /// approval, with the text to show. Only with `approve-commands-gate` On; the values are never sent.
+    pub fn commands_waiting_json(&self, project: &str) -> Option<Value> {
+        if !self.item_commands.flag_on(project, crate::command_gate::FLAG) {
+            return None;
+        }
+        let w = self.item_commands.gates().waiting(project)?;
+        Some(json!({ "version": w.version, "text": w.text, "by": w.by }))
     }
 
     /// The snapshot's `items` and `milestones` (09.2): with `snapshot-reporting` On, the items this agent holds a
@@ -532,21 +638,6 @@ impl AgentView {
             trial["prUrl"] = json!(url);
         }
         Some(trial)
-    }
-
-    /// The snapshot's galleries (tray/05.3-private-galleries-and-pictures-from.md section 5.3.1):
-    /// each of the project's own galleries' [`galleries::GalleryInfo`], none before Setup.
-    fn galleries_list(&self, project: &str, data_dir: &Path) -> Vec<Value> {
-        self.projects
-            .iter()
-            .find(|p| p.id == project)
-            .map(|p| {
-                p.galleries
-                    .iter()
-                    .map(|g| json!(galleries::info(data_dir, project, g)))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.

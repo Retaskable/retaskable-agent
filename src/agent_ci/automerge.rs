@@ -140,9 +140,11 @@ struct Label {
 }
 
 async fn gh(target: &Target<'_>, args: &[&str]) -> Result<String, String> {
+    let mut all = args.to_vec();
+    all.extend(["--repo", target.github_repo]);
+    crate::host_call::guard_program(target.gh, Some(target.repo_dir), &all).map_err(|e| e.to_string())?;
     let out = tokio::process::Command::new(target.gh)
-        .args(args)
-        .args(["--repo", target.github_repo])
+        .args(all)
         .current_dir(target.repo_dir)
         .stdin(Stdio::null())
         .kill_on_drop(true)

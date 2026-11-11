@@ -12,7 +12,6 @@ fn view() -> AgentView {
             repo_path: PathBuf::new(),
             worktrees_dir: PathBuf::new(),
             base_branch: String::new(),
-            galleries: vec![],
             play_command: String::new(),
         }],
         version: "9.9.9".into(),
@@ -130,15 +129,6 @@ fn before_setup_only_the_exempt_commands_run() {
         &data_dir(),
     );
     assert_eq!(answer["reason"], "Finish setup first.");
-    let answer = run(
-        &cmd("setup_check", json!({})),
-        "",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &data_dir(),
-    );
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: setup_check");
 }
 
 #[test]
@@ -211,93 +201,20 @@ fn play_and_stop_of_a_lane_are_queued_for_the_loop_and_refused_past_lanes() {
 }
 
 #[test]
-fn shoot_nacks_an_unknown_gallery() {
+fn the_gallery_names_are_no_command() {
     let v = view();
     let noop = |_: i32| {};
-    let answer = run(
-        &cmd("shoot", json!({ "gallery": "intro" })),
-        "one",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &data_dir(),
-    );
-    assert_eq!(answer["reason"], "No gallery called intro.");
-}
-
-#[test]
-fn shoot_nacks_a_gallery_with_no_command_set() {
-    let mut v = view();
-    v.projects[0].galleries = vec![crate::config::GalleryConfig {
-        name: "Intro".into(),
-        command: String::new(),
-        out_dir: "shots".into(),
-    }];
-    let noop = |_: i32| {};
-    let answer = run(
-        &cmd("shoot", json!({ "gallery": "intro" })),
-        "one",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &data_dir(),
-    );
-    assert_eq!(answer["reason"], "No command set for this gallery.");
-}
-
-#[cfg(windows)]
-fn copy_fixture_command() -> String {
-    "mkdir shots && copy fixture.png shots\\01-first.png".to_string()
-}
-#[cfg(not(windows))]
-fn copy_fixture_command() -> String {
-    "mkdir -p shots && cp fixture.png shots/01-first.png".to_string()
-}
-
-#[test]
-fn shoot_acks_at_once_and_runs_the_gallery_in_the_background() {
-    let root = tempfile::tempdir().unwrap();
-    let repo = crate::test_support::repo_with_origin(root.path());
-    image::DynamicImage::ImageRgb8(image::RgbImage::new(100, 20))
-        .save(repo.join("fixture.png"))
-        .unwrap();
-    crate::test_support::run(crate::test_support::git(&repo).args(["add", "fixture.png"]));
-    crate::test_support::run(crate::test_support::git(&repo).args(["commit", "--quiet", "-m", "fixture"]));
-    crate::test_support::run(crate::test_support::git(&repo).args(["push", "--quiet", "origin", "main"]));
-
-    let mut v = view();
-    v.projects[0].id = "commands-shoot-happy-path".into();
-    v.projects[0].repo_path = repo.clone();
-    v.projects[0].worktrees_dir = root.path().join("worktrees");
-    v.projects[0].base_branch = "main".into();
-    v.projects[0].galleries = vec![crate::config::GalleryConfig {
-        name: "Models".into(),
-        command: copy_fixture_command(),
-        out_dir: "shots".into(),
-    }];
-    let noop = |_: i32| {};
-    let dir = root.path().join("data");
-
-    let answer = run(
-        &cmd("shoot", json!({ "gallery": "models" })),
-        "commands-shoot-happy-path",
-        &mut Seen::default(),
-        &v,
-        &noop,
-        &dir,
-    );
-    assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
-
-    let index = dir.join("projects/commands-shoot-happy-path/galleries/models/index.json");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    while !index.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    for name in ["shoot", "gallery_index", "gallery_image", "gallery_feedback"] {
+        let answer = run(
+            &cmd(name, json!({ "gallery": "intro" })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], format!("Not a command this agent takes yet: {name}"));
     }
-    assert!(index.exists());
-    assert_eq!(
-        galleries::status("commands-shoot-happy-path", "models"),
-        galleries::GalleryStatus::Idle
-    );
 }
 
 fn claiming() -> AgentView {
@@ -452,7 +369,10 @@ fn a_bad_or_oversized_picture_nacks_and_saves_nothing() {
 #[test]
 fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
     let args = json!({ "id": "a", "pictures": [{ "type": "image/png", "data": "AAAA" }] });
-    assert_eq!(audit_args(&args)["pictures"], json!({ "count": 1, "bytes": 4 }));
+    assert_eq!(
+        audit_args("continue", &args)["pictures"],
+        json!({ "count": 1, "bytes": 4 })
+    );
 }
 
 #[test]
@@ -510,362 +430,94 @@ fn draft_edit_commits_and_pushes() {
     assert_eq!(missing["type"], "nack");
 }
 
+mod approve;
+mod more;
+mod setup_check;
+use more::run_cmd;
+
+fn logged(name: &str, args: Value) -> (String, Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let c = cmd(name, args);
+    audit(dir.path(), &c, &json!({ "type": "ack", "id": "c1" }), "wss://x");
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.trim()).unwrap();
+    (log, line["args"].clone())
+}
+
+const SECRET: &str = "hunter2-é";
+
 #[test]
-fn draft_files_nacks_an_unknown_draft() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut v = view();
-    v.projects[0].worktrees_dir = tmp.path().to_path_buf();
-    let noop = |_: i32| {};
-    for args in [json!({ "id": "9" }), json!({}), json!({ "id": "../x" })] {
-        let answer = run_cmd(&cmd("draft_files", args), &v, &noop);
-        assert_eq!(answer["type"], "nack", "{answer}");
+fn continue_retry_and_playtest_log_notes_by_size() {
+    for name in ["continue", "retry", "playtest"] {
+        let args = json!({ "id": "a", "notes": SECRET, "pictures": [{ "type": "image/png", "data": "PICDATA" }],
+            "pictureIds": ["p1", "p2"] });
+        let (log, a) = logged(name, args);
+        assert!(
+            !log.contains(SECRET) && !log.contains("PICDATA") && !log.contains("p1"),
+            "{name}: {log}"
+        );
+        assert_eq!(a["notes"], json!({ "bytes": SECRET.len() }));
+        assert_eq!(a["pictureIds"], 2);
+        assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
+        assert_eq!(a["id"], "a");
     }
 }
 
 #[test]
-fn approve_and_merge_into_main_are_queued_for_the_loop() {
+fn ask_logs_its_text_by_size_and_keeps_its_ids() {
+    let args =
+        json!({ "askId": "k", "replyTo": "r", "about": "x", "text": SECRET, "pictures": [{ "data": "PICDATA" }] });
+    let (log, a) = logged("ask", args);
+    assert!(!log.contains(SECRET) && !log.contains("PICDATA"), "{log}");
+    assert_eq!(a["text"], json!({ "bytes": SECRET.len() }));
+    assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
+    assert_eq!(
+        (&a["askId"], &a["replyTo"], &a["about"]),
+        (&json!("k"), &json!("r"), &json!("x"))
+    );
+}
+
+#[test]
+fn draft_edit_logs_its_content_by_size_and_keeps_its_path() {
+    let (log, a) = logged(
+        "draft_edit",
+        json!({ "id": "d", "path": "a.md", "branch": "b", "content": SECRET }),
+    );
+    assert!(!log.contains(SECRET), "{log}");
+    assert_eq!(
+        a,
+        json!({ "id": "d", "path": "a.md", "branch": "b", "content": { "bytes": SECRET.len() } })
+    );
+}
+
+#[test]
+fn a_typed_value_that_is_not_a_string_is_sized_zero() {
+    let (_, a) = logged("continue", json!({ "id": "a", "notes": { "secret": SECRET } }));
+    assert_eq!(a["notes"], json!({ "bytes": 0 }));
+}
+
+#[test]
+fn a_command_with_no_entry_logs_its_args_unchanged() {
+    let (_, a) = logged("skip", json!({ "id": "a" }));
+    assert_eq!(a, json!({ "id": "a" }));
+}
+
+#[test]
+fn resume_computer_leaves_the_stores_pause_alone() {
     let v = view();
     let noop = |_: i32| {};
-    let args = json!({ "draftId": "d1" });
-    assert_eq!(run_cmd(&cmd("draft_approve", args.clone()), &v, &noop)["type"], "nack");
-    v.item_commands.set_claim(true);
-    assert_eq!(run_cmd(&cmd("draft_approve", args.clone()), &v, &noop)["type"], "ack");
-    assert_eq!(run_cmd(&cmd("merge_pr", args.clone()), &v, &noop)["type"], "ack");
-    assert_eq!(run_cmd(&cmd("draft_discard", args), &v, &noop)["type"], "ack");
-    assert_eq!(run_cmd(&cmd("draft_discard", json!({})), &v, &noop)["type"], "nack");
-    assert_eq!(run_cmd(&cmd("draft_approve", json!({})), &v, &noop)["type"], "nack");
-    assert_eq!(
-        run_cmd(&cmd("merge_pr", json!({ "itemId": "x" })), &v, &noop)["type"],
-        "nack"
-    );
-    assert_eq!(
-        v.item_commands.take_drafts("one"),
-        [
-            DraftCommand::Approve {
-                project: "one".into(),
-                draft: "d1".into()
-            },
-            DraftCommand::Merge {
-                project: "one".into(),
-                draft: "d1".into()
-            },
-            DraftCommand::Discard {
-                project: "one".into(),
-                draft: "d1".into()
-            }
-        ]
-    );
-}
-
-fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {
-    run(c, "one", &mut Seen::default(), v, exit, &data_dir())
-}
-
-#[test]
-fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
-    let v = claiming();
-    let go = |v: &AgentView, args| run(&cmd("skip", args), "one", &mut Seen::default(), v, &|_| {}, &data_dir());
-    assert_eq!(go(&v, json!({ "id": " a " }))["type"], "ack");
-    assert_eq!(
-        v.item_commands.take("one"),
-        vec![ItemCommand::Skip {
-            project: "one".into(),
-            item: "a".into()
-        }]
-    );
-    let no_id = go(&v, json!({}));
-    assert_eq!(no_id["type"], "nack");
-    assert!(no_id["reason"].as_str().unwrap().contains("Skip"));
-    assert!(v.item_commands.take("one").is_empty());
-    assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
-}
-
-fn asking() -> AgentView {
-    let v = claiming();
-    v.item_commands.set_ask_on("one", true);
-    v
-}
-
-fn ask_with(v: &AgentView, args: Value, dir: &Path) -> Value {
-    run(&cmd("ask", args), "one", &mut Seen::default(), v, &|_| {}, dir)
-}
-
-#[test]
-fn ask_queues_the_message_for_the_loop_and_acks() {
-    let v = asking();
-    let answer = ask_with(
-        &v,
-        json!({ "askId": "k1", "text": " why is step 5 stuck? ", "replyTo": "k0", "about": "item-a" }),
-        &data_dir(),
-    );
-    assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
-    assert_eq!(
-        v.item_commands.take_asks("one"),
-        vec![crate::view::AskCommand {
-            project: "one".into(),
-            ask_id: "k1".into(),
-            text: "why is step 5 stuck?".into(),
-            reply_to: Some("k0".into()),
-            about: Some("item-a".into()),
-            images_block: String::new(),
-        }]
-    );
-}
-
-#[test]
-fn ask_saves_its_images_and_lists_their_paths_in_an_attached_images_block() {
-    let v = asking();
-    let dir = tempfile::tempdir().unwrap();
-    ask_with(
-        &v,
-        json!({ "askId": "k1", "text": "look", "images": [picture(10)] }),
-        dir.path(),
-    );
-    let ask = v.item_commands.take_asks("one").remove(0);
-    let saved = std::fs::read_dir(dir.path().join("attachments")).unwrap().count();
-    assert_eq!(saved, 1);
-    assert!(ask.images_block.starts_with("Attached images"));
-    assert!(ask.images_block.contains("attachments"));
-    assert!(ask.images_block.contains(".png"));
-}
-
-#[test]
-fn ask_checks_its_arguments() {
-    let v = asking();
-    let nack_of = |args: Value| {
-        ask_with(&v, args, &data_dir())["reason"]
-            .as_str()
-            .unwrap_or("")
-            .to_string()
-    };
-    assert_eq!(nack_of(json!({ "text": "hi" })), "ask needs its askId.");
-    assert_eq!(nack_of(json!({ "askId": "  ", "text": "hi" })), "ask needs its askId.");
-    assert_eq!(nack_of(json!({ "askId": "k" })), "ask needs the message's text.");
-    assert_eq!(
-        nack_of(json!({ "askId": "k", "text": " " })),
-        "ask needs the message's text."
-    );
-    assert_eq!(
-        nack_of(json!({ "askId": "k", "text": "hi", "replyTo": 3 })),
-        "ask's replyTo must be text."
-    );
-    assert_eq!(
-        nack_of(json!({ "askId": "k", "text": "hi", "images": "x" })),
-        "pictures must be a list."
-    );
-    assert!(
-        nack_of(json!({ "askId": "k", "text": "hi", "images": [json!({"type": "text/html", "data": "x"})] }))
-            .contains("isn't a PNG")
-    );
-    assert!(v.item_commands.take_asks("one").is_empty());
-}
-
-#[test]
-fn ask_is_refused_outside_claim_mode() {
-    let v = view();
-    let answer = ask_with(&v, json!({ "askId": "k", "text": "hi" }), &data_dir());
-    assert_eq!(answer["type"], "nack");
-    assert!(v.item_commands.take_asks("one").is_empty());
-}
-
-#[test]
-fn ask_is_refused_while_the_flag_is_off() {
-    let v = claiming();
-    let answer = ask_with(&v, json!({ "askId": "k", "text": "hi" }), &data_dir());
-    assert_eq!(answer["type"], "nack");
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: ask");
-    assert!(v.item_commands.take_asks("one").is_empty());
-}
-
-fn idea_accept(v: &AgentView, args: Value) -> Value {
+    v.store_paused
+        .set("one", crate::view::StorePause::Paused("Paused for everyone".into()));
     run(
-        &cmd("idea_accept", args),
+        &cmd("resume", json!({ "computer": true })),
         "one",
         &mut Seen::default(),
-        v,
-        &|_| {},
+        &v,
+        &noop,
         &data_dir(),
-    )
-}
-
-#[test]
-fn idea_accept_is_queued_for_the_loop_behind_the_flag_and_answered_later() {
-    let v = claiming();
-    let off = idea_accept(&v, json!({ "idea": "i1" }));
-    assert_eq!(off["type"], "nack");
-    assert!(off["reason"].as_str().unwrap().contains("idea_accept"));
-    v.item_commands.set_flag("one", "ideas-session", true);
+    );
     assert_eq!(
-        idea_accept(&v, json!({ "idea": "i1" }))["type"],
-        crate::commands::PENDING
+        v.store_paused.get("one"),
+        crate::view::StorePause::Paused("Paused for everyone".into())
     );
-    let queued = v.item_commands.take_ideas("one");
-    assert_eq!(queued.len(), 1);
-    assert_eq!((queued[0].idea.as_str(), queued[0].by.as_str()), ("i1", "jc"));
-    assert_eq!(idea_accept(&v, json!({ "idea": " " }))["type"], "nack");
-    assert_eq!(idea_accept(&v, json!({}))["type"], "nack");
-    assert!(v.item_commands.take_ideas("one").is_empty());
-}
-
-#[test]
-fn idea_accept_needs_claim_mode_and_not_now_and_never_are_the_sites() {
-    let v = view();
-    v.item_commands.set_flag("one", "ideas-session", true);
-    assert_eq!(idea_accept(&v, json!({ "idea": "i1" }))["type"], "nack");
-    for name in ["idea_later", "idea_never"] {
-        let answer = run(
-            &cmd(name, json!({ "idea": "i1" })),
-            "one",
-            &mut Seen::default(),
-            &v,
-            &|_| {},
-            &data_dir(),
-        );
-        assert_eq!(answer["type"], "nack");
-        assert!(answer["reason"].as_str().unwrap().contains("answers this one itself"));
-    }
-}
-
-#[test]
-fn a_settled_answer_goes_up_the_projects_open_connection() {
-    let v = claiming();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    v.item_commands.answer("one", json!({ "type": "ack", "id": "lost" }));
-    v.item_commands.set_out("one", Some(tx));
-    v.item_commands.answer("one", json!({ "type": "ack", "id": "c1" }));
-    assert_eq!(rx.try_recv().unwrap()["id"], "c1");
-    v.item_commands.set_out("one", None);
-    v.item_commands.answer("one", json!({ "type": "ack", "id": "c2" }));
-    assert!(rx.try_recv().is_err());
-}
-
-#[test]
-fn ideas_generate_queues_a_round_and_nacks_when_paused_or_not_set_up() {
-    let v = view();
-    let noop = |_: i32| {};
-    let go = |args: Value, project: &str, v: &AgentView| {
-        run(
-            &cmd("ideas_generate", args),
-            project,
-            &mut Seen::default(),
-            v,
-            &noop,
-            &data_dir(),
-        )
-    };
-    assert_eq!(go(json!({}), "one", &v)["type"], "ack");
-    assert_eq!(go(json!({ "fresh": true }), "one", &v)["type"], "ack");
-    assert_eq!(
-        v.item_commands.take("one"),
-        vec![
-            ItemCommand::Ideas {
-                project: "one".into(),
-                fresh: false
-            },
-            ItemCommand::Ideas {
-                project: "one".into(),
-                fresh: true
-            },
-        ]
-    );
-    assert_eq!(go(json!({}), "", &v)["reason"], "Finish setup first.");
-    v.paused.set("one", Some("test".into()));
-    assert_eq!(
-        go(json!({}), "one", &v)["reason"],
-        "The project is paused: resume it first."
-    );
-    assert!(v.item_commands.take("one").is_empty());
-}
-
-const SEED: &str = r#"{ "version": 2, "projects": [], "pollIntervalSec": 30, "custom": true }"#;
-
-/// A view whose settings read `dir`, with the new-hello signal's receiver.
-fn settings_view(dir: &Path) -> (AgentView, tokio::sync::watch::Receiver<u64>) {
-    let mut v = view();
-    v.settings = crate::hello_settings::HelloSettings::new(
-        dir.to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        std::sync::Arc::new(crate::flags::Flags::fixed(&["machine-settings"])),
-    );
-    let mut seen = v.settings.subscribe();
-    seen.mark_unchanged();
-    (v, seen)
-}
-
-fn send(v: &AgentView, name: &str, args: Value) -> Value {
-    run(&cmd(name, args), "one", &mut Seen::default(), v, &|_| {}, &data_dir())
-}
-
-#[test]
-fn agent_settings_is_saved_at_once_keeps_the_rest_and_fires_the_hello_signal() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("config.json");
-    std::fs::write(&file, SEED).unwrap();
-    let (v, seen) = settings_view(dir.path());
-    let answer = send(&v, "agent_settings", json!({ "dailyUsd": 12 }));
-    assert_eq!(answer["type"], "ack");
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(saved["budget"]["dailyUsd"], 12.0);
-    assert_eq!(saved["pollIntervalSec"], 30);
-    assert_eq!(saved["custom"], true);
-    assert!(seen.has_changed().unwrap());
-}
-
-#[test]
-fn agent_settings_refuses_bad_values_empty_changes_and_computer_only_fields_and_writes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("config.json");
-    std::fs::write(&file, SEED).unwrap();
-    let (v, seen) = settings_view(dir.path());
-    for args in [
-        json!({ "dailyUsd": 100001 }),
-        json!({ "concurrency": 0 }),
-        json!({}),
-        json!({ "pollIntervalSec": 5 }),
-        json!({ "local": { "enabled": true } }),
-        json!({ "tags": ["a"] }),
-        json!({ "dailyUsd": 5, "tags": ["a"] }),
-    ] {
-        let answer = send(&v, "agent_settings", args.clone());
-        assert_eq!(answer["type"], "nack", "{args}");
-    }
-    let answer = send(&v, "agent_settings", json!({ "pollIntervalSec": 5 }));
-    assert!(
-        answer["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("Not a command this agent takes")
-    );
-    let kept: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(kept, serde_json::from_str::<Value>(SEED).unwrap());
-    assert!(!seen.has_changed().unwrap());
-}
-
-#[test]
-fn computer_tags_and_settings_request_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let (v, seen) = settings_view(dir.path());
-    for name in ["computer_tags", "settings_request"] {
-        let answer = send(&v, name, json!({ "tags": ["a"] }));
-        assert_eq!(answer["type"], "nack", "{name}");
-        assert_eq!(answer["reason"], format!("Not a command this agent takes yet: {name}"));
-    }
-    assert!(!dir.path().join("config.json").exists());
-    assert!(!seen.has_changed().unwrap());
-}
-
-#[test]
-fn agent_settings_is_an_unknown_command_while_the_flag_is_off_and_writes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut v = view();
-    v.settings = crate::hello_settings::HelloSettings::new(
-        dir.path().to_path_buf(),
-        crate::env::Env::empty(),
-        4700,
-        std::sync::Arc::new(crate::flags::Flags::fixed(&[])),
-    );
-    let answer = send(&v, "agent_settings", json!({ "dailyUsd": 12 }));
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: agent_settings");
-    assert!(!dir.path().join("config.json").exists());
 }

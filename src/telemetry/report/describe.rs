@@ -120,12 +120,16 @@ fn describe_event(event: &Event) -> String {
                 ),
                 _ => String::new(),
             };
+            let review = match (e.lines, e.scouts) {
+                (Some(l), Some(s)) => format!(" ({l} lines, {s} scout{})", if s == 1 { "" } else { "s" }),
+                _ => String::new(),
+            };
             let not_ok = match text(&e.outcome) {
                 "" => "not ok",
                 o => o,
             };
             format!(
-                "{} {} ended {} after {}{checks}",
+                "{} {} ended {} after {}{checks}{review}",
                 text(&e.step),
                 text(&e.key),
                 outcome(e.ok, not_ok),
@@ -198,6 +202,24 @@ mod tests {
             .cloned()
             .unwrap_or_else(|| json!("2026-10-15T08:00:00.000Z"));
         describe(&Entry::from_value(&v).expect("an event"))
+    }
+
+    #[test]
+    fn a_review_step_end_shows_its_lines_and_scouts() {
+        let end = |extra: serde_json::Value| {
+            let mut v = json!({ "kind": "step_end", "step": "reviewing", "key": "slice 1 round 1", "ms": 60000, "ok": true, "outcome": "merging" });
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            d(v)
+        };
+        assert_eq!(
+            end(json!({ "lines": 40, "scouts": 2 })),
+            "reviewing slice 1 round 1 ended ok after 1m (40 lines, 2 scouts)"
+        );
+        assert_eq!(
+            end(json!({ "lines": 9, "scouts": 0 })),
+            "reviewing slice 1 round 1 ended ok after 1m (9 lines, 0 scouts)"
+        );
+        assert_eq!(end(json!({})), "reviewing slice 1 round 1 ended ok after 1m");
     }
 
     #[test]

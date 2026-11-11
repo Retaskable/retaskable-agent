@@ -321,13 +321,22 @@ impl CiLoop {
     }
 }
 
+/// config.json as saved now, each project's commands as this computer may run them (`approve-commands-gate`).
+fn load_allowed(dir: &std::path::Path, commands: &crate::view::ItemCommands) -> anyhow::Result<config::ConfigFile> {
+    let mut cfg = config::load(dir)?;
+    for p in &mut cfg.projects {
+        *p = commands.allowed_config(&p.id_or_derived(), p);
+    }
+    Ok(cfg)
+}
+
 /// The loop, until the agent stops: each `pollIntervalSec`, on the config as saved now.
-pub async fn run(mut ci: CiLoop, dir: std::path::PathBuf, env: Env) {
-    if let Ok(cfg) = config::load(&dir) {
+pub async fn run(mut ci: CiLoop, dir: std::path::PathBuf, env: Env, commands: crate::view::ItemCommands) {
+    if let Ok(cfg) = load_allowed(&dir, &commands) {
         ci.recover(&cfg, &dir).await;
     }
     loop {
-        let wait = match config::load(&dir) {
+        let wait = match load_allowed(&dir, &commands) {
             Ok(cfg) => {
                 let keys = ci.poll(&cfg, &env).await;
                 ci.start(&cfg, &env, &dir, keys).await;

@@ -5,7 +5,7 @@ use crate::orchestrator::driver::{AskHost, AskJob, AskReply, AskStore, WAITING};
 use crate::view::AskCommand;
 
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     /// `blocked` answers: the project's pause or the daily budget.
     blocked: AtomicBool,
     /// The store can't be read.
@@ -13,7 +13,7 @@ struct Host {
     hold: AtomicBool,
     /// The session fails: the host answers that it couldn't.
     crashed: AtomicBool,
-    jobs: Mutex<Vec<AskCommand>>,
+    pub(super) jobs: Mutex<Vec<AskCommand>>,
     engines: Mutex<Vec<Option<EngineId>>>,
     /// Tool events the session emits, a pause apart, before it answers.
     reads: Mutex<Vec<&'static str>>,
@@ -111,7 +111,7 @@ async fn rig_failing(fail: &'static str) -> (Rig, Arc<Host>, Asked) {
     (rig, host, asked)
 }
 
-fn ask(id: &str, text: &str) -> AskCommand {
+pub(super) fn ask(id: &str, text: &str) -> AskCommand {
     AskCommand {
         project: "p0".into(),
         ask_id: id.into(),
@@ -122,11 +122,11 @@ fn ask(id: &str, text: &str) -> AskCommand {
     }
 }
 
-fn push(rig: &Rig, a: AskCommand) {
+pub(super) fn push(rig: &Rig, a: AskCommand) {
     rig.machine.links.item_commands.push_ask(a);
 }
 
-fn reports(asked: &Asked) -> Vec<Value> {
+pub(super) fn reports(asked: &Asked) -> Vec<Value> {
     (asked.lock().unwrap().iter())
         .filter(|(op, _)| op == "ask_report")
         .map(|(_, a)| a.clone())
@@ -134,7 +134,7 @@ fn reports(asked: &Asked) -> Vec<Value> {
 }
 
 /// Passes until the store has `n` ask reports.
-async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent = reports(asked);
@@ -146,7 +146,7 @@ async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     panic!("the store never got {n} ask reports: {:?}", reports(asked));
 }
 
-async fn quiet_passes(rig: &mut Rig) {
+pub(super) async fn quiet_passes(rig: &mut Rig) {
     for _ in 0..8 {
         rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -394,4 +394,36 @@ async fn an_ask_report_the_store_refuses_is_logged_as_a_store_error_for_the_ask(
         .collect();
     assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
     assert_eq!(logged[0]["item"], "k1");
+}
+
+/// `local-limit-fallback`: Claude at its usage limit holds an ask only when the flag is Off, the model is down or
+/// Claude is signed out; else the ask starts (on the local model), with the start rules On or Off.
+#[tokio::test]
+async fn at_the_limit_an_ask_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for rules in [false, true] {
+        for (fallback, model, signed_out, starts) in [
+            (true, LocalModel::up(), false, true),
+            (false, LocalModel::up(), false, false),
+            (true, LocalModel::off(), false, false),
+            (true, LocalModel::up(), true, false),
+        ] {
+            crate::tiers::set_local_ladder_for_test(true);
+            crate::tiers::set_local_limit_fallback_for_test(fallback);
+            let (mut rig, host, _asked) = rig_with_host().await;
+            let mut on = vec!["ask-claude", "watchdog-anomaly-rules"];
+            on.extend(rules.then_some("engine-start-rules"));
+            rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+            rig.machine.local = model;
+            rig.machine.claude_signed_out_until =
+                signed_out.then(|| std::time::Instant::now() + Duration::from_secs(60));
+            rig.machine
+                .engine_limits
+                .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(3600));
+            push(&rig, ask("k1", "hello"));
+            quiet_passes(&mut rig).await;
+            let case = (rules, fallback, signed_out);
+            assert_eq!(host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
+        }
+    }
 }

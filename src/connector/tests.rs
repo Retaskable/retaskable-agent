@@ -9,11 +9,12 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseC
 
 use super::bug_link::BugOutcome;
 use super::*;
-use crate::config::GalleryConfig;
 use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
 use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 
+mod checks;
+mod commands;
 mod live;
 mod smoke;
 
@@ -107,39 +108,6 @@ fn view(projects: &[&str]) -> Arc<AgentView> {
         "9.9.9",
         2,
     ))
-}
-
-fn view_with_models_gallery(project: &str) -> Arc<AgentView> {
-    let mut v = view(&[project]);
-    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
-        name: "Models".to_string(),
-        command: "echo hi".to_string(),
-        out_dir: "out".to_string(),
-    }];
-    v
-}
-
-/// Starts a connector for `project` with a Models gallery, reads its hello and first snapshot,
-/// and checks the gallery starts `idle`: the shared setup for the gallery-status-resend tests,
-/// which then each send their own `galleries::set_status` calls and read what arrives next.
-async fn gallery_resend_setup(project: &str) -> (tempfile::TempDir, Connector, Accepted) {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let v = view_with_models_gallery(project);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        v,
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    let galleries = read(&mut first).await["state"]["galleries"].clone();
-    assert_eq!(galleries[0]["status"], "idle");
-    (dir, c, first)
 }
 
 /// An `exit` that does nothing, for tests that don't send Restart.
@@ -290,110 +258,6 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
 }
 
 #[tokio::test]
-async fn the_snapshot_reports_a_projects_gallery_info() {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    // As `galleries::shoot` would leave it after a shoot.
-    let dest = crate::paths::gallery_dir(dir.path(), "one", "models");
-    std::fs::create_dir_all(&dest).unwrap();
-    std::fs::write(
-        dest.join("index.json"),
-        json!({
-            "name": "Models",
-            "shotAt": "2026-01-01T00:00:00Z",
-            "sha": "deadbeef",
-            "images": [{ "file": "01-first.jpg", "title": "First" }],
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let v = view_with_models_gallery("one");
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        v,
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
-    let mut a = next(&mut rx).await;
-    read(&mut a).await; // hello
-    let galleries = read(&mut a).await["state"]["galleries"].clone();
-
-    assert_eq!(
-        galleries,
-        json!([{
-            "slug": "models",
-            "name": "Models",
-            "status": "idle",
-            "shotAt": "2026-01-01T00:00:00Z",
-            "sha": "deadbeef",
-            "count": 1,
-        }])
-    );
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
-    // A project id of its own: `galleries::set_status` broadcasts across the whole process, and
-    // "one" is shared by plenty of other tests that never expect an extra snapshot.
-    let project = "connector-gallery-resend";
-    let (_dir, c, mut first) = gallery_resend_setup(project).await;
-
-    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
-    let mut again = read(&mut first).await;
-    while again["type"] == "alive" {
-        again = read(&mut first).await;
-    }
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn the_snapshot_is_sent_again_when_the_trial_record_changes() {
-    let project = "connector-trial-resend";
-    let (dir, c, mut first) = gallery_resend_setup(project).await;
-
-    let mut store = crate::store::Store::load(&crate::paths::project_dir(dir.path(), project)).unwrap();
-    store
-        .set_trial(crate::trial_plan::TrialRecord::opened("https://x/pr/1"))
-        .unwrap();
-    let mut again = read(&mut first).await;
-    while again["type"] == "alive" {
-        again = read(&mut first).await;
-    }
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(
-        again["state"]["trial"],
-        json!({ "state": "open", "prUrl": "https://x/pr/1" })
-    );
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn a_status_change_still_arrives_when_another_projects_changes_right_after() {
-    // Two project ids of their own, as above: this test means to prove that a change on
-    // `other`, landing right after this project's own change, doesn't make the connector miss
-    // its own (the watch channel the two share keeps only the latest value).
-    let project = "connector-gallery-resend-own";
-    let other = "connector-gallery-resend-other";
-    let (_dir, c, mut first) = gallery_resend_setup(project).await;
-
-    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
-    galleries::set_status(other, "models", galleries::GalleryStatus::Shooting);
-    let mut again = read(&mut first).await;
-    while again["type"] == "alive" {
-        again = read(&mut first).await;
-    }
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
@@ -431,17 +295,13 @@ fn command(id: &str, name: &str, args: Value) -> Value {
 /// snapshot have been read, ready for a test to send it a command. The returned `TempDir` must
 /// be kept (as `_dir`): dropping it removes the credentials file the connector's still using.
 async fn connected_project(exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
+    connected_with(view(&["one"]), exit).await
+}
+
+async fn connected_with(v: Arc<AgentView>, exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        exit,
-        dir.path(),
-    );
+    let c = Connector::start(&url, store, reqwest::Client::new(), v, timing(), exit, dir.path());
     let mut a = next(&mut rx).await;
     read(&mut a).await; // hello
     read(&mut a).await; // snapshot
@@ -489,6 +349,35 @@ async fn every_command_answered_is_logged_to_remote_log() {
     assert_eq!(lines[1]["id"], "c2");
     assert_eq!(lines[1]["outcome"], "ack");
     assert_eq!(lines[1].get("reason"), None);
+}
+
+#[tokio::test]
+async fn setup_check_acks_with_the_checks_and_is_audited() {
+    let mut v = view(&["one"]);
+    Arc::get_mut(&mut v).unwrap().settings = crate::hello_settings::HelloSettings::new(
+        std::path::PathBuf::new(),
+        crate::env::Env::empty(),
+        0,
+        Arc::new(crate::flags::Flags::fixed(&["setup-check-command"])),
+    );
+    let (c, mut a, dir) = connected_with(v, noop_exit()).await;
+    a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
+        .await
+        .unwrap();
+    let mut ack = read(&mut a).await;
+    while ack["type"] == "hello" {
+        ack = read(&mut a).await; // the changed result resends hello, in either order
+    }
+    assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
+    assert!(ack["answer"]["git"].is_object());
+    c.stop(Duration::from_secs(1)).await;
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (line["name"].as_str(), line["outcome"].as_str()),
+        (Some("setup_check"), Some("ack"))
+    );
+    assert!(line["answerBytes"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

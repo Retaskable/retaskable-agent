@@ -1,6 +1,7 @@
 //! Whether a plan goes ahead on the yes its requester already gave (agent/06.5-spec-drafts.md, simple-flow.md
 //! section 2): `approvesItself` in the TypeScript agent's `drafts.ts`.
 use crate::config::Plans;
+use crate::text::is_blank;
 
 /// A plan someone asked for goes ahead on that yes, unless the drafter marked it `risk`, the project's `plans` is
 /// `ask`, or it is a trial draft (first-run-check.md: a trial never approves itself). A plan nobody asked for and a
@@ -14,7 +15,7 @@ pub fn approves_itself(
 ) -> bool {
     plans == Plans::Risky
         && requested_by.is_some_and(|b| !b.is_empty())
-        && risk.is_none_or(|r| r.trim().is_empty())
+        && risk.is_none_or(is_blank)
         && !release
         && !trial
 }

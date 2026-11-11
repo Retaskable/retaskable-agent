@@ -58,6 +58,7 @@ fn request_for(project: &str, piece: Value, other: Value) -> (RunRequest, Starte
         lane: None,
         engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees, stop })

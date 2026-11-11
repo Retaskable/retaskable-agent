@@ -503,3 +503,26 @@ async fn the_token_lines_show_what_ended_sessions_added() {
     assert_eq!(row(&status, "cursor").today_tokens, Some(13));
     assert_eq!(row(&status, "codex").today_tokens, Some(5));
 }
+
+#[test]
+fn a_signed_out_codex_and_a_missing_pi_read_right() {
+    let mut c = checks(Some(true));
+    c.codex = Some(check(Some(false), "Codex isn't signed in"));
+    c.pi = Some(check(Some(false), "pi isn't installed"));
+    let s = build(
+        &settled(EngineChoiceConfig::default(), 1),
+        &source(&[]),
+        Some(&c),
+        &LiveState::default(),
+    );
+    let codex = row(&s, "codex");
+    assert_eq!(
+        (codex.found, codex.state, codex.state_text),
+        (Some(true), "problem", "Not signed in")
+    );
+    let pi = row(&s, "pi");
+    assert_eq!(
+        (pi.found, pi.state, pi.state_text),
+        (Some(false), "off", "Not installed")
+    );
+}

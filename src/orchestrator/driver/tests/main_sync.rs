@@ -67,6 +67,7 @@ async fn settle(f: &mut Fixture) {
         let m = &mut f.rig.machine;
         let shared = Shared {
             links: &m.links,
+            local: &m.local,
             claim_paused_until: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
@@ -76,7 +77,10 @@ async fn settle(f: &mut Fixture) {
             .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
             .await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        if !adds(f).is_empty() && !f.script.lock().unwrap().args("lock_drop").is_empty() {
+        if !adds(f).is_empty()
+            && !f.script.lock().unwrap().args("lock_drop").is_empty()
+            && !remote_branches(f).is_empty()
+        {
             break;
         }
     }

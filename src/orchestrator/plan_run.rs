@@ -2,6 +2,7 @@
 //! structured result, and reading that result into the `planned` result for `run_done`; and [`PlanRuns`], which
 //! runs the store's `plan` runs: one read-only planner session in the project's base checkout, one at a time on
 //! this computer.
+use crate::text::{is_blank, non_blank};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -15,6 +16,7 @@ use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of, place,
@@ -45,8 +47,7 @@ fn specs(piece: &RunPiece) -> String {
     };
     let list: Vec<String> = list
         .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(|s| non_blank(&s).map(String::from))
         .collect();
     if list.is_empty() {
         "none (find them in `docs/specs`)".into()
@@ -159,7 +160,7 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
             return Err(format!("Piece {n} has no title."));
         }
         for field in ["what", "doneWhen"] {
-            if text(p, field).trim().is_empty() {
+            if is_blank(&text(p, field)) {
                 return Err(format!("Piece {n} (\"{title}\") has an empty {field}."));
             }
         }
@@ -203,7 +204,7 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     let mut result = Map::new();
     result.insert("pieces".into(), Value::Array(out));
     let no_flag = text(structured, "noFlag");
-    if !no_flag.trim().is_empty() {
+    if !is_blank(&no_flag) {
         result.insert("noFlag".into(), Value::String(no_flag.trim().to_string()));
     }
     Ok(Value::Object(result))
@@ -292,6 +293,7 @@ impl Roster {
             engine: placed.engine,
             model: model_name(placed.engine, &model, placed.cursor.as_ref()),
         };
+        let cursor = placed.cursor.map(|c| with_project(&project, c));
         let job = Job {
             sessions: self.sessions.clone(),
             info,
@@ -299,7 +301,7 @@ impl Roster {
             project,
             engine: placed.engine,
             bin: placed.bin,
-            cursor: placed.cursor,
+            cursor,
             model,
             local: self.local.clone(),
         };
@@ -331,7 +333,8 @@ impl RunStarter for PlanRuns {
         let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
             // Off, the planner stays on the chore tier as before.
             if flagged {
-                tiers::top_tier(None, crate::telemetry::now_ms() / 1000, models, local)
+                let floored = tiers::limit_floor(None, self.roster.sessions.claude_at_limit(), local);
+                tiers::top_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, models, local)
             } else {
                 tiers::chore_tier()
             }

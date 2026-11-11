@@ -28,5 +28,17 @@ export const triageSession = (): boolean => flags.on("triage-session");
 /** The `cursor-give-back` flag: give a Cursor-limited item with nothing pushed back to the shared backlog. Off until there is an answer. */
 export const cursorGiveBack = (): boolean => flags.on("cursor-give-back");
 
+/** The `cursor-allow-derive` flag: Cursor sessions get an allowlist derived from the project's checks and settings. Off until there is an answer. */
+export const cursorAllowDerive = (): boolean => flags.on("cursor-allow-derive");
+
 /** The `watchdog-anomaly-rules` flag: the watchdog's newer rules (restart_wait, and idle_lanes while a restart is pending). Off until there is an answer. */
 export const watchdogAnomalyRules = (): boolean => flags.on("watchdog-anomaly-rules");
+
+/** The `engine-setup-probes` flag: probe pi and Codex at setup and say why each failed. Off until there is an answer. */
+export const engineSetupProbes = (): boolean => flags.on("engine-setup-probes");
+
+/** The `playtest-answer-command` flag: take a person's playtest answer from the site. Off until there is an answer. */
+export const playtestAnswerCommand = (): boolean => flags.on("playtest-answer-command");
+
+/** The `step-events-complete` flag: each check's name, result and seconds in a `step_end`. Off until there is an answer. */
+export const stepEventsComplete = (): boolean => flags.on("step-events-complete");

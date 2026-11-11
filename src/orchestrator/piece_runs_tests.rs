@@ -91,6 +91,7 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
         engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees })
@@ -577,7 +578,13 @@ async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
         .min_scout_diff_lines = 0;
     let (req, mut s) = request(&r, RunKind::Build, piece());
     r.starter.start(req).unwrap();
-    let rows = r.starter.sessions.rows_when_running().await;
+    let rows = loop {
+        let rows = r.starter.sessions.rows_when_running().await;
+        if !rows.is_empty() && rows.iter().all(|row| row.info.role == crate::engines::Role::Scout) {
+            break rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     let info = &rows[0].info;
     assert_eq!((info.project.as_str(), info.item_id.as_str()), ("p", "pc1"));
     assert_eq!(info.title.as_deref(), Some("Show the thing"));

@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use super::piece_runs::{Job, piece_item, tree_sender};
 use super::session::watch_for;
 use crate::backlog::runs::RunOutcome;
+use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
     program_of, run_session_tracked, start_engine,
@@ -88,9 +89,18 @@ fn review_models(
     now: i64,
     models: &crate::config::ModelsConfig,
     up: (bool, bool),
+    at_limit: bool,
 ) -> (&'static str, &'static str) {
     if ladder {
-        (scout_tier(usage, now, models, up.0), top_tier(usage, now, models, up.1))
+        // Claude at its limit reads as the floor for a role the model can run (`local-limit-fallback`).
+        let (s, t) = (
+            crate::tiers::limit_floor(usage, at_limit, up.0),
+            crate::tiers::limit_floor(usage, at_limit, up.1),
+        );
+        (
+            scout_tier(s.as_ref(), now, models, up.0),
+            top_tier(t.as_ref(), now, models, up.1),
+        )
     } else {
         (SONNET, OPUS)
     }
@@ -172,7 +182,7 @@ fn session_config<'a>(
         model: model.to_string(),
         local: (model == LOCAL).then(|| job.local.target()),
         engine: Some(placed.engine),
-        cursor: placed.cursor.clone(),
+        cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
         sandbox: crate::engines::claude::sandbox_enabled(job.project.sandbox, cfg!(windows)),
         shell: true,
     }
@@ -198,9 +208,10 @@ fn requests(result: &ReviewerResult) -> String {
 }
 
 fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
+    let number = number.to_string();
     let mut cmd = Command::new(gh);
     cmd.current_dir(cwd)
-        .args(["pr", "comment", &number.to_string(), "--body-file", "-"]);
+        .args(["pr", "comment", &number, "--body-file", "-"]);
     run_command(cmd, Some(comment), "gh pr comment").map(|_| ())
 }
 
@@ -248,6 +259,7 @@ pub(super) async fn review(
             crate::telemetry::now_ms() / 1000,
             &job.models,
             (up(&scout_at), up(&reviewer_at)),
+            job.sessions.claude_at_limit(),
         );
         let input = StageInput {
             base_branch: &project.base_branch,
@@ -445,10 +457,19 @@ mod tests {
         let m = crate::config::ModelsConfig::default();
         let now = 1_000_000;
         let (low, full) = (reading(0.99), reading(0.1));
-        assert_eq!(review_models(true, Some(&low), now, &m, (true, true)).1, LOCAL);
-        assert_eq!(review_models(true, Some(&low), now, &m, (true, false)).1, OPUS); // a Cursor reviewer
-        assert_eq!(review_models(true, Some(&low), now, &m, (false, false)), (SONNET, OPUS)); // local down
-        assert_eq!(review_models(true, Some(&full), now, &m, (true, true)), (SONNET, OPUS));
-        assert_eq!(review_models(false, Some(&low), now, &m, (true, true)), (SONNET, OPUS)); // flag Off
+        assert_eq!(review_models(true, Some(&low), now, &m, (true, true), false).1, LOCAL);
+        assert_eq!(review_models(true, Some(&low), now, &m, (true, false), false).1, OPUS); // a Cursor reviewer
+        assert_eq!(
+            review_models(true, Some(&low), now, &m, (false, false), false),
+            (SONNET, OPUS)
+        ); // local down
+        assert_eq!(
+            review_models(true, Some(&full), now, &m, (true, true), false),
+            (SONNET, OPUS)
+        );
+        assert_eq!(
+            review_models(false, Some(&low), now, &m, (true, true), false),
+            (SONNET, OPUS)
+        ); // flag Off
     }
 }

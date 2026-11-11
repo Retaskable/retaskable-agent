@@ -4,8 +4,10 @@
 //! [`crate::playtest_groups::should_group`] says it's due, takes the [`crate::playtest_groups::TRYOUT_GROUPS_LOCK`]
 //! lock, runs the planner session and sends its grouping back with `tryout_groups`. Still missing
 //! (out of this slice): sending `tryout_add` after a merge is what ever puts something in the
-//! queue this reads, forwarding a person's playtest answer, and reopening on a Problem — nothing
-//! here does any of those.
+//! queue this reads, reopening and resuming the session that built a slice on a Problem
+//! (this agent's loop doesn't merge items, so it never records a merged slice's session and lane for
+//! [`crate::reopen`] to resume), and nothing here does either of those. A person's answer to a queued
+//! try-out goes to the store from `playtest_owed.rs`.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,6 +16,7 @@ use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
+use crate::engines::cursor::with_project;
 use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::link::TokenStore;
@@ -150,7 +153,7 @@ pub(super) async fn run(job: Job) {
             model: "sonnet".to_string(),
             local: None,
             engine: Some(placed.engine),
-            cursor: placed.cursor.clone(),
+            cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },

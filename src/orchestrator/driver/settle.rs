@@ -41,6 +41,10 @@ const MAX_OWN_FAILURES: u32 = 3;
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
 
+/// How long a release the store keeps refusing stays listed before it is dropped (behind `stuck-release-drop`):
+/// the store has expired the lease by then.
+pub(super) const STUCK_RELEASE_SECS: i64 = 24 * 60 * 60;
+
 /// The `needs_human` reason a Cursor implementer stops with after 3 limit hits in a row; the first fetch's
 /// give-back (`readopt`) matches it exactly.
 pub(super) const CURSOR_LIMIT_STOP: &str = "Cursor's usage limit was hit 3 times in a row";
@@ -187,7 +191,7 @@ impl ProjectLoop {
         );
         if let Some(token) = self.leases.remove(item_id) {
             let note = crate::text::truncate(why, MAX_NOTE_CHARS);
-            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.list_unreleased(item_id.to_string(), token, note);
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -216,7 +220,7 @@ impl ProjectLoop {
         self.free_lane(pool, item_id, "queued", &why);
         if let Some(token) = self.leases.remove(item_id) {
             let note = crate::text::truncate(&why, MAX_NOTE_CHARS);
-            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.list_unreleased(item_id.to_string(), token, note);
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -268,27 +272,42 @@ impl ProjectLoop {
         }
     }
 
-    /// Sends the releases and parks still owed. One the store refuses (or can't reach) stays listed for
+    /// Sends the releases, skips, parks and playtest answers still owed. One the store refuses (or can't reach) stays listed for
     /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
     pub(super) async fn flush_owed(&mut self, links: &Links) {
-        let Some(repo) = self
-            .repo
-            .filter(|_| !self.unreleased.is_empty() || !self.unparked.is_empty() || !self.unskipped.is_empty())
-        else {
+        self.note_playtests_setting().await;
+        let Some(repo) = self.repo.filter(|_| {
+            self.release_owed
+                || !self.unreleased.is_empty()
+                || !self.unparked.is_empty()
+                || !self.unskipped.is_empty()
+                || !self.unanswered.is_empty()
+        }) else {
             return;
         };
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
             return;
         };
+        let note_rules = !self.unreleased.is_empty() && self.flags.on("give-back-note-rules").await;
         for (id, (lease, note)) in self.unreleased.clone() {
+            // With `give-back-note-rules`: the note is trimmed and cut at MAX_NOTE_CHARS, and a blank one sends
+            // the release alone.
+            let note = if note_rules {
+                crate::text::truncate(note.trim(), MAX_NOTE_CHARS)
+            } else {
+                note
+            };
             // report then release (section 7.5): the note lands in the item's history while the
             // lease still holds. A refusal of either keeps both for the next pass.
-            match self.client.report(repo, Some(&token), &id, &lease, &note).await {
-                Ok(()) => {}
-                Err(e) if e.code() == Some("stale_lease") => {}
-                Err(e) => {
-                    self.store_error("report", &e);
-                    continue;
+            if !note_rules || !note.is_empty() {
+                match self.client.report(repo, Some(&token), &id, &lease, &note).await {
+                    Ok(()) => {}
+                    Err(e) if e.code() == Some("stale_lease") => {}
+                    Err(e) => {
+                        self.store_error("report", &e);
+                        self.drop_if_stuck(&id).await;
+                        continue;
+                    }
                 }
             }
             match self.client.release(repo, Some(&token), &id, &lease).await {
@@ -296,6 +315,7 @@ impl ProjectLoop {
                 Err(e) if e.code() == Some("stale_lease") => {}
                 Err(e) => {
                     self.store_error("release", &e);
+                    self.drop_if_stuck(&id).await;
                     continue;
                 }
             }
@@ -316,6 +336,8 @@ impl ProjectLoop {
             }
             self.unskipped.remove(&id);
         }
+        self.send_owed_answers(repo, &token).await;
+        self.send_owed_release(repo, &token).await;
         for (id, (lease, waits_for, state)) in self.unparked.clone() {
             match self.client.park(repo, Some(&token), &id, &lease, &waits_for).await {
                 Ok(()) => {}
@@ -337,6 +359,44 @@ impl ProjectLoop {
             );
         }
         self.save_leases();
+    }
+
+    /// Epoch seconds, or the test's clock.
+    pub(super) fn now_secs(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(t) = self.clock {
+            return t;
+        }
+        crate::telemetry::now_secs()
+    }
+
+    /// Lists a lease the store hasn't taken back yet; one already listed keeps the time it was first listed.
+    pub(super) fn list_unreleased(&mut self, id: String, token: String, note: String) {
+        let now = self.now_secs();
+        self.unreleased_since.entry(id.clone()).or_insert(now);
+        self.unreleased.insert(id, (token, note));
+    }
+
+    /// With `stuck-release-drop` On, drops an `unreleased` entry (and the skip owed after it) first listed
+    /// [`STUCK_RELEASE_SECS`] or more ago, with one `error` event.
+    async fn drop_if_stuck(&mut self, id: &str) {
+        let Some(&since) = self.unreleased_since.get(id) else {
+            return;
+        };
+        if self.now_secs() - since < STUCK_RELEASE_SECS || !self.flags.on("stuck-release-drop").await {
+            return;
+        }
+        self.unreleased.remove(id);
+        self.unskipped.remove(id);
+        self.events.add_in(
+            &self.id,
+            Event::Error(event::Error {
+                item: Some(id.to_string()),
+                r#where: Some("release".into()),
+                error: Some("the release was dropped after 24 hours: the store has expired the lease by then".into()),
+                ..Default::default()
+            }),
+        );
     }
 
     /// What an item's run moving from `from` to its state now means, after a session or a step ended
@@ -421,22 +481,11 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        if let Some(usage) = &outcome.usage
-            && self
-                .records
-                .get(&item)
-                .is_none_or(|r| r.impl_session_engine == EngineId::Claude)
-        {
-            self.pace_readings.push(usage.clone());
-        }
         let weekly = ProjectLoop::weekly_on(&self.flags).await;
         if weekly && let Some(usage) = &outcome.usage {
             Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
         }
-        let keep_week = weekly
-            || (self.auto_enabled
-                && self.flags.on("auto-concurrency").await
-                && self.flags.on("auto-concurrency-week").await);
+        let keep_week = weekly;
         let week = outcome
             .usage
             .clone()
@@ -711,9 +760,11 @@ impl ProjectLoop {
     pub(super) async fn take_finished(&mut self, pool: &mut LanePool, links: &Links) {
         // Keeps `watchdog-anomaly-rules` fresh for `step_started`, which can't wait on a request.
         self.flags.on("watchdog-anomaly-rules").await;
+        self.flags.on("step-events-complete").await;
         for (item, after) in self.running.finished() {
-            let outcome = after.map_or("panicked", |a| state_name(a.state));
-            self.step_ended(&item, after.is_some(), outcome);
+            let outcome = after.as_ref().map_or("panicked", |a| state_name(a.run.state));
+            let detail = after.as_ref().map(|a| &a.detail);
+            self.step_ended(&item, after.is_some(), outcome, detail);
             let Some(run) = self.runs.get_mut(&item) else { continue };
             let Some(after) = after else {
                 tracing::error!("{}: a step for {item} panicked", self.id);
@@ -726,7 +777,7 @@ impl ProjectLoop {
                 self.events.add_in(&self.id, Event::Error(error));
                 continue;
             };
-            let before = std::mem::replace(run, after);
+            let before = std::mem::replace(run, after.run);
             self.moved(pool, &item, before.state, "the step ended", links).await;
         }
     }
@@ -784,12 +835,12 @@ impl Machine {
             let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
                 Some(lp) => {
-                    lp.auto_enabled = self.auto.cfg.enabled;
                     lp.settle(
                         outcome,
                         &mut self.pool,
                         &mut Shared {
                             links: &self.links,
+                            local: &self.local,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
                             engine_limits: &mut self.engine_limits,

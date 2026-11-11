@@ -20,7 +20,7 @@
 //! [`bug_report::decide_bug_report`] and sent over the cloud link by the driver
 //! (`orchestrator/driver/triage_bug.rs`). Still missing: no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the
 //! prompt tells the session to run those itself). A caller puts this together the same way as
-//! [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`] from the
+//! [`crate::release_notes::write`]: gather a [`TriageContext`] from the
 //! item's own state, build a [`Triager`] with the project's words, the item's lane (or the base
 //! checkout) and `budget.reviewerUsd`, and run [`decide`] with
 //! [`crate::engines::runner::run_session`]. When that answer is `human` with a `suggest`,
@@ -213,7 +213,7 @@ pub fn build_prompt(
 }
 
 /// What a triager session runs with, besides the context: the same shape as
-/// [`crate::ideas::write::Writer`] and [`crate::release_notes::write::Writer`], plus the one field
+/// [`crate::release_notes::write::Writer`], plus the one field
 /// below that's specific to triage.
 pub struct Triager<'a> {
     /// `prompts/triage.md`.

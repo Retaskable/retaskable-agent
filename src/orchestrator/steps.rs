@@ -14,6 +14,7 @@ use futures_util::future::BoxFuture;
 use tokio::task::JoinSet;
 
 use crate::item_lifecycle::{ItemRun, ItemState};
+use crate::scouts::{DiffInfo, ScoutJob};
 
 /// Whether an item in `state` has a step for the loop to run (the TS agent's step table in `advance`). A
 /// `queued` item is started instead (`decide`), and the rest wait on a person or are finished.
@@ -62,11 +63,55 @@ pub struct StepRequest {
     pub token: String,
 }
 
+/// How long one check took, as a step reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckTime {
+    pub name: String,
+    pub ok: bool,
+    pub sec: f64,
+}
+
+/// What a step reports besides the run: the detail its `step_end` carries.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StepDetail {
+    pub checks: Vec<CheckTime>,
+    pub lines: Option<u64>,
+    pub scouts: Option<u32>,
+}
+
+impl StepDetail {
+    /// A review's detail: the diff lines it read and how many scouts ran (0 when the reviewer read a
+    /// small diff alone).
+    pub fn review(diff: &DiffInfo, jobs: &[ScoutJob]) -> Self {
+        Self {
+            lines: Some(u64::from(diff.total_lines)),
+            scouts: Some(jobs.len() as u32),
+            ..Default::default()
+        }
+    }
+}
+
+/// What a step hands back: the item's run as it left it, and its detail.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepDone {
+    pub run: ItemRun,
+    pub detail: StepDetail,
+}
+
+impl From<ItemRun> for StepDone {
+    fn from(run: ItemRun) -> Self {
+        Self {
+            run,
+            detail: StepDetail::default(),
+        }
+    }
+}
+
 /// One project's steps still running, by item.
 #[derive(Default)]
 pub struct Running {
     busy: BTreeSet<String>,
-    tasks: JoinSet<(String, Option<ItemRun>)>,
+    tasks: JoinSet<(String, Option<StepDone>)>,
 }
 
 impl Running {
@@ -76,7 +121,7 @@ impl Running {
     }
 
     /// Runs `step` for `item` as its own task. A panic in it is caught: the item keeps the run it had.
-    pub fn spawn(&mut self, item: String, step: BoxFuture<'static, ItemRun>) {
+    pub fn spawn(&mut self, item: String, step: BoxFuture<'static, StepDone>) {
         self.busy.insert(item.clone());
         self.tasks.spawn(async move {
             let run = AssertUnwindSafe(step).catch_unwind().await.ok();
@@ -84,9 +129,9 @@ impl Running {
         });
     }
 
-    /// The steps that ended since last asked, without waiting: each item and its run after the step,
+    /// The steps that ended since last asked, without waiting: each item and what it handed back,
     /// `None` when the step panicked.
-    pub fn finished(&mut self) -> Vec<(String, Option<ItemRun>)> {
+    pub fn finished(&mut self) -> Vec<(String, Option<StepDone>)> {
         let mut done = Vec::new();
         while let Some(joined) = self.tasks.try_join_next() {
             if let Ok((item, run)) = joined {
@@ -101,6 +146,35 @@ impl Running {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scouts::{FileLines, plan_scouts};
+
+    #[test]
+    fn a_review_detail_counts_the_scouts_plan_scouts_plans() {
+        let files = vec![
+            FileLines {
+                file: "a.rs".into(),
+                lines: 300,
+            },
+            FileLines {
+                file: "b.rs".into(),
+                lines: 200,
+            },
+        ];
+        let diff = |total| DiffInfo {
+            stat: String::new(),
+            files: files.clone(),
+            backlog_changed: false,
+            total_lines: total,
+        };
+        let small = diff(40);
+        let d = StepDetail::review(&small, &plan_scouts(&small, 400, 100));
+        assert_eq!((d.lines, d.scouts), (Some(40), Some(0)));
+        let big = diff(500);
+        let jobs = plan_scouts(&big, 400, 100);
+        assert!(!jobs.is_empty());
+        let d = StepDetail::review(&big, &jobs);
+        assert_eq!((d.lines, d.scouts), (Some(500), Some(jobs.len() as u32)));
+    }
 
     #[test]
     fn the_step_table_and_the_lane_holders_match_the_ts_agent() {
@@ -131,7 +205,7 @@ mod tests {
             "a".into(),
             async move {
                 rx.await.ok();
-                after
+                StepDone::from(after)
             }
             .boxed(),
         );
@@ -145,7 +219,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
         done.sort_by(|x, y| x.0.cmp(&y.0));
-        assert_eq!(done, vec![("a".into(), Some(after)), ("b".into(), None)]);
+        assert_eq!(done, vec![("a".into(), Some(after.into())), ("b".into(), None)]);
         assert!(!running.busy("a") && !running.busy("b"));
     }
 }
