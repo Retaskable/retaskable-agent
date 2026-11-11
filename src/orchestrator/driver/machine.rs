@@ -1,7 +1,6 @@
 //! The computer's orchestrator: one shared lane pool and every project's state, and what starts the
 //! whole loop running (`spawn_all`).
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -13,12 +12,11 @@ use super::panic::panic_message;
 use super::read::{Fail, Read, read};
 use super::run_starters::RunStarters;
 use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
-    playtest_round, vet_daily,
+    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, playtest_round,
 };
 use crate::backlog::Item;
 use crate::base_hold;
-use crate::config::{AutoConcurrency, CursorModels, EngineChoiceConfig, Playtests};
+use crate::config::{CursorModels, EngineChoiceConfig, Playtests};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -137,8 +135,6 @@ pub struct Machine {
     pub(super) concurrency: u32,
     /// The computer's local model: its slot holder doesn't count toward `concurrency` (`local-one-slot`).
     pub(super) local: crate::local_model::LocalModel,
-    /// Auto concurrency's pacer and the number it allows (`driver/auto.rs`).
-    pub(super) auto: super::auto::Auto,
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
     pub(super) outcome_sender: OutcomeSender,
@@ -147,9 +143,6 @@ pub struct Machine {
     /// tests, always: production always reads the real flag.
     #[cfg(test)]
     pub(super) stopping_override: Option<bool>,
-    /// A test's clock, in epoch seconds, for the pacer.
-    #[cfg(test)]
-    pub(super) clock: Option<i64>,
 }
 
 /// A [`Shared`] borrowing the machine's fields (not its projects), so a loop over `self.projects` can build one.
@@ -189,16 +182,10 @@ impl Machine {
             run_starters: RunStarters::default(),
             concurrency,
             local: crate::local_model::LocalModel::off(),
-            auto: super::auto::Auto::new(AutoConcurrency {
-                enabled: false,
-                ..Default::default()
-            }),
             outcomes,
             outcome_sender: OutcomeSender(sender),
             #[cfg(test)]
             stopping_override: None,
-            #[cfg(test)]
-            clock: None,
         }
     }
 
@@ -216,18 +203,6 @@ impl Machine {
         } else {
             concurrency
         }
-    }
-
-    /// Paces sessions with auto concurrency (behind the `auto-concurrency` flag) when `cfg.enabled`.
-    pub fn with_auto(mut self, cfg: AutoConcurrency) -> Self {
-        self.auto = super::auto::Auto::new(cfg);
-        self
-    }
-
-    /// Keeps the pacer's number across a restart in `<dir>/machine.json`.
-    pub fn with_machine_dir(mut self, dir: &Path) -> Self {
-        self.auto.dir = Some(dir.to_path_buf());
-        self
     }
 
     /// [`process_tree::stopping`], unless a test has overridden it.
@@ -337,7 +312,7 @@ impl Machine {
         }
     }
 
-    /// What a background round (playtest grouping, ideas) needs of project `lp`.
+    /// What a background round (playtest grouping, deprecations) needs of project `lp`.
     fn round_job(&self, lp: &ProjectLoop) -> playtest_round::Job {
         playtest_round::Job {
             id: lp.id.clone(),
@@ -353,44 +328,6 @@ impl Machine {
             keychain: self.links.keychain.clone(),
             locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
             sessions: lp.live.sessions().clone(),
-        }
-    }
-
-    /// Starts the daily round of ideas for every live (or `runs`-mode) project that ticked this minute, isn't
-    /// paused and has the `ideas-session` flag On, unless one is still running (`ideas_daily::run` asks the store
-    /// whether it's due). Each is its own task, so the pass never waits.
-    pub async fn ideas_rounds(&mut self, steps: &[Step]) {
-        let paused = self.paused().await;
-        let jobs: Vec<_> = (self.projects.iter().enumerate())
-            .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
-                    && !paused[*i]
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-            })
-            .map(|(_, lp)| lp)
-            .filter(|lp| {
-                let busy = lp.ideas_round_running.swap(true, Ordering::SeqCst);
-                if busy {
-                    tracing::debug!("{}: an ideas round is still running, skipping this minute", lp.id);
-                }
-                !busy
-            })
-            .map(|lp| {
-                (
-                    lp.ideas_round_running.clone(),
-                    ideas_daily::Daily {
-                        base: self.round_job(lp),
-                        flags: lp.flags.clone(),
-                        state: lp.ideas_daily.clone(),
-                    },
-                )
-            })
-            .collect();
-        for (running, daily) in jobs {
-            tokio::spawn(async move {
-                ideas_daily::run(daily).await;
-                running.store(false, Ordering::SeqCst);
-            });
         }
     }
 
@@ -418,53 +355,6 @@ impl Machine {
         for (running, daily) in jobs {
             tokio::spawn(async move {
                 deprecations::run(daily).await;
-                running.store(false, Ordering::SeqCst);
-            });
-        }
-    }
-
-    /// Starts the daily vet pass for every live (or `runs`-mode) project that ticked this minute and isn't paused,
-    /// unless one is still running (`vet_daily::run` checks the flag, the setting, the link and `jobs_due`).
-    pub async fn vet_rounds(&mut self, steps: &[Step]) {
-        for lp in &mut self.projects {
-            let record = {
-                let mut st = lp.vet_daily.lock().unwrap();
-                if !std::mem::take(&mut st.dirty) {
-                    continue;
-                }
-                st.record()
-            };
-            if let Some(record) = record {
-                lp.store.set_vet(&record);
-                if let Err(e) = lp.store.save() {
-                    tracing::warn!("{}: saving the vet record failed: {e:#}", lp.id);
-                }
-                lp.live.set_vet(&lp.id, Some(record.counts));
-            }
-        }
-        let paused = self.paused().await;
-        let jobs: Vec<_> = (self.projects.iter().enumerate())
-            .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
-                    && !paused[*i]
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-            })
-            .map(|(_, lp)| lp)
-            .filter(|lp| !lp.vet_running.swap(true, Ordering::SeqCst))
-            .map(|lp| {
-                (
-                    lp.vet_running.clone(),
-                    vet_daily::Daily {
-                        base: self.round_job(lp),
-                        flags: lp.flags.clone(),
-                        state: lp.vet_daily.clone(),
-                    },
-                )
-            })
-            .collect();
-        for (running, daily) in jobs {
-            tokio::spawn(async move {
-                vet_daily::run(daily).await;
                 running.store(false, Ordering::SeqCst);
             });
         }
@@ -719,8 +609,7 @@ impl Machine {
         if starter.is_some() {
             self.settle_outcomes().await;
         }
-        self.pace_step(ready, &live).await;
-        let concurrency = self.room_total(self.report_concurrency());
+        let concurrency = self.room_total(self.concurrency);
         if let Some(starter) = starter.as_deref() {
             for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
@@ -769,7 +658,6 @@ impl Machine {
                     stopping,
                 };
                 lp.idea_pass(&shared).await;
-                lp.gallery_feedback_pass(&shared).await;
             }
         }
         // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
@@ -843,7 +731,6 @@ impl Machine {
             claude_starts = lp.claude_starts;
             scheduled.push((actions, answer));
         }
-        self.auto.work_waiting = slots == 0 && starter.is_some() && self.work_waits(&live, paused);
         scheduled
     }
 }

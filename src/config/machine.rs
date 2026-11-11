@@ -8,7 +8,7 @@ use std::fmt;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{AutoConcurrency, ConfigFile, ModelConcurrency};
+use super::{ConfigFile, ModelConcurrency};
 pub use crate::lane_pool::LaneScaling;
 
 pub const DEFAULT_PORT: u16 = 4700;
@@ -29,9 +29,6 @@ pub struct MachineConfig {
     pub chore_lane: Option<u32>,
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
-    /// `autoConcurrency` (07.1-model-tiers.md): on by default, between a least and a most.
-    #[serde(default)]
-    pub auto_concurrency: AutoConcurrency,
     /// `modelConcurrency`: a cap per model (opus, sonnet), none by default.
     #[serde(default)]
     pub model_concurrency: ModelConcurrency,
@@ -73,7 +70,6 @@ impl Default for MachineConfig {
             lane_scaling: None,
             chore_lane: None,
             concurrency: default_concurrency(),
-            auto_concurrency: AutoConcurrency::default(),
             model_concurrency: ModelConcurrency::default(),
             poll_interval_sec: default_poll_interval_sec(),
             max_resume_context_tokens: default_max_resume_context_tokens(),

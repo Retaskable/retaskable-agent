@@ -34,7 +34,6 @@ fn command_values(cfg: &ProjectConfig) -> Value {
     let mut out = json!({
         "checks": cfg.checks,
         "playCommand": cfg.play_command,
-        "galleries": cfg.galleries,
         "phone": cfg.phone,
         "engines": cfg.engines,
     });
@@ -145,16 +144,14 @@ impl CommandGates {
         self.lock().get(project)?.allowing.allowed.clone()
     }
 
-    /// `view` with its galleries and play command as allowed.
+    /// `view` with its play command as allowed.
     pub fn view(&self, project: &ProjectView) -> ProjectView {
         let cfg = ProjectConfig {
-            galleries: project.galleries.clone(),
             play_command: project.play_command.clone(),
             ..ProjectConfig::default()
         };
         let cfg = self.config(&project.id, &cfg);
         ProjectView {
-            galleries: cfg.galleries,
             play_command: cfg.play_command,
             ..project.clone()
         }

@@ -9,14 +9,6 @@ fn check(command: &str) -> CheckConfig {
     }
 }
 
-fn gallery(command: &str) -> GalleryConfig {
-    GalleryConfig {
-        command: command.into(),
-        name: String::new(),
-        out_dir: String::new(),
-    }
-}
-
 #[test]
 fn program_skips_assignments_and_quotes() {
     assert_eq!(command_program("npm run typecheck").as_deref(), Some("npm"));
@@ -37,18 +29,13 @@ fn shells_once_each_in_order_without_denied_or_launchers() {
         check("bash scripts/ci.sh"),
         check("npm test"),
         check(""),
+        check("/bin/bash x"),
+        check("bash.exe x"),
+        check("PowerShell -f x"),
+        check("rm -rf x"),
+        check("make shots"),
     ];
-    let galleries = [
-        gallery("/bin/bash x"),
-        gallery("bash.exe x"),
-        gallery("PowerShell -f x"),
-        gallery("rm -rf x"),
-        gallery("make shots"),
-    ];
-    assert_eq!(
-        command_shells(&checks, &galleries),
-        ["Shell(npm)", "Shell(cargo)", "Shell(make)"]
-    );
+    assert_eq!(command_shells(&checks), ["Shell(npm)", "Shell(cargo)", "Shell(make)"]);
 }
 
 #[test]
@@ -122,7 +109,6 @@ fn project(repo: &std::path::Path, remote: Option<&str>, engines: serde_json::Va
     serde_json::from_value(serde_json::json!({
         "repoPath": repo,
         "checks": [{"command": "npm run typecheck"}, {"command": "CI=1 cargo test"}],
-        "galleries": [{"command": "bash scripts/shots.sh"}],
         "engines": engines,
     }))
     .unwrap()

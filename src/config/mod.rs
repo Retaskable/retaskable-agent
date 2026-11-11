@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-pub use concurrency::{AutoConcurrency, ModelConcurrency};
+pub use concurrency::ModelConcurrency;
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
     ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
@@ -28,8 +28,8 @@ pub(crate) use machine::{
     valid_local_url, valid_model_name,
 };
 pub use project::{
-    CheckConfig, CodeGates, DeployConfig, DeployTarget, GalleryConfig, LighthouseConfig, OnOff, Plans, Playtests,
-    ProjectBudget, ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
+    CheckConfig, CodeGates, DeployConfig, DeployTarget, LighthouseConfig, OnOff, Plans, Playtests, ProjectBudget,
+    ProjectConfig, ProjectType, ReviewConfig, SandboxMode, SyncMain,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
@@ -446,14 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn galleries_default_to_models_and_ui_and_other_optional_fields_take_their_defaults() {
+    fn optional_fields_take_their_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.json"), r#"{"repoPath":"C:/code/x"}"#).unwrap();
         let cfg = load(dir.path()).unwrap();
         let p = &cfg.projects[0];
-        assert_eq!(p.galleries.len(), 2);
-        assert_eq!(p.galleries[0].name, "Models");
-        assert_eq!(p.galleries[1].name, "UI");
         assert_eq!(p.max_conflict_rounds, 5);
         assert_eq!(p.max_check_rounds, 3);
         assert!(!p.require_ci);

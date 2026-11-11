@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::prompt::render_prompt;
 
 /// `titlesText` (drafts.ts): one parsed title per line with its theme beside it, or, with none
-/// (**Add spec**, gallery feedback, a specs chore), a line telling the drafter to make the cut and
+/// (**Add spec**, a specs chore), a line telling the drafter to make the cut and
 /// the themes itself. `themes` is used only when there's one per title.
 pub fn titles_text(titles: &[String], themes: &[String]) -> String {
     if titles.is_empty() {

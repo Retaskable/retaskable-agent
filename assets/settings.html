@@ -492,7 +492,7 @@
       });
       var parts = ["div", "field", h("h3", "", row.project), area, reason, inForce];
       if (row.commandShells.length) {
-        parts.push(h("p", "hint", "Already allowed, from your checks and galleries: " + row.commandShells.join(", ")));
+        parts.push(h("p", "hint", "Already allowed, from your checks: " + row.commandShells.join(", ")));
       }
       parts.push(button);
       box.append(h.apply(null, parts));

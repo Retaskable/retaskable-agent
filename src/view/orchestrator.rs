@@ -136,9 +136,6 @@ impl AgentView {
         } else {
             block["status"] = json!("running");
         }
-        if let Some((allowed, _)) = self.item_commands.auto() {
-            block["concurrency"] = json!(allowed);
-        }
         block
     }
 }

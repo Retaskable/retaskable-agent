@@ -1,4 +1,4 @@
-//! The base checkout's busy lock ([`crate::lanes::base_checkout_path`]): Shoot, Play main, the baseline and
+//! The base checkout's busy lock ([`crate::lanes::base_checkout_path`]): Play main, the baseline and
 //! the minute sync each hold it while they use the checkout, so each is refused (or, for the sync, put off
 //! and run on the next poll after the hold is given back) while another has it.
 
