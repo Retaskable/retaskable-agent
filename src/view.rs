@@ -104,8 +104,6 @@ pub enum ItemCommand {
     Stop { project: String, lane: u32 },
     /// **Restart** the game in lane `lane`: stop it if one runs, then play again.
     RestartPlay { project: String, lane: u32 },
-    /// **Generate ideas** (`ideas_generate { fresh }`): one non-quiet ideas round; `fresh` drops the waiting ideas first.
-    Ideas { project: String, fresh: bool },
 }
 
 impl ItemCommand {
@@ -121,8 +119,7 @@ impl ItemCommand {
             | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
-            | Self::RestartPlay { project, .. }
-            | Self::Ideas { project, .. } => project,
+            | Self::RestartPlay { project, .. } => project,
         }
     }
 }

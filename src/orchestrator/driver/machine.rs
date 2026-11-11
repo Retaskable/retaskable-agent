@@ -13,8 +13,7 @@ use super::panic::panic_message;
 use super::read::{Fail, Read, read};
 use super::run_starters::RunStarters;
 use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, ideas_daily,
-    playtest_round, vet_daily,
+    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, playtest_round,
 };
 use crate::backlog::Item;
 use crate::base_hold;
@@ -337,7 +336,7 @@ impl Machine {
         }
     }
 
-    /// What a background round (playtest grouping, ideas) needs of project `lp`.
+    /// What a background round (playtest grouping, deprecations) needs of project `lp`.
     fn round_job(&self, lp: &ProjectLoop) -> playtest_round::Job {
         playtest_round::Job {
             id: lp.id.clone(),
@@ -353,44 +352,6 @@ impl Machine {
             keychain: self.links.keychain.clone(),
             locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
             sessions: lp.live.sessions().clone(),
-        }
-    }
-
-    /// Starts the daily round of ideas for every live (or `runs`-mode) project that ticked this minute, isn't
-    /// paused and has the `ideas-session` flag On, unless one is still running (`ideas_daily::run` asks the store
-    /// whether it's due). Each is its own task, so the pass never waits.
-    pub async fn ideas_rounds(&mut self, steps: &[Step]) {
-        let paused = self.paused().await;
-        let jobs: Vec<_> = (self.projects.iter().enumerate())
-            .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
-                    && !paused[*i]
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-            })
-            .map(|(_, lp)| lp)
-            .filter(|lp| {
-                let busy = lp.ideas_round_running.swap(true, Ordering::SeqCst);
-                if busy {
-                    tracing::debug!("{}: an ideas round is still running, skipping this minute", lp.id);
-                }
-                !busy
-            })
-            .map(|lp| {
-                (
-                    lp.ideas_round_running.clone(),
-                    ideas_daily::Daily {
-                        base: self.round_job(lp),
-                        flags: lp.flags.clone(),
-                        state: lp.ideas_daily.clone(),
-                    },
-                )
-            })
-            .collect();
-        for (running, daily) in jobs {
-            tokio::spawn(async move {
-                ideas_daily::run(daily).await;
-                running.store(false, Ordering::SeqCst);
-            });
         }
     }
 
@@ -418,53 +379,6 @@ impl Machine {
         for (running, daily) in jobs {
             tokio::spawn(async move {
                 deprecations::run(daily).await;
-                running.store(false, Ordering::SeqCst);
-            });
-        }
-    }
-
-    /// Starts the daily vet pass for every live (or `runs`-mode) project that ticked this minute and isn't paused,
-    /// unless one is still running (`vet_daily::run` checks the flag, the setting, the link and `jobs_due`).
-    pub async fn vet_rounds(&mut self, steps: &[Step]) {
-        for lp in &mut self.projects {
-            let record = {
-                let mut st = lp.vet_daily.lock().unwrap();
-                if !std::mem::take(&mut st.dirty) {
-                    continue;
-                }
-                st.record()
-            };
-            if let Some(record) = record {
-                lp.store.set_vet(&record);
-                if let Err(e) = lp.store.save() {
-                    tracing::warn!("{}: saving the vet record failed: {e:#}", lp.id);
-                }
-                lp.live.set_vet(&lp.id, Some(record.counts));
-            }
-        }
-        let paused = self.paused().await;
-        let jobs: Vec<_> = (self.projects.iter().enumerate())
-            .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
-                    && !paused[*i]
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-            })
-            .map(|(_, lp)| lp)
-            .filter(|lp| !lp.vet_running.swap(true, Ordering::SeqCst))
-            .map(|lp| {
-                (
-                    lp.vet_running.clone(),
-                    vet_daily::Daily {
-                        base: self.round_job(lp),
-                        flags: lp.flags.clone(),
-                        state: lp.vet_daily.clone(),
-                    },
-                )
-            })
-            .collect();
-        for (running, daily) in jobs {
-            tokio::spawn(async move {
-                vet_daily::run(daily).await;
                 running.store(false, Ordering::SeqCst);
             });
         }

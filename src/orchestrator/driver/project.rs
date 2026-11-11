@@ -252,13 +252,6 @@ pub struct ProjectLoop {
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
-    /// Set while this project's ideas round is running, so a second one doesn't start on top of it.
-    pub(super) ideas_round_running: Arc<AtomicBool>,
-    /// The daily vet pass's state and its own running guard ([`super::vet_daily`]).
-    pub(super) vet_daily: Arc<std::sync::Mutex<super::vet_daily::State>>,
-    pub(super) vet_running: Arc<AtomicBool>,
-    /// The daily ideas round's asker and last tried day ([`super::ideas_daily`]).
-    pub(super) ideas_daily: Arc<std::sync::Mutex<super::ideas_daily::State>>,
     /// Set while this project's deprecated-specs check is running, and its asker and last checked day
     /// ([`super::deprecations`]).
     pub(super) deprecations_running: Arc<AtomicBool>,
@@ -383,10 +376,6 @@ impl ProjectLoop {
             seen: report::Seen::default(),
             follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
-            ideas_round_running: Arc::new(AtomicBool::new(false)),
-            vet_daily: Arc::new(std::sync::Mutex::new(super::vet_daily::State::from_record(vet))),
-            vet_running: Arc::new(AtomicBool::new(false)),
-            ideas_daily: Default::default(),
             deprecations_running: Default::default(),
             deprecations: Default::default(),
             telemetry: Telemetry::new(),

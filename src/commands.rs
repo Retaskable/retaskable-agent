@@ -112,7 +112,6 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             playtest(cmd, project, view, data_dir)
         }
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
-        "ideas_generate" => ideas_generate(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
         "agent_settings" if view.settings.on_now() => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
@@ -366,12 +365,9 @@ fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
     json!({ "type": PENDING, "id": cmd.id })
 }
 
-/// `idea_accept { idea }` (**Build this** on an idea): behind the `ideas-session` flag, queued for the loop, which reads the
+/// `idea_accept { idea }` (**Build this** on an idea): queued for the loop, which reads the
 /// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.
 fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    if !view.item_commands.flag_on(project, "ideas-session") {
-        return nack(&cmd.id, "Not a command this agent takes yet: idea_accept".into());
-    }
     let idea = cmd
         .args
         .get("idea")
@@ -452,24 +448,6 @@ pub(crate) fn skip_item(view: &AgentView, project: &str, id: &str) -> Result<(),
 fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let id = cmd.args.get("id").and_then(Value::as_str).unwrap_or("");
     answer(cmd, skip_item(view, project, id))
-}
-
-/// `ideas_generate { fresh? }`: queued for the orchestrator loop, which starts one round of ideas
-/// (`orchestrator::driver::ideas_round`). Refused while the project is paused or before setup is finished.
-fn ideas_generate(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    if !view.projects.iter().any(|p| p.id == project) {
-        return nack(&cmd.id, "Finish setup first.".to_string());
-    }
-    let store_paused = matches!(view.store_paused.get(project), crate::view::StorePause::Paused(_));
-    if view.paused.reason(project).is_some() || store_paused {
-        return nack(&cmd.id, "The project is paused: resume it first.".to_string());
-    }
-    let fresh = cmd.args.get("fresh").and_then(Value::as_bool).unwrap_or(false);
-    view.item_commands.push(ItemCommand::Ideas {
-        project: project.to_string(),
-        fresh,
-    });
-    ack(&cmd.id)
 }
 
 /// `play { lane }` / `stop { lane }` (also `stop_play`) / `restart_play { lane }`.
