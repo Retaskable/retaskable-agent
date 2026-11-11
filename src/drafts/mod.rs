@@ -4,6 +4,7 @@
 //! prompt ([`prompt`]).
 pub mod actions;
 pub mod approval;
+pub mod failure;
 pub mod files;
 pub mod land;
 pub mod model;

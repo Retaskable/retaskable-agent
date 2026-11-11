@@ -21,6 +21,7 @@ fn idea(title: &str, state: IdeaState) -> StoreIdea {
         at: 0,
         answer: None,
         added_by: None,
+        plan_id: None,
     }
 }
 
