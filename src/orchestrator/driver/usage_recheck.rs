@@ -83,10 +83,24 @@ impl Machine {
     }
 }
 
-/// The 5-hour window's share left, in whole percent, when the reading carries one.
+/// The 5-hour window's share left, in whole percent, when the reading carries one. A reading labeled with another
+/// window (a weekly `rateLimitType`) says nothing about the 5-hour one.
 fn five_hour_left_pct(usage: &Value) -> Option<i64> {
-    let used = usage["unifiedWindows"]["five_hour"]["utilization"]
-        .as_f64()
-        .or_else(|| usage["utilization"].as_f64())?;
+    let used = crate::view::usage::five_hour(usage)?.get("utilization")?.as_f64()?;
     Some(((1.0 - crate::tiers::frac(used)) * 100.0).round() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_weekly_reading_is_not_the_five_hour_share_left() {
+        let week = json!({"status": "rejected", "rateLimitType": "seven_day", "utilization": 0.9});
+        assert_eq!(five_hour_left_pct(&week), None);
+        let five = json!({"unifiedWindows": {"five_hour": {"utilization": 0.25}, "seven_day": {"utilization": 0.9}}});
+        assert_eq!(five_hour_left_pct(&five), Some(75));
+        assert_eq!(five_hour_left_pct(&json!({"utilization": 40})), Some(60));
+    }
 }

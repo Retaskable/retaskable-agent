@@ -14,7 +14,7 @@ use crate::hello_settings::HelloSettings;
 
 mod cursor;
 mod orchestrator;
-mod usage;
+pub(crate) mod usage;
 
 /// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
 pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
