@@ -173,4 +173,59 @@ mod tests {
         apply(&host(d.path()), "main", LIST, &HashSet::new(), "m").unwrap();
         assert!(posts(d.path()).is_empty());
     }
+
+    const DRAFT_LIST: &str = r#"[
+      {"number":1,"isDraft":false,"headRefOid":"agent","headRefName":"retaskable/x"},
+      {"number":2,"isDraft":true,"headRefOid":"person","headRefName":"wip"}]"#;
+
+    #[test]
+    fn a_person_draft_is_never_held_and_a_held_one_is_released_with_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        host(d.path());
+        let run_draft = |d: &Path| apply(&host(d), "main", DRAFT_LIST, &HashSet::from([1]), "m").unwrap();
+        // The agent is queued, yet the draft isn't held.
+        run_draft(d.path());
+        assert!(posts(d.path()).is_empty());
+        // A draft already held stays held while the agent's turn lasts, and nothing is posted again.
+        std::fs::write(d.path().join("person.json"), status("pending", HOLD_CONTEXT)).unwrap();
+        run_draft(d.path());
+        assert!(posts(d.path()).is_empty());
+        // Once the agent's PR is checked, the held draft is released too.
+        std::fs::write(d.path().join("agent.json"), status("success", PR_CONTEXT)).unwrap();
+        run_draft(d.path());
+        let p = posts(d.path());
+        assert_eq!(p.len(), 1);
+        assert!(p[0].contains("state=success"), "{p:?}");
+    }
+
+    #[test]
+    fn a_person_pr_whose_statuses_cannot_be_read_does_not_stop_the_rest() {
+        let d = tempfile::tempdir().unwrap();
+        let program = d.path().join("fake");
+        write_executable(
+            &program,
+            "#!/bin/sh\n[ -n \"$1\" ] || exit 0\nprintf 'CALL %s\\n' \"$*\" >> calls.log\n\
+             case \"$*\" in *compare*) echo '{\"behind_by\":0}';; *commits/broken/*) exit 1;; *commits/*/statuses*) echo '[]';; esac\n",
+        );
+        let list = r#"[
+          {"number":1,"isDraft":false,"headRefOid":"agent","headRefName":"retaskable/x"},
+          {"number":2,"isDraft":false,"headRefOid":"broken","headRefName":"a"},
+          {"number":3,"isDraft":false,"headRefOid":"fine","headRefName":"b"}]"#;
+        let me = Host {
+            program,
+            kind: Kind::Github,
+            repo: "o/r".into(),
+            dir: d.path().to_path_buf(),
+        };
+        apply(&me, "main", list, &HashSet::from([1]), "m").unwrap();
+        let p = posts(d.path());
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("statuses/fine"));
+    }
+
+    #[test]
+    fn the_hold_texts_name_the_machine() {
+        assert_eq!(waiting_text("box"), "box: waiting for the agent's turn");
+        assert_eq!(released_text("box"), "box: the agent's turn is over");
+    }
 }
