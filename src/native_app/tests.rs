@@ -74,6 +74,20 @@ fn a_config_naming_neither_platform_builds_for_neither() {
     assert!(!app.ios && !app.android && app.version.is_none() && app.changed_since.is_none());
 }
 
+#[test]
+fn a_zero_platform_value_is_falsy_like_javascript() {
+    assert!(!present(Some(&serde_json::json!(0))));
+    assert!(!present(Some(&serde_json::json!(0.0))));
+    assert!(present(Some(&serde_json::json!(1))));
+    assert!(present(Some(&serde_json::json!({}))));
+    let (_t, dir) = repo(&[
+        ("app/eas.json", "{}"),
+        ("app/app.json", r#"{"expo":{"android":0,"ios":{}}}"#),
+    ]);
+    let app = native_app(&dir, "main", &none(), &[]).unwrap();
+    assert!(!app.android && app.ios);
+}
+
 fn log(tmp: &Path, text: &str) -> PathBuf {
     let file = tmp.join("testflight.log");
     fs::write(&file, text).unwrap();
