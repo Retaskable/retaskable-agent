@@ -170,12 +170,14 @@ async fn carries_on_from_the_pushed_branch(kind: RunKind) {
     );
     let repo = r.root.join("repo");
     let git = |args: &[&str]| {
-        assert!(std::process::Command::new("git")
-            .current_dir(&repo)
-            .args(args)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
     };
     git(&["checkout", "-q", "-b", "pushed-branch"]);
     std::fs::write(repo.join("pushed.rs"), "fn p() {}").unwrap();
@@ -348,9 +350,11 @@ async fn a_failed_install_counts_as_a_failed_blocking_check() {
         panic!("{:?}", end.outcome)
     };
     assert!(why.contains("npm"), "{why}");
-    assert!(std::fs::read_to_string(r.root.join("prompt2.txt"))
-        .unwrap()
-        .contains("npm"));
+    assert!(
+        std::fs::read_to_string(r.root.join("prompt2.txt"))
+            .unwrap()
+            .contains("npm")
+    );
 }
 
 #[test]
@@ -387,9 +391,11 @@ async fn an_approving_review_posts_its_comment_and_ends_pr_opened() {
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened);
     assert!(comment(&r).contains("**Verdict:** approve"), "{}", comment(&r));
-    assert!(std::fs::read_to_string(r.root.join("gh.log"))
-        .unwrap()
-        .contains("pr comment 7"));
+    assert!(
+        std::fs::read_to_string(r.root.join("gh.log"))
+            .unwrap()
+            .contains("pr comment 7")
+    );
     let prompt = std::fs::read_to_string(r.root.join("reviewer1.txt")).unwrap();
     assert!(prompt.contains("The piece: Show it."), "{prompt}");
 }
@@ -404,12 +410,14 @@ async fn a_request_for_changes_resumes_the_implementer_then_re_reviews() {
     assert_eq!(end.outcome, RunOutcome::PrOpened);
     let fix = std::fs::read_to_string(r.root.join("prompt2.txt")).unwrap();
     assert!(fix.contains("rename the thing"), "{fix}");
-    assert!(std::fs::read_to_string(r.root.join("args_all"))
-        .unwrap()
-        .lines()
-        .nth(1)
-        .unwrap()
-        .contains("--resume"));
+    assert!(
+        std::fs::read_to_string(r.root.join("args_all"))
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("--resume")
+    );
     let again = std::fs::read_to_string(r.root.join("reviewer2.txt")).unwrap();
     assert!(again.contains("re-review"), "{again}");
     assert_eq!(comment(&r).matches("**Verdict:**").count(), 2);
@@ -690,7 +698,7 @@ async fn a_chore_that_asks_questions_ends_failed_and_its_change_is_closed() {
 
 /// A store whose `lock_take` answers per `mode` ("free", "held" by another, "error"); every op body is logged.
 async fn lock_store(mode: &'static str) -> (String, Arc<Mutex<Vec<Value>>>) {
-    use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
     let log: Arc<Mutex<Vec<Value>>> = Default::default();
     let app = Router::new()
         .route(
