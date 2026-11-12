@@ -6,32 +6,32 @@
 //! A beat's `stop` and the ceiling cut the session's process tree ([`RunProcesses`]); the loop releases the
 //! lane whatever the outcome.
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::baseline_wait::BaselineStage;
-use super::driver::{piece_id, RunEnd, RunProcesses, RunRequest, RunStarter};
-use super::piece_review::{review as review_change, ReviewState, Reviewed};
-use super::session::{gate_rounds, piece_branch_name, watch_for, Attempt, ChecksStage, GateRounds, Gated, Step};
+use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
+use super::piece_review::{ReviewState, Reviewed, review as review_change};
+use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, watch_for};
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{parse_engine, CursorModels, EngineChoiceConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
-    engine_for, engine_of, run_session_tracked, start_engine, EngineId, Role, SessionStart, TranscriptSink,
+    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked, start_engine,
 };
-use crate::engines::{place, Placement};
+use crate::engines::{Placement, place};
 use crate::env::Env;
-use crate::implementer::{publish, run_implementer, session_spec, start_files, Session, Start};
-use crate::orchestrator::live::sessions::{model_name, SessionInfo, Sessions};
-use crate::runs::chore::{chore_end, chore_lock_name, chore_of, model_for, tier_for, Chore, ChoreKind, Outside};
-use crate::runs::{end_from_answer, needs_push, Pushed};
+use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
+use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
+use crate::runs::{Pushed, end_from_answer, needs_push};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
