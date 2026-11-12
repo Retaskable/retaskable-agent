@@ -617,3 +617,47 @@ fn answer_goes_up_the_projects_connection_and_is_dropped_once_it_is_gone() {
     q.answer("one", json!({"n": 3}));
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn store_pause_state_is_unknown_until_set_and_unknown_clears_it() {
+    let s = StorePauseState::default();
+    assert_eq!(s.get("a"), StorePause::Unknown);
+    s.set("a", StorePause::Paused("freeze".into()));
+    assert_eq!(s.get("a"), StorePause::Paused("freeze".into()));
+    assert_eq!(s.get("b"), StorePause::Unknown, "other projects are untouched");
+    s.set("a", StorePause::NotPaused);
+    assert_eq!(s.get("a"), StorePause::NotPaused);
+    s.set("a", StorePause::Unknown);
+    assert_eq!(s.get("a"), StorePause::Unknown);
+}
+
+#[test]
+fn store_pause_state_notifies_subscribers_only_of_real_changes() {
+    let s = StorePauseState::default();
+    let mut rx = s.subscribe();
+    s.set("a", StorePause::Unknown);
+    assert!(
+        !rx.has_changed().unwrap(),
+        "unknown for an unrecorded project is no change"
+    );
+    s.set("a", StorePause::Paused("x".into()));
+    assert!(rx.has_changed().unwrap());
+    rx.borrow_and_update();
+    s.set("a", StorePause::Paused("x".into()));
+    assert!(!rx.has_changed().unwrap(), "the same pause is no change");
+    s.set("a", StorePause::Paused("y".into()));
+    assert!(rx.has_changed().unwrap(), "a new reason is a change");
+    rx.borrow_and_update();
+    s.set("a", StorePause::Unknown);
+    assert!(rx.has_changed().unwrap(), "forgetting a recorded pause is a change");
+}
+
+#[test]
+fn store_pause_states_compare_by_content() {
+    let (a, b) = (StorePauseState::default(), StorePauseState::default());
+    assert_eq!(a, b);
+    a.set("p", StorePause::NotPaused);
+    assert_ne!(a, b);
+    b.set("p", StorePause::NotPaused);
+    assert_eq!(a, b);
+}
