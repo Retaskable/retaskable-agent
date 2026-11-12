@@ -87,7 +87,7 @@ impl Machine {
 /// window (a weekly `rateLimitType`) says nothing about the 5-hour one.
 fn five_hour_left_pct(usage: &Value) -> Option<i64> {
     let used = crate::view::usage::five_hour(usage)?.get("utilization")?.as_f64()?;
-    Some(((1.0 - crate::tiers::frac(used)) * 100.0).round() as i64)
+    Some(((1.0 - crate::tiers::frac(used)).max(0.0) * 100.0).round() as i64)
 }
 
 #[cfg(test)]
@@ -102,5 +102,10 @@ mod tests {
         let five = json!({"unifiedWindows": {"five_hour": {"utilization": 0.25}, "seven_day": {"utilization": 0.9}}});
         assert_eq!(five_hour_left_pct(&five), Some(75));
         assert_eq!(five_hour_left_pct(&json!({"utilization": 40})), Some(60));
+    }
+
+    #[test]
+    fn an_overrun_five_hour_window_has_no_negative_share_left() {
+        assert_eq!(five_hour_left_pct(&json!({"utilization": 120})), Some(0));
     }
 }
