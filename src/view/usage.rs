@@ -23,7 +23,7 @@ fn iso_if_future(epoch: Option<i64>, now: i64) -> Value {
 
 /// The 5-hour window of a reading: `unifiedWindows.five_hour`, else the reading itself unless it is labeled with
 /// another window.
-fn five_hour(usage: &Value) -> Option<&Value> {
+pub(crate) fn five_hour(usage: &Value) -> Option<&Value> {
     if let Some(w) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
         return Some(w);
     }
