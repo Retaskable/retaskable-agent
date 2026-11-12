@@ -812,10 +812,7 @@ async fn a_non_rejected_weekly_reading_does_not_overwrite_the_usage_reading() {
 
 #[tokio::test]
 async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = crate::telemetry::now_secs() as u64;
     let reading = |u: f64| {
         json!({"unifiedWindows": {
             "five_hour": {"utilization": 0.1, "resetsAt": now + 3600},
@@ -850,10 +847,7 @@ async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
 
 #[tokio::test]
 async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = crate::telemetry::now_secs() as u64;
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
@@ -882,10 +876,7 @@ async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
 
 #[tokio::test]
 async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = crate::telemetry::now_secs() as u64;
     for (u, limited) in [(0.96, true), (0.94, false)] {
         let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
         let mut rig = rig(2, &[&base]);
