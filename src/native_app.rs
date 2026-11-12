@@ -76,7 +76,12 @@ fn parse(text: Option<String>) -> Option<Value> {
 
 /// Truthy like JavaScript's `!!`, for a config value.
 fn present(v: Option<&Value>) -> bool {
-    !matches!(v, None | Some(Value::Null | Value::Bool(false))) && v != Some(&Value::String(String::new()))
+    match v {
+        None | Some(Value::Null | Value::Bool(false)) => false,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+        Some(_) => true,
+    }
 }
 
 /// The Expo config's `(version, android, ios)`: `app.json`, else `app.config.js`.
