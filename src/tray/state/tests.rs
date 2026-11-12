@@ -20,6 +20,7 @@ pub(crate) fn input(clouds: Vec<CloudInput>) -> TrayInput {
         backlog: None,
         is_release: false,
         start_at_login: false,
+        keep_awake: None,
         windows: false,
         machine: "jcnash-pc4".into(),
         tags: vec![],

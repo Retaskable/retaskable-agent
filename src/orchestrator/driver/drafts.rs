@@ -13,19 +13,23 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::Shared;
-use super::project::{ProjectLoop, signed_out};
+use super::project::ProjectLoop;
+use super::signed_out::signed_out;
 use super::start_gate::StartGate;
-use super::store_errors::WATCH;
+use crate::ask::classify::Classified;
 use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
+use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::engines::Role;
+use crate::ideas::Ideas;
+use crate::ideas::bug_sort::sort;
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
@@ -45,9 +49,7 @@ pub struct DraftJob {
     pub follow_up: String,
     /// The project's latest `state.usage` reading, for the drafter's model tier.
     pub usage: Option<Value>,
-    /// The `engine-placement` flag: Off, only a Claude drafter runs.
-    pub placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
+    /// The engine to start on when it isn't the drafter's chosen one.
     pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
@@ -74,6 +76,10 @@ pub trait DraftHost: Send + Sync {
     fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
+    /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
+    fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
+        Box::pin(async { Classified::Unavailable })
+    }
 }
 
 /// The draft this project is drafting: only ids, never the draft itself.
@@ -128,15 +134,9 @@ impl ProjectLoop {
         if self.drafting() || *slots == 0 || shared.stopping {
             return;
         }
-        let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
-        let placement = self.flags.on("engine-placement").await;
-        let engine = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Drafter, placement) {
-                Some(engine) => engine,
-                None => return,
-            },
-            None if signed_out(shared) => return,
-            None => None,
+        let gate = StartGate::for_lanes(self, lanes, shared);
+        let Some(engine) = gate.role_start(self, shared, Role::Drafter, true) else {
+            return;
         };
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
@@ -150,14 +150,22 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
+        let mut claim = claim;
         let resume = claim.draft.session_id.is_some();
+        // A person's idea that is really a bug is moved to Bugs and planned as a fix; never blocks the draft.
+        if !resume && !signed_out(shared) {
+            let ideas = Ideas {
+                client: &self.client,
+                repo_id: repo,
+                token: Some(&token),
+            };
+            let project = self.project.clone();
+            let host = host.clone();
+            sort(&ideas, &mut claim.draft, |text| host.classify(&project, text)).await;
+        }
         // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
         let engine = if resume { None } else { engine };
-        if resume
-            && gate
-                .as_ref()
-                .is_some_and(|g| g.role_start(self, shared, Role::Drafter, false).is_none())
-        {
+        if resume && gate.role_start(self, shared, Role::Drafter, false).is_none() {
             let released = self
                 .client
                 .draft_release(repo, Some(&token), &claim.draft.id, &claim.token);
@@ -171,11 +179,10 @@ impl ProjectLoop {
         let session_id = claim.draft.session_id.clone().unwrap_or_else(new_session_id);
         let ctx = Ctx {
             client: self.client.clone(),
-            flags: self.flags.clone(),
             repo,
             token,
             lease: claim.token,
-            failures: self.failures.when(self.flags.on(WATCH).await),
+            failures: self.failures.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -218,7 +225,6 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
 
 struct Ctx {
     client: std::sync::Arc<Client>,
-    flags: std::sync::Arc<crate::flags::Flags>,
     repo: u64,
     token: String,
     lease: String,
@@ -246,11 +252,7 @@ impl Ctx {
 
     /// Retaskable's own message in the chat about `draft`: into the ask that wanted it, or a new conversation. The draft's
     /// state is already reported, so a message the store doesn't take is only logged.
-    /// Only with the `ask-claude` flag On: Off is today's behaviour, no message.
     async fn say(&self, draft: &ClaimedDraft, text: &str) {
-        if !self.flags.on("ask-claude").await {
-            return;
-        }
         let posted = (self.client)
             .ask_post(self.repo, Some(&self.token), text, &draft.id, draft.ask_id.as_deref())
             .await;
@@ -262,15 +264,19 @@ impl Ctx {
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
     /// failed on its retry waits for a person as `failed`.
     async fn failed(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
+        let report = DraftReport {
+            summary: Some(reason_or(report.summary.as_deref().unwrap_or(""), NO_REASON)),
+            ..report
+        };
+        let summary = report.summary.clone().unwrap_or_default();
         if self.retried {
             return self.needs_person(id, "failed", report).await;
         }
-        let summary = report.summary.as_deref().unwrap_or("it failed");
         self.report(
             id,
             DraftReport {
                 status: Some("queued".into()),
-                summary: Some(format!("Trying again by itself: {summary}")),
+                summary: Some(format!("{RETRY_PREFIX}{summary}")),
                 retried: Some(true),
                 ..Default::default()
             },
@@ -315,7 +321,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     )
     .await?;
     let failed = |why: String| DraftReport {
-        summary: Some(why),
+        summary: Some(error_reason(&why, "error")),
         ..Default::default()
     };
     let prepared = {
@@ -347,7 +353,6 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         session_id,
         resume,
         usage: ctx.usage.clone(),
-        placement: ctx.flags.on("engine-placement").await,
         engine: ctx.engine,
         sessions: ctx.sessions.clone(),
     };
@@ -395,7 +400,10 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             ctx.say(&draft, follow_up::HAS_QUESTIONS).await;
             Ok(())
         }
-        (None, DrafterStatus::Failed) => ctx.failed(&id, failed(result.summary.clone())).await,
+        (None, DrafterStatus::Failed) => {
+            let why = reason_or(&result.summary, "The drafter stopped without giving a reason.");
+            ctx.failed(&id, failed(why)).await
+        }
         (None, _) => {
             let outcome = sorted.outcome;
             for fix in &sorted.fix_items {
@@ -462,7 +470,10 @@ async fn open_pr(
     let published = match published {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            let why = format!("The spec is committed but couldn't be published: {e:#}");
+            let why = format!(
+                "The spec is committed but couldn't be published: {}",
+                reason_or(&format!("{e:#}"), "no reason given")
+            );
             return ctx
                 .failed(
                     id,

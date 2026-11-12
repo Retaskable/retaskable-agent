@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use super::menu::{Action, Menu, tray_menu};
 use super::state::{BacklogWait, CloudInput, Exit, IconState, LinkState, TrayInput, icon_state, tooltip};
 use crate::connector::{CloudHandle, CloudLink};
+use crate::keep_awake::KeepAwake;
 use crate::link::pending::{BacklogWaiting, Links};
 use crate::restart::RestartState;
 use crate::settings_server::SettingsServer;
@@ -181,6 +182,8 @@ pub struct TrayDeps {
     pub settings: Arc<dyn SettingsLink>,
     /// Release builds only: Start at login, Open the log and Open Retaskable.
     pub login: Option<Arc<dyn Login>>,
+    /// Keep this computer awake, where the OS has a way to hold it.
+    pub keep_awake: Option<Arc<KeepAwake>>,
     pub log_file: Option<PathBuf>,
     pub windows: bool,
     /// Link the shared backlog's store again.
@@ -265,6 +268,10 @@ impl TrayAgent {
             }),
             is_release: self.deps.login.is_some(),
             start_at_login: self.deps.login.as_ref().is_some_and(|l| l.is_on()),
+            keep_awake: self.deps.keep_awake.as_ref().map(|k| {
+                k.tick();
+                k.is_on()
+            }),
             windows: self.deps.windows,
             machine: self.deps.view.machine.clone(),
             tags: self.deps.view.tags.get(),
@@ -397,6 +404,11 @@ impl TrayAgent {
             Action::ToggleStartAtLogin => {
                 if let Some(login) = &self.deps.login {
                     login.set(!login.is_on())?;
+                }
+            }
+            Action::ToggleKeepAwake => {
+                if let Some(k) = &self.deps.keep_awake {
+                    k.set(!k.is_on())?;
                 }
             }
             Action::OpenLog => {

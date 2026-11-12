@@ -73,7 +73,6 @@ async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
 
 #[tokio::test]
 async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
-    tiers::set_local_ladder_for_test(true);
     let r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
     let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
     std::fs::create_dir_all(&base).unwrap();
@@ -98,7 +97,6 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
 
 #[tokio::test]
 async fn a_plan_is_listed_while_it_runs_and_not_after() {
-    tiers::set_local_ladder_for_test(true);
     let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
     let (req, mut s) = request(brief());
     r.starter.start(req).unwrap();
@@ -223,18 +221,6 @@ async fn a_plan_told_to_start_on_claude_while_the_planner_is_cursor_runs_on_clau
 }
 
 #[tokio::test]
-async fn with_placement_off_a_plan_told_to_start_on_cursor_is_given_back() {
-    let mut r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
-    let root = r.root.clone();
-    on_every_engine(&mut r.starter.roster, &root);
-    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    let (mut req, _s) = request(brief());
-    req.engine = Some(EngineId::Cursor);
-    assert!(r.starter.start(req).unwrap_err().contains("Claude alone"));
-    assert_eq!(r.starter.kinds(), vec![RunKind::Plan]);
-}
-
-#[tokio::test]
 async fn a_missing_binary_of_the_chosen_engine_gives_the_run_back_naming_it() {
     let mut choice = EngineChoiceConfig::default();
     choice.roles.planner = Some(Engine::Cursor);
@@ -271,25 +257,13 @@ async fn a_plan_and_a_look_share_one_slot() {
     cut_registered_tree(&mut s.trees).await;
 }
 
-#[tokio::test]
-async fn with_the_flag_off_only_a_role_on_claude_runs() {
-    let mut choice = EngineChoiceConfig::default();
-    choice.roles.planner = Some(Engine::Codex);
-    let mut r = rig(&answer(GOOD), "", choice);
-    r.starter.roster.flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    assert!(r.starter.kinds().is_empty());
-    let (req, _s) = request(brief());
-    assert!(r.starter.start(req).unwrap_err().contains("Claude alone"));
-}
-
-/// What `begin` offered the tier closure as "local may be used" for a rig with the flag and the local model as given.
-fn offered_local(flag: bool, up: bool, engine: Engine) -> bool {
+/// What `begin` offered the tier closure as "local may be used" for a rig with the local model as given.
+fn offered_local(up: bool, engine: Engine) -> bool {
     let mut choice = EngineChoiceConfig::default();
     choice.roles.planner = Some(engine);
     let mut r = rig(&answer(GOOD), "", choice);
     let root = r.root.clone();
     on_every_engine(&mut r.starter.roster, &root);
-    tiers::set_local_ladder_for_test(flag);
     if up {
         r.starter.roster.local = crate::local_model::LocalModel::up();
     }
@@ -306,32 +280,15 @@ fn offered_local(flag: bool, up: bool, engine: Engine) -> bool {
 }
 
 #[test]
-fn the_tier_is_offered_the_local_model_only_with_the_flag_on_and_the_model_up_on_claude() {
-    assert!(offered_local(true, true, Engine::Claude));
-    assert!(!offered_local(false, true, Engine::Claude), "flag Off");
-    assert!(!offered_local(true, false, Engine::Claude), "local down");
-    assert!(!offered_local(true, true, Engine::Cursor), "not on Claude");
+fn the_tier_is_offered_the_local_model_only_with_the_model_up_on_claude() {
+    assert!(offered_local(true, Engine::Claude));
+    assert!(!offered_local(false, Engine::Claude), "local down");
+    assert!(!offered_local(true, Engine::Cursor), "not on Claude");
 }
 
 #[test]
-fn the_planner_is_on_the_top_tier_and_stays_off_a_free_local_slot_above_the_limit() {
-    let m = ModelsConfig::default();
-    let usage =
-        |used: f64| json!({"unifiedWindows": {"five_hour": {"utilization": used, "resetsAt": 4_000_000_000i64}}});
-    // 80%, 94% used: Opus even with local up; only below `pauseBelowPct` is it `local`.
-    assert_eq!(tiers::top_tier(Some(&usage(0.8)), 0, &m, true), tiers::OPUS);
-    assert_eq!(tiers::top_tier(Some(&usage(0.94)), 0, &m, true), tiers::OPUS);
-    assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, true), tiers::LOCAL);
-    assert_eq!(tiers::top_tier(Some(&usage(0.99)), 0, &m, false), tiers::OPUS);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_the_planner_stays_on_the_chore_tier() {
-    tiers::set_local_ladder_for_test(false);
-    let r = rig(&answer(GOOD), "sleep 1", EngineChoiceConfig::default());
-    let (req, mut s) = request(brief());
-    r.starter.start(req).unwrap();
-    let rows = rows_once_running(&r.starter.roster.sessions).await;
-    assert_eq!(rows[0].info.model, tiers::chore_tier());
-    end_of(&mut s.ends).await;
+fn the_planner_is_on_the_top_tier_and_local_only_at_the_limit_with_the_model_up() {
+    assert_eq!(tiers::floor(tiers::OPUS, false, true), tiers::OPUS);
+    assert_eq!(tiers::floor(tiers::OPUS, true, true), tiers::LOCAL);
+    assert_eq!(tiers::floor(tiers::OPUS, true, false), tiers::OPUS);
 }

@@ -4,7 +4,7 @@ use super::*;
 use crate::view::ProjectView;
 
 fn view() -> AgentView {
-    AgentView {
+    let v = AgentView {
         projects: vec![ProjectView {
             id: "one".into(),
             github_repo: "o/one".into(),
@@ -16,7 +16,9 @@ fn view() -> AgentView {
         }],
         version: "9.9.9".into(),
         ..AgentView::blank()
-    }
+    };
+    v.item_commands.gates().open_unrecorded("one");
+    v
 }
 
 fn data_dir() -> PathBuf {

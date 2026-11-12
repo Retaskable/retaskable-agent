@@ -396,8 +396,8 @@ async fn a_successful_save_fires_the_hello_signal_and_a_refused_one_does_not() {
     assert!(seen.has_changed().unwrap());
 }
 
-fn ci_server(dir: &std::path::Path, env: Env, flag: bool) -> Arc<SettingsServer> {
-    let settings = Arc::new(SettingsServer::new(
+fn ci_server(dir: &std::path::Path, env: Env) -> Arc<SettingsServer> {
+    Arc::new(SettingsServer::new(
         dir.to_path_buf(),
         4700,
         4700,
@@ -406,15 +406,13 @@ fn ci_server(dir: &std::path::Path, env: Env, flag: bool) -> Arc<SettingsServer>
         || 1_700_000_000,
         |_: i32| {},
         test_keychain(dir),
-    ));
-    settings.set_agent_ci_flag(flag);
-    settings
+    ))
 }
 
 #[tokio::test]
-async fn saving_ci_slots_validates_0_to_8_and_round_trips_with_the_flag_on() {
+async fn saving_ci_slots_validates_0_to_8_and_round_trips() {
     let dir = tempfile::tempdir().unwrap();
-    let settings = ci_server(dir.path(), Env::empty(), true);
+    let settings = ci_server(dir.path(), Env::empty());
     assert_eq!(signed_in_settings(&settings).await["ciSlots"], json!(1));
     let app = app(settings.clone());
     let (cookie, csrf) = sign_in(&app, &settings).await;
@@ -433,7 +431,7 @@ async fn saving_ci_slots_validates_0_to_8_and_round_trips_with_the_flag_on() {
 #[tokio::test]
 async fn ci_slots_is_greyed_out_and_refused_when_the_variable_sets_it() {
     let dir = tempfile::tempdir().unwrap();
-    let settings = ci_server(dir.path(), Env::from_pairs([("RETASKABLE_CI_SLOTS", "4")]), true);
+    let settings = ci_server(dir.path(), Env::from_pairs([("RETASKABLE_CI_SLOTS", "4")]));
     let body = signed_in_settings(&settings).await;
     assert_eq!(
         (body["ciSlots"].clone(), body["envVars"]["RETASKABLE_CI_SLOTS"].clone()),
@@ -449,18 +447,6 @@ async fn ci_slots_is_greyed_out_and_refused_when_the_variable_sets_it() {
             .unwrap()
             .contains("RETASKABLE_CI_SLOTS")
     );
-}
-
-#[tokio::test]
-async fn ci_slots_is_absent_and_refused_with_the_flag_off() {
-    let dir = tempfile::tempdir().unwrap();
-    let settings = ci_server(dir.path(), Env::empty(), false);
-    assert!(signed_in_settings(&settings).await.get("ciSlots").is_none());
-    let app = app(settings.clone());
-    let (cookie, csrf) = sign_in(&app, &settings).await;
-    let res = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 2 })).await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(config::load(dir.path()).unwrap().machine.ci_slots, 1);
 }
 
 fn write_project_config(dir: &std::path::Path) {
@@ -485,8 +471,7 @@ fn saved_engines(dir: &std::path::Path) -> Value {
 async fn engines_allow_refuses_bad_entries_saving_nothing_and_saves_valid_ones() {
     let dir = tempfile::tempdir().unwrap();
     write_project_config(dir.path());
-    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    settings.set_cursor_allow_flag(true);
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
     let before = saved_engines(dir.path());
 
     for (typed, reason) in [
@@ -535,7 +520,6 @@ async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived
     let dir = tempfile::tempdir().unwrap();
     write_project_config(dir.path());
     let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    settings.set_cursor_allow_flag(true);
     let ok = post_setting(
         &app,
         &cookie,
@@ -555,24 +539,6 @@ async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived
 }
 
 #[tokio::test]
-async fn cursor_allow_is_absent_and_refused_with_the_flag_off() {
-    let dir = tempfile::tempdir().unwrap();
-    write_project_config(dir.path());
-    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    let before = saved_engines(dir.path());
-    assert!(signed_in_settings(&settings).await.get("cursorAllow").is_none());
-    let res = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({"cursorAllow": {"project": "app", "allow": "Shell(just)"}}),
-    )
-    .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(saved_engines(dir.path()), before);
-}
-
-#[tokio::test]
 async fn cursor_allow_on_a_version_1_config_is_an_error_not_a_silent_no_save() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -580,8 +546,7 @@ async fn cursor_allow_on_a_version_1_config_is_an_error_not_a_silent_no_save() {
         json!({"repoPath": "/nowhere/app"}).to_string(),
     )
     .unwrap();
-    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    settings.set_cursor_allow_flag(true);
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
     let res = post_setting(
         &app,
         &cookie,

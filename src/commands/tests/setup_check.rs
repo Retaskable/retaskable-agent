@@ -4,7 +4,7 @@ use super::super::*;
 use super::{cmd, data_dir, view};
 
 /// A view whose runner's probe counts its runs and whose `setup-check-command` flag is `on`.
-fn checks_view(on: bool, runs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> AgentView {
+fn checks_view(runs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> AgentView {
     use crate::setup_check::{SetupCheck, SetupCheckRunner, SetupChecks};
     let probe: crate::setup_check::runner::Probe = Box::new(move || {
         let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -25,13 +25,7 @@ fn checks_view(on: bool, runs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -
     });
     let mut v = view();
     v.checks = std::sync::Arc::new(SetupCheckRunner::with_probe(probe));
-    let flags = crate::flags::Flags::fixed(if on { &["setup-check-command"] } else { &[] });
-    v.settings = crate::hello_settings::HelloSettings::new(
-        PathBuf::new(),
-        crate::env::Env::empty(),
-        0,
-        std::sync::Arc::new(flags),
-    );
+    v.settings = crate::hello_settings::HelloSettings::new(PathBuf::new(), crate::env::Env::empty(), 0);
     v
 }
 
@@ -43,7 +37,7 @@ async fn ask_setup_check(v: &AgentView, project: &str, args: Value, seen: &mut S
 async fn setup_check_is_pending_then_acks_with_the_checks_even_before_setup() {
     for project in ["one", ""] {
         let runs = Default::default();
-        let v = checks_view(true, std::sync::Arc::clone(&runs));
+        let v = checks_view(std::sync::Arc::clone(&runs));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         v.item_commands.set_out(project, Some(tx));
         for args in [json!({}), Value::Null] {
@@ -64,7 +58,7 @@ async fn setup_check_is_pending_then_acks_with_the_checks_even_before_setup() {
 #[tokio::test]
 async fn setup_check_with_any_argument_is_a_nack_and_runs_nothing() {
     let runs: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
-    let v = checks_view(true, runs.clone());
+    let v = checks_view(runs.clone());
     let answer = ask_setup_check(&v, "one", json!({ "x": 1 }), &mut Seen::default()).await;
     assert_eq!(answer["type"], "nack");
     assert_eq!(answer["reason"], "setup_check takes no arguments.");
@@ -72,9 +66,9 @@ async fn setup_check_with_any_argument_is_a_nack_and_runs_nothing() {
 }
 
 #[tokio::test]
-async fn setup_check_is_refused_when_replayed_or_expired_and_with_the_flag_off() {
+async fn setup_check_is_refused_when_replayed_or_expired_() {
     let runs: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
-    let v = checks_view(true, runs.clone());
+    let v = checks_view(runs.clone());
     let mut seen = Seen::default();
     assert_eq!(ask_setup_check(&v, "one", json!({}), &mut seen).await["type"], PENDING);
     let replay = ask_setup_check(&v, "one", json!({}), &mut seen).await;
@@ -83,15 +77,12 @@ async fn setup_check_is_refused_when_replayed_or_expired_and_with_the_flag_off()
     old.expires_at = now_ms() - 1;
     let expired = run(&old, "one", &mut Seen::default(), &v, &|_: i32| {}, &data_dir());
     assert_eq!(expired["type"], "nack");
-    let off = checks_view(false, Default::default());
-    let answer = ask_setup_check(&off, "one", json!({}), &mut Seen::default()).await;
-    assert_eq!(answer["reason"], "Not a command this agent takes yet: setup_check");
 }
 
 #[tokio::test]
 async fn setup_check_ticks_the_change_watch_only_for_a_different_result() {
     let runs: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
-    let v = checks_view(true, runs);
+    let v = checks_view(runs);
     let mut watch = v.checks.subscribe();
     v.checks.run_now().await; // first result counts
     assert!(watch.has_changed().unwrap());

@@ -73,39 +73,33 @@ static MACHINE_WRITE: Mutex<()> = Mutex::new(());
 /// A session of `engine` ended with `result`: when it ended at the engine's limit, that engine is limited until
 /// the usage reading's reset, else for [`LIMIT_PAUSE`] (engines/03-choosing-the-engine.md section 3.5). A Cursor
 /// or Codex session's tokens go to the day's total in machine.json, and Cursor's limit is stamped. A no-op when no
-/// session is scoped, or the `engine-limit-records` flag is Off.
+/// session is scoped.
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
     let _ = LIMITS.try_with(|limits| {
         if engine == EngineId::Claude
-            && limits.week_cutoff_on()
             && let Some(usage) = &result.usage
         {
             limits.cut_off_for_week(usage);
         }
-        let records = limits.records_any_role();
-        if records && result.limit_hit {
-            let wait = crate::engines::engine::resets_in(
-                result.usage.as_ref(),
-                crate::tiers::weekly_reading_on() || limits.week_cutoff_on(),
-            )
-            .unwrap_or(LIMIT_PAUSE);
+        if result.limit_hit {
+            let wait = crate::engines::engine::resets_in(result.usage.as_ref()).unwrap_or(LIMIT_PAUSE);
             limits.hit(engine, Instant::now() + wait);
         }
         let _ = MACHINE_DIR.try_with(|dir| {
             if let Some(dir) = dir {
-                record_machine(dir, engine, result, records);
+                record_machine(dir, engine, result);
             }
         });
     });
 }
 
-/// Adds the session's cost to its project's day, and (with `records`, the `engine-limit-records` flag On) its tokens
+/// Adds the session's cost to its project's day, and its tokens
 /// (Cursor, Codex) and Cursor's limit stamp, to machine.json; a failure is logged only.
-fn record_machine(dir: &std::path::Path, engine: EngineId, result: &SessionResult, records: bool) {
+fn record_machine(dir: &std::path::Path, engine: EngineId, result: &SessionResult) {
     let tokens = result
         .tokens
-        .filter(|_| records && matches!(engine, EngineId::Cursor | EngineId::Codex));
-    let stamp = records && result.limit_hit && engine == EngineId::Cursor;
+        .filter(|_| matches!(engine, EngineId::Cursor | EngineId::Codex));
+    let stamp = result.limit_hit && engine == EngineId::Cursor;
     let spend = result
         .cost_usd
         .filter(|c| *c > 0.0)
@@ -345,7 +339,6 @@ mod tests {
     async fn a_non_implementer_session_at_its_limit_limits_only_its_engine_for_30_minutes() {
         for engine in [EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
             let s = Sessions::default();
-            s.limits().record_any_role(true);
             end_in_scope(&s, engine, ended(true, None)).await;
             let now = Instant::now();
             for e in [EngineId::Claude, EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
@@ -365,7 +358,6 @@ mod tests {
     #[tokio::test]
     async fn a_rejected_reading_sets_the_reset() {
         let s = Sessions::default();
-        s.limits().record_any_role(true);
         let at = u64::try_from(crate::telemetry::now_secs()).unwrap() + 600;
         let usage = serde_json::json!({"status": "rejected", "resetsAt": at});
         end_in_scope(&s, EngineId::Claude, ended(true, Some(usage))).await;
@@ -384,14 +376,12 @@ mod tests {
     async fn a_non_implementer_claude_session_at_the_weekly_cutoff_limits_claude_to_the_weeks_reset() {
         let at = u64::try_from(crate::telemetry::now_secs()).unwrap() + 86_400;
         let usage = |u: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": at}}});
-        for (on, u, engine, limited) in [
-            (true, 0.96, EngineId::Claude, true),
-            (true, 0.90, EngineId::Claude, false),
-            (true, 0.96, EngineId::Cursor, false),
-            (false, 0.96, EngineId::Claude, false),
+        for (u, engine, limited) in [
+            (0.96, EngineId::Claude, true),
+            (0.90, EngineId::Claude, false),
+            (0.96, EngineId::Cursor, false),
         ] {
             let s = Sessions::default();
-            s.limits().set_week_cutoff(on);
             end_in_scope(&s, engine, ended(false, Some(usage(u)))).await;
             let t = Instant::now();
             let day = std::time::Duration::from_secs(80_000);
@@ -401,14 +391,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_that_did_not_hit_the_limit_or_ran_with_the_flag_off_records_nothing() {
+    async fn a_session_that_did_not_hit_the_limit_records_nothing() {
         let s = Sessions::default();
-        s.limits().record_any_role(true);
         end_in_scope(&s, EngineId::Cursor, ended(false, None)).await;
         assert!(!s.limits().is_limited(EngineId::Cursor, Instant::now()));
-        let off = Sessions::default();
-        end_in_scope(&off, EngineId::Cursor, ended(true, None)).await;
-        assert!(!off.limits().is_limited(EngineId::Cursor, Instant::now()));
     }
 
     #[test]
@@ -424,9 +410,7 @@ mod tests {
     }
 
     fn machine_sessions(dir: &std::path::Path) -> Sessions {
-        let s = Sessions::default().with_machine_dir(dir.to_path_buf());
-        s.limits().record_any_role(true);
-        s
+        Sessions::default().with_machine_dir(dir.to_path_buf())
     }
 
     fn machine(dir: &std::path::Path) -> crate::store::MachineStore {
@@ -500,14 +484,6 @@ mod tests {
             (m.spend_today("a"), m.spend_today("b"), m.spend_today("c")),
             (1.5, 2.0, 0.0)
         );
-    }
-
-    #[tokio::test]
-    async fn the_flag_off_adds_no_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = Sessions::default().with_machine_dir(dir.path().to_path_buf());
-        end_in_scope(&s, EngineId::Cursor, with_tokens(false, 1, 1)).await;
-        assert!(machine(dir.path()).cursor_today_tokens().is_none());
     }
 
     #[tokio::test]

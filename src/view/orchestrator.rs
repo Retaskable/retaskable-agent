@@ -32,12 +32,9 @@ fn cut_details(details: &Value) -> Value {
 }
 
 impl AgentView {
-    /// Why `project` is paused, if it is. With `obey-shared-pause` On the store's own words win, then "This computer
-    /// is paused"; an unknown store pause alone isn't a pause. With it Off, only this computer's pause counts.
+    /// Why `project` is paused, if it is. The store's own words win, then "This computer is paused"; an unknown
+    /// store pause alone isn't a pause.
     pub fn pause_reason(&self, project: &str) -> Option<String> {
-        if !self.item_commands.flag_on(project, super::OBEY_SHARED_PAUSE_FLAG) {
-            return self.paused.reason(project);
-        }
         match self.store_paused.get(project) {
             StorePause::Paused(words) => Some(words),
             _ => self
@@ -47,7 +44,7 @@ impl AgentView {
         }
     }
 
-    /// The `orchestrator` block for `project` ("" before Setup). With `snapshot-reporting` Off, or for a project
+    /// The `orchestrator` block for `project` ("" before Setup). For a project
     /// whose loop isn't running, the project reads as paused with [`NO_WORK_YET`] unless a person's pause set a reason.
     pub(super) fn orchestrator_block(&self, project: &str) -> Value {
         let mut block = if project.is_empty() {
@@ -61,7 +58,7 @@ impl AgentView {
                 }
             }
         };
-        if !project.is_empty() && self.settings.snapshot_reporting_on() {
+        if !project.is_empty() {
             let (spent, daily) = self.settings.spend_today(project);
             block["spendTodayUsd"] = json!(spent);
             block["dailyUsd"] = json!(daily);
@@ -78,12 +75,9 @@ impl AgentView {
         block
     }
 
-    /// With `snapshot-reporting` On, every project's open anomalies (oldest first, at most [`MAX_ANOMALIES`]) and
+    /// Every project's open anomalies (oldest first, at most [`MAX_ANOMALIES`]) and
     /// how many more there are; `None` when there are none.
     fn anomalies_block(&self) -> Option<(Value, usize)> {
-        if !self.settings.snapshot_reporting_on() {
-            return None;
-        }
         let state = self.live.snapshot();
         let mut all: Vec<(&str, &OpenAnomaly)> = state
             .projects
@@ -116,11 +110,8 @@ impl AgentView {
         Some((Value::Array(sent), more))
     }
 
-    /// The project's loop as of its last pass, when the flag is On and the loop runs.
+    /// The project's loop as of its last pass, when the loop runs.
     pub(super) fn loop_state(&self, project: &str) -> Option<crate::orchestrator::live::LiveState> {
-        if !self.settings.snapshot_reporting_on() {
-            return None;
-        }
         let state = self.live.snapshot();
         state.projects.contains_key(project).then_some(state)
     }

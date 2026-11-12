@@ -66,19 +66,6 @@ pub fn spawn_all(args: SpawnArgs) {
     if args.live.snapshot().mode == OrchestratorMode::Off {
         return;
     }
-    let limits = args.live.sessions().limits();
-    {
-        // `engine-limit-records`: kept fresh in the background; Off until there is an answer.
-        let flag = Arc::new(crate::flags::Flags::from_env());
-        let limits = limits.clone();
-        tokio::spawn(async move {
-            loop {
-                limits.record_any_role(flag.on("engine-limit-records").await);
-                limits.set_week_cutoff(flag.on("weekly-cutoff").await);
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            }
-        });
-    }
     let mut machine = Machine::new(
         args.lane_count,
         args.concurrency,
@@ -100,7 +87,7 @@ pub fn spawn_all(args: SpawnArgs) {
             bug_version: args.bug_version,
         },
     );
-    machine.engine_limits = limits;
+    machine.engine_limits = args.live.sessions().limits();
     machine = machine.with_local(args.local);
     if args.live.snapshot().mode == OrchestratorMode::Runs {
         machine = machine.with_run_starters(args.run_starters);

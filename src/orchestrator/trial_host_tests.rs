@@ -46,7 +46,6 @@ fn rig(answer: &str, gh_fails: bool, claude_missing: bool) -> Rig {
         root.join("data"),
         EngineChoiceConfig::default(),
         env,
-        ModelsConfig::default(),
         Default::default(),
         crate::local_model::LocalModel::off(),
     );
@@ -72,7 +71,6 @@ async fn run(rig: &Rig) -> TrialEnd {
         branch: "retaskable/trial-plan".into(),
         session_id: crate::implementer::new_session_id(),
         usage: None,
-        placement: false,
         sessions: Default::default(),
     };
     rig.host.run(job).await.unwrap()
@@ -147,7 +145,7 @@ async fn a_failing_publish_is_dropped() {
 }
 
 #[tokio::test]
-async fn the_trial_runs_on_the_implementers_chosen_engine_with_placement_on() {
+async fn the_trial_runs_on_the_implementers_chosen_engine() {
     let mut rig = rig(&answer("pr_opened"), false, false);
     let pi = rig.root.join("pi.sh");
     let r = rig.root.display();
@@ -167,31 +165,24 @@ async fn the_trial_runs_on_the_implementers_chosen_engine_with_placement_on() {
         _ => None,
     });
     let mut choice = EngineChoiceConfig::default();
-    choice.roles.implementer = Some(Engine::Pi);
+    choice.roles.implementer = Some(crate::config::Engine::Pi);
     rig.host = ClaudeTrial::new(
         rig.root.join("data"),
         choice,
         env,
-        ModelsConfig::default(),
         Default::default(),
         crate::local_model::LocalModel::off(),
     );
-    let job = |placement| TrialJob {
+    let job = || TrialJob {
         engine: None,
         project: rig.project.clone(),
         lane: 1,
         branch: "retaskable/trial-plan".into(),
         session_id: crate::implementer::new_session_id(),
         usage: None,
-        placement,
         sessions: Default::default(),
     };
-    let TrialEnd::Dropped { reason } = rig.host.run(job(false)).await.unwrap() else {
-        panic!("placement Off should drop a pi trial")
-    };
-    assert!(reason.contains("pi"), "{reason}");
-    assert!(!rig.root.join("pi_args").exists());
-    rig.host.run(job(true)).await.unwrap();
+    rig.host.run(job()).await.unwrap();
     assert!(rig.root.join("pi_args").exists(), "the pi stub ran");
     assert!(!rig.root.join("args").exists(), "claude did not");
 }

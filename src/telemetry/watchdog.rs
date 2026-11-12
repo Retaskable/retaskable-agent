@@ -103,8 +103,6 @@ pub struct Input<'a> {
     pub lease_idle_minutes: u32,
     pub idle_lanes_minutes: u32,
     pub no_progress_minutes: u32,
-    /// The `watchdog-anomaly-rules` release flag: the rules behind it (`sync_failing`, `duplicate_step`) run only when On.
-    pub anomaly_rules: bool,
 }
 
 /// Every rule's findings this minute.
@@ -115,9 +113,7 @@ pub fn check(input: &Input) -> Vec<Found> {
     idle_lanes(input, &mut found);
     repeat_error(input, &mut found);
     no_progress(input, &mut found);
-    if input.anomaly_rules {
-        sync_failing(input, &mut found);
-    }
+    sync_failing(input, &mut found);
     restart_wait(input, &mut found);
     duplicate_step(input, &mut found);
     found
@@ -344,9 +340,6 @@ fn restart_wait(input: &Input, out: &mut Vec<Found>) {
 /// in between). Shown at once, for `DUPLICATE_SHOWN_MINUTES` after the latest repeated start. A start with
 /// no key never counts.
 fn duplicate_step(input: &Input, out: &mut Vec<Found>) {
-    if !input.anomaly_rules {
-        return;
-    }
     let mut open: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
     let mut duplicated: BTreeMap<(&str, &str, &str), i64> = BTreeMap::new();
     for e in input.recent {

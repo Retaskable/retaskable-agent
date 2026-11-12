@@ -12,11 +12,6 @@ use crate::ideas::{self, Ideas};
 impl ProjectLoop {
     pub(super) async fn idea_pass(&mut self, shared: &Shared<'_>) {
         let queue = &shared.links.item_commands;
-        queue.set_flag(
-            &self.id,
-            "restart-play-command",
-            self.flags.on("restart-play-command").await,
-        );
         for cmd in queue.take_ideas(&self.id) {
             let done = accept_idea(&self.client, self.repo, &cmd.idea, &cmd.by, shared).await;
             queue.answer(

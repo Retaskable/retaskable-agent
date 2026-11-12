@@ -37,12 +37,14 @@ fn a_build_with_no_free_lane_does_not_start() {
 }
 
 #[test]
-fn the_beat_lists_every_live_run() {
+fn the_beat_lists_every_live_run_but_a_merge_turn_which_beats_on_its_own() {
     let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
     runs.start(&mut pool, "a", RunKind::Build, "x", t0).unwrap();
     runs.start(&mut pool, "b", RunKind::Merge, "y", t0).unwrap();
     runs.start(&mut pool, "c", RunKind::Look, "z", t0).unwrap();
-    assert_eq!(runs.beat_tokens(), ["a", "b", "c"]);
+    assert_eq!(runs.beat_tokens(), ["a", "c"]);
+    assert_eq!(runs.merge_tokens(), ["b"]);
+    assert!(runs.merging());
 }
 
 fn sleeper() -> (tokio::process::Child, Arc<ProcessTree>) {

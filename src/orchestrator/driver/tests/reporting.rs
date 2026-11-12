@@ -60,6 +60,7 @@ fn live_rig(base: &str, root: &Path) -> (Rig, PathBuf) {
     let mut rig = rig(2, &[base]);
     rig.go_live();
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = repo.to_string_lossy().into_owned();
     rig.lp(0).seen.default_branch = Some("main".into());
     (rig, repo)
 }
@@ -162,12 +163,14 @@ async fn production_lands_what_its_branch_or_its_deploy_serves() {
     let merged = push(&repo, "src.txt", "merged");
     *awaiting.lock().unwrap() = json!([{ "id": "z", "status": "on_main", "mergeCommit": merged }]);
     let production = |url: Option<String>| DeployTarget {
+        rollout: None,
         branch: "prod".into(),
         url,
         smoke: None,
         version_path: None,
     };
     rig.lp(0).project.deploy.production = Some(production(None));
+    rig.lp(0).file_project.deploy.production = Some(production(None));
     rig.machine.fetch().await;
     assert!(landed(&asked).is_empty(), "no production branch yet");
     run(git(&repo).args(["push", "--quiet", "origin", "main:prod"]));
@@ -177,6 +180,7 @@ async fn production_lands_what_its_branch_or_its_deploy_serves() {
     // With a URL, only what production says it serves counts.
     asked.lock().unwrap().clear();
     rig.lp(0).project.deploy.production = Some(production(Some(format!("{base}/"))));
+    rig.lp(0).file_project.deploy.production = Some(production(Some(format!("{base}/"))));
     rig.lp(0).seen = Default::default();
     rig.lp(0).seen.default_branch = Some("main".into());
     rig.machine.fetch().await;
@@ -220,6 +224,7 @@ async fn the_sync_gives_the_base_back_after_a_failed_fetch() {
     let (mut rig, _repo) = live_rig(&base, root.path());
     let id = format!("{}p0", rig.machine.base_scope);
     rig.lp(0).project.repo_path = root.path().join("nowhere").to_string_lossy().into_owned();
+    rig.lp(0).file_project.repo_path = root.path().join("nowhere").to_string_lossy().into_owned();
     rig.machine.fetch().await;
     assert!(kinds(&mut rig).contains(&"error".to_string()));
     assert_eq!(crate::base_hold::base_holder(&id), None);

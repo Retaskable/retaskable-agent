@@ -4,12 +4,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::ask::classify::{Classified, Options, classify};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
+use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
@@ -17,7 +19,7 @@ use crate::engines::cursor::with_project;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
-use crate::tiers::{LOCAL, implementer_tier};
+use crate::tiers::{LOCAL, SONNET, floor};
 use crate::{draft_worktree, paths};
 
 const TEMPLATE: &str = include_str!("../../prompts/drafter.md");
@@ -26,7 +28,6 @@ pub struct ClaudeDrafts {
     data_dir: PathBuf,
     choice: EngineChoiceConfig,
     env: Env,
-    models: ModelsConfig,
     cursor_models: CursorModels,
     /// The computer's local model, for the tier ladder.
     local: crate::local_model::LocalModel,
@@ -37,7 +38,6 @@ impl ClaudeDrafts {
         data_dir: PathBuf,
         choice: EngineChoiceConfig,
         env: Env,
-        models: ModelsConfig,
         cursor_models: CursorModels,
         local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
@@ -45,7 +45,6 @@ impl ClaudeDrafts {
             data_dir,
             choice,
             env,
-            models,
             cursor_models,
             local,
         })
@@ -79,11 +78,10 @@ impl DraftHost for ClaudeDrafts {
     }
 
     fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
-        let (data_dir, choice, env, models, cursor_models, local) = (
+        let (data_dir, choice, env, cursor_models, local) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
-            self.models,
             self.cursor_models.clone(),
             self.local.clone(),
         );
@@ -97,9 +95,6 @@ impl DraftHost for ClaudeDrafts {
                 Engine::Local => Engine::Claude,
                 other => other,
             };
-            if chosen != Engine::Claude && !job.placement {
-                return Err(anyhow!("{chosen} sessions don't run yet"));
-            }
             let placed = place(chosen, Role::Drafter, &env, &cursor_models).map_err(anyhow::Error::msg)?;
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
@@ -108,7 +103,7 @@ impl DraftHost for ClaudeDrafts {
             // A resumed Claude drafter stays on the backend its transcript's first line names (read before the new
             // session rewrites it): a local one goes back to the model while it's up, else to its Anthropic tier; an
             // Anthropic one, or one with no readable header, never goes local.
-            let resumed = job.resume && chosen == Engine::Claude && crate::tiers::tier_kept_on_resume_on();
+            let resumed = job.resume && chosen == Engine::Claude;
             let tier = if resumed
                 && up
                 && started_on_drafter(&data_dir, &project.id_or_derived(), &draft.id).is_some_and(|m| m == LOCAL)
@@ -116,12 +111,16 @@ impl DraftHost for ClaudeDrafts {
                 LOCAL
             } else {
                 let ladder = up && !resumed;
-                let floored =
-                    crate::tiers::limit_floor(job.usage.as_ref(), !resumed && job.sessions.claude_at_limit(), ladder);
                 drafter_tier(
                     draft.request.as_deref().unwrap_or(""),
-                    implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, ladder),
+                    floor(SONNET, !resumed && job.sessions.claude_at_limit(), ladder),
                 )
+            };
+            let retried = !job.resume && draft.other.get("retried").and_then(|v| v.as_bool()) == Some(true);
+            let retry = if retried {
+                retry_text(failure_reason(draft).as_deref())
+            } else {
+                String::new()
             };
             // Held until the session ends.
             let claimed = local.claim(tier).await;
@@ -132,6 +131,7 @@ impl DraftHost for ClaudeDrafts {
                     titles: &titles,
                     branch: &job.branch,
                     base_branch: &project.base_branch,
+                    retry: &retry,
                     engine: chosen,
                     tier,
                     budget: &project.budget,
@@ -225,6 +225,33 @@ impl DraftHost for ClaudeDrafts {
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
     }
+
+    fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
+        let (env, models, project) = (self.env.clone(), self.cursor_models.clone(), project.clone());
+        // What the project's sessions cost today on this computer, so a spent day's budget skips the call.
+        let spent =
+            crate::store::MachineStore::load(&self.data_dir).map_or(0.0, |m| m.spend_today(&project.id_or_derived()));
+        Box::pin(async move {
+            let Ok(placed) = place(Engine::Claude, Role::Assistant, &env, &models) else {
+                return Classified::Unavailable;
+            };
+            let opts = Options::new(true, false, project.budget.ask_usd, spent);
+            let cwd = std::env::temp_dir();
+            classify(&text, &opts, &cwd, |spec| async move {
+                let engine = engine_of(spec.engine)?;
+                run_session(
+                    engine.as_ref(),
+                    &placed.bin,
+                    &spec,
+                    "classify",
+                    None,
+                    Default::default(),
+                )
+                .await
+            })
+            .await
+        })
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -260,11 +287,10 @@ mod tests {
             root.join("data"),
             choice,
             env,
-            ModelsConfig::default(),
             models,
             crate::local_model::LocalModel::off(),
         );
-        let job = |session_id: &str, resume: bool, placement: bool| DraftJob {
+        let job = |session_id: &str, resume: bool| DraftJob {
             engine: None,
             project: project_in(&root, &repo),
             draft: serde_json::from_value(serde_json::json!({ "id": "d1", "request": "Add charts" })).unwrap(),
@@ -274,13 +300,11 @@ mod tests {
             resume,
             follow_up: "Revise it.".into(),
             usage: None,
-            placement,
             sessions: Default::default(),
         };
-        assert!(host.run(job("fresh-id", false, false)).await.is_err());
-        let first = host.run(job("fresh-id", false, true)).await.unwrap();
+        let first = host.run(job("fresh-id", false)).await.unwrap();
         assert_eq!(first.session_id.as_deref(), Some("chat-1"));
-        host.run(job("chat-1", true, true)).await.unwrap();
+        host.run(job("chat-1", true)).await.unwrap();
         let args = std::fs::read_to_string(root.join("args")).unwrap();
         let (fresh, revision) = args.trim().split_once('\n').unwrap();
         assert!(
@@ -297,13 +321,7 @@ mod tests {
 
     /// Runs a resumed drafter whose earlier `drafter.jsonl` header names `header` (none when `None`) with the usage at
     /// 2% left, on `local`; returns the model the new transcript's header records and the claude stub's arguments.
-    async fn resumed_drafter(
-        header: Option<&str>,
-        local: crate::local_model::LocalModel,
-        kept: bool,
-    ) -> (String, String) {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_tier_kept_on_resume_for_test(kept);
+    async fn resumed_drafter(header: Option<&str>, local: crate::local_model::LocalModel) -> (String, String) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let repo = crate::test_support::repo_with_origin(&root);
@@ -315,14 +333,7 @@ mod tests {
             let meta = serde_json::json!({ "type": "retaskable_meta", "model": model, "engine": "claude", "at": 1 });
             std::fs::write(run.join("drafter.jsonl"), format!("{meta}\n")).unwrap();
         }
-        let host = ClaudeDrafts::new(
-            root.join("data"),
-            Default::default(),
-            env,
-            ModelsConfig::default(),
-            Default::default(),
-            local,
-        );
+        let host = ClaudeDrafts::new(root.join("data"), Default::default(), env, Default::default(), local);
         let usage = serde_json::json!({ "status": "allowed", "utilization": 0.98, "resetsAt": 4_000_000_000_i64 });
         host.run(DraftJob {
             engine: None,
@@ -334,7 +345,6 @@ mod tests {
             resume: true,
             follow_up: "Revise it.".into(),
             usage: Some(usage),
-            placement: true,
             sessions: Default::default(),
         })
         .await
@@ -347,11 +357,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_local_drafter_goes_back_to_the_model_while_it_is_up_and_to_anthropic_when_it_is_down() {
-        let (model, _) = resumed_drafter(Some("local"), crate::local_model::LocalModel::up(), true).await;
+        let (model, _) = resumed_drafter(Some("local"), crate::local_model::LocalModel::up()).await;
         assert_eq!(model, "local");
         let down = crate::local_model::LocalModel::up();
         down.set_up(false);
-        let (model, args) = resumed_drafter(Some("local"), down, true).await;
+        let (model, args) = resumed_drafter(Some("local"), down).await;
         assert_eq!(model, "sonnet");
         assert!(
             args.contains("--model sonnet") && args.contains("--resume chat-1"),
@@ -362,16 +372,9 @@ mod tests {
     #[tokio::test]
     async fn a_resumed_anthropic_drafter_or_one_with_no_header_never_takes_the_local_model() {
         for header in [Some("sonnet"), Some("opus"), None] {
-            let (model, _) = resumed_drafter(header, crate::local_model::LocalModel::up(), true).await;
+            let (model, _) = resumed_drafter(header, crate::local_model::LocalModel::up()).await;
             assert_ne!(model, "local", "{header:?}");
         }
-    }
-
-    #[tokio::test]
-    async fn a_resume_with_the_flag_off_picks_its_tier_as_before() {
-        // Flag Off: a resume with an Anthropic header lands on the local rows, as it did before.
-        let (model, _) = resumed_drafter(Some("sonnet"), crate::local_model::LocalModel::up(), false).await;
-        assert_eq!(model, "local");
     }
 
     #[tokio::test]
@@ -387,7 +390,6 @@ mod tests {
             root.join("data"),
             Default::default(),
             env,
-            ModelsConfig::default(),
             Default::default(),
             crate::local_model::LocalModel::off(),
         );
@@ -405,7 +407,6 @@ mod tests {
             resume: false,
             follow_up: String::new(),
             usage: None,
-            placement: true,
             sessions: sessions.clone(),
         };
         let task = tokio::spawn(host.run(job));

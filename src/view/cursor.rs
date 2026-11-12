@@ -6,11 +6,8 @@ use crate::store::MachineStore;
 
 impl AgentView {
     /// `{ todayTokens, weekInputTokens, weekOutputTokens, limitHitAt? }` from this computer's machine file; `None`
-    /// while the flag is Off or until a Cursor session has reported tokens.
+    /// until a Cursor session has reported tokens.
     pub(super) fn cursor_usage(&self) -> Option<Value> {
-        if !self.settings.snapshot_reporting_on() {
-            return None;
-        }
         let machine = MachineStore::load(self.settings.dir()?).ok()?;
         let today = machine.cursor_today_tokens()?;
         let (input, output) = machine.cursor_week_tokens()?;

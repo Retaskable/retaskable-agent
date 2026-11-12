@@ -10,6 +10,8 @@ use tokio::sync::watch;
 
 /// The most a restart waits for work on the finish-first list.
 pub const FINISH_FIRST: Duration = Duration::from_secs(2 * 60);
+/// The most a restart waits while a TestFlight build runs, then it goes even if the build hangs.
+pub const TESTFLIGHT_FIRST: Duration = Duration::from_secs(45 * 60);
 /// The most the cloud link gets to send its same-tick answers before the exit.
 pub const FLUSH: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(100);
@@ -30,6 +32,8 @@ pub enum Step {
     Now,
 }
 
+const TESTFLIGHT: &str = "a TestFlight build";
+
 #[derive(Default)]
 struct Inner {
     why: Option<Why>,
@@ -42,6 +46,8 @@ pub struct RestartState {
     inner: Mutex<Inner>,
     next: AtomicU64,
     started: AtomicBool,
+    /// Whether a TestFlight build runs; a test swaps it.
+    build_running: fn() -> bool,
     changed: watch::Sender<u64>,
 }
 
@@ -63,6 +69,7 @@ impl Default for RestartState {
             inner: Mutex::default(),
             next: AtomicU64::new(0),
             started: AtomicBool::new(false),
+            build_running: crate::testflight::testflight_running,
             changed: watch::Sender::new(0),
         }
     }
@@ -124,8 +131,13 @@ impl RestartState {
         }
     }
 
+    /// What a restart or quit waits for: what is held, then "a TestFlight build" while one runs.
     pub fn held(&self) -> Vec<String> {
-        self.inner.lock().unwrap().held.iter().map(|(_, w)| w.clone()).collect()
+        let mut list: Vec<String> = self.inner.lock().unwrap().held.iter().map(|(_, w)| w.clone()).collect();
+        if (self.build_running)() {
+            list.push(TESTFLIGHT.to_string());
+        }
+        list
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -156,7 +168,7 @@ impl RestartState {
         self.changed.send_modify(|n| *n += 1);
     }
 
-    /// Step 2: waits while anything is held, [`FINISH_FIRST`] at most by `clock`, reporting `waiting` with what it
+    /// Step 2: waits while anything is held, [`FINISH_FIRST`] at most ([`TESTFLIGHT_FIRST`] while a build runs) by `clock`, reporting `waiting` with what it
     /// waits on. `on_waiting` runs once, when the first wait starts, with what it waits on and the ms waited so far
     /// at its end (for `restart_waiting`). Ends with the step `now`.
     pub fn finish_first(&self, clock: &Clock, on_waiting: &mut dyn FnMut(Vec<String>, u64)) {
@@ -165,8 +177,16 @@ impl RestartState {
         if !first.is_empty() {
             self.set_step(Step::Waiting(first.clone()));
             let mut last = first.clone();
-            while (clock.now_ms)() - started < FINISH_FIRST.as_millis() as i64 {
+            loop {
                 let now_held = self.held();
+                let cap = if now_held.iter().any(|w| w == TESTFLIGHT) {
+                    TESTFLIGHT_FIRST
+                } else {
+                    FINISH_FIRST
+                };
+                if (clock.now_ms)() - started >= cap.as_millis() as i64 {
+                    break;
+                }
                 if now_held.is_empty() {
                     break;
                 }
@@ -272,6 +292,23 @@ mod tests {
         let mut ms = 0;
         s.finish_first(&fake(|_| {}), &mut |_, m| ms = m);
         assert_eq!(ms, FINISH_FIRST.as_millis() as u64);
+        assert_eq!(s.step(), Some(Step::Now));
+    }
+
+    #[test]
+    fn a_running_build_is_waited_on_for_45_minutes() {
+        let s = RestartState {
+            build_running: || true,
+            ..Default::default()
+        };
+        s.ask(why("ann"));
+        assert_eq!(s.held(), vec![TESTFLIGHT.to_string()]);
+        let mut seen = None;
+        s.finish_first(&fake(|_| {}), &mut |on, m| seen = Some((on, m)));
+        assert_eq!(
+            seen,
+            Some((vec![TESTFLIGHT.to_string()], TESTFLIGHT_FIRST.as_millis() as u64))
+        );
         assert_eq!(s.step(), Some(Step::Now));
     }
 }

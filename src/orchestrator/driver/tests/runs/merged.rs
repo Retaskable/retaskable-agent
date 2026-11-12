@@ -1,11 +1,12 @@
 //! The `merged` event a merge run writes when it lands (`ci-merged-events`).
 use super::*;
 
+/// The store's turn for a merge: the piece the run is on.
 fn merge_run(token: &str, change: Value, chore: bool) -> Value {
-    let mut r = run(token, "merge");
-    r["piece"]["change"] = change;
+    let mut r = turn(token);
+    r["turn"]["piece"]["change"] = change;
     if chore {
-        r["piece"]["chore"] = json!({ "kind": "tidy" });
+        r["turn"]["piece"]["chore"] = json!({ "kind": "tidy" });
     }
     r
 }
@@ -17,14 +18,11 @@ fn merged_events(rig: &mut Rig) -> Vec<Value> {
         .collect()
 }
 
-async fn merge_ends(flag_on: bool, change: Value, chore: bool, outcome: RunOutcome, ends: usize) -> Vec<Value> {
+async fn merge_ends(change: Value, chore: bool, outcome: RunOutcome, ends: usize) -> Vec<Value> {
     let (mut rig, script) = setup(1).await;
-    if flag_on {
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ci-merged-events"]));
-    }
     let starter = FakeRuns::new(&[RunKind::Merge]);
     let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([merge_run("m1", change, chore)]);
+    script.lock().unwrap().merges = VecDeque::from([merge_run("m1", change, chore)]);
     pass(&mut rig, &starter, t0).await;
     for _ in 0..ends {
         starter.finish("m1", outcome.clone());
@@ -35,7 +33,7 @@ async fn merge_ends(flag_on: bool, change: Value, chore: bool, outcome: RunOutco
 
 #[tokio::test]
 async fn a_merged_run_writes_one_merged_event_with_the_item_and_the_pr_number() {
-    let events = merge_ends(true, json!(42), false, RunOutcome::Merged, 1).await;
+    let events = merge_ends(json!(42), false, RunOutcome::Merged, 1).await;
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0]["item"], "piece-m1");
     assert_eq!(events[0]["pr"], 42);
@@ -45,13 +43,12 @@ async fn a_merged_run_writes_one_merged_event_with_the_item_and_the_pr_number() 
 #[tokio::test]
 async fn a_pr_url_gives_its_number_and_a_chore_is_marked() {
     let change = json!("https://github.com/o/r/pull/77");
-    let events = merge_ends(true, change, true, RunOutcome::Merged, 1).await;
+    let events = merge_ends(change, true, RunOutcome::Merged, 1).await;
     assert_eq!(
         (events[0]["pr"].as_u64(), events[0]["chore"].as_bool()),
         (Some(77), Some(true))
     );
     let events = merge_ends(
-        true,
         json!({ "url": "https://github.com/o/r/pull/9/" }),
         false,
         RunOutcome::Merged,
@@ -62,18 +59,13 @@ async fn a_pr_url_gives_its_number_and_a_chore_is_marked() {
 }
 
 #[tokio::test]
-async fn no_number_a_failed_merge_a_second_end_or_the_flag_off_write_nothing_more() {
+async fn no_number_a_failed_merge_or_a_second_end_write_nothing_more() {
     assert!(
-        merge_ends(true, json!("no number"), false, RunOutcome::Merged, 1)
+        merge_ends(json!("no number"), false, RunOutcome::Merged, 1)
             .await
             .is_empty()
     );
     let failed = RunOutcome::Failed("conflict".into());
-    assert!(merge_ends(true, json!(42), false, failed, 1).await.is_empty());
-    assert_eq!(merge_ends(true, json!(42), false, RunOutcome::Merged, 2).await.len(), 1);
-    assert!(
-        merge_ends(false, json!(42), false, RunOutcome::Merged, 1)
-            .await
-            .is_empty()
-    );
+    assert!(merge_ends(json!(42), false, failed, 1).await.is_empty());
+    assert_eq!(merge_ends(json!(42), false, RunOutcome::Merged, 2).await.len(), 1);
 }

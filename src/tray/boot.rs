@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::agent::{CloudSlot, Opener, Quit, SystemOpener, TrayAgent, TrayDeps};
 use super::helper::helper_path;
 use super::icons::{TrayState, load_tray_icon};
-use super::mode::{TrayMode, tray_mode, use_tui};
+use super::mode::{TrayMode, tray_mode};
 use super::run::{Icons, encode_icon, start};
 use super::term::StdTerm;
 use super::tui::{TerminalMenu, TuiOpener};
@@ -40,9 +40,9 @@ pub struct Boot<'a> {
     pub exit: Arc<Exit>,
     /// Quit now: the agent's own shutdown.
     pub quit_now: Arc<tokio::sync::Notify>,
-    /// Card flag `terminal-menu`.
-    pub terminal_menu: bool,
     pub link_backlog: Arc<dyn Fn() + Send + Sync>,
+    /// Keep this computer awake.
+    pub keep_awake: Option<Arc<crate::keep_awake::KeepAwake>>,
     /// Said (with why) when the helper stops after it started.
     pub on_stopped: Box<dyn FnOnce(String) + Send>,
 }
@@ -128,13 +128,9 @@ fn start_tui(deps: TrayDeps, quit: Arc<dyn Quit>) -> Option<Shutdown> {
     }))
 }
 
-/// Whether the terminal menu is drawn. With the `terminal-menu` flag Off, `use_tui` decides as it always did; On, `ui_mode`.
-fn ui(args: &[String], env: &Env, os: OsKind, has_helper: bool, interactive: bool, flag: bool) -> bool {
-    if flag {
-        ui_mode(args, env, std::env::consts::OS, has_helper, interactive) == UiMode::TerminalMenu
-    } else {
-        use_tui(args, env, os, interactive)
-    }
+/// Whether the terminal menu is drawn.
+fn ui(args: &[String], env: &Env, has_helper: bool, interactive: bool) -> bool {
+    ui_mode(args, env, std::env::consts::OS, has_helper, interactive) == UiMode::TerminalMenu
 }
 
 /// The running tray or terminal menu, or `None` when the agent runs with the plain console (the console says why).
@@ -143,12 +139,9 @@ pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
     let exe = b.exe.unwrap_or(Path::new(""));
     let terminals = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let helper = helper_path(b.build, exe, b.env, os);
-    let tui = ui(b.args, b.env, os, helper.is_some(), terminals, b.terminal_menu);
-    // Card flag `terminal-menu`: On says why there is no tray (once); Off keeps the console as it was.
-    let reason = b
-        .terminal_menu
-        .then(|| no_tray_reason(b.args, b.env, std::env::consts::OS, helper.is_some()))
-        .flatten();
+    let tui = ui(b.args, b.env, helper.is_some(), terminals);
+    // Says why there is no tray (once).
+    let reason = no_tray_reason(b.args, b.env, std::env::consts::OS, helper.is_some());
     if let Some(why) = &reason {
         tracing::info!("{why}");
     }
@@ -193,6 +186,7 @@ pub async fn boot(b: Boot<'_>) -> Option<Shutdown> {
         quit: quit.clone(),
         settings: b.settings,
         login,
+        keep_awake: b.keep_awake,
         log_file,
         windows: cfg!(windows),
         link_backlog: b.link_backlog,
@@ -214,19 +208,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_needs_its_flag_to_use_ui_mode_and_a_terminal() {
+    fn the_menu_needs_a_terminal() {
         let args = vec!["--tui".to_string()];
         let env = Env::from_map(Default::default());
-        let os = current_os();
-        assert!(ui(&args, &env, os, true, true, true));
-        assert!(!ui(&args, &env, os, true, false, true));
-    }
-
-    #[test]
-    fn with_the_flag_off_use_tui_still_decides() {
-        let args = vec!["--tui".to_string()];
-        let env = Env::from_map(Default::default());
-        assert!(ui(&args, &env, current_os(), true, true, false));
-        assert!(!ui(&args, &env, current_os(), true, false, false));
+        assert!(ui(&args, &env, true, true));
+        assert!(!ui(&args, &env, true, false));
     }
 }

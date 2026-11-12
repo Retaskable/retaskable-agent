@@ -11,6 +11,7 @@ use serde_json::json;
 use super::claim::{self, Verdict};
 use super::report::{self, Host, Kind, State};
 use super::{CheckKey, Programs, RunningCheck, automerge, container, host};
+use crate::backlog::runs::short_sha;
 use crate::config::ProjectConfig;
 use crate::orchestrator::live::LiveHandle;
 use crate::telemetry::event::{Ci, Event};
@@ -50,16 +51,12 @@ fn context_of(k: &CheckKey) -> &'static str {
     }
 }
 
-fn short(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
 /// `<head>-<main>`, short: the key as the failure comment and events carry it.
 pub fn key_text(k: &CheckKey) -> String {
     if k.is_push() {
-        return short(&k.main);
+        return short_sha(&k.main).to_string();
     }
-    format!("{}-{}", short(&k.head), short(&k.main))
+    format!("{}-{}", short_sha(&k.head), short_sha(&k.main))
 }
 
 /// Writes a `ci` event to the project's log.
@@ -123,12 +120,12 @@ pub async fn run(j: Job) -> Ran {
     }
     let begun = Instant::now();
     let started_ms = now_ms();
-    let sha7 = short(&j.key.head);
+    let sha7 = short_sha(&j.key.head);
     j.live.update_ci(|c| {
         c.checks.push(RunningCheck {
             project: j.id.clone(),
             pr: j.key.pr,
-            sha: sha7.clone(),
+            sha: sha7.to_string(),
             started: begun,
         });
         c.running = c.checks.len() as u32;
@@ -329,12 +326,6 @@ mod tests {
     #[test]
     fn a_push_key_text_is_main_alone_short() {
         assert_eq!(key_text(&CheckKey::push("0123456789abc")), "0123456");
-    }
-
-    #[test]
-    fn short_keeps_a_sha_shorter_than_seven_whole() {
-        assert_eq!(short("abc"), "abc");
-        assert_eq!(short(""), "");
     }
 
     #[test]

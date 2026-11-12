@@ -6,7 +6,7 @@
 //! the smoke command in its own reused worktree ([`crate::lanes::prepare_smoke_checkout`]).
 //! Calling this on a timer after every real merge, queueing a `fix_main` chore on failure, and
 //! reporting [`SmokeState`] to the hub are not yet built here: those are the not-yet-built
-//! orchestrator-loop's, chore-rotation's and snapshot-reporting's jobs.
+//! orchestrator-loop's, the chore rotation's and snapshot-reporting's jobs.
 use std::path::Path;
 use std::time::Duration;
 
@@ -224,6 +224,7 @@ mod tests {
             url: Some("https://staging.example.com".to_string()),
             smoke: smoke.map(str::to_string),
             version_path: None,
+            rollout: None,
         }
     }
 
@@ -499,6 +500,7 @@ mod tests {
             url: Some(url),
             smoke: Some(smoke_command.to_string()),
             version_path: None,
+            rollout: None,
         };
 
         let state = run(&repo, &worktrees, &target, &sha).unwrap();
@@ -520,6 +522,7 @@ mod tests {
             url: Some(url),
             smoke: Some(smoke_command.to_string()),
             version_path: None,
+            rollout: None,
         };
 
         let state = run(&repo, &worktrees, &target, &sha).unwrap();
@@ -541,6 +544,7 @@ mod tests {
             url: Some(format!("http://127.0.0.1:{port}")),
             smoke: Some("true".to_string()),
             version_path: None,
+            rollout: None,
         };
         let http = reqwest::blocking::Client::new();
 

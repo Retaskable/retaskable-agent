@@ -112,6 +112,8 @@ pub struct Machine {
     /// Which engines are at their usage limit and until when, from a session's `limit_hit`: a resume of a
     /// session on one starts fresh on another engine that can take it (engines/03 section 3.5). In memory only.
     pub(super) engine_limits: EngineLimits,
+    /// The pace of the usage recheck while Claude's limit holds the computer.
+    pub(super) usage_check: crate::usage_check::UsageCheck,
     pub(super) projects: Vec<ProjectLoop>,
     /// Index in `projects` of the project served last: the next start goes to the one after it.
     pub(super) last_served: Option<usize>,
@@ -133,7 +135,7 @@ pub struct Machine {
     pub(super) run_starters: RunStarters,
     /// How many sessions may run at once, across every project (`concurrency`).
     pub(super) concurrency: u32,
-    /// The computer's local model: its slot holder doesn't count toward `concurrency` (`local-one-slot`).
+    /// The computer's local model: its slot holder doesn't count toward `concurrency`.
     pub(super) local: crate::local_model::LocalModel,
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
@@ -170,6 +172,7 @@ impl Machine {
             claim_paused_until: None,
             claude_signed_out_until: None,
             engine_limits: EngineLimits::default(),
+            usage_check: Default::default(),
             projects: Vec::new(),
             last_served: None,
             links,
@@ -195,14 +198,10 @@ impl Machine {
         self
     }
 
-    /// `concurrency` plus the session holding the local slot (already in the starter's counts), when `local-one-slot`
-    /// is On. Applied once, to the base number, so it can't be added back twice.
+    /// `concurrency` plus the session holding the local slot (already in the starter's counts). Applied once, to
+    /// the base number, so it can't be added back twice.
     fn room_total(&self, concurrency: u32) -> u32 {
-        if crate::tiers::local_one_slot_on() {
-            concurrency + self.local.holding()
-        } else {
-            concurrency
-        }
+        concurrency + self.local.holding()
     }
 
     /// [`process_tree::stopping`], unless a test has overridden it.
@@ -224,20 +223,19 @@ impl Machine {
         self.starter.is_some() && lp.mode == OrchestratorMode::Claim
     }
 
-    /// Whether each project holds new work: this computer's pause is on, or, with `obey-shared-pause` On, the
+    /// Whether each project holds new work: this computer's pause is on, or the
     /// store's is on or unknown (fails closed; work already running carries on).
     fn paused(&self) -> impl std::future::Future<Output = Vec<bool>> + Send + 'static {
         let projects: Vec<_> = (self.projects.iter())
             .map(|lp| {
                 let own = self.links.paused.reason(&lp.id).is_some();
-                (own, self.links.store_paused.get(&lp.id), lp.flags.clone())
+                (own, self.links.store_paused.get(&lp.id))
             })
             .collect();
         async move {
             let mut out = Vec::new();
-            for (own, store, flags) in projects {
-                let obey = !own && flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
-                out.push(own || (obey && store != StorePause::NotPaused));
+            for (own, store) in projects {
+                out.push(own || store != StorePause::NotPaused);
             }
             out
         }
@@ -322,7 +320,6 @@ impl Machine {
             env: self.links.env.clone(),
             engine_choice: self.links.engine_choice.clone(),
             cursor_models: self.links.cursor_models.clone(),
-            flags: lp.flags.clone(),
             machine: self.links.machine.clone(),
             backlog_url: self.links.backlog_url.clone(),
             keychain: self.links.keychain.clone(),
@@ -346,7 +343,6 @@ impl Machine {
                     lp.deprecations_running.clone(),
                     deprecations::Daily {
                         base: self.round_job(lp),
-                        flags: lp.flags.clone(),
                         state: lp.deprecations.clone(),
                     },
                 )
@@ -469,29 +465,11 @@ impl Machine {
     /// One pass over every project, in the order added. A project whose read fails (or panics) is skipped
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
-        self.write_host_calls().await;
-        let mut gate_on = Vec::new();
-        let asked: Vec<_> = self
-            .projects
-            .iter()
-            .map(|lp| (lp.id.clone(), lp.flags.clone()))
-            .collect();
-        let mut obey_on = Vec::new();
-        for (id, flags) in asked {
-            let on = flags.on(crate::command_gate::FLAG).await;
-            self.links.item_commands.set_flag(&id, crate::command_gate::FLAG, on);
-            gate_on.push(on);
-            let obey = flags.on(crate::view::OBEY_SHARED_PAUSE_FLAG).await;
-            self.links
-                .item_commands
-                .set_flag(&id, crate::view::OBEY_SHARED_PAUSE_FLAG, obey);
-            obey_on.push(obey);
-        }
+        self.write_host_calls();
         let jobs: Vec<_> = self
             .projects
             .iter()
-            .zip(gate_on.iter().zip(&obey_on))
-            .map(|(lp, (&on, &facts))| {
+            .map(|lp| {
                 tokio::spawn(read(
                     lp.client.clone(),
                     lp.id.clone(),
@@ -499,8 +477,6 @@ impl Machine {
                     lp.repo,
                     self.links.backlog_url.clone(),
                     self.links.keychain.clone(),
-                    on,
-                    facts,
                 ))
             })
             .collect();
@@ -516,7 +492,7 @@ impl Machine {
                 }
             });
             lp.repo = done.repo;
-            // Off: nothing was read, so nothing is held. A failed read, of the items or the facts, is unknown.
+            // A failed read, of the items or the facts, is unknown.
             let pause = match (&done.items, done.facts) {
                 (Ok(_), Some(Ok(facts))) if facts.paused => {
                     StorePause::Paused(facts.paused_reason.unwrap_or_else(|| "Paused for everyone".to_string()))
@@ -560,9 +536,8 @@ impl Machine {
                 && self.live(&self.projects[i])
             {
                 self.projects[i].backlog_items = items.len();
-                let give_back = self.projects[i].flags.on("cursor-give-back").await;
                 let machine = self.links.machine.clone();
-                self.projects[i].readopt(items, &mut self.pool, give_back.then_some(machine.as_str()));
+                self.projects[i].readopt(items, &mut self.pool, machine.as_str());
                 self.projects[i].follow_drafts(items, &self.links).await;
             }
         }
@@ -575,7 +550,7 @@ impl Machine {
         for (((lp, items), paused), (actions, live)) in
             (self.projects.iter_mut().zip(read_items).zip(paused)).zip(scheduled)
         {
-            let cant_start = lp.start_blocked(&shared!(self, false), &self.pool).await;
+            let cant_start = lp.start_blocked(&shared!(self, false), &self.pool);
             lp.report_limit(cant_start, &self.engine_limits);
             match items {
                 Some(items) => steps.push(lp.record(items, paused, cant_start, actions, &self.pool, live).await),
@@ -591,13 +566,12 @@ impl Machine {
     /// session slots left (`concurrency` less the starter's `active`), and the live ones apply them and ask the
     /// store for the lanes and slots still free. Each project's actions, and for a live one its claim answer.
     async fn schedule(&mut self, ready: &[bool], paused: &[bool]) -> Vec<(Vec<Action>, Option<Option<String>>)> {
+        self.recheck_usage().await;
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
             if *ready && !lp.week_checked {
                 lp.week_checked = true;
-                if ProjectLoop::weekly_on(&lp.flags).await {
-                    for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
-                        ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
-                    }
+                for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
+                    ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
                 }
             }
         }

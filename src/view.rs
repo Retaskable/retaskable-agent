@@ -14,10 +14,7 @@ use crate::hello_settings::HelloSettings;
 
 mod cursor;
 mod orchestrator;
-mod usage;
-
-/// The release flag that has the snapshot carry the loop's state (agent/09.2-what-the-computer-reports.md).
-pub const SNAPSHOT_REPORTING_FLAG: &str = "snapshot-reporting";
+pub(crate) mod usage;
 
 /// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
 pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
@@ -167,12 +164,10 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     asks: Arc<std::sync::Mutex<Vec<AskCommand>>>,
-    /// The `(project, flag)` pairs On, set by the loop each pass.
-    flags_on: Arc<std::sync::Mutex<std::collections::HashSet<(String, &'static str)>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
-    /// Each project's allowed commands (`approve-commands-gate`), kept by its loop.
+    /// Each project's allowed commands, kept by its loop.
     gates: crate::command_gate::CommandGates,
 }
 
@@ -192,23 +187,15 @@ impl ItemCommands {
         self.claim.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// A project's `cfg` as it may run: with the allowed commands over it while `approve-commands-gate` is On for
-    /// it, else as given. Everything that runs a project command takes its config through here.
+    /// A project's `cfg` as it may run: with the allowed commands over it. Everything that runs a project
+    /// command takes its config through here.
     pub fn allowed_config(&self, project: &str, cfg: &ProjectConfig) -> ProjectConfig {
-        if self.flag_on(project, crate::command_gate::FLAG) {
-            self.gates.config(project, cfg)
-        } else {
-            cfg.clone()
-        }
+        self.gates.config(project, cfg)
     }
 
     /// [`allowed_config`](Self::allowed_config) for a project as the connector holds it.
     pub fn allowed_view(&self, project: &ProjectView) -> ProjectView {
-        if self.flag_on(&project.id, crate::command_gate::FLAG) {
-            self.gates.view(project)
-        } else {
-            project.clone()
-        }
+        self.gates.view(project)
     }
 
     pub fn gates(&self) -> &crate::command_gate::CommandGates {
@@ -221,30 +208,6 @@ impl ItemCommands {
 
     pub fn push_draft(&self, command: DraftCommand) {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Set by the loop each pass: whether the `ask-claude` flag is On for `project`.
-    pub fn set_ask_on(&self, project: &str, on: bool) {
-        self.set_flag(project, "ask-claude", on);
-    }
-
-    pub fn ask_on(&self, project: &str) -> bool {
-        self.flag_on(project, "ask-claude")
-    }
-
-    /// Records whether `flag` is On for `project`; commands behind a flag are refused while it is Off.
-    pub fn set_flag(&self, project: &str, flag: &'static str, on: bool) {
-        let mut set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
-        if on {
-            set.insert((project.to_string(), flag));
-        } else {
-            set.remove(&(project.to_string(), flag));
-        }
-    }
-
-    pub fn flag_on(&self, project: &str, flag: &'static str) -> bool {
-        let set = self.flags_on.lock().unwrap_or_else(|e| e.into_inner());
-        set.contains(&(project.to_string(), flag))
     }
 
     pub fn push_idea(&self, command: IdeaCommand) {
@@ -364,9 +327,6 @@ impl PauseState {
         self.0.subscribe()
     }
 }
-
-/// The release flag that has the loop read the shared backlog's pause each pass.
-pub const OBEY_SHARED_PAUSE_FLAG: &str = "obey-shared-pause";
 
 /// What the store says about a project's own pause.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -507,15 +467,11 @@ impl AgentView {
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags.get(),
         });
-        if self.settings.on().await {
-            hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
-        }
+        hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
         if let Some(settings) = self.settings.json().await {
             hello["settings"] = settings;
         }
-        if self.settings.setup_checks_on().await
-            && let Some(checks) = self.checks.latest()
-        {
+        if let Some(checks) = self.checks.latest() {
             hello["checks"] = checks.to_json();
         }
         hello
@@ -532,7 +488,7 @@ impl AgentView {
                 "items": [],
                 "sessions": [],
                 "lanes": self.lanes_list(project),
-                "mainPlaying": self.settings.snapshot_reporting_on() && crate::play::running(project),
+                "mainPlaying": crate::play::running(project),
                 "drafts": [],
                 "asks": [],
         });
@@ -562,21 +518,15 @@ impl AgentView {
     }
 
     /// The snapshot's `commandsWaiting`: the version of a shared project's commands that waits for the owner's
-    /// approval, with the text to show. Only with `approve-commands-gate` On; the values are never sent.
+    /// approval, with the text to show. The values are never sent.
     pub fn commands_waiting_json(&self, project: &str) -> Option<Value> {
-        if !self.item_commands.flag_on(project, crate::command_gate::FLAG) {
-            return None;
-        }
         let w = self.item_commands.gates().waiting(project)?;
         Some(json!({ "version": w.version, "text": w.text, "by": w.by }))
     }
 
-    /// The snapshot's `items` and `milestones` (09.2): with `snapshot-reporting` On, the items this agent holds a
+    /// The snapshot's `items` and `milestones` (09.2): the items this agent holds a
     /// lease on, and the Chores milestone when one is a chore.
     fn items_block(&self, project: &str) -> Option<(Value, Value)> {
-        if !self.settings.snapshot_reporting_on() {
-            return None;
-        }
         let held = self
             .loop_state(project)
             .and_then(|s| s.projects.get(project).map(|p| p.items.clone()))
@@ -605,11 +555,11 @@ impl AgentView {
         Some((json!(items), milestones))
     }
 
-    /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with `snapshot-reporting` On and a
+    /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with a
     /// smoke to report. `tail` is kept only for a failure or timeout.
     pub fn smoke_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
         use crate::store::SmokeStatus;
-        if !self.settings.snapshot_reporting_on() || !self.projects.iter().any(|p| p.id == project) {
+        if !self.projects.iter().any(|p| p.id == project) {
             return None;
         }
         let mut smoke = Store::load(&paths::project_dir(data_dir, project)).ok()?.smoke()?;

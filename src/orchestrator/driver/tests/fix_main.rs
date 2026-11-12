@@ -84,10 +84,12 @@ async fn fixture(code: i32) -> Fixture {
     // The baseline caches by project and commit, and these repos' first commits can be the same.
     lp.id = format!("fm-{}", root.path().file_name().unwrap().to_string_lossy());
     lp.mode = OrchestratorMode::Runs;
-    lp.flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
     lp.project.repo_path = repo.display().to_string();
+    lp.file_project.repo_path = repo.display().to_string();
     lp.project.worktrees_dir = root.path().join("wt").display().to_string();
+    lp.file_project.worktrees_dir = root.path().join("wt").display().to_string();
     lp.project.base_branch = "main".into();
+    lp.file_project.base_branch = "main".into();
     lp.project.checks = vec![CheckConfig {
         name: "unit".into(),
         command: format!("echo broke-here && exit {code}"),
@@ -223,14 +225,6 @@ async fn a_held_lock_or_a_store_error_adds_nothing() {
     settle(&mut f).await;
     assert!(adds(&f).is_empty());
     assert!(f.script.lock().unwrap().args("lock_take").is_empty());
-}
-
-#[tokio::test]
-async fn with_the_flag_off_nothing_is_checked() {
-    let mut f = fixture(1).await;
-    f.rig.machine.projects[0].flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    settle(&mut f).await;
-    assert!(f.script.lock().unwrap().args("list").is_empty());
 }
 
 #[tokio::test]

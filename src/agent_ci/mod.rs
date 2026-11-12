@@ -321,7 +321,7 @@ impl CiLoop {
     }
 }
 
-/// config.json as saved now, each project's commands as this computer may run them (`approve-commands-gate`).
+/// config.json as saved now, each project's commands as this computer may run them.
 fn load_allowed(dir: &std::path::Path, commands: &crate::view::ItemCommands) -> anyhow::Result<config::ConfigFile> {
     let mut cfg = config::load(dir)?;
     for p in &mut cfg.projects {

@@ -430,7 +430,6 @@ async fn backlog_link_body(settings: Arc<SettingsServer>) -> Value {
 #[tokio::test]
 async fn backlog_link_without_a_session_is_refused() {
     let (settings, _dir) = test_server();
-    settings.set_backlog_link_flag(true);
     let res = app(settings)
         .oneshot(request("GET", "/api/backlog/link").body(Body::empty()).unwrap())
         .await
@@ -439,17 +438,9 @@ async fn backlog_link_without_a_session_is_refused() {
 }
 
 #[tokio::test]
-async fn backlog_link_is_a_404_with_the_flag_off() {
-    let (settings, _dir) = test_server();
-    let res = backlog_link_signed_in(settings).await;
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
 async fn backlog_link_unlinked_has_the_store_url_and_no_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings_with_network(dir.path(), false, None);
-    settings.set_backlog_link_flag(true);
     let body = backlog_link_body(settings).await;
     assert_eq!(body["linked"], json!(false));
     assert_eq!(body["url"], json!(crate::backlog::DEFAULT_URL));
@@ -460,7 +451,6 @@ async fn backlog_link_unlinked_has_the_store_url_and_no_waiting() {
 async fn backlog_link_gives_the_approval_page_while_a_code_waits() {
     let dir = tempfile::tempdir().unwrap();
     let settings = settings_with_network(dir.path(), false, None);
-    settings.set_backlog_link_flag(true);
     let links = crate::link::pending::Links::new(
         test_keychain(dir.path()),
         reqwest::Client::new(),
@@ -483,7 +473,6 @@ async fn backlog_link_says_linked_when_the_keychain_holds_a_token() {
         .set(&crate::backlog::url(&Env::empty()), "refresh-token")
         .unwrap();
     let settings = test_server_with_keychain(dir.path(), keychain);
-    settings.set_backlog_link_flag(true);
     let body = backlog_link_body(settings).await;
     assert_eq!(body["linked"], json!(true));
 }
@@ -697,7 +686,7 @@ async fn the_page_has_the_cursor_may_also_run_box_hidden_until_a_role_is_on_curs
     assert!(body.contains(r#"id="cursorAllowGroup" hidden"#));
     assert!(body.contains("Cursor may also run"));
     assert!(body.contains("Already allowed, from your checks: "));
-    // Shown only when the settings carry cursorAllow (flag On) and some role or lane picks Cursor.
+    // Shown only when the settings carry cursorAllow and some role or lane picks Cursor.
     assert!(body.contains("group.hidden = !rows || !usesCursor(s.engineChoice)"));
     assert!(body.contains(r#"JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } })"#));
 }

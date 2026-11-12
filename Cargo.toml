@@ -58,6 +58,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+tokio = { version = "1.54.1", features = ["test-util"] }
 http-body-util = "0.1.5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tempfile = "3.27.0"

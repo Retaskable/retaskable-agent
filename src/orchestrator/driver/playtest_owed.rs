@@ -50,7 +50,7 @@ impl ProjectLoop {
         self.save_leases();
     }
 
-    /// Behind `release-playtests-off` (Off: today's behaviour, nothing is sent). Remembers the `playtests` value config.json has now (not a gated overlay), and when it is `off` and the
+    /// Remembers the `playtests` value config.json has now (not a gated overlay), and when it is `off` and the
     /// remembered one wasn't, owes the store a `release_playtests`. The loop is rebuilt on restart, so the value
     /// and the debt live in the state file. With nothing remembered (a first run) and `off` already set, nothing
     /// is owed: the TS agent only releases on a tick that finds items waiting, and a project that was never
@@ -64,7 +64,7 @@ impl ProjectLoop {
         if self.playtests_seen.as_deref() == Some(now) {
             return;
         }
-        if now == "off" && self.playtests_seen.is_some() && self.flags.on("release-playtests-off").await {
+        if now == "off" && self.playtests_seen.is_some() {
             self.release_owed = true;
         }
         self.playtests_seen = Some(now.to_string());

@@ -18,6 +18,7 @@ pub(crate) fn item(
     milestone: Option<&str>,
 ) -> Item {
     Item {
+        merge_commit: None,
         id: id.to_string(),
         title: title.to_string(),
         status,
@@ -36,6 +37,7 @@ pub(crate) fn item(
         red_sha: None,
         no_fix_sha: None,
         size: None,
+        tier: None,
     }
 }
 

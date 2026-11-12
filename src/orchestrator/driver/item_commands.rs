@@ -29,7 +29,6 @@
 //! **Skip** (`skip`, and a triage `skip` decision, `claude`) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
 //! run, frees its lane, gives the lease back with a note (`report`, `release`) and then skips the item in the store
 //! (`skip`), so no computer claims it again. Its branch and pull request are kept.
-use super::project::signed_out;
 use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
 use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
@@ -52,11 +51,6 @@ impl ProjectLoop {
         mut room: u32,
         shared: &mut Shared<'_>,
     ) {
-        let on = self.flags.on("playtest-answer-command").await;
-        shared
-            .links
-            .item_commands
-            .set_flag(&self.id, "playtest-answer-command", on);
         for command in shared.links.item_commands.take(&self.id) {
             if let ItemCommand::Continue { item, .. }
             | ItemCommand::StartOver { item, .. }
@@ -98,8 +92,7 @@ impl ProjectLoop {
                 queue.push((item, notes.filter(|n| !is_blank(n))));
             }
         }
-        let rules_on = self.flags.on("engine-start-rules").await;
-        if (!rules_on && signed_out(shared)) || shared.stopping {
+        if shared.stopping {
             return;
         }
         for (item, notes) in std::mem::take(&mut self.continuing) {
@@ -118,9 +111,7 @@ impl ProjectLoop {
                 self.starting_over.push((item, notes));
             }
         }
-        if self.flags.on("release-playtests-off").await {
-            self.release_playtests();
-        }
+        self.release_playtests();
         for (item, message) in std::mem::take(&mut self.playtest_fails) {
             if !self
                 .resume_after_playtest(
@@ -255,7 +246,7 @@ impl ProjectLoop {
         let Some(lane) = self.take_lane(pool, item_id) else {
             return false;
         };
-        if self.start_held(pool, shared, lane).await {
+        if self.start_held(pool, shared, lane) {
             self.give_back_lane(pool, item_id, lane);
             return false;
         }
@@ -397,9 +388,8 @@ impl ProjectLoop {
         let session = record.and_then(|r| r.impl_session_id.as_deref());
         if !at_limit && nothing_to_continue(branch, pr_url, session) {
             tracing::info!("{}: {item_id} has nothing to continue from; starting it over", self.id);
-            let redirected = self.flags.on("own-failure-handling").await;
             return self
-                .start_over(item_id, (notes.as_deref(), redirected), (pool, starter), (room, shared))
+                .start_over(item_id, (notes.as_deref(), true), (pool, starter), (room, shared))
                 .await;
         }
         let checks_only = notes.is_none() && !at_limit;
@@ -409,7 +399,7 @@ impl ProjectLoop {
         let Some(lane) = self.take_lane(pool, item_id) else {
             return false;
         };
-        if !checks_only && self.start_held(pool, shared, lane).await {
+        if !checks_only && self.start_held(pool, shared, lane) {
             self.give_back_lane(pool, item_id, lane);
             return false;
         }
@@ -448,7 +438,7 @@ impl ProjectLoop {
         true
     }
 
-    /// Carries out one Start over (`redirected`: it's a Continue with nothing to continue from and `own-failure-handling` is On, so the note says so).
+    /// Carries out one Start over (`redirected`: it's a Continue with nothing to continue from, so the note says so).
     /// False when it must wait for a lane or a session slot.
     async fn start_over(
         &mut self,
@@ -467,7 +457,7 @@ impl ProjectLoop {
         let Some(lane) = pool.claim(&self.want(item_id)) else {
             return false;
         };
-        if self.start_held(pool, shared, lane).await {
+        if self.start_held(pool, shared, lane) {
             self.give_back_lane(pool, item_id, lane);
             return false;
         }

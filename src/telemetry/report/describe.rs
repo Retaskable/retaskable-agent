@@ -167,7 +167,8 @@ fn describe_event(event: &Event) -> String {
         | Event::RestartAsked(_)
         | Event::RestartWaiting(_)
         | Event::RestartExit(_)
-        | Event::RestartBack(_) => other_fields(&event.fields()),
+        | Event::RestartBack(_)
+        | Event::UsageRechecked(_) => other_fields(&event.fields()),
     }
 }
 

@@ -77,6 +77,8 @@ pub struct TrayInput {
     pub is_release: bool,
     /// Start at login is on (release build only).
     pub start_at_login: bool,
+    /// Keep this computer awake: on or off, `None` when there is no way to hold it.
+    pub keep_awake: Option<bool>,
     /// "Start with Windows" instead of "Start at login".
     pub windows: bool,
     pub machine: String,

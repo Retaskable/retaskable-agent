@@ -1,46 +1,12 @@
 //! Host calls (`gh`, `glab`) with a missing argument are refused and recorded (agent-telemetry.md section 3.3,
 //! `host_call_undefined`). A call deep in the code has no event log, so a refusal goes to a process-wide sink that
 //! the orchestrator's pass drains into the log of the project it was for ([`crate::orchestrator::driver`]).
-//! Behind the `host-call-undefined-event` flag: Off ([`set_on_for`]), the guard neither refuses nor records.
 use std::path::{Path, PathBuf};
 #[cfg(not(test))]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
 use crate::telemetry::events::{MAX_TEXT, scrub};
-
-/// The release flag.
-pub const FLAG: &str = "host-call-undefined-event";
-
-// Tests run in parallel threads and each pass sets this, so under test it is per thread.
-#[cfg(not(test))]
-static ON: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-#[cfg(test)]
-thread_local!(static ON: Mutex<Vec<PathBuf>> = const { Mutex::new(Vec::new()) });
-
-/// Sets the repos whose project has the flag On; the orchestrator does it each pass. A call is guarded only when
-/// its directory is under one of them, so a project with the flag Off keeps today's behaviour.
-pub fn set_on_for(repos: Vec<PathBuf>) {
-    #[cfg(test)]
-    ON.with(|o| *o.lock().unwrap_or_else(|p| p.into_inner()) = repos);
-    #[cfg(not(test))]
-    {
-        *ON.lock().unwrap_or_else(|p| p.into_inner()) = repos;
-    }
-}
-
-fn is_on(dir: &Path) -> bool {
-    let under = |o: &Mutex<Vec<PathBuf>>| {
-        o.lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .iter()
-            .any(|r| dir.starts_with(r))
-    };
-    #[cfg(test)]
-    return ON.with(under);
-    #[cfg(not(test))]
-    under(&ON)
-}
 
 /// One refused call: the command, its arguments (scrubbed and cut) and the directory it would have run in.
 #[derive(Debug, Clone, PartialEq)]
@@ -73,7 +39,6 @@ impl Sink {
     /// The process-wide sink.
     #[cfg(not(test))]
     pub fn global() -> &'static Sink {
-        // Tests run in parallel threads, so under test it is per thread (like `ON`).
         #[cfg(test)]
         {
             thread_local!(static SINK: &'static Sink = Box::leak(Box::default()));
@@ -114,7 +79,7 @@ pub fn undefined_arg(args: &[&str]) -> Option<usize> {
 }
 
 /// Checks a call to `program` (recorded as its file stem, `gh` or `glab`, never a path) before it runs. With no
-/// `dir` the call is guarded when any project has the flag On, and its refusal is written to every project's log.
+/// `dir` its refusal is written to every project's log.
 pub fn guard_program(program: impl AsRef<Path>, dir: Option<&Path>, args: &[&str]) -> Result<(), Refused> {
     let cmd = program
         .as_ref()
@@ -123,9 +88,6 @@ pub fn guard_program(program: impl AsRef<Path>, dir: Option<&Path>, args: &[&str
     match dir {
         Some(dir) => guard(&cmd, dir, args),
         None => {
-            if !any_on() {
-                return Ok(());
-            }
             let Some(i) = undefined_arg(args) else {
                 return Ok(());
             };
@@ -139,19 +101,8 @@ pub fn guard_program(program: impl AsRef<Path>, dir: Option<&Path>, args: &[&str
     }
 }
 
-fn any_on() -> bool {
-    let some = |o: &Mutex<Vec<PathBuf>>| !o.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
-    #[cfg(test)]
-    return ON.with(some);
-    #[cfg(not(test))]
-    some(&ON)
-}
-
-/// Checks a call before it runs: on a match (and with the flag On) records it in the global sink and refuses.
+/// Checks a call before it runs: on a match records it in the global sink and refuses.
 pub fn guard(cmd: &str, dir: &Path, args: &[&str]) -> Result<(), Refused> {
-    if !is_on(dir) {
-        return Ok(());
-    }
     let Some(i) = undefined_arg(args) else {
         return Ok(());
     };

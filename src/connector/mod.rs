@@ -414,8 +414,6 @@ async fn session(
     local_down.mark_unchanged();
     let mut settings_saved = view.settings.subscribe();
     settings_saved.mark_unchanged();
-    // Card flag `setup-check-command`: Off sends no checks, so a changed result sends no hello either.
-    let checks_flag = view.settings.setup_checks_on().await;
     let mut checks_changed = view.checks.subscribe();
     checks_changed.mark_unchanged();
     let mut live = view.live.subscribe();
@@ -450,14 +448,11 @@ async fn session(
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
-            Ok(()) = checks_changed.changed(), if checks_flag => Some(view.hello(project).await),
+            Ok(()) = checks_changed.changed() => Some(view.hello(project).await),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = live.changed(), if live_due.is_none() => {
-                // With `snapshot-reporting` Off the snapshot doesn't carry the loop's state: nothing to resend.
-                if view.settings.snapshot_reporting_on() {
-                    live_due = Some(tokio::time::Instant::now() + t.live_coalesce);
-                }
+                live_due = Some(tokio::time::Instant::now() + t.live_coalesce);
                 None
             },
             () = tokio::time::sleep_until(live_due.unwrap_or_else(tokio::time::Instant::now)), if live_due.is_some() => {

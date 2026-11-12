@@ -255,12 +255,6 @@ impl LiveTags {
         let mut g = self.inner.write().unwrap();
         *g = (list, g.1 + 1);
     }
-
-    /// What a settings save does (`tags-reread-on-save`): re-read when the flag is On, else leave the
-    /// list as startup read it.
-    pub async fn on_save(&self, flags: &crate::flags::Flags, dir: &Path, env: &Env) -> bool {
-        flags.on("tags-reread-on-save").await && self.reread(dir, env)
-    }
 }
 
 #[cfg(test)]
@@ -407,20 +401,5 @@ mod tests {
         save_added(dir.path(), &["zz-new"]);
         assert!(!live.reread(dir.path(), &env));
         assert_eq!(live.get(), vec!["a", "b"]);
-    }
-
-    #[tokio::test]
-    async fn on_save_does_nothing_with_the_flag_off_and_rereads_with_it_on() {
-        let dir = tempfile::tempdir().unwrap();
-        let env = Env::empty();
-        let live = LiveTags::from(vec![]);
-        save_added(dir.path(), &["zz-new"]);
-        assert!(!live.on_save(&crate::flags::Flags::fixed(&[]), dir.path(), &env).await);
-        assert!(live.get().is_empty());
-        assert!(
-            live.on_save(&crate::flags::Flags::fixed(&["tags-reread-on-save"]), dir.path(), &env)
-                .await
-        );
-        assert!(live.get().contains(&"zz-new".to_string()));
     }
 }

@@ -297,16 +297,10 @@ fn version_check(name: &str, r: Option<&RunOutput>, fix: &str) -> SetupCheck {
     SetupCheck::pass(if line.is_empty() { name.to_string() } else { line })
 }
 
-/// Before the `engine-setup-probes` flag: a pass naming the first line of `--version`, only when the binary ran.
-fn plain_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck> {
-    r.filter(|r| r.code == Some(0))
-        .map(|r| version_check(name, Some(r), ""))
-}
-
 /// `runSetupChecks()`: runs every probe, never through a shell, the git/`gh`/engine probes
 /// concurrently the same way the TypeScript agent does so a missing binary's 20s timeout doesn't
 /// stack with the others.
-pub async fn run_setup_checks(env: &Env, probes: bool) -> SetupChecks {
+pub async fn run_setup_checks(env: &Env) -> SetupChecks {
     let claude_bin = resolve_claude_on_path(env).ok();
     let cursor_bin = resolve_cursor_on_path(env);
     let api_key = env.get("ANTHROPIC_API_KEY").is_some();
@@ -345,7 +339,7 @@ pub async fn run_setup_checks(env: &Env, probes: bool) -> SetupChecks {
             }
         },
         async {
-            if probes && codex_ok {
+            if codex_ok {
                 run(&codex_bin, &["login", "status"]).await
             } else {
                 None
@@ -353,17 +347,10 @@ pub async fn run_setup_checks(env: &Env, probes: bool) -> SetupChecks {
         },
     );
     let dirs = crate::env_path::path_dirs(env);
-    let (pi, codex) = if probes {
-        (
-            pi_found(env, cfg!(windows), &dirs).then(|| pi_check(pi_version.as_ref())),
-            codex_found(env, cfg!(windows), &dirs).then(|| codex_check(codex_version.as_ref(), codex_login.as_ref())),
-        )
-    } else {
-        (
-            plain_engine_check("pi", pi_version.as_ref()),
-            plain_engine_check("Codex", codex_version.as_ref()),
-        )
-    };
+    let (pi, codex) = (
+        pi_found(env, cfg!(windows), &dirs).then(|| pi_check(pi_version.as_ref())),
+        codex_found(env, cfg!(windows), &dirs).then(|| codex_check(codex_version.as_ref(), codex_login.as_ref())),
+    );
 
     SetupChecks {
         git,
@@ -433,32 +420,30 @@ pub fn setup_check_line(check: &SetupCheck) -> String {
 }
 
 /// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, Cursor only when shown, pi and Codex only when
-/// found and `probes` (the `engine-setup-probes` flag) is On, and Docker only with the `agent-ci` flag On.
+/// found, and Docker only with the `agent-ci` flag On.
 /// `ghInstalled` is a separate check, not one of these lines.
-pub fn setup_check_lines(c: &SetupChecks, probes: bool) -> Vec<String> {
+pub fn setup_check_lines(c: &SetupChecks) -> Vec<String> {
     let mut shown = vec![&c.git, &c.gh, &c.claude, &c.claude_signed_in];
     if show_cursor(c) {
         shown.push(&c.cursor);
     }
     let mut lines: Vec<String> = shown.into_iter().map(setup_check_line).collect();
-    if probes {
-        for (name, check) in [("pi", &c.pi), ("Codex", &c.codex)] {
-            let Some(check) = check else { continue };
-            lines.push(match check.ok {
-                // A pass names the engine before its version, as Cursor's does; the check keeps the raw version.
-                Some(true) => format!("✓ {name}: {}", check.detail),
-                _ => setup_check_line(check),
-            });
-        }
+    for (name, check) in [("pi", &c.pi), ("Codex", &c.codex)] {
+        let Some(check) = check else { continue };
+        lines.push(match check.ok {
+            // A pass names the engine before its version, as Cursor's does; the check keeps the raw version.
+            Some(true) => format!("✓ {name}: {}", check.detail),
+            _ => setup_check_line(check),
+        });
     }
     lines.extend(c.docker.as_ref().map(setup_check_line));
     lines
 }
 
 /// `setupCheckReport`: "Setup check:" followed by each line, indented.
-pub fn setup_check_report(c: &SetupChecks, probes: bool) -> String {
+pub fn setup_check_report(c: &SetupChecks) -> String {
     let mut lines = vec!["Setup check:".to_string()];
-    lines.extend(setup_check_lines(c, probes).into_iter().map(|l| format!("  {l}")));
+    lines.extend(setup_check_lines(c).into_iter().map(|l| format!("  {l}")));
     lines.join("\n")
 }
 

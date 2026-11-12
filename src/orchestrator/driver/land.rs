@@ -14,9 +14,7 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
-use super::project::signed_out;
 use super::start_gate::StartGate;
-use super::store_errors::WATCH;
 use super::{ProjectLoop, Shared};
 use crate::ask::follow_up;
 use crate::backlog::Client;
@@ -72,10 +70,8 @@ struct Ctx {
     failures: crate::backlog::failures::Failures,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
-    flags: Arc<crate::flags::Flags>,
     wait: Duration,
-    placement: bool,
-    /// With `engine-start-rules` On, the engine to start on when it isn't the drafter's chosen one.
+    /// The engine to start on when it isn't the drafter's chosen one.
     engine: Option<EngineId>,
     sessions: crate::orchestrator::live::sessions::Sessions,
 }
@@ -89,12 +85,9 @@ impl Ctx {
         }
     }
 
-    /// Retaskable's own message about `draft`'s landing, once, behind the `ask-claude` flag. The draft's state is already
+    /// Retaskable's own message about `draft`'s landing, once. The draft's state is already
     /// reported, so a message the store doesn't take is only logged.
     async fn say(&self, draft: &crate::backlog::drafts::ClaimedDraft, text: &str) {
-        if !self.flags.on("ask-claude").await {
-            return;
-        }
         let ask = draft.ask_id.as_deref();
         if let Err(e) = follow_up::post_once(&self.client, self.repo, &self.token, &draft.id, ask, text).await {
             tracing::warn!("a draft's chat message didn't reach the store: {e}");
@@ -180,7 +173,6 @@ impl Ctx {
             resume: true,
             follow_up: rebase_request(reason),
             usage: None,
-            placement: self.placement,
             engine: self.engine,
             sessions: self.sessions.clone(),
         };
@@ -366,20 +358,18 @@ impl ProjectLoop {
         if presses.is_empty() || shared.stopping {
             return;
         }
-        let gate = StartGate::for_lanes(self.flags.on("engine-start-rules").await, self, lanes, shared);
+        let gate = StartGate::for_lanes(self, lanes, shared);
         // A rebase resumes the drafter's own session: it waits while that engine is out and never moves.
-        let engine = match &gate {
-            Some(gate) if gate.role_start(self, shared, Role::Drafter, false).is_none() => return,
-            None if signed_out(shared) => return,
-            _ => None,
-        };
+        if gate.role_start(self, shared, Role::Drafter, false).is_none() {
+            return;
+        }
+        let engine = None;
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let placement = self.flags.on("engine-placement").await;
         for press in presses {
             let (DraftCommand::Approve { draft, .. }
             | DraftCommand::Merge { draft, .. }
@@ -400,12 +390,10 @@ impl ProjectLoop {
                 repo,
                 token: token.clone(),
                 lease: taken.token.clone(),
-                failures: self.failures.when(self.flags.on(WATCH).await),
+                failures: self.failures.clone(),
                 project: self.project.clone(),
                 host: host.clone(),
-                flags: self.flags.clone(),
                 wait,
-                placement,
                 engine,
                 sessions: self.live.sessions().clone(),
             };

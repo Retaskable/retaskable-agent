@@ -1,7 +1,6 @@
 //! The main sync (docs/specs/agent/06.7-chores-never-idle.md, "A main sync is a chore too"): about once a minute
 //! a project whose base branch is behind the default branch merges main into a branch off the base, off the loop's
-//! thread, in its own sync worktree, and adds a `sync_main` item for it. Plain code; behind the `chore-rotation`
-//! and `chore-main-sync` flags. The store's `sync_main-<base>` lock is held from before the merge until the add.
+//! thread, in its own sync worktree, and adds a `sync_main` item for it. Plain code. The store's `sync_main-<base>` lock is held from before the merge until the add.
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -83,8 +82,6 @@ impl ProjectLoop {
             || state.running.is_some()
             || state.looked.is_some_and(|t| now.duration_since(t) < LOOK_EVERY)
             || self.project.sync_main == SyncMain::Off
-            || !self.flags.on("chore-rotation").await
-            || !self.flags.on("chore-main-sync").await
         {
             return;
         }

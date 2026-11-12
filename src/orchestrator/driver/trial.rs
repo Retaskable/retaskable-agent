@@ -1,5 +1,4 @@
-//! The trial plan's step (first-run-check.md section 3.3, "When it runs"): once per project, in `claim` mode, behind
-//! the `trial-plan-draft` release flag. A project with a repo, passing setup checks and an empty backlog takes a free
+//! The trial plan's step (first-run-check.md section 3.3, "When it runs"): once per project, in `claim` mode. A project with a repo, passing setup checks and an empty backlog takes a free
 //! lane (ahead of chores, never in front of roadmap work already holding lanes) and one session slot, saves `running`
 //! in its state, and runs [`TrialHost::run`]; a backlog with items saves `skipped` and never starts one later. On a
 //! later pass the end is taken in: `Opened` saves `open` with the PR's URL, `Dropped` saves `failed` and logs why in
@@ -12,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::machine::SetupChecksHandle;
-use super::project::{ProjectLoop, signed_out};
+use super::project::ProjectLoop;
 use super::start_gate::StartGate;
 use crate::engines::Role;
 use crate::implementer::session::new_session_id;
@@ -20,9 +19,6 @@ use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::trial_host::{TrialEnd, TrialHost, TrialJob};
 use crate::telemetry::{Event, event};
 use crate::trial_plan::{Decision, TRIAL_BRANCH, TrialRecord, TrialState, should_start};
-
-/// The release flag that gates the whole step.
-const FLAG: &str = "trial-plan-draft";
 
 /// The trial session running now: its lane and task, in memory only.
 pub(super) struct RunningTrial {
@@ -99,18 +95,12 @@ impl ProjectLoop {
         if record.state == TrialState::Running {
             return self.trial_dropped("the agent restarted while the trial plan was running".into());
         }
-        if paused || *slots == 0 || shared.stopping || !self.flags.on(FLAG).await {
+        if paused || *slots == 0 || shared.stopping {
             return;
         }
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        let placement = self.flags.on("engine-placement").await;
-        let engine = match &gate {
-            Some(gate) => match gate.role_start(self, shared, Role::Implementer, placement) {
-                Some(engine) => engine,
-                None => return,
-            },
-            None if signed_out(shared) => return,
-            None => None,
+        let gate = StartGate::new(self, pool, shared);
+        let Some(engine) = gate.role_start(self, shared, Role::Implementer, true) else {
+            return;
         };
         let checks = checks.lock().unwrap().clone();
         match should_start(&record, &self.project, checks.as_ref(), self.backlog_items) {
@@ -119,7 +109,7 @@ impl ProjectLoop {
                 self.save_trial(TrialRecord::skip());
             }
             Decision::Start => {
-                let Some(lane) = pool.free_lane(false, None, None, |_| true) else {
+                let Some(lane) = pool.free_lane(false, None, |_| true) else {
                     return;
                 };
                 if !pool.take(lane, self.holder()) || !self.save_trial(TrialRecord::started()) {
@@ -134,7 +124,6 @@ impl ProjectLoop {
                     branch: TRIAL_BRANCH.to_string(),
                     session_id: new_session_id(),
                     usage: self.store.usage(),
-                    placement: self.flags.on("engine-placement").await,
                     engine,
                     sessions: self.live.sessions().clone(),
                 });

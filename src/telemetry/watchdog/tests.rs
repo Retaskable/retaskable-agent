@@ -37,7 +37,6 @@ fn make_input<'a>(
         recent,
         now_ms: 0,
         restart: None,
-        anomaly_rules: true,
         lease_idle_minutes: LEASE_IDLE_MINUTES,
         idle_lanes_minutes: IDLE_LANES_MINUTES,
         no_progress_minutes: NO_PROGRESS_MINUTES,
@@ -256,10 +255,6 @@ fn store_error(op: &str) -> Event {
 
 /// Runs `check` over store errors `(at_ms, op)` at `now_ms`, returning the sync_failing finding if any.
 fn sync_finding(errors: &[(i64, &str)], now_ms: i64) -> Option<Found> {
-    sync_finding_with(errors, now_ms, true)
-}
-
-fn sync_finding_with(errors: &[(i64, &str)], now_ms: i64, anomaly_rules: bool) -> Option<Found> {
     let events: Vec<Event> = errors.iter().map(|(_, op)| store_error(op)).collect();
     let recent: Vec<RecentEvent> = errors
         .iter()
@@ -270,7 +265,6 @@ fn sync_finding_with(errors: &[(i64, &str)], now_ms: i64, anomaly_rules: bool) -
     let (running, pool, actions) = (Running::default(), pool(2), Vec::new());
     let input = Input {
         now_ms,
-        anomaly_rules,
         ..make_input(&runs, &leases, &records, &running, &pool, &actions, &recent)
     };
     check(&input).into_iter().find(|f| f.rule == "sync_failing")
@@ -287,12 +281,6 @@ fn sync_failing_needs_three_matching_failures() {
     assert_eq!(f.threshold_minutes, 0);
     assert_eq!(f.details["count"], 3);
     assert_eq!(f.details["ops"], json!(["ask_post", "details_put", "draft_save"]));
-}
-
-#[test]
-fn sync_failing_is_silent_with_the_flag_off() {
-    let three = [(0, "details_put"), (0, "draft_save"), (0, "ask_post")];
-    assert!(sync_finding_with(&three, 0, false).is_none());
 }
 
 #[test]
@@ -506,10 +494,10 @@ fn duplicates(events: &[(i64, Event)], now_ms: i64) -> Vec<Found> {
         .iter()
         .map(|(at_ms, event)| RecentEvent { at_ms: *at_ms, event })
         .collect();
-    with_recent(&recent, now_ms, true)
+    with_recent(&recent, now_ms)
 }
 
-fn with_recent(recent: &[RecentEvent], now_ms: i64, anomaly_rules: bool) -> Vec<Found> {
+fn with_recent(recent: &[RecentEvent], now_ms: i64) -> Vec<Found> {
     let (runs, leases, records, running, pool) = (
         BTreeMap::new(),
         BTreeMap::new(),
@@ -520,7 +508,6 @@ fn with_recent(recent: &[RecentEvent], now_ms: i64, anomaly_rules: bool) -> Vec<
     let actions = Vec::new();
     let input = Input {
         now_ms,
-        anomaly_rules,
         ..make_input(&runs, &leases, &records, &running, &pool, &actions, recent)
     };
     check(&input)
@@ -560,17 +547,4 @@ fn duplicate_step_ignores_start_end_start_different_keys_and_keyless_starts() {
     );
     assert!(duplicates(&[(0, step(true, "R-1", k)), (1, step(true, "R-1", Some("round 2")))], 3).is_empty());
     assert!(duplicates(&[(0, step(true, "R-1", None)), (1, step(true, "R-1", None))], 3).is_empty());
-}
-
-#[test]
-fn duplicate_step_fires_nothing_with_the_flag_off() {
-    let events = [
-        (0, step(true, "R-12", Some("round 1"))),
-        (1, step(true, "R-12", Some("round 1"))),
-    ];
-    let recent: Vec<RecentEvent> = events
-        .iter()
-        .map(|(at_ms, event)| RecentEvent { at_ms: *at_ms, event })
-        .collect();
-    assert!(with_recent(&recent, 2, false).is_empty());
 }

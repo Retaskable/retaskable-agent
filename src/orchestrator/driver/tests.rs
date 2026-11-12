@@ -52,6 +52,9 @@ async fn stub() -> (String, Arc<Mutex<Vec<String>>>) {
         post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {
+                if body["op"] == "settings_get" || body["op"] == "facts_get" {
+                    return Json(json!({ "value": if body["op"] == "facts_get" { json!({ "paused": false }) } else { Value::Null } }));
+                }
                 seen.lock().unwrap().push(body["op"].as_str().unwrap_or("").to_string());
                 Json(json!({ "value": [{ "id": "a", "title": "A", "status": "todo", "rank": 0 }] }))
             }
@@ -160,6 +163,13 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
             150_000,
         );
         lp.repo = Some(7);
+        // The gate is open with nothing in the store: config.json's commands run as written.
+        machine.links.item_commands.gates().open_unrecorded(&lp.id);
+        // A poll with no pass before it reads the store's pause as known and clear.
+        machine
+            .links
+            .store_paused
+            .set(&lp.id, crate::view::StorePause::NotPaused);
         machine.add(lp);
     }
     Rig {
@@ -178,12 +188,10 @@ fn would(step: &Step) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn the_tick_counts_every_registered_session_only_with_live_sessions_reporting_on() {
-    for (on, want) in [(true, 2), (false, 0)] {
+async fn the_tick_counts_every_registered_session() {
+    {
         let (base, _asked) = stub().await;
         let mut rig = rig(2, &[&base]);
-        let flags: &[&str] = if on { &["live-sessions-reporting"] } else { &[] };
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
         let info = |lane| crate::orchestrator::live::sessions::SessionInfo {
             project: "p0".into(),
             item_id: "x".into(),
@@ -197,7 +205,7 @@ async fn the_tick_counts_every_registered_session_only_with_live_sessions_report
         let _b = rig.live.sessions().register(info(None));
         rig.machine.pass().await;
         let tick = rig.lp(0).events().recent()[0].to_value();
-        assert_eq!(tick["sessions"], want, "flag on: {on}");
+        assert_eq!(tick["sessions"], 2);
     }
 }
 
@@ -305,8 +313,8 @@ async fn an_unreachable_backlog_is_a_store_error_and_no_tick() {
     let mut rig = rig(2, &["http://127.0.0.1:1"]);
     assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
     let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(Entry::kind).collect();
-    assert_eq!(kinds, vec!["store_error"]);
-    assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "list");
+    assert_eq!(kinds, vec!["store_error", "store_error"]);
+    assert_eq!(rig.lp(0).events().recent()[1].to_value()["op"], "list");
 }
 
 #[tokio::test]
@@ -588,6 +596,9 @@ async fn claim_stub_failing(
             let (fail_release, fail_skip) = (fail_release.clone(), fail_skip.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
+                if op == "settings_get" || op == "facts_get" {
+                    return (StatusCode::OK, Json(json!({ "value": if op == "facts_get" { json!({ "paused": false }) } else { Value::Null } })));
+                }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 match (op.as_str(), claim) {
                     ("release" | "park", _) if fail_release.load(Ordering::SeqCst) => {
@@ -668,7 +679,6 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             attempt: 0,
             notes: None,
             takeover: None,
-            placement: false,
         }]
     );
     assert_eq!(
@@ -821,10 +831,10 @@ async fn a_finished_step_moves_the_item_and_frees_a_lane_it_no_longer_needs() {
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
     assert_eq!(
         kinds_without_claims(&mut rig),
-        ["step_start", "item_state", "lane_freed", "step_start"],
+        ["step_start", "step_end", "item_state", "lane_freed", "step_start"],
         "awaiting_merge has a step of its own"
     );
-    let moved = rig.lp(0).events().recent()[2].to_value();
+    let moved = rig.lp(0).events().recent()[3].to_value();
     assert_eq!(
         (moved["from"].as_str(), moved["to"].as_str()),
         (Some("reviewing"), Some("awaiting_merge"))
@@ -929,4 +939,5 @@ mod store_pause;
 mod stuck_release;
 mod triage;
 mod trial;
+mod usage_recheck;
 mod weekly_cutoff;

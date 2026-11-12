@@ -2,17 +2,6 @@
 use super::*;
 use crate::orchestrator::steps::CheckTime;
 
-fn flag_on(rig: &mut Rig) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["watchdog-anomaly-rules"]));
-}
-
-fn complete_on(rig: &mut Rig) {
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[
-        "watchdog-anomaly-rules",
-        "step-events-complete",
-    ]));
-}
-
 fn step_events(rig: &mut Rig, kind: &str) -> Vec<Value> {
     (rig.lp(0).events().recent().iter())
         .map(Entry::to_value)
@@ -24,7 +13,6 @@ fn step_events(rig: &mut Rig, kind: &str) -> Vec<Value> {
 async fn a_checking_step_writes_a_keyed_step_start_and_a_step_end() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
     let fake = rig.go_live();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
     *fake.to.lock().unwrap() = Some(ItemState::Reviewing);
@@ -50,24 +38,9 @@ async fn a_checking_step_writes_a_keyed_step_start_and_a_step_end() {
 }
 
 #[tokio::test]
-async fn with_the_flag_off_a_step_start_has_no_key_and_no_step_end_follows() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    *fake.to.lock().unwrap() = Some(ItemState::Reviewing);
-    rig.machine.poll().await;
-    settle().await;
-    rig.machine.poll().await;
-    assert!(step_events(&mut rig, "step_start")[0].get("key").is_none());
-    assert!(step_events(&mut rig, "step_end").is_empty());
-}
-
-#[tokio::test]
 async fn a_step_started_while_one_is_open_is_again() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
     let fake = rig.go_live();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
     rig.lp(0).step_started(
@@ -89,7 +62,6 @@ async fn a_step_started_while_one_is_open_is_again() {
 async fn a_panicking_or_cut_step_still_writes_step_end_with_ok_false() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
     let fake = rig.go_live();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
     fake.step_panics.store(true, Ordering::SeqCst);
@@ -129,7 +101,6 @@ fn two_checks() -> StepDetail {
 async fn a_checking_step_with_checks_writes_them_in_step_end() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    complete_on(&mut rig);
     let fake = rig.go_live();
     *fake.detail.lock().unwrap() = two_checks();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
@@ -147,42 +118,12 @@ async fn a_checking_step_with_checks_writes_them_in_step_end() {
 async fn a_step_with_no_detail_writes_no_checks() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
     rig.go_live();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
     rig.machine.poll().await;
     settle().await;
     rig.machine.poll().await;
     assert!(step_events(&mut rig, "step_end").remove(0).get("checks").is_none());
-}
-
-#[tokio::test]
-async fn with_the_flag_off_checks_write_no_step_end() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    *fake.detail.lock().unwrap() = two_checks();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    rig.machine.poll().await;
-    settle().await;
-    rig.machine.poll().await;
-    assert!(step_events(&mut rig, "step_end").is_empty());
-}
-
-#[tokio::test]
-async fn without_step_events_complete_the_checks_are_left_out() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    flag_on(&mut rig);
-    let fake = rig.go_live();
-    *fake.detail.lock().unwrap() = two_checks();
-    at(&mut rig, 0, "a", ItemState::Checking, Some(1));
-    rig.machine.poll().await;
-    settle().await;
-    rig.machine.poll().await;
-    let ends = step_events(&mut rig, "step_end");
-    assert_eq!(ends.len(), 1);
-    assert!(ends[0].get("checks").is_none());
 }
 
 fn review_detail() -> StepDetail {
@@ -197,7 +138,6 @@ fn review_detail() -> StepDetail {
 async fn a_reviewing_step_writes_its_lines_and_scouts() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    complete_on(&mut rig);
     let fake = rig.go_live();
     *fake.detail.lock().unwrap() = review_detail();
     at(&mut rig, 0, "a", ItemState::Reviewing, Some(1));
@@ -212,7 +152,6 @@ async fn a_reviewing_step_writes_its_lines_and_scouts() {
 async fn a_checking_step_end_has_no_lines_or_scouts() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    complete_on(&mut rig);
     let fake = rig.go_live();
     *fake.detail.lock().unwrap() = two_checks();
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
@@ -227,7 +166,6 @@ async fn a_checking_step_end_has_no_lines_or_scouts() {
 async fn a_panicked_review_step_end_has_no_lines_or_scouts() {
     let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base]);
-    complete_on(&mut rig);
     let fake = rig.go_live();
     *fake.detail.lock().unwrap() = review_detail();
     fake.step_panics.store(true, Ordering::SeqCst);

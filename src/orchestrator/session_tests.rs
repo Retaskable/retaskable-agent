@@ -43,7 +43,6 @@ pub(super) fn rig_with(lines: Option<&str>, choice: EngineChoiceConfig, claude: 
         choice,
         env,
         50,
-        ModelsConfig::default(),
         150_000,
         Default::default(),
         Default::default(),
@@ -102,6 +101,7 @@ fn branch() -> String {
 
 fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     Item {
+        merge_commit: None,
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,
@@ -120,6 +120,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         red_sha: None,
         no_fix_sha: None,
         size: None,
+        tier: None,
     }
 }
 
@@ -173,7 +174,6 @@ pub(super) fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         attempt: 0,
         notes: None,
         takeover: None,
-        placement: true,
     };
     (request, rx)
 }
@@ -689,7 +689,6 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         EngineChoiceConfig::default(),
         rig.starter.env.clone(),
         50,
-        ModelsConfig::default(),
         150_000,
         Default::default(),
         Default::default(),

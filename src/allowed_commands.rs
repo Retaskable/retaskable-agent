@@ -33,8 +33,6 @@ pub const COMMAND_LABELS: &[(&str, &str)] = &[
 const COMMAND_FIELDS: &[&str] = &["checks", "playCommand", "promptNotes", "ciCommand", "phone", "engines"];
 const SMOKE: &str = "deploy.staging.smoke";
 const ROLLOUT: &str = "deploy.production.rollout";
-/// Minutes an automatic rollout takes (`FIXED_MINUTES` in `shared/rolloutSetting.ts`).
-const ROLLOUT_MINUTES: u32 = 10;
 const TEXT_LIMIT: usize = 2000;
 
 /// What a computer must allow before it runs a change: the command fields, the staging smoke, and automatic
@@ -98,6 +96,9 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
             if let Some(s) = out.deploy.staging.as_mut() {
                 s.smoke = None;
             }
+            if let Some(p) = out.deploy.production.as_mut() {
+                p.rollout = None;
+            }
             return out;
         }
         None => return cfg.clone(),
@@ -111,6 +112,11 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
             SMOKE => {
                 if let Some(s) = out.deploy.staging.as_mut() {
                     s.smoke = value.as_str().map(str::to_string);
+                }
+            }
+            ROLLOUT => {
+                if let Some(p) = out.deploy.production.as_mut() {
+                    p.rollout = serde_json::from_value(value.clone()).ok();
                 }
             }
             _ => {}
@@ -183,12 +189,7 @@ fn command_text(field: &str, value: Option<&Value>) -> String {
                 "" => "none".to_string(),
                 c => format!("`{c}`"),
             };
-            let place = if v.get("site") == Some(&Value::Bool(true)) {
-                "through retaskable.com".to_string()
-            } else {
-                format!("traffic {}, health {}", cmd("traffic"), cmd("health"))
-            };
-            format!("rolls out over {ROLLOUT_MINUTES} minutes, {place}")
+            format!("traffic {}, health {}", cmd("traffic"), cmd("health"))
         }
         _ => format!("`{}`", v.as_str().map_or_else(|| v.to_string(), str::to_string)),
     }

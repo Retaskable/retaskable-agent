@@ -1,5 +1,5 @@
 //! The engine start rules in the project loop (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5),
-//! behind the `engine-start-rules` flag: new work only takes a lane whose own engine may start now.
+//! new work only takes a lane whose own engine may start now.
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -15,25 +15,21 @@ use crate::orchestrator::{Action, decide_where};
 pub(super) struct StartGate {
     used: Vec<EngineId>,
     out: BTreeSet<EngineId>,
-    /// `local-limit-fallback` (see [`ProjectLoop::limit_fallback`]): Claude being limited doesn't hold its lanes.
+    /// The limit fallback (see [`ProjectLoop::limit_fallback`]): Claude being limited doesn't hold its lanes.
     fallback: bool,
 }
 
 impl StartGate {
-    /// `None` while `engine-start-rules` (`on`) is Off.
-    pub(super) fn new(on: bool, lp: &ProjectLoop, pool: &LanePool, shared: &Shared<'_>) -> Option<StartGate> {
-        StartGate::for_lanes(on, lp, pool.rules().lanes, shared)
+    pub(super) fn new(lp: &ProjectLoop, pool: &LanePool, shared: &Shared<'_>) -> StartGate {
+        StartGate::for_lanes(lp, pool.rules().lanes, shared)
     }
 
     /// `new`, for a pass that knows the computer's lane count but holds no pool.
-    pub(super) fn for_lanes(on: bool, lp: &ProjectLoop, lanes: u32, shared: &Shared<'_>) -> Option<StartGate> {
-        if !on {
-            return None;
-        }
+    pub(super) fn for_lanes(lp: &ProjectLoop, lanes: u32, shared: &Shared<'_>) -> StartGate {
         let used = engines_used_here(&shared.links.engine_choice, lp.project.engines.as_ref(), lanes);
         let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, Instant::now());
         let fallback = ProjectLoop::limit_fallback(shared);
-        Some(StartGate { used, out, fallback })
+        StartGate { used, out, fallback }
     }
 
     /// Whether new work may start in `lane`: its engine, after `engine_now`, isn't out.
@@ -53,8 +49,8 @@ impl StartGate {
     }
 
     /// What a new session of `role` does now: `None` while its engine is out; else `Some(engine)`, the one to start
-    /// on when that isn't the role's chosen one. Only a fresh session with `engine-placement` On (`switch`) moves to
-    /// `engine_now`; a resume keeps the engine it ran on and waits while that is out.
+    /// on when that isn't the role's chosen one. Only a fresh session (`switch`) moves to `engine_now`; a
+    /// resume keeps the engine it ran on and waits while that is out.
     pub(super) fn role_start(
         &self,
         lp: &ProjectLoop,
@@ -95,66 +91,44 @@ impl StartGate {
 }
 
 impl ProjectLoop {
-    /// `decide`, with new work limited to lanes whose engine may start while the gate is on, and, with `model_full`
+    /// `decide`, with new work limited to lanes whose engine may start and, with `model_full`
     /// (the model cap), to lanes that don't run a Claude implementer.
     pub(super) fn decide_gated(
         &self,
         pool: &LanePool,
         shared: &Shared<'_>,
-        gate: Option<&StartGate>,
+        gate: &StartGate,
         model_full: bool,
     ) -> Vec<Action> {
         decide_where(&self.id, false, &self.runs, pool, &self.project, |k| {
-            gate.is_none_or(|g| g.lane_may_start(self, shared, k)) && !(model_full && self.runs_claude(shared, gate, k))
+            gate.lane_may_start(self, shared, k) && !(model_full && self.runs_claude(shared, gate, k))
         })
     }
 
     /// Whether a fresh implementer in `lane` would run on Claude.
-    pub(super) fn runs_claude(&self, shared: &Shared<'_>, gate: Option<&StartGate>, lane: u32) -> bool {
-        let engine = match gate {
-            Some(g) => g.engine_now(self, shared, lane),
-            None => program_of(engine_for(
-                &shared.links.engine_choice,
-                self.project.engines.as_ref(),
-                Role::Implementer,
-                Some(lane),
-            )),
-        };
-        engine == EngineId::Claude
+    pub(super) fn runs_claude(&self, shared: &Shared<'_>, gate: &StartGate, lane: u32) -> bool {
+        gate.engine_now(self, shared, lane) == EngineId::Claude
     }
 
-    /// Whether `model-concurrency-caps` is On and the starter says the model a fresh implementer would run on has
-    /// no slot free: Claude lanes then claim and start nothing new this pass.
-    pub(super) fn model_full(&self, starter: &dyn super::project::SessionStarter, caps_on: bool) -> bool {
-        caps_on && !starter.implementer_may_start(self.store.usage().as_ref(), self.claude_starts)
-    }
-
-    /// Claude's sign-out holds every claim only while the start rules are Off.
-    pub(super) fn claim_held_by_sign_out(shared: &Shared<'_>, gate: Option<&StartGate>) -> bool {
-        gate.is_none() && signed_out(shared)
+    /// Whether the starter says the model a fresh implementer would run on has no slot free: Claude lanes then claim
+    /// and start nothing new this pass.
+    pub(super) fn model_full(&self, starter: &dyn super::project::SessionStarter) -> bool {
+        !starter.implementer_may_start(self.claude_starts)
     }
 }
 
 impl ProjectLoop {
-    /// Whether the start rules (On) hold a session on `lane` back: the engine it would run on is out.
-    pub(super) async fn start_held(&mut self, pool: &LanePool, shared: &Shared<'_>, lane: u32) -> bool {
-        let gate = StartGate::new(self.flags.on("engine-start-rules").await, self, pool, shared);
-        gate.is_some_and(|g| g.holds(self, shared, lane))
+    /// Whether the start rules hold a session on `lane` back: the engine it would run on is out.
+    pub(super) fn start_held(&self, pool: &LanePool, shared: &Shared<'_>, lane: u32) -> bool {
+        StartGate::new(self, pool, shared).holds(self, shared, lane)
     }
 }
 
 impl ProjectLoop {
-    /// Section 7.2's fallback: with `local-limit-fallback` On and the model up, Claude being limited (not signed
+    /// Section 7.2's fallback: with the model up, Claude being limited (not signed
     /// out) holds no fresh work for a Claude lane, which starts on the local model.
     pub(super) fn limit_fallback(shared: &Shared<'_>) -> bool {
-        crate::tiers::local_limit_fallback_on() && shared.local.ladder() && !signed_out(shared)
-    }
-
-    /// Whether `engine` is limited now and so holds a fresh session (the start rules Off): Claude's usage limit
-    /// doesn't while the fallback is in force.
-    pub(super) fn engine_limited(shared: &Shared<'_>, engine: EngineId) -> bool {
-        shared.engine_limits.is_limited(engine, Instant::now())
-            && !(engine == EngineId::Claude && Self::limit_fallback(shared))
+        shared.local.ladder() && !signed_out(shared)
     }
 
     /// Whether Claude is limited now with the fallback in force and the one local slot already has a session
@@ -174,7 +148,7 @@ impl ProjectLoop {
     ) {
         let now = Instant::now();
         let resets = cant_start
-            .filter(|c| matches!(*c, "usage limit" | "weekly limit"))
+            .filter(|c| *c == "usage limit")
             .and_then(|_| limits.limited_until(EngineId::Claude, now));
         self.live.set_limit(&self.id, resets);
     }

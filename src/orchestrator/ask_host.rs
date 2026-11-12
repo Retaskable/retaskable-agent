@@ -15,14 +15,14 @@ use crate::ask::perform::{Perform, perform};
 use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, StateItem, StateSummary};
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig};
 use crate::engines::cursor::with_project;
 use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::Interrupted;
 use crate::implementer::session::new_session_id;
 use crate::paths;
-use crate::tiers::implementer_tier;
+use crate::tiers::{SONNET, floor};
 use crate::view::AgentView;
 
 const TEMPLATE: &str = include_str!("../../prompts/assistant.md");
@@ -31,7 +31,6 @@ pub struct ClaudeAsks {
     data_dir: PathBuf,
     choice: EngineChoiceConfig,
     env: Env,
-    models: ModelsConfig,
     cursor_models: CursorModels,
     /// The machine's `budget.dailyUsd`; 0 is no cap.
     daily_usd: f64,
@@ -46,7 +45,6 @@ impl ClaudeAsks {
         data_dir: PathBuf,
         choice: EngineChoiceConfig,
         env: Env,
-        models: ModelsConfig,
         cursor_models: CursorModels,
         daily_usd: f64,
         view: Arc<AgentView>,
@@ -56,7 +54,6 @@ impl ClaudeAsks {
             data_dir,
             choice,
             env,
-            models,
             cursor_models,
             daily_usd,
             view,
@@ -92,11 +89,10 @@ impl AskHost for ClaudeAsks {
     }
 
     fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
-        let (data_dir, choice, env, models, cursor_models, daily_usd, view, local) = (
+        let (data_dir, choice, env, cursor_models, daily_usd, view, local) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
-            self.models,
             self.cursor_models.clone(),
             self.daily_usd,
             self.view.clone(),
@@ -107,11 +103,9 @@ impl AskHost for ClaudeAsks {
                 project,
                 ask,
                 store,
-                usage,
                 lanes,
                 runs,
                 events,
-                placement,
                 engine,
                 sessions,
             } = job;
@@ -183,19 +177,13 @@ impl AskHost for ClaudeAsks {
                 Engine::Local => Engine::Claude,
                 other => other,
             };
-            if !placement && chosen != Engine::Claude {
-                return Ok(reply(
-                    "Sorry, I couldn't answer that: Claude alone starts sessions while engine-placement is off.".into(),
-                ));
-            }
             let placed = match place(chosen, Role::Assistant, &env, &cursor_models) {
                 Ok(placed) => placed,
                 Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
             };
             let repo_path = PathBuf::from(&project.repo_path);
             let up = local.ladder_for(chosen == Engine::Claude);
-            let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
-            let tier = implementer_tier(floored.as_ref(), crate::telemetry::now_ms() / 1000, &models, up);
+            let tier = floor(SONNET, sessions.claude_at_limit(), up);
             // Held until the session ends.
             let claimed = local.claim(tier).await;
             let spec = match session_spec(&Session {

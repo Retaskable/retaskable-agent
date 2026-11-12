@@ -153,6 +153,7 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
             "value": {
                 "item": { "id": "a", "title": "First", "status": "claimed", "rank": 0 },
                 "token": "lease-1",
+                "tier": "opus",
             }
         }))
     }))
@@ -163,6 +164,7 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
     match answer {
         ClaimNextAnswer::Item { item, token } => {
             assert_eq!(item.id, "a");
+            assert_eq!(item.tier.as_deref(), Some("opus"));
             assert_eq!(token, "lease-1");
         }
         ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) => panic!("expected an item"),

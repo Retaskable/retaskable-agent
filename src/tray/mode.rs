@@ -44,22 +44,3 @@ pub fn tray_mode(args: &[String], env: &Env, os: OsKind, helper: Option<PathBuf>
         None => TrayMode::Headless("no tray helper for this computer".into()),
     }
 }
-
-/// Whether the terminal menu is drawn (section 4.7): never without a terminal on both stdin and stdout, never with
-/// `--no-tui` or `RETASKABLE_TUI=0`; otherwise with `--tui` or `RETASKABLE_TUI=1`, or whenever there is no tray
-/// from the start.
-pub fn use_tui(args: &[String], env: &Env, os: OsKind, terminals: bool) -> bool {
-    let has = |f: &str| args.iter().any(|a| a == f);
-    let var = env.get("RETASKABLE_TUI").map(|v| v.trim().to_string());
-    if !terminals || has("--no-tui") {
-        return false;
-    }
-    if has("--tui") {
-        return true;
-    }
-    match var.as_deref() {
-        Some("0") => false,
-        Some("") | None => no_tray_from_start(args, env, os).is_some(),
-        Some(_) => true,
-    }
-}

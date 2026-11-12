@@ -34,7 +34,7 @@ The agent keeps each project's own state in `.retaskable/projects/<id>/state.jso
 
 Every line here is a **[Proposal]** unless it says "as built". It fills a gap: the sections above say what to drop, never what is left or how big it may get, and the run-loop work ([pieces.md](pieces.md) section 3.1: "`state.json` keeps only the computer's own settings and caches: no runs, no tokens, no items") changes what is left.
 
-**As built, a project's `state.json` holds six keys** (`src/store/project.rs`); a key it doesn't know round-trips untouched, so a newer or older agent's keys survive a save:
+**As built, a project's `state.json` holds six keys** (`src/store/project.rs`); a key it doesn't know round-trips untouched, so a newer or older agent's keys survive a save. The one-off trim also drops `unskipped`, `unanswered`, `playtestsSeen` and `releaseOwed`: they cached what the store holds, and the loop now keeps a skip or playtest answer it still owes the store, and the `playtests` value it last saw, in memory only (a restart forgets them; the store still lists the item or try-out for a person to answer again):
 
 | Key | What it is | Bound |
 | --- | --- | --- |

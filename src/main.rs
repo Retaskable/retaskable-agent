@@ -50,11 +50,8 @@ async fn main() -> Result<()> {
     // `retaskable check` (first-run-check.md section 3.1, `npm run check`): print the setup
     // checks and exit without starting the server.
     if std::env::args().nth(1).as_deref() == Some("check") {
-        let probes = retaskable_agent::flags::Flags::from_env()
-            .on("engine-setup-probes")
-            .await;
-        let checks = setup_check::run_setup_checks(env, probes).await;
-        println!("{}", setup_check::setup_check_report(&checks, probes));
+        let checks = setup_check::run_setup_checks(env).await;
+        println!("{}", setup_check::setup_check_report(&checks));
         std::process::exit(if setup_check::setup_checks_pass(&checks) { 0 } else { 1 });
     }
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
@@ -193,12 +190,9 @@ async fn main() -> Result<()> {
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
-    // Card flag `machine-settings`: Off keeps today's behaviour (the keys ignored, silently, and left in the file).
-    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await {
-        config::set_retiring_project_lanes(true);
-        if let Some(note) = config::retired_keys_note(&dir) {
-            tracing::info!("{note}");
-        }
+    config::set_retiring_project_lanes(true);
+    if let Some(note) = config::retired_keys_note(&dir) {
+        tracing::info!("{note}");
     }
     // agent-settings.md section 3.1: which program runs each kind of work (engines.md section
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
@@ -322,8 +316,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let check_flags = Arc::new(retaskable_agent::flags::Flags::from_env());
-    let checks = runtime::setup_check_runner(env.clone(), check_flags.clone());
+    let checks = runtime::setup_check_runner(env.clone());
     let view = Arc::new(agent_view(
         cfg,
         tag_list.clone(),
@@ -338,7 +331,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
-    // Card flag `tray-icon-menu`: the tray, when it runs, is told to exit before a restart ends the process.
+    // The tray, when it runs, is told to exit before a restart ends the process.
     let tray_slot: Arc<std::sync::OnceLock<tray::boot::Shutdown>> = Arc::default();
     let tray_down = tray_slot.clone();
     let exit = runtime::restart_handler(
@@ -361,7 +354,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         .cloned()
         .zip(connectors.iter().map(|c| c.handle()))
         .collect();
-    runtime::spawn_setup_checks(is_release, &checks, check_flags);
+    runtime::spawn_setup_checks(is_release, &checks);
     let latest_checks = checks.shared();
 
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
@@ -423,23 +416,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             // One plan or look at a time on this computer: both runners hold this slot.
             let plan_or_look = orchestrator::slot::Slot::default();
-            // One `engine-placement` answer for the plan and look roster and the piece starter, kept fresh in the
-            // background so a role on another engine is offered a run before any run has asked.
-            let placement = Arc::new(retaskable_agent::flags::Flags::from_env());
-            placement.keep_fresh("engine-placement", std::time::Duration::from_secs(30));
-            orchestrator::session::keep_cursor_guard_fresh();
-            retaskable_agent::tiers::set_flags(placement.clone());
-            placement.keep_fresh("subscription-zero-budget", std::time::Duration::from_secs(30));
-            placement.keep_fresh("weekly-limit-reading", std::time::Duration::from_secs(30));
-            placement.keep_fresh("weekly-cutoff", std::time::Duration::from_secs(30));
-            placement.keep_fresh("model-concurrency-caps", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-tier-ladder", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-chores-scouts", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-one-slot", std::time::Duration::from_secs(30));
-            placement.keep_fresh("local-limit-fallback", std::time::Duration::from_secs(30));
-            placement.keep_fresh("implementer-step-up", std::time::Duration::from_secs(30));
-            placement.keep_fresh("tier-kept-on-resume", std::time::Duration::from_secs(30));
-            placement.keep_fresh("cursor-allow-derive", std::time::Duration::from_secs(30));
             retaskable_agent::engines::model_slots::set_global(
                 retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
             );
@@ -448,16 +424,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 projects: cfg.projects.clone(),
                 choice: config::engine_choice(cfg, env),
                 env: env.clone(),
-                models: cfg.machine.models,
                 cursor_models: config::cursor_models(cfg, env),
-                flags: placement.clone(),
                 sessions: live.sessions().clone(),
                 local: local.clone(),
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
-                orchestrator::merge_run::MergeRuns::new(link::machine_name(env), placement.clone())
-                    as Arc<dyn orchestrator::driver::RunStarter>,
+                orchestrator::merge_run::MergeRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::plan_run::PlanRuns::new(
                     roster.clone(),
                     plan_or_look.clone(),
@@ -471,8 +444,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     cursor_models: config::cursor_models(cfg, env),
                     env: env.clone(),
                     max_turns: cfg.machine.max_turns,
-                    models: cfg.machine.models,
-                    flags: placement,
                     machine: link::machine_name(env),
                     sessions: live.sessions().clone(),
                     local: local.clone(),
@@ -486,7 +457,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
                 env.clone(),
-                cfg.machine.models,
                 config::cursor_models(cfg, env),
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::DraftHost>
@@ -497,7 +467,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     dir.to_path_buf(),
                     config::engine_choice(cfg, env),
                     env.clone(),
-                    cfg.machine.models,
                     config::cursor_models(cfg, env),
                     local.clone(),
                 ) as Arc<dyn orchestrator::trial_host::TrialHost>,
@@ -509,7 +478,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
                 env.clone(),
-                cfg.machine.models,
                 config::cursor_models(cfg, env),
                 cfg.machine.budget.daily_usd,
                 view.clone(),
@@ -523,7 +491,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::engine_choice(cfg, env),
                 env.clone(),
                 cfg.machine.max_turns,
-                cfg.machine.models,
                 cfg.machine.max_resume_context_tokens,
                 config::cursor_models(cfg, env),
                 live.sessions().clone(),
@@ -532,23 +499,31 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
     });
-    // Card flag `agent-ci`: Off starts no CI loop (agent-ci.md section 3.1).
-    if retaskable_agent::flags::Flags::from_env().on("agent-ci").await {
-        let ci = retaskable_agent::agent_ci::CiLoop::new(
-            Default::default(),
-            live.clone(),
-            retaskable_agent::agent_ci::docker::in_agent_image(),
-        )
-        .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
-            retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
-        )));
-        tokio::spawn(retaskable_agent::agent_ci::run(
-            ci,
-            dir.to_path_buf(),
-            env.clone(),
-            view.item_commands.clone(),
-        ));
-    }
+    retaskable_agent::rollout::spawn_all(retaskable_agent::rollout::SpawnArgs {
+        dir,
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        item_commands: &view.item_commands,
+        machine: link::machine_name(env),
+    });
+    // agent-ci.md section 3.1.
+    let ci = retaskable_agent::agent_ci::CiLoop::new(
+        Default::default(),
+        live.clone(),
+        retaskable_agent::agent_ci::docker::in_agent_image(),
+    )
+    .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
+        retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
+    )));
+    tokio::spawn(retaskable_agent::agent_ci::run(
+        ci,
+        dir.to_path_buf(),
+        env.clone(),
+        view.item_commands.clone(),
+    ));
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
@@ -578,35 +553,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         },
         keychain.clone(),
     ));
-    // Card flag `settings-page`: Off keeps the Host check loopback-only. The flag client's `PROJECT_ID`
-    // and `RETASKABLE_FLAG_KEY` are placeholders the owner fills in.
-    settings.set_settings_page_flag(retaskable_agent::flags::Flags::from_env().on("settings-page").await);
-    settings.set_cursor_allow_flag(
-        retaskable_agent::flags::Flags::from_env()
-            .on("cursor-allow-derive")
-            .await,
-    );
-    settings.set_backlog_link_flag(
-        retaskable_agent::flags::Flags::from_env()
-            .on("backlog-link-route")
-            .await,
-    );
-    settings.set_agent_ci_flag(retaskable_agent::flags::Flags::from_env().on("agent-ci").await);
-    settings.set_live_sessions_flag(
-        retaskable_agent::flags::Flags::from_env()
-            .on("live-sessions-reporting")
-            .await,
-    );
     settings.set_saved_signal(view.settings.clone());
     settings.set_links(links.clone());
-    // `tags-reread-on-save`: a save on the settings page changes the list the next ask carries.
+    // A save on the settings page changes the list the next ask carries.
     {
         let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
-        let flags = retaskable_agent::flags::Flags::from_env();
         let mut saved = view.settings.subscribe();
         tokio::spawn(async move {
             while saved.changed().await.is_ok() {
-                if tags.on_save(&flags, &dir, &env).await {
+                if tags.reread(&dir, &env) {
                     log_tags(&tags.get());
                 }
             }
@@ -618,58 +573,56 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         checks: latest_checks,
         live,
     });
-    // agent-settings.md section 4.4, behind the `machine-settings` flag (Off keeps today's behaviour).
-    if retaskable_agent::flags::Flags::from_env().on("machine-settings").await
-        && let Err(e) = settings.open_on_first_run(is_release, link::open_url)
-    {
+    // agent-settings.md section 4.4.
+    if let Err(e) = settings.open_on_first_run(is_release, link::open_url) {
         tracing::warn!("first-run settings page: {e:#}");
     }
-    // Card flag `tray-icon-menu`: Off keeps today's console-only agent.
     let quit_now = Arc::new(tokio::sync::Notify::new());
-    if retaskable_agent::flags::Flags::from_env().on("tray-icon-menu").await {
-        let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
-        let backlog_url = backlog::url(env);
-        let (backlog_links, backlog_keys, backlog_http, backlog_env) =
-            (links.clone(), keychain.clone(), http.clone(), env.clone());
-        let backlog_version = version.to_string();
-        let tray = tray::boot::boot(tray::boot::Boot {
-            args: &std::env::args().skip(1).collect::<Vec<_>>(),
-            env,
-            build,
-            exe: exe_path.as_deref(),
-            view: view.clone(),
-            clouds: cloud_handles,
-            links: links.clone(),
-            settings: settings.clone(),
-            sessions: Arc::new(move || tray_sessions.snapshot().len()),
-            restart: view.restart.clone(),
-            exit: exit.clone(),
-            quit_now: quit_now.clone(),
-            terminal_menu: retaskable_agent::flags::Flags::from_env().on("terminal-menu").await,
-            link_backlog: Arc::new(move || {
-                tokio::spawn(auto_link_backlog(
-                    backlog_links.clone(),
-                    backlog_keys.clone(),
-                    backlog_http.clone(),
-                    backlog_env.clone(),
-                    backlog_version.clone(),
-                ));
-            }),
-            on_stopped: Box::new(move |why| {
-                tracing::warn!("Tray: the tray stopped ({why}); running headless.");
-                tracing::info!(
-                    "{}",
-                    link::links_line(&stopped_urls, &backlog_url, |url| matches!(
-                        stopped_keys.get(url),
-                        Ok(Some(_))
-                    ))
-                );
-            }),
-        })
-        .await;
-        if let Some(tray) = tray {
-            let _ = tray_slot.set(tray);
-        }
+    // tray.md section 4.2: Keep this computer awake comes back as it was left.
+    let keep_awake = Arc::new(retaskable_agent::keep_awake::KeepAwake::new(dir));
+    keep_awake.tick();
+    let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
+    let backlog_url = backlog::url(env);
+    let (backlog_links, backlog_keys, backlog_http, backlog_env) =
+        (links.clone(), keychain.clone(), http.clone(), env.clone());
+    let backlog_version = version.to_string();
+    let tray = tray::boot::boot(tray::boot::Boot {
+        args: &std::env::args().skip(1).collect::<Vec<_>>(),
+        env,
+        build,
+        exe: exe_path.as_deref(),
+        view: view.clone(),
+        clouds: cloud_handles,
+        links: links.clone(),
+        settings: settings.clone(),
+        sessions: Arc::new(move || tray_sessions.snapshot().len()),
+        restart: view.restart.clone(),
+        exit: exit.clone(),
+        quit_now: quit_now.clone(),
+        keep_awake: Some(keep_awake.clone()),
+        link_backlog: Arc::new(move || {
+            tokio::spawn(auto_link_backlog(
+                backlog_links.clone(),
+                backlog_keys.clone(),
+                backlog_http.clone(),
+                backlog_env.clone(),
+                backlog_version.clone(),
+            ));
+        }),
+        on_stopped: Box::new(move |why| {
+            tracing::warn!("Tray: the tray stopped ({why}); running headless.");
+            tracing::info!(
+                "{}",
+                link::links_line(&stopped_urls, &backlog_url, |url| matches!(
+                    stopped_keys.get(url),
+                    Ok(Some(_))
+                ))
+            );
+        }),
+    })
+    .await;
+    if let Some(tray) = tray {
+        let _ = tray_slot.set(tray);
     }
     axum::serve(
         listener,

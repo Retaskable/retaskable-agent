@@ -1,14 +1,11 @@
-//! The weekly cutoff behind the `weekly-cutoff` flag: an implementer session ending with the week used up at the
+//! The weekly cutoff: an implementer session ending with the week used up at the
 //! cutoff limits Claude to the week's reset, and nothing new is claimed (`driver/settle.rs`, `driver/project.rs`,
 //! docs/specs/agent/07.1-model-tiers.md).
 use super::*;
 use crate::engines::EngineId;
 
 fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    crate::telemetry::now_secs() as u64
 }
 
 fn week(u: f64) -> Value {
@@ -18,20 +15,14 @@ fn week(u: f64) -> Value {
         "seven_day": {"utilization": u, "resetsAt": now + 86_400}}})
 }
 
-/// A rig with the item "a" implementing on lane 1 and these flags On; `result` ends its session, carrying `usage`.
-async fn ended(
-    flags: &[&str],
-    lanes: Option<[&str; 2]>,
-    result: SessionResult,
-    usage: Value,
-) -> (Rig, Asked, Arc<Fake>) {
+/// A rig with the item "a" implementing on lane 1; `result` ends its session, carrying `usage`.
+async fn ended(lanes: Option<[&str; 2]>, result: SessionResult, usage: Value) -> (Rig, Asked, Arc<Fake>) {
     let (base, asked) = claim_stub(
         json!([item("b", "claimed")]),
         Some(json!({"item": item("b", "claimed"), "token": "t"})),
     )
     .await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(flags));
     if let Some(lanes) = lanes {
         rig.machine.links.engine_choice =
             serde_json::from_value(json!({ "default": lanes[0], "lanes": lanes })).unwrap();
@@ -63,31 +54,15 @@ fn limited(rig: &Rig, after: u64) -> bool {
 
 #[tokio::test]
 async fn at_the_cutoff_claude_is_limited_to_the_weeks_reset_and_nothing_new_is_claimed() {
-    for flags in [&["weekly-cutoff"][..], &["weekly-cutoff", "engine-start-rules"][..]] {
-        let (mut rig, asked, _) = ended(flags, None, SessionResult::NeedsHuman("x".into()), week(0.96)).await;
-        assert!(limited(&rig, 80_000) && !limited(&rig, 86_402), "{flags:?}");
-        rig.machine.pass().await;
-        assert_eq!(claims(&asked), 0, "{flags:?}");
-    }
+    let (mut rig, asked, _) = ended(None, SessionResult::NeedsHuman("x".into()), week(0.96)).await;
+    assert!(limited(&rig, 80_000) && !limited(&rig, 86_402));
+    rig.machine.pass().await;
+    assert_eq!(claims(&asked), 0);
 }
 
 #[tokio::test]
 async fn below_the_cutoff_work_still_starts() {
-    let (mut rig, asked, _) = ended(
-        &["weekly-cutoff"],
-        None,
-        SessionResult::NeedsHuman("x".into()),
-        week(0.90),
-    )
-    .await;
-    assert!(!limited(&rig, 1));
-    rig.machine.pass().await;
-    assert!(claims(&asked) > 0);
-}
-
-#[tokio::test]
-async fn with_the_flag_off_nothing_changes() {
-    let (mut rig, asked, _) = ended(&[], None, SessionResult::NeedsHuman("x".into()), week(0.96)).await;
+    let (mut rig, asked, _) = ended(None, SessionResult::NeedsHuman("x".into()), week(0.90)).await;
     assert!(!limited(&rig, 1));
     rig.machine.pass().await;
     assert!(claims(&asked) > 0);
@@ -101,15 +76,13 @@ async fn a_weekly_rejection_holds_until_the_weeks_reset_not_the_five_hour_one() 
         why: "limit".into(),
         resets_in: Some(Duration::from_secs(3600)),
     };
-    let (rig, _, _) = ended(&["weekly-cutoff"], None, result, usage).await;
+    let (rig, _, _) = ended(None, result, usage).await;
     assert!(limited(&rig, 80_000) && !limited(&rig, 86_402));
 }
 
 #[tokio::test]
 async fn a_cursor_lane_still_starts_while_claude_is_cut_off() {
-    let flags = ["weekly-cutoff", "engine-start-rules", "engine-placement"];
     let (mut rig, asked, fake) = ended(
-        &flags,
         Some(["claude", "cursor"]),
         SessionResult::NeedsHuman("x".into()),
         week(0.96),
@@ -125,10 +98,9 @@ async fn a_cursor_lane_still_starts_while_claude_is_cut_off() {
 async fn a_lone_weekly_reading_is_saved_as_the_week_usage_and_not_as_the_usage() {
     let week =
         json!({"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.5, "resetsAt": 4_000_000_000u64});
-    for (flag, saved) in [("weekly-cutoff", true), ("other", false)] {
+    {
         let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
         let mut rig = rig(2, &[&base]);
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[flag]));
         rig.go_live();
         at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
         rig.machine.outcome_sender().send(SessionOutcome {
@@ -142,28 +114,19 @@ async fn a_lone_weekly_reading_is_saved_as_the_week_usage_and_not_as_the_usage()
             session_id: None,
         });
         rig.machine.poll().await;
-        assert_eq!(rig.lp(0).store.week_usage(), saved.then(|| week.clone()));
+        assert_eq!(rig.lp(0).store.week_usage(), Some(week.clone()));
         assert_eq!(rig.lp(0).store.usage(), None);
     }
 }
 
 #[tokio::test]
-async fn a_saved_weekly_reading_limits_claude_on_a_started_loop_only_while_ahead_and_with_the_flag_on() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // (flag, utilization, reset offset, limited)
-    let cases: [(&str, f64, i64, bool); 4] = [
-        ("weekly-cutoff", 0.96, 86_400, true),
-        ("weekly-cutoff", 0.96, -60, false),
-        ("weekly-cutoff", 0.94, 86_400, false),
-        ("other", 0.96, 86_400, false),
-    ];
-    for (flag, u, offset, limited) in cases {
+async fn a_saved_weekly_reading_limits_claude_on_a_started_loop_only_while_ahead() {
+    let now = now();
+    // (utilization, reset offset, limited)
+    let cases: [(f64, i64, bool); 3] = [(0.96, 86_400, true), (0.96, -60, false), (0.94, 86_400, false)];
+    for (u, offset, limited) in cases {
         let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
         let mut rig = rig(2, &[&base]);
-        rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[flag]));
         let at_ = (now as i64 + offset) as u64;
         rig.lp(0)
             .store

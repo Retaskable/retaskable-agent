@@ -74,7 +74,7 @@ async fn rig_with(listed: Value, end: TrialEnd) -> T {
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     rig.lp(0).project.github_repo = "o/r".into();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["trial-plan-draft"]));
+    rig.lp(0).file_project.github_repo = "o/r".into();
     let host = Arc::new(Host {
         end: Mutex::new(Some(end)),
         ..Default::default()
@@ -164,15 +164,12 @@ async fn a_backlog_with_items_saves_skipped_and_never_starts_one_later() {
 }
 
 #[tokio::test]
-async fn it_doesnt_start_when_paused_flagged_off_failing_unchecked_or_full() {
+async fn it_doesnt_start_when_paused_failing_unchecked_or_full() {
     let mut t = empty(opened()).await;
     t.rig.pause("p0", true);
     passes(&mut t, 2).await;
-    t.rig.pause("p0", false);
-    t.rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    passes(&mut t, 2).await;
-    t.rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["trial-plan-draft"]));
     *t.checks.lock().unwrap() = Some(checks(false));
+    t.rig.pause("p0", false);
     passes(&mut t, 2).await;
     *t.checks.lock().unwrap() = None;
     passes(&mut t, 2).await;
@@ -205,12 +202,9 @@ fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
 
-/// `engine-start-rules` On, the engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
 /// Cursor is at its limit.
-fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, cursor_out: bool) {
-    let mut on = vec!["engine-start-rules", "engine-placement"];
-    on.extend(flags);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
+fn start_rules(rig: &mut Rig, choice: Value, claude_out: bool, cursor_out: bool) {
     rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
     rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
     if cursor_out {
@@ -223,7 +217,7 @@ fn start_rules(rig: &mut Rig, flags: &[&str], choice: Value, claude_out: bool, c
 async fn trial_with(choice: Value, claude_out: bool, cursor_out: bool) -> T {
     let mut t = empty(opened()).await;
     t.host.hold.store(true, Ordering::SeqCst);
-    start_rules(&mut t.rig, &["trial-plan-draft"], choice, claude_out, cursor_out);
+    start_rules(&mut t.rig, choice, claude_out, cursor_out);
     passes(&mut t, 3).await;
     t
 }
@@ -249,28 +243,25 @@ async fn a_trial_waits_when_no_engine_may_start() {
     assert!(t.host.jobs.lock().unwrap().is_empty());
 }
 
-/// `local-limit-fallback`: Claude at its usage limit holds the trial only without the flag, the model, or sign-in.
+/// Claude at its usage limit holds the trial only without the model or sign-in.
 #[tokio::test]
 async fn at_the_limit_the_trial_starts_with_the_fallback_and_waits_without_it() {
     use crate::local_model::LocalModel;
-    for (fallback, model, signed_out, starts) in [
-        (true, LocalModel::up(), false, true),
-        (false, LocalModel::up(), false, false),
-        (true, LocalModel::off(), false, false),
-        (true, LocalModel::up(), true, false),
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
     ] {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_local_limit_fallback_for_test(fallback);
         let mut t = empty(opened()).await;
         t.host.hold.store(true, Ordering::SeqCst);
-        start_rules(&mut t.rig, &["trial-plan-draft"], json!({}), signed_out, false);
+        start_rules(&mut t.rig, json!({}), signed_out, false);
         t.rig.machine.local = model;
         t.rig
             .machine
             .engine_limits
             .hit(crate::engines::EngineId::Claude, out_for(600));
         passes(&mut t, 3).await;
-        let case = (fallback, signed_out);
+        let case = signed_out;
         assert_eq!(t.host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
     }
 }

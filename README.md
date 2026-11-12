@@ -8,6 +8,7 @@ by piece.
 ## What it does so far
 
 - It listens on `127.0.0.1`, never a public port.
+- It reads no release flags: a new behaviour ships On, with no Off path (`src/no_flags.rs` fails `cargo test` on a flag read).
   - The port is `RETASKABLE_PORT` if set, then `port` in `config.json`, then 4700.
 - `GET /api/health` answers `{"ok": true, "version": "..."}`. Every other path is a 404.
 - It reads `config.json` from `RETASKABLE_DATA_DIR`, or from `.retaskable/` in the working folder.

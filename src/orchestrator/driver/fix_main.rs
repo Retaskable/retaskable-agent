@@ -1,8 +1,7 @@
 //! Fix main (docs/specs/agent/06.7-chores-never-idle.md, "The baseline also runs when Retaskable is idle"): when a
 //! project has a lane free and `run_take` handed out nothing, the baseline runs on the base branch's head, off the
 //! loop's thread so the beats go on. Blocking checks failing with no fix main open: this computer takes the
-//! store's `fix_main` lock and adds a fix main chore for that commit, once per commit. Plain code; behind the
-//! `chore-rotation` flag.
+//! store's `fix_main` lock and adds a fix main chore for that commit, once per commit. Plain code.
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -52,7 +51,6 @@ impl ProjectLoop {
         if self.run_loop.fix_main.task.is_some()
             || self.project.chores == OnOff::Off
             || pool.claim_lane(&pool.run_want(&self.id, "")).is_none()
-            || !self.flags.on("chore-rotation").await
         {
             return;
         }

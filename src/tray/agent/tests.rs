@@ -186,6 +186,7 @@ pub(crate) fn rig(release: bool) -> Rig {
         quit: quit.clone(),
         settings: Arc::new(FakeSettings(AtomicUsize::new(0))),
         login: release.then(|| login.clone() as Arc<dyn Login>),
+        keep_awake: None,
         log_file: release.then(|| PathBuf::from("agent.log")),
         windows: false,
         link_backlog: Arc::new(move || {
@@ -371,9 +372,6 @@ fn the_notification_fires_once_per_wait() {
 fn a_project_paused_by_the_store_counts_as_paused() {
     let r = rig(false);
     for p in ["a", "b"] {
-        r.agent_view
-            .item_commands
-            .set_flag(p, crate::view::OBEY_SHARED_PAUSE_FLAG, true);
         r.agent_view
             .store_paused
             .set(p, crate::view::StorePause::Paused("Paused for everyone".into()));

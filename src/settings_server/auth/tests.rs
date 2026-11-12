@@ -129,7 +129,6 @@ fn server_with_own(network: bool, own: Vec<IpAddr>) -> SettingsServer {
         test_keychain(std::path::Path::new(".")),
     );
     s.own_addresses = Box::new(move || own.clone());
-    s.set_settings_page_flag(true);
     s
 }
 
@@ -142,10 +141,5 @@ fn host_may_be_an_own_address_only_while_network_access_is_on() {
     assert!(!on.host_is_allowed("192.168.1.20:1"));
     assert!(!on.host_is_allowed("192.168.1.21:4700"));
     assert!(!on.host_is_allowed("evil.example.com:4700"));
-    assert!(!server_with_own(false, own.clone()).host_is_allowed("192.168.1.20:4700"));
-    // Flag Off: loopback only, even while network access is on.
-    let flag_off = server_with_own(true, own);
-    flag_off.set_settings_page_flag(false);
-    assert!(!flag_off.host_is_allowed("192.168.1.20:4700"));
-    assert!(flag_off.host_is_allowed("127.0.0.1:4700"));
+    assert!(!server_with_own(false, own).host_is_allowed("192.168.1.20:4700"));
 }

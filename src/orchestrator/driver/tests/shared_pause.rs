@@ -1,9 +1,8 @@
-//! `obey-shared-pause` piece 2: a project is held while this computer's pause or the store's is on, or the
+//! A project is held while this computer's pause or the store's is on, or the
 //! store's is unknown; work already running carries on.
 use super::asks::{self, Host as AskHost};
 use super::drafts::Host as DraftHost;
 use super::*;
-use crate::flags::Flags;
 use axum::response::IntoResponse;
 
 const OFF: u8 = 0;
@@ -63,11 +62,6 @@ async fn setup(mode: u8, own: bool) -> T {
     let (base, asked) = store(mode.clone()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
-    rig.lp(0).flags = Arc::new(Flags::fixed(&[
-        "obey-shared-pause",
-        "ask-claude",
-        "watchdog-anomaly-rules",
-    ]));
     let (asks, drafts) = (Arc::new(AskHost::default()), Arc::new(DraftHost::default()));
     rig.machine.asks = Some(asks.clone());
     rig.machine.drafts = Some(drafts.clone());

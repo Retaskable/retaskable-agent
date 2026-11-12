@@ -10,7 +10,7 @@ use super::driver::{
     LookFailure, SecondLookEnd, SecondLookRequest, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
 };
 use super::session::{ClaudeStarter, watch_for};
-use crate::config::{Engine, ProjectConfig};
+use crate::config::ProjectConfig;
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::{
@@ -19,7 +19,7 @@ use crate::engines::{
 };
 use crate::implementer::new_session_id;
 use crate::orchestrator::live::sessions::{SessionInfo, model_name};
-use crate::tiers::{claude_model_for, implementer_tier, mid_tier, top_tier};
+use crate::tiers::{OPUS, SONNET, claude_model_for, floor};
 use crate::triage::schedule::MAX_TRIAGES;
 use crate::triage::second_look::{SecondLook, SecondLookContext, check};
 use crate::triage::{Triager, decide};
@@ -52,24 +52,13 @@ fn triager_info(project: &str, item: &str, lane: Option<u32>, placed: &Placement
 }
 
 impl ClaudeStarter {
-    /// Where the triager (and its second look) runs: the engine chosen for the role and its binary. With
-    /// `engine-placement` Off (`placement`), the engine chosen is not used: Claude alone runs. Only the triager itself is refused then when it isn't on Claude (`start_triage`); a second look always was Claude.
-    fn place_triager(
-        &self,
-        project: &ProjectConfig,
-        placement: bool,
-        now: Option<EngineId>,
-    ) -> Result<Placement, String> {
+    /// Where the triager (and its second look) runs: the engine chosen for the role and its binary.
+    fn place_triager(&self, project: &ProjectConfig, now: Option<EngineId>) -> Result<Placement, String> {
         let chosen = start_engine(
             now,
             engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None),
         );
-        place(
-            if placement { chosen } else { Engine::Claude },
-            Role::Triager,
-            &self.env,
-            &self.cursor_models,
-        )
+        place(chosen, Role::Triager, &self.env, &self.cursor_models)
     }
 
     /// A new session's id, where its transcript goes, and the running count it's now part of.
@@ -91,21 +80,12 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        if !request.placement
-            && start_engine(
-                request.engine,
-                engine_for(&self.choice, project.engines.as_ref(), Role::Triager, None),
-            ) != Engine::Claude
-        {
-            return Err("Claude alone starts sessions while engine-placement is off".into());
-        }
-        let placed = self.place_triager(&project, request.placement, request.engine)?;
+        let placed = self.place_triager(&project, request.engine)?;
         let TriageRequest {
             project: project_id,
             item_id,
             mut context,
             lane,
-            usage,
             outcomes,
             sessions,
             ..
@@ -116,13 +96,7 @@ impl ClaudeStarter {
                 .to_string(),
         );
         let up = self.local.ladder_for(placed.engine == EngineId::Claude);
-        let floored = crate::tiers::limit_floor(usage.as_ref(), sessions.claude_at_limit(), up);
-        let tier = mid_tier(implementer_tier(
-            floored.as_ref(),
-            crate::telemetry::now_ms() / 1000,
-            &self.models,
-            up,
-        ));
+        let tier = floor(SONNET, sessions.claude_at_limit(), up);
         let (model, local) = (tier.to_string(), self.local.clone());
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let info = triager_info(&project_id, &item_id, lane, &placed, &model);
@@ -213,7 +187,7 @@ impl ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let placed = self.place_triager(&project, request.placement, None)?;
+        let placed = self.place_triager(&project, None)?;
         let SecondLookRequest {
             project: project_id,
             item_id,
@@ -233,8 +207,7 @@ impl ClaudeStarter {
         );
         let (session_id, sink, running) = self.begin_session(&project_id, &item_id, lane);
         let up = self.local.ladder_for(placed.engine == EngineId::Claude);
-        let floored = crate::tiers::limit_floor(None, sessions.claude_at_limit(), up);
-        let top = top_tier(floored.as_ref(), 0, &self.models, up);
+        let top = floor(OPUS, sessions.claude_at_limit(), up);
         let local = self.local.clone();
         let info = triager_info(&project_id, &item_id, lane, &placed, top);
         tokio::spawn(async move {

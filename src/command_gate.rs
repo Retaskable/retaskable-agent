@@ -1,7 +1,7 @@
-//! The approval gate's wiring (item `approve-commands-gate`, agent/08-http-api.md): one [`CommandAllowing`] per
+//! The approval gate's wiring (agent/08-http-api.md): one [`CommandAllowing`] per
 //! project, shared by the loop that reads the store's settings and by everything that runs a project command, which
 //! gets its `ProjectConfig` through [`CommandGates::config`] (or [`CommandGates::view`] for the connector's
-//! `ProjectView`). Behind the `approve-commands-gate` release flag; Off, config.json's commands run as before.
+//! `ProjectView`).
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -15,9 +15,6 @@ use crate::allowed_commands::{
 use crate::backlog::settings::StoreSettings;
 use crate::config::ProjectConfig;
 use crate::view::ProjectView;
-
-/// The release flag that turns the gate on, per project.
-pub const FLAG: &str = "approve-commands-gate";
 
 #[derive(Debug)]
 struct Gate {
@@ -85,6 +82,20 @@ impl CommandGates {
             allowing: CommandAllowing::new(allowed_commands_file(data_dir, project)),
             has_record: true,
         });
+    }
+
+    /// For a test: `project`'s gate open with nothing in the store, so config.json's commands run as written.
+    #[cfg(test)]
+    pub fn open_unrecorded(&self, project: &str) {
+        let file = std::env::temp_dir().join(format!("retaskable-unrecorded-{project}.json"));
+        let allowing = CommandAllowing::new(file);
+        self.lock().insert(
+            project.to_string(),
+            Gate {
+                allowing,
+                has_record: false,
+            },
+        );
     }
 
     /// What `cfg` is with the allowed commands over it. A project the loop never opened has nothing allowed.

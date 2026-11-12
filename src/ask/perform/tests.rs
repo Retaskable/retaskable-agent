@@ -13,7 +13,7 @@ const LONG_RUNNING: &str = "ping -n 60 127.0.0.1 >nul";
 const LONG_RUNNING: &str = "sleep 60";
 
 fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
-    AgentView {
+    let v = AgentView {
         machine: "pc".into(),
         tags: Default::default(),
         projects: vec![ProjectView {
@@ -39,7 +39,9 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         live: Default::default(),
         checks: Default::default(),
         owner: Default::default(),
-    }
+    };
+    v.item_commands.gates().open_unrecorded(project);
+    v
 }
 
 fn command(name: &str, args: Value) -> Value {

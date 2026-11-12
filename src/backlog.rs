@@ -14,6 +14,7 @@
 pub mod asks;
 pub mod drafts;
 pub mod failures;
+pub mod merge;
 pub mod runs;
 pub mod settings;
 pub mod suggestions;
@@ -147,6 +148,10 @@ pub struct Item {
     /// The item's size (`S`, `M`, `L`, `XL`) when the store sends one; `L` and `XL` keep `opus` (`implementer_model`).
     #[serde(default)]
     pub size: Option<String>,
+    /// The tier the store names for the session this claim starts (`opus`, `sonnet` or `local`,
+    /// agent/07.1-model-tiers.md); set from the `claim_next` answer's `tier`, `None` when it sent none.
+    #[serde(default)]
+    pub tier: Option<String>,
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,
@@ -156,6 +161,9 @@ pub struct Item {
     /// On a `fix_main` item that ended without a merge: the commit fixing found nothing to fix.
     #[serde(default)]
     pub no_fix_sha: Option<String>,
+    /// The commit the item's change merged as (`merge_commit`); the rollout report matches it against git.
+    #[serde(default)]
+    pub merge_commit: Option<String>,
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the
@@ -453,12 +461,17 @@ impl Client {
                 struct Answer {
                     item: Item,
                     token: String,
+                    #[serde(default)]
+                    tier: Option<String>,
                 }
-                let answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
+                let mut answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
                     status,
                     code: None,
                     message: format!("couldn't read the item it claimed: {e}"),
                 })?;
+                if answer.tier.is_some() {
+                    answer.item.tier = answer.tier;
+                }
                 Ok(ClaimNextAnswer::Item {
                     item: Box::new(answer.item),
                     token: answer.token,
@@ -682,6 +695,17 @@ impl Client {
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
     /// answering its `value` read as `T` (`what` names it when it can't be read). A refusal keeps the
     /// store's own `error` code (`bad_request`, `not_found`, ...) so a caller can tell them apart.
+    /// An op whose answer says nothing the caller reads: only that the store took it.
+    pub async fn op_done(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(), BacklogError> {
+        self.send(repo_id, token, op, args).await.map(|_| ())
+    }
+
     pub async fn op<T: DeserializeOwned>(
         &self,
         repo_id: u64,

@@ -2,7 +2,7 @@
 //! messages"; chat-follow-up.md section 4). Plain code, worked out from the items the pass read and posted once each:
 //! a message the conversation already has (`ask::follow_up::post_once`) isn't posted again, so a restart repeats
 //! nothing. A draft is followed once it has a message of Retaskable's own (written, or approved), so a draft that
-//! posted nothing (a chore's, one approved with the flag Off) stays silent. Behind the `ask-claude` flag.
+//! posted nothing (a chore's) stays silent.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -72,7 +72,7 @@ impl ProjectLoop {
             }
         }
         let Some(repo) = self.repo else { return };
-        if drafts.is_empty() || !self.flags.on("ask-claude").await {
+        if drafts.is_empty() {
             return;
         }
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {

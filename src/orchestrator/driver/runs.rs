@@ -2,7 +2,7 @@
 //! beat the live ones every minute, and end them. It is reached only through [`ProjectLoop::run_pass`]; the claim
 //! path in `project.rs` is separate. What runs and how they are kept live is `crate::runs`; the work of a run
 //! is the [`RunStarter`]'s.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,8 +14,10 @@ use tokio::sync::mpsc;
 use super::project::ProjectLoop;
 use super::{Links, Shared};
 use crate::backlog::Client;
+use crate::backlog::merge::{MergeNext, MergeOutcome, MergeTurn};
 use crate::backlog::runs::{
-    ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer, RunTakeUses, RunWant,
+    BeatVerdict, ChoreCount, Run, RunDoneError, RunKind, RunOutcome, RunPiece, RunTakeAgent, RunTakeAnswer,
+    RunTakeUses, RunWant,
 };
 use crate::config::ProjectConfig;
 use crate::config::{Engine, EngineChoiceConfig, OnOff};
@@ -109,8 +111,8 @@ pub struct RunContext {
     pub token: String,
     /// Where the run takes and drops store locks; the loop beats them.
     pub locks: RunLocks,
-    /// With `engine-fall-over` On: the engines out and the ones this computer uses, so a run's own sessions (a
-    /// piece's `engine`, the review roles) go to the engine that takes over. `None` places them as chosen.
+    /// The engines out and the ones this computer uses, so a run's own sessions (a
+    /// piece's `engine`, the review roles) go to the engine that takes over. `None` (no run context) places them as chosen.
     pub fall: Option<FallOver>,
 }
 
@@ -170,7 +172,7 @@ pub struct RunRequest {
     pub other: serde_json::Map<String, serde_json::Value>,
     /// The folder of the lane the run holds; `None` for a kind that runs in none.
     pub lane: Option<PathBuf>,
-    /// With `engine-fall-over` On: the engine the run's session starts on when its chosen one is out.
+    /// The engine the run's session starts on when its chosen one is out.
     pub engine: Option<EngineId>,
     pub ends: RunEndSender,
     /// Events the run's task has the loop write to the project's log.
@@ -191,6 +193,8 @@ pub struct RunLoop {
     runs: Runs,
     /// `runs_drop` went through, so asking is allowed.
     dropped: bool,
+    /// `merge_open` was answered after `runs_drop`.
+    opened: bool,
     /// The store said it waits for something this computer lacks: no asking until `work_available`.
     waiting: bool,
     last_beat: Option<Instant>,
@@ -216,6 +220,7 @@ impl RunLoop {
         Self {
             runs: Runs::new(project),
             dropped: false,
+            opened: false,
             waiting: false,
             last_beat: None,
             idle: false,
@@ -239,27 +244,27 @@ impl RunLoop {
 impl ProjectLoop {
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
-    /// With `tags-reread-on-save` On a wake ends a wait only when the tag list changed since the ask that got
-    /// the wait (`tags_seen`, set at each ask); otherwise it is used up and nothing is asked.
+    /// A wake ends a wait only when the tag list changed since the ask that got the wait (`tags_seen`, set at
+    /// each ask); otherwise it is used up and nothing is asked.
     pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>) {
         // A re-read that changed the tags ends the waits too: the next ask carries the new list.
         let generation = shared.links.tags.generation();
         let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
-        let woke = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
-        let wake_counts = woke && !self.flags.on("tags-reread-on-save").await;
-        if tags_changed | wake_counts {
+        // A wake is used up once read.
+        shared.links.work.signal(&self.id).notified().now_or_never();
+        if tags_changed {
             self.run_loop.waiting = false;
             self.claim_waiting = false;
         }
     }
 
-    /// Writes the events the runs' tasks sent. Behind `ci-merged-events`: Off, they are dropped.
+    /// Writes the events the runs' tasks sent.
     pub(super) async fn write_run_events(&mut self) {
         let mut sent = Vec::new();
         while let Ok(event) = self.run_loop.events_rx.try_recv() {
             sent.push(event);
         }
-        if sent.is_empty() || !self.flags.on("ci-merged-events").await {
+        if sent.is_empty() {
             return;
         }
         for event in sent {
@@ -274,6 +279,10 @@ impl ProjectLoop {
             return;
         };
         let token = Some(token.as_str());
+        let merges = starter.kinds().contains(&RunKind::Merge);
+        if merges && !self.run_loop.opened && !self.open_turn((repo, token), pool, starter, shared, now).await {
+            return;
+        }
         self.hear_work_wake(shared).await;
         while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
             if !self.run_loop.runs.add_process(&run, tree.clone()) {
@@ -286,7 +295,6 @@ impl ProjectLoop {
             let merged = self.run_loop.merges.remove(&end.token);
             if let Some(merged) = merged
                 && end.outcome == RunOutcome::Merged
-                && self.flags.on("ci-merged-events").await
             {
                 self.events.add_in(&self.id, Event::Merged(merged));
             }
@@ -306,12 +314,23 @@ impl ProjectLoop {
                     Err(e) => self.store_error("run_beat", &e),
                 }
             }
+            let mut verdicts = HashMap::new();
+            for turn in self.run_loop.runs.merge_tokens() {
+                match self.client.merge_beat(repo, token, &turn, "merge").await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        verdicts.insert(turn, BeatVerdict::Stop);
+                    }
+                    Err(e) => self.store_error("merge_beat", &e),
+                }
+            }
+            if !verdicts.is_empty() {
+                self.run_loop.runs.apply_beat(pool, &verdicts, now);
+            }
         }
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
-        let outside_flag = self.flags.on("run-limits-and-causes").await;
         for mut end in due {
-            if outside_flag
-                && let RunOutcome::Failed(why) = &end.outcome
+            if let RunOutcome::Failed(why) = &end.outcome
                 && crate::runs::is_outside(why)
             {
                 if !end.result.is_object() {
@@ -319,13 +338,30 @@ impl ProjectLoop {
                 }
                 end.result["outside"] = json!(true);
             }
-            let answer = self
-                .client
-                .run_done(repo, token, &end.token, &end.outcome, end.result)
-                .await;
-            if let Err(RunDoneError::Other(e)) = &answer {
-                self.store_error("run_done", e);
-            }
+            let answer = if end.merge {
+                let outcome = MergeOutcome::of_run(&end.outcome, &end.result);
+                match self.client.merge_result(repo, token, &end.token, &outcome).await {
+                    Ok(answer) => {
+                        if !answer.held && !matches!(outcome, MergeOutcome::Merged { .. }) {
+                            tracing::info!(turn = %end.token, "the store dropped a merge result: the turn was no longer held");
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.store_error("merge_result", &e);
+                        Err(RunDoneError::Other(e))
+                    }
+                }
+            } else {
+                let answer = self
+                    .client
+                    .run_done(repo, token, &end.token, &end.outcome, end.result)
+                    .await;
+                if let Err(RunDoneError::Other(e)) = &answer {
+                    self.store_error("run_done", e);
+                }
+                answer
+            };
             self.run_loop.runs.end_sent(&end.token, answer, now);
         }
         self.run_loop.idle = false;
@@ -398,23 +434,123 @@ impl ProjectLoop {
         shared: &Shared<'_>,
         now: Instant,
     ) -> bool {
-        let start = self.start_rules(pool, shared, now).await;
+        let start = self.start_rules(pool, shared, now);
         let want = pool.run_want(&self.id, "");
-        let lane_free = match &start {
-            Some(s) => pool.claim_lane_where(&want, |k| s.lane_may_start(k)),
-            None => pool.claim_lane(&want),
-        }
-        .is_some();
-        let kinds: Vec<RunKind> = starter
+        let lane_free = pool.claim_lane_where(&want, |k| start.lane_may_start(k)).is_some();
+        let mut kinds: Vec<RunKind> = starter
             .kinds()
             .into_iter()
-            .filter(|k| (lane_free || !needs_lane(*k)) && start.as_ref().is_none_or(|s| s.kind_may_start(*k)))
+            .filter(|k| (lane_free || !needs_lane(*k)) && start.kind_may_start(*k))
             .collect();
+        if kinds.contains(&RunKind::Merge) {
+            // A piece's merge comes from the store's queue, never from `run_take`.
+            kinds.retain(|k| *k != RunKind::Merge);
+            if !self.run_loop.runs.merging() && self.ask_merge((repo, token), pool, starter, (&start, now)).await {
+                return true;
+            }
+        }
         if kinds.is_empty() {
             return false;
         }
         self.ask(repo, token, pool, starter, shared, RunWant::Kinds(&kinds), now)
             .await
+    }
+
+    /// Writes the `claim` event for what the store answered.
+    fn write_claim(&mut self, op: &str, answer: Value) {
+        self.events.add_in(
+            &self.id,
+            Event::Claim(event::Claim {
+                op: Some(op.into()),
+                answer: Some(answer),
+                ..Default::default()
+            }),
+        );
+    }
+
+    /// Starts the merge run for a turn the store handed out (or still holds), with the answer for its `claim` event.
+    /// A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
+    async fn start_turn(
+        &mut self,
+        (repo, token): (u64, Option<&str>),
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        (start, now): (&StartRules, Instant),
+        turn: MergeTurn,
+    ) -> (Value, bool) {
+        let Some(piece) = turn.piece else {
+            if let Err(e) = self
+                .client
+                .merge_result(repo, token, &turn.token, &MergeOutcome::Released)
+                .await
+            {
+                self.store_error("merge_result", &e);
+            }
+            return (json!("passed"), false);
+        };
+        let answer = json!(piece.title);
+        let run = Run {
+            token: turn.token,
+            kind: RunKind::Merge,
+            piece,
+            other: turn.other,
+        };
+        (answer, self.begin(repo, token, pool, starter, run, start, now).await)
+    }
+
+    /// Once after `runs_drop`, before any `run_take` (docs/specs/merge-queue-from-store.md section 3.5):
+    /// `merge_open` for the turn this computer still holds. A held turn's run starts again and reads the change on
+    /// the host before it pushes or merges (`merge_run`: merged → `merged`, head moved → carries on from there);
+    /// with no turn (or a lease gone) it goes back to `merge_next`. Nothing is rebuilt from `state.json`. False when
+    /// the store couldn't say: nothing more is asked this pass.
+    async fn open_turn(
+        &mut self,
+        access: (u64, Option<&str>),
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        shared: &Shared<'_>,
+        now: Instant,
+    ) -> bool {
+        let (repo, token) = access;
+        match self.client.merge_open(repo, token).await {
+            Err(e) => {
+                self.store_error("merge_open", &e);
+                false
+            }
+            Ok(held) => {
+                self.run_loop.opened = true;
+                if let Some(turn) = held {
+                    let start = self.start_rules(pool, shared, now);
+                    let (answer, _) = self.start_turn(access, pool, starter, (&start, now), turn).await;
+                    self.write_claim("merge_open", answer);
+                }
+                true
+            }
+        }
+    }
+
+    /// One `merge_next` for a piece's merge, with its `claim` event. Whether a merge run started.
+    async fn ask_merge(
+        &mut self,
+        (repo, token): (u64, Option<&str>),
+        pool: &mut LanePool,
+        starter: &dyn RunStarter,
+        (start, now): (&StartRules, Instant),
+    ) -> bool {
+        let base = self.project.base_branch.clone();
+        let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
+            Err(e) => {
+                self.store_error("merge_next", &e);
+                (json!("failed"), false)
+            }
+            Ok(MergeNext::Nothing) => (json!("none"), false),
+            Ok(MergeNext::Waiting { place, ahead }) => {
+                (json!({ "waiting": { "place": place, "ahead": ahead } }), false)
+            }
+            Ok(MergeNext::Turn(turn)) => self.start_turn((repo, token), pool, starter, (start, now), *turn).await,
+        };
+        self.write_claim("merge_next", answer);
+        more
     }
 
     /// One `run_take` for `want`, with its `claim` event. Whether a run was handed out and started.
@@ -429,16 +565,16 @@ impl ProjectLoop {
         want: RunWant<'_>,
         now: Instant,
     ) -> bool {
-        let start = self.start_rules(pool, shared, now).await;
+        let start = self.start_rules(pool, shared, now);
         self.tags_seen = shared.links.tags.generation();
         let agent = RunTakeAgent {
             machine: shared.links.machine.clone(),
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.get(),
-            engines: engines_here(shared.links, self.flags.on("engine-placement").await, start.as_ref()),
-            uses: uses_here(shared.links, self.project.engines.as_ref(), start.as_ref()),
-            chores: (self.chores_off() && self.flags.on("chore-rotation").await).then_some(false),
+            engines: engines_here(shared.links, &start),
+            uses: uses_here(shared.links, self.project.engines.as_ref(), &start),
+            chores: self.chores_off().then_some(false),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
@@ -454,32 +590,21 @@ impl ProjectLoop {
                 (json!({ "waitingFor": waiting }), false)
             }
             Ok(RunTakeAnswer::Run(run)) => {
-                if let Some(count) = ChoreCount::read(&run.other)
-                    && self.flags.on("chore-rotation").await
-                {
+                if let Some(count) = ChoreCount::read(&run.other) {
                     self.live.set_chores(&self.id, count);
                 }
                 let answer = json!(run.piece.title);
-                let more = self.begin(repo, token, pool, starter, *run, start.as_ref(), now).await;
+                let more = self.begin(repo, token, pool, starter, *run, &start, now).await;
                 (answer, more)
             }
         };
-        self.events.add_in(
-            &self.id,
-            Event::Claim(event::Claim {
-                answer: Some(answer),
-                ..Default::default()
-            }),
-        );
+        self.write_claim("run_take", answer);
         more
     }
 
-    /// With `engine-start-rules` On: which engines are out now and which this computer runs
-    /// (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5). `None` is today's behaviour.
-    async fn start_rules(&mut self, pool: &LanePool, shared: &Shared<'_>, now: Instant) -> Option<StartRules> {
-        if !self.flags.on("engine-start-rules").await {
-            return None;
-        }
+    /// Which engines are out now and which this computer runs
+    /// (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5).
+    fn start_rules(&self, pool: &LanePool, shared: &Shared<'_>, now: Instant) -> StartRules {
         let mut out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
         if Self::limit_fallback(shared) {
             // Claude's usage limit holds nothing: its runs start on the local model.
@@ -490,12 +615,12 @@ impl ProjectLoop {
             self.project.engines.as_ref(),
             pool.rules().lanes,
         );
-        Some(StartRules {
+        StartRules {
             out,
             used,
             choice: shared.links.engine_choice.clone(),
             project_engines: self.project.engines.clone(),
-        })
+        }
     }
 
     fn chores_off(&self) -> bool {
@@ -511,13 +636,9 @@ impl ProjectLoop {
         pool: &mut LanePool,
         starter: &dyn RunStarter,
         run: Run,
-        start: Option<&StartRules>,
+        start: &StartRules,
         now: Instant,
     ) -> bool {
-        let fall = match start {
-            Some(s) if self.flags.on("engine-fall-over").await => Some(s),
-            _ => None,
-        };
         let piece_id = piece_id(&run.piece).to_string();
         // An older store may hand out a rotation chore though chores are off: given back before any lane work.
         let stray = self.chores_off()
@@ -526,8 +647,7 @@ impl ProjectLoop {
                     c.kind,
                     ChoreKind::Tidy | ChoreKind::Tests | ChoreKind::Bugs | ChoreKind::Specs
                 )
-            })
-            && self.flags.on("chore-rotation").await;
+            });
         if stray {
             let ended = self
                 .client
@@ -542,9 +662,7 @@ impl ProjectLoop {
         let started = self
             .run_loop
             .runs
-            .start_where(pool, &run.token, run.kind, &piece_id, now, |k| {
-                start.is_none_or(|s| s.lane_may_start(k))
-            });
+            .start_where(pool, &run.token, run.kind, &piece_id, now, |k| start.lane_may_start(k));
         if let Err(NoLane) = started {
             // Not queued: the run never held anything here, so its end is sent now, once.
             let ended = self
@@ -555,6 +673,10 @@ impl ProjectLoop {
                 self.store_error("run_done", e);
             }
             return false;
+        }
+        if run.kind == RunKind::Merge {
+            let name = format!("merge-{}", self.project.base_branch);
+            self.run_loop.runs.locks().add_turn(&run.token, &name, now);
         }
         if run.kind == RunKind::Merge
             && let Some(pr) = run
@@ -591,7 +713,7 @@ impl ProjectLoop {
             piece: run.piece,
             other: run.other,
             lane,
-            engine: fall.and_then(|s| s.takes_over(run.kind)),
+            engine: start.takes_over(run.kind),
             ends: self.run_loop.ends_tx.clone(),
             events: self.run_loop.events_tx.clone(),
             context: RunContext {
@@ -601,14 +723,15 @@ impl ProjectLoop {
                 repo,
                 token: token.unwrap_or_default().to_string(),
                 locks: self.run_loop.runs.locks(),
-                fall: fall.map(|s| FallOver {
-                    out: s.out.clone(),
-                    used: s.used.clone(),
+                fall: Some(FallOver {
+                    out: start.out.clone(),
+                    used: start.used.clone(),
                 }),
             },
         };
         if let Err(why) = starter.start(request) {
             tracing::warn!("{}: the run {} didn't start: {why}", self.id, run.token);
+            self.run_loop.runs.locks().remove(&run.token);
             self.run_loop
                 .runs
                 .end(pool, &run.token, RunOutcome::Interrupted, json!({}), now);
@@ -618,7 +741,7 @@ impl ProjectLoop {
     }
 }
 
-/// The engines out now, the ones this computer uses and its choices, for `engine-start-rules`.
+/// The engines out now, the ones this computer uses and its choices, for the start rules.
 struct StartRules {
     out: BTreeSet<EngineId>,
     used: Vec<EngineId>,
@@ -661,9 +784,8 @@ fn role_of(kind: RunKind) -> Option<Role> {
 }
 
 /// The engines this computer tells the store it has: the latest setup checks' (Claude when installed and signed
-/// in, Cursor, Pi and Codex when present and passing). With `engine-placement` Off, Claude alone is reported, as
-/// every starter then refuses another engine. Empty until the checks have run.
-fn engines_here(links: &Links, placement: bool, start: Option<&StartRules>) -> Vec<String> {
+/// in, Cursor, Pi and Codex when present and passing). Empty until the checks have run.
+fn engines_here(links: &Links, start: &StartRules) -> Vec<String> {
     let guard = links.checks.lock().unwrap();
     let Some(c) = guard.as_ref() else { return Vec::new() };
     let pass = |s: &Option<crate::setup_check::SetupCheck>| s.as_ref().is_some_and(|s| s.ok == Some(true));
@@ -677,20 +799,20 @@ fn engines_here(links: &Links, placement: bool, start: Option<&StartRules>) -> V
         ("codex", pass(&c.codex)),
     ];
     all.into_iter()
-        .filter(|(id, ok)| {
-            *ok && (placement || *id == "claude") && start.is_none_or(|s| !s.out.iter().any(|e| e.to_string() == *id))
-        })
+        .filter(|(id, ok)| *ok && !start.out.iter().any(|e| e.to_string() == *id))
         .map(|(id, _)| id.to_string())
         .collect()
 }
 
-/// The engine each kind's role runs on here; with `engine-start-rules` On, the one it would start on now.
-fn uses_here(links: &Links, project_engines: Option<&Value>, start: Option<&StartRules>) -> RunTakeUses {
+/// The engine each kind's role runs on here: the one it would start on now.
+fn uses_here(links: &Links, project_engines: Option<&Value>, start: &StartRules) -> RunTakeUses {
     let on = |role| {
         let chosen = engine_for(&links.engine_choice, project_engines, role, None);
-        match start.map(|s| s.engine_now(role)) {
-            Some(now) if now != program_of(chosen) => now.to_string(),
-            _ => chosen.to_string(),
+        let now = start.engine_now(role);
+        if now != program_of(chosen) {
+            now.to_string()
+        } else {
+            chosen.to_string()
         }
     };
     RunTakeUses {

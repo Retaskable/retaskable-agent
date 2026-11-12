@@ -12,6 +12,7 @@ use tokio::time::timeout;
 
 use super::priority::low_priority_tokio;
 use crate::ci_watch::LOG_TAIL_LINES;
+use crate::telemetry::now_secs;
 
 /// Wall-clock ceiling of one check (agent-ci.md section 3.2).
 pub const CEILING: Duration = Duration::from_secs(45 * 60);
@@ -190,9 +191,7 @@ pub async fn run(c: &Check<'_>) -> Result<Outcome> {
     std::fs::create_dir_all(c.log_dir).context("creating the CI log folder")?;
     prune_logs(c.log_dir, SystemTime::now());
     let name = container_name(c.repo, c.sha);
-    let stamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let stamp = now_secs();
     let log_path = c.log_dir.join(format!("{name}-{stamp}.log"));
     let log = File::create(&log_path).context("creating the CI log")?;
     let mut cmd = docker_command(c.docker);

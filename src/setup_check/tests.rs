@@ -235,7 +235,7 @@ fn a_ready_machine_passes_with_the_documented_lines() {
     assert!(!show_cursor(&c));
     assert!(setup_checks_pass(&c));
     assert_eq!(
-        setup_check_lines(&c, false),
+        setup_check_lines(&c),
         vec![
             "✓ git",
             "✓ gh signed in",
@@ -273,7 +273,7 @@ fn a_signed_in_cursor_is_enough_when_claude_isnt() {
     assert!(engine_ready(&c));
     assert!(show_cursor(&c));
     assert!(setup_checks_pass(&c));
-    assert!(setup_check_lines(&c, false).contains(&"✓ Cursor's agent: Logged in as a@b.c".to_string()));
+    assert!(setup_check_lines(&c).contains(&"✓ Cursor's agent: Logged in as a@b.c".to_string()));
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn setup_check_report_has_the_setup_check_header_and_indented_lines() {
         SetupCheck::pass("Claude Code is signed in"),
         SetupCheck::fail("Cursor's agent isn't installed", fixes::CURSOR_MISSING),
     );
-    let report = setup_check_report(&c, false);
+    let report = setup_check_report(&c);
     assert!(report.starts_with("Setup check:\n"));
     assert!(report.contains("  ✓ Claude Code 2.1.4"));
 }
@@ -325,7 +325,7 @@ fn setup_check_report_has_the_setup_check_header_and_indented_lines() {
 
 #[tokio::test]
 async fn run_setup_checks_completes_promptly_and_builds_every_field() {
-    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(&Env::empty(), true)).await;
+    let result = tokio::time::timeout(Duration::from_secs(25), run_setup_checks(&Env::empty())).await;
     let c = result.expect("run_setup_checks should finish within its own 20s check budget");
     for check in [
         &c.git,
@@ -448,37 +448,20 @@ fn a_signed_out_codex_leaves_the_checks_passing() {
 }
 
 #[test]
-fn the_flag_off_keeps_the_old_pi_and_codex_result() {
-    assert_eq!(plain_engine_check("pi", None), None);
-    assert_eq!(plain_engine_check("pi", Some(&out(1, "oops"))), None);
-    assert_eq!(
-        plain_engine_check("Codex", Some(&out(0, "codex-cli 0.5.0\n"))),
-        Some(SetupCheck::pass("codex-cli 0.5.0"))
-    );
-    assert_eq!(
-        plain_engine_check("pi", Some(&out(0, "\n"))),
-        Some(SetupCheck::pass("pi"))
-    );
-}
-
-#[test]
-fn pi_and_codex_lines_follow_the_probe_flag_and_the_found_binaries() {
+fn pi_and_codex_lines_follow_the_found_binaries() {
     let mut c = checks(
         SetupCheck::pass("Claude Code 2.1.0"),
         SetupCheck::pass("Claude Code is signed in"),
         SetupCheck::fail("Cursor's agent isn't installed", fixes::CURSOR_MISSING),
     );
-    let today = setup_check_lines(&c, true);
-    assert_eq!(today, setup_check_lines(&c, false));
     c.pi = Some(SetupCheck::pass("pi 0.3.1"));
     c.codex = Some(SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN));
-    let report = setup_check_report(&c, true);
+    let report = setup_check_report(&c);
     assert!(report.contains("  ✓ pi: pi 0.3.1"));
     assert!(report.contains("  ✗ Codex isn't signed in: run `codex login`."));
     assert!(setup_checks_pass(&c));
-    assert_eq!(setup_check_lines(&c, false), today);
     c.codex = Some(SetupCheck::pass("codex-cli 0.46.0"));
-    assert!(setup_check_lines(&c, true).contains(&"✓ Codex: codex-cli 0.46.0".to_string()));
+    assert!(setup_check_lines(&c).contains(&"✓ Codex: codex-cli 0.46.0".to_string()));
 }
 
 // docker line (agent-ci.md section 3.6)
@@ -490,12 +473,12 @@ fn the_docker_line_shows_only_when_there_is_a_docker_check() {
         SetupCheck::pass("Claude Code is signed in"),
         SetupCheck::pass("Cursor"),
     );
-    assert!(!setup_check_report(&c, false).contains("Docker"));
+    assert!(!setup_check_report(&c).contains("Docker"));
     c.docker = Some(SetupCheck::fail(
         "Docker isn't running: this computer won't run CI",
         fixes::DOCKER,
     ));
-    let lines = setup_check_lines(&c, false);
+    let lines = setup_check_lines(&c);
     assert_eq!(
         lines.last().unwrap(),
         "✗ Docker isn't running: this computer won't run CI: start Docker (or install it) on this computer."

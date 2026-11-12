@@ -47,7 +47,10 @@ payload!(Lease {
     change: String,
     state: String
 });
-payload!(Claim { answer: Value });
+payload!(Claim {
+    op: String,
+    answer: Value
+});
 payload!(StoreError {
     item: String,
     op: String,
@@ -111,6 +114,14 @@ payload!(TrialOpened {
     pr_url: String
 });
 payload!(TrialDropped { reason: String });
+payload!(UsageRechecked {
+    status: String,
+    #[serde(rename = "leftPct")]
+    left_pct: i64,
+    #[serde(rename = "wasWaiting")]
+    was_waiting: bool,
+    waiting: bool
+});
 payload!(HostCallUndefined {
     cmd: String,
     args: Value
@@ -171,6 +182,7 @@ pub enum Event {
     Anomaly(Anomaly),
     TrialOpened(TrialOpened),
     TrialDropped(TrialDropped),
+    UsageRechecked(UsageRechecked),
 }
 
 fn extra_item(extra: &Map<String, Value>) -> Option<&str> {
@@ -204,6 +216,7 @@ impl Event {
             Event::RestartBack(e) => return extra_item(&e.extra),
             Event::TrialOpened(e) => return extra_item(&e.extra),
             Event::TrialDropped(e) => return extra_item(&e.extra),
+            Event::UsageRechecked(e) => return extra_item(&e.extra),
         };
         own.as_deref()
     }

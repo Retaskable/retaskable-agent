@@ -29,7 +29,7 @@ use crate::review_run::{StageInput, review_lane};
 use crate::reviewer::{Reviewer, ReviewerResult};
 use crate::runs::Pushed;
 use crate::scouts::{Scouts, parse_scout_info};
-use crate::tiers::{LOCAL, OPUS, SONNET, scout_tier, top_tier};
+use crate::tiers::{LOCAL, OPUS, SONNET, floor};
 
 const SCOUT_TEMPLATE: &str = include_str!("../../prompts/scout.md");
 const SCOUT_INFO: &str = include_str!("../../prompts/scouts.json");
@@ -69,58 +69,28 @@ fn behind_head(cwd: &Path, sha: &str) -> bool {
     crate::lanes::git_output_in_worktree(cwd, &["merge-base", "--is-ancestor", sha, "HEAD"]).is_ok()
 }
 
-/// Where a review role runs: its `review` group's engine with `engine-placement` On, else the Claude the run
-/// started with.
+/// Where a review role runs: its `review` group's engine.
 fn placement(job: &Job, role: Role, hit: &BTreeSet<EngineId>) -> Result<Placement> {
-    let engine = if job.placed {
-        job.context
-            .engine_now_out(engine_for(&job.choice, job.project.engines.as_ref(), role, None), hit)
-    } else {
-        crate::config::Engine::Claude
-    };
+    let engine = job
+        .context
+        .engine_now_out(engine_for(&job.choice, job.project.engines.as_ref(), role, None), hit);
     place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
 }
 
-/// The models the scouts and the final reviewer start on: Sonnet and Opus with the ladder Off, else `scout_tier` and
-/// `top_tier`, each given whether the local model can run that role (`up`: scouts, reviewer).
-fn review_models(
-    ladder: bool,
-    usage: Option<&Value>,
-    now: i64,
-    models: &crate::config::ModelsConfig,
-    up: (bool, bool),
-    at_limit: bool,
-) -> (&'static str, &'static str) {
-    if ladder {
-        // Claude at its limit reads as the floor for a role the model can run (`local-limit-fallback`).
-        let (s, t) = (
-            crate::tiers::limit_floor(usage, at_limit, up.0),
-            crate::tiers::limit_floor(usage, at_limit, up.1),
-        );
-        (
-            scout_tier(s.as_ref(), now, models, up.0),
-            top_tier(t.as_ref(), now, models, up.1),
-        )
-    } else {
-        (SONNET, OPUS)
-    }
+/// The models the scouts (`sonnet`) and the final reviewer (`opus`) start on, each given whether the local model can run that role (`up`: scouts, reviewer). Claude at its limit reads as the floor for a role the model can run.
+fn review_models(up: (bool, bool), at_limit: bool) -> (&'static str, &'static str) {
+    (floor(SONNET, at_limit, up.0), floor(OPUS, at_limit, up.1))
 }
 
-/// The local model's slot for a review session, if it runs there: with `ladder`, a session already set to `local`
-/// waits for the slot; with `grab` (`local-chores-scouts`), a scout whose tier isn't `local` takes it when it is free
+/// The local model's slot for a review session, if it runs there: a session already set to `local`
+/// waits for the slot; a scout whose tier isn't `local` takes it when it is free
 /// right now (and then runs `local`), else carries on at once. Cursor never takes it. The slot is held until the returned value is dropped.
-async fn claim_local(
-    local: &LocalModel,
-    (grab, ladder): (bool, bool),
-    program: EngineId,
-    role: Role,
-    spec: &mut SessionSpec,
-) -> Option<LocalSlot> {
+async fn claim_local(local: &LocalModel, program: EngineId, role: Role, spec: &mut SessionSpec) -> Option<LocalSlot> {
     if program != EngineId::Claude {
         None
-    } else if ladder && spec.model == LOCAL {
+    } else if spec.model == LOCAL {
         Some(local.take().await)
-    } else if grab && spec.model != LOCAL && role == Role::Scout && local.available() {
+    } else if spec.model != LOCAL && role == Role::Scout && local.available() {
         local.try_take().inspect(|_| {
             spec.model = LOCAL.to_string();
             spec.local = Some(local.target());
@@ -137,7 +107,6 @@ async fn run_session(
     job: &Job,
     bins: &[&Placement],
     hit: &Hit,
-    local_flags: (bool, bool),
     role: Role,
     mut spec: SessionSpec,
 ) -> Result<SessionResult> {
@@ -149,7 +118,7 @@ async fn run_session(
     let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
     let engine = engine_of(Some(program))?;
     let quiet = watch_for(&job.project, program);
-    let _slot = claim_local(&job.local, local_flags, program, role, &mut spec).await;
+    let _slot = claim_local(&job.local, program, role, &mut spec).await;
     let mut info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
     // A scout holds no lane.
     if role == Role::Scout {
@@ -157,9 +126,9 @@ async fn run_session(
     }
     let run = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job)));
     let result = job.sessions.track(info, run).await?;
-    // With `engine-fall-over` On, a session at its engine's limit sends the whole review to another engine.
-    if result.limit_hit && job.placed && job.context.fall.is_some() {
-        let wait = crate::engines::engine::resets_in(result.usage.as_ref(), crate::tiers::weekly_reading_on());
+    // A session at its engine's limit sends the whole review to another engine.
+    if result.limit_hit && job.context.fall.is_some() {
+        let wait = crate::engines::engine::resets_in(result.usage.as_ref());
         hit.lock().unwrap().get_or_insert((program, wait));
     }
     // A cut session (a stop) isn't a failed review: the run ends `interrupted`.
@@ -226,7 +195,6 @@ pub(super) async fn review(
     playtest: Option<&Playtest>,
     checks: &str,
     state: &mut ReviewState,
-    usage: Option<&Value>,
 ) -> Result<Reviewed> {
     let project = &job.project;
     let item = piece_item(&job.piece);
@@ -249,18 +217,8 @@ pub(super) async fn review(
             placement(job, Role::Reviewer, &out)?,
         );
         let info = parse_scout_info(SCOUT_INFO)?;
-        // With `local-tier-ladder` Off, scouts run on Sonnet and the reviewer on Opus.
-        let ladder = job.flags.on("local-tier-ladder").await;
-        let grab = job.flags.on("local-chores-scouts").await;
         let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
-        let (scout_model, top_model) = review_models(
-            ladder,
-            usage,
-            crate::telemetry::now_ms() / 1000,
-            &job.models,
-            (up(&scout_at), up(&reviewer_at)),
-            job.sessions.claude_at_limit(),
-        );
+        let (scout_model, top_model) = review_models((up(&scout_at), up(&reviewer_at)), job.sessions.claude_at_limit());
         let input = StageInput {
             base_branch: &project.base_branch,
             review: project.review,
@@ -288,10 +246,7 @@ pub(super) async fn review(
         };
         let bins = [&scout_at, &reviewer_at];
         let hit = Hit::default();
-        let review = review_lane(cwd, &input, |role, spec| {
-            run_session(job, &bins, &hit, (grab, ladder), role, spec)
-        })
-        .await;
+        let review = review_lane(cwd, &input, |role, spec| run_session(job, &bins, &hit, role, spec)).await;
         if let Err(e) = &review
             && e.downcast_ref::<Interrupted>().is_some()
         {
@@ -372,6 +327,7 @@ pub(super) async fn review(
 mod tests {
     use super::*;
     use crate::engines::engine::test_spec;
+    use crate::tiers::{OPUS, SONNET};
 
     fn up() -> LocalModel {
         let local = LocalModel::new(crate::config::LocalModelConfig {
@@ -383,16 +339,10 @@ mod tests {
         local
     }
 
-    async fn claim(
-        local: &LocalModel,
-        flags: (bool, bool),
-        program: EngineId,
-        role: Role,
-        model: &str,
-    ) -> (SessionSpec, bool) {
+    async fn claim(local: &LocalModel, program: EngineId, role: Role, model: &str) -> (SessionSpec, bool) {
         let mut spec = test_spec(Path::new("."), "p");
         spec.model = model.into();
-        let slot = claim_local(local, flags, program, role, &mut spec).await;
+        let slot = claim_local(local, program, role, &mut spec).await;
         (spec, slot.is_some())
     }
 
@@ -401,75 +351,52 @@ mod tests {
         let local = up();
         let mut first = test_spec(Path::new("."), "p");
         first.model = SONNET.into();
-        let held = claim_local(&local, (true, false), EngineId::Claude, Role::Scout, &mut first).await;
+        let held = claim_local(&local, EngineId::Claude, Role::Scout, &mut first).await;
         assert!(held.is_some());
         assert_eq!(first.model, LOCAL);
         assert_eq!(first.local, Some(local.target()));
         // The first still holds the slot while the others start.
         let mut held = test_spec(Path::new("."), "p");
         held.model = SONNET.into();
-        let slot = claim_local(&local, (true, false), EngineId::Claude, Role::Scout, &mut held).await;
+        let slot = claim_local(&local, EngineId::Claude, Role::Scout, &mut held).await;
         assert!(slot.is_none());
         assert_eq!((held.model.as_str(), held.local), (SONNET, None));
     }
 
     #[tokio::test]
-    async fn scouts_stay_on_sonnet_with_local_down_off_the_flag_or_on_cursor() {
+    async fn scouts_stay_on_sonnet_with_local_down_or_on_cursor() {
         let off = LocalModel::off();
-        for (local, flags, program) in [
-            (&off, (true, true), EngineId::Claude),
-            (&up(), (false, false), EngineId::Claude),
-            (&up(), (false, true), EngineId::Claude), // the ladder alone never grabs the free slot
-            (&up(), (true, true), EngineId::Cursor),
-            (&up(), (true, false), EngineId::Codex),
+        for (local, program) in [
+            (&off, EngineId::Claude),
+            (&up(), EngineId::Cursor),
+            (&up(), EngineId::Codex),
         ] {
-            let (spec, took) = claim(local, flags, program, Role::Scout, SONNET).await;
+            let (spec, took) = claim(local, program, Role::Scout, SONNET).await;
             assert_eq!((spec.model.as_str(), spec.local, took), (SONNET, None, false));
         }
     }
 
     #[tokio::test]
-    async fn a_scout_takes_the_free_slot_with_either_ladder_setting_when_the_flag_is_on() {
-        for ladder in [false, true] {
-            let local = up();
-            let (spec, took) = claim(&local, (true, ladder), EngineId::Claude, Role::Scout, SONNET).await;
-            assert_eq!((spec.model.as_str(), took), (LOCAL, true));
-        }
+    async fn a_scout_takes_the_free_slot_when_local_is_up() {
+        let local = up();
+        let (spec, took) = claim(&local, EngineId::Claude, Role::Scout, SONNET).await;
+        assert_eq!((spec.model.as_str(), took), (LOCAL, true));
     }
 
     #[tokio::test]
-    async fn the_reviewer_never_takes_the_free_slot_and_waits_only_when_its_tier_is_local_on_the_ladder() {
+    async fn the_reviewer_never_takes_the_free_slot_and_waits_only_when_its_tier_is_local() {
         let local = up();
-        let (spec, took) = claim(&local, (true, true), EngineId::Claude, Role::Reviewer, OPUS).await;
+        let (spec, took) = claim(&local, EngineId::Claude, Role::Reviewer, OPUS).await;
         assert_eq!((spec.model.as_str(), took), (OPUS, false));
-        let (spec, took) = claim(&local, (false, true), EngineId::Claude, Role::Reviewer, LOCAL).await;
+        let (spec, took) = claim(&local, EngineId::Claude, Role::Reviewer, LOCAL).await;
         assert_eq!((spec.model.as_str(), took), (LOCAL, true));
-        let (_, took) = claim(&up(), (true, false), EngineId::Claude, Role::Reviewer, LOCAL).await;
-        assert!(!took);
-    }
-
-    fn reading(utilization: f64) -> Value {
-        json!({"unifiedWindows": {"five_hour": {"utilization": utilization, "resetsAt": 1_000_100}}})
     }
 
     #[test]
-    fn the_reviewer_is_local_only_below_the_pause_line_and_only_when_local_can_run_it() {
-        let m = crate::config::ModelsConfig::default();
-        let now = 1_000_000;
-        let (low, full) = (reading(0.99), reading(0.1));
-        assert_eq!(review_models(true, Some(&low), now, &m, (true, true), false).1, LOCAL);
-        assert_eq!(review_models(true, Some(&low), now, &m, (true, false), false).1, OPUS); // a Cursor reviewer
-        assert_eq!(
-            review_models(true, Some(&low), now, &m, (false, false), false),
-            (SONNET, OPUS)
-        ); // local down
-        assert_eq!(
-            review_models(true, Some(&full), now, &m, (true, true), false),
-            (SONNET, OPUS)
-        );
-        assert_eq!(
-            review_models(false, Some(&low), now, &m, (true, true), false),
-            (SONNET, OPUS)
-        ); // flag Off
+    fn the_reviewer_is_local_only_at_the_limit_and_only_when_local_can_run_it() {
+        assert_eq!(review_models((true, true), true), (LOCAL, LOCAL));
+        assert_eq!(review_models((true, false), true), (LOCAL, OPUS)); // a Cursor reviewer
+        assert_eq!(review_models((false, false), true), (SONNET, OPUS)); // local down
+        assert_eq!(review_models((true, true), false), (SONNET, OPUS));
     }
 }

@@ -17,6 +17,7 @@ use serde_json::json;
 use super::{Links, ProjectLoop};
 use crate::backlog::Client;
 use crate::backlog::drafts::SpecsUpsert;
+use crate::backlog::runs::short_sha;
 use crate::config::DeployTarget;
 use crate::spec_items::{SPECS_DIR, check_spec_items};
 use crate::{lanes, smoke};
@@ -137,8 +138,8 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         seen.sent_tree = Some(tree);
         return Ok(format!(
             "the store is at {}, not behind {}",
-            short(previous),
-            short(&commit)
+            short_sha(previous),
+            short_sha(&commit)
         ));
     }
     let files = spec_files(&ctx.repo_path, &at).await.context("reading the specs")?;
@@ -152,7 +153,7 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         seen.sent_tree = Some(tree);
         tracing::warn!(
             "not sending the Items headers at {}: {} line {}: {}",
-            short(&commit),
+            short_sha(&commit),
             cycle.spec,
             cycle.line,
             cycle.message
@@ -162,7 +163,7 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
     for p in &problems {
         tracing::warn!(
             "the Items headers at {}: {} line {}: {}; sent without it",
-            short(&commit),
+            short_sha(&commit),
             p.spec,
             p.line,
             p.message
@@ -191,7 +192,7 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         .await?;
     seen.sent_tree = Some(tree);
     landing.sent();
-    tracing::info!("sent the Items headers at {}: {} new", short(&commit), added.len());
+    tracing::info!("sent the Items headers at {}: {} new", short_sha(&commit), added.len());
     Ok("sent".into())
 }
 
@@ -263,7 +264,7 @@ async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
     if since.elapsed() >= DEPLOY_WAIT {
         tracing::info!(
             "production didn't serve {} within 20 minutes; the next move of its branch tries again",
-            short(&head)
+            short_sha(&head)
         );
         seen.want = None;
     }
@@ -315,7 +316,7 @@ async fn send(ctx: &Ctx, place: &str, sha: &str, items: Vec<String>) -> Result<V
         } else {
             "in production at deploy"
         };
-        tracing::info!("{} {at} {}", moved.join(", "), short(sha));
+        tracing::info!("{} {at} {}", moved.join(", "), short_sha(sha));
     }
     Ok(moved)
 }
@@ -388,16 +389,13 @@ pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<Stri
     (out.status.success() && !branch.is_empty()).then_some(branch)
 }
 
-fn short(sha: &str) -> &str {
-    sha.get(..7).unwrap_or(sha)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn target(url: Option<&str>, version_path: Option<&str>) -> DeployTarget {
         DeployTarget {
+            rollout: None,
             branch: "main".into(),
             url: url.map(str::to_string),
             smoke: None,

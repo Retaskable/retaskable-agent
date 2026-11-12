@@ -6,9 +6,6 @@ use crate::backlog::BacklogError;
 use crate::orchestrator::live::now_iso8601;
 use crate::telemetry::{Event, event};
 
-/// The release flag: Off, a failed draft or ask write is only logged to the console.
-pub(super) const WATCH: &str = "watchdog-anomaly-rules";
-
 impl ProjectLoop {
     /// A pass that couldn't even ask the store (no repo id, no link): the page hears of it too.
     pub(super) fn cant_start(&self, message: String) {
@@ -17,7 +14,7 @@ impl ProjectLoop {
 
     /// A failed write for one draft or ask: the event log hears of it, nothing else changes.
     pub(super) async fn store_failure(&mut self, op: &str, item: &str, e: &BacklogError) {
-        self.failures.when(self.flags.on(WATCH).await).add(op, item, e);
+        self.failures.add(op, item, e);
         self.drain_failures();
     }
 

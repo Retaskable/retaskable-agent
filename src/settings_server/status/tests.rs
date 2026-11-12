@@ -51,7 +51,6 @@ fn settled(choice: EngineChoiceConfig, lanes: u32) -> Settled {
         lanes,
         codex_tokens: Some(42),
         cursor_tokens: None,
-        live_sessions: false,
     }
 }
 
@@ -214,7 +213,7 @@ fn off_mode_looks_as_before_with_a_quiet_note() {
     let s = status_with(&LiveState::default());
     assert!(s.alerts.is_empty(), "off is not an error");
     assert_eq!(s.header.lanes_busy, 0);
-    assert!(s.lanes.iter().all(|l| l.state == "free" && l.item.is_none()));
+    assert!(s.lanes.iter().all(|l| l.state == "free"));
     assert_eq!(
         (s.orchestrator.mode, s.orchestrator.note.as_str()),
         ("off", "Orchestrator off")
@@ -246,7 +245,7 @@ fn dry_mode_says_it_claims_nothing_and_a_store_error_is_an_alert() {
 }
 
 #[test]
-fn a_held_lane_is_busy_with_its_holder() {
+fn held_lanes_alone_do_not_make_a_lane_busy() {
     let ticking = ProjectLive {
         last_tick: Some("2026-10-29T14:04:00Z".into()),
         held: vec![
@@ -269,18 +268,8 @@ fn a_held_lane_is_busy_with_its_holder() {
         ..ProjectLive::default()
     };
     let s = status_with(&live(OrchestratorMode::Dry, &[("a", ticking)]));
-    assert_eq!(s.header.lanes_busy, 1, "a lane past the count is ignored");
-    let lane = &s.lanes[1];
-    assert_eq!((lane.state, lane.state_text), ("busy", "Busy"));
-    let item = lane.item.as_ref().unwrap();
-    assert_eq!(
-        (item.id.as_str(), item.title.as_str(), item.project.as_str()),
-        ("i1", "Add a thing", "a")
-    );
-    assert_eq!(s.lanes[0].state, "free");
+    assert_eq!(s.header.lanes_busy, 0, "busy lanes come from the session registry");
     let v = serde_json::to_value(&s).unwrap();
-    assert_eq!(v["lanes"][1]["item"]["title"], "Add a thing");
-    assert!(v["lanes"][0].get("item").is_none());
     assert_eq!(v["orchestrator"]["projects"][0]["decision"], "would ask for work");
 }
 
@@ -388,9 +377,8 @@ fn info(item: &str, role: Role, lane: Option<u32>) -> SessionInfo {
     }
 }
 
-fn live_status(on: bool, src: &StatusSource) -> ComputerStatus {
-    let mut s = settled(EngineChoiceConfig::default(), 3);
-    s.live_sessions = on;
+fn live_status(src: &StatusSource) -> ComputerStatus {
+    let s = settled(EngineChoiceConfig::default(), 3);
     build(&s, src, None, &src.live.snapshot())
 }
 
@@ -402,7 +390,7 @@ fn live_sessions_join_their_lane_and_the_rest_are_listed_apart() {
     let _g2 = reg.register(info("ask1", Role::Assistant, None));
     let _g3 = reg.register(info("d1", Role::Drafter, None));
     let _g4 = reg.register(info("s1", Role::Scout, None));
-    let s = live_status(true, &src);
+    let s = live_status(&src);
     assert_eq!(s.header.lanes_busy, 1);
     let lane = &s.lanes[1];
     assert_eq!(lane.state, "busy");
@@ -421,7 +409,7 @@ fn live_sessions_join_their_lane_and_the_rest_are_listed_apart() {
 fn the_json_has_names_and_times_but_no_prompt_or_transcript() {
     let src = source(&["a"]);
     let _g = src.live.sessions().register(info("i1", Role::Implementer, Some(1)));
-    let v = serde_json::to_value(live_status(true, &src)).unwrap();
+    let v = serde_json::to_value(live_status(&src)).unwrap();
     let ses = &v["lanes"][0]["session"];
     assert_eq!(ses["runSec"], 0);
     assert_eq!(ses["quietSec"], 0);
@@ -433,18 +421,6 @@ fn the_json_has_names_and_times_but_no_prompt_or_transcript() {
             "engine", "id", "model", "project", "quietSec", "role", "runSec", "title"
         ]
     );
-}
-
-#[test]
-fn with_the_flag_off_the_registry_is_ignored_and_the_old_view_stays() {
-    let src = source(&["a"]);
-    let _g = src.live.sessions().register(info("i1", Role::Implementer, Some(1)));
-    let s = live_status(false, &src);
-    assert_eq!(s.header.lanes_busy, 0);
-    assert!(s.lanes.iter().all(|l| l.session.is_none() && l.state == "free"));
-    assert!(s.sessions.is_empty());
-    let v = serde_json::to_value(&s).unwrap();
-    assert!(v["lanes"][0].get("session").is_none());
 }
 
 #[test]
@@ -465,7 +441,6 @@ async fn the_token_lines_show_what_ended_sessions_added() {
     use crate::engines::engine::{EngineId, SessionResult, Tokens};
     let dir = tempfile::tempdir().unwrap();
     let sessions = crate::orchestrator::live::sessions::Sessions::default().with_machine_dir(dir.path().to_path_buf());
-    sessions.limits().record_any_role(true);
     let result = |input, output| SessionResult {
         ok: true,
         subtype: String::new(),

@@ -12,7 +12,9 @@ fn idle(lanes: u32) -> (Rig, Arc<Fake>) {
     lp.runs.get_mut("a").unwrap().state = ItemState::AwaitingCi;
     lp.last_lane.insert("a".into(), 1);
     lp.project.play_command = "the-game".into();
+    lp.file_project.play_command = "the-game".into();
     lp.project.worktrees_dir = "wt".into();
+    lp.file_project.worktrees_dir = "wt".into();
     (rig, fake)
 }
 

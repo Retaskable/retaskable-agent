@@ -95,10 +95,9 @@ fn is_set(env: &Env, var: &str) -> bool {
 }
 
 /// Asks the questions and saves the answers. `default_port` is this build's own (the port shown
-/// when none is set). `flag_on` is the `machine-settings` release flag: Off asks nothing, as
-/// before.
-pub fn run(dir: &Path, env: &Env, default_port: u16, flag_on: bool, term: &mut Terminal) -> Result<()> {
-    if !flag_on || !term.is_terminal {
+/// when none is set).
+pub fn run(dir: &Path, env: &Env, default_port: u16, term: &mut Terminal) -> Result<()> {
+    if !term.is_terminal {
         return Ok(());
     }
     let saver = Saver { dir, env };

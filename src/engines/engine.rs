@@ -58,7 +58,7 @@ pub struct SessionSpec {
     pub cwd: PathBuf,
     pub max_turns: Option<u32>,
     /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check. `run_session_tracked` runs
-    /// it as 0 on a Claude subscription (`tiers::machine_on_subscription`), whatever the settings say.
+    /// it as 0 on a Claude subscription (`tiers::signal_on`), whatever the settings say.
     pub budget_usd: f64,
     pub start: SessionStart,
     /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist,
@@ -247,15 +247,13 @@ pub struct SessionResult {
     pub tokens: Option<Tokens>,
 }
 
-/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead. With
-/// `weekly` (the `weekly-limit-reading` flag), when the weekly window is what rejected it is the week's reset: a
+/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead. When the weekly window is what rejected it, that is the week's reset: a
 /// top-level `rateLimitType: "seven_day"` uses its own `resetsAt`; a reading with `unifiedWindows.seven_day`
 /// rejected (or full) takes the later of that window's `resetsAt` and the top-level one.
-pub fn resets_in(usage: Option<&Value>, weekly: bool) -> Option<std::time::Duration> {
+pub fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
     let usage = usage.filter(|u| u["status"] == "rejected")?;
     let mut at = usage["resetsAt"].as_u64();
-    if weekly
-        && let Some(week) = usage.get("unifiedWindows").and_then(|w| w.get("seven_day"))
+    if let Some(week) = usage.get("unifiedWindows").and_then(|w| w.get("seven_day"))
         && (week["status"] == "rejected" || week["utilization"].as_f64().is_some_and(crate::tiers::utilization_full))
     {
         at = at.max(week["resetsAt"].as_u64());
@@ -417,6 +415,22 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
 /// A `SessionResult` test fixture shared by `write_note`'s and `run_round`'s own tests: a result
 /// with a cost, and nothing else interesting. Callers set `ok`, `subtype`, `structured` and `error`.
 #[cfg(test)]
+/// A read-only session config for tests: sonnet, $1, no engine, local or cursor settings.
+#[cfg(test)]
+pub(crate) fn test_config() -> EphemeralSessionConfig<'static> {
+    EphemeralSessionConfig {
+        cwd: std::path::Path::new("."),
+        budget_usd: 1.0,
+        model: "sonnet".into(),
+        local: None,
+        engine: None,
+        cursor: None,
+        sandbox: false,
+        shell: true,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
     SessionResult {
         ok,
@@ -450,7 +464,7 @@ mod tests {
     #[test]
     fn resets_in_a_top_level_weekly_rejection_is_its_own_reset() {
         let u = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": in_secs(500_000)});
-        assert!(secs(resets_in(Some(&u), true)) > 499_000);
+        assert!(secs(resets_in(Some(&u))) > 499_000);
     }
 
     #[test]
@@ -458,21 +472,20 @@ mod tests {
         let u = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
             "five_hour": {"utilization": 0.4, "resetsAt": in_secs(3600)},
             "seven_day": {"status": "rejected", "utilization": 1.0, "resetsAt": in_secs(500_000)}}});
-        assert!(secs(resets_in(Some(&u), true)) > 499_000);
-        assert!(secs(resets_in(Some(&u), false)) <= 3600, "Off keeps today's behaviour");
+        assert!(secs(resets_in(Some(&u))) > 499_000);
         let pct = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
             "seven_day": {"utilization": 100, "resetsAt": in_secs(500_000)}}});
-        assert!(secs(resets_in(Some(&pct), true)) > 499_000);
+        assert!(secs(resets_in(Some(&pct))) > 499_000);
     }
 
     #[test]
     fn resets_in_a_five_hour_rejection_is_unchanged_and_no_rejection_is_none() {
         let u = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
             "seven_day": {"utilization": 0.3, "resetsAt": in_secs(500_000)}}});
-        assert!(secs(resets_in(Some(&u), true)) <= 3600);
+        assert!(secs(resets_in(Some(&u))) <= 3600);
         let ok = json!({"status": "allowed", "resetsAt": in_secs(3600)});
-        assert_eq!(resets_in(Some(&ok), true), None);
-        assert_eq!(resets_in(None, true), None);
+        assert_eq!(resets_in(Some(&ok)), None);
+        assert_eq!(resets_in(None), None);
     }
 
     #[test]

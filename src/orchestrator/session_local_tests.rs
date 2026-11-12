@@ -1,5 +1,5 @@
 //! The implementer's model tier (agent/07.1) and its `local` row (agent/07.2): the one slot, and the same reading
-//! with local down or the flag Off.
+//! with local down.
 use super::tests::{FINISHED, Rig, fake_name, request, rig, rig_with};
 use super::*;
 use crate::local_model::LocalModel;
@@ -17,20 +17,16 @@ fn recording_claude(rig: &Rig, sleep: u32) {
 }
 
 /// A reading with 10% of the 5-hour limit left: below `sonnetAbovePct`, above `pauseBelowPct`.
-fn low_usage() -> Option<Value> {
-    Some(serde_json::json!({"unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": i64::MAX}}}))
-}
 
 #[cfg(unix)]
 #[tokio::test]
 async fn below_sonnet_above_pct_with_local_up_the_implementer_runs_on_the_local_model_one_at_a_time() {
-    crate::tiers::set_local_ladder_for_test(true);
     let local = LocalModel::up();
     let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local.clone());
     recording_claude(&rig, 1);
     let held = local.take().await;
     let (mut request, mut rx) = request();
-    request.usage = low_usage();
+    request.item.tier = Some("local".into());
     rig.starter.start(request).unwrap();
     // Waits for the slot: nothing has started.
     tokio::time::sleep(Duration::from_millis(700)).await;
@@ -57,19 +53,16 @@ async fn below_sonnet_above_pct_with_local_up_the_implementer_runs_on_the_local_
 
 #[cfg(unix)]
 #[tokio::test]
-async fn with_local_down_or_the_flag_off_the_same_reading_gives_plain_sonnet() {
-    for (flag, local) in [(true, LocalModel::off()), (false, LocalModel::up())] {
-        crate::tiers::set_local_ladder_for_test(flag);
-        let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local.clone());
-        recording_claude(&rig, 0);
-        let (mut request, mut rx) = request();
-        request.usage = low_usage();
-        rig.starter.start(request).unwrap();
-        rx.recv().await.unwrap();
-        let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains("--model sonnet") && !args.contains("BASE=http"), "{args}");
-        assert!(local.try_take().is_some() || !flag);
-    }
+async fn with_local_down_the_same_reading_gives_plain_sonnet() {
+    let local = LocalModel::off();
+    let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local.clone());
+    recording_claude(&rig, 0);
+    let (mut request, mut rx) = request();
+    request.item.tier = Some("local".into());
+    rig.starter.start(request).unwrap();
+    rx.recv().await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(args.contains("--model sonnet") && !args.contains("BASE=http"), "{args}");
 }
 
 #[tokio::test]
@@ -85,10 +78,10 @@ async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
 }
 
 #[tokio::test]
-async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
+async fn a_reopened_item_the_store_named_opus_starts_on_opus() {
     let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
     let (mut request, mut rx) = request();
-    request.usage = None;
+    request.item.tier = Some("opus".into());
     request.item.reopened = Some(crate::backlog::Reopened {
         notes: Some("The list is empty".into()),
         at: Some("2026-10-29T00:00:00Z".into()),
@@ -125,7 +118,6 @@ fn local_engine_rig(local: &LocalModel) -> Rig {
 #[cfg(unix)]
 #[tokio::test]
 async fn an_engine_set_to_local_starts_on_the_local_target_even_with_a_full_window() {
-    crate::tiers::set_local_ladder_for_test(true);
     let local = LocalModel::up();
     let rig = local_engine_rig(&local);
     let (mut request, mut rx) = request();
@@ -143,10 +135,9 @@ async fn an_engine_set_to_local_starts_on_the_local_target_even_with_a_full_wind
 #[cfg(unix)]
 #[tokio::test]
 async fn an_engine_set_to_local_with_local_down_runs_on_the_roles_tier() {
-    crate::tiers::set_local_ladder_for_test(true);
     let rig = local_engine_rig(&LocalModel::off());
     let (mut request, mut rx) = request();
-    request.usage = None;
+    request.item.tier = Some("opus".into());
     request.item.reopened = Some(crate::backlog::Reopened {
         notes: Some("x".into()),
         at: Some("2026-10-29T00:00:00Z".into()),
@@ -168,7 +159,6 @@ async fn resume_after(first: Option<&str>, local: LocalModel) -> String {
 /// [`resume_after`], with Claude limited on this computer before the resume when `limited`.
 #[cfg(unix)]
 async fn resume_limited(first: Option<&str>, local: LocalModel, limited: bool) -> String {
-    crate::tiers::set_local_ladder_for_test(false);
     let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
     recording_claude(&rig, 0);
     let (first_try, mut rx) = request();
@@ -179,16 +169,14 @@ async fn resume_limited(first: Option<&str>, local: LocalModel, limited: bool) -
         Some(line) => std::fs::write(&file, format!("{line}\n")).unwrap(),
         None => std::fs::remove_file(&file).unwrap(),
     }
-    crate::tiers::set_local_ladder_for_test(true);
     if limited {
-        crate::tiers::set_local_limit_fallback_for_test(true);
         rig.starter
             .sessions
             .limits()
             .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
     }
     let (mut request, mut rx) = request();
-    request.usage = low_usage();
+    request.item.tier = Some("local".into());
     request.resume = true;
     rig.starter.start(request).unwrap();
     rx.recv().await.unwrap();
@@ -226,25 +214,20 @@ async fn an_anthropic_or_missing_transcript_resumes_on_sonnet_never_locally() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_start_over_job_on_a_full_window_starts_on_opus_with_the_step_up_flag() {
-    for (attempt, flag, model) in [
-        (1, true, "--model opus"),
-        (0, true, "--model sonnet"),
-        (1, false, "--model sonnet"),
-    ] {
-        crate::tiers::set_step_up_for_test(flag);
+async fn a_start_over_job_the_store_named_opus_starts_on_opus() {
+    for (attempt, model) in [(1, "--model opus"), (0, "--model sonnet")] {
         let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
         recording_claude(&rig, 0);
         let (mut request, mut rx) = request();
         request.attempt = attempt;
-        request.usage = None;
+        request.item.tier = Some("opus".into());
         rig.starter.start(request).unwrap();
         tokio::time::timeout(Duration::from_secs(120), rx.recv())
             .await
             .unwrap()
             .unwrap();
         let args = std::fs::read_to_string(&rig.args).unwrap();
-        assert!(args.contains(model), "attempt {attempt}, flag {flag}: {args}");
+        assert!(args.contains(model), "attempt {attempt}: {args}");
     }
 }
 
@@ -255,9 +238,7 @@ fn allowed_usage() -> Option<Value> {
 
 /// Starts a fresh session with Claude limited and `allowed` saved usage; returns the arguments `claude` got.
 #[cfg(unix)]
-async fn limited_start(flag: bool, local: LocalModel) -> String {
-    crate::tiers::set_local_ladder_for_test(true);
-    crate::tiers::set_local_limit_fallback_for_test(flag);
+async fn limited_start(local: LocalModel) -> String {
     let rig = rig_with(Some(FINISHED), EngineChoiceConfig::default(), true, local);
     recording_claude(&rig, 0);
     rig.starter
@@ -274,7 +255,7 @@ async fn limited_start(flag: bool, local: LocalModel) -> String {
 #[cfg(unix)]
 #[tokio::test]
 async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_the_saved_reading_says() {
-    let args = limited_start(true, LocalModel::up()).await;
+    let args = limited_start(LocalModel::up()).await;
     assert!(
         args.contains("BASE=http://127.0.0.1:11436") && args.contains("--model sonnet"),
         "{args}"
@@ -283,11 +264,9 @@ async fn claude_at_its_limit_starts_a_fresh_session_on_the_local_model_whatever_
 
 #[cfg(unix)]
 #[tokio::test]
-async fn with_the_limit_flag_off_or_local_down_a_limited_claude_starts_as_it_does_today() {
-    for (flag, local) in [(false, LocalModel::up()), (true, LocalModel::off())] {
-        let args = limited_start(flag, local).await;
-        assert!(args.contains("--model sonnet") && !args.contains("BASE=http"), "{args}");
-    }
+async fn with_local_down_a_limited_claude_starts_on_its_tier() {
+    let args = limited_start(LocalModel::off()).await;
+    assert!(args.contains("--model sonnet") && !args.contains("BASE=http"), "{args}");
 }
 
 #[cfg(unix)]

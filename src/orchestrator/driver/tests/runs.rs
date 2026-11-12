@@ -12,6 +12,15 @@ struct Script {
     log: Vec<Value>,
     drop_fails: bool,
     takes: VecDeque<Value>,
+    /// What `merge_next` answers, in turn (`null` once spent).
+    merges: VecDeque<Value>,
+    /// `merge_beat` says the turn is no longer held.
+    turn_lost: bool,
+    /// What `merge_open` answers (`null`: no turn held), and whether it fails.
+    open: Value,
+    open_fails: bool,
+    /// `merge_result` fails while this is set (the store can't be reached).
+    result_fails: bool,
     beat: Value,
     /// A refusal code for `run_done`.
     done_refused: Option<&'static str>,
@@ -46,6 +55,12 @@ async fn store() -> (String, Shared_) {
                     "runs_drop" if s.drop_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
                     "run_take" => ok(s.takes.pop_front().unwrap_or(Value::Null)),
                     "run_beat" => ok(s.beat.clone()),
+                    "merge_next" => ok(s.merges.pop_front().unwrap_or(Value::Null)),
+                    "merge_open" if s.open_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+                    "merge_open" => ok(json!({ "turn": s.open.clone() })),
+                    "merge_result" if s.result_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+                    "merge_beat" => ok(json!({ "held": !s.turn_lost })),
+                    "merge_result" => ok(json!({ "held": true })),
                     "lock_take" => ok(json!({ "held": true, "token": "L1" })),
                     "run_done" if s.done_refused.is_some() => {
                         let code = s.done_refused.unwrap();
@@ -205,12 +220,12 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
         2,
         "a beat doesn't end the wait"
     );
-    rig.machine.links.work.wake(&rig.machine.projects[0].id);
+    rig.machine.links.tags.set(vec!["gpu".to_string()]);
     pass(&mut rig, &starter, t0 + Duration::from_secs(62)).await;
     assert_eq!(
         script.lock().unwrap().args("run_take").len(),
         3,
-        "work_available asks again in the same pass"
+        "a change of tags asks again in the same pass"
     );
 
     let claim = rig
@@ -228,9 +243,8 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
 }
 
 #[tokio::test]
-async fn with_the_tags_flag_on_a_wake_ends_a_run_wait_only_when_the_tags_changed() {
+async fn a_wake_ends_a_run_wait_only_when_the_tags_changed() {
     let (mut rig, script) = setup(2).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["tags-reread-on-save"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
     script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] })]);
@@ -476,8 +490,11 @@ async fn watch_rig(dir: &std::path::Path, poll: Duration) -> (Rig, Shared_, Arc<
     use crate::orchestrator::watch_run::{WatchRuns, tests as w};
     let (mut rig, script) = setup(1).await;
     assert!(rig.machine.pool.claim_run("other", "x").is_some(), "the lane is busy");
-    rig.machine.projects[0].project.repo_path = w::repo_with_ci(dir).display().to_string();
+    let repo = w::repo_with_ci(dir).display().to_string();
+    rig.machine.projects[0].project.repo_path = repo.clone();
+    rig.machine.projects[0].file_project.repo_path = repo;
     rig.machine.projects[0].project.base_branch = "main".into();
+    rig.machine.projects[0].file_project.base_branch = "main".into();
     let mut take = run("w1", "watch");
     take["piece"]["change"] = json!({ "number": 7 });
     script.lock().unwrap().takes = VecDeque::from([take]);
@@ -567,44 +584,105 @@ async fn a_beat_stop_between_polls_ends_the_run_and_starts_no_more_gh() {
     assert_eq!(done[0]["outcome"], json!("interrupted"));
 }
 
+fn turn(token: &str) -> Value {
+    json!({ "turn": { "token": token, "leaseMs": 300000, "entry": "e",
+        "piece": { "id": format!("piece-{token}"), "title": token } } })
+}
+
 #[tokio::test]
-async fn a_merge_run_is_asked_for_with_no_lane_free_and_its_lock_beats_with_it() {
+async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_with_merge_beat() {
     let (mut rig, script) = setup(1).await;
     let starter = FakeRuns::new(&[RunKind::Build, RunKind::Merge]);
     let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([run("b1", "build"), run("m1", "merge")]);
+    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
+    script.lock().unwrap().merges = VecDeque::from([turn("m1")]);
     pass(&mut rig, &starter, t0).await;
     pass(&mut rig, &starter, t0).await;
-    let takes = script.lock().unwrap().args("run_take");
-    assert_eq!(takes[1]["kinds"], json!(["merge"]), "the build's lane is the only one");
-    assert_eq!(starter.started(), vec!["b1", "m1"]);
-
-    // The merge run takes its lock through the handle the loop gave it.
-    let context = starter.started.lock().unwrap()[1].context.clone();
-    let taken = context
-        .client
-        .lock_take(
-            context.repo,
-            Some(&context.token),
-            "merge-main",
-            Some("piece-m1 on here"),
-        )
-        .await
-        .unwrap();
-    let crate::backlog::runs::LockTake::Held(lock) = taken else {
-        panic!("{taken:?}")
-    };
-    context.locks.add(&lock, "merge-main", Instant::now());
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(s.args("merge_next")[0], json!({ "base": "", "piece": true }));
+        assert!(s.args("run_take").iter().all(|t| t["kinds"] != json!(["merge"])));
+        assert_eq!(
+            s.args("run_take")[0]["kinds"],
+            json!(["build"]),
+            "run_take never asks for a merge"
+        );
+    }
+    assert_eq!(starter.started(), vec!["m1", "b1"]);
+    let context = starter.started.lock().unwrap()[0].context.clone();
+    assert!(context.locks.held("m1"), "the turn is in the run's locks");
 
     pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
-    let beats = script.lock().unwrap().args("run_beat");
-    assert_eq!(beats, vec![json!({ "tokens": ["b1", "m1", "L1"] })]);
+    let s = script.lock().unwrap();
+    assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["b1"] })]);
+    assert_eq!(s.args("merge_beat"), vec![json!({ "token": "m1", "phase": "merge" })]);
+    assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
+}
+
+#[tokio::test]
+async fn a_waiting_answer_starts_nothing_and_is_asked_again() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    let t0 = Instant::now();
+    script.lock().unwrap().merges = VecDeque::from([json!({ "waiting": { "place": 2, "ahead": 1 } }), turn("m1")]);
+    pass(&mut rig, &starter, t0).await;
+    assert!(starter.started().is_empty());
+    pass(&mut rig, &starter, t0 + Duration::from_secs(15)).await;
+    assert_eq!(starter.started(), vec!["m1"]);
+}
+
+#[tokio::test]
+async fn a_lost_turn_stops_the_run_and_a_finished_one_ends_with_merge_result_not_run_done() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    let t0 = Instant::now();
+    script.lock().unwrap().merges = VecDeque::from([turn("m1"), turn("m2")]);
+    pass(&mut rig, &starter, t0).await;
+    script.lock().unwrap().turn_lost = true;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
+    let context = starter.started.lock().unwrap()[0].context.clone();
+    assert!(!context.locks.held("m1"));
+    assert!(starter.started.lock().unwrap()[0].stop.stopped());
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(
+            s.args("merge_result"),
+            vec![json!({ "token": "m1", "outcome": "released" })]
+        );
+        assert!(s.args("run_done").is_empty());
+    }
+
+    script.lock().unwrap().turn_lost = false;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(61)).await;
+    let request = starter.started.lock().unwrap()[1].clone();
+    request.ends.send(RunEnd {
+        token: "m2".into(),
+        outcome: RunOutcome::Merged,
+        result: json!({ "commit": "abc" }),
+    });
+    pass(&mut rig, &starter, t0 + Duration::from_secs(62)).await;
+    let s = script.lock().unwrap();
+    let results = s.args("merge_result");
+    assert_eq!(
+        results[1],
+        json!({ "token": "m2", "outcome": "merged", "mergeCommit": "abc" })
+    );
+    assert!(s.args("run_done").is_empty());
+}
+
+#[tokio::test]
+async fn a_store_that_cant_be_asked_for_a_turn_starts_no_merge() {
+    let (rig_, script) = setup(1).await;
+    let mut rig = rig_;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    script.lock().unwrap().merges = VecDeque::from([json!({ "oops": 1 })]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    assert!(starter.started().is_empty());
 }
 
 #[tokio::test]
 async fn a_failure_from_outside_the_work_says_outside_and_an_ordinary_one_does_not() {
     let (mut rig, script) = setup(2).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
     script.lock().unwrap().takes = VecDeque::from([run("a", "build"), run("b", "build")]);
@@ -617,19 +695,6 @@ async fn a_failure_from_outside_the_work_says_outside_and_an_ordinary_one_does_n
     assert_eq!(result("a")["outside"], true);
     assert_eq!(result("a")["why"], "connect ECONNREFUSED 127.0.0.1:443");
     assert!(result("b").get("outside").is_none());
-}
-
-#[tokio::test]
-async fn with_the_flag_off_a_failure_from_outside_the_work_sends_no_outside() {
-    let (mut rig, script) = setup(1).await;
-    let starter = FakeRuns::new(&[RunKind::Build]);
-    let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
-    pass(&mut rig, &starter, t0).await;
-    starter.finish("a", RunOutcome::Failed("connect ECONNREFUSED 127.0.0.1:443".into()));
-    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
-    let done = script.lock().unwrap().args("run_done");
-    assert!(done[0]["result"].get("outside").is_none());
 }
 
 fn check(ok: Option<bool>) -> crate::setup_check::SetupCheck {
@@ -664,24 +729,13 @@ fn checks_with(claude_signed_in: Option<bool>, cursor: bool) -> crate::setup_che
     }
 }
 
-/// Like `agent_with`, with `engine-placement` On.
+/// Like `agent_with`, .
 async fn placed_agent_with(checks: Option<crate::setup_check::SetupChecks>) -> Value {
     let (mut rig, script) = setup(1).await;
     *rig.machine.links.checks.lock().unwrap() = checks;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
     pass(&mut rig, &FakeRuns::new(&[RunKind::Build]), Instant::now()).await;
     let takes = script.lock().unwrap().args("run_take");
     takes[0]["agent"].clone()
-}
-
-#[tokio::test]
-async fn run_take_sends_claude_only_with_placement_off() {
-    let signed_in = agent_with(Some(checks_with(Some(true), true)), Default::default()).await;
-    assert_eq!(signed_in["engines"], json!(["claude"]));
-    let signed_out = agent_with(Some(checks_with(Some(false), true)), Default::default()).await;
-    assert_eq!(signed_out["engines"], json!([]));
-    let none_yet = agent_with(None, Default::default()).await;
-    assert_eq!(none_yet["engines"], json!([]));
 }
 
 #[tokio::test]
@@ -720,8 +774,8 @@ fn chore_run(token: &str, kind: &str) -> Value {
 #[tokio::test]
 async fn chores_off_is_sent_and_a_stray_rotation_chore_is_given_back_but_fix_main_runs() {
     let (mut rig, script) = setup(2).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
     rig.lp(0).project.chores = crate::config::OnOff::Off;
+    rig.lp(0).file_project.chores = crate::config::OnOff::Off;
     let starter = FakeRuns::new(&[RunKind::Build]);
     script.lock().unwrap().takes = VecDeque::from([chore_run("tidy", "build"), chore_run("fix_main", "build")]);
     pass(&mut rig, &starter, Instant::now()).await;
@@ -737,7 +791,6 @@ async fn chores_off_is_sent_and_a_stray_rotation_chore_is_given_back_but_fix_mai
 #[tokio::test]
 async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     let (mut rig, script) = setup(1).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["chore-rotation"]));
     let starter = FakeRuns::new(&[RunKind::Build]);
     let mut r = chore_run("tidy", "build");
     r["chores"] = json!({ "today": 2, "limit": 3 });
@@ -756,26 +809,22 @@ async fn chores_on_sends_no_key_and_the_stores_count_is_kept_for_the_status() {
     assert_eq!((c.today, c.limit), (2, 3));
 }
 
-/// A pass with `engine-start-rules` On, Claude signed out for a minute and `limited` engines at their limit.
+/// A pass with Claude signed out for a minute and `limited` engines at their limit.
 async fn start_rules_pass(
     rig: &mut Rig,
     starter: &dyn RunStarter,
     limited: &[crate::engines::EngineId],
     claude_signed_out: bool,
 ) {
-    start_pass_with(rig, starter, limited, claude_signed_out, &[]).await;
+    start_pass_with(rig, starter, limited, claude_signed_out).await;
 }
 
-/// `start_rules_pass`, with the release flags `more` On as well.
 async fn start_pass_with(
     rig: &mut Rig,
     starter: &dyn RunStarter,
     limited: &[crate::engines::EngineId],
     claude_signed_out: bool,
-    more: &[&str],
 ) {
-    let on = [&["engine-placement", "engine-start-rules"], more].concat();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&on));
     let now = Instant::now();
     let limits = crate::orchestrator::fresh_start::EngineLimits::default();
     for e in limited {
@@ -838,7 +887,7 @@ async fn with_cursor_limited_run_take_leaves_out_cursor() {
 }
 
 /// A Cursor implementer whose Cursor is at its limit, on a computer whose planner runs Claude; one build is handed out.
-async fn cursor_limited_build(more: &[&str]) -> FakeRuns {
+async fn cursor_limited_build() -> FakeRuns {
     let (mut rig, script) = setup(1).await;
     both_engines(
         &mut rig,
@@ -846,14 +895,14 @@ async fn cursor_limited_build(more: &[&str]) -> FakeRuns {
     );
     script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
     let starter = FakeRuns::new(&[RunKind::Build]);
-    start_pass_with(&mut rig, &starter, &[crate::engines::EngineId::Cursor], false, more).await;
+    start_pass_with(&mut rig, &starter, &[crate::engines::EngineId::Cursor], false).await;
     starter
 }
 
 #[tokio::test]
-async fn with_engine_fall_over_a_build_started_while_cursor_is_limited_is_placed_on_claude() {
+async fn a_build_started_while_cursor_is_limited_is_placed_on_claude() {
     use crate::engines::EngineId::Claude;
-    let starter = cursor_limited_build(&["engine-fall-over"]).await;
+    let starter = cursor_limited_build().await;
     let started = starter.started.lock().unwrap();
     assert_eq!(started[0].engine, Some(Claude));
     assert!(
@@ -865,13 +914,6 @@ async fn with_engine_fall_over_a_build_started_while_cursor_is_limited_is_placed
             .out
             .contains(&crate::engines::EngineId::Cursor)
     );
-}
-
-#[tokio::test]
-async fn without_engine_fall_over_a_build_is_placed_as_chosen() {
-    let starter = cursor_limited_build(&[]).await;
-    let started = starter.started.lock().unwrap();
-    assert_eq!((started[0].engine, started[0].context.fall.is_none()), (None, true));
 }
 
 #[tokio::test]
@@ -913,27 +955,24 @@ async fn a_build_takes_a_cursor_lane_when_claude_is_signed_out_and_claude_lanes_
     assert!(lane(&rig, &starter), "Claude's lane first");
 }
 
-/// `local-limit-fallback`: Claude at its usage limit holds a plan or build only without the flag, the model, or
+/// Claude at its usage limit holds a plan or build only without the model or
 /// sign-in; with it they are asked for like any run (they start on the local model).
 #[tokio::test]
 async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it() {
     use crate::engines::EngineId::Claude;
     use crate::local_model::LocalModel;
-    for (fallback, model, signed_out, asks) in [
-        (true, LocalModel::up(), false, true),
-        (false, LocalModel::up(), false, false),
-        (true, LocalModel::off(), false, false),
-        (true, LocalModel::up(), true, false),
+    for (model, signed_out, asks) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
     ] {
-        crate::tiers::set_local_ladder_for_test(true);
-        crate::tiers::set_local_limit_fallback_for_test(fallback);
         let (mut rig, script) = setup(1).await;
         both_engines(&mut rig, json!({ "default": "claude" }));
         rig.machine.local = model;
         let starter = FakeRuns::new(&[RunKind::Build, RunKind::Plan]);
         start_rules_pass(&mut rig, &starter, &[Claude], signed_out).await;
         let takes = script.lock().unwrap().args("run_take");
-        let case = (fallback, signed_out);
+        let case = signed_out;
         assert_eq!(takes.is_empty(), !asks, "{case:?}");
         if asks {
             assert_eq!(takes[0]["kinds"], json!(["build", "plan"]));
@@ -948,3 +987,4 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
 }
 
 mod merged;
+mod restart;

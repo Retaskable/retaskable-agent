@@ -6,32 +6,32 @@
 //! A beat's `stop` and the ceiling cut the session's process tree ([`RunProcesses`]); the loop releases the
 //! lane whatever the outcome.
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::baseline_wait::BaselineStage;
-use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
-use super::piece_review::{ReviewState, Reviewed, review as review_change};
-use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, watch_for};
+use super::driver::{piece_id, RunEnd, RunProcesses, RunRequest, RunStarter};
+use super::piece_review::{review as review_change, ReviewState, Reviewed};
+use super::session::{gate_rounds, piece_branch_name, watch_for, Attempt, ChecksStage, GateRounds, Gated, Step};
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{CursorModels, Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
+use crate::config::{parse_engine, CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::engine::CursorOptions;
 use crate::engines::{
-    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked, start_engine,
+    engine_for, engine_of, run_session_tracked, start_engine, EngineId, Role, SessionStart, TranscriptSink,
 };
-use crate::engines::{Placement, place};
+use crate::engines::{place, Placement};
 use crate::env::Env;
-use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
-use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
-use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
-use crate::runs::{Pushed, end_from_answer, needs_push};
+use crate::implementer::{publish, run_implementer, session_spec, start_files, Session, Start};
+use crate::orchestrator::live::sessions::{model_name, SessionInfo, Sessions};
+use crate::runs::chore::{chore_end, chore_lock_name, chore_of, model_for, tier_for, Chore, ChoreKind, Outside};
+use crate::runs::{end_from_answer, needs_push, Pushed};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
@@ -47,8 +47,6 @@ pub struct PieceStarter {
     pub cursor_models: CursorModels,
     pub env: Env,
     pub max_turns: u32,
-    pub models: ModelsConfig,
-    pub flags: std::sync::Arc<crate::flags::Flags>,
     /// This computer, for a chore lock's note.
     pub machine: String,
     /// The sessions running now: a run's sessions list themselves while they run.
@@ -60,16 +58,12 @@ pub struct PieceStarter {
 impl PieceStarter {
     /// A run on an engine this agent can't run yet isn't refused (that would send it back `interrupted`, to bounce
     /// between computers): it ends `failed`, an outside cause, so the store gives it a look that can move the
-    /// piece's engine. With `run-limits-and-causes` Off it is given back as before.
+    /// piece's engine.
     fn cannot_run(&self, request: RunRequest, engine: String) -> Result<(), String> {
-        let (ends, token, flags) = (request.ends, request.token, self.flags.clone());
+        let (ends, token) = (request.ends, request.token);
         tokio::spawn(async move {
-            let (outcome, result) = if flags.on("run-limits-and-causes").await {
-                let why = format!("this computer can't run {engine} sessions yet");
-                (RunOutcome::Failed(why), json!({ "outside": true }))
-            } else {
-                (RunOutcome::Interrupted, json!({}))
-            };
+            let why = format!("this computer can't run {engine} sessions yet");
+            let (outcome, result) = (RunOutcome::Failed(why), json!({ "outside": true }));
             ends.send(RunEnd { token, outcome, result });
         });
         Ok(())
@@ -90,7 +84,7 @@ impl RunStarter for PieceStarter {
             .clone();
         let lane = request.lane.clone().ok_or("the run has no lane")?;
         // The piece's own engine wins; an unknown name is an engine this agent can't run, not Claude.
-        // With `engine-fall-over` On, one that is out goes to the engine that takes over.
+        // One that is out goes to the engine that takes over.
         let chosen = match request.piece.other.get("engine").and_then(Value::as_str) {
             Some(name) => parse_engine(name)
                 .map(|e| request.context.engine_now(e))
@@ -100,16 +94,12 @@ impl RunStarter for PieceStarter {
                 engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None),
             )),
         };
-        // With `engine-placement` Off, Claude alone runs; any other engine is refused as before.
-        let placed = self.flags.last("engine-placement");
         let engine = match chosen {
-            Ok(Engine::Claude) => Engine::Claude,
-            Ok(other) if placed => other,
-            Ok(other) => return self.cannot_run(request, other.to_string()),
+            Ok(engine) => engine,
             Err(name) => return self.cannot_run(request, name),
         };
         let placement = place(engine, Role::Implementer, &self.env, &self.cursor_models)?;
-        self.run(request, project, lane, placement, placed)
+        self.run(request, project, lane, placement)
     }
 }
 
@@ -120,7 +110,6 @@ impl PieceStarter {
         project: ProjectConfig,
         lane: PathBuf,
         placement: Placement,
-        placed: bool,
     ) -> Result<(), String> {
         let cursor = placement.cursor.map(|c| with_project(&project, c));
         let job = Job {
@@ -132,7 +121,6 @@ impl PieceStarter {
                 .get("RETASKABLE_GH")
                 .map_or_else(|| PathBuf::from("gh"), PathBuf::from),
             max_turns: self.max_turns,
-            models: self.models,
             lane,
             token: request.token.clone(),
             kind: request.kind,
@@ -140,11 +128,9 @@ impl PieceStarter {
             cursor,
             choice: self.choice.clone(),
             cursor_models: self.cursor_models.clone(),
-            placed,
             env: self.env.clone(),
             piece: request.piece,
             processes: request.processes,
-            flags: self.flags.clone(),
             context: request.context,
             machine: self.machine.clone(),
             sessions: self.sessions.clone(),
@@ -156,8 +142,6 @@ impl PieceStarter {
         let token = request.token;
         // The inner task is joined, so even a panic in it ends in exactly one end.
         tokio::spawn(async move {
-            // Keeps the flag's answer fresh for the next run's start.
-            job.flags.on("engine-placement").await;
             let (outcome, result) = match tokio::spawn(run_locked(job)).await {
                 Ok(end) => end,
                 Err(e) => (RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({})),
@@ -177,7 +161,6 @@ pub(super) struct Job {
     pub(super) bin: PathBuf,
     pub(super) gh: PathBuf,
     pub(super) max_turns: u32,
-    pub(super) models: ModelsConfig,
     pub(super) lane: PathBuf,
     pub(super) token: String,
     pub(super) kind: RunKind,
@@ -185,12 +168,9 @@ pub(super) struct Job {
     pub(super) cursor: Option<CursorOptions>,
     pub(super) choice: EngineChoiceConfig,
     pub(super) cursor_models: CursorModels,
-    /// `engine-placement` was On when the run started.
-    pub(super) placed: bool,
     pub(super) env: Env,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
-    pub(super) flags: std::sync::Arc<crate::flags::Flags>,
     pub(super) context: crate::orchestrator::driver::RunContext,
     pub(super) machine: String,
     pub(super) sessions: crate::orchestrator::live::sessions::Sessions,
@@ -252,12 +232,7 @@ fn is_retry(piece: &RunPiece) -> bool {
 /// (`interrupted`, nothing started), a store that can't be asked fails closed (`failed`, outside). The lock is
 /// dropped whatever the run's end. A roadmap piece and a playtest fix take none.
 async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
-    let chore = if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    };
-    let Some(name) = chore.and_then(|c| chore_lock_name(c.kind, &job.project.base_branch)) else {
+    let Some(name) = chore_of(&job.piece).and_then(|c| chore_lock_name(c.kind, &job.project.base_branch)) else {
         return run(job).await;
     };
     let ctx = job.context.clone();
@@ -299,7 +274,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         (_, Some(b)) => (b.to_string(), format!("origin/{b}")),
         (RunKind::Fix, None) => return failed("A fix run needs the piece's pushed branch, and the piece has none."),
         _ => (
-            match sync_of(&job).await.filter(|c| !c.sync_sha.is_empty()) {
+            match sync_of(&job).filter(|c| !c.sync_sha.is_empty()) {
                 Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
                 None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
             },
@@ -319,12 +294,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         Err(e) => failed(format!("{e:#}")),
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
-    let chore = if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    };
-    let Some(chore) = chore else {
+    let Some(chore) = chore_of(&job.piece) else {
         return (outcome, result);
     };
     let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
@@ -360,20 +330,9 @@ async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf
     .context("preparing the lane")
 }
 
-/// The piece's chore, with `chore-rotation` On; Off, a chore piece is run like any other.
-async fn chore_for(job: &Job) -> Option<Chore> {
-    if job.flags.on("chore-rotation").await {
-        chore_of(&job.piece)
-    } else {
-        None
-    }
-}
-
-/// The piece's chore when it is a main sync and `chore-main-sync` is On (with `chore-rotation`); Off, a sync
-/// runs like any other piece.
-async fn sync_of(job: &Job) -> Option<Chore> {
-    let chore = chore_for(job).await.filter(|c| c.kind == ChoreKind::SyncMain)?;
-    job.flags.on("chore-main-sync").await.then_some(chore)
+/// The piece's chore when it is a main sync.
+fn sync_of(job: &Job) -> Option<Chore> {
+    chore_of(&job.piece).filter(|c| c.kind == ChoreKind::SyncMain)
 }
 
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
@@ -388,31 +347,18 @@ async fn session(
 ) -> Result<Attempt> {
     let project = &job.project;
     let item = piece_item(&job.piece);
-    let now = crate::telemetry::now_ms() / 1000;
-    // With `chore-rotation` Off, a chore piece is run like any other.
-    let chore = chore_for(job).await;
-    // Held until the session ends. Only a Claude session may use the model: the free-slot grab for a chore is behind
-    // `local-chores-scouts`, the fallback rows behind `local-tier-ladder`.
-    // Never on a resume (a gate round's fix) unless `tier-kept-on-resume` is On and the run's first session ran
-    // `local`: it then goes back to the model while it's up (the ladder On), else to its Anthropic tier.
-    let flags = (crate::tiers::local_chores_scouts_on(), crate::tiers::local_ladder_on());
+    let chore = chore_of(&job.piece);
+    // Held until the session ends. Only a Claude session may use the model. A fresh session picks as `tier_for` says;
+    // a resume (a gate round's fix) stays on the backend its run started on: `local` while the model is up, else its
+    // Anthropic tier, and an Anthropic session is never resumed against the local server.
     let resumed = matches!(start, Start::Resume { .. });
-    let keep_local = resumed
-        && crate::tiers::tier_kept_on_resume_on()
-        && started_local.load(Ordering::SeqCst)
-        && job.engine == EngineId::Claude
-        && flags.1
-        && job.local.available();
-    let may = job.engine == EngineId::Claude && !resumed && (flags.0 || flags.1);
-    let (tier, local_run) = if keep_local {
+    let claude = job.engine == EngineId::Claude;
+    let (tier, local_run) = if resumed && claude && started_local.load(Ordering::SeqCst) && job.local.available() {
         (crate::tiers::LOCAL, Some(job.local.run().await))
     } else {
         tier_for(
             chore.as_ref(),
-            now,
-            &job.models,
-            may.then_some(&job.local),
-            flags,
+            (claude && !resumed).then_some(&job.local),
             job.wants_local,
             !resumed && job.sessions.claude_at_limit(),
         )
@@ -512,10 +458,8 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let where_to_start = start_files::render(
         &start_files::build(crate::git_bin::program(), cwd, &base_ref, &piece_item(&job.piece)).await,
     );
-    let sync = sync_of(job).await.is_some();
-    let chore = chore_for(job)
-        .await
-        .filter(|c| c.has_prompt() && (sync || c.kind != ChoreKind::SyncMain));
+    let sync = sync_of(job).is_some();
+    let chore = chore_of(&job.piece).filter(|c| c.has_prompt() && (sync || c.kind != ChoreKind::SyncMain));
     let start = match &chore {
         Some(chore) => Start::Chore {
             template: if sync { SYNC_TEMPLATE } else { CHORE_TEMPLATE },
@@ -548,7 +492,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         backlog_path: &job.project.backlog_path,
         on_tree,
         result: &stage_one,
-        baseline: job.flags.on("chore-rotation").await.then(|| BaselineStage {
+        baseline: Some(BaselineStage {
             project: &project_id,
             repo_path: &repo_path,
             worktrees_dir: &worktrees_dir,
@@ -594,7 +538,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
                 let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
                 // A main sync keeps its own title, not the session's.
-                let sync_main = sync_of(job).await.map(|c| c.main);
+                let sync_main = sync_of(job).map(|c| c.main);
                 let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
                 let (gh, dir, branch, base) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string(), base.clone());
                 let published = tokio::task::spawn_blocking(move || {
@@ -626,19 +570,8 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .ok()
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
-        // With `run-limits-and-causes` Off, a usage limit ends `failed` as before.
-        let limited_as = job
-            .flags
-            .on("run-limits-and-causes")
-            .await
-            .then(|| job.engine.to_string());
-        let (outcome, mut result) = end_from_answer(
-            a.answer,
-            pushed.as_ref(),
-            &decisions,
-            limited_as.as_deref(),
-            chrono::Utc::now(),
-        );
+        let engine = job.engine.to_string();
+        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, &engine, chrono::Utc::now());
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
@@ -656,18 +589,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             }
             return Ok((outcome, result));
         }
-        match review_change(
-            job,
-            cwd,
-            pushed,
-            &description,
-            playtest.as_ref(),
-            &checks,
-            &mut review,
-            a.usage.as_ref(),
-        )
-        .await?
-        {
+        match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
             Reviewed::Approved => {
                 if let Some(stage) = stage {
                     result["checks_summary"] = json!(checks);

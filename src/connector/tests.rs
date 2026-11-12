@@ -354,12 +354,8 @@ async fn every_command_answered_is_logged_to_remote_log() {
 #[tokio::test]
 async fn setup_check_acks_with_the_checks_and_is_audited() {
     let mut v = view(&["one"]);
-    Arc::get_mut(&mut v).unwrap().settings = crate::hello_settings::HelloSettings::new(
-        std::path::PathBuf::new(),
-        crate::env::Env::empty(),
-        0,
-        Arc::new(crate::flags::Flags::fixed(&["setup-check-command"])),
-    );
+    Arc::get_mut(&mut v).unwrap().settings =
+        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty(), 0);
     let (c, mut a, dir) = connected_with(v, noop_exit()).await;
     a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
         .await
@@ -403,7 +399,7 @@ async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     assert_eq!(snapshot["type"], "snapshot");
     assert_eq!(
         snapshot["state"]["orchestrator"]["pausedReason"],
-        "Paused from retaskable.com by jc"
+        "This computer is paused"
     );
 
     a.ws.send(Message::text(

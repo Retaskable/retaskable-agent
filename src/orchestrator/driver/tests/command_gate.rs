@@ -1,4 +1,4 @@
-//! `approve-commands-gate` in the loop (`driver/project.rs`'s `take_allowed_commands`): a project's commands are the
+//! The approval gate in the loop (`driver/project.rs`'s `take_allowed_commands`): a project's commands are the
 //! allowed ones, never the store's until approved.
 use super::*;
 use crate::allowed_commands::{AllowedCommands, allowed_commands_file};
@@ -18,6 +18,7 @@ async fn store(settings: Arc<Mutex<Option<Value>>>) -> (String, Arc<Mutex<Vec<St
                 match (op.as_str(), settings.lock().unwrap().clone()) {
                     ("settings_get", None) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                     ("settings_get", Some(v)) => Json(json!({ "value": v })).into_response(),
+                    ("facts_get", _) => Json(json!({ "value": { "paused": false } })).into_response(),
                     _ => Json(json!({ "value": [] })).into_response(),
                 }
             }
@@ -45,18 +46,15 @@ fn commands(rig: &mut Rig) -> (Vec<String>, String) {
     )
 }
 
-/// A rig whose project's config.json has `file`'s commands and whose gate flag is `on`.
-async fn gated(on: bool, settings: Option<Value>) -> (Rig, Arc<Mutex<Option<Value>>>, Arc<Mutex<Vec<String>>>) {
+/// A rig whose project's config.json has `file`'s commands
+async fn gated(settings: Option<Value>) -> (Rig, Arc<Mutex<Option<Value>>>, Arc<Mutex<Vec<String>>>) {
     let settings = Arc::new(Mutex::new(settings));
     let (base, asked) = store(settings.clone()).await;
     let mut rig = rig(2, &[&base]);
     let dir = rig._dir.path().to_path_buf();
+    // The loop opens the gate itself, from `data_dir`, after what is allowed has been saved.
+    rig.machine.links.item_commands = Default::default();
     let lp = rig.lp(0);
-    lp.flags = Arc::new(crate::flags::Flags::fixed(if on {
-        &["approve-commands-gate"]
-    } else {
-        &[]
-    }));
     lp.data_dir = Some(dir);
     lp.file_project.checks = serde_json::from_value(json!([{ "name": "t", "command": "file test" }])).unwrap();
     lp.file_project.play_command = "file play".into();
@@ -78,7 +76,7 @@ fn allow(rig: &Rig, version: u64, command: &str) {
 
 #[tokio::test]
 async fn with_nothing_allowed_no_command_runs() {
-    let (mut rig, _, asked) = gated(true, Some(record(1, "store test"))).await;
+    let (mut rig, _, asked) = gated(Some(record(1, "store test"))).await;
     rig.machine.pass().await;
     assert_eq!(commands(&mut rig), (vec![], String::new()));
     assert!(asked.lock().unwrap().contains(&"settings_get".to_string()));
@@ -86,14 +84,14 @@ async fn with_nothing_allowed_no_command_runs() {
 
 #[tokio::test]
 async fn before_the_first_read_answers_nothing_runs_either() {
-    let (mut rig, _, _) = gated(true, None).await;
+    let (mut rig, _, _) = gated(None).await;
     rig.machine.pass().await;
     assert_eq!(commands(&mut rig), (vec![], String::new()));
 }
 
 #[tokio::test]
 async fn an_allowed_version_runs_while_a_changed_store_command_waits_until_approved() {
-    let (mut rig, _, _) = gated(true, Some(record(2, "new test"))).await;
+    let (mut rig, _, _) = gated(Some(record(2, "new test"))).await;
     allow(&rig, 1, "old test");
     rig.machine.pass().await;
     assert_eq!(commands(&mut rig), (vec!["old test".into()], "play old test".into()));
@@ -105,7 +103,7 @@ async fn an_allowed_version_runs_while_a_changed_store_command_waits_until_appro
 
 #[tokio::test]
 async fn a_failed_settings_read_keeps_the_allowed_commands() {
-    let (mut rig, settings, _) = gated(true, Some(record(1, "old test"))).await;
+    let (mut rig, settings, _) = gated(Some(record(1, "old test"))).await;
     allow(&rig, 1, "old test");
     rig.machine.pass().await;
     *settings.lock().unwrap() = None;
@@ -114,16 +112,8 @@ async fn a_failed_settings_read_keeps_the_allowed_commands() {
 }
 
 #[tokio::test]
-async fn with_the_flag_off_config_json_runs_and_settings_are_not_read() {
-    let (mut rig, _, asked) = gated(false, Some(record(1, "store test"))).await;
-    rig.machine.pass().await;
-    assert_eq!(commands(&mut rig), (vec!["file test".into()], "file play".into()));
-    assert!(!asked.lock().unwrap().contains(&"settings_get".to_string()));
-}
-
-#[tokio::test]
 async fn a_changed_command_waits_the_old_one_runs_and_approve_commands_makes_the_new_one_run() {
-    let (mut rig, _, _) = gated(true, Some(record(2, "new test"))).await;
+    let (mut rig, _, _) = gated(Some(record(2, "new test"))).await;
     allow(&rig, 1, "old test");
     rig.machine.pass().await;
     assert_eq!(commands(&mut rig), (vec!["old test".into()], "play old test".into()));

@@ -12,8 +12,7 @@ fn model_of(piece: &RunPiece) -> &'static str {
 }
 
 #[test]
-fn with_the_step_up_flag_on_a_retried_or_big_piece_keeps_opus() {
-    crate::tiers::set_step_up_for_test(true);
+fn a_retried_or_big_piece_keeps_opus() {
     assert_eq!(model_of(&build_piece(json!({}))), "sonnet");
     let failed = json!({ "attempts": [{ "kind": "build", "outcome": "failed" }] });
     assert_eq!(model_of(&build_piece(failed)), "opus");
@@ -27,15 +26,7 @@ fn with_the_step_up_flag_on_a_retried_or_big_piece_keeps_opus() {
         crate::tiers::chore_tier()
     );
 }
-
-#[test]
-fn with_the_step_up_flag_off_every_piece_stays_on_sonnet() {
-    crate::tiers::set_step_up_for_test(false);
-    let failed = json!({ "attempts": [{ "kind": "build", "outcome": "failed" }], "size": "XL" });
-    assert_eq!(model_of(&build_piece(failed)), "sonnet");
-}
-
-// A resumed session keeps the backend it started on (`tier-kept-on-resume`).
+// A resumed session keeps the backend it started on.
 use crate::local_model::LocalModel;
 
 #[derive(Clone, Copy)]
@@ -53,27 +44,24 @@ struct Seen {
 
 /// Runs a piece on the `local` engine (`wants_local`) with the local model `up` for the first session; `down_after`
 /// takes it down while that session runs, `up_after` brings it up. The first session is followed by a `fix` round.
-async fn run_two(fix: Fix, wants_local: bool, up: bool, flip: Option<bool>, kept: bool) -> Seen {
-    crate::tiers::set_local_ladder_for_test(true);
-    crate::tiers::set_local_chores_scouts_for_test(false);
-    crate::tiers::set_tier_kept_on_resume_for_test(kept);
+async fn run_two(fix: Fix, wants_local: bool, up: bool, flip: Option<bool>) -> Seen {
     let local = if up { LocalModel::up() } else { LocalModel::off() };
     if !up {
         local.mark_down_for_test();
     }
-    let sleepy = format!("sleep 2; {COMMIT_B}");
+    let sleepy = format!("sleep 2; {FIXED}");
+    let sleepy_b = format!("sleep 2; {COMMIT_B}");
     let mut r = match fix {
         Fix::Gate => {
-            let c = check("needs-fix", "test -f b.rs", true);
-            rig_checked(&[&format!("sleep 2; {COMMIT}"), &sleepy], vec![c], 3)
+            let c = check("needs-fix", BROKEN_BY_BAD, true);
+            rig_checked(&[&format!("sleep 2; {BAD}"), &sleepy], vec![c], 3)
         }
         Fix::Review => {
-            let r = rig(&[&format!("sleep 2; {COMMIT}"), &sleepy], &answer("pr_opened", ""));
+            let r = rig(&[&format!("sleep 2; {COMMIT}"), &sleepy_b], &answer("pr_opened", ""));
             script_review(&r, 1, "request_changes");
             r
         }
     };
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["engine-placement"]));
     Arc::get_mut(&mut r.starter).unwrap().local = local.clone();
     // Record the local base URL each implementer session was given next to its arguments.
     let bin = r.root.join(fake_name());
@@ -113,12 +101,11 @@ async fn run_two(fix: Fix, wants_local: bool, up: bool, flip: Option<bool>, kept
 }
 
 const LOCAL_URL: &str = "BASE=http://127.0.0.1:11436";
-
 #[cfg(unix)]
 #[tokio::test]
 async fn a_local_first_session_resumes_its_gate_fix_and_review_changes_round_on_local() {
     for fix in [Fix::Gate, Fix::Review] {
-        let seen = run_two(fix, true, true, None, true).await;
+        let seen = run_two(fix, true, true, None).await;
         assert!(seen.lines[0].contains(LOCAL_URL), "{:?}", seen.lines);
         assert!(
             seen.lines[1].contains("--resume") && seen.lines[1].contains("--model sonnet"),
@@ -134,7 +121,7 @@ async fn a_local_first_session_resumes_its_gate_fix_and_review_changes_round_on_
 #[tokio::test]
 async fn with_the_model_down_before_the_fix_round_it_resumes_on_the_anthropic_tier() {
     for fix in [Fix::Gate, Fix::Review] {
-        let seen = run_two(fix, true, true, Some(false), true).await;
+        let seen = run_two(fix, true, true, Some(false)).await;
         assert!(seen.lines[0].contains(LOCAL_URL), "{:?}", seen.lines);
         assert!(
             seen.lines[1].contains("--model sonnet") && !seen.lines[1].contains(LOCAL_URL),
@@ -150,19 +137,8 @@ async fn with_the_model_down_before_the_fix_round_it_resumes_on_the_anthropic_ti
 async fn an_anthropic_first_session_never_resumes_local() {
     for fix in [Fix::Gate, Fix::Review] {
         // The model was down when it started and is up for the fix round; `wants_local` is set.
-        let seen = run_two(fix, true, false, Some(true), true).await;
+        let seen = run_two(fix, true, false, Some(true)).await;
         assert!(!seen.lines[0].contains(LOCAL_URL), "{:?}", seen.lines);
-        assert!(!seen.lines[1].contains(LOCAL_URL), "{:?}", seen.lines);
-        assert_eq!(seen.second_model, "sonnet");
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn with_the_flag_off_a_local_first_session_resumes_on_the_anthropic_tier() {
-    for fix in [Fix::Gate, Fix::Review] {
-        let seen = run_two(fix, true, true, None, false).await;
-        assert!(seen.lines[0].contains(LOCAL_URL), "{:?}", seen.lines);
         assert!(!seen.lines[1].contains(LOCAL_URL), "{:?}", seen.lines);
         assert_eq!(seen.second_model, "sonnet");
     }
