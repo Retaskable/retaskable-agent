@@ -5,10 +5,7 @@ use super::*;
 use crate::engines::EngineId;
 
 fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    crate::telemetry::now_secs() as u64
 }
 
 fn week(u: f64) -> Value {
@@ -124,10 +121,7 @@ async fn a_lone_weekly_reading_is_saved_as_the_week_usage_and_not_as_the_usage()
 
 #[tokio::test]
 async fn a_saved_weekly_reading_limits_claude_on_a_started_loop_only_while_ahead() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now();
     // (utilization, reset offset, limited)
     let cases: [(f64, i64, bool); 3] = [(0.96, 86_400, true), (0.96, -60, false), (0.94, 86_400, false)];
     for (u, offset, limited) in cases {
