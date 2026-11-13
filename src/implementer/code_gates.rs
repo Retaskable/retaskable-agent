@@ -161,6 +161,8 @@ pub fn added_lines(diff: &str) -> Vec<(String, BTreeSet<u32>)> {
     for raw in diff.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
         if let Some(name) = line.strip_prefix("+++ ") {
+            // git ends the name of a path containing a space with a tab (a real tab in a name is C-quoted).
+            let name = name.strip_suffix('\t').unwrap_or(name);
             current = if name == "/dev/null" {
                 None
             } else {
