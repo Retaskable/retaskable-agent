@@ -47,7 +47,7 @@ static ANCHOR: LazyLock<Regex> = LazyLock::new(|| {
 });
 /// A spec: `specs/<name>.md`, or a split spec's section file `specs/<name>/<section>.md`.
 static SPEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|/)specs/([^/]+/)?[^/]+\.md$").unwrap());
-static HUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@").unwrap());
+static HUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap());
 static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{2,3}) ").unwrap());
 pub(crate) static FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ {0,3}(```|~~~)").unwrap());
 
@@ -158,8 +158,15 @@ fn unquote_git_path(quoted: &str) -> String {
 pub fn added_lines(diff: &str) -> Vec<(String, BTreeSet<u32>)> {
     let mut out: Vec<(String, BTreeSet<u32>)> = Vec::new();
     let mut current: Option<usize> = None;
+    // Body lines of the current hunk still to read: an added line whose text starts with `++ ` looks
+    // like a `+++ ` file header, so a hunk's lines are skipped by count.
+    let mut body_left: u32 = 0;
     for raw in diff.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if body_left > 0 && !line.starts_with('\\') {
+            body_left -= 1;
+            continue;
+        }
         if let Some(name) = line.strip_prefix("+++ ") {
             // git ends the name of a path containing a space with a tab (a real tab in a name is C-quoted).
             let name = name.strip_suffix('\t').unwrap_or(name);
@@ -179,8 +186,9 @@ pub fn added_lines(diff: &str) -> Vec<(String, BTreeSet<u32>)> {
         }
         let Some(idx) = current else { continue };
         let Some(caps) = HUNK.captures(line) else { continue };
-        let start: u32 = caps[1].parse().unwrap_or(0);
-        let count: u32 = caps.get(2).map(|m| m.as_str().parse().unwrap_or(1)).unwrap_or(1);
+        let num = |i: usize| caps.get(i).map(|m| m.as_str().parse().unwrap_or(1)).unwrap_or(1u32);
+        let (old_count, start, count) = (num(1), caps[2].parse().unwrap_or(0), num(3));
+        body_left = old_count + count;
         for n in start..start + count {
             out[idx].1.insert(n);
         }
