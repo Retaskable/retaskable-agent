@@ -25,3 +25,42 @@ impl Drop for SlotGuard {
         self.0.store(false, Ordering::SeqCst);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_run_holds_the_slot_at_a_time() {
+        let slot = Slot::default();
+        assert!(!slot.busy());
+        let guard = slot.take().expect("a free slot is taken");
+        assert!(slot.busy());
+        assert!(slot.take().is_none(), "a held slot can't be taken again");
+        assert!(slot.busy(), "a refused take leaves the holder in place");
+        drop(guard);
+        assert!(!slot.busy());
+        assert!(slot.take().is_some());
+    }
+
+    #[test]
+    fn clones_share_the_one_slot() {
+        let slot = Slot::default();
+        let other = slot.clone();
+        let _guard = slot.take().unwrap();
+        assert!(other.busy());
+        assert!(other.take().is_none());
+    }
+
+    #[test]
+    fn a_panicking_run_still_frees_the_slot() {
+        let slot = Slot::default();
+        let held = slot.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _guard = held.take().unwrap();
+            panic!("run blew up");
+        });
+        assert!(result.is_err());
+        assert!(!slot.busy());
+    }
+}
