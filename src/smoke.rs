@@ -450,15 +450,7 @@ mod tests {
         repo
     }
 
-    fn git(dir: &Path) -> Command {
-        let mut c = Command::new("git");
-        c.current_dir(dir);
-        c
-    }
-
-    fn run_git(cmd: &mut Command) {
-        assert!(cmd.status().unwrap().success());
-    }
+    use crate::test_support::{git, run as run_git};
 
     fn head_sha(dir: &Path) -> String {
         String::from_utf8(git(dir).args(["rev-parse", "HEAD"]).output().unwrap().stdout)
