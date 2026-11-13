@@ -354,6 +354,25 @@ fn added_lines_drops_the_tab_git_adds_after_a_path_with_a_space() {
 }
 
 #[test]
+fn added_lines_does_not_read_an_added_line_starting_with_plus_plus_as_a_file_header() {
+    // An added line `++ b/x` shows in the diff as `+++ b/x`.
+    let diff = [
+        "+++ b/a.rs",
+        "@@ -0,0 +1,2 @@",
+        "+one",
+        "+++ b/x",
+        "@@ -5 +9 @@",
+        "-old",
+        "+new",
+    ]
+    .join("\n");
+    let got = added_lines(&diff);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, "a.rs");
+    assert_eq!(got[0].1.iter().copied().collect::<Vec<_>>(), vec![1, 2, 9]);
+}
+
+#[test]
 fn oversized_split_points_are_top_level_declarations_near_equal_parts_at_most_3_across_files() {
     let file = |name: &str, n: usize| {
         let text: String = (0..n)
