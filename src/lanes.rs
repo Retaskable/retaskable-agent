@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::repo::git;
 use crate::sync::lock;
 
 mod manifest_scan;
@@ -429,10 +430,6 @@ pub(crate) fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
     }
     found.sort_unstable();
     Ok(found)
-}
-
-fn git(repo_path: &Path) -> Command {
-    crate::git_bin::command(repo_path)
 }
 
 /// A git call inside `<worktreesDir>` (a lane, in this module). These worktrees share the
