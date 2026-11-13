@@ -218,7 +218,17 @@ pub fn lane_path(worktrees_dir: &Path, lane: u32) -> PathBuf {
 
 /// The `k` of a `lane-<k>` folder.
 pub fn lane_number(dir: &Path) -> Option<u32> {
-    dir.file_name()?.to_str()?.strip_prefix("lane-")?.parse().ok()
+    parse_lane_name(dir.file_name()?.to_str()?)
+}
+
+/// The `k` of a folder name that is exactly what [`lane_path`] writes: `lane-` and plain digits, no
+/// `+` sign and no leading zero (`lane-+1` and `lane-01` aren't lane 1's folder, and `parse` alone takes both).
+fn parse_lane_name(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix("lane-")?;
+    if digits.starts_with('0') && digits.len() > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn ensure_worktree(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Result<()> {
@@ -419,12 +429,7 @@ pub(crate) fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
     };
     for entry in entries {
         let entry = entry?;
-        if let Some(lane) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix("lane-"))
-            .and_then(|num| num.parse::<u32>().ok())
-        {
+        if let Some(lane) = entry.file_name().to_str().and_then(parse_lane_name) {
             found.push(lane);
         }
     }
@@ -946,6 +951,10 @@ mod tests {
         assert_eq!(lane_number(Path::new("lane-12")), Some(12));
         assert_eq!(lane_number(Path::new("worktrees/smoke")), None);
         assert_eq!(lane_number(Path::new("lane-")), None);
+        assert_eq!(lane_number(Path::new("lane-+1")), None);
+        assert_eq!(lane_number(Path::new("lane-01")), None);
+        assert_eq!(lane_number(Path::new("lane-0")), Some(0));
+        assert_eq!(lane_number(Path::new("lane-12")), Some(12));
         assert_eq!(lane_number(Path::new("lane-x")), None);
         assert_eq!(lane_number(Path::new("lane--1")), None);
         assert_eq!(lane_number(Path::new("")), None);
