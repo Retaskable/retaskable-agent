@@ -346,6 +346,14 @@ fn added_lines_unescapes_a_c_quoted_path_with_an_embedded_quote() {
 }
 
 #[test]
+fn added_lines_drops_the_tab_git_adds_after_a_path_with_a_space() {
+    // git ends the `+++` line of a path containing a space with a tab: `+++ b/a b.rs<TAB>`.
+    let diff = ["--- a/a b.rs\t", "+++ b/a b.rs\t", "@@ -1,0 +2 @@", "+x"].join("\n");
+    let got: Vec<String> = added_lines(&diff).into_iter().map(|(f, _)| f).collect();
+    assert_eq!(got, vec!["a b.rs".to_string()]);
+}
+
+#[test]
 fn oversized_split_points_are_top_level_declarations_near_equal_parts_at_most_3_across_files() {
     let file = |name: &str, n: usize| {
         let text: String = (0..n)
