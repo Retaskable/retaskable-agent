@@ -707,3 +707,41 @@ fn an_item_parses_with_and_without_a_size() {
         Some("XL")
     );
 }
+
+#[test]
+fn an_error_carries_the_stores_code_only_when_it_refused_with_one() {
+    let refused = |code: Option<&str>| BacklogError::BadAnswer {
+        status: 409,
+        code: code.map(str::to_string),
+        message: "no".into(),
+    };
+    assert_eq!(refused(Some("not_found")).code(), Some("not_found"));
+    assert_eq!(refused(None).code(), None);
+    assert_eq!(BacklogError::Unreachable("down".into()).code(), None);
+}
+
+#[test]
+fn only_the_already_answered_code_means_a_verdict_was_already_taken() {
+    let refused = |code: &str| BacklogError::BadAnswer {
+        status: 409,
+        code: Some(code.to_string()),
+        message: String::new(),
+    };
+    assert!(refused("already_answered").is_already_answered());
+    assert!(!refused("bad_request").is_already_answered());
+    assert!(!BacklogError::Unreachable("x".into()).is_already_answered());
+}
+
+#[test]
+fn errors_read_as_what_went_wrong() {
+    assert_eq!(
+        BacklogError::Unreachable("timed out".into()).to_string(),
+        "couldn't reach the backlog store: timed out"
+    );
+    let bad = BacklogError::BadAnswer {
+        status: 404,
+        code: Some("not_found".into()),
+        message: "no such item".into(),
+    };
+    assert_eq!(bad.to_string(), "the backlog store answered 404: no such item");
+}

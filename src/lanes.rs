@@ -942,4 +942,15 @@ mod tests {
         let _ = outside.kill();
         let _ = outside.wait();
     }
+
+    #[test]
+    fn a_lane_folders_number_is_read_from_its_name() {
+        assert_eq!(lane_number(Path::new("worktrees/lane-3")), Some(3));
+        assert_eq!(lane_number(Path::new("lane-12")), Some(12));
+        assert_eq!(lane_number(Path::new("worktrees/smoke")), None);
+        assert_eq!(lane_number(Path::new("lane-")), None);
+        assert_eq!(lane_number(Path::new("lane-x")), None);
+        assert_eq!(lane_number(Path::new("lane--1")), None);
+        assert_eq!(lane_number(Path::new("")), None);
+    }
 }
