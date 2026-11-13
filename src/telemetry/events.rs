@@ -331,6 +331,13 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Now, in epoch nanoseconds (0 if the clock is before the epoch); for unique names, not timing.
+pub fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
 /// Now, in epoch seconds.
 pub fn now_secs() -> i64 {
     now_ms() / 1000

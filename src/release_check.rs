@@ -49,10 +49,7 @@ impl ScratchDir {
         let dir = std::env::temp_dir().join(format!(
             "{prefix}-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
+            crate::telemetry::events::now_nanos()
         ));
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         Ok(Self(dir))
