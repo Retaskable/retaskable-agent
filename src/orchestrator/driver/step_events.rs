@@ -106,3 +106,76 @@ impl ProjectLoop {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(state: ItemState, slice: u32, check_rounds: u32, review_rounds: u32) -> ItemRun {
+        ItemRun {
+            state,
+            slice,
+            check_rounds,
+            review_rounds,
+            ..ItemRun::new()
+        }
+    }
+
+    fn start(item: &str, step: &str, key: &str) -> Entry {
+        let s = event::StepStart {
+            item: Some(item.into()),
+            step: Some(step.into()),
+            key: Some(key.into()),
+            ..Default::default()
+        };
+        Entry::new("t".into(), None, Event::StepStart(s))
+    }
+
+    fn end(item: &str) -> Entry {
+        let e = event::StepEnd {
+            item: Some(item.into()),
+            ..Default::default()
+        };
+        Entry::new("t".into(), None, Event::StepEnd(e))
+    }
+
+    #[test]
+    fn a_step_key_is_its_one_based_slice_and_for_checks_and_reviews_the_round() {
+        assert_eq!(key_of(&run(ItemState::Queued, 0, 0, 0)), "slice 1");
+        assert_eq!(key_of(&run(ItemState::Checking, 1, 0, 3)), "slice 2 round 1");
+        assert_eq!(key_of(&run(ItemState::Checking, 0, 2, 0)), "slice 1 round 3");
+        assert_eq!(key_of(&run(ItemState::Reviewing, 2, 5, 1)), "slice 3 round 2");
+    }
+
+    #[test]
+    fn a_step_is_open_in_the_log_until_its_step_end() {
+        let log = [start("a", "checking", "slice 1 round 1")];
+        assert!(open_in_log(&log, "a", "checking", "slice 1 round 1"));
+        assert!(!open_in_log(&[], "a", "checking", "slice 1 round 1"));
+        let closed = [log[0].clone(), end("a")];
+        assert!(!open_in_log(&closed, "a", "checking", "slice 1 round 1"));
+    }
+
+    #[test]
+    fn only_the_same_step_and_key_count_as_open() {
+        let log = [start("a", "checking", "slice 1 round 1")];
+        assert!(!open_in_log(&log, "a", "reviewing", "slice 1 round 1"));
+        assert!(!open_in_log(&log, "a", "checking", "slice 1 round 2"));
+    }
+
+    #[test]
+    fn another_items_events_neither_open_nor_close_a_step() {
+        let log = [
+            start("a", "checking", "slice 1 round 1"),
+            end("b"),
+            start("b", "reviewing", "slice 1 round 1"),
+        ];
+        assert!(open_in_log(&log, "a", "checking", "slice 1 round 1"));
+        let log = [
+            start("a", "checking", "slice 1 round 1"),
+            start("a", "reviewing", "slice 1 round 1"),
+        ];
+        assert!(!open_in_log(&log, "a", "checking", "slice 1 round 1"));
+        assert!(open_in_log(&log, "a", "reviewing", "slice 1 round 1"));
+    }
+}
