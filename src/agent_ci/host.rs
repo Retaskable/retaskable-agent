@@ -55,9 +55,7 @@ pub fn fetch(data_dir: &Path, project: &str, repo: &Path, main_branch: &str, mod
     std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
+    let nanos = crate::telemetry::events::now_nanos();
     let dir = root.join(format!("check-{}-{nanos}-{n}", std::process::id()));
     std::fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
     match fetch_into(&dir, repo, main_branch, mode) {
