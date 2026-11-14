@@ -335,7 +335,10 @@ mod stubbed {
             t.await.unwrap();
         }
         let c = calls(&r);
-        let (pending, success) = (c.find("state=pending").unwrap(), c.find("state=success").unwrap());
+        let (pending, success) = (
+            c.find("state=pending").unwrap_or_else(|| panic!("no pending: {c}")),
+            c.find("state=success").unwrap_or_else(|| panic!("no success: {c}")),
+        );
         assert!(
             pending < success && !c.contains("state=failure") && !c.contains("/comments"),
             "{c}"
