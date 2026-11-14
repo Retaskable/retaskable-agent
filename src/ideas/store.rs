@@ -215,4 +215,83 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[test]
+    fn answers_go_to_the_store_by_name() {
+        assert_eq!(IdeaAnswer::Accept.as_str(), "accept");
+        assert_eq!(IdeaAnswer::Later.as_str(), "later");
+        assert_eq!(IdeaAnswer::Never.as_str(), "never");
+    }
+
+    #[test]
+    fn a_bare_row_reads_with_every_optional_field_defaulted() {
+        let row: StoreIdea =
+            serde_json::from_value(json!({ "id": "7", "title": "T", "state": "never", "at": 5 })).unwrap();
+        assert_eq!(row.state, IdeaState::Never);
+        assert!(row.idea.is_none() && row.answer.is_none() && row.plan_id.is_none());
+        assert!(!row.bug);
+        assert!(row.pictures.is_empty());
+    }
+
+    #[test]
+    fn a_full_row_reads_the_renamed_fields() {
+        let row: StoreIdea = serde_json::from_value(json!({
+            "id": "7", "title": "T", "state": "accepted", "at": 5, "bug": true, "planId": "p1",
+            "addedBy": { "login": "me" },
+            "answer": { "by": "owner", "at": 9, "draftId": "d1" },
+            "idea": { "whyNow": "soon", "for": ["dev"], "newFeature": "x", "waited": 2 },
+        }))
+        .unwrap();
+        assert!(row.bug && row.added_by.is_some());
+        assert_eq!(row.plan_id.as_deref(), Some("p1"));
+        assert_eq!(row.answer.unwrap().draft_id.as_deref(), Some("d1"));
+        let body = row.idea.unwrap();
+        assert_eq!(body.why_now, "soon");
+        assert_eq!(body.for_profiles, ["dev"]);
+        assert_eq!(body.new_feature.as_deref(), Some("x"));
+        assert_eq!((body.waited, body.experience.as_str()), (2, ""));
+    }
+
+    #[tokio::test]
+    async fn answer_leaves_out_the_draft_and_login_when_there_are_none() {
+        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
+            assert_eq!(req["args"]["answer"], "never");
+            assert!(req["args"].get("draftId").is_none());
+            assert!(req["args"]["for"].get("login").is_none());
+            assert_eq!(req["args"]["for"]["via"], "command");
+            axum::Json(json!({ "value": { "round": null, "ideas": [] } }))
+        }))
+        .await;
+        let client = Client::new(base);
+        let ideas = Ideas {
+            client: &client,
+            repo_id: 1,
+            token: None,
+        };
+        ideas.answer("1", IdeaAnswer::Never, None, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mark_bug_sends_the_id_and_surfaces_a_refusal() {
+        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
+            assert_eq!(req["op"], "idea_mark_bug");
+            if req["args"]["id"] == "gone" {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "error": "not_found" })),
+                );
+            }
+            (axum::http::StatusCode::OK, axum::Json(json!({ "value": null })))
+        }))
+        .await;
+        let client = Client::new(base);
+        let ideas = Ideas {
+            client: &client,
+            repo_id: 1,
+            token: Some("tok"),
+        };
+        ideas.mark_bug("1").await.unwrap();
+        let err = ideas.mark_bug("gone").await.unwrap_err();
+        assert_eq!(err.code(), Some("not_found"));
+    }
 }
