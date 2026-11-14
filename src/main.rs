@@ -484,6 +484,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>
         }),
+        experts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::expert_host::ClaudeExperts::new(
+                dir.to_path_buf(),
+                env.clone(),
+                config::cursor_models(cfg, env),
+            ) as Arc<dyn orchestrator::driver::ExpertHost>
+        }),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),

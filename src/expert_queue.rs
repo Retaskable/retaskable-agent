@@ -6,9 +6,9 @@
 //! continuation note, a discard) is sent when it is back. There is no queue file: the engine's own session files
 //! never come here, and nothing is read from disk.
 //!
-//! Not here yet: the expert session itself (turns, lanes, the commands), which will call `add`, `take`, `done`,
-//! `clear` and `set_continued`, run `beat` every [`BEAT_MS`], and call `pull` at start, when the link opens again
-//! and on `facts_changed` naming `expert_queue`.
+//! The expert session (`orchestrator::driver::experts`) calls `add`, `take`, `done` and `clear`, runs `beat` every
+//! [`BEAT_MS`] and calls `pull` at start and with each beat (this agent hears no `facts_changed` yet, so the beat
+//! stands in for it). Not called yet: `set_continued` (a session that continues a Claude Code session).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -91,6 +91,44 @@ impl QueueOps for StoreQueue<'_> {
     }
     async fn list(&self) -> Result<QueueList, BacklogError> {
         self.client.expert_queue_list(self.repo_id, self.token, None).await
+    }
+}
+
+/// [`StoreQueue`] that owns its client, for a queue the session keeps across passes.
+pub struct OwnedQueue {
+    pub client: std::sync::Arc<Client>,
+    pub repo_id: u64,
+    pub token: String,
+}
+
+impl OwnedQueue {
+    fn store(&self) -> StoreQueue<'_> {
+        StoreQueue {
+            client: &self.client,
+            repo_id: self.repo_id,
+            token: Some(&self.token),
+        }
+    }
+}
+
+impl QueueOps for OwnedQueue {
+    async fn add(&self, item: &str, text: &str, by: &str, pictures: &[String]) -> Result<String, BacklogError> {
+        self.store().add(item, text, by, pictures).await
+    }
+    async fn take(&self, item: &str, ids: &[String], machine: &str) -> Result<Vec<ExpertRow>, BacklogError> {
+        self.store().take(item, ids, machine).await
+    }
+    async fn done(&self, item: &str, ids: &[String]) -> Result<bool, BacklogError> {
+        self.store().done(item, ids).await
+    }
+    async fn clear(&self, item: &str) -> Result<(), BacklogError> {
+        self.store().clear(item).await
+    }
+    async fn continues_set(&self, item: &str, from: &ExpertFrom) -> Result<(), BacklogError> {
+        self.store().continues_set(item, from).await
+    }
+    async fn list(&self) -> Result<QueueList, BacklogError> {
+        self.store().list().await
     }
 }
 

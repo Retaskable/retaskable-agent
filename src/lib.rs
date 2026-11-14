@@ -24,6 +24,7 @@ pub mod drafts;
 pub mod engines;
 pub mod env;
 pub mod env_path;
+pub mod expert;
 pub mod expert_queue;
 pub mod fs_util;
 pub mod git_bin;

@@ -914,6 +914,7 @@ mod commands;
 mod cursor_limit;
 mod deprecations;
 mod drafts;
+mod experts;
 mod fix_main;
 mod follow;
 mod host_call_undefined;

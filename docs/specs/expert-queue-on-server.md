@@ -41,7 +41,7 @@ A claim goes stale as a draft's lease does: a `taken` row whose computer has not
 
 ## 4. Built so far
 
-The store client and the queue that wraps it: `src/backlog/expert.rs` (the ops above) and `src/expert_queue.rs` (taking, beating, owing `done`/`clear`/notes to the store, local rows). The expert session itself (turns, lanes, the `expert_*` commands; see [expert-chat.md](expert-chat.md)) is not built yet and will call into it.
+The store client and the queue that wraps it: `src/backlog/expert.rs` (the ops above) and `src/expert_queue.rs` (taking, beating, owing `done`/`clear`/notes to the store, local rows). The expert session itself (turns, lanes, the `expert_*` commands; see [expert-chat.md](expert-chat.md), "Built so far") calls into it: it adds the item (`expert_add`), takes and finishes rows in turn order, beats the lease with `lease_beat`, and reads the queue back with `pull()` once a minute (the `facts_changed` kind `expert_queue` is not wired yet).
 
 ## 5. Tests and acceptance
 

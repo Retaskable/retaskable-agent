@@ -25,7 +25,7 @@ pub struct HeldLane {
 }
 
 /// An item this computer holds a lease on, as the snapshot's `items` lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HeldItem {
     pub id: String,
     pub title: String,
@@ -36,6 +36,8 @@ pub struct HeldItem {
     pub pr_url: Option<String>,
     pub attempt: u32,
     pub chore: bool,
+    /// An expert session's `{ startedBy, detail, queue?, ask? }` (`expert::`), the person's own conversation.
+    pub expert: Option<serde_json::Value>,
 }
 
 /// The backlog could not be reached (or answered something unreadable) on the last pass.

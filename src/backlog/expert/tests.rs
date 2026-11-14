@@ -126,3 +126,40 @@ fn a_session_id_is_word_characters_and_dashes_up_to_100() {
     assert!(!ExpertFrom::session_id_ok("../etc"));
     assert!(!ExpertFrom::session_id_ok("a b"));
 }
+
+#[tokio::test]
+async fn add_sends_an_expert_item_claimed_by_this_agent_and_reads_its_lease() {
+    let item = json!({ "id": "expert-x", "title": "X", "status": "claimed", "rank": 1 });
+    let (base, seen) = store(200, json!({ "value": { "item": item, "token": "lease-1" } })).await;
+    let c = Client::new(base);
+    let agent = crate::backlog::ClaimNextAgent {
+        machine: "box".into(),
+        environment: "dev".into(),
+        base_branch: "main".into(),
+        tags: vec![],
+    };
+    let it = ExpertItem {
+        id: "expert-x".into(),
+        title: "X".into(),
+        remaining: "do X".into(),
+    };
+    let added = c.expert_add(3, Some("t"), &it, "ada", &agent).await.unwrap();
+    assert_eq!((added.item.id.as_str(), added.token.as_str()), ("expert-x", "lease-1"));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0]["op"], "add");
+    assert_eq!(seen[0]["args"]["via"], "expert");
+    assert_eq!(seen[0]["args"]["startedBy"], "ada");
+    assert_eq!(seen[0]["args"]["agent"]["machine"], "box");
+    assert_eq!(seen[0]["args"]["items"][0]["remaining"], "do X");
+}
+
+#[tokio::test]
+async fn a_beat_is_a_report_with_no_note() {
+    let (base, seen) = store(200, json!({ "value": null })).await;
+    Client::new(base).lease_beat(3, None, "e-1", "lease-1").await.unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        (seen[0]["op"].as_str(), &seen[0]["args"]),
+        (Some("report"), &json!({ "id": "e-1", "token": "lease-1" }))
+    );
+}
