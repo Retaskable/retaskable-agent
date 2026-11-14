@@ -49,7 +49,53 @@ static ANCHOR: LazyLock<Regex> = LazyLock::new(|| {
 static SPEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)(^|/)specs/([^/]+/)?[^/]+\.md$").unwrap());
 static HUNK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap());
 static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{2,3}) ").unwrap());
-pub(crate) static FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^ {0,3}(```|~~~)").unwrap());
+
+/// Follows Markdown code fences down a spec's lines. A fence opens with 3+ backticks or tildes and
+/// only a fence of the same character, at least as long and with nothing after it, closes it, so a
+/// ```` block holding a ``` example (or a `~~~` block holding ```) stays one block.
+#[derive(Default)]
+pub(crate) struct Fences(Option<(char, usize)>);
+
+impl Fences {
+    /// Reads the next line; true when it's an opening or closing fence line.
+    pub(crate) fn is_fence(&mut self, line: &str) -> bool {
+        let t = line.trim_end_matches(['\n', '\r']);
+        let indent = t.len() - t.trim_start_matches(' ').len();
+        if indent > 3 {
+            return false;
+        }
+        let t = &t[indent..];
+        let Some(ch) = t.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+            return false;
+        };
+        let run = t.chars().take_while(|c| *c == ch).count();
+        if run < 3 {
+            return false;
+        }
+        let rest = &t[run..];
+        match self.0 {
+            Some((open, len)) => {
+                if ch == open && run >= len && rest.trim().is_empty() {
+                    self.0 = None;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                if ch == '`' && rest.contains('`') {
+                    return false;
+                }
+                self.0 = Some((ch, run));
+                true
+            }
+        }
+    }
+
+    pub(crate) fn inside(&self) -> bool {
+        self.0.is_some()
+    }
+}
 
 pub fn is_source(file: &str) -> bool {
     SOURCE.is_match(file) && !SKIPPED.is_match(file)
@@ -307,12 +353,12 @@ pub fn oversized_specs(files: &[(String, String)], limit: u32) -> Vec<BigSpec> {
         }
         let mut heads: Vec<(u32, String, u32, u32)> = Vec::new();
         let mut pos: u32 = 0;
-        let mut fenced = false;
+        let mut fences = Fences::default();
         for (i, l) in split_lines(text).iter().enumerate() {
-            if FENCE.is_match(l) {
-                fenced = !fenced;
-            }
-            if !fenced && let Some(caps) = HEADING.captures(l) {
+            fences.is_fence(l);
+            if !fences.inside()
+                && let Some(caps) = HEADING.captures(l)
+            {
                 heads.push(((i + 1) as u32, truncate80(l), pos, caps[1].len() as u32));
             }
             pos += l.chars().count() as u32 + 1;
