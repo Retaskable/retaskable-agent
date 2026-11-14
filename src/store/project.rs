@@ -67,16 +67,6 @@ pub struct RunRecord {
     /// finding a triager left), for the triage session (06.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_human_reason: Option<String>,
-    /// The state the item failed in, as `item_lifecycle::ItemState` snake case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed_in: Option<String>,
-    /// Claude already looked at this stop (06.9 bullet 16): a restart never looks again.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub triaged: bool,
-    /// Automatic decisions made as `(slice, n)`; counted across start-overs, and a mark from an earlier slice
-    /// doesn't count.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triages: Option<(u32, u32)>,
     /// Looks at this stop that failed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub failed_looks: u32,
@@ -95,21 +85,16 @@ pub struct RunRecord {
     /// ran, so a restart must not resume it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_started: bool,
-    /// Signatures of Retaskable bugs this item's triage already reported (`reported_bug`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reported_bugs: Vec<String>,
 }
 
 impl RunRecord {
-    /// The run reached a new `needs_human` stop from `from` for `reason`: the stop's facts replace the old
-    /// ones, and the look marks start clean. `triages` is kept for the same slice and reset for a new one.
-    pub fn new_stop(&mut self, from: &str, reason: &str, slice: u32) {
+    /// The run reached a new `needs_human` stop for `reason`: the reason replaces the old one and the failed-look
+    /// count starts clean. The facts that outlive this machine (`failedIn`, `triaged`, `triages`) are the item's
+    /// decisions on the store: `Decisions::new_stop`.
+    pub fn new_stop(&mut self, reason: &str) {
         self.needs_human_reason = Some(reason.to_string());
-        self.failed_in = Some(from.to_string());
-        self.triaged = false;
         self.failed_looks = 0;
         self.next_look_at = None;
-        self.triages = self.triages.filter(|(s, _)| *s == slice);
     }
 }
 

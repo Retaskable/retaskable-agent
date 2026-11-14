@@ -589,13 +589,19 @@ async fn claim_stub_failing(
     let asked: Asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
     let served = Arc::new(AtomicBool::new(false));
+    let details: Details = Default::default();
     let app = Router::new().route(
         "/v1/repos/{id}/ops",
         post(move |Json(body): Json<Value>| {
             let (seen, listed, claim, served) = (seen.clone(), listed.clone(), claim.clone(), served.clone());
             let (fail_release, fail_skip) = (fail_release.clone(), fail_skip.clone());
+            let details = details.clone();
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
+                // Item details are kept per item and not counted among the ops a test asserts on.
+                if let Some(answer) = details_answer(&details, &op, &body["args"]) {
+                    return answer;
+                }
                 if op == "settings_get" || op == "facts_get" {
                     return (StatusCode::OK, Json(json!({ "value": if op == "facts_get" { json!({ "paused": false }) } else { Value::Null } })));
                 }
@@ -625,6 +631,42 @@ async fn claim_stub_failing(
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), asked)
+}
+
+/// The store's item details by item id: version and fields, as `details_get` and `details_report` keep them.
+type Details = Arc<Mutex<std::collections::BTreeMap<String, (u64, serde_json::Map<String, Value>)>>>;
+
+/// `details_get` and `details_report` over `details` (a patch over the right version; `null` clears a field).
+fn details_answer(details: &Details, op: &str, args: &Value) -> Option<(axum::http::StatusCode, Json<Value>)> {
+    use axum::http::StatusCode;
+    if op != "details_get" && op != "details_report" {
+        return None;
+    }
+    let mut all = details.lock().unwrap();
+    let id = args["id"].as_str().unwrap_or("").to_string();
+    let entry = all.entry(id).or_default();
+    if op == "details_report" {
+        if args["baseVersion"].as_u64() != Some(entry.0) {
+            return Some((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "conflict", "message": "moved" })),
+            ));
+        }
+        for (k, v) in args["patch"].as_object().cloned().unwrap_or_default() {
+            if v.is_null() {
+                entry.1.remove(&k);
+            } else {
+                entry.1.insert(k, v);
+            }
+        }
+        entry.0 += 1;
+    }
+    let value = if entry.0 == 0 {
+        Value::Null
+    } else {
+        json!({ "version": entry.0, "details": entry.1 })
+    };
+    Some((StatusCode::OK, Json(json!({ "value": value }))))
 }
 
 fn item(id: &str, status: &str) -> Value {
