@@ -190,9 +190,6 @@ pub struct ProjectLoop {
     pub(super) unskipped: std::collections::BTreeSet<String>,
     /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`. In memory only.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
-    /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`. In memory only.
-    pub(super) playtests_seen: Option<String>,
-    pub(super) release_owed: bool,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
@@ -325,8 +322,6 @@ impl ProjectLoop {
             clock: None,
             unskipped: Default::default(),
             unanswered: Default::default(),
-            playtests_seen: None,
-            release_owed: false,
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
