@@ -43,14 +43,12 @@ fn logs_older_than_seven_days_are_pruned() {
 #[cfg(unix)]
 mod stub {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     const TOKEN: &str = "ghp_faketokenvalue123";
 
     fn stub(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("docker");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&path, body);
         path
     }
 
@@ -77,14 +75,17 @@ mod stub {
         );
         let work = t.path().join("work");
         std::fs::create_dir(&work).unwrap();
-        // SAFETY: the test process sets these before spawning; the command clears them.
-        unsafe { std::env::set_var("GH_TOKEN", TOKEN) };
-        // SAFETY: the test process sets these before spawning; the command clears them.
-        unsafe { std::env::set_var("GITHUB_TOKEN", TOKEN) };
-        // SAFETY: the test process sets these before spawning; the command clears them.
-        unsafe { std::env::set_var("GLAB_TOKEN", TOKEN) };
+        let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            ("GH_TOKEN", TOKEN),
+            ("GITHUB_TOKEN", TOKEN),
+            ("GLAB_TOKEN", TOKEN),
+            ("PATH", "/usr/bin:/bin"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
         let logs = t.path().join("logs");
-        let out = run(&check(&docker, &work, &logs, Mode::PullRequest, CEILING))
+        let out = run_with_env(&check(&docker, &work, &logs, Mode::PullRequest, CEILING), parent)
             .await
             .unwrap();
         assert_eq!(out.exit_code, Some(3));

@@ -66,7 +66,8 @@ fn a_finished_key_is_never_run_again() {
     assert!(matches!(decide(&[other, push], KEY, "a", T0), Verdict::Run { .. }));
 }
 
-#[tokio::test]
+// Paused time: the 110ms run and the 20ms interval are virtual, so the count is exact under any load.
+#[tokio::test(start_paused = true)]
 async fn a_refresh_is_posted_every_interval_during_a_long_run() {
     let n = AtomicU32::new(0);
     let out = refreshing(

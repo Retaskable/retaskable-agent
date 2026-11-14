@@ -77,6 +77,33 @@ pub(crate) fn write_executable(path: &Path, contents: &str) {
     }
 }
 
+/// Writes `/bin/sh` script `body` as an executable a test can spawn at once, and returns once it can be.
+///
+/// Like `write_executable` (see its note on `ETXTBSY`), but for scripts that must not run with no arguments
+/// (they sleep, log or fail): the script starts with a guard that exits at once for `--probe`, and that is the
+/// one call made here, retrying while the file is busy.
+#[cfg(unix)]
+pub(crate) fn write_script(path: &Path, body: &str) {
+    write_executable_probing(path, &format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n"));
+}
+
+#[cfg(unix)]
+fn write_executable_probing(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    loop {
+        match Command::new(path).arg("--probe").output() {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(26) && started.elapsed() < std::time::Duration::from_secs(10) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => panic!("starting {}: {e}", path.display()),
+        }
+    }
+}
+
 /// Starts a long-lived process whose command line contains `dir`, so a scan for processes inside
 /// it (`lanes::processes_in`) finds it. Shared by `lanes.rs`'s and `shutdown.rs`'s own tests.
 pub(crate) fn hold_process(dir: &Path) -> std::process::Child {
