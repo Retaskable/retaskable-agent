@@ -85,7 +85,7 @@ async fn store(intake: Value) -> (String, Asked) {
             let (seen, intake) = (seen.clone(), intake.clone());
             async move {
                 let (op, args) = (body["op"].as_str().unwrap_or("").to_string(), body["args"].clone());
-                seen.lock().unwrap().push((op.clone(), args.clone()));
+                seen.lock().unwrap().push((op.clone(), args));
                 let value = match op.as_str() {
                     "draft_take" => json!({ "token": "lease-d", "draft": { "intake": intake,
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval", "titles": ["Charts"],

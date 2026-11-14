@@ -264,7 +264,7 @@ fn duplicates_ignores_noise_and_merges_a_block_repeated_twice() {
     .map(ToString::to_string)
     .collect();
     let mut boiler = noise.clone();
-    boiler.extend(noise.clone());
+    boiler.extend(noise);
     let added = |file: &str, n: u32| vec![(file.to_string(), (1..=n).collect::<BTreeSet<u32>>())];
     let files = vec![
         ("a.ts".to_string(), text_of(&boiler)),
@@ -275,7 +275,7 @@ fn duplicates_ignores_noise_and_merges_a_block_repeated_twice() {
     let block = distinct("t", 8, 0);
     let mut twice = block.clone();
     twice.push("const gap = 1;".to_string());
-    twice.extend(block.clone());
+    twice.extend(block);
     let files = vec![("n.ts".to_string(), text_of(&twice))];
     assert_eq!(
         duplicates(&files, &added("n.ts", 17), 8),

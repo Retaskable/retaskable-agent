@@ -226,7 +226,7 @@ mod tests {
     fn concurrent_sets_on_one_store_lose_no_url() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("credentials.json");
-        let store = Arc::new(FileStore::new(file.clone(), "retaskable"));
+        let store = Arc::new(FileStore::new(file, "retaskable"));
         let urls: Vec<String> = (0..20).map(|i| format!("https://cloud-{i}.example")).collect();
         std::thread::scope(|scope| {
             for url in &urls {
@@ -257,7 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("scratch.json");
         let path = file.to_string_lossy().to_string();
-        let env = Env::from_pairs([("RETASKABLE_CREDENTIALS_FILE", path.clone())]);
+        let env = Env::from_pairs([("RETASKABLE_CREDENTIALS_FILE", path)]);
         keychain(dir.path(), &env).set("https://retaskable.com", "t").unwrap();
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"t\""));
         assert!(
