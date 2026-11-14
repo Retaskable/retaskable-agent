@@ -250,7 +250,7 @@ mod tests {
         local.local = Some(target.clone());
         let spec = session_spec(&local, Start::Fresh).unwrap();
         assert_eq!((spec.model.as_str(), spec.engine), ("sonnet", Some(EngineId::Claude)));
-        assert_eq!(spec.local, Some(target.clone()));
+        assert_eq!(spec.local, Some(target));
         local.request = "[Lighthouse] fix it";
         let lh = session_spec(&local, Start::Fresh).unwrap();
         assert_eq!(lh.model, "sonnet");

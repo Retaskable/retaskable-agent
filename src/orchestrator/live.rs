@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn clones_share_state_and_now_is_rfc3339() {
         let live = LiveHandle::default();
-        live.clone().register("shared");
+        live.register("shared");
         assert!(live.snapshot().projects.contains_key("shared"));
         assert!(now_iso8601().ends_with('Z'));
     }

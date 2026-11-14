@@ -367,7 +367,7 @@ mod tests {
         std::fs::create_dir_all(&platform_tools).unwrap();
         std::fs::write(platform_tools.join("adb"), "").unwrap();
         let home = dir.path().to_string_lossy().to_string();
-        let env = Env::from_pairs([("ANDROID_HOME", home.clone())]);
+        let env = Env::from_pairs([("ANDROID_HOME", home)]);
 
         assert_eq!(find_adb(&env, "adb", &[], None), Some(platform_tools.join("adb")));
     }
@@ -404,7 +404,7 @@ mod tests {
         let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
         std::fs::write(platform_tools.join(exe_name), "").unwrap();
         let sdk_root = dir.path().to_string_lossy().to_string();
-        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root.clone())]);
+        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root)]);
 
         assert_eq!(find_adb_on_path(&env), Some(platform_tools.join(exe_name)));
     }

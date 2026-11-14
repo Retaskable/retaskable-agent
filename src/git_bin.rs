@@ -190,7 +190,7 @@ mod tests {
         let real = dir.path().join("mingw64").join("bin").join("git.exe");
         write_exe(&real);
         let path_value = cmd.to_string_lossy().into_owned();
-        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        let env = Env::from_pairs([("PATH", path_value)]);
 
         assert_eq!(
             resolve_git_on_path(&env),

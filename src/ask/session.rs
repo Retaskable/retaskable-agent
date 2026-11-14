@@ -173,7 +173,7 @@ mod tests {
         let got = |engine| {
             let mut got = None;
             with_local(engine, "local", Some(target.clone()), |s| {
-                got = Some((s.model.clone(), s.local.clone()))
+                got = Some((s.model.clone(), s.local))
             });
             got.unwrap()
         };

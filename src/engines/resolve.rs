@@ -210,7 +210,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("claude.exe"), "").unwrap();
         let path_value = dir.path().to_string_lossy().into_owned();
-        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        let env = Env::from_pairs([("PATH", path_value)]);
         assert_eq!(resolve_claude_on_path(&env).unwrap(), dir.path().join("claude.exe"));
     }
 
@@ -269,7 +269,7 @@ mod tests {
         let name = if cfg!(windows) { "pi.exe" } else { "pi" };
         std::fs::write(dir.path().join(name), "").unwrap();
         let path_value = dir.path().to_string_lossy().into_owned();
-        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        let env = Env::from_pairs([("PATH", path_value)]);
         assert_eq!(resolve_pi_on_path(&env), dir.path().join(name));
     }
 
@@ -349,7 +349,7 @@ mod tests {
         };
         std::fs::write(dir.path().join(name), "").unwrap();
         let path_value = dir.path().to_string_lossy().into_owned();
-        let env = Env::from_pairs([("PATH", path_value.clone())]);
+        let env = Env::from_pairs([("PATH", path_value)]);
         assert_eq!(resolve_cursor_on_path(&env), dir.path().join(name));
     }
 }
