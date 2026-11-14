@@ -107,7 +107,6 @@ fn the_ticks_ci_object_carries_slots_running_and_docker() {
 #[cfg(unix)]
 mod stubbed {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     fn run(dir: &Path, args: &[&str]) {
@@ -121,8 +120,7 @@ mod stubbed {
 
     fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&path, body);
         path
     }
 

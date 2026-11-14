@@ -43,14 +43,12 @@ fn logs_older_than_seven_days_are_pruned() {
 #[cfg(unix)]
 mod stub {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     const TOKEN: &str = "ghp_faketokenvalue123";
 
     fn stub(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("docker");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&path, body);
         path
     }
 
