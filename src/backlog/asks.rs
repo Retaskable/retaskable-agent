@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use super::audiences::{Audience, audiences_of};
 use super::{BacklogError, Client};
 
 /// One message in the project's chat, as `asks_list` gives it.
@@ -61,21 +62,6 @@ pub struct AskReport {
     pub actions: Option<Vec<Value>>,
 }
 
-/// A company audience (chat-asks-who.md), as `facts_get { kind: "audiences" }` lists it.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Audience {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub short: Option<String>,
-    /// Who they are, in a sentence (the ideas prompt's user types).
-    #[serde(default)]
-    pub who: Option<String>,
-    /// The part of the product they use.
-    #[serde(default)]
-    pub part: Option<String>,
-}
-
 /// A draft for the store's queue (`draft_queue`). `audience` and `revises` are sent as `null` when there is none; the
 /// optional fields are left out when unset (chat sets only `ask_id`, an accepted idea the rest).
 #[derive(Debug, Clone, Default, Serialize)]
@@ -121,12 +107,6 @@ pub struct ProjectFacts {
 struct Asks {
     #[serde(default)]
     asks: Vec<Ask>,
-}
-
-#[derive(Deserialize)]
-struct Audiences {
-    #[serde(default)]
-    audiences: Vec<Audience>,
 }
 
 #[derive(Deserialize)]
@@ -184,12 +164,12 @@ impl Client {
         .await
     }
 
-    /// `facts_get { kind: "audiences" }`: the company's audiences.
+    /// `facts_get { kinds: ["audiences"] }`: the company's audiences (the starters when it has no row yet).
     pub async fn audiences(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Audience>, BacklogError> {
-        let list: Audiences = self
-            .op(repo_id, token, "facts_get", json!({ "kind": "audiences" }), "audiences")
-            .await?;
-        Ok(list.audiences)
+        let facts = self.facts_get(repo_id, token, &["audiences"]).await?;
+        Ok(audiences_of(
+            &facts.get("audiences").map(|f| f.data.clone()).unwrap_or_default(),
+        ))
     }
 
     /// `draft_queue { request, titles, themes, audience, revises, askId }`: a new draft for the queue. Answers its id.
