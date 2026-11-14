@@ -31,6 +31,15 @@ macro_rules! decisions {
                 }
             }
 
+            /// Sets each field the patch names: a value sets it, `null` clears it. Other fields are left alone.
+            pub fn apply(&mut self, patch: &Map<String, Value>) {
+                $(
+                    if let Some(v) = patch.get($key) {
+                        self.$field = serde_json::from_value(v.clone()).ok();
+                    }
+                )*
+            }
+
             /// The patch that turns `old` into `self`: changed fields only, a field gone as `null`.
             pub fn diff(&self, old: &Decisions) -> Map<String, Value> {
                 let mut patch = Map::new();
@@ -101,6 +110,8 @@ impl Client {
             })
     }
 }
+
+pub mod sync;
 
 #[cfg(test)]
 mod tests;
