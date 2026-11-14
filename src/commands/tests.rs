@@ -466,20 +466,6 @@ fn continue_retry_and_playtest_log_notes_by_size() {
 }
 
 #[test]
-fn ask_logs_its_text_by_size_and_keeps_its_ids() {
-    let args =
-        json!({ "askId": "k", "replyTo": "r", "about": "x", "text": SECRET, "pictures": [{ "data": "PICDATA" }] });
-    let (log, a) = logged("ask", args);
-    assert!(!log.contains(SECRET) && !log.contains("PICDATA"), "{log}");
-    assert_eq!(a["text"], json!({ "bytes": SECRET.len() }));
-    assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
-    assert_eq!(
-        (&a["askId"], &a["replyTo"], &a["about"]),
-        (&json!("k"), &json!("r"), &json!("x"))
-    );
-}
-
-#[test]
 fn draft_edit_logs_its_content_by_size_and_keeps_its_path() {
     let (log, a) = logged(
         "draft_edit",

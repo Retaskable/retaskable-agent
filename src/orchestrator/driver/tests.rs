@@ -915,7 +915,6 @@ mod cursor_limit;
 mod deprecations;
 mod drafts;
 mod fix_main;
-mod follow;
 mod host_call_undefined;
 mod idea_accept;
 mod lane_play;

@@ -32,6 +32,7 @@ pub mod host_call;
 mod host_call_sites_tests;
 pub mod ideas;
 pub mod implementer;
+pub mod intents;
 pub mod item_lifecycle;
 pub mod jobs_due;
 pub mod keep_awake;

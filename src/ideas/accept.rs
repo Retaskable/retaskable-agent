@@ -3,7 +3,7 @@
 //! backlog, then answered `accept` there. The store is asked first whether the idea still waits, so one answered elsewhere
 //! isn't written up twice.
 use crate::backlog::BacklogError;
-use crate::backlog::asks::QueuedDraft;
+use crate::backlog::facts::QueuedDraft;
 
 use super::store::{IdeaAnswer, IdeaState, Ideas, StoreIdea};
 

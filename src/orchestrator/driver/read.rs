@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use super::machine::repo_id;
-use crate::backlog::asks::ProjectFacts;
+use crate::backlog::facts::ProjectFacts;
 use crate::backlog::settings::StoreSettings;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::link::TokenStore;

@@ -19,7 +19,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, AskCommand, DraftCommand, Exit, ItemCommand};
+use crate::view::{AgentView, DraftCommand, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -110,7 +110,6 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "skip" => skip(cmd, project, view),
         "playtest" => playtest(cmd, project, view, data_dir),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
-        "ask" => ask(cmd, project, view, data_dir),
         "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
@@ -276,59 +275,6 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
         passed,
         notes,
         merged_at: text("mergedAt").map(str::to_string),
-    });
-    ack(&cmd.id)
-}
-
-/// **ask** (`ask { askId, text, replyTo?, about?, images? }`, spec 06.6): a chat message for the assistant. The images
-/// are saved like a message's pictures and their paths go in an "Attached images…" block; the ask is queued for the
-/// orchestrator loop, which answers it with `ask_report`. Refused outside `claim` mode, the only mode that runs sessions.
-fn ask(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
-    let text_of = |key: &str| {
-        let v = cmd.args.get(key);
-        match v {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(s)) => Ok(crate::text::non_blank(s).map(str::to_string)),
-            Some(_) => Err(format!("ask's {key} must be text.")),
-        }
-    };
-    let fields = (|| {
-        Ok((
-            text_of("askId")?,
-            text_of("text")?,
-            text_of("replyTo")?,
-            text_of("about")?,
-        ))
-    })();
-    let (ask_id, text, reply_to, about) = match fields {
-        Ok((Some(ask_id), Some(text), reply_to, about)) => (ask_id, text, reply_to, about),
-        Ok((None, ..)) => return nack(&cmd.id, "ask needs its askId.".into()),
-        Ok(_) => return nack(&cmd.id, "ask needs the message's text.".into()),
-        Err(reason) => return nack(&cmd.id, reason),
-    };
-    if let Err(reason) = claim_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    let images = match save_pictures(&cmd.args, "images", data_dir) {
-        Ok(p) => p,
-        Err(reason) => return nack(&cmd.id, reason),
-    };
-    let images_block = if images.is_empty() {
-        String::new()
-    } else {
-        let list: Vec<String> = images.iter().map(|p| format!("- {}", p.display())).collect();
-        format!(
-            "Attached images (look at each with your Read tool before acting on this):\n{}",
-            list.join("\n")
-        )
-    };
-    view.item_commands.push_ask(AskCommand {
-        project: project.to_string(),
-        ask_id,
-        text,
-        reply_to,
-        about,
-        images_block,
     });
     ack(&cmd.id)
 }
@@ -668,7 +614,6 @@ fn audit_args(name: &str, args: &Value) -> Value {
     let mut args = args.clone();
     let typed: &[&str] = match name {
         "continue" | "retry" | "playtest" => &["notes"],
-        "ask" => &["text"],
         "draft_edit" => &["content"],
         _ => &[],
     };

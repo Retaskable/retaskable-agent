@@ -11,9 +11,10 @@
 //! operation can fail — no address, no network, a refused or unreadable answer — comes back as a
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
-pub mod asks;
 pub mod drafts;
+pub mod facts;
 pub mod failures;
+pub mod intents;
 pub mod merge;
 pub mod runs;
 pub mod settings;
@@ -757,6 +758,40 @@ impl Client {
             });
         }
         Ok((status.as_u16(), body))
+    }
+
+    /// `GET /v1/repos/<id>/<rest>` as this machine, answered as raw bytes: a non-2xx or network failure is a
+    /// `BacklogError`, as for an op.
+    pub(crate) async fn get_bytes(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        rest: &str,
+    ) -> Result<Vec<u8>, BacklogError> {
+        let url = format!("{}/v1/repos/{}/{}", self.base_url, repo_id, rest);
+        let mut req = self.http.get(&url);
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        let res = req.send().await.map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+        let status = res.status();
+        if !status.is_success() {
+            let body: OpResponse = res.json().await.unwrap_or_default();
+            let message = body
+                .message
+                .or_else(|| body.error.clone())
+                .unwrap_or_else(|| format!("the store answered {status}"));
+            return Err(BacklogError::BadAnswer {
+                status: status.as_u16(),
+                code: body.error,
+                message,
+            });
+        }
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+        Ok(bytes.to_vec())
     }
 }
 

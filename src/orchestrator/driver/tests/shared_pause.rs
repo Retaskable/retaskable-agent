@@ -10,7 +10,7 @@ const ON: u8 = 1;
 const DOWN: u8 = 2;
 
 /// A store with an item to claim and a draft to take (each once), whose `facts_get` answers by `mode`.
-async fn store(mode: Arc<AtomicU32>) -> (String, Asked) {
+async fn store(mode: Arc<AtomicU32>, rows: asks::Listed) -> (String, Asked) {
     let asked: Asked = Default::default();
     let (seen, claimed, drafted) = (
         asked.clone(),
@@ -20,7 +20,13 @@ async fn store(mode: Arc<AtomicU32>) -> (String, Asked) {
     let app = Router::new().route(
         "/v1/repos/{id}/ops",
         post(move |Json(body): Json<Value>| {
-            let (seen, mode, claimed, drafted) = (seen.clone(), mode.clone(), claimed.clone(), drafted.clone());
+            let (seen, mode, claimed, drafted, rows) = (
+                seen.clone(),
+                mode.clone(),
+                claimed.clone(),
+                drafted.clone(),
+                rows.clone(),
+            );
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
@@ -31,6 +37,9 @@ async fn store(mode: Arc<AtomicU32>) -> (String, Asked) {
                         _ => json!({ "paused": false }),
                     },
                     "list" => json!([item("a", "claimed")]),
+                    "intent_list" => Value::Array(rows.rows.lock().unwrap().clone()),
+                    "intent_claim" => json!({ "won": true }),
+                    "intent_beat" | "intent_finish" => json!({ "ok": true }),
                     "claim_next" if !claimed.swap(true, Ordering::SeqCst) => {
                         json!({ "item": item("a", "claimed"), "token": "lease-1" })
                     }
@@ -54,16 +63,19 @@ struct T {
     asks: Arc<AskHost>,
     drafts: Arc<DraftHost>,
     asked: Asked,
+    listed: asks::Listed,
     mode: Arc<AtomicU32>,
 }
 
 async fn setup(mode: u8, own: bool) -> T {
     let mode = Arc::new(AtomicU32::new(mode as u32));
-    let (base, asked) = store(mode.clone()).await;
+    let listed: asks::Listed = Default::default();
+    let (base, asked) = store(mode.clone(), listed.clone()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
     let (asks, drafts) = (Arc::new(AskHost::default()), Arc::new(DraftHost::default()));
     rig.machine.asks = Some(asks.clone());
+    rig.lp(0).asks.poll_every = Duration::ZERO;
     rig.machine.drafts = Some(drafts.clone());
     rig.pause("p0", own);
     T {
@@ -72,6 +84,7 @@ async fn setup(mode: u8, own: bool) -> T {
         asks,
         drafts,
         asked,
+        listed,
         mode,
     }
 }
@@ -82,7 +95,7 @@ fn count(t: &T, op: &str) -> usize {
 
 /// Nothing new started in a few passes, while the fetch-side reads carried on.
 async fn held(t: &mut T) {
-    asks::push(&t.rig, asks::ask("k1", "hello"));
+    asks::push(&t.listed, asks::code_question("in-1", "hello"));
     for _ in 0..5 {
         t.rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -157,14 +170,12 @@ async fn a_session_already_running_finishes_while_the_store_is_paused() {
 }
 
 #[tokio::test]
-async fn an_ask_waits_once_across_the_stores_pause_and_is_answered_after_it_lifts() {
+async fn a_question_waits_across_the_stores_pause_and_is_answered_after_it_lifts() {
     let mut t = setup(ON, false).await;
-    asks::push(&t.rig, asks::ask("k1", "hello"));
-    let sent = asks::until(&mut t.rig, &t.asked, 1).await;
-    assert_eq!(sent[0]["status"], "waiting");
+    asks::push(&t.listed, asks::code_question("in-1", "hello"));
     asks::quiet_passes(&mut t.rig).await;
-    assert_eq!(asks::reports(&t.asked).len(), 1, "waiting goes once");
+    assert_eq!(count(&t, "intent_claim"), 0, "held while the store is paused");
     t.mode.store(OFF as u32, Ordering::SeqCst);
-    let sent = asks::until(&mut t.rig, &t.asked, 2).await;
-    assert_eq!(sent[1]["answer"], "Answer to hello");
+    let sent = asks::until(&mut t.rig, &t.asked, 1).await;
+    assert_eq!(sent[0]["result"]["answer"], "Answer to hello");
 }

@@ -276,7 +276,7 @@ pub fn lighthouse_request(
     summaries: &[Summary],
     new: &[(&Summary, &Finding)],
     specs_index: &str,
-) -> anyhow::Result<crate::backlog::asks::QueuedDraft> {
+) -> anyhow::Result<crate::backlog::facts::QueuedDraft> {
     let pages: String = summaries
         .iter()
         .map(|s| {
@@ -315,7 +315,7 @@ pub fn lighthouse_request(
         ],
     )?;
     let keys: Vec<&str> = new.iter().map(|(_, f)| f.key.as_str()).collect();
-    Ok(crate::backlog::asks::QueuedDraft {
+    Ok(crate::backlog::facts::QueuedDraft {
         request: format!("{TAG} {prompt}"),
         titles: vec![format!("{TAG} Fix what Lighthouse found on staging")],
         intake: Some(
