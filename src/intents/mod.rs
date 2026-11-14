@@ -7,6 +7,8 @@
 //! agent id, and claiming it again keeps the claim (the store lets a claim go after a few minutes without a beat).
 //!
 //! A kind is added by registering one [`Handler`]; the puller itself knows nothing of any kind.
+pub mod take_over;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
