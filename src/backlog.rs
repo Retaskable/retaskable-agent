@@ -13,6 +13,7 @@
 //! for "nothing to do".
 pub mod asks;
 pub mod complete;
+pub mod decisions;
 pub mod drafts;
 pub mod failures;
 pub mod merge;
