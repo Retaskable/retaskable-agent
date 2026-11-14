@@ -15,6 +15,7 @@ pub mod asks;
 pub mod audiences;
 pub mod drafts;
 pub mod facts;
+pub mod expert;
 pub mod failures;
 pub mod merge;
 pub mod runs;
