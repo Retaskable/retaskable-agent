@@ -22,6 +22,7 @@
 mod asks;
 mod deprecations;
 mod drafts;
+mod finish_steps;
 mod fix_main;
 mod held_items;
 mod host_calls;

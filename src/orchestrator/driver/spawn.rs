@@ -108,6 +108,7 @@ pub fn spawn_all(args: SpawnArgs) {
             machine = machine.with_trial(host, checks);
         }
         machine = machine.with_take_overs();
+        machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
         }

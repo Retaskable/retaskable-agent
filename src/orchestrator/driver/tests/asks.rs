@@ -127,6 +127,7 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                             }
                         }
                         "intent_beat" => json!({ "ok": true }),
+                        "complete" => json!({ "built": true, "status": "merged" }),
                         "intent_finish" => {
                             let id = body["args"]["id"].clone();
                             for row in rows.rows.lock().unwrap().iter_mut().filter(|r| r["id"] == id) {

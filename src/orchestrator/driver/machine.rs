@@ -131,6 +131,8 @@ pub struct Machine {
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
     /// Whether a person's take-over requests are pulled. Off unless a session starter is wired.
     pub(super) take_overs: bool,
+    /// Finishes items a person marks Done. With none, `finish_requested` rows are left alone.
+    pub(super) finish_host: Option<Arc<dyn super::finish_steps::FinishHost>>,
     /// The wait between merge tries after a draft is rebased.
     pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
@@ -184,6 +186,7 @@ impl Machine {
             trial: None,
             asks: None,
             take_overs: false,
+            finish_host: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
@@ -444,6 +447,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode finish items a person marks Done.
+    pub fn with_finish_host(mut self, host: Arc<dyn super::finish_steps::FinishHost>) -> Self {
+        self.finish_host = Some(host);
+        self
+    }
+
     /// Lets `claim` mode answer the chat's asks.
     pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
         self.asks = Some(host);
@@ -633,6 +642,15 @@ impl Machine {
             if live && self.take_overs {
                 let shared = shared!(self, stopping);
                 lp.take_over_pass(&shared).await;
+            }
+        }
+        // A person's Done on an item that needs help here: no session, so no slot.
+        if let Some(host) = self.finish_host.clone() {
+            for (lp, &live) in self.projects.iter_mut().zip(&live) {
+                if live {
+                    let shared = shared!(self, stopping);
+                    lp.finish_pass(&host, &shared).await;
+                }
             }
         }
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
