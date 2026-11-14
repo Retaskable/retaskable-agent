@@ -393,10 +393,12 @@ mod tests {
         assert!(changed(&mut rx), "concurrency");
     }
 
+    // The clone is what's under test, so it must stay even though `live` isn't used by value after.
+    #[allow(clippy::redundant_clone)]
     #[test]
     fn clones_share_state_and_now_is_rfc3339() {
         let live = LiveHandle::default();
-        live.register("shared");
+        live.clone().register("shared");
         assert!(live.snapshot().projects.contains_key("shared"));
         assert!(now_iso8601().ends_with('Z'));
     }

@@ -67,7 +67,9 @@ mod tests {
     #[test]
     fn a_clone_shares_the_lookup() {
         let env = Env::from_pairs([("A", "1")]);
+        let copy = env.clone();
         assert_eq!(env.get("A").as_deref(), Some("1"));
+        assert_eq!(copy.get("A").as_deref(), Some("1"));
     }
 
     #[test]
