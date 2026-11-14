@@ -288,6 +288,7 @@ pub struct ProjectLoop {
     pub(super) asks: super::asks::Asks,
     /// Items taken over from another computer, and the rows asking for it (`take_overs.rs`).
     pub(super) take_overs: super::take_overs::Pulling,
+    pub(super) finishing: super::finish_steps::Finishing,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
@@ -371,6 +372,7 @@ impl ProjectLoop {
             claude_pending: Default::default(),
             asks: Default::default(),
             take_overs: Default::default(),
+            finishing: Default::default(),
             trial: None,
             backlog_items: 0,
             file_project,
