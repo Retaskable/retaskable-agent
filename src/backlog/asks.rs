@@ -102,19 +102,27 @@ pub struct QueuedDraft {
     pub intake: Option<Value>,
 }
 
-/// What `facts_get { kind: "project" }` says about the project's use today.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What `pause_get {}` says: the project's own pause, for every computer on it. Spend is this computer's own
+/// (the machine store), not the store's.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProjectFacts {
-    /// The project's own pause (for every computer on it), set from the store.
-    #[serde(default)]
     pub paused: bool,
-    /// The store's own words for that pause ("Paused by @james for everyone").
-    #[serde(default)]
+    /// Who paused it and why ("Paused by @james for everyone: before the demo").
     pub paused_reason: Option<String>,
-    /// What the project's sessions cost today, in USD, across computers.
+}
+
+/// The store's `ProjectPause` (`{ by, at, reason }`), `null` when not paused.
+#[derive(Deserialize)]
+struct PauseGet {
     #[serde(default)]
-    pub spent_today_usd: f64,
+    paused: Option<PauseBy>,
+}
+
+#[derive(Deserialize)]
+struct PauseBy {
+    by: String,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -172,16 +180,19 @@ impl Client {
         Ok(ask.id)
     }
 
-    /// `facts_get { kind: "project" }`: the project's pause and today's spend, which gate new asks.
+    /// `pause_get {}`: whether the project is paused for everyone, which gates new work and asks.
     pub async fn project_facts(&self, repo_id: u64, token: Option<&str>) -> Result<ProjectFacts, BacklogError> {
-        self.op(
-            repo_id,
-            token,
-            "facts_get",
-            json!({ "kind": "project" }),
-            "project facts",
-        )
-        .await
+        let got: PauseGet = self.op(repo_id, token, "pause_get", json!({}), "pause").await?;
+        Ok(match got.paused {
+            None => ProjectFacts::default(),
+            Some(p) => ProjectFacts {
+                paused: true,
+                paused_reason: Some(match p.reason.filter(|r| !r.trim().is_empty()) {
+                    Some(reason) => format!("Paused by @{} for everyone: {reason}", p.by),
+                    None => format!("Paused by @{} for everyone", p.by),
+                }),
+            },
+        })
     }
 
     /// `facts_get { kind: "audiences" }`: the company's audiences.
