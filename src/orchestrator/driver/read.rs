@@ -73,7 +73,13 @@ pub(super) async fn read(
             code: Some("unauthorized".into()),
             message: "this computer holds no link to the backlog store".into(),
         })),
-        Some(ref token) => client.list(repo_id, Some(token)).await.map_err(Fail::Store),
+        Some(ref token) => (client.list(repo_id, Some(token)).await)
+            .map(|mut items| {
+                // Expert sessions are the experts module's, never planned.
+                items.retain(|i| !crate::expert::is_expert(&i.id, i.kind.as_deref()));
+                items
+            })
+            .map_err(Fail::Store),
     };
     let settings = match &token {
         Some(token) => Some(client.settings_get(repo_id, Some(token)).await),

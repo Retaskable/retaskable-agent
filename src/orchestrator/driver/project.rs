@@ -288,6 +288,8 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
+    /// The expert sessions (`experts.rs`).
+    pub(super) experts: super::experts::Experts,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
@@ -369,6 +371,7 @@ impl ProjectLoop {
             second_due: Vec::new(),
             claude_pending: Default::default(),
             asks: Default::default(),
+            experts: Default::default(),
             trial: None,
             backlog_items: 0,
             file_project,

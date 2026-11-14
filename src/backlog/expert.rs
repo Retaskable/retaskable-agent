@@ -200,5 +200,52 @@ impl Client {
     }
 }
 
+impl Client {
+    /// `add { via: "expert", startedBy, agent, items: [item] }`: a person's expert session, added to the store
+    /// claimed by `agent` in the same step, so no other computer takes it, and owned by `started_by`. Answers the
+    /// item and its lease. A `conflict` is an id already taken: the caller tries the next one.
+    pub async fn expert_add(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        item: &ExpertItem,
+        started_by: &str,
+        agent: &super::ClaimNextAgent,
+    ) -> Result<ExpertAdded, BacklogError> {
+        let args = json!({ "via": "expert", "startedBy": started_by, "agent": agent, "items": [item] });
+        self.op(repo_id, token, "add", args, "expert session").await
+    }
+
+    /// `report { id, token }` with no note: touches the lease on item `id` without changing it, so a session
+    /// that is being used isn't dropped as idle (`HostedWork.beat`). A `stale_lease` answer is an error the
+    /// caller may ignore.
+    pub async fn lease_beat(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        lease: &str,
+    ) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "report", json!({ "id": id, "token": lease }))
+            .await?;
+        Ok(())
+    }
+}
+
+/// An expert session as it is added: its id, title and the request it starts from.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExpertItem {
+    pub id: String,
+    pub title: String,
+    pub remaining: String,
+}
+
+/// What `add` answers for an expert session: the item, claimed, and the lease that goes with it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpertAdded {
+    pub item: super::Item,
+    pub token: String,
+}
+
 #[cfg(test)]
 mod tests;

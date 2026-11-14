@@ -10,7 +10,8 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop, `restart_play` too,
 //! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
-//! `.retaskable/remote.log` ([`audit`]).
+//! `.retaskable/remote.log` ([`audit`]). The expert commands (`expert_start`, `expert_say`, `expert_stop`, `expert_end`) are queued for the
+//! loop too (`orchestrator::driver::experts`).
 
 use crate::text::is_blank;
 use std::collections::HashMap;
@@ -111,6 +112,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "playtest" => playtest(cmd, project, view, data_dir),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "ask" => ask(cmd, project, view, data_dir),
+        "expert_start" | "expert_say" | "expert_stop" | "expert_end" => expert::expert(cmd, project, view),
         "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
@@ -668,7 +670,8 @@ fn audit_args(name: &str, args: &Value) -> Value {
     let mut args = args.clone();
     let typed: &[&str] = match name {
         "continue" | "retry" | "playtest" => &["notes"],
-        "ask" => &["text"],
+        "ask" | "expert_say" => &["text"],
+        "expert_start" => &["request"],
         "draft_edit" => &["content"],
         _ => &[],
     };
@@ -724,5 +727,6 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     });
 }
 
+mod expert;
 #[cfg(test)]
 mod tests;
