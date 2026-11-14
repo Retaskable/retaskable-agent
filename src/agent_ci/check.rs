@@ -8,10 +8,13 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use super::claim::{self, Verdict};
+use super::automerge::{self, Automerge};
+use super::claim;
+use super::prs::PrMeta;
 use super::report::{self, Host, Kind, State};
 use super::settings::Repo;
-use super::{CheckKey, Programs, automerge, container, host};
+use super::store::{self, Claim, Claimed};
+use super::{CheckKey, Programs, container, host};
 use crate::backlog::runs::short_sha;
 use crate::telemetry::EventLog;
 use crate::telemetry::event::{Ci, Event};
@@ -28,11 +31,21 @@ pub struct Job {
     pub cpus: u32,
     pub image: String,
     pub key: CheckKey,
-    /// Merges the pull request when the check is green; none merges nothing.
-    pub automerge: Option<automerge::Automerge>,
+    /// The store (the lease, the run record) and what merges a green pull request.
+    pub merge: Automerge,
+    /// The pull request's branch, title and author, as a claim and a run record tell the store.
+    pub meta: PrMeta,
+    /// A commit named on the command line (`once`): checked whatever its status says, and the claim forced.
+    pub force: bool,
     pub clock: super::Clock,
+    /// How often a running check sends its heartbeat.
     pub refresh: std::time::Duration,
+    /// The pause between `ci_finish` tries.
+    pub finish_pause: std::time::Duration,
 }
+
+/// `ci_finish` is tried this many times.
+const FINISH_TRIES: u32 = 3;
 
 /// How a poll's attempt at a key ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,9 +111,45 @@ fn name_file(dir: &Path) -> PathBuf {
     dir.with_extension("name")
 }
 
+/// The event a check runs for, as the runner names it.
+fn event_of(k: &CheckKey) -> &'static str {
+    if k.is_push() { "push" } else { "pull_request" }
+}
+
+/// Whether the commit's newest status of the check's context leaves the run to this computer (`claim::wants_run`,
+/// asked as under an agent: the store's lease decides between computers). A host that can't be read is an error.
+async fn wanted(j: &Job, host_api: &Arc<Host>, context: &str) -> anyhow::Result<bool> {
+    let (h, head) = (host_api.clone(), j.key.head.clone());
+    let all = tokio::task::spawn_blocking(move || h.read_statuses(&head)).await??;
+    let me = report::me(&j.computer);
+    Ok(claim::wants_run(claim::newest(&all, context), &me, (j.clock)(), true))
+}
+
+/// The lease: `ci_claim` to the store. A store that can't be reached is an error (nothing runs).
+async fn lease(j: &Job, context: &str) -> Result<Claimed, String> {
+    let c = Claim {
+        sha: &j.key.head,
+        context,
+        event: event_of(&j.key),
+        pr: j.key.pr,
+        branch: &j.meta.branch,
+        title: &j.meta.title,
+        author: &j.meta.author,
+        computer: &j.computer,
+    };
+    let mut args = store::claim_args(&c);
+    if j.force {
+        args["force"] = json!(true);
+    }
+    let v = j.merge.store().op(&j.repo.github_repo, "ci_claim", args).await?;
+    Ok(store::read_claim(&v))
+}
+
 /// Claims the key and, if this computer wins, runs the check; the last status is posted before this returns.
-/// Failures to reach the host are logged: the check still counts as finished, so a broken `gh` doesn't rerun
-/// the container every poll. A key that can't be claimed (host unreachable) is tried again next poll.
+/// A commit whose status leaves no run to this computer is done at once. A key that can't be claimed (the store or
+/// the host unreachable, or another computer holds the lease) is tried again next poll. Failures to reach the host
+/// after the claim are logged: the check still counts as finished, so a broken `gh` doesn't rerun the container
+/// every poll.
 pub async fn run(j: Job) -> Ran {
     let host_api = Arc::new(Host {
         program: PathBuf::from(&j.programs.gh),
@@ -109,29 +158,30 @@ pub async fn run(j: Job) -> Ran {
         dir: j.mirror.clone(),
     });
     let key = key_text(&j.key);
-    match claim::claim(&host_api, context_of(&j.key), &j.key.head, &key, &j.computer, || {
-        (j.clock)()
-    })
-    .await
-    {
-        Ok(Verdict::Run { stale }) => {
-            if !stale.is_empty() {
-                tracing::info!("agent CI: taking over {key} from {}", stale.join(", "));
-                emit(&j, "stale_taken_over", 0);
+    let context = context_of(&j.key);
+    if !j.force {
+        match wanted(&j, &host_api, context).await {
+            Ok(true) => {}
+            Ok(false) => return Ran::Done,
+            Err(e) => {
+                tracing::warn!("agent CI: reading the statuses of {key} failed: {e:#}");
+                return Ran::Lost;
             }
-            emit(&j, "claimed", 0);
         }
-        Ok(Verdict::Lose) => return Ran::Lost,
-        Ok(Verdict::Finished) => return Ran::Done,
+    }
+    match lease(&j, context).await {
+        Ok(Claimed::Won) => emit(&j, "claimed", 0),
+        Ok(Claimed::Finished) => return Ran::Done,
+        Ok(Claimed::Held(_)) => return Ran::Lost,
         Err(e) => {
-            tracing::warn!("agent CI: claiming {key} failed: {e:#}");
+            tracing::warn!("agent CI: claiming {key} failed: {e}");
             return Ran::Lost;
         }
     }
     let begun = Instant::now();
     tracing::info!("agent CI: {} {}: checking", j.repo.github_repo, subject(&j.key));
     emit(&j, "started", 0);
-    let ok = go(&j, begun, host_api).await;
+    let ok = go(&j, begun, host_api.clone()).await;
     let ms = begun.elapsed().as_millis();
     emit(&j, "finished", ms);
     let verdict = if ok { "passed" } else { "failed" };
@@ -141,18 +191,56 @@ pub async fn run(j: Job) -> Ran {
         subject(&j.key),
         ms / 1000
     );
+    finish(&j, ok, ms).await;
+    if ok {
+        land(&j, &host_api).await;
+    }
     Ran::Done
+}
+
+/// The run's result goes in the project's history (`ci_finish`); the status is already the truth, so a store that
+/// can't be reached only loses the record, after three tries.
+async fn finish(j: &Job, ok: bool, ms: u128) {
+    let context = context_of(&j.key);
+    let mut args = json!({
+        "sha": j.key.head,
+        "context": context,
+        "event": event_of(&j.key),
+        "result": if ok { "passed" } else { "failed" },
+        "minutes": (ms as f64 / 6000.0).round() / 10.0,
+        "computer": j.computer,
+    });
+    if !j.key.is_push() {
+        args["pr"] = json!(j.key.pr);
+        for (k, v) in [
+            ("branch", &j.meta.branch),
+            ("title", &j.meta.title),
+            ("author", &j.meta.author),
+        ] {
+            if !v.is_empty() {
+                args[k] = json!(v);
+            }
+        }
+    }
+    for _ in 0..FINISH_TRIES {
+        match j.merge.store().op(&j.repo.github_repo, "ci_finish", args.clone()).await {
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!("agent CI: ci_finish: {e}");
+                tokio::time::sleep(j.finish_pause).await;
+            }
+        }
+    }
 }
 
 async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     let me = report::me(&j.computer);
     let repo = j.mirror.clone();
-    let key = key_text(&j.key);
     let head = j.key.head.clone();
     let minutes = || begun.elapsed().as_secs() / 60;
     let context = context_of(&j.key);
     let post = |state: State, text: String| {
-        let (h, head, text) = (host_api.clone(), head.clone(), claim::describe(&text, &key));
+        let (h, head) = (host_api.clone(), head.clone());
         async move {
             let r = tokio::task::spawn_blocking(move || h.post_status(&head, context, state, &text, None)).await;
             match r {
@@ -162,8 +250,22 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
             }
         }
     };
-    // The claim is already posted; it is posted again every few minutes until the last status.
-    let refresh = || post(State::Pending, report::running_text(&me));
+    // The pending status is the display of the lease; it is posted now, and with each heartbeat to the store
+    // until the last status.
+    post(State::Pending, report::running_text(&me)).await;
+    let beat = || {
+        let (store, repo) = (j.merge.store().clone(), j.repo.github_repo.clone());
+        let args = json!({ "sha": j.key.head, "context": context });
+        let pending = post(State::Pending, report::running_text(&me));
+        async move {
+            match store.op(&repo, "ci_heartbeat", args).await {
+                Ok(v) if store::lease_lost(&v) => tracing::warn!("agent CI: lease lost"),
+                Err(e) => tracing::warn!("agent CI: heartbeat: {e}"),
+                Ok(_) => {}
+            }
+            pending.await;
+        }
+    };
     let fail = |reason: String, log: String| {
         let (h, key, head) = (host_api.clone(), key_text(&j.key), j.key.head.clone());
         let pr = j.key.pr;
@@ -186,7 +288,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
 
     // Only the fetch and the run are refreshed: the final status and the comment are posted after the last
     // refresh, so a late refresh can't turn the finished check pending again.
-    let result: Result<(), (String, String)> = claim::refreshing(j.refresh, refresh, async {
+    let result: Result<(), (String, String)> = claim::refreshing(j.refresh, beat, async {
         let (data, id, main) = (j.data_dir.clone(), j.repo.id(), j.repo.base_branch.clone());
         let head_ref = format!("refs/pull/{}/head", j.key.pr);
         let push = j.key.is_push();
@@ -259,7 +361,6 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     match result {
         Ok(()) => {
             post(State::Success, report::passed_text(&me, minutes())).await;
-            land(j).await;
             true
         }
         Err((reason, log)) => {
@@ -269,22 +370,15 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     }
 }
 
-/// A green check's `automerge`: the pull request is squash-merged under the merge lock, or says why not.
-async fn land(j: &Job) {
-    let Some(am) = &j.automerge else { return };
-    let target = automerge::Target {
-        gh: &j.programs.gh,
-        git: &j.programs.git,
-        repo_dir: &j.mirror,
-        github_repo: &j.repo.github_repo,
-        base: &j.repo.base_branch,
-        computer: &j.computer,
-        key: &j.key,
-    };
-    match automerge::run(am, &target).await {
+/// A green check's `automerge`: the pull request is squash-merged pinned to its head, or says why not.
+async fn land(j: &Job, host_api: &Arc<Host>) {
+    if j.key.is_push() {
+        return;
+    }
+    let ended = automerge::Automerge::run(&j.merge, host_api, &j.repo.base_branch, j.key.pr, &j.key.head).await;
+    match ended {
         automerge::Ended::Merged => tracing::info!("agent CI: merged PR #{}", j.key.pr),
-        automerge::Ended::MainMoved => tracing::info!("agent CI: main moved, PR #{} isn't merged", j.key.pr),
-        automerge::Ended::NotAsked => {}
+        automerge::Ended::Held(_) | automerge::Ended::NotAsked => {}
         automerge::Ended::Failed(why) => tracing::warn!("agent CI: merging PR #{} failed: {why}", j.key.pr),
     }
 }

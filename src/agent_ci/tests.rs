@@ -1,4 +1,26 @@
 use super::*;
+#[cfg(unix)]
+use serde_json::json;
+#[cfg(unix)]
+use store::tests::FakeStore;
+
+#[test]
+fn metas_carry_what_a_claim_tells_the_store_and_the_automerge_label() {
+    let json = r#"[{"number":4,"labels":[{"name":"automerge"}],"headRefOid":"a","headRefName":"fix","title":"T","author":{"login":"me"}},
+      {"number":5,"labels":[],"headRefOid":"b"}]"#;
+    let m = prs::metas(json).unwrap();
+    assert_eq!(
+        m[&4],
+        prs::PrMeta {
+            branch: "fix".into(),
+            title: "T".into(),
+            author: "me".into(),
+            automerge: true
+        }
+    );
+    assert_eq!(m[&5], prs::PrMeta::default());
+    assert!(prs::metas("nope").is_err());
+}
 
 #[test]
 fn ready_skips_drafts_and_forks_and_holds_an_agent_branch_until_ci_ready() {
@@ -132,6 +154,7 @@ mod stubbed {
         _dir: tempfile::TempDir,
         ci: CiLoop,
         cfg: Settings,
+        store: Arc<FakeStore>,
     }
 
     fn rig(files: &[&str], branch_files: &[&str], gh_json: &str) -> Rig {
@@ -154,10 +177,17 @@ mod stubbed {
             gh: gh.into(),
             ..Programs::default()
         };
-        let mut ci = CiLoop::new(programs);
+        let store = FakeStore::winning();
+        let mut ci = CiLoop::new(programs).with_store(store.clone());
+        ci.finish_pause = Duration::from_millis(1);
         let url = origin.to_str().unwrap().to_string();
         ci.remote = Arc::new(move |_| url.clone());
-        Rig { ci, cfg, _dir: dir }
+        Rig {
+            ci,
+            cfg,
+            store,
+            _dir: dir,
+        }
     }
 
     const ONE_PR: &str = r#"[{"number":7,"isDraft":false,"labels":[],"headRefOid":"h1"}]"#;
@@ -298,68 +328,88 @@ mod stubbed {
                 .count(),
             0
         );
+        let claim = &r.store.args("ci_claim")[0];
+        assert_eq!(claim["sha"], "h7");
+        assert_eq!(claim["event"], "pull_request");
+        assert_eq!((claim["pr"].as_u64(), claim["computer"].as_str()), (Some(7), Some("t")));
+        let fin = &r.store.args("ci_finish")[0];
+        assert_eq!(
+            (fin["result"].as_str(), fin["context"].as_str()),
+            (Some("passed"), Some("ci/agent/pr/ci"))
+        );
         // A key no longer listed (this one isn't) is forgotten at the next poll.
         r.ci.poll(&r.cfg).await;
         assert!(r.ci.seen.lock().unwrap().is_empty());
     }
 
-    /// `pr_rig` with a `gh` that logs every call, answers `pr view` with `view` and a list with PR 7, and a fake
-    /// store lock; main is where the check saw it.
-    fn automerge_rig(docker_body: &str, view: &str) -> (Rig, Arc<std::sync::Mutex<Vec<String>>>) {
-        let mut r = pr_rig(docker_body);
+    /// `pr_rig` with a `gh` that logs every call and answers the pull request's own endpoint with `view`.
+    fn automerge_rig(docker_body: &str, view: &str) -> Rig {
+        let r = pr_rig(docker_body);
         let bin = r._dir.path().join("bin");
         let log = r._dir.path().join("calls.log");
         script(
             &bin,
             "gh",
             &format!(
-                "echo \"gh $*\" >> {l}\nif [ \"$1\" = api ]; then [ \"$3\" = GET ] && echo '[]'; exit 0; fi\n\
-                 if [ \"$2\" = view ]; then echo '{view}'; exit 0; fi\n\
-                 [ \"$2\" = merge ] && exit 0\n\
+                "echo \"gh $*\" >> {l}\nif [ \"$1\" = api ]; then\n case \"$4\" in\n repos/o/p/pulls/7) echo '{view}';;\n \
+                 *) [ \"$3\" = GET ] && echo '[]';;\n esac\n exit 0\nfi\n\
                  echo '[{{\"number\":7,\"isDraft\":false,\"labels\":[],\"headRefOid\":\"h7\"}}]'",
                 l = log.display()
             ),
         );
-        let store = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let locks = automerge::tests::FakeLocks {
-            busy: std::sync::Mutex::new(0),
-            log: store.clone(),
-        };
-        let am = automerge::Automerge {
-            locks: Arc::new(locks),
-            ask_every: Duration::from_millis(5),
-            wait: Duration::from_secs(5),
-        };
-        r.ci = std::mem::replace(&mut r.ci, CiLoop::new(Programs::default())).with_automerge(am);
-        (r, store)
+        r
     }
 
-    const LABELLED: &str = r#"{"state":"OPEN","headRefOid":"h7","labels":[{"name":"automerge"}]}"#;
+    const LABELLED: &str = r#"{"state":"open","head":{"sha":"h7","ref":"fix"},"labels":[{"name":"automerge"}]}"#;
 
     #[tokio::test]
     async fn a_green_automerge_check_merges_and_a_red_one_does_not() {
         for (docker, merged) in [("exit 0", true), ("echo boom >&2\nexit 1", false)] {
-            let (mut r, store) = automerge_rig(docker, LABELLED);
-            // The checked main is the real origin/main, so the merge sees it unmoved.
-            let main = std::process::Command::new("git")
-                .args(["rev-parse", "origin/main"])
-                .current_dir(r._dir.path().join("work"))
-                .output()
-                .unwrap();
-            let main = String::from_utf8(main.stdout).unwrap().trim().to_string();
-            let k = CheckKey { main, ..key(7, "h7") };
-            for t in go(&mut r, vec![k]).await {
+            let mut r = automerge_rig(docker, LABELLED);
+            for t in go(&mut r, vec![key(7, "h7")]).await {
                 t.await.unwrap();
             }
             assert_eq!(
-                calls(&r).contains("pr merge 7 --squash --delete-branch"),
+                calls(&r).contains("-X PUT repos/o/p/pulls/7/merge -f merge_method=squash -f sha=h7"),
                 merged,
                 "{}",
                 calls(&r)
             );
-            let store = store.lock().unwrap().clone();
-            assert_eq!(store.len(), if merged { 2 } else { 0 }, "{store:?}");
+            assert_eq!(r.store.args("ci_merged").len(), usize::from(merged));
+            assert_eq!(r.store.args("ci_finish").len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn a_poll_merges_a_green_pull_request_that_asks_late() {
+        let mut r = pr_rig("exit 0");
+        let bin = r._dir.path().join("bin");
+        let log = r._dir.path().join("calls.log");
+        let ok = r#"[{"context":"ci/agent/pr/ci","state":"success","description":"agent-ci t: passed in 1m","updated_at":"2026-01-01T00:00:00Z"}]"#;
+        script(
+            &bin,
+            "gh",
+            &format!(
+                "echo \"gh $*\" >> {l}\nif [ \"$1\" = api ]; then\n case \"$4\" in\n repos/o/p/pulls/7) echo '{LABELLED}';;\n \
+                 *commits/*/statuses*) echo '{ok}';;\n *) [ \"$3\" = GET ] && echo '[]';;\n esac\n exit 0\nfi\n\
+                 echo '[{{\"number\":7,\"isDraft\":false,\"labels\":[{{\"name\":\"automerge\"}}],\"headRefOid\":\"h7\",\"headRefName\":\"fix\"}}]'",
+                l = log.display()
+            ),
+        );
+        r.ci.poll(&r.cfg).await;
+        assert!(calls(&r).contains("-X PUT repos/o/p/pulls/7/merge"), "{}", calls(&r));
+        assert_eq!(r.store.args("ci_merged").len(), 1);
+        assert!(!r.store.args("ci_merge_requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_a_store_nothing_is_listed_or_run() {
+        let mut r = pr_rig("exit 0");
+        r.ci.merge = None;
+        assert!(r.ci.poll(&r.cfg).await.is_empty());
+        let keys = [("o-p".to_string(), vec![key(7, "h7")])].into();
+        assert!(r.ci.start(&r.cfg, keys).await.is_empty());
+        assert_eq!(calls(&r).matches("docker run").count(), 0);
     }
 
     #[tokio::test]
@@ -530,10 +580,23 @@ mod stubbed {
     }
 
     #[tokio::test]
-    async fn two_loops_sharing_one_host_run_a_key_once() {
+    async fn two_loops_sharing_one_store_run_a_key_once() {
         let mut a = pr_rig("sleep 1");
         claim_gh(&mut a, &[]);
-        let mut b = CiLoop::new(a.ci.programs.clone());
+        // The store gives the lease to the first claim and names its holder to the next.
+        let taken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = FakeStore::answering(move |op, _| {
+            Ok(match op {
+                "ci_claim" if taken.swap(true, Ordering::SeqCst) => {
+                    json!({ "won": false, "holder": { "computer": "a" } })
+                }
+                "ci_claim" => json!({ "won": true }),
+                "ci_merge_requests" => json!({ "requests": [] }),
+                _ => json!({ "ok": true }),
+            })
+        });
+        a.ci = std::mem::replace(&mut a.ci, CiLoop::new(Programs::default())).with_store(store.clone());
+        let mut b = CiLoop::new(a.ci.programs.clone()).with_store(store.clone());
         b.remote = a.ci.remote.clone();
         let (mut cfg_a, mut cfg_b) = (a.cfg.clone(), a.cfg.clone());
         (cfg_a.computer, cfg_b.computer) = ("a".into(), "b".into());
@@ -541,7 +604,6 @@ mod stubbed {
         a.ci.poll(&cfg_a).await;
         b.poll(&cfg_b).await;
         let ta = a.ci.start(&cfg_a, keys.clone()).await;
-        // Wait for a's claim to be posted before b looks.
         while !calls(&a).contains("state=pending") {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -550,30 +612,52 @@ mod stubbed {
             t.await.unwrap();
         }
         assert_eq!(docker_runs(&a), 1, "{}", calls(&a));
+        assert_eq!(store.args("ci_claim").len(), 2);
         // The loser forgets the key so it looks again; the winner's finished key is not run again.
         assert!(b.seen.lock().unwrap().is_empty());
         assert_eq!(a.ci.seen.lock().unwrap().len(), 1);
-        run_as(&mut a, "c").await;
-        assert_eq!(docker_runs(&a), 1);
     }
 
     #[tokio::test]
-    async fn a_claim_fifteen_minutes_old_is_taken_over_and_fourteen_is_not() {
+    async fn only_a_won_lease_runs_the_check() {
+        for (answer, runs, done) in [
+            (json!({ "won": true }), 1, true),
+            (json!({ "won": false, "holder": { "computer": "z" } }), 0, false),
+            (json!({ "won": false, "finished": true }), 0, true),
+        ] {
+            let mut r = pr_rig("exit 0");
+            claim_gh(&mut r, &[]);
+            let store = FakeStore::answering(move |op, _| {
+                Ok(if op == "ci_claim" {
+                    answer.clone()
+                } else {
+                    json!({ "ok": true })
+                })
+            });
+            r.ci = std::mem::replace(&mut r.ci, CiLoop::new(Programs::default())).with_store(store);
+            run_as(&mut r, "a").await;
+            assert_eq!(docker_runs(&r), runs);
+            assert_eq!(r.ci.seen.lock().unwrap().len(), usize::from(done));
+        }
+        // A store that can't be reached: nothing runs, and the key is tried again.
+        let mut r = pr_rig("exit 0");
+        claim_gh(&mut r, &[]);
+        let down = FakeStore::answering(|_, _| Err("down".into()));
+        r.ci = std::mem::replace(&mut r.ci, CiLoop::new(Programs::default())).with_store(down);
+        run_as(&mut r, "a").await;
+        assert_eq!(docker_runs(&r), 0);
+        assert!(r.ci.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn another_computers_pending_status_is_left_to_the_lease() {
         let desc = format!("agent-ci z: running ({KEY_TEXT})");
         let mut r = pr_rig("exit 0");
         claim_gh(&mut r, &[("pending", &desc, now() - 14 * 60_000)]);
-        let t = now();
-        r.ci.clock = Arc::new(move || t);
         run_as(&mut r, "a").await;
-        assert_eq!(docker_runs(&r), 0, "{}", calls(&r));
-        assert!(!calls(&r).contains("-X POST"));
-
-        let mut r = pr_rig("exit 0");
-        claim_gh(&mut r, &[("pending", &desc, now() - 15 * 60_000)]);
-        run_as(&mut r, "a").await;
+        // The status's age doesn't matter: the store's answer (won) is what lets it run.
         assert_eq!(docker_runs(&r), 1, "{}", calls(&r));
-        let ev = events(&r);
-        assert!(ev.contains("stale_taken_over") && ev.contains("claimed"), "{ev}");
+        assert_eq!(r.store.args("ci_claim").len(), 1);
     }
 
     #[tokio::test]
@@ -587,6 +671,7 @@ mod stubbed {
             run_as(&mut r, "a").await;
             assert_eq!(docker_runs(&r), 0);
             assert!(!calls(&r).contains("-X POST"));
+            assert!(r.store.args("ci_claim").is_empty());
         }
     }
 
@@ -599,6 +684,8 @@ mod stubbed {
         // The claim, then a refresh each interval of the second-long run, then success.
         assert!(calls(&r).matches("state=pending").count() >= 4, "{}", calls(&r));
         assert_eq!(calls(&r).matches("state=success").count(), 1);
+        assert!(r.store.args("ci_heartbeat").len() >= 2);
+        assert_eq!(r.store.args("ci_heartbeat")[0]["context"], "ci/agent/pr/ci");
     }
 
     #[tokio::test]

@@ -2,14 +2,13 @@
 //! This is the loop. Each poll it checks Docker, then for each repo in `AGENT_CI_REPO` updates the repo's bare
 //! mirror (`mirror.rs`), looks for the repo's CI files on its base branch and lists the pull requests to check.
 //! Checks are listed here, not run. `host.rs` is the fetch step; `report.rs` is the code host side: statuses and
-//! the failure comment. `AGENT_CI_SLOTS` permits bound the checks; nothing else is shared with any other agent.
+//! the failure comment, `store.rs` the store ops (the lease and the run records). `AGENT_CI_SLOTS` permits bound the checks.
 pub mod automerge;
 pub mod check;
 pub mod claim;
 pub mod container;
 pub mod discovery;
 pub mod docker;
-pub mod hold;
 pub mod host;
 pub mod link;
 pub mod mirror;
@@ -17,6 +16,7 @@ pub mod priority;
 pub mod prs;
 pub mod report;
 pub mod settings;
+pub mod store;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -77,8 +77,15 @@ pub struct CiLoop {
     pub refresh: Duration,
     /// Where a repo's mirror fetches from; a test points it at a local repo.
     pub remote: Arc<dyn Fn(&Repo) -> String + Send + Sync>,
-    /// What squash-merges a green `automerge` pull request; none merges nothing (fail closed).
-    automerge: Option<automerge::Automerge>,
+    /// The store (the lease, the run records) and the merge of green pull requests. None: nothing runs (fail
+    /// closed: the store is the claim).
+    merge: Option<automerge::Automerge>,
+    /// Each open pull request's branch, title, author and `automerge` label, as of the last poll.
+    metas: Arc<Mutex<HashMap<(String, u64), prs::PrMeta>>>,
+    /// Heads (or their prefixes) named to `once`: checked whatever their status says.
+    force: Vec<String>,
+    /// The pause between `ci_finish` tries.
+    pub finish_pause: Duration,
 }
 
 impl CiLoop {
@@ -95,13 +102,17 @@ impl CiLoop {
             clock: Arc::new(crate::telemetry::now_ms),
             refresh: claim::REFRESH,
             remote: Arc::new(Repo::url),
-            automerge: None,
+            merge: None,
+            metas: Arc::default(),
+            force: Vec::new(),
+            finish_pause: Duration::from_secs(5),
         }
     }
 
-    /// Lets the loop merge green pull requests labelled `automerge`, under the store's merge lock.
-    pub fn with_automerge(mut self, automerge: automerge::Automerge) -> Self {
-        self.automerge = Some(automerge);
+    /// Gives the loop its store: the lease every check is claimed with, the run records, and the merge of green
+    /// pull requests (labelled `automerge`, or a person's Merge). Without it nothing runs.
+    pub fn with_store(mut self, store: Arc<dyn store::CiStore>) -> Self {
+        self.merge = Some(automerge::Automerge::new(store));
         self
     }
 
@@ -184,6 +195,9 @@ impl CiLoop {
     /// permit waits for the next poll.
     pub async fn start(&mut self, cfg: &Settings, keys: BTreeMap<String, Vec<CheckKey>>) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
+        let Some(merge) = self.merge.clone() else {
+            return tasks;
+        };
         for (id, list) in keys {
             let Some(repo) = cfg.repos.iter().find(|r| r.id() == id) else {
                 continue;
@@ -200,6 +214,16 @@ impl CiLoop {
                 let Ok(permit) = self.slot.clone().try_acquire_owned() else {
                     return tasks;
                 };
+                let meta = if key.is_push() {
+                    prs::PrMeta::default()
+                } else {
+                    self.metas
+                        .lock()
+                        .unwrap()
+                        .get(&(id.clone(), key.pr))
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 self.seen.lock().unwrap().insert(started.clone());
                 self.running.lock().unwrap().insert(started.clone());
                 let (seen, running, owed) = (self.seen.clone(), self.running.clone(), self.owed.clone());
@@ -211,10 +235,16 @@ impl CiLoop {
                     mirror: mirror.clone(),
                     cpus: self.cpus(cfg),
                     image: image.clone(),
-                    key,
-                    automerge: self.automerge.clone(),
+                    key: key.clone(),
+                    merge: merge.clone(),
+                    meta,
+                    force: self
+                        .force
+                        .iter()
+                        .any(|s| !s.is_empty() && key.head.starts_with(s.as_str())),
                     clock: self.clock.clone(),
                     refresh: self.refresh,
+                    finish_pause: self.finish_pause,
                 };
                 tasks.push(tokio::spawn(async move {
                     // A loser forgets the key, so the next poll looks again (the winner may go stale).
@@ -263,19 +293,34 @@ impl CiLoop {
         let main = discovery::git(git, &mirror, &["rev-parse", &format!("origin/{base}")]).await?;
         let list = prs::list(&self.programs.gh, &mirror, &repo.github_repo, base).await?;
         let mut ready = prs::ready(&list, main.trim())?;
-        // The person's-merge hold (section 3.3). A host that can't be read holds no one.
-        let host = report::Host {
+        let merge = self.merge.as_ref().ok_or("no store: nothing runs")?;
+        let host = Arc::new(report::Host {
             program: self.programs.gh.clone().into(),
             kind: report::Kind::Github,
             repo: repo.github_repo.clone(),
             dir: mirror,
-        };
-        let (base, me): (String, String) = (base.to_string(), report::me(&cfg.computer));
-        let numbers: HashSet<u64> = ready.iter().map(|k| k.pr).collect();
-        match tokio::task::spawn_blocking(move || hold::apply(&host, &base, &list, &numbers, &me)).await {
-            Ok(Err(e)) => tracing::warn!("{id}: merge hold: {e:#}"),
-            Err(e) => tracing::warn!("{id}: merge hold: {e}"),
-            Ok(Ok(())) => {}
+        });
+        merge.refresh_asked(&repo.github_repo).await;
+        let metas = prs::metas(&list)?;
+        self.metas.lock().unwrap().retain(|(i, _), _| *i != id);
+        for (n, m) in &metas {
+            self.metas.lock().unwrap().insert((id.clone(), *n), m.clone());
+        }
+        merge.tell_closed(&host).await;
+        // Green pull requests that now ask to merge (a late label, a person's Merge, a retry): the check that
+        // made them green is over, so nothing else would merge them.
+        for k in &ready {
+            let labelled = metas.get(&k.pr).is_some_and(|m| m.automerge);
+            if !labelled && !merge.is_asked(k.pr, &k.head) {
+                continue;
+            }
+            let (h, head) = (host.clone(), k.head.clone());
+            let Ok(Ok(all)) = tokio::task::spawn_blocking(move || h.read_statuses(&head)).await else {
+                continue;
+            };
+            if claim::newest(&all, report::PR_CONTEXT).is_some_and(|s| s.state == "success") {
+                merge.run(&host, base, k.pr, &k.head).await;
+            }
         }
         // The baseline: main's own push run (the key is main's sha alone, so a new sha is a new run).
         ready.push(CheckKey::push(main.trim()));
@@ -297,6 +342,7 @@ pub async fn run(mut ci: CiLoop, cfg: Settings) {
 /// head, or main's head for its push run), each key once, then waits for them. How many checks started.
 pub async fn once(mut ci: CiLoop, cfg: Settings, shas: &[String]) -> usize {
     ci.recover(&cfg).await;
+    ci.force = shas.to_vec();
     let mut keys = ci.poll(&cfg).await;
     for list in keys.values_mut() {
         list.retain(|k| shas.iter().any(|s| !s.is_empty() && k.head.starts_with(s.as_str())));

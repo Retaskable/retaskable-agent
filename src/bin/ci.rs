@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use retaskable_agent::agent_ci::automerge::{Automerge, StoreLocks};
+use retaskable_agent::agent_ci::store::StoreOps;
 use retaskable_agent::agent_ci::{self, CiLoop, Settings, link as ci_link};
 use retaskable_agent::env::Env;
 
@@ -68,7 +68,7 @@ fn start(env: &Env) -> Result<(CiLoop, Settings)> {
             "The CI runner isn't linked to the shared backlog (run `retaskable-ci link`): it merges nothing."
         );
     }
-    let ci = CiLoop::new(Default::default()).with_automerge(Automerge::new(Arc::new(StoreLocks::new(url, keychain))));
+    let ci = CiLoop::new(Default::default()).with_store(Arc::new(StoreOps::new(url, keychain)));
     let names: Vec<_> = cfg.repos.iter().map(|r| r.github_repo.as_str()).collect();
     tracing::info!(
         "CI runner {}: {} slot(s), repos {}, data {}",

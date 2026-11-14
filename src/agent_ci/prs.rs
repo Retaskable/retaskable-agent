@@ -47,6 +47,43 @@ struct Pr {
     head_ref_name: String,
     #[serde(default)]
     is_cross_repository: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    author: Option<Author>,
+}
+
+#[derive(Deserialize)]
+struct Author {
+    #[serde(default)]
+    login: String,
+}
+
+/// What a claim tells the store of a pull request, and whether it carries `automerge`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrMeta {
+    pub branch: String,
+    pub title: String,
+    pub author: String,
+    pub automerge: bool,
+}
+
+/// The open pull requests' details by number, from `gh pr list`'s output.
+pub fn metas(json: &str) -> Result<std::collections::HashMap<u64, PrMeta>, String> {
+    let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
+    Ok(prs
+        .into_iter()
+        .map(|p| {
+            let automerge = p.labels.iter().any(|l| l.name == super::automerge::AUTOMERGE_LABEL);
+            let meta = PrMeta {
+                branch: p.head_ref_name,
+                title: p.title,
+                author: p.author.map(|a| a.login).unwrap_or_default(),
+                automerge,
+            };
+            (p.number, meta)
+        })
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -86,7 +123,7 @@ pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result
     cmd.args(args)
         .args([
             "--json",
-            "number,isDraft,labels,headRefOid,headRefName,isCrossRepository",
+            "number,isDraft,labels,headRefOid,headRefName,isCrossRepository,title,author",
         ])
         .current_dir(repo_dir)
         .stdin(Stdio::null())

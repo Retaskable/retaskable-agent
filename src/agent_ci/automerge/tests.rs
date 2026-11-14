@@ -1,185 +1,213 @@
-use std::os::unix::fs::PermissionsExt;
-use std::sync::Mutex;
+use std::path::Path;
 
 use super::*;
+use crate::agent_ci::report::Kind;
+use crate::agent_ci::store::tests::FakeStore;
+use crate::test_support::write_executable;
 
-/// A store whose lock is held by another computer for the first `busy` asks.
-pub(crate) struct FakeLocks {
-    pub busy: Mutex<u32>,
-    pub log: Arc<Mutex<Vec<String>>>,
-}
-
-impl MergeLocks for FakeLocks {
-    fn take<'a>(&'a self, _: &'a str, name: &'a str, note: &'a str) -> BoxFuture<'a, Result<LockTake, String>> {
-        Box::pin(async move {
-            self.log.lock().unwrap().push(format!("take {name} {note}"));
-            let mut busy = self.busy.lock().unwrap();
-            if *busy > 0 {
-                *busy -= 1;
-                return Ok(LockTake::HeldBy {
-                    by: "other-pc".into(),
-                    note: None,
-                });
-            }
-            Ok(LockTake::Held("L1".into()))
-        })
-    }
-
-    fn drop_lock<'a>(&'a self, _: &'a str, token: &'a str) -> BoxFuture<'a, ()> {
-        Box::pin(async move { self.log.lock().unwrap().push(format!("drop {token}")) })
-    }
-}
-
-struct Rig {
-    dir: tempfile::TempDir,
-    am: Automerge,
-    log: Arc<Mutex<Vec<String>>>,
-}
-
-fn script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    // A test thread forking at the same moment can still hold the file open for writing ("Text file busy"): run it
-    // once until that clears, so the real call never meets it.
-    for _ in 0..200 {
-        match std::process::Command::new(&path).arg("--probe").status() {
-            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(Duration::from_millis(5)),
-            _ => break,
+/// A `gh` that logs each call and answers from files in its directory: `pull.json` (the pull request),
+/// `open.json` (the open list), `compare.json`, `closed.json` and `<sha>.json` (statuses); `merge.fail` makes
+/// the merge fail.
+fn host(dir: &Path) -> Arc<Host> {
+    let program = dir.join("fake");
+    write_executable(
+        &program,
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\nprintf 'CALL %s\\n' \"$*\" >> calls.log\n\
+         case \"$4\" in\n\
+         *pulls/*/merge) [ -e merge.fail ] && { echo 'Head branch was modified' >&2; exit 1; }; echo '{}';;\n\
+         *compare/*) cat compare.json;;\n\
+         *pulls?state=open*) cat open.json;;\n\
+         *pulls?state=closed*) cat closed.json;;\n\
+         *pulls/*) cat pull.json;;\n\
+         *commits/*/statuses*) sha=${4#*commits/}; sha=${sha%%/*}; cat \"$sha.json\" 2>/dev/null || echo '[]';;\n\
+         esac\n",
+    );
+    for (name, body) in [
+        ("compare.json", r#"{"behind_by":0}"#),
+        ("open.json", "[]"),
+        ("closed.json", "[]"),
+    ] {
+        if !dir.join(name).exists() {
+            std::fs::write(dir.join(name), body).unwrap();
         }
     }
-    path
+    Arc::new(Host {
+        program,
+        kind: Kind::Github,
+        repo: "o/r".into(),
+        dir: dir.to_path_buf(),
+    })
 }
 
-/// `view` is `gh pr view`'s answer; `main` is what `origin/main` is now; a real `gh pr merge` is logged to `gh.log`.
-fn rig(view: &str, main: &str, busy: u32) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("gh.log");
-    script(
-        dir.path(),
-        "gh",
-        &format!(
-            "echo \"$*\" >> {}\nif [ \"$2\" = view ]; then cat <<'EOF'\n{view}\nEOF\nfi",
-            log.display()
-        ),
-    );
-    script(
-        dir.path(),
-        "git",
-        &format!("[ \"$1\" = rev-parse ] && echo {main}\nexit 0"),
-    );
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let locks = FakeLocks {
-        busy: Mutex::new(busy),
-        log: log.clone(),
-    };
-    let am = Automerge {
-        locks: Arc::new(locks),
-        ask_every: Duration::from_millis(5),
-        wait: Duration::from_secs(5),
-    };
-    Rig { dir, am, log }
+fn pull(dir: &Path, state: &str, sha: &str, branch: &str, labels: &[&str]) {
+    let labels: Vec<_> = labels.iter().map(|n| json!({ "name": n })).collect();
+    let v = json!({ "state": state, "head": { "sha": sha, "ref": branch }, "labels": labels });
+    std::fs::write(dir.join("pull.json"), v.to_string()).unwrap();
 }
 
-const CHECKED_MAIN: &str = "mmmm";
-
-async fn land(r: &Rig) -> Ended {
-    let key = CheckKey {
-        pr: 7,
-        head: "h7".into(),
-        main: CHECKED_MAIN.into(),
-    };
-    let dir = r.dir.path();
-    let (gh, git) = (dir.join("gh"), dir.join("git"));
-    run(
-        &r.am,
-        &Target {
-            gh: gh.as_os_str(),
-            git: git.as_os_str(),
-            repo_dir: dir,
-            github_repo: "o/p",
-            base: "main",
-            computer: "pc",
-            key: &key,
-        },
-    )
-    .await
+fn calls(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
 }
 
-fn gh_calls(r: &Rig) -> String {
-    std::fs::read_to_string(r.dir.path().join("gh.log")).unwrap_or_default()
+fn merges(dir: &Path) -> Vec<String> {
+    calls(dir)
+        .lines()
+        .filter(|l| l.contains("/merge"))
+        .map(String::from)
+        .collect()
 }
 
-const LABELLED: &str = r#"{"state":"OPEN","headRefOid":"h7","labels":[{"name":"automerge"}]}"#;
+fn am() -> (Automerge, Arc<FakeStore>) {
+    let store = FakeStore::winning();
+    (Automerge::new(store.clone()), store)
+}
 
 #[tokio::test]
-async fn a_green_automerge_pull_request_is_squash_merged_under_the_lock_and_the_lock_is_dropped() {
-    let r = rig(LABELLED, CHECKED_MAIN, 0);
-    assert_eq!(land(&r).await, Ended::Merged);
-    let log = r.log.lock().unwrap().clone();
-    assert_eq!(log, ["take merge-main PR #7 on pc", "drop L1"]);
-    assert!(
-        gh_calls(&r).contains("pr merge 7 --squash --delete-branch --match-head-commit h7 --repo o/p"),
-        "{}",
-        gh_calls(&r)
+async fn a_labelled_pull_request_is_squash_merged_pinned_to_its_head_and_the_store_is_told() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    let (am, store) = am();
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Merged);
+    let m = merges(d.path());
+    assert_eq!(m.len(), 1);
+    assert!(m[0].contains("-X PUT repos/o/r/pulls/7/merge"), "{m:?}");
+    assert!(m[0].contains("-f merge_method=squash") && m[0].contains("-f sha=h7"));
+    assert_eq!(
+        store.args("ci_merged"),
+        [json!({ "sha": "h7", "context": "ci/agent/pr/ci", "pr": 7 })]
     );
 }
 
 #[tokio::test]
-async fn a_held_lock_is_waited_for() {
-    let r = rig(LABELLED, CHECKED_MAIN, 3);
-    assert_eq!(land(&r).await, Ended::Merged);
-    let log = r.log.lock().unwrap().clone();
-    assert_eq!(log.iter().filter(|l| l.starts_with("take")).count(), 4);
-    assert_eq!(log.last().unwrap(), "drop L1");
+async fn a_persons_merge_request_counts_like_the_label() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &[]);
+    let store = FakeStore::answering(|op, _| {
+        Ok(match op {
+            "ci_merge_requests" => json!({ "requests": [{ "pr": 7, "sha": "h7" }] }),
+            _ => json!({ "ok": true }),
+        })
+    });
+    let am = Automerge::new(store);
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::NotAsked);
+    am.refresh_asked("o/r").await;
+    assert!(am.is_asked(7, "h7") && !am.is_asked(7, "other"));
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Merged);
 }
 
 #[tokio::test]
-async fn a_lock_held_past_the_wait_is_a_failure_with_nothing_merged_or_dropped() {
-    let mut r = rig(LABELLED, CHECKED_MAIN, u32::MAX);
-    r.am.wait = Duration::from_millis(20);
-    assert!(matches!(land(&r).await, Ended::Failed(w) if w.contains("other-pc")));
-    assert!(!gh_calls(&r).contains("pr merge"));
-    assert!(r.log.lock().unwrap().iter().all(|l| !l.starts_with("drop")));
-}
-
-#[tokio::test]
-async fn main_moving_after_the_check_merges_nothing_and_drops_the_lock() {
-    let r = rig(LABELLED, "newmain", 0);
-    assert_eq!(land(&r).await, Ended::MainMoved);
-    assert!(!gh_calls(&r).contains("pr merge"));
-    assert_eq!(r.log.lock().unwrap().last().unwrap(), "drop L1");
-}
-
-#[tokio::test]
-async fn a_pull_request_without_the_label_or_with_a_new_head_takes_no_lock_and_is_not_merged() {
-    for view in [
-        r#"{"state":"OPEN","headRefOid":"h7","labels":[{"name":"ci-ready"}]}"#,
-        r#"{"state":"OPEN","headRefOid":"other","labels":[{"name":"automerge"}]}"#,
-        r#"{"state":"CLOSED","headRefOid":"h7","labels":[{"name":"automerge"}]}"#,
+async fn a_pull_request_that_no_longer_asks_is_not_merged() {
+    for (state, sha, labels) in [
+        ("open", "h7", &["ci-ready"][..]),
+        ("open", "other", &["automerge"]),
+        ("closed", "h7", &["automerge"]),
     ] {
-        let r = rig(view, CHECKED_MAIN, 0);
-        assert_eq!(land(&r).await, Ended::NotAsked, "{view}");
-        assert!(r.log.lock().unwrap().is_empty());
-        assert!(!gh_calls(&r).contains("pr merge"));
+        let d = tempfile::tempdir().unwrap();
+        let h = host(d.path());
+        pull(d.path(), state, sha, "fix", labels);
+        let (am, store) = am();
+        assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::NotAsked, "{state} {sha}");
+        assert!(merges(d.path()).is_empty());
+        assert!(store.args("ci_merged").is_empty());
     }
 }
 
 #[tokio::test]
-async fn a_head_pushed_while_the_lock_was_waited_for_is_not_merged() {
-    let r = rig(LABELLED, CHECKED_MAIN, 0);
-    // The first read of the pull request is the checked head; every later one is a new head.
-    let moved = r#"{"state":"OPEN","headRefOid":"h8","labels":[{"name":"automerge"}]}"#;
-    script(
-        r.dir.path(),
-        "gh",
-        &format!(
-            "echo \"$*\" >> {log}\nif [ \"$2\" = view ]; then\n if [ -e {seen} ]; then echo '{moved}'; else touch {seen}; echo '{LABELLED}'; fi\nfi",
-            log = r.dir.path().join("gh.log").display(),
-            seen = r.dir.path().join("seen").display(),
-        ),
+async fn a_failed_merge_says_why_and_tells_the_store_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    std::fs::write(d.path().join("merge.fail"), "").unwrap();
+    let (am, store) = am();
+    assert!(matches!(am.run(&h, "main", 7, "h7").await, Ended::Failed(w) if w.contains("Head branch was modified")));
+    assert!(store.args("ci_merged").is_empty());
+}
+
+fn agent_pr(dir: &Path, behind: u64, ci: &str) {
+    let open = json!([
+        { "number": 3, "head": { "sha": "agent", "ref": "retaskable/x" } },
+        { "number": 7, "head": { "sha": "h7", "ref": "fix" } }
+    ]);
+    std::fs::write(dir.join("open.json"), open.to_string()).unwrap();
+    std::fs::write(dir.join("compare.json"), json!({ "behind_by": behind }).to_string()).unwrap();
+    let s = json!([{ "state": ci, "context": "ci/agent/pr/ci", "description": "agent-ci x: running" }]);
+    std::fs::write(dir.join("agent.json"), s.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn a_persons_pull_request_waits_while_an_up_to_date_agent_pr_is_checking() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    agent_pr(d.path(), 0, "pending");
+    let (am, store) = am();
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Held(3));
+    assert!(merges(d.path()).is_empty());
+    assert!(calls(d.path()).contains("repos/o/r/compare/main...agent"));
+    // The agent's check is done: the next poll merges.
+    agent_pr(d.path(), 0, "success");
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Merged);
+    assert_eq!(store.args("ci_merged").len(), 1);
+}
+
+#[tokio::test]
+async fn an_agent_pr_behind_main_holds_no_one_and_an_agent_pr_never_waits() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    agent_pr(d.path(), 2, "pending");
+    assert_eq!(am().0.run(&h, "main", 7, "h7").await, Ended::Merged);
+    // A retaskable/ pull request itself is never held.
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "retaskable/y", &["automerge"]);
+    agent_pr(d.path(), 0, "pending");
+    assert_eq!(am().0.run(&h, "main", 7, "h7").await, Ended::Merged);
+}
+
+#[tokio::test]
+async fn the_wait_ends_after_the_hold() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    agent_pr(d.path(), 0, "pending");
+    let (mut am, _) = am();
+    am.hold = Duration::from_millis(30);
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Held(3));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Merged);
+}
+
+#[tokio::test]
+async fn closed_pull_requests_are_told_once_and_forks_never() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    let closed = json!([
+        { "number": 4, "merged_at": "2026-01-01T00:00:00Z", "head": { "repo": { "full_name": "o/r" } } },
+        { "number": 5, "merged_at": null, "head": { "repo": { "full_name": "o/r" } } },
+        { "number": 6, "merged_at": null, "head": { "repo": { "full_name": "fork/r" } } }
+    ]);
+    std::fs::write(d.path().join("closed.json"), closed.to_string()).unwrap();
+    let (am, store) = am();
+    am.tell_closed(&h).await;
+    am.tell_closed(&h).await;
+    assert_eq!(
+        store.args("ci_pr_closed"),
+        [json!({ "pr": 4, "merged": true }), json!({ "pr": 5, "merged": false })]
     );
-    assert_eq!(land(&r).await, Ended::NotAsked);
-    assert!(!gh_calls(&r).contains("pr merge"));
-    assert_eq!(r.log.lock().unwrap().last().unwrap(), "drop L1");
+}
+
+#[tokio::test]
+async fn a_closed_pull_request_the_store_refused_is_told_again_next_time() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    let closed = json!([{ "number": 4, "merged_at": null, "head": { "repo": { "full_name": "o/r" } } }]);
+    std::fs::write(d.path().join("closed.json"), closed.to_string()).unwrap();
+    let store = FakeStore::answering(|_, _| Err("down".into()));
+    let am = Automerge::new(store.clone());
+    am.tell_closed(&h).await;
+    am.tell_closed(&h).await;
+    assert_eq!(store.args("ci_pr_closed").len(), 2);
 }
