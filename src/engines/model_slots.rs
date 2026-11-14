@@ -113,6 +113,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn has_room_after_counts_the_sessions_about_to_take_a_slot() {
+        let s = slots(Some(2), Some(1));
+        // Two free slots: one pending session leaves room, two do not.
+        assert!(s.has_room_after("opus", 0));
+        assert!(s.has_room_after("opus", 1));
+        assert!(!s.has_room_after("opus", 2));
+        // A held slot counts the same way as a pending one.
+        let _held = s.acquire("opus").await;
+        assert!(s.has_room_after("opus", 0));
+        assert!(!s.has_room_after("opus", 1));
+        // Each capped model is counted on its own slots.
+        assert!(s.has_room_after("sonnet", 0));
+        assert!(!s.has_room_after("sonnet", 1));
+    }
+
+    #[test]
+    fn has_room_after_never_limits_an_uncapped_or_other_model() {
+        let s = slots(None, Some(1));
+        assert!(s.has_room_after("opus", 100));
+        for model in ["haiku", "local", "something-else"] {
+            assert!(s.has_room_after(model, 100), "{model}");
+        }
+        // A model that can't be capped ignores a cap on the others.
+        assert!(slots(Some(1), Some(1)).has_room_after("haiku", 5));
+    }
+
+    #[tokio::test]
+    async fn a_cap_of_zero_never_has_room() {
+        let s = slots(Some(0), None);
+        assert!(!s.has_room("opus"));
+        assert!(waits(&s, "opus").await);
+    }
+
+    #[tokio::test]
     async fn no_cap_never_waits() {
         let s = slots(None, None);
         let _held = (
