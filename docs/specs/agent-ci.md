@@ -90,6 +90,10 @@ What the computer reports:
 - **Settings.** `AGENT_CI_SLOTS` (default 2, 0 = nothing), `AGENT_CI_CPUS` (default 8, capped at the NCPU `docker info` reports; each check runs with `--cpus`), `AGENT_CI_NAME` (default the host name; the `<computer>` in each status), and `RETASKABLE_DATA_DIR` for the data folder.
 - **Which pull requests.** Not drafts, not forks, and a `retaskable/` branch only once it has `ci-ready`; this replaces the per-project `ciWhenReady` switch with the runner's own rule.
 
+### 3.8 Published binaries
+
+`.github/workflows/sidecars.yml` builds `retaskable-ci` (and `retaskable-chat-agent` once its bin exists) for win32, linux and darwin on x64 and arm64, and uploads them to a GitHub release (published, a pushed `v*` tag, or run by hand for a tag). Assets: `<bin>-<win32|linux|darwin>-<x64|arm64>` (`.exe` on win32) and `<asset>.sha256` holding the hex digest, the names Retaskable.com's `agent/src/chatAgent.ts` downloads from `releases/latest/download`. The R2 release flow (`.woodpecker/release.yaml`) makes no GitHub release; a pushed `v*` tag makes one.
+
 ## 4. Slices
 
 1. **Slot, discovery and settings.** `ciSlots` in `config/machine.rs` and its environment variable; `src/agent_ci/mod.rs`'s loop with discovery; the Docker check (first-run line, `ci.docker`); the Now tab and tick fields. No container run.
