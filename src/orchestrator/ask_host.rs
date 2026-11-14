@@ -122,7 +122,7 @@ impl AskHost for ClaudeAsks {
                 .map(|a| AudienceLine {
                     id: a.id,
                     name: a.name,
-                    who: a.short,
+                    who: Some(a.who),
                 })
                 .collect();
             let state = StateSummary {

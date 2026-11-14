@@ -391,6 +391,7 @@ fn playtest_is_nacked_for_an_item_held_in_another_state() {
         pr_url: None,
         attempt: 0,
         chore: false,
+        expert: None,
     };
     v.live
         .set_items("one", vec![held("a", "building"), held("b", "awaiting_playtest")]);
