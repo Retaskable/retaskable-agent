@@ -509,6 +509,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         item_commands: &view.item_commands,
         machine: link::machine_name(env),
     });
+    // deploy-requests.md section 3.2: starts only for a kind this computer can run (none yet).
+    retaskable_agent::deploy_requests::spawn_all(retaskable_agent::deploy_requests::SpawnArgs {
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        machine: link::machine_name(env),
+    });
     // agent-ci.md section 3.1.
     let ci = retaskable_agent::agent_ci::CiLoop::new(
         Default::default(),

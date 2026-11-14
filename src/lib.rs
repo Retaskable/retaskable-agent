@@ -18,6 +18,7 @@ pub mod commands;
 pub mod config;
 pub mod connector;
 pub mod decisions;
+pub mod deploy_requests;
 pub mod deprecations;
 pub mod draft_worktree;
 pub mod drafts;
