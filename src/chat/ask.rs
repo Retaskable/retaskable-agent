@@ -7,7 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::answer::{self, Project, exchanges};
-use super::board::{self, Board, Finished};
+use super::board::{self, Board, Carry, Finished};
 use super::classify::{Filing, Reason, Route, route_ask, unavailable_text};
 use super::claude::Runner;
 use super::report::Ask;
@@ -98,20 +98,36 @@ pub fn intake<R: Runner>(cmd: &Command, seen: &mut Seen, runner: &R, host: &str,
             .map(str::to_string)
     };
     let reply_to = nonempty("replyTo");
-    let pictures = cmd
+    let picture_ids: Vec<String> = cmd
         .args
         .get("pictureIds")
         .and_then(Value::as_array)
-        .is_some_and(|p| !p.is_empty());
+        .map(|p| {
+            p.iter()
+                .filter_map(Value::as_str)
+                .filter(|id| board::picture_id(id))
+                .take(board::MAX_PICTURES)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    // `audience`: an id, or null for nobody; anything else is left to the project's guess.
+    let audience = match cmd.args.get("audience") {
+        Some(Value::Null) => Some(None),
+        Some(Value::String(a)) if !a.is_empty() => Some(Some(a.clone())),
+        _ => None,
+    };
     let by = Some(cmd.issued_by.clone()).filter(|b| !b.trim().is_empty() && b != "?");
     Intake::Take(Box::new(Ask {
         id: cmd.id.clone(),
         question: question.to_string(),
         by,
         context: cmd.args.get("context").map(exchanges).unwrap_or_default(),
-        plain: reply_to.is_none() && !pictures,
+        plain: reply_to.is_none(),
         reply_to,
         about: cmd.args.get("about").filter(|a| a.is_object()).cloned(),
+        picture_ids,
+        audience,
         at,
     }))
 }
@@ -131,25 +147,40 @@ pub struct Deps<'a, B, R> {
 /// Sorts the ask and carries it to where it goes. Whatever goes wrong comes back as a `failed` with its reason: nothing
 /// is filed or answered on a guess.
 pub async fn process<B: Board, R: Runner>(d: &Deps<'_, B, R>, ask: &Ask) -> Finished {
-    let route = route_ask(d.runner, &ask.question, ask.plain, d.cwd, d.classify_timeout).await;
+    // Neither the classifier nor the answer has tools to see a picture: they are told how many came, and the verdict
+    // still routes the message. The pictures themselves ride with the filed idea and the code question, by store id.
+    let seen = with_pictures_note(&ask.question, ask.picture_ids.len());
+    let route = route_ask(d.runner, &seen, ask.plain, d.cwd, d.classify_timeout).await;
     match route {
         Route::Unavailable(reason) => Finished::failed(unavailable_text(reason, d.host)),
-        Route::Question => {
-            answer::answer(d.board, d.runner, d.project, &ask.question, &ask.context, d.cwd, d.host).await
-        }
+        Route::Question => answer::answer(d.board, d.runner, d.project, &seen, &ask.context, d.cwd, d.host).await,
         Route::File { kind, title } => match &ask.by {
             Some(login) => {
                 let bug = kind == Filing::Bug;
-                board::file_idea(d.board, &ask.id, &ask.question, title.as_deref(), bug, login).await
+                let carry = Carry {
+                    picture_ids: ask.picture_ids.clone(),
+                    audience: ask.audience.clone(),
+                    about: ask.about.clone(),
+                };
+                board::file_idea(d.board, &ask.id, &ask.question, title.as_deref(), bug, login, &carry).await
             }
             None => nobody(),
         },
         Route::Code => match &ask.by {
             Some(login) => {
-                board::ask_coding_agent(d.board, &ask.id, &ask.question, login, d.code_wait, d.code_poll).await
+                let (id, q) = (&ask.id, &ask.question);
+                board::ask_coding_agent(d.board, id, q, login, &ask.picture_ids, d.code_wait, d.code_poll).await
             }
             None => nobody(),
         },
+    }
+}
+
+/// The message with a line saying how many pictures came with it, for a session that cannot see them.
+fn with_pictures_note(text: &str, n: usize) -> String {
+    match n {
+        0 => text.to_string(),
+        n => format!("{text}\n\n(The message came with {n} picture(s) you cannot see.)"),
     }
 }
 
@@ -256,11 +287,24 @@ mod tests {
             panic!()
         };
         assert!(!a.plain && a.reply_to.as_deref() == Some("c0") && a.context.len() == 1);
-        let pic = json!({ "question": "see", "pictureIds": ["p1"] });
-        let Intake::Take(a) = take(&msg("ask", pic), &mut Seen::default(), &runner) else {
+    }
+
+    const PIC: &str = "01234567-89ab-cdef-0123-456789abcdef.png";
+
+    #[test]
+    fn pictures_stay_plain_and_only_valid_ids_come_along_with_the_audience() {
+        let runner = Fake::new(vec![]);
+        let args = json!({ "question": "see", "pictureIds": [PIC, "p1", "../x", 5], "audience": null });
+        let Intake::Take(a) = take(&msg("ask", args), &mut Seen::default(), &runner) else {
             panic!()
         };
-        assert!(!a.plain);
+        assert!(a.plain);
+        assert_eq!((a.picture_ids, a.audience), (vec![PIC.to_string()], Some(None)));
+        let args = json!({ "question": "x", "audience": "owners" });
+        let Intake::Take(a) = take(&msg("ask", args), &mut Seen::default(), &runner) else {
+            panic!()
+        };
+        assert_eq!(a.audience, Some(Some("owners".to_string())));
     }
 
     fn ask(by: Option<&str>) -> Ask {
@@ -272,6 +316,8 @@ mod tests {
             plain: true,
             reply_to: None,
             about: None,
+            picture_ids: vec![],
+            audience: None,
             at: String::new(),
         }
     }
@@ -305,6 +351,49 @@ mod tests {
             (true, "Filed as a bug: Crash", Some("idea-1"))
         );
         assert_eq!(board.ops(), ["idea_add"]);
+    }
+
+    #[tokio::test]
+    async fn a_message_with_pictures_is_classified_and_filed_with_them_and_its_card() {
+        let runner = sorted(json!({ "kind": "bug", "confidence": 0.9, "title": "Crash" }));
+        let board = FakeBoard::new(|_, _, _| Ok(json!({ "id": "idea-1" })));
+        let mut a = ask(Some("ada"));
+        a.picture_ids = vec![PIC.to_string()];
+        a.about = Some(json!({ "kind": "item", "id": "i9" }));
+        a.audience = Some(Some("owners".into()));
+        let r = run(&runner, &board, &a).await;
+        assert!(r.done);
+        let specs = runner.specs.lock().unwrap();
+        assert_eq!(specs.len(), 1, "the classifier ran");
+        assert!(specs[0].prompt.contains("1 picture(s)"));
+        let sent = board.sent.lock().unwrap();
+        let args = &sent[0].1;
+        assert_eq!(
+            (
+                args["pictureIds"].clone(),
+                args["audience"].clone(),
+                args["revises"].clone()
+            ),
+            (json!([PIC]), json!("owners"), json!("i9"))
+        );
+        assert_eq!(args["about"], json!({ "kind": "item", "id": "i9" }));
+        assert_eq!(
+            args["experience"], "it crashes",
+            "the idea keeps the person's exact words"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_code_question_with_pictures_posts_their_ids() {
+        let runner = sorted(json!({ "kind": "code", "confidence": 0.9 }));
+        let board = FakeBoard::new(|op, _, _| match op {
+            "intent_request" => Ok(json!({ "id": "r1" })),
+            _ => Ok(json!([{ "id": "r1", "status": "done", "result": { "answer": "In x.rs" } }])),
+        });
+        let mut a = ask(Some("ada"));
+        a.picture_ids = vec![PIC.to_string()];
+        assert!(run(&runner, &board, &a).await.done);
+        assert_eq!(board.sent.lock().unwrap()[0].1["args"]["pictureIds"], json!([PIC]));
     }
 
     #[tokio::test(start_paused = true)]

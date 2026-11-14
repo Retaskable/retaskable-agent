@@ -143,8 +143,8 @@ fn checked(v: &Value) -> Option<(Kind, f64, Option<String>)> {
     Some((kind, confidence, title))
 }
 
-/// Sorts a message that has neither pictures nor a reply. A message with either is a question: the classifier sees
-/// only text, and a reply continues an answer the asker already has.
+/// Sorts a message that is not a reply (`plain`). Pictures do not matter: the classifier sees the text alone and the
+/// verdict routes the message all the same. A reply is a question: it continues an answer the asker already has.
 pub async fn route_ask<R: Runner>(runner: &R, text: &str, plain: bool, cwd: &Path, timeout: Duration) -> Route {
     if !plain {
         return Route::Question;
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pictures_or_a_reply_skip_the_classifier() {
+    async fn a_reply_skips_the_classifier() {
         let fake = Fake::new(vec![]);
         let r = route_ask(&fake, "see this", false, Path::new("."), TIMEOUT).await;
         assert_eq!(r, Route::Question);

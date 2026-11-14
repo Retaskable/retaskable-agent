@@ -19,10 +19,14 @@ pub struct Ask {
     /// Who asked (a GitHub login), when the hub said.
     pub by: Option<String>,
     pub context: Vec<Exchange>,
-    /// No pictures and no reply to an earlier answer: the only kind the classifier sorts.
+    /// Not a reply to an earlier answer: the only kind the classifier sorts (pictures do not matter, chat-classifier.md).
     pub plain: bool,
     pub reply_to: Option<String>,
     pub about: Option<Value>,
+    /// The message's pictures, as valid store ids (the Chat Agent never holds the files).
+    pub picture_ids: Vec<String>,
+    /// `audience` as the ask named it: `Some(None)` is nobody, absent is the project's guess.
+    pub audience: Option<Option<String>>,
     pub at: String,
 }
 
@@ -71,6 +75,8 @@ mod tests {
             plain: true,
             reply_to: Some("c0".into()),
             about: Some(json!({ "kind": "item", "id": "i1" })),
+            picture_ids: vec![],
+            audience: None,
             at: "2026-11-13T00:00:00Z".into(),
         }
     }

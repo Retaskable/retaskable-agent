@@ -49,12 +49,35 @@ fn for_chat(args: &Value) -> bool {
             .is_some_and(|l| !l.trim().is_empty())
 }
 
+/// A store picture id (`PICTURE_ID`, shared/sentPictures.ts): a uuid and an image extension.
+pub fn picture_id(id: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"^[0-9a-f-]{36}\.(png|jpg|gif|webp)$").expect("a valid pattern"))
+        .is_match(id)
+}
+
+/// At most this many pictures go with a message (`MAX_SENT_PICTURES`).
+pub const MAX_PICTURES: usize = 4;
+
+/// `pictureIds` absent, or an array of at most [`MAX_PICTURES`] valid store ids.
+fn pictures_ok(v: Option<&Value>) -> bool {
+    match v {
+        None => true,
+        Some(v) => v
+            .as_array()
+            .is_some_and(|a| a.len() <= MAX_PICTURES && a.iter().all(|x| x.as_str().is_some_and(picture_id))),
+    }
+}
+
 /// The allowlist (`chatOpRefusal`): `Err` says why the op is not the Chat Agent's to send.
 pub fn check_op(op: &str, args: &Value) -> Result<(), String> {
     if READS.contains(&op) {
         return Ok(());
     }
     match op {
+        "idea_add" if for_chat(args) && !pictures_ok(args.get("pictureIds")) => {
+            Err("pictureIds must be up to 4 pictures' ids in the store".into())
+        }
         "idea_add" if for_chat(args) => Ok(()),
         "idea_add" => Err("idea_add is only for the person who typed the message (for: via chat, with a login)".into()),
         "intent_request" => {
@@ -63,11 +86,12 @@ pub fn check_op(op: &str, args: &Value) -> Result<(), String> {
                 && args.get("kind").and_then(Value::as_str) == Some("ask")
                 && nested.and_then(|a| a.get("codeQuestion")) == Some(&Value::Bool(true))
                 && nested.and_then(|a| a.get("question")).is_some_and(Value::is_string)
-                && nested.and_then(|a| a.get("askId")).is_some_and(Value::is_string);
+                && nested.and_then(|a| a.get("askId")).is_some_and(Value::is_string)
+                && pictures_ok(nested.and_then(|a| a.get("pictureIds")));
             if ok {
                 Ok(())
             } else {
-                Err("intent_request is only a code question: kind ask, codeQuestion true, a question and an askId, for the asker".into())
+                Err("intent_request is only a code question: kind ask, codeQuestion true, a question and an askId (pictureIds, if any, valid store ids), for the asker".into())
             }
         }
         other => Err(format!("The Chat Agent may not run {other}")),
@@ -150,6 +174,31 @@ pub fn client_id(ask_id: &str) -> String {
     id.chars().take(60).collect()
 }
 
+/// What a filed idea carries from the ask beside its words: the message's pictures (store ids), the ask's audience
+/// (`Some(None)` is "nobody", absent is the project's guess) and the card it was typed on (chat-classifier.md section 4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Carry {
+    pub picture_ids: Vec<String>,
+    pub audience: Option<Option<String>>,
+    pub about: Option<Value>,
+}
+
+impl Carry {
+    /// `about` as `{ kind, id }`, only when it is a card or plan as the store names them.
+    fn about(&self) -> Option<Value> {
+        let a = self.about.as_ref()?;
+        let kind = a
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|k| matches!(*k, "item" | "draft"))?;
+        let id = a
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|i| !i.is_empty() && i.len() <= 80)?;
+        Some(json!({ "kind": kind, "id": id }))
+    }
+}
+
 /// Files the message as the asker's own bug or idea, planned automatically and asked about first.
 pub async fn file_idea<B: Board>(
     board: &B,
@@ -158,6 +207,7 @@ pub async fn file_idea<B: Board>(
     title: Option<&str>,
     bug: bool,
     login: &str,
+    carry: &Carry,
 ) -> Finished {
     let first_line = question.lines().next().unwrap_or_default().trim();
     let title: String = title
@@ -167,7 +217,7 @@ pub async fn file_idea<B: Board>(
         .chars()
         .take(80)
         .collect();
-    let args = json!({
+    let mut args = json!({
         "title": title,
         "experience": question,
         "freeText": true,
@@ -177,6 +227,20 @@ pub async fn file_idea<B: Board>(
         "clientId": client_id(ask_id),
         "for": { "via": "chat", "login": login },
     });
+    let o = args.as_object_mut().expect("an object");
+    if !carry.picture_ids.is_empty() {
+        o.insert("pictureIds".into(), json!(carry.picture_ids));
+    }
+    if let Some(audience) = &carry.audience {
+        o.insert("audience".into(), json!(audience));
+    }
+    if let Some(about) = carry.about() {
+        // A card's own item is what the request revises (card-revisions.md section 3.2); a plan's page is new work.
+        if about["kind"] == "item" {
+            o.insert("revises".into(), about["id"].clone());
+        }
+        o.insert("about".into(), about);
+    }
     match board.op("idea_add", args).await {
         Ok(v) => Finished {
             idea_id: v.get("id").and_then(Value::as_str).map(str::to_string),
@@ -192,14 +256,18 @@ pub async fn ask_coding_agent<B: Board>(
     ask_id: &str,
     question: &str,
     login: &str,
+    picture_ids: &[String],
     wait: Duration,
     poll: Duration,
 ) -> Finished {
-    let args = json!({
+    let mut args = json!({
         "kind": "ask",
         "args": { "question": question, "codeQuestion": true, "askId": ask_id },
         "for": { "via": "chat", "login": login },
     });
+    if !picture_ids.is_empty() {
+        args["args"]["pictureIds"] = json!(picture_ids);
+    }
     let id = match board.op("intent_request", args).await {
         Ok(v) => match v.get("id").and_then(Value::as_str) {
             Some(id) => id.to_string(),
@@ -324,6 +392,74 @@ mod tests {
         }
     }
 
+    const PIC: &str = "01234567-89ab-cdef-0123-456789abcdef.png";
+
+    #[test]
+    fn pictures_are_allowed_only_as_valid_store_ids() {
+        assert!(picture_id("01234567-89ab-cdef-0123-456789abcdef.webp"));
+        for bad in ["x.png", "../etc/passwd", "01234567-89ab-cdef-0123-456789abcdef.svg"] {
+            assert!(!picture_id(bad), "{bad}");
+        }
+        let idea = |p: Value| json!({ "pictureIds": p, "for": chat_for() });
+        assert!(check_op("idea_add", &idea(json!([PIC]))).is_ok());
+        for bad in [
+            json!(["nope"]),
+            json!("x"),
+            json!([1]),
+            json!([PIC, PIC, PIC, PIC, PIC]),
+        ] {
+            assert!(check_op("idea_add", &idea(bad.clone())).is_err(), "{bad}");
+        }
+        let ask = |p: Value| json!({ "kind": "ask", "args": { "question": "q", "codeQuestion": true, "askId": "a", "pictureIds": p }, "for": chat_for() });
+        assert!(check_op("intent_request", &ask(json!([PIC]))).is_ok());
+        assert!(check_op("intent_request", &ask(json!(["../x"]))).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_filed_idea_carries_pictures_audience_and_its_card() {
+        let board = Fake::new(|_, _, _| Ok(json!({ "id": "idea-1" })));
+        let carry = Carry {
+            picture_ids: vec![PIC.to_string()],
+            audience: Some(Some("owners".into())),
+            about: Some(json!({ "kind": "item", "id": "i1", "extra": 1 })),
+        };
+        assert!(file_idea(&board, "k", "x", None, false, "ada", &carry).await.done);
+        // Audience "nobody" is sent as null; a plan's page is about, not a revision; none of it is invented.
+        let carry2 = Carry {
+            audience: Some(None),
+            about: Some(json!({ "kind": "draft", "id": "d1" })),
+            ..Carry::default()
+        };
+        file_idea(&board, "k", "x", None, false, "ada", &carry2).await;
+        file_idea(&board, "k", "x", None, false, "ada", &Carry::default()).await;
+        let sent = board.sent.lock().unwrap();
+        let a = &sent[0].1;
+        assert_eq!(
+            (a["pictureIds"].clone(), a["audience"].clone(), a["revises"].clone()),
+            (json!([PIC]), json!("owners"), json!("i1"))
+        );
+        assert_eq!(a["about"], json!({ "kind": "item", "id": "i1" }));
+        assert_eq!(
+            (sent[1].1["audience"].clone(), sent[1].1.get("revises")),
+            (Value::Null, None)
+        );
+        assert_eq!(sent[1].1["about"]["kind"], "draft");
+        for k in ["pictureIds", "audience", "about", "revises"] {
+            assert!(sent[2].1.get(k).is_none(), "{k}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_code_question_names_the_pictures_by_id() {
+        let board = Fake::new(|op, _, _| match op {
+            "intent_request" => Ok(json!({ "id": "row-1" })),
+            _ => Ok(rows("done", json!({}))),
+        });
+        let pics = [PIC.to_string()];
+        ask_coding_agent(&board, "a1", "see?", "ada", &pics, CODE_QUESTION_WAIT, CODE_POLL).await;
+        assert_eq!(board.sent.lock().unwrap()[0].1["args"]["pictureIds"], json!([PIC]));
+    }
+
     #[test]
     fn the_client_id_is_lowercase_safe_and_at_most_sixty() {
         assert_eq!(client_id("Ask_1.X"), "chat-ask-1-x");
@@ -340,6 +476,7 @@ mod tests {
             Some("Crash on tap"),
             true,
             "ada",
+            &Carry::default(),
         )
         .await;
         assert_eq!(r.answer, "Filed as a bug: Crash on tap");
@@ -365,7 +502,7 @@ mod tests {
     async fn an_idea_without_a_title_takes_the_first_line_cut_to_eighty() {
         let board = Fake::new(|_, _, _| Ok(json!({})));
         let long = format!("{}\nmore", "w".repeat(100));
-        let r = file_idea(&board, "k", &long, None, false, "ada").await;
+        let r = file_idea(&board, "k", &long, None, false, "ada", &Carry::default()).await;
         assert_eq!(r.answer, format!("Filed as an idea: {}", "w".repeat(80)));
         assert_eq!(r.idea_id, None);
     }
@@ -373,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn filing_for_nobody_is_refused_before_it_is_sent() {
         let board = Fake::new(|_, _, _| Ok(json!({})));
-        let r = file_idea(&board, "k", "x", None, false, "").await;
+        let r = file_idea(&board, "k", "x", None, false, "", &Carry::default()).await;
         assert!(!r.done);
         assert!(board.ops().is_empty());
     }
@@ -391,7 +528,7 @@ mod tests {
             _ if n < 3 => Ok(rows("claimed", json!({}))),
             _ => Ok(rows("done", json!({ "result": { "answer": "In src/x.rs." } }))),
         });
-        let r = ask_coding_agent(&board, "a1", "where is x?", "ada", CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a1", "where is x?", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::done("In src/x.rs."));
         let sent = board.sent.lock().unwrap();
         assert_eq!(
@@ -408,7 +545,7 @@ mod tests {
             "intent_request" => Ok(json!({ "id": "row-1" })),
             _ => Ok(rows("done", json!({}))),
         });
-        let r = ask_coding_agent(&board, "a", "q", "ada", CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::done("The Coding Agent had nothing to say."));
     }
 
@@ -419,7 +556,7 @@ mod tests {
                 "intent_request" => Ok(json!({ "id": "row-1" })),
                 _ => Ok(rows("refused", extra.clone())),
             });
-            let r = ask_coding_agent(&board, "a", "q", "ada", CODE_QUESTION_WAIT, CODE_POLL).await;
+            let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
             assert_eq!(r, Finished::failed(want));
         }
     }
@@ -431,7 +568,7 @@ mod tests {
             _ => Ok(rows("open", json!({}))),
         });
         let start = tokio::time::Instant::now();
-        let r = ask_coding_agent(&board, "a", "q", "ada", CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::failed(NONE_WAS_FREE));
         assert!(start.elapsed() >= CODE_QUESTION_WAIT);
         assert!(start.elapsed() < CODE_QUESTION_WAIT + CODE_POLL * 2);
@@ -440,13 +577,13 @@ mod tests {
     #[tokio::test]
     async fn a_failed_post_or_read_is_told() {
         let board = Fake::new(|_, _, _| Err("the store is down".into()));
-        let r = ask_coding_agent(&board, "a", "q", "ada", CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::failed("the store is down"));
         let board = Fake::new(|op, _, _| match op {
             "intent_request" => Ok(json!({ "id": "row-1" })),
             _ => Err("read failed".into()),
         });
-        let r = ask_coding_agent(&board, "a", "q", "ada", CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::failed("read failed"));
     }
 }
