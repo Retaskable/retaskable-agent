@@ -137,6 +137,7 @@ async fn add_sends_an_expert_item_claimed_by_this_agent_and_reads_its_lease() {
         environment: "dev".into(),
         base_branch: "main".into(),
         tags: vec![],
+        week: None,
     };
     let it = ExpertItem {
         id: "expert-x".into(),
