@@ -7,6 +7,7 @@
 //! lane whatever the outcome.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -342,20 +343,30 @@ async fn session(
     start: Start<'_>,
     where_to_start: &str,
     ids: &Mutex<String>,
+    started_local: &AtomicBool,
 ) -> Result<Attempt> {
     let project = &job.project;
     let item = piece_item(&job.piece);
     let chore = chore_of(&job.piece);
-    // Held until the session ends. Only a Claude session may use the model, never on a resume (a gate round's fix):
-    // an Anthropic session isn't resumed against the local server.
-    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. });
-    let (tier, local_run) = tier_for(
-        chore.as_ref(),
-        may.then_some(&job.local),
-        job.wants_local,
-        !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
-    )
-    .await;
+    // Held until the session ends. Only a Claude session may use the model. A fresh session picks as `tier_for` says;
+    // a resume (a gate round's fix) stays on the backend its run started on: `local` while the model is up, else its
+    // Anthropic tier, and an Anthropic session is never resumed against the local server.
+    let resumed = matches!(start, Start::Resume { .. });
+    let claude = job.engine == EngineId::Claude;
+    let (tier, local_run) = if resumed && claude && started_local.load(Ordering::SeqCst) && job.local.available() {
+        (crate::tiers::LOCAL, Some(job.local.run().await))
+    } else {
+        tier_for(
+            chore.as_ref(),
+            (claude && !resumed).then_some(&job.local),
+            job.wants_local,
+            !resumed && job.sessions.claude_at_limit(),
+        )
+        .await
+    };
+    if !resumed {
+        started_local.store(local_run.is_some(), Ordering::SeqCst);
+    }
     let model = model_for(chore.as_ref(), tier, &item, is_retry(&job.piece)).to_string();
     let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
@@ -463,7 +474,9 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         },
     };
     let ids = Mutex::new(String::new());
-    let first = session(job, cwd, branch, start, &where_to_start, &ids).await?;
+    let started_local = AtomicBool::new(false);
+    let started_local = &started_local;
+    let first = session(job, cwd, branch, start, &where_to_start, &ids, started_local).await?;
     // A gate round resumes the session of this same run (section 2: a fix round inside a run may resume).
     // Stage 1 of review runs in the lane after the gates; its commands' trees go to the run like the session's.
     let stage_one = Mutex::new(None);
@@ -506,7 +519,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                 follow_up: &follow_up,
                 decisions: &[],
             };
-            session(job, cwd, branch, start, "", ids).await
+            session(job, cwd, branch, start, "", ids, started_local).await
         }
     };
     let decisions = crate::implementer::piece_decision_list(&job.piece);
@@ -593,7 +606,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                     follow_up: &follow_up,
                     decisions: &[],
                 };
-                let next = session(job, cwd, branch, start, "", ids).await?;
+                let next = session(job, cwd, branch, start, "", ids, started_local).await?;
                 gated = gate_rounds(&rounds, next, &resume).await?;
             }
         }
