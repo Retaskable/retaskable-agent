@@ -489,6 +489,7 @@ impl Machine {
                     items: Err(Fail::Cant(format!("the backlog read failed: {e}"))),
                     settings: None,
                     facts: None,
+                    shown: None,
                 }
             });
             lp.repo = done.repo;
@@ -501,6 +502,9 @@ impl Machine {
                 _ => StorePause::Unknown,
             };
             self.links.store_paused.set(&lp.id, pause);
+            if let (Ok(_), Some(Ok(shown))) = (&done.items, done.shown) {
+                lp.live.set_shown(&lp.id, shown);
+            }
             lp.take_allowed_commands(&self.links.item_commands, done.settings);
             read_items.push(match done.items {
                 Ok(items) => Some(items),

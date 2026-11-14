@@ -19,6 +19,7 @@ pub mod failures;
 pub mod merge;
 pub mod runs;
 pub mod settings;
+pub mod shown;
 pub mod suggestions;
 
 use crate::env::Env;

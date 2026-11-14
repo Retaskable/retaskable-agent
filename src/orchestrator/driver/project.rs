@@ -309,8 +309,6 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         let file_project = project.clone();
-        let vet = store.vet();
-        live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
         Self {
             run_loop: super::RunLoop::new(&id),
             claim_waiting: false,

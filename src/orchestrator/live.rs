@@ -67,8 +67,10 @@ pub struct ProjectLive {
     pub sync_main: Option<String>,
     /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
     pub chores: Option<crate::backlog::runs::ChoreCount>,
-    /// The last vet run's counts by verdict name; `None` before a run.
-    pub vet: Option<BTreeMap<String, usize>>,
+    /// The store's last vet summary; `None` before a run.
+    pub vet: Option<crate::backlog::shown::VetView>,
+    /// The store's staging smoke fact; `None` when it holds none.
+    pub smoke: Option<crate::store::SmokeState>,
     /// When Claude's limit lifts (ISO 8601), while the loop can't start work because Claude is at its limit.
     pub limit_resets_at: Option<String>,
     /// The instant `limit_resets_at` was made from, so the same limit keeps the same string pass after pass.
@@ -93,7 +95,17 @@ pub struct LiveState {
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
 type Reported = (
     u32,
-    BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldLane>, Vec<HeldItem>)>,
+    BTreeMap<
+        String,
+        (
+            bool,
+            Option<String>,
+            Vec<OpenAnomaly>,
+            Vec<HeldLane>,
+            Vec<HeldItem>,
+            Option<crate::store::SmokeState>,
+        ),
+    >,
 );
 
 fn reported(state: &LiveState) -> Reported {
@@ -109,6 +121,7 @@ fn reported(state: &LiveState) -> Reported {
                     p.anomalies.clone(),
                     p.held.clone(),
                     p.items.clone(),
+                    p.smoke.clone(),
                 ),
             )
         })
@@ -242,6 +255,7 @@ impl LiveHandle {
                 sync_main: entry.sync_main.take(),
                 chores: entry.chores,
                 vet: entry.vet.take(),
+                smoke: entry.smoke.take(),
                 limit_resets_at: entry.limit_resets_at.take(),
                 limit_until: entry.limit_until.take(),
                 anomalies: std::mem::take(&mut entry.anomalies),
@@ -264,9 +278,18 @@ impl LiveHandle {
         self.lock().projects.entry(project.to_string()).or_default().sync_main = note;
     }
 
-    /// Says what the last vet run found, or nothing.
-    pub fn set_vet(&self, project: &str, counts: Option<BTreeMap<String, usize>>) {
-        self.lock().projects.entry(project.to_string()).or_default().vet = counts;
+    /// Takes what the store's `smoke` and `vet` facts say; a change in the smoke resends the snapshot.
+    pub fn set_shown(&self, project: &str, shown: crate::backlog::shown::Shown) {
+        self.edit(|s| {
+            let entry = s.projects.entry(project.to_string()).or_default();
+            entry.smoke = shown.smoke;
+            entry.vet = shown.vet;
+        });
+    }
+
+    /// The store's smoke fact as of the last pass.
+    pub fn smoke(&self, project: &str) -> Option<crate::store::SmokeState> {
+        self.lock().projects.get(project).and_then(|p| p.smoke.clone())
     }
 
     /// The store's last chore count for the project.

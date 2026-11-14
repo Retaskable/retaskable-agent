@@ -508,7 +508,7 @@ impl AgentView {
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
         }
-        if let Some(smoke) = self.smoke_json(project, data_dir) {
+        if let Some(smoke) = self.smoke_json(project) {
             state["smoke"] = smoke;
         }
         if let Some(waiting) = self.commands_waiting_json(project) {
@@ -555,14 +555,14 @@ impl AgentView {
         Some((json!(items), milestones))
     }
 
-    /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with a
-    /// smoke to report. `tail` is kept only for a failure or timeout.
-    pub fn smoke_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
+    /// The snapshot's `smoke` (09.2): the store's `smoke` fact as the loop last read it, when there is
+    /// one. `tail` is kept only for a failure or timeout.
+    pub fn smoke_json(&self, project: &str) -> Option<Value> {
         use crate::store::SmokeStatus;
         if !self.projects.iter().any(|p| p.id == project) {
             return None;
         }
-        let mut smoke = Store::load(&paths::project_dir(data_dir, project)).ok()?.smoke()?;
+        let mut smoke = self.live.smoke(project)?;
         if !matches!(smoke.status, SmokeStatus::Failed | SmokeStatus::Timeout) {
             smoke.tail = None;
         }

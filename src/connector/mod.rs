@@ -423,9 +423,6 @@ async fn session(
     let mut trial_saved = crate::store::subscribe_trial_changes();
     trial_saved.mark_unchanged();
     let mut trial_sent = view.trial_json(project, &cloud.dir);
-    let mut smoke_saved = crate::store::subscribe_smoke_changes();
-    smoke_saved.mark_unchanged();
-    let mut smoke_sent = view.smoke_json(project, &cloud.dir);
     let mut commands_changed = view.item_commands.gates().subscribe();
     commands_changed.mark_unchanged();
     let mut commands_sent = view.commands_waiting_json(project);
@@ -466,15 +463,6 @@ async fn session(
                 let now = view.trial_json(project, &cloud.dir);
                 if now != trial_sent {
                     trial_sent = now;
-                    Some(view.snapshot(project, &cloud.dir))
-                } else {
-                    None
-                }
-            },
-            Ok(()) = smoke_saved.changed() => {
-                let now = view.smoke_json(project, &cloud.dir);
-                if now != smoke_sent {
-                    smoke_sent = now;
                     Some(view.snapshot(project, &cloud.dir))
                 } else {
                     None
