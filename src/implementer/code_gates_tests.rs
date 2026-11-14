@@ -434,3 +434,45 @@ fn is_source_and_is_test_tell_code_generated_vendored_code_and_tests_apart() {
         assert!(!is_test(f), "{f}");
     }
 }
+
+#[test]
+fn fences_nest_by_character_and_length() {
+    let mut f = Fences::default();
+    let lines = ["````md", "```", "## not a heading", "```", "````", "## real"];
+    let seen: Vec<(bool, bool)> = lines.iter().map(|l| (f.is_fence(l), f.inside())).collect();
+    assert_eq!(
+        seen,
+        [
+            (true, true),
+            (false, true),
+            (false, true),
+            (false, true),
+            (true, false),
+            (false, false)
+        ]
+    );
+    let mut f = Fences::default();
+    assert!(f.is_fence("~~~"));
+    assert!(!f.is_fence("```"));
+    assert!(f.inside());
+    assert!(f.is_fence("~~~~\n"));
+    assert!(!f.inside());
+}
+
+#[test]
+fn a_heading_inside_a_longer_fence_is_not_a_split_point() {
+    let mut text = vec![
+        "# Big".to_string(),
+        "````md".to_string(),
+        "```".to_string(),
+        "```".to_string(),
+    ];
+    text.push("## fake".to_string());
+    text.push("````".to_string());
+    text.extend(distinct("a", 40, 0));
+    text.push("## real".to_string());
+    text.extend(distinct("b", 40, 0));
+    let big = oversized_specs(&[("docs/specs/x.md".to_string(), text.join("\n"))], 500);
+    assert!(!big.is_empty());
+    assert!(big[0].splits.iter().all(|s| s.at != "## fake"));
+}
