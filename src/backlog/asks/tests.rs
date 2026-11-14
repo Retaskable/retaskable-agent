@@ -61,21 +61,29 @@ async fn ask_post_sends_a_retaskable_message_into_a_conversation() {
 }
 
 #[tokio::test]
-async fn audiences_asks_for_the_kind_and_reads_the_list() {
+async fn audiences_asks_for_the_kind_and_reads_the_book() {
     let (base, seen) = store(
         200,
-        json!({ "value": { "audiences": [
-            { "id": "dev", "name": "Developers", "short": "Write code" }, { "id": "ops", "name": "Ops" } ] } }),
+        json!({ "value": { "audiences": { "kind": "audiences", "updatedAt": 1, "by": "a", "data": {
+            "added": [ { "id": "dev", "name": "Developers", "who": "Write code", "part": "platform", "trial": false } ],
+            "edits": { "admin": { "name": "Boss" } } } } } }),
     )
     .await;
     let list = Client::new(base).audiences(1, None).await.unwrap();
     assert_eq!(
         seen.lock().unwrap()[0],
-        json!({ "op": "facts_get", "args": { "kind": "audiences" } })
+        json!({ "op": "facts_get", "args": { "kinds": ["audiences"] } })
     );
-    assert_eq!(list[0].short.as_deref(), Some("Write code"));
-    assert_eq!(list[1].name, "Ops");
-    assert_eq!(list[1].short, None);
+    assert_eq!(list.len(), 9);
+    assert_eq!(list[0].name, "Boss");
+    assert_eq!(list[8].who, "Write code");
+}
+
+#[tokio::test]
+async fn audiences_with_no_row_are_the_starters() {
+    let (base, _) = store(200, json!({ "value": {} })).await;
+    let list = Client::new(base).audiences(1, None).await.unwrap();
+    assert_eq!(list.len(), 8);
 }
 
 #[tokio::test]
