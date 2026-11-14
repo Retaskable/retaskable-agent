@@ -133,9 +133,17 @@ pub fn run_args(c: &Check) -> Vec<String> {
 
 /// A low-priority `docker` with its environment cleared to what docker needs (and `DOCKER_*` config).
 fn docker_command(docker: &OsStr) -> tokio::process::Command {
+    docker_command_from(docker, std::env::vars_os())
+}
+
+/// `docker_command` over the given parent environment, so a test needs no process-wide variables.
+fn docker_command_from(
+    docker: &OsStr,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> tokio::process::Command {
     let mut cmd = low_priority_tokio(docker);
     cmd.env_clear().stdin(Stdio::null()).kill_on_drop(true);
-    for (k, v) in std::env::vars_os() {
+    for (k, v) in vars {
         let key = k.to_string_lossy();
         let wanted =
             DOCKER_ENV.iter().any(|w| key.eq_ignore_ascii_case(w)) || key.to_ascii_uppercase().starts_with("DOCKER_");
@@ -188,13 +196,21 @@ fn tail_of(path: &Path) -> String {
 
 /// Run the check, streaming stdout and stderr to a log file under `log_dir`; old logs are pruned first.
 pub async fn run(c: &Check<'_>) -> Result<Outcome> {
+    run_with_env(c, std::env::vars_os().collect::<Vec<_>>()).await
+}
+
+/// `run` over the given parent environment (the agent's own, in production).
+async fn run_with_env(
+    c: &Check<'_>,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<Outcome> {
     std::fs::create_dir_all(c.log_dir).context("creating the CI log folder")?;
     prune_logs(c.log_dir, SystemTime::now());
     let name = container_name(c.repo, c.sha);
     let stamp = now_secs();
     let log_path = c.log_dir.join(format!("{name}-{stamp}.log"));
     let log = File::create(&log_path).context("creating the CI log")?;
-    let mut cmd = docker_command(c.docker);
+    let mut cmd = docker_command_from(c.docker, vars);
     cmd.args(run_args(c)).stdout(log.try_clone()?).stderr(log);
     let mut child = cmd.spawn().context("starting docker run")?;
     let (exit_code, timed_out) = match timeout(c.ceiling, child.wait()).await {

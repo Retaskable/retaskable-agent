@@ -317,6 +317,40 @@ mod stubbed {
         std::fs::read_to_string(r._dir.path().join("calls.log")).unwrap_or_default()
     }
 
+    /// Replaces the rig's `docker` with one that logs its calls and, for `run`, runs `body` once the gate is open.
+    /// `body` may call `wait_gate` (a shell function defined here) to hold the check until `open_gate`.
+    fn gated_docker(r: &Rig, body: &str) {
+        let (root, gate) = (r._dir.path(), r._dir.path().join("gate"));
+        let log = root.join("calls.log");
+        script(
+            &root.join("bin"),
+            "docker",
+            &format!(
+                "echo \"docker $*\" >> {l}
+[ \"$1\" = run ] || exit 0
+wait_gate() {{ while [ ! -f {g} ]; do sleep 0.02; done; }}
+{body}",
+                l = log.display(),
+                g = gate.display()
+            ),
+        );
+    }
+
+    fn open_gate(r: &Rig) {
+        std::fs::write(r._dir.path().join("gate"), "").unwrap();
+    }
+
+    /// Waits (bounded) until `cond` holds.
+    async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
     fn events(r: &Rig) -> String {
         let dir = r._dir.path().join("data/projects/p/events");
         std::fs::read_dir(dir)
@@ -457,25 +491,24 @@ mod stubbed {
     async fn one_slot_runs_two_pull_requests_one_after_the_other() {
         let mut r = pr_rig("exit 0");
         let log = r._dir.path().join("calls.log");
-        let body = format!("echo begin >> {l}; sleep 1.5; echo end >> {l}", l = log.display());
-        script(
-            &r._dir.path().join("bin"),
-            "docker",
-            &format!(
-                "echo \"docker $*\" >> {l}\n[ \"$1\" = run ] || exit 0\n{body}",
-                l = log.display()
-            ),
+        gated_docker(
+            &r,
+            &format!("echo begin >> {l}; wait_gate; echo end >> {l}", l = log.display()),
         );
         let keys = vec![key(7, "h7"), key(8, "h8")];
         let first = go(&mut r, keys.clone()).await;
         assert_eq!(first.len(), 1, "only one permit");
         let c = r.live.snapshot().ci.unwrap();
         assert_eq!(c.slots, 1);
-        // Still running: the Now tab lists it and the second key finds no permit.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Still running (the gate is shut): the Now tab lists it and the second key finds no permit.
+        until("the check to be listed", || {
+            r.live.snapshot().ci.is_some_and(|c| !c.checks.is_empty())
+        })
+        .await;
         let live = r.live.snapshot().ci.unwrap();
         assert_eq!((live.running, live.checks.len(), live.checks[0].pr), (1, 1, 7));
         assert!(go(&mut r, keys.clone()).await.is_empty());
+        open_gate(&r);
         for t in first {
             t.await.unwrap();
         }
@@ -510,12 +543,15 @@ mod stubbed {
 
     #[tokio::test]
     async fn a_shrink_while_a_check_runs_does_not_leave_extra_permits() {
-        let mut r = pr_rig("sleep 0.4");
+        let mut r = pr_rig("exit 0");
+        gated_docker(&r, "wait_gate");
         let env = Env::from_map(Default::default());
         let tasks = go(&mut r, vec![key(7, "h7")]).await;
+        until("the check to run", || calls(&r).contains("docker run")).await;
         // Docker "down" for one poll while the check holds the only permit.
         r.cfg.machine.ci_slots = 0;
         r.ci.poll(&r.cfg, &env).await;
+        open_gate(&r);
         for t in tasks {
             t.await.unwrap();
         }
@@ -672,11 +708,26 @@ mod stubbed {
 
     #[tokio::test]
     async fn a_long_run_refreshes_its_claim() {
-        let mut r = pr_rig("sleep 1");
+        let mut r = pr_rig("exit 0");
+        gated_docker(&r, "wait_gate");
         claim_gh(&mut r, &[]);
-        r.ci.refresh = Duration::from_millis(250);
+        r.ci.refresh = Duration::from_millis(50);
+        // The run stays open until the claim has been refreshed three times.
+        let (log, gate) = (r._dir.path().join("calls.log"), r._dir.path().join("gate"));
+        let opener = tokio::spawn(async move {
+            while std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .matches("state=pending")
+                .count()
+                < 4
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            std::fs::write(gate, "").unwrap();
+        });
         run_as(&mut r, "a").await;
-        // The claim, then a refresh each interval of the second-long run, then success.
+        opener.await.unwrap();
+        // The claim, then a refresh each interval of the run, then success.
         assert!(calls(&r).matches("state=pending").count() >= 4, "{}", calls(&r));
         assert_eq!(calls(&r).matches("state=success").count(), 1);
     }
@@ -750,11 +801,13 @@ mod stubbed {
 
     #[tokio::test]
     async fn a_push_run_takes_a_permit_like_a_pull_request_check() {
-        let mut r = pr_rig("sleep 1");
+        let mut r = pr_rig("exit 0");
+        gated_docker(&r, "wait_gate");
         // One slot, a pull request and the push: the push waits for the permit.
         let tasks = poll_and_start(&mut r).await;
         assert_eq!(tasks.len(), 1);
         assert_eq!(r.ci.slot().available_permits(), 0);
+        open_gate(&r);
         for t in tasks {
             t.await.unwrap();
         }
