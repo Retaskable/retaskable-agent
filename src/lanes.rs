@@ -204,7 +204,8 @@ pub fn outside_paths(manifest: &str) -> Vec<String> {
         .into_iter()
         .chain(file_or_link_values(&manifest))
     {
-        if path.starts_with("..") && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
+        let climbs = path.split(['/', '\\']).next() == Some("..");
+        if climbs && !Path::new(&path).is_absolute() &&!found.iter().any(|p| p == &path) {
             found.push(path);
         }
     }
@@ -773,6 +774,13 @@ mod tests {
         let non_ascii =
             "[package]\nauthors = [\"José 🚀\"]\n\n[dependencies]\nvoid_engine = { path = \"../void-engine\" }\n";
         assert_eq!(outside_paths(non_ascii), vec!["../void-engine"]);
+    }
+
+    #[test]
+    fn outside_paths_needs_a_real_parent_component_not_just_a_dotdot_prefix() {
+        // `..hidden` is an ordinary folder name inside the repo, not a climb out of it.
+        let cargo = "a = { path = \"..hidden/x\" }\nb = { path = \"..\\\\win\" }\nc = { path = \"..\" }\n";
+        assert_eq!(outside_paths(cargo), vec!["..\\\\win", ".."]);
     }
 
     #[test]
