@@ -89,6 +89,21 @@ decisions! {
     triaged: "triaged": bool,
 }
 
+impl Decisions {
+    /// The run reached a new `needs_human` stop from `from` at `slice`: the stop's facts replace the old ones and the
+    /// look mark starts clean. `triages` is kept for the same slice and dropped for a new one.
+    pub fn new_stop(&mut self, from: &str, slice: u32) {
+        self.failed_in = Some(from.to_string());
+        self.triaged = None;
+        self.triages = self.triages.filter(|t| t.slice == slice);
+    }
+
+    /// `triages` as the `(slice, n)` pair the triage schedule reads.
+    pub fn triage_pair(&self) -> Option<(u32, u32)> {
+        self.triages.map(|t| (t.slice, t.n))
+    }
+}
+
 impl Client {
     /// Reads item `id`'s details record: no lease needed. `None` when the store holds no record for it yet.
     pub async fn details_get(
