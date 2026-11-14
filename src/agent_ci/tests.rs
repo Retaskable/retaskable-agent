@@ -252,14 +252,7 @@ mod stubbed {
         run(&origin, &["update-ref", "refs/pull/9/head", "refs/heads/pr"]);
         let bin = root.join("bin");
         let log = root.join("calls.log");
-        script(
-            &bin,
-            "docker",
-            &format!(
-                "echo \"docker $*\" >> {l}\n[ \"$1\" = run ] || exit 0\n{docker_body}",
-                l = log.display()
-            ),
-        );
+        script(&bin, "docker", &docker_stub(&log, docker_body, ""));
         let json = r#"[{"number":7,"isDraft":false,"labels":[],"headRefOid":"h7"}]"#;
         script(
             &bin,
@@ -272,6 +265,17 @@ mod stubbed {
         r.ci.programs.docker = bin.join("docker").into();
         r.ci.programs.gh = bin.join("gh").into();
         r
+    }
+
+    /// A `docker` that logs each call and runs `body` for the check container only (fetch and warm succeed); a
+    /// `ps` answers `ps_ids`.
+    fn docker_stub(log: &Path, body: &str, ps_ids: &str) -> String {
+        format!(
+            "echo \"docker $*\" >> {l}\n[ \"$1\" = ps ] && echo '{ps_ids}'\n[ \"$1\" = run ] || exit 0\n\
+             n=; p=; for a in \"$@\"; do [ \"$p\" = --name ] && n=$a; p=$a; done\n\
+             case \"$n\" in *-check) ;; *) exit 0;; esac\n{body}",
+            l = log.display()
+        )
     }
 
     fn key(pr: u64, head: &str) -> CheckKey {
@@ -313,21 +317,25 @@ mod stubbed {
             "{c}"
         );
         assert!(
-            c.contains("docker run") && c.contains("--name retaskable-ci-o-p-h7"),
+            c.contains("--name agent-ci-t-o-p--h7-pull_request-fetch")
+                && c.contains("--name agent-ci-t-o-p--h7-pull_request-check")
+                && !c.contains("-warm")
+                && c.contains("com.docker.compose.project=retaskable-ci"),
             "{c}"
         );
+        assert_eq!(check_runs(&r), 1);
+        let log = std::fs::read_dir(r._dir.path().join("data/projects/o-p/ci-logs"))
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("a log");
+        assert!(log.file_name().to_string_lossy().ends_with("-pull_request.log"));
         let ev = events(&r);
         assert!(
             ev.contains(r#""state":"started""#) && ev.contains(r#""state":"finished""#),
             "{ev}"
         );
         assert!(ev.contains("PR #7") && ev.contains(r#""key":"h7-mmmmmmm""#), "{ev}");
-        assert_eq!(
-            std::fs::read_dir(r._dir.path().join("data/projects/o-p/ci"))
-                .unwrap()
-                .count(),
-            0
-        );
         let claim = &r.store.args("ci_claim")[0];
         assert_eq!(claim["sha"], "h7");
         assert_eq!(claim["event"], "pull_request");
@@ -412,6 +420,13 @@ mod stubbed {
         assert_eq!(calls(&r).matches("docker run").count(), 0);
     }
 
+    fn check_runs(r: &Rig) -> usize {
+        calls(r)
+            .lines()
+            .filter(|l| l.starts_with("docker run") && l.contains("-check "))
+            .count()
+    }
+
     #[tokio::test]
     async fn a_failing_check_posts_failure_and_one_comment() {
         let mut r = pr_rig("echo boom; exit 1");
@@ -420,21 +435,75 @@ mod stubbed {
         }
         let c = calls(&r);
         assert!(c.contains("state=failure") && !c.contains("state=success"), "{c}");
-        assert_eq!(c.matches("issues/7/comments").count(), 2, "{c}"); // the lookup and the one post
-        assert!(c.contains("body=agent CI failed on h7."), "{c}");
+        assert_eq!(c.matches("issues/7/comments").count(), 1, "{c}"); // the one post
+        assert!(c.contains("body=agent-ci t failed on h7."), "{c}");
         assert!(c.contains("boom"), "{c}");
     }
 
+    /// `pr_rig` whose main also holds `.agent-ci/warm.sh`, and whose fetch step prints `fetch_says`.
+    fn warm_rig(fetch_says: &str) -> Rig {
+        let r = pr_rig("exit 0");
+        let work = r._dir.path().join("work");
+        run(&work, &["checkout", "-q", "main"]);
+        std::fs::write(work.join(".agent-ci/warm.sh"), "true\n").unwrap();
+        run(&work, &["add", "."]);
+        run(&work, &["commit", "-qm", "warm"]);
+        run(&work, &["push", "-q", "origin", "main"]);
+        let bin = r._dir.path().join("bin");
+        let log = r._dir.path().join("calls.log");
+        let stub = docker_stub(&log, "exit 0", "").replace(
+            "case \"$n\" in *-check) ;;",
+            &format!("case \"$n\" in *-fetch) echo '{fetch_says}';; esac\ncase \"$n\" in *-check) ;;"),
+        );
+        script(&bin, "docker", &stub);
+        r
+    }
+
+    fn warm_runs(r: &Rig) -> usize {
+        calls(r)
+            .lines()
+            .filter(|l| l.starts_with("docker run") && l.contains("-warm "))
+            .count()
+    }
+
     #[tokio::test]
-    async fn a_conflicting_pull_request_fails_without_a_container() {
+    async fn warm_runs_only_with_warm_sh_and_the_default_image() {
+        let mut r = warm_rig("");
+        for t in go(&mut r, vec![key(7, "h7")]).await {
+            t.await.unwrap();
+        }
+        assert_eq!((warm_runs(&r), check_runs(&r)), (1, 1), "{}", calls(&r));
+        assert!(
+            calls(&r).contains("mcr.microsoft.com/playwright:v1.63.0-noble"),
+            "{}",
+            calls(&r)
+        );
+        // The repo's own image: no warm step.
+        let mut r = warm_rig("AGENT_CI_IMAGE rust:1");
+        for t in go(&mut r, vec![key(7, "h7")]).await {
+            t.await.unwrap();
+        }
+        assert_eq!((warm_runs(&r), check_runs(&r)), (0, 1), "{}", calls(&r));
+        // No warm.sh on main: no warm step even on the default image.
         let mut r = pr_rig("exit 0");
-        for t in go(&mut r, vec![key(9, "h9")]).await {
+        for t in go(&mut r, vec![key(7, "h7")]).await {
+            t.await.unwrap();
+        }
+        assert_eq!(warm_runs(&r), 0);
+    }
+
+    #[tokio::test]
+    async fn a_bad_image_name_fails_the_check_in_its_log_and_a_push_failure_comments_on_the_commit() {
+        let mut r = warm_rig("AGENT_CI_IMAGE bad name");
+        let sha = "a".repeat(40);
+        for t in go(&mut r, vec![CheckKey::push(&sha)]).await {
             t.await.unwrap();
         }
         let c = calls(&r);
-        assert!(c.contains("state=failure") && c.contains("conflicts with main"), "{c}");
-        assert!(!c.contains("docker run"), "{c}");
-        assert!(c.contains("issues/9/comments"), "{c}");
+        assert!(c.contains("state=failure"), "{c}");
+        assert!(c.contains(&format!("commits/{sha}/comments")), "{c}");
+        assert!(c.contains(".agent-ci/image is not an image name: bad name"), "{c}");
+        assert_eq!(check_runs(&r), 0, "{c}");
     }
 
     #[tokio::test]
@@ -442,14 +511,7 @@ mod stubbed {
         let mut r = pr_rig("exit 0");
         let log = r._dir.path().join("calls.log");
         let body = format!("echo begin >> {l}; sleep 1.5; echo end >> {l}", l = log.display());
-        script(
-            &r._dir.path().join("bin"),
-            "docker",
-            &format!(
-                "echo \"docker $*\" >> {l}\n[ \"$1\" = run ] || exit 0\n{body}",
-                l = log.display()
-            ),
-        );
+        script(&r._dir.path().join("bin"), "docker", &docker_stub(&log, &body, ""));
         let keys = vec![key(7, "h7"), key(8, "h8")];
         let first = go(&mut r, keys.clone()).await;
         assert_eq!(first.len(), 1, "only one permit");
@@ -474,19 +536,16 @@ mod stubbed {
     }
 
     #[tokio::test]
-    async fn recovery_removes_a_leftover_directory_and_its_container() {
-        let r = pr_rig("exit 0");
-        let root = r._dir.path().join("data/projects/o-p/ci");
-        std::fs::create_dir_all(root.join("check-1")).unwrap();
-        std::fs::write(root.join("check-1/f"), "x").unwrap();
-        std::fs::write(root.join("check-1.name"), "retaskable-ci-o-p-abc1234").unwrap();
+    async fn recovery_removes_this_computers_leftover_containers() {
+        let mut r = pr_rig("exit 0");
+        let bin = r._dir.path().join("bin");
+        let log = r._dir.path().join("calls.log");
+        script(&bin, "docker", &docker_stub(&log, "exit 0", "abc123"));
+        r.ci.programs.docker = bin.join("docker").into();
         r.ci.recover(&r.cfg).await;
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
-        assert!(
-            calls(&r).contains("docker rm -f retaskable-ci-o-p-abc1234"),
-            "{}",
-            calls(&r)
-        );
+        let c = calls(&r);
+        assert!(c.contains("docker ps -aq --filter name=^agent-ci-t-o-p--"), "{c}");
+        assert!(c.contains("docker rm -f abc123"), "{c}");
     }
 
     #[tokio::test]
@@ -514,12 +573,7 @@ mod stubbed {
         for t in r.ci.start(&r.cfg, keys).await {
             t.await.unwrap();
         }
-        let count = |r: &Rig| {
-            (
-                calls(r).matches("state=pending").count(),
-                calls(r).matches("docker run").count(),
-            )
-        };
+        let count = |r: &Rig| (calls(r).matches("state=pending").count(), check_runs(r));
         assert_eq!(count(&r), (2, 2));
         // Still listed: not run again.
         let keys = r.ci.poll(&r.cfg).await;
@@ -576,7 +630,7 @@ mod stubbed {
     }
 
     fn docker_runs(r: &Rig) -> usize {
-        calls(r).matches("docker run").count()
+        check_runs(r)
     }
 
     #[tokio::test]
@@ -742,7 +796,7 @@ echo '[]'",
             t.await.unwrap();
         }
         let c = calls(&r);
-        assert!(c.contains("bash .agent-ci/checks.sh push"), "{c}");
+        assert!(c.contains("bash .agent-ci/checks.sh"), "{c}");
         assert!(c.contains(&format!("statuses/{main}")), "{c}");
         assert!(
             c.contains("context=ci/agent/push/ci") && !c.contains("ci/agent/pr/ci"),
@@ -757,13 +811,17 @@ echo '[]'",
     }
 
     #[tokio::test]
-    async fn a_failing_push_run_posts_failure_on_main_and_no_comment() {
+    async fn a_failing_push_run_posts_failure_on_main_and_a_commit_comment() {
         let mut r = push_rig("echo boom; exit 1");
         for t in poll_and_start(&mut r).await {
             t.await.unwrap();
         }
         let c = calls(&r);
-        assert!(c.contains("state=failure") && !c.contains("/comments"), "{c}");
+        assert!(
+            c.contains("state=failure") && c.contains("/commits/") && c.contains("/comments"),
+            "{c}"
+        );
+        assert!(!c.contains("issues/"), "{c}");
     }
 
     #[tokio::test]

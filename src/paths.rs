@@ -12,11 +12,6 @@ pub fn run_dir(data_dir: &Path, project: &str, item_id: &str) -> PathBuf {
     project_dir(data_dir, project).join("runs").join(item_id)
 }
 
-/// Where a project's CI checks get their fresh directories (agent-ci.md section 3.2).
-pub fn ci_dir(data_dir: &Path, project: &str) -> PathBuf {
-    project_dir(data_dir, project).join("ci")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

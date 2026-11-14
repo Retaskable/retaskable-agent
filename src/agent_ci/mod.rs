@@ -1,21 +1,25 @@
 //! docs/specs/agent-ci.md: running CI on this computer, as its own process (`retaskable-ci`, `src/bin/ci.rs`).
 //! This is the loop. Each poll it checks Docker, then for each repo in `AGENT_CI_REPO` updates the repo's bare
 //! mirror (`mirror.rs`), looks for the repo's CI files on its base branch and lists the pull requests to check.
-//! Checks are listed here, not run. `host.rs` is the fetch step; `report.rs` is the code host side: statuses and
-//! the failure comment, `store.rs` the store ops (the lease and the run records). `AGENT_CI_SLOTS` permits bound the checks.
+//! Checks are listed here, not run. `exec.rs` runs a check's three containers (`steps.rs` their arguments and scripts); `report.rs` is the code host side:
+//! statuses and the failure comment, `store.rs` the store ops (the lease and the run records). `AGENT_CI_SLOTS` permits bound the checks.
 pub mod automerge;
 pub mod check;
 pub mod claim;
 pub mod container;
 pub mod discovery;
 pub mod docker;
-pub mod host;
+pub mod etag;
+pub mod exec;
+pub mod inputs;
 pub mod link;
+pub mod log_excerpt;
 pub mod mirror;
 pub mod priority;
 pub mod prs;
 pub mod report;
 pub mod settings;
+pub mod steps;
 pub mod store;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -203,9 +207,13 @@ impl CiLoop {
                 continue;
             };
             let mirror = cfg.mirror(repo);
-            let Ok(image) = discovery::discover(&self.programs.git, &mirror, &repo.base_branch).await else {
+            if discovery::discover(&self.programs.git, &mirror, &repo.base_branch)
+                .await
+                .is_err()
+            {
                 continue;
-            };
+            }
+            let has_warm = discovery::has_file(&self.programs.git, &mirror, &repo.base_branch, "warm.sh").await;
             for key in list {
                 let started = (id.clone(), key.clone());
                 if self.seen.lock().unwrap().contains(&started) {
@@ -234,7 +242,7 @@ impl CiLoop {
                     repo: repo.clone(),
                     mirror: mirror.clone(),
                     cpus: self.cpus(cfg),
-                    image: image.clone(),
+                    has_warm,
                     key: key.clone(),
                     merge: merge.clone(),
                     meta,
@@ -267,7 +275,7 @@ impl CiLoop {
     /// Recovery (agent.md section 7.4): leftover directories and containers from a cut check.
     pub async fn recover(&self, cfg: &Settings) {
         for repo in &cfg.repos {
-            check::recover(&self.programs.docker, &cfg.data_dir, &repo.id()).await;
+            check::recover(&self.programs.docker, &cfg.computer, &repo.github_repo).await;
         }
     }
 
