@@ -21,6 +21,7 @@ pub mod runs;
 pub mod settings;
 pub mod shown;
 pub mod suggestions;
+pub mod week;
 
 use crate::env::Env;
 use crate::text::{non_blank, trim_url};
@@ -207,6 +208,9 @@ pub struct ClaimNextAgent {
     pub base_branch: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// This computer's Claude week; left out when it has no reading (backlog/06.6 section 6.6.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<week::WeekUse>,
 }
 
 /// What `claim_next` answers: an item claimed, with the lease token that goes with it, or nothing
@@ -221,6 +225,8 @@ pub enum ClaimNextAnswer {
     /// Tags the project needs that this computer lacks (`{ waitingFor }`): nothing is handed out until
     /// `work_available`.
     WaitingFor(Value),
+    /// Another computer with more of its Claude week left takes the next item; ask again after `retry_ms`.
+    Passed(week::Passed),
 }
 
 /// What `tryout_add` sends for a merged slice's after-merge try-out (backlog/06-data-and-operations.md
@@ -457,6 +463,12 @@ impl Client {
             None | Some(Value::Null) => Ok(ClaimNextAnswer::Nothing),
             Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
                 Ok(ClaimNextAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
+            }
+            Some(Value::Object(o)) if o.contains_key("passed") => {
+                Ok(ClaimNextAnswer::Passed(week::Passed::of(&o).unwrap_or(week::Passed {
+                    to: "another computer".into(),
+                    retry_ms: 60_000,
+                })))
             }
             Some(value) => {
                 #[derive(Deserialize)]
