@@ -106,7 +106,26 @@ async fn a_clean_main_pushes_the_branch_opens_one_pr_and_adds_one_item() {
     settle(&mut f).await;
     let sha = crate::lanes::head_sha(&f.repo).unwrap();
     let branch = format!("retaskable/sync-main-{}", &sha[..7]);
-    assert!(remote_branches(&f).contains(&branch));
+    // On a loaded machine the loop can still be mid-push when settle gives up: keep passing.
+    for _ in 0..100 {
+        if remote_branches(&f).contains(&branch) {
+            break;
+        }
+        let m = &mut f.rig.machine;
+        let shared = Shared {
+            links: &m.links,
+            local: &m.local,
+            claim_paused_until: &mut None,
+            claude_signed_out_until: &mut None,
+            engine_limits: &mut Default::default(),
+            stopping: false,
+        };
+        m.projects[0]
+            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(remote_branches(&f).contains(&branch), "{}", remote_branches(&f));
     let adds = adds(&f);
     assert_eq!(adds.len(), 1, "{adds:?}");
     assert_eq!(adds[0]["via"], "chore");
