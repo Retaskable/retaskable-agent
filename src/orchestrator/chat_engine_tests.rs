@@ -10,12 +10,13 @@ use super::tests::project_in;
 use crate::backlog::Client;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, RoleEngines};
 use crate::env::Env;
+use crate::intents::Outcome;
 use crate::orchestrator::ask_host::ClaudeAsks;
 use crate::orchestrator::driver::{
     AskHost, AskJob, AskStore, OutcomeSender, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
 };
 use crate::orchestrator::live::sessions::Sessions;
-use crate::view::{AgentView, AskCommand};
+use crate::view::AgentView;
 
 /// A Cursor-style answer carrying `json` as the model's text.
 fn cursor_says(json: &str) -> String {
@@ -86,18 +87,12 @@ async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env
         view,
         crate::local_model::LocalModel::off(),
     );
-    let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let job = AskJob {
         engine: None,
         project: project_in(root, &repo),
-        ask: AskCommand {
-            project: "p".into(),
-            ask_id: "a1".into(),
-            text: "How is it going?".into(),
-            reply_to: None,
-            about: None,
-            images_block: String::new(),
-        },
+        id: "a1".into(),
+        question: "How is it going?".into(),
+        images_block: String::new(),
         store: AskStore {
             client: Arc::new(Client::new(base)),
             repo: 1,
@@ -106,10 +101,13 @@ async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env
         },
         lanes: vec![],
         runs: Default::default(),
-        events,
         sessions,
     };
-    host.run(job).await.unwrap().answer
+    match host.run(job).await {
+        Outcome::Done(v) => v["answer"].as_str().unwrap_or_default().to_string(),
+        Outcome::Failed(why) => why,
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -143,10 +141,7 @@ async fn an_ask_with_the_binary_missing_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let env = stubs(dir.path(), "", &["cursor-agent"]);
     let answer = ask(dir.path(), chat_on(Engine::Cursor), env).await;
-    assert!(
-        answer.starts_with("Sorry, I couldn't answer that: the cursor-agent binary wasn't found ("),
-        "{answer}"
-    );
+    assert!(answer.starts_with("the cursor-agent binary wasn't found ("), "{answer}");
 }
 
 fn starter(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> (Arc<ClaudeStarter>, PathBuf) {

@@ -23,7 +23,6 @@ mod asks;
 mod deprecations;
 mod drafts;
 mod fix_main;
-mod follow;
 mod held_items;
 mod host_calls;
 mod idea_accept;
@@ -56,7 +55,7 @@ mod triage_run;
 mod trial;
 mod usage_recheck;
 
-pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
+pub use asks::{AskHost, AskJob, AskStore};
 pub use drafts::{DraftHost, DraftJob};
 pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared};

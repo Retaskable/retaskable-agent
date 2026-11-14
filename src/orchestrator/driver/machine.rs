@@ -538,7 +538,6 @@ impl Machine {
                 self.projects[i].backlog_items = items.len();
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
-                self.projects[i].follow_drafts(items, &self.links).await;
             }
         }
         if self.starter.is_some() {

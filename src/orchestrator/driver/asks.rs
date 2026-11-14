@@ -1,37 +1,32 @@
-//! The ask step of a project's loop (docs/specs/agent/06.6-ask-claude.md, "Interactive sessions"): the chat's
-//! `ask` commands queued by `commands::ask` are answered here, one `AskHost` session each. An ask has a person
-//! waiting, so it doesn't queue behind `concurrency` but counts toward it while it runs. It doesn't start while
-//! this computer or the project is paused, over the daily budget, at the engine's usage limit, signed out or while
-//! the agent is stopping: it is reported waiting ("Paused: I'll answer when someone resumes") and answered once
-//! that passes. The store keeps the conversation; the loop keeps only the asks waiting for a session and the tasks
-//! running. A store that can't be reached fails closed: the ask goes back in the queue, nothing is answered locally.
-use std::collections::{BTreeMap, BTreeSet};
+//! The ask step of a project's loop (docs/specs/agent/06.6-ask-claude.md, "Code questions"): the `ask` intent rows
+//! that are code questions, pulled from the store by the intent puller (`intents/mod.rs`) and answered here, one
+//! `AskHost` session each. A question has a person waiting, so it doesn't queue behind `concurrency` but counts toward
+//! it while it runs. It isn't taken while this computer or the project is paused, over the daily budget, at the
+//! engine's usage limit, signed out or while the agent is stopping: the row stays open and is taken once that passes
+//! (the store times it out after 5 minutes unclaimed). A store that can't be reached takes nothing: nothing is
+//! answered locally.
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
-use serde_json::Value;
-use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::project::ProjectLoop;
 use super::start_gate::StartGate;
+use crate::ask::code_answer::question_of;
+use crate::ask::pictures;
 use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
-use crate::backlog::asks::AskReport;
+use crate::backlog::intents::IntentRow;
 use crate::config::ProjectConfig;
-use crate::engines::{EventKind, Role, SessionEvent};
+use crate::engines::Role;
+use crate::intents::{Handler, IntentStore, Outcome, Puller, StoreLink};
 use crate::lane_pool::{Holder, LanePool};
 use crate::store::RunRecord;
-use crate::view::AskCommand;
 
-/// What an ask's `ask_report` says while it waits.
-pub const WAITING: &str = "Paused: I'll answer when someone resumes";
-
-/// How often a running ask reports how long it has been thinking and what it is reading.
-const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// The store as the ask reads and writes it.
+/// The store as the ask reads it.
 #[derive(Clone)]
 pub struct AskStore {
     pub client: Arc<Client>,
@@ -44,25 +39,20 @@ pub struct AskStore {
 /// What an assistant session needs besides the store: the agent's own run state, for the prompt.
 pub struct AskJob {
     pub project: ProjectConfig,
-    pub ask: AskCommand,
+    /// The intent row's id.
+    pub id: String,
+    pub question: String,
+    /// The "Attached images" block made from the row's pictures, empty when there are none.
+    pub images_block: String,
     pub store: AskStore,
     /// The lanes this project holds.
     pub lanes: Vec<StateLane>,
     /// The runs this computer holds, by item id.
     pub runs: BTreeMap<String, RunRecord>,
-    /// Where the host sends the session's summarized events as they happen; the loop reports them as progress.
-    pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
     /// The engine to start on when it isn't the assistant's chosen one.
     pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
-}
-
-/// The answer and what each action it asked for came to (`perform`'s results).
-#[derive(Debug, Clone, PartialEq)]
-pub struct AskReply {
-    pub answer: String,
-    pub actions: Vec<Value>,
 }
 
 /// The parts of an ask that touch the store, the machine and the engine. Faked in tests.
@@ -70,45 +60,102 @@ pub trait AskHost: Send + Sync {
     /// Whether the store says new asks must wait: the project is paused, or today's spend is over the daily budget.
     /// An `Err` is the store not answering.
     fn blocked(&self, store: &AskStore) -> BoxFuture<'static, Result<bool>>;
-    /// Reads the store for the prompt, runs the assistant session in the base checkout and carries out its actions.
-    /// A session that fails is an answer saying so; an `Err` is the store not answering, which leaves the ask waiting.
-    fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>>;
+    /// Reads the store for the prompt and runs the assistant session in the base checkout, read-only. `Done` carries
+    /// the row's `{ answer }`; a session that fails is `Failed` with its plain reason; one cut by a restart is
+    /// `Abandoned`.
+    fn run(&self, job: AskJob) -> BoxFuture<'static, Outcome>;
 }
 
-/// A project's asks: those waiting for a session, which of them the store was told so, and those running.
+/// What the ask handler knows when the puller takes a row.
+pub(super) struct AskCx {
+    project: ProjectConfig,
+    store: AskStore,
+    lanes: Vec<StateLane>,
+    runs: BTreeMap<String, RunRecord>,
+    engine: Option<crate::engines::EngineId>,
+    sessions: crate::orchestrator::live::sessions::Sessions,
+}
+
+/// The `ask` kind: a code question, answered by a read-only session with the pictures it came with.
+struct AskHandler {
+    host: Arc<dyn AskHost>,
+    /// Where pictures are saved.
+    pictures: std::path::PathBuf,
+}
+
+impl Handler<AskCx> for AskHandler {
+    fn kind(&self) -> &'static str {
+        "ask"
+    }
+
+    fn takes(&self, row: &IntentRow) -> bool {
+        question_of(&row.kind, &row.args).is_some()
+    }
+
+    fn run(&self, row: IntentRow, cx: &AskCx) -> BoxFuture<'static, Outcome> {
+        let host = self.host.clone();
+        let dir = self.pictures.clone();
+        let job = AskJob {
+            project: cx.project.clone(),
+            id: row.id.clone(),
+            question: question_of(&row.kind, &row.args).unwrap_or_default().to_string(),
+            images_block: String::new(),
+            store: cx.store.clone(),
+            lanes: cx.lanes.clone(),
+            runs: cx.runs.clone(),
+            engine: cx.engine,
+            sessions: cx.sessions.clone(),
+        };
+        async move {
+            let ids = pictures::ids_of(&row.args);
+            let store = &job.store;
+            let saved = match pictures::fetch(&store.client, store.repo, Some(&store.token), &ids, &dir).await {
+                Ok(saved) => saved,
+                Err(why) => return Outcome::Failed(why),
+            };
+            // `saved` lives until the session is done: the pictures are removed after the run.
+            let outcome = host
+                .run(AskJob {
+                    images_block: saved.block(),
+                    ..job
+                })
+                .await;
+            drop(saved);
+            outcome
+        }
+        .boxed()
+    }
+}
+
+/// How often the store is asked for new questions (docs/specs/intent-rows.md section 3.3).
+const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A project's asks: the puller, built the first time a pass has a host.
 pub(super) struct Asks {
-    waiting: Vec<AskCommand>,
-    reported: BTreeSet<String>,
-    running: Vec<RunningAsk>,
-    /// How often a running ask's progress is reported.
-    pub(super) progress_every: std::time::Duration,
+    puller: Option<Puller<AskCx>>,
+    polled: Option<std::time::Instant>,
+    /// How long after one look at the store the next may be.
+    pub(super) poll_every: std::time::Duration,
 }
 
 impl Default for Asks {
     fn default() -> Self {
         Self {
-            waiting: Vec::new(),
-            reported: BTreeSet::new(),
-            running: Vec::new(),
-            progress_every: PROGRESS_EVERY,
+            puller: None,
+            polled: None,
+            poll_every: POLL_EVERY,
         }
     }
-}
-
-/// An ask whose session is running.
-pub(super) struct RunningAsk {
-    task: JoinHandle<()>,
 }
 
 impl ProjectLoop {
     /// How many asks are running here now; finished ones are forgotten.
     pub(super) fn asking(&mut self) -> u32 {
         self.drain_failures();
-        self.asks.running.retain(|a| !a.task.is_finished());
-        self.asks.running.len() as u32
+        self.asks.puller.as_mut().map_or(0, |p| p.active())
     }
 
-    /// Takes in the asks queued for this project and starts each one that may run, or reports it waiting.
+    /// Takes the code questions the store lists for this project and starts each one that may run.
     pub(super) async fn ask_pass(
         &mut self,
         paused: bool,
@@ -117,8 +164,7 @@ impl ProjectLoop {
         host: &Arc<dyn AskHost>,
         shared: &Shared<'_>,
     ) {
-        self.asks.waiting.extend(shared.links.item_commands.take_asks(&self.id));
-        if self.asks.waiting.is_empty() || shared.stopping {
+        if shared.stopping {
             return;
         }
         let Some(repo) = self.repo else { return };
@@ -128,60 +174,54 @@ impl ProjectLoop {
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
         let failures = self.failures.clone();
-        let store = || AskStore {
+        let store = AskStore {
             client: self.client.clone(),
             repo,
             token: token.clone(),
             failures: failures.clone(),
         };
         let gate = StartGate::for_lanes(self, pool.rules().lanes, shared);
-        let (mut hold, start_on) = match gate.role_start(self, shared, Role::Assistant, true) {
+        let (hold, start_on) = match gate.role_start(self, shared, Role::Assistant, true) {
             Some(engine) => (paused, engine),
             None => (true, None),
         };
-        if !hold {
-            hold = match host.blocked(&store()).await {
-                Ok(blocked) => blocked,
-                Err(e) => return tracing::warn!("{}: the ask gate couldn't read the store: {e:#}", self.id),
-            };
-        }
-        let waiting = std::mem::take(&mut self.asks.waiting);
         if hold {
-            for ask in &waiting {
-                if !self.asks.reported.contains(&ask.ask_id) {
-                    let report = AskReport {
-                        status: Some("waiting".into()),
-                        waiting: Some(WAITING.into()),
-                        ..Default::default()
-                    };
-                    if send(&store(), &ask.ask_id, &report).await {
-                        self.asks.reported.insert(ask.ask_id.clone());
-                    }
-                }
-            }
-            self.asks.waiting = waiting;
             return;
         }
-        for ask in waiting {
-            self.asks.reported.remove(&ask.ask_id);
-            *slots = slots.saturating_sub(1);
-            let (events, rx) = tokio::sync::mpsc::unbounded_channel();
-            let every = self.asks.progress_every;
-            let job = AskJob {
-                project: self.project.clone(),
-                ask,
-                store: store(),
-                lanes: self.ask_lanes(pool),
-                runs: self.records.clone(),
-                events,
-                engine: start_on,
-                sessions: self.live.sessions().clone(),
-            };
-            let (host, queue) = (host.clone(), shared.links.item_commands.clone());
-            tracing::info!("{}: answering ask {}", self.id, job.ask.ask_id);
-            self.asks.running.push(RunningAsk {
-                task: tokio::spawn(answer(host, job, rx, every, queue)),
-            });
+        if self.asks.polled.is_some_and(|at| at.elapsed() < self.asks.poll_every) {
+            return;
+        }
+        self.asks.polled = Some(std::time::Instant::now());
+        match host.blocked(&store).await {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(e) => return tracing::warn!("{}: the ask gate couldn't read the store: {e:#}", self.id),
+        }
+        let link: Arc<dyn IntentStore> = Arc::new(StoreLink {
+            client: self.client.clone(),
+            repo,
+            token,
+            machine: shared.links.machine.clone(),
+            failures,
+        });
+        let cx = AskCx {
+            project: self.project.clone(),
+            store,
+            lanes: self.ask_lanes(pool),
+            runs: self.records.clone(),
+            engine: start_on,
+            sessions: self.live.sessions().clone(),
+        };
+        let puller = self.asks.puller.get_or_insert_with(|| {
+            Puller::default().register(Arc::new(AskHandler {
+                host: host.clone(),
+                pictures: pictures::folder(),
+            }))
+        });
+        let started = puller.pass(&link, || cx).await;
+        *slots = slots.saturating_sub(started);
+        if started > 0 {
+            tracing::info!("{}: answering {started} code question(s)", self.id);
         }
     }
 
@@ -198,105 +238,5 @@ impl ProjectLoop {
                 _ => None,
             })
             .collect()
-    }
-}
-
-/// One ask from start to report. A store that fails before the session puts the ask back in the queue; once the
-/// session has run and its actions are done the reply is kept and only the report is retried, never the session.
-async fn answer(
-    host: Arc<dyn AskHost>,
-    job: AskJob,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
-    every: std::time::Duration,
-    queue: crate::view::ItemCommands,
-) {
-    let (store, ask) = (job.store.clone(), job.ask.clone());
-    let started = std::time::Instant::now();
-    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
-    let mut reading: Option<String> = None;
-    let run = host.run(job);
-    tokio::pin!(run);
-    // Progress goes out on the tick, not per event, and each send finishes before the next step, so the answer
-    // always follows the last progress report.
-    let result = loop {
-        tokio::select! {
-            r = &mut run => break r,
-            Some(ev) = events.recv() => {
-                if let Some(now) = reading_now(&ev) {
-                    reading = Some(now);
-                }
-            }
-            _ = tick.tick() => {
-                let report = AskReport {
-                    progress: Some(progress_line(started.elapsed().as_secs(), reading.as_deref())),
-                    ..Default::default()
-                };
-                send(&store, &ask.ask_id, &report).await;
-            }
-        }
-    };
-    let reply = match result {
-        Ok(reply) => reply,
-        Err(e) => {
-            tracing::warn!("ask {}: the store failed, it stays waiting: {e:#}", ask.ask_id);
-            return queue.push_ask(ask);
-        }
-    };
-    let done = AskReport {
-        status: Some("answered".into()),
-        answer: Some(reply.answer),
-        actions: Some(reply.actions),
-        ..Default::default()
-    };
-    for attempt in 0..3 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-        if send(&store, &ask.ask_id, &done).await {
-            return;
-        }
-    }
-    tracing::error!(
-        "ask {}: the answer never reached the store; it isn't run again",
-        ask.ask_id
-    );
-}
-
-async fn send(store: &AskStore, id: &str, report: &AskReport) -> bool {
-    match store
-        .client
-        .ask_report(store.repo, Some(&store.token), id, report)
-        .await
-    {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("ask {id}: the report didn't reach the store: {e}");
-            store.failures.add("ask_report", id, &e);
-            false
-        }
-    }
-}
-
-/// What a tool event says the session is reading or looking at, for the progress line.
-fn reading_now(ev: &SessionEvent) -> Option<String> {
-    if ev.kind != EventKind::Tool {
-        return None;
-    }
-    let (tool, arg) = ev.text.split_once(": ")?;
-    let arg = arg.trim();
-    if arg.is_empty() {
-        return None;
-    }
-    Some(match tool {
-        "Read" | "NotebookRead" => format!("reading {arg}"),
-        "Grep" | "Glob" => format!("searching for {arg}"),
-        _ => format!("{tool}: {arg}"),
-    })
-}
-
-fn progress_line(secs: u64, reading: Option<&str>) -> String {
-    match reading {
-        Some(r) => format!("Thinking for {secs}s, {r}"),
-        None => format!("Thinking for {secs}s"),
     }
 }
