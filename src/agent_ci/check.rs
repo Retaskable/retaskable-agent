@@ -10,21 +10,22 @@ use serde_json::json;
 
 use super::claim::{self, Verdict};
 use super::report::{self, Host, Kind, State};
-use super::{CheckKey, Programs, RunningCheck, automerge, container, host};
+use super::settings::Repo;
+use super::{CheckKey, Programs, automerge, container, host};
 use crate::backlog::runs::short_sha;
-use crate::config::ProjectConfig;
-use crate::orchestrator::live::LiveHandle;
+use crate::telemetry::EventLog;
 use crate::telemetry::event::{Ci, Event};
-use crate::telemetry::{EventLog, now_ms};
 
 /// Everything one check needs.
 pub struct Job {
     pub programs: Programs,
     pub data_dir: PathBuf,
     pub computer: String,
-    pub live: LiveHandle,
-    pub id: String,
-    pub project: ProjectConfig,
+    pub repo: Repo,
+    /// The repo's bare mirror: where `gh` runs and the fetch step clones from.
+    pub mirror: PathBuf,
+    /// `--cpus` of the container, already capped at what Docker has.
+    pub cpus: u32,
     pub image: String,
     pub key: CheckKey,
     /// Merges the pull request when the check is green; none merges nothing.
@@ -62,7 +63,7 @@ pub fn key_text(k: &CheckKey) -> String {
 /// Writes a `ci` event to the project's log.
 fn emit(j: &Job, state: &str, ms: u128) {
     let mut log = EventLog::new();
-    log.open(&crate::paths::project_dir(&j.data_dir, &j.id).join("events"));
+    log.open(&crate::paths::project_dir(&j.data_dir, &j.repo.id()).join("events"));
     let mut ci = Ci {
         item: Some(if j.key.is_push() {
             "push main".into()
@@ -75,7 +76,16 @@ fn emit(j: &Job, state: &str, ms: u128) {
     };
     ci.extra.insert("key".into(), json!(key_text(&j.key)));
     ci.extra.insert("pr".into(), json!(j.key.pr));
-    log.add_in(&j.id, Event::Ci(ci));
+    log.add_in(&j.repo.id(), Event::Ci(ci));
+}
+
+/// What a log line calls a check: `PR #7 abcdef1` or `push abcdef1`.
+fn subject(k: &CheckKey) -> String {
+    if k.is_push() {
+        format!("push {}", short_sha(&k.head))
+    } else {
+        format!("PR #{} {}", k.pr, short_sha(&k.head))
+    }
 }
 
 /// The log's last non-empty line, for the failure status.
@@ -95,8 +105,8 @@ pub async fn run(j: Job) -> Ran {
     let host_api = Arc::new(Host {
         program: PathBuf::from(&j.programs.gh),
         kind: Kind::Github,
-        repo: j.project.github_repo.clone(),
-        dir: PathBuf::from(&j.project.repo_path),
+        repo: j.repo.github_repo.clone(),
+        dir: j.mirror.clone(),
     });
     let key = key_text(&j.key);
     match claim::claim(&host_api, context_of(&j.key), &j.key.head, &key, &j.computer, || {
@@ -119,33 +129,24 @@ pub async fn run(j: Job) -> Ran {
         }
     }
     let begun = Instant::now();
-    let started_ms = now_ms();
-    let sha7 = short_sha(&j.key.head);
-    j.live.update_ci(|c| {
-        c.checks.push(RunningCheck {
-            project: j.id.clone(),
-            pr: j.key.pr,
-            sha: sha7.to_string(),
-            started: begun,
-        });
-        c.running = c.checks.len() as u32;
-    });
+    tracing::info!("agent CI: {} {}: checking", j.repo.github_repo, subject(&j.key));
     emit(&j, "started", 0);
     let ok = go(&j, begun, host_api).await;
     let ms = begun.elapsed().as_millis();
     emit(&j, "finished", ms);
-    j.live.update_ci(|c| {
-        c.checks
-            .retain(|r| !(r.project == j.id && r.pr == j.key.pr && r.sha == sha7));
-        c.running = c.checks.len() as u32;
-        c.last_result = Some(json!({ "project": j.id, "pr": j.key.pr, "sha": sha7, "ok": ok, "at": started_ms }));
-    });
+    let verdict = if ok { "passed" } else { "failed" };
+    tracing::info!(
+        "agent CI: {} {}: {verdict} in {}s",
+        j.repo.github_repo,
+        subject(&j.key),
+        ms / 1000
+    );
     Ran::Done
 }
 
 async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     let me = report::me(&j.computer);
-    let repo = PathBuf::from(&j.project.repo_path);
+    let repo = j.mirror.clone();
     let key = key_text(&j.key);
     let head = j.key.head.clone();
     let minutes = || begun.elapsed().as_secs() / 60;
@@ -186,7 +187,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
     // Only the fetch and the run are refreshed: the final status and the comment are posted after the last
     // refresh, so a late refresh can't turn the finished check pending again.
     let result: Result<(), (String, String)> = claim::refreshing(j.refresh, refresh, async {
-        let (data, id, main) = (j.data_dir.clone(), j.id.clone(), j.project.base_branch.clone());
+        let (data, id, main) = (j.data_dir.clone(), j.repo.id(), j.repo.base_branch.clone());
         let head_ref = format!("refs/pull/{}/head", j.key.pr);
         let push = j.key.is_push();
         let fetched = tokio::task::spawn_blocking(move || {
@@ -206,7 +207,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
         let dir = match fetched {
             Ok(Ok(host::FetchOutcome::Ready { dir, .. })) => dir,
             Ok(Ok(host::FetchOutcome::Conflict { reason })) => {
-                let line = format!("conflicts with {}: {}", j.project.base_branch, last_line(&reason));
+                let line = format!("conflicts with {}: {}", j.repo.base_branch, last_line(&reason));
                 return Err((line, reason));
             }
             other => {
@@ -220,12 +221,12 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
             }
         };
 
-        let name = container::container_name(&j.project.github_repo, &j.key.head);
+        let name = container::container_name(&j.repo.github_repo, &j.key.head);
         let _ = std::fs::write(name_file(&dir), &name);
-        let log_dir = crate::paths::project_dir(&j.data_dir, &j.id).join("ci-logs");
+        let log_dir = crate::paths::project_dir(&j.data_dir, &j.repo.id()).join("ci-logs");
         let outcome = container::run(&container::Check {
             docker: &j.programs.docker,
-            repo: &j.project.github_repo,
+            repo: &j.repo.github_repo,
             sha: &j.key.head,
             dir: &dir,
             image: &j.image,
@@ -236,6 +237,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
             },
             log_dir: &log_dir,
             ceiling: container::CEILING,
+            cpus: j.cpus,
         })
         .await;
         host::cleanup(&dir);
@@ -270,13 +272,12 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> bool {
 /// A green check's `automerge`: the pull request is squash-merged under the merge lock, or says why not.
 async fn land(j: &Job) {
     let Some(am) = &j.automerge else { return };
-    let repo = PathBuf::from(&j.project.repo_path);
     let target = automerge::Target {
         gh: &j.programs.gh,
         git: &j.programs.git,
-        repo_dir: &repo,
-        github_repo: &j.project.github_repo,
-        base: &j.project.base_branch,
+        repo_dir: &j.mirror,
+        github_repo: &j.repo.github_repo,
+        base: &j.repo.base_branch,
         computer: &j.computer,
         key: &j.key,
     };

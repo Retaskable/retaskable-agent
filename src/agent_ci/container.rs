@@ -67,6 +67,8 @@ pub struct Check<'a> {
     /// Where logs are kept (under the data folder).
     pub log_dir: &'a Path,
     pub ceiling: Duration,
+    /// `--cpus`: how much of the computer one check may use.
+    pub cpus: u32,
 }
 
 /// How a check ended.
@@ -117,6 +119,8 @@ pub fn run_args(c: &Check) -> Vec<String> {
         &name,
         "--cpu-shares",
         "128",
+        "--cpus",
+        &c.cpus.to_string(),
         "-v",
         &format!("{}:{WORKDIR}", mount_path(c.dir)),
         "-w",

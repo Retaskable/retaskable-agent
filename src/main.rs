@@ -509,21 +509,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         item_commands: &view.item_commands,
         machine: link::machine_name(env),
     });
-    // agent-ci.md section 3.1.
-    let ci = retaskable_agent::agent_ci::CiLoop::new(
-        Default::default(),
-        live.clone(),
-        retaskable_agent::agent_ci::docker::in_agent_image(),
-    )
-    .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
-        retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
-    )));
-    tokio::spawn(retaskable_agent::agent_ci::run(
-        ci,
-        dir.to_path_buf(),
-        env.clone(),
-        view.item_commands.clone(),
-    ));
+    // CI is its own process now (agent-ci.md section 1): `retaskable-ci run`, not started here.
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(

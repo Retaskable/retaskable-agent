@@ -43,6 +43,10 @@ struct Pr {
     #[serde(default)]
     labels: Vec<Label>,
     head_ref_oid: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    is_cross_repository: bool,
 }
 
 #[derive(Deserialize)]
@@ -50,18 +54,19 @@ struct Label {
     name: String,
 }
 
-/// The ready pull requests in `gh pr list --json number,isDraft,labels,headRefOid`'s output: the `ci-ready`
-/// ones with `ciWhenReady` active, otherwise every non-draft one.
-pub fn ready(json: &str, main: &str, ci_when_ready: bool) -> Result<Vec<CheckKey>, String> {
+/// The branch prefix of an agent's pull request: it runs only once it carries `ci-ready`.
+const AGENT_BRANCH_PREFIX: &str = "retaskable/";
+
+/// The ready pull requests in `gh pr list --json number,isDraft,labels,headRefOid,headRefName,isCrossRepository`'s
+/// output (agent-ci.md section 3.1): not drafts, not forks, and a `retaskable/` branch only with `ci-ready`.
+pub fn ready(json: &str, main: &str) -> Result<Vec<CheckKey>, String> {
     let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
     Ok(prs
         .into_iter()
         .filter(|p| {
-            if ci_when_ready {
-                p.labels.iter().any(|l| l.name == READY_LABEL)
-            } else {
-                !p.is_draft
-            }
+            !p.is_draft
+                && !p.is_cross_repository
+                && (!p.head_ref_name.starts_with(AGENT_BRANCH_PREFIX) || p.labels.iter().any(|l| l.name == READY_LABEL))
         })
         .map(|p| CheckKey {
             pr: p.number,
@@ -79,7 +84,10 @@ pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result
     crate::host_call::guard_program(gh, Some(repo_dir), &args).map_err(|e| e.to_string())?;
     let mut cmd = low_priority_tokio(gh);
     cmd.args(args)
-        .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
+        .args([
+            "--json",
+            "number,isDraft,labels,headRefOid,headRefName,isCrossRepository",
+        ])
         .current_dir(repo_dir)
         .stdin(Stdio::null())
         .kill_on_drop(true);

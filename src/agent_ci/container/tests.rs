@@ -64,6 +64,7 @@ mod stub {
             mode,
             log_dir: logs,
             ceiling,
+            cpus: 4,
         }
     }
 
@@ -98,6 +99,7 @@ mod stub {
         assert!(args.contains("--name retaskable-ci-web-abcdef0 "));
         assert!(args.contains("--cpu-shares 128"));
         assert!(args.contains(&format!("-v {}:{WORKDIR}", work.display())));
+        assert!(args.contains("--cpus 4"));
         assert!(args.trim_end().ends_with("bash .agent-ci/checks.sh pull_request"));
         let push = run_args(&check(&docker, &work, &logs, Mode::Push, CEILING));
         assert_eq!(push.last().unwrap(), "push");
@@ -150,6 +152,7 @@ async fn real_docker_runs_a_tiny_image() {
         mode: Mode::Push,
         log_dir: &t.path().join("logs"),
         ceiling: Duration::from_secs(300),
+        cpus: 1,
     };
     let Ok(out) = run(&c).await else { return };
     if out.exit_code == Some(0) {

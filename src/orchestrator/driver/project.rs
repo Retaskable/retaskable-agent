@@ -492,9 +492,6 @@ impl ProjectLoop {
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
         self.live.set_items(&self.id, held_items);
         let mut payload = payload;
-        if let Some(ci) = self.live.snapshot().ci {
-            payload.extra.insert("ci".into(), ci.tick_json());
-        }
         payload.states = Some(json!(states));
         // `live` is the claim answer when this pass really applied its decisions (`claim` mode with a starter).
         payload.claim = Some(json!(live.clone().flatten().unwrap_or_else(|| "not asked".into())));

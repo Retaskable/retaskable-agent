@@ -1,112 +1,87 @@
 use super::*;
-use crate::lane_pool::{Holder, LanePool, PoolRules};
-use crate::orchestrator::live::{HeldLane, LiveHandle};
 
 #[test]
-fn ready_with_ci_when_ready_takes_only_ci_ready_pull_requests_and_off_takes_non_drafts() {
+fn ready_skips_drafts_and_forks_and_holds_an_agent_branch_until_ci_ready() {
     let json = r#"[
-      {"number":1,"isDraft":false,"labels":[{"name":"ci-ready"}],"headRefOid":"aaa"},
-      {"number":2,"isDraft":false,"labels":[],"headRefOid":"bbb"},
-      {"number":3,"isDraft":true,"labels":[{"name":"ci-ready"}],"headRefOid":"ccc"},
-      {"number":4,"isDraft":true,"labels":[],"headRefOid":"ddd"}]"#;
-    let nums = |on| {
-        prs::ready(json, "m", on)
-            .unwrap()
-            .iter()
-            .map(|k| k.pr)
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(nums(true), [1, 3]);
-    assert_eq!(nums(false), [1, 2]);
-    assert!(prs::ready("nope", "m", false).is_err());
+      {"number":1,"isDraft":false,"labels":[],"headRefOid":"aaa","headRefName":"fix-it"},
+      {"number":2,"isDraft":true,"labels":[],"headRefOid":"bbb","headRefName":"wip"},
+      {"number":3,"isDraft":false,"labels":[],"headRefOid":"ccc","headRefName":"patch","isCrossRepository":true},
+      {"number":4,"isDraft":false,"labels":[],"headRefOid":"ddd","headRefName":"retaskable/item-4"},
+      {"number":5,"isDraft":false,"labels":[{"name":"ci-ready"}],"headRefOid":"eee","headRefName":"retaskable/item-5"},
+      {"number":6,"isDraft":true,"labels":[{"name":"ci-ready"}],"headRefOid":"fff","headRefName":"retaskable/item-6"}]"#;
+    let nums: Vec<u64> = prs::ready(json, "m").unwrap().iter().map(|k| k.pr).collect();
+    assert_eq!(nums, [1, 5]);
+    assert!(prs::ready("nope", "m").is_err());
 }
 
 #[test]
 fn a_new_main_sha_is_a_new_key() {
     let json = r#"[{"number":1,"isDraft":false,"labels":[],"headRefOid":"aaa"}]"#;
-    let a = prs::ready(json, "m1", false).unwrap();
-    let b = prs::ready(json, "m2", false).unwrap();
+    let a = prs::ready(json, "m1").unwrap();
+    let b = prs::ready(json, "m2").unwrap();
     assert_ne!(a, b);
-    assert_eq!(a, prs::ready(json, "m1", false).unwrap());
+    assert_eq!(a, prs::ready(json, "m1").unwrap());
     assert_eq!((a[0].head.as_str(), a[0].main.as_str()), ("aaa", "m1"));
 }
 
 #[test]
 fn a_reason_is_said_once_across_polls() {
-    let mut ci = CiLoop::new(Programs::default(), LiveHandle::default(), false);
+    let mut ci = CiLoop::new(Programs::default());
     assert!(ci.say_once("p", "No image"));
     assert!(!ci.say_once("p", "No image"));
     assert!(ci.say_once("p", "No checks.sh"));
 }
 
 #[test]
-fn lanes_all_busy_does_not_block_a_permit() {
-    let mut pool = LanePool::new(PoolRules {
-        lanes: 2,
-        ..Default::default()
-    });
-    for k in 1..=2 {
-        assert!(pool.take(
-            k,
-            Holder::Item {
-                project: "p".into(),
-                item: format!("i{k}")
-            }
-        ));
-    }
-    let mut ci = CiLoop::new(Programs::default(), LiveHandle::default(), false);
+fn resize_gives_and_takes_back_permits() {
+    let mut ci = CiLoop::new(Programs::default());
     ci.resize(1);
-    let permit = ci.slot().try_acquire_owned().expect("a permit with every lane busy");
+    let permit = ci.slot().try_acquire_owned().expect("a permit");
     assert_eq!(ci.slot().available_permits(), 0);
     drop(permit);
     ci.resize(0);
     assert!(ci.slot().try_acquire_owned().is_err());
 }
 
+fn settings(slots: u32) -> Settings {
+    Settings {
+        repos: vec![Repo::parse("o/p").unwrap()],
+        slots,
+        cpus: 2,
+        computer: "t".into(),
+        data_dir: std::env::temp_dir().join("retaskable-ci-test-never-written"),
+    }
+}
+
 #[tokio::test]
 async fn no_slots_or_no_docker_means_zero_permits_and_a_reason() {
-    let env = Env::from_map(Default::default());
-    let mut cfg = ConfigFile::default();
-    let live = LiveHandle::default();
-    let mut ci = CiLoop::new(
-        Programs {
-            docker: "retaskable-no-such-docker".into(),
-            ..Programs::default()
-        },
-        live.clone(),
-        false,
-    );
-    cfg.machine.ci_slots = 2;
-    ci.poll(&cfg, &env).await;
-    let c = live.snapshot().ci.unwrap();
-    assert_eq!((c.slots, c.running, c.docker), (2, 0, "missing"));
-    assert!(c.docker_reason.unwrap().contains("isn't installed"));
+    let mut ci = CiLoop::new(Programs {
+        docker: "retaskable-no-such-docker".into(),
+        ..Programs::default()
+    });
+    ci.poll(&settings(2)).await;
+    assert!(ci.logged["docker"].contains("isn't installed"));
     assert_eq!(ci.slot().available_permits(), 0);
 
-    cfg.machine.ci_slots = 0;
-    ci.poll(&cfg, &env).await;
-    let c = live.snapshot().ci.unwrap();
-    assert_eq!((c.slots, c.docker), (0, "off"));
-    assert!(c.docker_reason.unwrap().contains("CI slots is 0"));
+    ci.poll(&settings(0)).await;
+    assert!(ci.logged["docker"].contains("CI slots is 0"));
     assert_eq!(ci.slot().available_permits(), 0);
 }
 
 #[test]
-fn the_ticks_ci_object_carries_slots_running_and_docker() {
-    let live = LiveHandle::default();
-    live.update_ci(|c| {
-        c.slots = 1;
-        c.docker = "ok";
-    });
-    assert_eq!(
-        live.snapshot().ci.unwrap().tick_json(),
-        json!({ "slots": 1, "running": 0, "docker": "ok" })
-    );
+fn a_checks_cpus_are_capped_at_what_docker_has() {
+    let mut ci = CiLoop::new(Programs::default());
+    assert_eq!(ci.cpus(&settings(1)), 2);
+    ci.ncpu = Some(1);
+    assert_eq!(ci.cpus(&settings(1)), 1);
+    ci.ncpu = Some(16);
+    assert_eq!(ci.cpus(&settings(1)), 2);
 }
 
 #[cfg(unix)]
 mod stubbed {
     use super::*;
+    use std::path::Path;
     use std::process::Command;
 
     fn run(dir: &Path, args: &[&str]) {
@@ -156,94 +131,66 @@ mod stubbed {
     struct Rig {
         _dir: tempfile::TempDir,
         ci: CiLoop,
-        live: LiveHandle,
-        cfg: ConfigFile,
+        cfg: Settings,
     }
 
-    fn rig(files: &[&str], branch_files: &[&str], ci_when_ready: bool, gh_json: &str) -> Rig {
+    fn rig(files: &[&str], branch_files: &[&str], gh_json: &str) -> Rig {
         let dir = tempfile::tempdir().unwrap();
-        let work = checkout(dir.path(), files, branch_files);
+        checkout(dir.path(), files, branch_files);
+        let origin = dir.path().join("origin.git");
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let docker = script(&bin, "docker", "exit 0");
         let gh = script(&bin, "gh", &format!("cat <<'EOF'\n{gh_json}\nEOF"));
-        let live = LiveHandle::default();
-        live.ticked("p", false, "t".into(), Vec::<HeldLane>::new(), "d".into());
-        let mut cfg = ConfigFile::default();
-        cfg.projects.push(ProjectConfig {
-            id: Some("p".into()),
-            repo_path: work.to_str().unwrap().into(),
-            github_repo: "o/p".into(),
-            base_branch: "main".into(),
-            require_ci: ci_when_ready,
-            ci_when_ready,
-            ..Default::default()
-        });
+        let cfg = Settings {
+            repos: vec![Repo::parse("o/p").unwrap()],
+            slots: 1,
+            cpus: 2,
+            computer: "t".into(),
+            data_dir: dir.path().join("data"),
+        };
         let programs = Programs {
             docker: docker.into(),
             gh: gh.into(),
             ..Programs::default()
         };
-        Rig {
-            ci: CiLoop::new(programs, live.clone(), false),
-            live,
-            cfg,
-            _dir: dir,
-        }
+        let mut ci = CiLoop::new(programs);
+        let url = origin.to_str().unwrap().to_string();
+        ci.remote = Arc::new(move |_| url.clone());
+        Rig { ci, cfg, _dir: dir }
     }
 
     const ONE_PR: &str = r#"[{"number":7,"isDraft":false,"labels":[],"headRefOid":"h1"}]"#;
 
     #[tokio::test]
-    async fn both_files_on_main_give_the_project_agent_ci_and_its_keys() {
-        let mut r = rig(&["image", "checks.sh"], &[], false, ONE_PR);
-        let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
-        assert_eq!(keys["p"].len(), 2);
-        assert_eq!(keys["p"][0].pr, 7);
-        assert_eq!(keys["p"][0].main.len(), 40);
-        assert!(keys["p"][1].is_push() && keys["p"][1].head == keys["p"][0].main);
-        let c = r.live.snapshot().ci.unwrap();
-        assert_eq!((c.docker, c.running, c.slots), ("ok", 0, 1));
-        assert!(c.reasons.is_empty());
+    async fn both_files_on_main_give_the_repo_agent_ci_and_its_keys() {
+        let mut r = rig(&["image", "checks.sh"], &[], ONE_PR);
+        let keys = r.ci.poll(&r.cfg).await;
+        assert_eq!(keys["o-p"].len(), 2);
+        assert_eq!(keys["o-p"][0].pr, 7);
+        assert_eq!(keys["o-p"][0].main.len(), 40);
+        assert!(keys["o-p"][1].is_push() && keys["o-p"][1].head == keys["o-p"][0].main);
+        assert!(r.ci.logged.is_empty());
         assert_eq!(r.ci.slot().available_permits(), 1);
+        assert!(r.cfg.mirror(&r.cfg.repos[0]).join("HEAD").exists());
     }
 
     #[tokio::test]
     async fn one_file_missing_says_why_once_and_keeps_the_reason() {
-        let mut r = rig(&["image"], &[], false, ONE_PR);
+        let mut r = rig(&["image"], &[], ONE_PR);
         for _ in 0..3 {
-            let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
-            assert!(!keys.contains_key("p"));
+            let keys = r.ci.poll(&r.cfg).await;
+            assert!(!keys.contains_key("o-p"));
         }
-        let reasons = r.live.snapshot().ci.unwrap().reasons;
-        assert!(reasons["p"].contains(".agent-ci/checks.sh"), "{reasons:?}");
-        assert_eq!(r.ci.logged["p"], reasons["p"]);
+        assert!(r.ci.logged["o-p"].contains(".agent-ci/checks.sh"), "{:?}", r.ci.logged);
     }
 
     #[tokio::test]
     async fn files_only_on_a_pull_request_branch_are_ignored() {
-        let mut r = rig(&[], &["image", "checks.sh"], false, ONE_PR);
-        let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
+        let mut r = rig(&[], &["image", "checks.sh"], ONE_PR);
+        let keys = r.ci.poll(&r.cfg).await;
         assert!(keys.is_empty());
-        assert!(r.live.snapshot().ci.unwrap().reasons["p"].contains("no agent CI"));
-    }
-
-    #[tokio::test]
-    async fn a_project_whose_backlog_cant_be_reached_runs_no_ci() {
-        let mut r = rig(&["image", "checks.sh"], &[], false, ONE_PR);
-        r.live.failed("p", "t2".into(), "down".into());
-        let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
-        assert!(keys.is_empty());
-        assert!(r.live.snapshot().ci.unwrap().reasons["p"].contains("backlog can't be reached"));
-    }
-
-    #[tokio::test]
-    async fn listing_follows_ci_when_ready() {
-        let json = r#"[{"number":1,"isDraft":false,"labels":[{"name":"ci-ready"}],"headRefOid":"a"},
-          {"number":2,"isDraft":false,"labels":[],"headRefOid":"b"}]"#;
-        let mut r = rig(&["image", "checks.sh"], &[], true, json);
-        let keys = r.ci.poll(&r.cfg, &Env::from_map(Default::default())).await;
-        assert_eq!(keys["p"].iter().map(|k| k.pr).collect::<Vec<_>>(), [1, 0]);
+        assert!(r.ci.logged["o-p"].contains("no agent CI"), "{:?}", r.ci.logged);
     }
 
     /// A rig whose origin serves pull requests 7 and 8 (a clean change) and 9 (conflicting with main), with a `gh`
@@ -252,7 +199,6 @@ mod stubbed {
         let mut r = rig(
             &["image", "checks.sh"],
             &[],
-            false,
             r#"[{"number":7,"isDraft":false,"labels":[],"headRefOid":"h7"},
                 {"number":8,"isDraft":false,"labels":[],"headRefOid":"h8"}]"#,
         );
@@ -307,10 +253,8 @@ mod stubbed {
     }
 
     async fn go(r: &mut Rig, keys: Vec<CheckKey>) -> Vec<tokio::task::JoinHandle<()>> {
-        let env = Env::from_map(Default::default());
-        r.ci.poll(&r.cfg, &env).await;
-        let data = r._dir.path().join("data");
-        r.ci.start(&r.cfg, &env, &data, [("p".to_string(), keys)].into()).await
+        r.ci.poll(&r.cfg).await;
+        r.ci.start(&r.cfg, [("o-p".to_string(), keys)].into()).await
     }
 
     fn calls(r: &Rig) -> String {
@@ -318,7 +262,7 @@ mod stubbed {
     }
 
     fn events(r: &Rig) -> String {
-        let dir = r._dir.path().join("data/projects/p/events");
+        let dir = r._dir.path().join("data/projects/o-p/events");
         std::fs::read_dir(dir)
             .unwrap()
             .flatten()
@@ -348,17 +292,14 @@ mod stubbed {
             "{ev}"
         );
         assert!(ev.contains("PR #7") && ev.contains(r#""key":"h7-mmmmmmm""#), "{ev}");
-        let ci = r.live.snapshot().ci.unwrap();
-        assert!(ci.checks.is_empty() && ci.last_result.unwrap()["ok"] == true);
         assert_eq!(
-            std::fs::read_dir(r._dir.path().join("data/projects/p/ci"))
+            std::fs::read_dir(r._dir.path().join("data/projects/o-p/ci"))
                 .unwrap()
                 .count(),
             0
         );
         // A key no longer listed (this one isn't) is forgotten at the next poll.
-        let env = Env::from_map(Default::default());
-        r.ci.poll(&r.cfg, &env).await;
+        r.ci.poll(&r.cfg).await;
         assert!(r.ci.seen.lock().unwrap().is_empty());
     }
 
@@ -389,11 +330,7 @@ mod stubbed {
             ask_every: Duration::from_millis(5),
             wait: Duration::from_secs(5),
         };
-        r.ci = std::mem::replace(
-            &mut r.ci,
-            CiLoop::new(Programs::default(), LiveHandle::default(), false),
-        )
-        .with_automerge(am);
+        r.ci = std::mem::replace(&mut r.ci, CiLoop::new(Programs::default())).with_automerge(am);
         (r, store)
     }
 
@@ -466,12 +403,9 @@ mod stubbed {
         let keys = vec![key(7, "h7"), key(8, "h8")];
         let first = go(&mut r, keys.clone()).await;
         assert_eq!(first.len(), 1, "only one permit");
-        let c = r.live.snapshot().ci.unwrap();
-        assert_eq!(c.slots, 1);
-        // Still running: the Now tab lists it and the second key finds no permit.
+        // Still running: the second key finds no permit.
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let live = r.live.snapshot().ci.unwrap();
-        assert_eq!((live.running, live.checks.len(), live.checks[0].pr), (1, 1, 7));
+        assert_eq!(r.ci.running.lock().unwrap().len(), 1);
         assert!(go(&mut r, keys.clone()).await.is_empty());
         for t in first {
             t.await.unwrap();
@@ -492,11 +426,11 @@ mod stubbed {
     #[tokio::test]
     async fn recovery_removes_a_leftover_directory_and_its_container() {
         let r = pr_rig("exit 0");
-        let root = r._dir.path().join("data/projects/p/ci");
+        let root = r._dir.path().join("data/projects/o-p/ci");
         std::fs::create_dir_all(root.join("check-1")).unwrap();
         std::fs::write(root.join("check-1/f"), "x").unwrap();
         std::fs::write(root.join("check-1.name"), "retaskable-ci-o-p-abc1234").unwrap();
-        r.ci.recover(&r.cfg, &r._dir.path().join("data")).await;
+        r.ci.recover(&r.cfg).await;
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         assert!(
             calls(&r).contains("docker rm -f retaskable-ci-o-p-abc1234"),
@@ -508,29 +442,26 @@ mod stubbed {
     #[tokio::test]
     async fn a_shrink_while_a_check_runs_does_not_leave_extra_permits() {
         let mut r = pr_rig("sleep 0.4");
-        let env = Env::from_map(Default::default());
         let tasks = go(&mut r, vec![key(7, "h7")]).await;
         // Docker "down" for one poll while the check holds the only permit.
-        r.cfg.machine.ci_slots = 0;
-        r.ci.poll(&r.cfg, &env).await;
+        r.cfg.slots = 0;
+        r.ci.poll(&r.cfg).await;
         for t in tasks {
             t.await.unwrap();
         }
         assert_eq!(r.ci.slot().available_permits(), 0);
-        r.cfg.machine.ci_slots = 1;
-        r.ci.poll(&r.cfg, &env).await;
+        r.cfg.slots = 1;
+        r.ci.poll(&r.cfg).await;
         assert_eq!(r.ci.slot().available_permits(), 1);
-        assert_eq!(r.live.snapshot().ci.unwrap().running, 0);
+        assert!(r.ci.running.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn a_finished_check_does_not_rerun_after_a_poll_that_could_not_read_the_list() {
         let mut r = pr_rig("exit 0");
-        r.cfg.machine.ci_slots = 2; // the pull request and the push to main
-        let env = Env::from_map(Default::default());
-        let data = r._dir.path().join("data");
-        let keys = r.ci.poll(&r.cfg, &env).await;
-        for t in r.ci.start(&r.cfg, &env, &data, keys).await {
+        r.cfg.slots = 2; // the pull request and the push to main
+        let keys = r.ci.poll(&r.cfg).await;
+        for t in r.ci.start(&r.cfg, keys).await {
             t.await.unwrap();
         }
         let count = |r: &Rig| {
@@ -541,15 +472,15 @@ mod stubbed {
         };
         assert_eq!(count(&r), (2, 2));
         // Still listed: not run again.
-        let keys = r.ci.poll(&r.cfg, &env).await;
-        assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
+        let keys = r.ci.poll(&r.cfg).await;
+        assert!(r.ci.start(&r.cfg, keys).await.is_empty());
         // A poll that can't read the list (ciSlots 0), then a healthy one with the same key listed.
-        r.cfg.machine.ci_slots = 0;
-        r.ci.poll(&r.cfg, &env).await;
-        r.cfg.machine.ci_slots = 2;
-        let keys = r.ci.poll(&r.cfg, &env).await;
-        assert_eq!(keys["p"].len(), 2);
-        assert!(r.ci.start(&r.cfg, &env, &data, keys).await.is_empty());
+        r.cfg.slots = 0;
+        r.ci.poll(&r.cfg).await;
+        r.cfg.slots = 2;
+        let keys = r.ci.poll(&r.cfg).await;
+        assert_eq!(keys["o-p"].len(), 2);
+        assert!(r.ci.start(&r.cfg, keys).await.is_empty());
         assert_eq!(count(&r), (2, 2));
     }
 
@@ -579,10 +510,6 @@ mod stubbed {
         script(&root.join("bin"), "gh", &body);
     }
 
-    fn named(name: &str) -> Env {
-        Env::from_map([("RETASKABLE_MACHINE".to_string(), name.to_string())].into())
-    }
-
     const KEY_TEXT: &str = "h7-mmmmmmm";
 
     fn now() -> i64 {
@@ -590,13 +517,10 @@ mod stubbed {
     }
 
     async fn run_as(r: &mut Rig, name: &str) {
-        let env = named(name);
-        let data = r._dir.path().join("data");
-        r.ci.poll(&r.cfg, &env).await;
-        for t in
-            r.ci.start(&r.cfg, &env, &data, [("p".to_string(), vec![key(7, "h7")])].into())
-                .await
-        {
+        r.cfg.computer = name.into();
+        r.ci.poll(&r.cfg).await;
+        let keys = [("o-p".to_string(), vec![key(7, "h7")])].into();
+        for t in r.ci.start(&r.cfg, keys).await {
             t.await.unwrap();
         }
     }
@@ -609,20 +533,19 @@ mod stubbed {
     async fn two_loops_sharing_one_host_run_a_key_once() {
         let mut a = pr_rig("sleep 1");
         claim_gh(&mut a, &[]);
-        let mut b = CiLoop::new(a.ci.programs.clone(), LiveHandle::default(), false);
-        b.live
-            .ticked("p", false, "t".into(), Vec::<HeldLane>::new(), "d".into());
-        let (env_a, env_b) = (named("a"), named("b"));
-        let data = a._dir.path().join("data");
-        let keys: BTreeMap<_, _> = [("p".to_string(), vec![key(7, "h7")])].into();
-        a.ci.poll(&a.cfg, &env_a).await;
-        b.poll(&a.cfg, &env_b).await;
-        let ta = a.ci.start(&a.cfg, &env_a, &data, keys.clone()).await;
+        let mut b = CiLoop::new(a.ci.programs.clone());
+        b.remote = a.ci.remote.clone();
+        let (mut cfg_a, mut cfg_b) = (a.cfg.clone(), a.cfg.clone());
+        (cfg_a.computer, cfg_b.computer) = ("a".into(), "b".into());
+        let keys: BTreeMap<_, _> = [("o-p".to_string(), vec![key(7, "h7")])].into();
+        a.ci.poll(&cfg_a).await;
+        b.poll(&cfg_b).await;
+        let ta = a.ci.start(&cfg_a, keys.clone()).await;
         // Wait for a's claim to be posted before b looks.
         while !calls(&a).contains("state=pending") {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let tb = b.start(&a.cfg, &env_b, &data, keys).await;
+        let tb = b.start(&cfg_b, keys).await;
         for t in ta.into_iter().chain(tb) {
             t.await.unwrap();
         }
@@ -698,17 +621,30 @@ mod stubbed {
     }
 
     async fn poll_and_start(r: &mut Rig) -> Vec<tokio::task::JoinHandle<()>> {
-        let env = Env::from_map(Default::default());
-        let keys = r.ci.poll(&r.cfg, &env).await;
-        let data = r._dir.path().join("data");
-        r.ci.start(&r.cfg, &env, &data, keys).await
+        let keys = r.ci.poll(&r.cfg).await;
+        r.ci.start(&r.cfg, keys).await
+    }
+
+    /// `pr_rig` with no pull request ready, so only main's own push run is listed.
+    fn push_rig(docker_body: &str) -> Rig {
+        let r = pr_rig(docker_body);
+        let bin = r._dir.path().join("bin");
+        let log = r._dir.path().join("calls.log");
+        script(
+            &bin,
+            "gh",
+            &format!(
+                "if [ \"$1\" = api ]; then echo \"gh $*\" >> {l}; [ \"$3\" = GET ] && echo '[]'; exit 0; fi
+echo '[]'",
+                l = log.display()
+            ),
+        );
+        r
     }
 
     #[tokio::test]
     async fn a_new_main_sha_gets_one_push_run_with_statuses_on_main_and_no_comment() {
-        let mut r = pr_rig("exit 0");
-        r.cfg.projects[0].require_ci = true;
-        r.cfg.projects[0].ci_when_ready = true; // no pull request is ready: only the push runs
+        let mut r = push_rig("exit 0");
         let main = Command::new("git")
             .args(["rev-parse", "origin/main"])
             .current_dir(r._dir.path().join("work"))
@@ -735,9 +671,7 @@ mod stubbed {
 
     #[tokio::test]
     async fn a_failing_push_run_posts_failure_on_main_and_no_comment() {
-        let mut r = pr_rig("echo boom; exit 1");
-        r.cfg.projects[0].require_ci = true;
-        r.cfg.projects[0].ci_when_ready = true;
+        let mut r = push_rig("echo boom; exit 1");
         for t in poll_and_start(&mut r).await {
             t.await.unwrap();
         }
