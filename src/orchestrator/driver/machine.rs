@@ -129,6 +129,8 @@ pub struct Machine {
     pub(super) trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks. With none, asks are left unanswered.
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
+    /// Whether a person's take-over requests are pulled. Off unless a session starter is wired.
+    pub(super) take_overs: bool,
     /// The wait between merge tries after a draft is rebased.
     pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
@@ -181,6 +183,7 @@ impl Machine {
             drafts: None,
             trial: None,
             asks: None,
+            take_overs: false,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
@@ -435,6 +438,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode take over items a person asks for.
+    pub fn with_take_overs(mut self) -> Self {
+        self.take_overs = true;
+        self
+    }
+
     /// Lets `claim` mode answer the chat's asks.
     pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
         self.asks = Some(host);
@@ -617,6 +626,13 @@ impl Machine {
                     let shared = shared!(self, stopping);
                     lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
                 }
+            }
+        }
+        // A person taking over an item whose owner's computer is gone: no session, so no slot.
+        for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            if live && self.take_overs {
+                let shared = shared!(self, stopping);
+                lp.take_over_pass(&shared).await;
             }
         }
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.

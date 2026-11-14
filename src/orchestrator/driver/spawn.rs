@@ -107,6 +107,7 @@ pub fn spawn_all(args: SpawnArgs) {
         if let Some((host, checks)) = args.trial {
             machine = machine.with_trial(host, checks);
         }
+        machine = machine.with_take_overs();
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
         }

@@ -19,6 +19,7 @@ pub mod merge;
 pub mod runs;
 pub mod settings;
 pub mod suggestions;
+pub mod take_over;
 
 use crate::env::Env;
 use crate::text::{non_blank, trim_url};
@@ -405,6 +406,9 @@ struct OpResponse {
     error: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// Why a conflict was refused, when it says (`held`: who holds the item, from which computer).
+    #[serde(default)]
+    why: Option<Value>,
 }
 
 /// A client for one backlog store (one `BacklogStore` in the TypeScript agent, trimmed to `list`).
@@ -735,12 +739,26 @@ impl Client {
         op: &'static str,
         args: Value,
     ) -> Result<(u16, OpResponse), BacklogError> {
+        self.send_why(repo_id, token, op, args).await.map_err(|(e, _)| e)
+    }
+
+    /// [`Self::send`], with the store's `why` beside a refusal.
+    async fn send_why(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
         let url = format!("{}/v1/repos/{}/ops", self.base_url, repo_id);
         let mut req = self.http.post(&url).json(&OpRequest { op, args });
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
-        let res = req.send().await.map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+        let res = req
+            .send()
+            .await
+            .map_err(|e| (BacklogError::Unreachable(e.to_string()), None))?;
         let status = res.status();
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
@@ -751,11 +769,12 @@ impl Client {
                 .message
                 .or_else(|| body.error.clone())
                 .unwrap_or_else(|| format!("the store answered {status}"));
-            return Err(BacklogError::BadAnswer {
+            let error = BacklogError::BadAnswer {
                 status: status.as_u16(),
                 code: body.error,
                 message,
-            });
+            };
+            return Err((error, body.why));
         }
         Ok((status.as_u16(), body))
     }
