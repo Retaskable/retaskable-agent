@@ -13,7 +13,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use super::main_pr::Why;
-use super::{Handler, Outcome};
+use super::{Handler, Outcome, dropped};
 use crate::backlog::intents::IntentRow;
 
 /// What `sync_push` is refused with here (the TS agent's own words for a project with no code storage).
@@ -55,14 +55,14 @@ impl<C: Send + Sync> Handler<C> for SyncHandler {
             }
             let (reply, answer) = oneshot::channel();
             if asks.send(SyncNow { reply }).is_err() {
-                return Outcome::Abandoned;
+                return dropped();
             }
             match answer.await {
                 Ok(Ok(id)) => Outcome::Done(json!({ "id": id })),
                 Ok(Err(Why::Refused(why))) => Outcome::Refused(why),
                 Ok(Err(Why::Failed(why))) => Outcome::Failed(why),
-                // The loop went away before it answered (a restart): the row, held and not twice, is failed then.
-                Err(_) => Outcome::Abandoned,
+                // The loop dropped the reply (a restart, or a panic in its pass).
+                Err(_) => dropped(),
             }
         }
         .boxed()

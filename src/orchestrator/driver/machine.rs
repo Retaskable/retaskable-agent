@@ -434,8 +434,6 @@ impl Machine {
     pub async fn run_passes(&mut self) {
         let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused().await;
-        let (mut claim_paused_until, mut signed_out_until) = (None, None);
-        let mut limits = EngineLimits::default();
         for (lp, paused) in self.projects.iter_mut().zip(paused.iter().copied()) {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
@@ -443,9 +441,9 @@ impl Machine {
             let mut shared = Shared {
                 links: &self.links,
                 local: &self.local,
-                claim_paused_until: &mut claim_paused_until,
-                claude_signed_out_until: &mut signed_out_until,
-                engine_limits: &mut limits,
+                claim_paused_until: &mut self.claim_paused_until,
+                claude_signed_out_until: &mut self.claude_signed_out_until,
+                engine_limits: &mut self.engine_limits,
                 stopping: stopping || paused,
             };
             let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
