@@ -31,6 +31,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
+use crate::program_status::{self, Linked, Report, StatusWriter};
 pub use prs::CheckKey;
 pub use settings::{Repo, Settings};
 
@@ -39,6 +40,9 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 /// How often the loop polls.
 pub const POLL: Duration = Duration::from_secs(10);
+
+/// The status file's writer, whether the store link is held now, and the names of the settings the environment sets.
+type StatusFile = (StatusWriter, Arc<dyn Fn() -> bool + Send + Sync>, Vec<String>);
 
 /// The programs the loop starts; a test points them at stubs.
 #[derive(Debug, Clone)]
@@ -90,6 +94,10 @@ pub struct CiLoop {
     force: Vec<String>,
     /// The pause between `ci_finish` tries.
     pub finish_pause: Duration,
+    /// Docker as the last poll found it (`ok`, `missing`, `stopped`), for the status file.
+    docker_state: &'static str,
+    /// The status file's writer, and whether the store link is there now.
+    status: Option<StatusFile>,
 }
 
 impl CiLoop {
@@ -105,6 +113,8 @@ impl CiLoop {
             ncpu: None,
             clock: Arc::new(crate::telemetry::now_ms),
             refresh: claim::REFRESH,
+            docker_state: "unknown",
+            status: None,
             remote: Arc::new(Repo::url),
             merge: None,
             metas: Arc::default(),
@@ -118,6 +128,41 @@ impl CiLoop {
     pub fn with_store(mut self, store: Arc<dyn store::CiStore>) -> Self {
         self.merge = Some(automerge::Automerge::new(store));
         self
+    }
+
+    /// Keeps `<ci folder>/status.json` (programs-status.md); `linked` says whether the store link is held now, and
+    /// `env_set` names the settings that came from the environment.
+    pub fn with_status(
+        mut self,
+        writer: StatusWriter,
+        linked: Arc<dyn Fn() -> bool + Send + Sync>,
+        env_set: Vec<String>,
+    ) -> Self {
+        self.status = Some((writer, linked, env_set));
+        self
+    }
+
+    /// One write of the status file, if there is a writer.
+    fn write_status(&self, cfg: &Settings) {
+        let Some((writer, linked, env_set)) = &self.status else {
+            return;
+        };
+        let mut extra = serde_json::Map::new();
+        extra.insert("docker".into(), self.docker_state.into());
+        extra.insert("slots".into(), cfg.slots.into());
+        extra.insert("slotsBusy".into(), self.running.lock().unwrap().len().into());
+        writer.write_or_log(
+            program_status::now_ms(),
+            Report {
+                linked: Linked {
+                    store: linked(),
+                    cloud: None,
+                },
+                last_error: None,
+                env_set: env_set.clone(),
+                extra,
+            },
+        );
     }
 
     /// The slot: a check holds a permit from its claim to its last status.
@@ -153,7 +198,9 @@ impl CiLoop {
         let docker = if cfg.slots == 0 {
             Err("CI slots is 0: this computer runs no CI".to_string())
         } else {
-            match docker::probe(&self.programs.docker, false).await {
+            let state = docker::probe(&self.programs.docker, false).await;
+            self.docker_state = state.as_str();
+            match state {
                 docker::DockerState::Ok => Ok(()),
                 state => Err(state.reason().unwrap_or("Docker is not usable").to_string()),
             }
@@ -338,10 +385,12 @@ impl CiLoop {
 
 /// The loop, until the process stops: recovery first, then a poll and what it starts, each `POLL`.
 pub async fn run(mut ci: CiLoop, cfg: Settings) {
+    ci.write_status(&cfg);
     ci.recover(&cfg).await;
     loop {
         let keys = ci.poll(&cfg).await;
         ci.start(&cfg, keys).await;
+        ci.write_status(&cfg);
         tokio::time::sleep(POLL).await;
     }
 }

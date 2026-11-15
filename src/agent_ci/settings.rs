@@ -8,6 +8,15 @@ use crate::env::Env;
 
 /// The CI runner's own folder inside the data folder: its link marker, mirrors, check directories and logs.
 pub const DATA_SUBDIR: &str = crate::paths::CI_SUBDIR;
+/// The environment variables that set the runner (the status file lists which are set, never their values).
+pub const ENV_VARS: [&str; 6] = [
+    "AGENT_CI_REPO",
+    "AGENT_CI_SLOTS",
+    "AGENT_CI_CPUS",
+    "AGENT_CI_NAME",
+    "RETASKABLE_DATA_DIR",
+    "RETASKABLE_BACKLOG_URL",
+];
 /// Slots when `AGENT_CI_SLOTS` is not set.
 pub const DEFAULT_SLOTS: u32 = 2;
 /// CPUs a check may use when `AGENT_CI_CPUS` is not set, before the cap at what Docker has.

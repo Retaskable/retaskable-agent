@@ -68,6 +68,7 @@ pub mod playtest_groups;
 pub mod proc;
 pub mod process_tree;
 pub mod profile;
+pub mod program_status;
 pub mod prompt;
 pub mod release;
 pub mod release_check;

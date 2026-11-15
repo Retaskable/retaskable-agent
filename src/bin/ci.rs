@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use retaskable_agent::agent_ci::store::StoreOps;
 use retaskable_agent::agent_ci::{self, CiLoop, Settings, link as ci_link};
 use retaskable_agent::env::Env;
+use retaskable_agent::program_status::{self, StatusWriter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -68,7 +69,23 @@ fn start(env: &Env) -> Result<(CiLoop, Settings)> {
             "The CI runner isn't linked to the shared backlog (run `retaskable-ci link`): it merges nothing."
         );
     }
-    let ci = CiLoop::new(Default::default()).with_store(Arc::new(StoreOps::new(url, keychain)));
+    let linked = {
+        let (keychain, url) = (keychain.clone(), url.clone());
+        Arc::new(move || matches!(keychain.get(&url), Ok(Some(_))))
+    };
+    let status = StatusWriter::new(
+        &cfg.data_dir,
+        program_status::CI_RUNNER,
+        VERSION,
+        program_status::now_ms(),
+    );
+    let ci = CiLoop::new(Default::default())
+        .with_store(Arc::new(StoreOps::new(url, keychain)))
+        .with_status(
+            status,
+            linked,
+            program_status::env_set(env, &agent_ci::settings::ENV_VARS),
+        );
     let names: Vec<_> = cfg.repos.iter().map(|r| r.github_repo.as_str()).collect();
     tracing::info!(
         "CI runner {}: {} slot(s), repos {}, data {}",
