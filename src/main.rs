@@ -484,6 +484,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>
         }),
+        experts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::expert_host::ClaudeExperts::new(
+                dir.to_path_buf(),
+                env.clone(),
+                config::cursor_models(cfg, env),
+            ) as Arc<dyn orchestrator::driver::ExpertHost>
+        }),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),
@@ -509,21 +516,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         item_commands: &view.item_commands,
         machine: link::machine_name(env),
     });
-    // agent-ci.md section 3.1.
-    let ci = retaskable_agent::agent_ci::CiLoop::new(
-        Default::default(),
-        live.clone(),
-        retaskable_agent::agent_ci::docker::in_agent_image(),
-    )
-    .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
-        retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
-    )));
-    tokio::spawn(retaskable_agent::agent_ci::run(
-        ci,
-        dir.to_path_buf(),
-        env.clone(),
-        view.item_commands.clone(),
-    ));
+    // deploy-requests.md section 3.2: starts only for a kind this computer can run (none yet).
+    retaskable_agent::deploy_requests::spawn_all(retaskable_agent::deploy_requests::SpawnArgs {
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        machine: link::machine_name(env),
+    });
+    // CI is its own process now (agent-ci.md section 1): `retaskable-ci run`, not started here.
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(

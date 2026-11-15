@@ -143,7 +143,8 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let agent = claim_agent(shared.links, &self.project);
+        let mut agent = claim_agent(shared.links, &self.project);
+        agent.week = self.week_use();
         let claim = match self.client.draft_claim_next(repo, Some(&token), &agent, &[]).await {
             Ok(Some(claim)) => claim,
             Ok(None) => return,
@@ -219,6 +220,16 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
         environment: links.environment.clone(),
         base_branch: project.base_branch.clone(),
         tags: links.tags.get(),
+        week: None,
+    }
+}
+
+impl ProjectLoop {
+    /// This computer's Claude week as the store takes it, from the project's last usage readings
+    /// (backlog/06.6 section 6.6.5); `None` when there's no reading or the week has reset.
+    pub(super) fn week_use(&self) -> Option<crate::backlog::week::WeekUse> {
+        let readings = [self.store.usage(), self.store.week_usage()];
+        crate::backlog::week::WeekUse::of(readings.iter().flatten(), crate::telemetry::now_secs())
     }
 }
 

@@ -87,6 +87,23 @@ pub async fn probe(program: impl AsRef<OsStr>, in_image: bool) -> DockerState {
     DockerState::Stopped(STOPPED.into())
 }
 
+/// How many CPUs Docker has (`docker info`), which the CPUs a check asks for are capped at.
+pub async fn ncpu(program: impl AsRef<OsStr>) -> Option<u32> {
+    let mut cmd = low_priority_tokio(program);
+    cmd.args(["info", "--format", "{{.NCPU}}"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let child = cmd.spawn().ok()?;
+    let out = timeout(VERSION_BUDGET, child.wait_with_output()).await.ok()?.ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok())
+        .flatten()
+        .filter(|n| *n > 0)
+}
+
 /// `docker run --rm <image> true`: the project's image runs (pulled the first time).
 pub async fn probe_image(program: impl AsRef<OsStr>, image: &str) -> DockerState {
     let mut cmd = low_priority_tokio(program);

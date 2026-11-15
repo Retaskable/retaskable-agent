@@ -451,7 +451,7 @@ impl ProjectLoop {
             tracing::info!("{}: dropped a start over for {item_id}: it isn't stopped here", self.id);
             return true;
         }
-        if *room == 0 {
+        if *room == 0 || self.decisions_of(item_id).is_none() {
             return false;
         }
         let Some(lane) = pool.claim(&self.want(item_id)) else {
@@ -485,7 +485,10 @@ impl ProjectLoop {
         let attempt = self.attempt_of(item_id) + 1;
         let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
         if let Some(record) = self.records.get_mut(item_id) {
-            (record.attempt, record.slice) = (attempt, slice);
+            record.slice = slice;
+        }
+        if let Some(held) = self.decisions.get_mut(item_id) {
+            held.now.attempt = Some(attempt + 1);
         }
         let run = self.runs.get_mut(item_id).expect("checked above");
         run.resume_from_needs_human();

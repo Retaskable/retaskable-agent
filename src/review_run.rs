@@ -273,7 +273,7 @@ mod tests {
         let input = stage_input(&repo, &info, ("opus", "local"), "");
         let seen = Mutex::new(Vec::new());
         review_lane(&repo, &input, |role, spec: SessionSpec| {
-            seen.lock().unwrap().push((role, spec.model.clone()));
+            seen.lock().unwrap().push((role, spec.model));
             let out = if role == Role::Reviewer {
                 json!({"verdict": "approve", "summary": "ok"})
             } else {

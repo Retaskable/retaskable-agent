@@ -182,6 +182,16 @@ impl Client {
         let (status, body) = self.send(repo_id, token, "draft_claim_next", args).await?;
         match body.value {
             None | Some(Value::Null) => Ok(None),
+            // Another computer with more of its Claude week left takes the plan; ask again next pass.
+            Some(Value::Object(o)) if o.contains_key("passed") => {
+                if let Some(p) = super::week::Passed::of(&o) {
+                    tracing::info!(
+                        "left the next plan for {}, which has more of its Claude week left",
+                        p.to
+                    );
+                }
+                Ok(None)
+            }
             Some(value) => serde_json::from_value(value)
                 .map(Some)
                 .map_err(|e| BacklogError::BadAnswer {

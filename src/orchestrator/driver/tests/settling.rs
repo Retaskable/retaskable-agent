@@ -440,13 +440,15 @@ async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_reco
     let r = lp.records["a"].clone();
     assert_eq!(r.state, "needs_human");
     assert_eq!(r.needs_human_reason.as_deref(), Some("first problem"));
-    assert_eq!(r.failed_in.as_deref(), Some("implementing"));
-    assert!(!r.triaged && r.failed_looks == 0 && r.next_look_at.is_none());
+    let d = lp.decisions["a"].now.clone();
+    assert_eq!(d.failed_in.as_deref(), Some("implementing"));
+    assert!(d.triaged.is_none() && r.failed_looks == 0 && r.next_look_at.is_none());
     // The marks survive a rewrite of the run's own fields, and the context reads the record.
-    lp.records.get_mut("a").unwrap().triages = Some((r.slice, 1));
-    lp.records.get_mut("a").unwrap().triaged = true;
+    let held = &mut lp.decisions.get_mut("a").unwrap().now;
+    held.triages = Some(crate::backlog::decisions::Triages { slice: r.slice, n: 1 });
+    held.triaged = Some(true);
     lp.remember("a", None, None, None);
-    assert!(lp.records["a"].triaged);
+    assert_eq!(lp.decisions["a"].now.triaged, Some(true));
     let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
     assert_eq!(
         (ctx.reason.as_str(), ctx.failed_in.as_str()),
@@ -484,8 +486,9 @@ async fn a_run_that_needs_a_person_saves_its_stop_and_a_second_stop_clears_the_f
     let record = rig.lp(0).records["a"].clone();
     assert_eq!(record.state, "needs_human");
     assert_eq!(record.needs_human_reason.as_deref(), Some(why));
-    assert_eq!(record.failed_in.as_deref(), Some("implementing"));
-    assert!(!record.triaged && record.failed_looks == 0 && record.next_look_at.is_none());
+    let d = rig.lp(0).decisions["a"].now.clone();
+    assert_eq!(d.failed_in.as_deref(), Some("implementing"));
+    assert!(d.triaged.is_none() && record.failed_looks == 0 && record.next_look_at.is_none());
     let back: crate::store::RunRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(back, record);
     assert_eq!(rig.lp(0).store.runs()["a"], record, "saved in the state file");
@@ -493,16 +496,21 @@ async fn a_run_that_needs_a_person_saves_its_stop_and_a_second_stop_clears_the_f
     // Claude looked at this stop and decided once; a later stop on the same slice clears the look marks
     // but keeps the count, and a new slice resets it.
     let slice = record.slice;
-    let r = rig.lp(0).records.get_mut("a").unwrap();
-    (r.triaged, r.failed_looks, r.triages) = (true, 2, Some((slice, 1)));
-    r.new_stop("merging", "Merge failed", slice);
-    assert!(!r.triaged && r.failed_looks == 0);
+    let lp = rig.lp(0);
+    let d = &mut lp.decisions.get_mut("a").unwrap().now;
+    (d.triaged, d.triages) = (Some(true), Some(crate::backlog::decisions::Triages { slice, n: 1 }));
+    let r = lp.records.get_mut("a").unwrap();
+    r.failed_looks = 2;
+    r.new_stop("Merge failed");
+    let d = &mut lp.decisions.get_mut("a").unwrap().now;
+    d.new_stop("merging", slice);
+    assert!(d.triaged.is_none() && lp.records["a"].failed_looks == 0);
     assert_eq!(
-        (r.needs_human_reason.as_deref(), r.triages),
+        (lp.records["a"].needs_human_reason.as_deref(), d.triage_pair()),
         (Some("Merge failed"), Some((slice, 1)))
     );
-    r.new_stop("merging", "Merge failed again", slice + 1);
-    assert_eq!(r.triages, None);
+    d.new_stop("merging", slice + 1);
+    assert_eq!(d.triages, None);
 }
 
 #[tokio::test]
@@ -526,13 +534,14 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
         rig.machine.poll().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         rig.machine.poll().await;
+        let failed_in = rig.lp(0).decisions["a"].now.failed_in.clone();
         let r = &rig.lp(0).records["a"];
         assert_eq!(r.state, "needs_human", "{from:?}");
         assert!(
             r.needs_human_reason.as_deref().unwrap().starts_with(to_reason),
             "{from:?}: {r:?}"
         );
-        assert_eq!(r.failed_in.as_deref(), Some(state_name(from)));
+        assert_eq!(failed_in.as_deref(), Some(state_name(from)));
     }
 }
 

@@ -41,8 +41,10 @@ impl ProjectLoop {
     /// and its recent notes. `None` without a record.
     pub(super) fn triage_context(&self, item_id: &str, data_dir: &Path) -> Option<crate::triage::TriageContext> {
         let record = self.records.get(item_id)?;
+        let decisions = self.decisions_of(item_id)?;
         Some(crate::triage::record::triage_context(
             record,
+            decisions,
             self.items.get(item_id),
             self.item_notes(item_id, TRIAGE_NOTES),
             data_dir,

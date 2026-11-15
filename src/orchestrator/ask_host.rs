@@ -67,12 +67,20 @@ fn status_word(status: crate::backlog::ItemStatus) -> String {
         .unwrap_or_default()
 }
 
+impl ClaudeAsks {
+    /// What the project's sessions cost today on this computer (the store keeps no spend).
+    fn spent_today(&self, project: &str) -> f64 {
+        crate::store::MachineStore::load(&self.data_dir).map_or(0.0, |m| m.spend_today(project))
+    }
+}
+
 impl AskHost for ClaudeAsks {
     fn blocked(&self, store: &AskStore) -> BoxFuture<'static, Result<bool>> {
         let (client, repo, token, daily) = (store.client.clone(), store.repo, store.token.clone(), self.daily_usd);
+        let spent = self.spent_today(&store.project_id);
         Box::pin(async move {
             let facts = client.project_facts(repo, Some(&token)).await?;
-            Ok(facts.paused || (daily > 0.0 && facts.spent_today_usd >= daily))
+            Ok(facts.paused || (daily > 0.0 && spent >= daily))
         })
     }
 
@@ -125,13 +133,14 @@ async fn ask(
     let audiences = client.audiences(repo, token).await?;
     let items = client.list(repo, token).await?;
     let drafts = client.drafts(repo, token).await?;
-    let facts = client.project_facts(repo, token).await?;
+    let spent_today_usd =
+        crate::store::MachineStore::load(&data_dir).map_or(0.0, |m| m.spend_today(&project.id_or_derived()));
 
     let audiences: Vec<AudienceLine> = (audiences.into_iter())
         .map(|a| AudienceLine {
             id: a.id,
             name: a.name,
-            who: a.short,
+            who: Some(a.who),
         })
         .collect();
     let state = StateSummary {
@@ -165,7 +174,7 @@ async fn ask(
             .collect(),
         status: "running".into(),
         paused_reason: view.pause_reason(&project.id_or_derived()),
-        spent_today_usd: facts.spent_today_usd,
+        spent_today_usd,
         daily_usd,
     };
     let question = if images_block.is_empty() {

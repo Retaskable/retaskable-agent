@@ -21,6 +21,8 @@ fn awaiting(lanes: u32) -> (Rig, Arc<Fake>) {
             ..Default::default()
         },
     );
+    lp.decisions
+        .insert("a".into(), crate::backlog::decisions::sync::ItemDecisions::default());
     (rig, fake)
 }
 
