@@ -115,4 +115,29 @@ mod tests {
         ]);
         assert!(urls(&env).is_err());
     }
+
+    #[test]
+    fn the_chat_agents_data_folder_agrees_with_the_code_agents_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("agent");
+        std::fs::write(
+            tmp.path().join("build.json"),
+            r#"{"os":"linux","version":"1.2.3","commit":"abc","environment":"production"}"#,
+        )
+        .unwrap();
+        for env in [
+            Env::from_pairs([("RETASKABLE_DATA_DIR", "d"), ("HOME", "/h")]),
+            Env::from_pairs([("HOME", "/h"), ("LOCALAPPDATA", "/h/lad")]),
+        ] {
+            let root = crate::paths::data_dir_for_exe(&env, Some(&exe));
+            assert_eq!(data_dir_for(&env, Some(&exe)), root.join("chat"));
+        }
+        // No build.json: a checkout, as the code agent sees it.
+        let none = tmp.path().join("none").join("agent");
+        let env = Env::empty();
+        assert_eq!(
+            data_dir_for(&env, Some(&none)),
+            crate::paths::data_dir(&env, None).join("chat")
+        );
+    }
 }

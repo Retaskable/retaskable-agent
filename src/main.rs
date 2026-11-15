@@ -616,16 +616,19 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             version,
             program_status::now_ms(),
         );
-        writer.spawn(move || {
+        let linked = program_status::LinkedCache::new(program_status::LINKED_TTL, move || {
             let held = |url: &str| matches!(keys.get(url), Ok(Some(_)));
+            Linked {
+                store: held(&store_url),
+                cloud: Some(urls.iter().any(|u| held(u))),
+            }
+        });
+        writer.spawn(move || {
             let mut extra = serde_json::Map::new();
             extra.insert("port".into(), port.into());
             extra.insert("projects".into(), projects.into());
             Report {
-                linked: Linked {
-                    store: held(&store_url),
-                    cloud: Some(urls.iter().any(|u| held(u))),
-                },
+                linked: linked.get(program_status::now_ms()),
                 env_set: env_set.clone(),
                 extra,
                 ..Report::default()

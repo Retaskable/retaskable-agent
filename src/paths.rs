@@ -83,7 +83,7 @@ mod tests {
     }
 
     #[test]
-    fn all_three_programs_agree_with_and_without_the_env_dir() {
+    fn a_build_json_beside_the_exe_makes_a_release_build() {
         let tmp = tempfile::tempdir().unwrap();
         let exe = tmp.path().join("agent");
         std::fs::write(
@@ -91,19 +91,13 @@ mod tests {
             r#"{"os":"linux","version":"1.2.3","commit":"abc","environment":"production"}"#,
         )
         .unwrap();
-        for env in [
-            Env::from_pairs([("RETASKABLE_DATA_DIR", "d"), ("HOME", "/h")]),
-            Env::from_pairs([("HOME", "/h"), ("LOCALAPPDATA", "/h/lad")]),
-        ] {
-            let root = data_dir_for_exe(&env, Some(&exe));
-            // The chat agent and the CI runner resolve through the same function the code agent does.
-            assert_eq!(crate::chat::link::data_dir_for(&env, Some(&exe)), chat_dir(&root));
-            assert_eq!(crate::agent_ci::settings::data_dir_for(&env, Some(&exe)), ci_dir(&root));
-            assert_eq!(code_dir(&root), root);
-        }
+        let bare = Env::from_pairs([("HOME", "/h"), ("LOCALAPPDATA", "/h/lad")]);
+        assert_eq!(data_dir_for_exe(&bare, Some(&exe)), release::data_dir(&build(), &bare));
         let set = Env::from_pairs([("RETASKABLE_DATA_DIR", "d")]);
         assert_eq!(data_dir_for_exe(&set, Some(&exe)), PathBuf::from("d"));
         assert_eq!(ci_dir(Path::new("d")), PathBuf::from("d").join("ci"));
+        assert_eq!(chat_dir(Path::new("d")), PathBuf::from("d").join("chat"));
+        assert_eq!(code_dir(Path::new("d")), PathBuf::from("d"));
     }
 
     #[test]

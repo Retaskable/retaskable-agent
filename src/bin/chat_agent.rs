@@ -93,16 +93,19 @@ async fn run(env: &Env) -> Result<()> {
     let (started, served, claude) = (program_status::now_ms(), hubs.len(), runner_probe.available());
     let (keys, env_set) = (chat_link::token_store(env), program_status::env_set(env, &ENV_VARS));
     let status = StatusWriter::new(&chat_link::data_dir(env), program_status::CHAT_AGENT, VERSION, started);
-    let _status = status.spawn(move || {
+    let linked = program_status::LinkedCache::new(program_status::LINKED_TTL, move || {
         let held = |url: &str| matches!(keys.get(url), Ok(Some(_)));
+        Linked {
+            store: held(&store_url),
+            cloud: Some(held(&cloud_url)),
+        }
+    });
+    let _status = status.spawn(move || {
         let mut extra = serde_json::Map::new();
         extra.insert("claudeAvailable".into(), claude.into());
         extra.insert("projectsServed".into(), served.into());
         Report {
-            linked: Linked {
-                store: held(&store_url),
-                cloud: Some(held(&cloud_url)),
-            },
+            linked: linked.get(program_status::now_ms()),
             env_set: env_set.clone(),
             extra,
             ..Report::default()

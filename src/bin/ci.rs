@@ -71,7 +71,11 @@ fn start(env: &Env) -> Result<(CiLoop, Settings)> {
     }
     let linked = {
         let (keychain, url) = (keychain.clone(), url.clone());
-        Arc::new(move || matches!(keychain.get(&url), Ok(Some(_))))
+        let cache = program_status::LinkedCache::new(program_status::LINKED_TTL, move || program_status::Linked {
+            store: matches!(keychain.get(&url), Ok(Some(_))),
+            cloud: None,
+        });
+        Arc::new(move || cache.get(program_status::now_ms()).store)
     };
     let status = StatusWriter::new(
         &cfg.data_dir,

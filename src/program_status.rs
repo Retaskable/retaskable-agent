@@ -53,6 +53,45 @@ pub struct ProgramStatus {
     pub extra: Map<String, Value>,
 }
 
+/// How long a read of the links is kept. Reading them asks the OS keychain, which can prompt (macOS) or cost a D-Bus
+/// call (Linux), so a status tick never does it each time.
+pub const LINKED_TTL: Duration = Duration::from_secs(300);
+
+/// The links, read once and again only after `ttl`, or when `refresh` says the program's own link changed.
+pub struct LinkedCache {
+    fetch: Box<dyn Fn() -> Linked + Send + Sync>,
+    ttl_ms: u64,
+    held: std::sync::Mutex<Option<(u64, Linked)>>,
+}
+
+impl LinkedCache {
+    pub fn new(ttl: Duration, fetch: impl Fn() -> Linked + Send + Sync + 'static) -> Self {
+        Self {
+            fetch: Box::new(fetch),
+            ttl_ms: ttl.as_millis() as u64,
+            held: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The links as of `now` (ms): the kept read while it is fresh, else a new one.
+    pub fn get(&self, now: u64) -> Linked {
+        let mut held = self.held.lock().unwrap();
+        if let Some((at, linked)) = held.as_ref()
+            && now.saturating_sub(*at) <= self.ttl_ms
+        {
+            return linked.clone();
+        }
+        let linked = (self.fetch)();
+        *held = Some((now, linked.clone()));
+        linked
+    }
+
+    /// Forgets the kept read, for a program whose link just changed.
+    pub fn refresh(&self) {
+        *self.held.lock().unwrap() = None;
+    }
+}
+
 /// What one write carries besides the identity the writer already has.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
@@ -320,6 +359,30 @@ mod tests {
         writer(dir.path()).write(1, r).unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
         assert!(!text.contains(secret) && !text.contains("ghp_"));
+    }
+
+    #[test]
+    fn the_links_are_read_once_until_the_ttl_or_a_refresh() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let cache = LinkedCache::new(LINKED_TTL, move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Linked {
+                store: true,
+                cloud: None,
+            }
+        });
+        for tick in 0..30 {
+            assert!(cache.get(1_000 + tick * 10_000).store);
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        cache.get(1_000 + 300_001);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        cache.refresh();
+        cache.get(1_000 + 300_002);
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
     }
 
     fn status(updated_at: u64, store: bool) -> ProgramStatus {
