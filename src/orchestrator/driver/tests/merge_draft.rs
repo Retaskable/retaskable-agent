@@ -20,12 +20,21 @@ impl MergeHost for NoItems {
         anyhow::bail!("a draft is merged by the draft path")
     }
 
-    fn ship(
+    fn ship_read(
         &self,
         _: &crate::config::ProjectConfig,
         _: &str,
         _: &[crate::backlog::Item],
-    ) -> Result<Option<String>, crate::team_branch::ship::Stop> {
+    ) -> Result<crate::team_branch::ship::Shipping, crate::team_branch::ship::Stop> {
+        unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
+    }
+
+    fn ship_merge(
+        &self,
+        _: &crate::config::ProjectConfig,
+        _: &str,
+        _: &crate::team_branch::ship::Shipping,
+    ) -> Result<crate::team_branch::ship::Shipped, crate::team_branch::ship::Stop> {
         unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
     }
 }
