@@ -403,8 +403,11 @@ impl ProjectLoop {
             };
             let slice = self.runs.get(item).map_or(0, |r| r.slice);
             if let Some(record) = self.records.get_mut(item) {
-                record.new_stop(state_name(from), &reason, slice);
+                record.new_stop(&reason);
                 record.state = "needs_human".into();
+            }
+            if let Some(held) = self.decisions.get_mut(item) {
+                held.now.new_stop(state_name(from), slice);
             }
         }
         if from != to {

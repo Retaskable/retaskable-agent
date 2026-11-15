@@ -7,6 +7,7 @@ fn agent() -> ClaimNextAgent {
         environment: "Production".into(),
         base_branch: "main".into(),
         tags: vec![],
+        week: None,
     }
 }
 

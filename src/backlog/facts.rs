@@ -1,10 +1,30 @@
-//! The store's project facts and draft queue: `facts_get { kind: "project" }` (the pause and today's spend) and
+//! `facts_get`: the project's facts, one row per kind (spec 03.16). The store answers a map of
+//! `{ kind: { kind, data, updatedAt, by, machine? } }`, leaving out a kind with no row. Beside it, what the
+//! puller and the ideas path read and send: the project's pause (`pause_get`), the company's audiences and
 //! `draft_queue`. Every failure is a `BacklogError`, never an empty answer.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::audiences::{Audience, audiences_of};
 use super::{BacklogError, Client};
+
+/// One fact row.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fact {
+    #[serde(default)]
+    pub data: Value,
+    /// When the row was last written (milliseconds); a writer sends it back as `ifUpdatedAt`.
+    #[serde(default)]
+    pub updated_at: u64,
+    #[serde(default)]
+    pub by: Option<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+}
 
 /// A draft for the store's queue (`draft_queue`). `audience` and `revises` are sent as `null` when there is none; the
 /// optional fields are left out when unset (chat sets only `ask_id`, an accepted idea the rest).
@@ -32,40 +52,27 @@ pub struct QueuedDraft {
     pub intake: Option<Value>,
 }
 
-/// A company audience (chat-asks-who.md), as `facts_get { kind: "audiences" }` lists it.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Audience {
-    pub id: String,
-    pub name: String,
+/// What `pause_get {}` says: the project's own pause, for every computer on it. Spend is this computer's own
+/// (the machine store), not the store's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectFacts {
+    pub paused: bool,
+    /// Who paused it and why ("Paused by @james for everyone: before the demo").
+    pub paused_reason: Option<String>,
+}
+
+/// The store's `ProjectPause` (`{ by, at, reason }`), `null` when not paused.
+#[derive(Deserialize)]
+struct PauseGet {
     #[serde(default)]
-    pub short: Option<String>,
-    /// Who they are, in a sentence (the ideas prompt's user types).
-    #[serde(default)]
-    pub who: Option<String>,
-    /// The part of the product they use.
-    #[serde(default)]
-    pub part: Option<String>,
+    paused: Option<PauseBy>,
 }
 
 #[derive(Deserialize)]
-struct Audiences {
+struct PauseBy {
+    by: String,
     #[serde(default)]
-    audiences: Vec<Audience>,
-}
-
-/// What `facts_get { kind: "project" }` says about the project's use today.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectFacts {
-    /// The project's own pause (for every computer on it), set from the store.
-    #[serde(default)]
-    pub paused: bool,
-    /// The store's own words for that pause ("Paused by @james for everyone").
-    #[serde(default)]
-    pub paused_reason: Option<String>,
-    /// What the project's sessions cost today, in USD, across computers.
-    #[serde(default)]
-    pub spent_today_usd: f64,
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -74,24 +81,38 @@ struct Queued {
 }
 
 impl Client {
-    /// `facts_get { kind: "audiences" }`: the company's audiences.
-    pub async fn audiences(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Audience>, BacklogError> {
-        let list: Audiences = self
-            .op(repo_id, token, "facts_get", json!({ "kind": "audiences" }), "audiences")
-            .await?;
-        Ok(list.audiences)
+    /// `facts_get { kinds }`: the rows that exist, by kind. A kind with no row is left out of the answer.
+    pub async fn facts_get(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        kinds: &[&str],
+    ) -> Result<BTreeMap<String, Fact>, BacklogError> {
+        self.op(repo_id, token, "facts_get", json!({ "kinds": kinds }), "facts")
+            .await
     }
 
-    /// `facts_get { kind: "project" }`: the project's pause and today's spend, which gate new questions.
+    /// `pause_get {}`: whether the project is paused for everyone, which gates new work and asks.
     pub async fn project_facts(&self, repo_id: u64, token: Option<&str>) -> Result<ProjectFacts, BacklogError> {
-        self.op(
-            repo_id,
-            token,
-            "facts_get",
-            json!({ "kind": "project" }),
-            "project facts",
-        )
-        .await
+        let got: PauseGet = self.op(repo_id, token, "pause_get", json!({}), "pause").await?;
+        Ok(match got.paused {
+            None => ProjectFacts::default(),
+            Some(p) => ProjectFacts {
+                paused: true,
+                paused_reason: Some(match p.reason.filter(|r| !r.trim().is_empty()) {
+                    Some(reason) => format!("Paused by @{} for everyone: {reason}", p.by),
+                    None => format!("Paused by @{} for everyone", p.by),
+                }),
+            },
+        })
+    }
+
+    /// `facts_get { kinds: ["audiences"] }`: the company's audiences (the starters when it has no row yet).
+    pub async fn audiences(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Audience>, BacklogError> {
+        let facts = self.facts_get(repo_id, token, &["audiences"]).await?;
+        Ok(audiences_of(
+            &facts.get("audiences").map(|f| f.data.clone()).unwrap_or_default(),
+        ))
     }
 
     /// `draft_queue { request, titles, themes, audience, revises, askId }`: a new draft for the queue. Answers its id.

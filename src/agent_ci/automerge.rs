@@ -1,245 +1,197 @@
-//! docs/specs/agent-ci.md section 3.3: a green pull request labelled `automerge` is squash-merged by the loop.
-//! It takes the same `merge-<base>` store lock the orchestrator's merge takes (pieces.md section 3.4) and waits
-//! for it, then merges only if main is still where the check saw it; else the new main is a new key, checked again.
-use std::ffi::OsStr;
-use std::path::Path;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::time::Duration;
+//! docs/specs/agent-ci.md section 3.3: what the runner does with pull requests besides checking them, as
+//! `.agent-ci/runner.mjs` does. A green pull request labelled `automerge`, or one a person pressed Merge on (the
+//! store's `ci_merge_requests`), is squash-merged pinned to the head that was checked; there is no store lock. A
+//! person's pull request waits (is not merged yet) while an up-to-date `retaskable/` pull request's check is
+//! pending, for at most `HOLD`. The store is told of each merge (`ci_merged`) and of each pull request someone
+//! else closed (`ci_pr_closed`, once).
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use futures_util::future::BoxFuture;
-use serde::Deserialize;
+use serde_json::{Value, json};
 
-use super::{CheckKey, discovery};
-use crate::backlog::Client;
-use crate::backlog::runs::LockTake;
-use crate::link::TokenStore;
-use crate::runs::{CEILING_MARGIN, lock_ceiling};
+use super::report::{self, Host};
+use super::store::{self, CiStore};
 
 /// The label that asks for the merge.
 pub const AUTOMERGE_LABEL: &str = "automerge";
+/// How long a person's merge waits for the agent's turn, at most.
+pub const HOLD: Duration = Duration::from_secs(25 * 60);
+/// The branch prefix of an agent's pull request.
+pub const AGENT_BRANCH: &str = "retaskable/";
 
-/// How often a lock another computer holds is asked for again.
-pub const ASK_EVERY: Duration = Duration::from_secs(15);
-
-/// The store's locks, so a test can stand in for it.
-pub trait MergeLocks: Send + Sync {
-    /// `lock_take` on the project's backlog.
-    fn take<'a>(
-        &'a self,
-        github_repo: &'a str,
-        name: &'a str,
-        note: &'a str,
-    ) -> BoxFuture<'a, Result<LockTake, String>>;
-    /// `lock_drop`; a failure is the store's to expire.
-    fn drop_lock<'a>(&'a self, github_repo: &'a str, token: &'a str) -> BoxFuture<'a, ()>;
-}
-
-/// What the loop merges with: the locks and how it waits for them.
+/// What the loop merges with: the store and what it has read of it.
 #[derive(Clone)]
 pub struct Automerge {
-    pub locks: Arc<dyn MergeLocks>,
-    pub ask_every: Duration,
-    /// How long the lock is asked for: the `merge` lock's ceiling less its margin.
-    pub wait: Duration,
+    store: Arc<dyn CiStore>,
+    /// `(pr, head sha)` a person pressed Merge on, as of the last poll.
+    asked: Arc<Mutex<HashSet<(u64, String)>>>,
+    /// When each held merge was first held.
+    held: Arc<Mutex<HashMap<u64, Instant>>>,
+    /// Pull requests already told to the store as closed.
+    told: Arc<Mutex<HashSet<u64>>>,
+    pub hold: Duration,
 }
 
-impl Automerge {
-    pub fn new(locks: Arc<dyn MergeLocks>) -> Self {
-        Self {
-            locks,
-            ask_every: ASK_EVERY,
-            wait: lock_ceiling("merge-").saturating_sub(CEILING_MARGIN),
-        }
-    }
-}
-
-/// The real locks: the backlog store, with the link's token from the keychain.
-pub struct StoreLocks {
-    url: String,
-    keychain: Arc<dyn TokenStore>,
-}
-
-impl StoreLocks {
-    pub fn new(url: String, keychain: Arc<dyn TokenStore>) -> Self {
-        Self { url, keychain }
-    }
-
-    async fn ready(&self, github_repo: &str) -> Result<(Client, u64, String), String> {
-        let token = self
-            .keychain
-            .get(&self.url)
-            .map_err(|e| format!("reading the backlog link: {e:#}"))?
-            .ok_or("this computer holds no link to the backlog store")?;
-        let repo = crate::orchestrator::driver::repo_id(github_repo)
-            .await
-            .ok_or_else(|| format!("gh couldn't say the id of {github_repo}"))?;
-        Ok((Client::new(self.url.clone()), repo, token))
-    }
-}
-
-impl MergeLocks for StoreLocks {
-    fn take<'a>(
-        &'a self,
-        github_repo: &'a str,
-        name: &'a str,
-        note: &'a str,
-    ) -> BoxFuture<'a, Result<LockTake, String>> {
-        Box::pin(async move {
-            let (client, repo, token) = self.ready(github_repo).await?;
-            client
-                .lock_take(repo, Some(&token), name, Some(note))
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
-
-    fn drop_lock<'a>(&'a self, github_repo: &'a str, token: &'a str) -> BoxFuture<'a, ()> {
-        Box::pin(async move {
-            if let Ok((client, repo, link)) = self.ready(github_repo).await {
-                let _ = client.lock_drop(repo, Some(&link), token).await;
-            }
-        })
-    }
-}
-
-/// Where the pull request is, and the program that merges it.
-pub struct Target<'a> {
-    pub gh: &'a OsStr,
-    pub git: &'a OsStr,
-    pub repo_dir: &'a Path,
-    pub github_repo: &'a str,
-    pub base: &'a str,
-    pub computer: &'a str,
-    pub key: &'a CheckKey,
-}
-
-/// How an automerge ended.
+/// How a merge attempt ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ended {
     Merged,
-    /// No `automerge` label, or the pull request is closed or has a new head.
+    /// No `automerge` label or merge request, or the pull request is closed or has a new head.
     NotAsked,
-    /// Main moved since the check: the new main is a new key.
-    MainMoved,
+    /// Waiting for this `retaskable/` pull request's turn; tried again on a later poll.
+    Held(u64),
     Failed(String),
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct View {
-    state: String,
-    head_ref_oid: String,
-    #[serde(default)]
-    labels: Vec<Label>,
-}
-
-#[derive(Deserialize)]
-struct Label {
-    name: String,
-}
-
-async fn gh(target: &Target<'_>, args: &[&str]) -> Result<String, String> {
-    let mut all = args.to_vec();
-    all.extend(["--repo", target.github_repo]);
-    crate::host_call::guard_program(target.gh, Some(target.repo_dir), &all).map_err(|e| e.to_string())?;
-    let out = tokio::process::Command::new(target.gh)
-        .args(all)
-        .current_dir(target.repo_dir)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
+async fn get(host: &Arc<Host>, endpoint: String) -> Result<Value, String> {
+    let h = host.clone();
+    let out = tokio::task::spawn_blocking(move || h.api("GET", &endpoint, &[]))
         .await
-        .map_err(|e| format!("gh didn't start: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(format!(
-            "gh {} failed: {}",
-            args.first().copied().unwrap_or(""),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{e:#}"))?;
+    serde_json::from_str(&out).map_err(|e| format!("unreadable answer: {e}"))
 }
 
-/// Whether the pull request still asks for the merge: open, labelled `automerge`, and at the head that was checked.
-async fn asked(t: &Target<'_>, pr: &str) -> Result<bool, String> {
-    let view = gh(t, &["pr", "view", pr, "--json", "state,headRefOid,labels"]).await?;
-    let view: View = serde_json::from_str(&view).map_err(|e| format!("unreadable pull request: {e}"))?;
-    Ok(
-        view.state == "OPEN"
-            && view.head_ref_oid == t.key.head
-            && view.labels.iter().any(|l| l.name == AUTOMERGE_LABEL),
-    )
+fn is_agent_branch(p: &Value) -> bool {
+    p["head"]["ref"].as_str().is_some_and(|r| r.starts_with(AGENT_BRANCH))
 }
 
-/// Merges the pull request of a green check, if it asks for it and main hasn't moved. Call only after success.
-pub async fn run(am: &Automerge, t: &Target<'_>) -> Ended {
-    let pr = t.key.pr.to_string();
-    match asked(t, &pr).await {
-        Ok(true) => {}
-        Ok(false) => return Ended::NotAsked,
-        Err(e) => return Ended::Failed(e),
-    }
-    let name = format!("merge-{}", t.base);
-    let note = format!("PR #{} on {}", t.key.pr, t.computer);
-    let token = match take(am, t, &name, &note).await {
-        Ok(token) => token,
-        Err(e) => return Ended::Failed(e),
-    };
-    let end = merge_if_still_main(t, &pr).await;
-    am.locks.drop_lock(t.github_repo, &token).await;
-    end
-}
-
-/// The lock's token, asking again while another computer holds it, up to `wait`.
-async fn take(am: &Automerge, t: &Target<'_>, name: &str, note: &str) -> Result<String, String> {
-    let start = tokio::time::Instant::now();
-    loop {
-        match am.locks.take(t.github_repo, name, note).await {
-            Ok(LockTake::Held(token)) => return Ok(token),
-            Ok(LockTake::HeldBy { by, .. }) if start.elapsed() >= am.wait => {
-                return Err(format!("The {name} lock stayed held by {by}."));
-            }
-            Ok(LockTake::HeldBy { .. }) => {}
-            Err(e) => return Err(format!("Couldn't take the {name} lock: {e}")),
+impl Automerge {
+    pub fn new(store: Arc<dyn CiStore>) -> Self {
+        Self {
+            store,
+            asked: Arc::default(),
+            held: Arc::default(),
+            told: Arc::default(),
+            hold: HOLD,
         }
-        tokio::time::sleep(am.ask_every).await;
     }
-}
 
-/// Under the lock (which may have been waited for a long time): the pull request is read again, main is read
-/// again, and the squash merge goes only for the head and the main the check saw.
-async fn merge_if_still_main(t: &Target<'_>, pr: &str) -> Ended {
-    match asked(t, pr).await {
-        Ok(true) => {}
-        Ok(false) => return Ended::NotAsked,
-        Err(e) => return Ended::Failed(e),
+    pub fn store(&self) -> &Arc<dyn CiStore> {
+        &self.store
     }
-    if let Err(e) = discovery::git(t.git, t.repo_dir, &["fetch", "origin", t.base]).await {
-        return Ended::Failed(e);
+
+    /// Reads the pull requests a person pressed Merge on (each poll). A store that can't be read leaves the last
+    /// answer.
+    pub async fn refresh_asked(&self, github_repo: &str) {
+        match self.store.op(github_repo, "ci_merge_requests", json!({})).await {
+            Ok(v) => *self.asked.lock().unwrap() = store::read_requests(&v).into_iter().collect(),
+            Err(e) => tracing::warn!("agent CI: ci_merge_requests: {e}"),
+        }
     }
-    match discovery::git(t.git, t.repo_dir, &["rev-parse", &format!("origin/{}", t.base)]).await {
-        Ok(main) if main.trim() == t.key.main => {}
-        Ok(_) => return Ended::MainMoved,
-        Err(e) => return Ended::Failed(e),
+
+    /// Whether a person pressed Merge on this pull request at this head.
+    pub fn is_asked(&self, pr: u64, sha: &str) -> bool {
+        self.asked.lock().unwrap().contains(&(pr, sha.to_string()))
     }
-    match gh(
-        t,
-        &[
-            "pr",
-            "merge",
-            pr,
-            "--squash",
-            "--delete-branch",
-            "--match-head-commit",
-            &t.key.head,
-        ],
-    )
-    .await
-    {
-        Ok(_) => Ended::Merged,
-        Err(e) => Ended::Failed(e),
+
+    /// Tells the store, once per pull request, of the 30 most recently updated closed pull requests whose head is
+    /// in this repo.
+    pub async fn tell_closed(&self, host: &Arc<Host>) {
+        let endpoint = format!(
+            "repos/{}/pulls?state=closed&sort=updated&direction=desc&per_page=30",
+            host.repo
+        );
+        let closed = match get(host, endpoint).await {
+            Ok(v) => v,
+            Err(e) => return tracing::warn!("agent CI: closed pull requests: {e}"),
+        };
+        for p in closed.as_array().into_iter().flatten() {
+            let Some(n) = p["number"].as_u64() else { continue };
+            if self.told.lock().unwrap().contains(&n) || p["head"]["repo"]["full_name"].as_str() != Some(&host.repo) {
+                continue;
+            }
+            let args = json!({ "pr": n, "merged": !p["merged_at"].is_null() });
+            match self.store.op(&host.repo, "ci_pr_closed", args).await {
+                Ok(_) => {
+                    self.told.lock().unwrap().insert(n);
+                }
+                Err(e) => tracing::warn!("agent CI: ci_pr_closed #{n}: {e}"),
+            }
+        }
+    }
+
+    /// The open `retaskable/` pull request whose turn it is: up to date with `base` and its `/ci` check pending.
+    async fn agent_turn(&self, host: &Arc<Host>, base: &str, open: &Value) -> Option<u64> {
+        for p in open.as_array()? {
+            if !is_agent_branch(p) {
+                continue;
+            }
+            let (Some(sha), Some(n)) = (p["head"]["sha"].as_str(), p["number"].as_u64()) else {
+                continue;
+            };
+            let compare = get(host, format!("repos/{}/compare/{base}...{sha}", host.repo))
+                .await
+                .ok()?;
+            if compare["behind_by"].as_u64() != Some(0) {
+                continue;
+            }
+            let (h, sha) = (host.clone(), sha.to_string());
+            let statuses = tokio::task::spawn_blocking(move || h.read_statuses(&sha))
+                .await
+                .ok()?
+                .ok()?;
+            if statuses
+                .iter()
+                .find(|s| s.context.ends_with("/ci"))
+                .is_some_and(|s| s.state == "pending")
+            {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Merges pull request `pr` at `sha` (a green check's head), if it still asks for it: open, at that head, and
+    /// labelled `automerge` or asked for by a person. Squash, pinned to `sha`.
+    pub async fn run(&self, host: &Arc<Host>, base: &str, pr: u64, sha: &str) -> Ended {
+        let p = match get(host, format!("repos/{}/pulls/{pr}", host.repo)).await {
+            Ok(p) => p,
+            Err(e) => return Ended::Failed(e),
+        };
+        let labelled = p["labels"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|l| l["name"] == AUTOMERGE_LABEL));
+        if p["state"] != "open" || p["head"]["sha"] != sha || !(labelled || self.is_asked(pr, sha)) {
+            return Ended::NotAsked;
+        }
+        if !is_agent_branch(&p) {
+            let since = self.held.lock().unwrap().get(&pr).copied().unwrap_or_else(Instant::now);
+            let holder = if since.elapsed() < self.hold {
+                match get(host, format!("repos/{}/pulls?state=open&per_page=100", host.repo)).await {
+                    Ok(open) => self.agent_turn(host, base, &open).await,
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            if let Some(turn) = holder {
+                if self.held.lock().unwrap().insert(pr, since).is_none() {
+                    tracing::info!("agent CI: merge #{pr}: waits for #{turn}, the agent's turn");
+                }
+                return Ended::Held(turn);
+            }
+            self.held.lock().unwrap().remove(&pr);
+        }
+        let (h, sha_s) = (host.clone(), sha.to_string());
+        let endpoint = format!("repos/{}/pulls/{pr}/merge", host.repo);
+        let merged = tokio::task::spawn_blocking(move || {
+            h.api("PUT", &endpoint, &[("merge_method", "squash"), ("sha", &sha_s)])
+        })
+        .await;
+        match merged {
+            Ok(Ok(_)) => {
+                // One try: a lost record only leaves the board's row Passed.
+                let args = json!({ "sha": sha, "context": report::PR_CONTEXT, "pr": pr });
+                if let Err(e) = self.store.op(&host.repo, "ci_merged", args).await {
+                    tracing::warn!("agent CI: ci_merged: {e}");
+                }
+                Ended::Merged
+            }
+            Ok(Err(e)) => Ended::Failed(format!("{e:#}")),
+            Err(e) => Ended::Failed(e.to_string()),
+        }
     }
 }
 

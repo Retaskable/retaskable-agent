@@ -15,6 +15,7 @@ fn agent(tags: &[&str]) -> RunTakeAgent {
             look: "claude".into(),
         },
         chores: None,
+        week: None,
     }
 }
 
@@ -277,5 +278,34 @@ fn the_agent_serializes_engines_and_uses_in_camel_case_next_to_tags() {
     assert_eq!(
         v["uses"],
         json!({ "plan": "claude", "build": "cursor", "fix": "cursor", "look": "claude" })
+    );
+}
+
+#[tokio::test]
+async fn run_take_sends_the_week_and_reads_a_pass_over() {
+    let (base, seen) = store(
+        200,
+        json!({ "value": { "passed": { "to": "box-2", "retryMs": 60000 } } }),
+    )
+    .await;
+    let mut a = agent(&[]);
+    a.week = Some(crate::backlog::week::WeekUse {
+        used: 0.7,
+        resets_at: 9,
+    });
+    let answer = Client::new(base)
+        .run_take(1, Some("tok"), &a, RunWant::Kinds(&[RunKind::Build]))
+        .await
+        .unwrap();
+    assert_eq!(
+        answer,
+        RunTakeAnswer::Passed(crate::backlog::week::Passed {
+            to: "box-2".into(),
+            retry_ms: 60_000
+        })
+    );
+    assert_eq!(
+        seen.lock().unwrap()[0]["args"]["agent"]["week"],
+        json!({ "used": 0.7, "resetsAt": 9 })
     );
 }

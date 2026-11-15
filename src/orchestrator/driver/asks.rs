@@ -31,6 +31,8 @@ use crate::store::RunRecord;
 pub struct AskStore {
     pub client: Arc<Client>,
     pub repo: u64,
+    /// The project's id, for what it has spent on this computer today.
+    pub project_id: String,
     pub token: String,
     /// Where a failed write is kept for the loop to log.
     pub failures: crate::backlog::failures::Failures,
@@ -177,6 +179,7 @@ impl ProjectLoop {
         let store = AskStore {
             client: self.client.clone(),
             repo,
+            project_id: self.id.clone(),
             token: token.clone(),
             failures: failures.clone(),
         };

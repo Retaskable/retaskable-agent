@@ -7,7 +7,7 @@ use crate::orchestrator::session::branch_name;
 impl ProjectLoop {
     /// The leased items among `items` (the backlog as last read), with the lane each holds in `held`.
     pub(super) fn held_items(&self, items: &[Item], held: &[HeldLane]) -> Vec<HeldItem> {
-        items
+        let mut out: Vec<HeldItem> = items
             .iter()
             .filter(|i| self.leases.contains_key(&i.id))
             .map(|i| HeldItem {
@@ -22,7 +22,10 @@ impl ProjectLoop {
                 pr_url: i.pr_url.clone(),
                 attempt: self.attempt_of(&i.id),
                 chore: i.kind.as_deref() == Some("chore") || i.id.starts_with("chore-"),
+                expert: None,
             })
-            .collect()
+            .collect();
+        out.extend(self.expert_items());
+        out
     }
 }

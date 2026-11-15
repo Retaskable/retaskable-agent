@@ -129,6 +129,8 @@ impl ProjectLoop {
                 environment: shared.links.environment.clone(),
                 base_branch: self.project.base_branch.clone(),
                 tags: shared.links.tags.get(),
+                // A claim by name: the store has no other computer to pass it to, so no week.
+                week: None,
             },
         });
         let handler = Arc::new(TakeOverHandler::new(self.take_overs.shared.clone()));

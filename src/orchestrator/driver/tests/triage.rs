@@ -120,7 +120,7 @@ async fn a_stopped_item_gets_exactly_one_look_that_leaves_a_human_finding_on_its
         ("a", "first problem")
     );
     let r = rig.lp(0).records["a"].clone();
-    assert!(r.triaged);
+    assert_eq!(rig.lp(0).decisions["a"].now.triaged, Some(true));
     let reason = r.needs_human_reason.unwrap();
     assert!(reason.starts_with("first problem"), "{reason}");
     assert!(
@@ -141,7 +141,7 @@ async fn a_record_that_already_holds_a_finding_is_not_looked_at_again() {
     rig.machine.pass().await;
     assert_eq!(looks(&fake), 1);
     // A restart keeps the record: even without its mark, the reason says Claude looked.
-    rig.lp(0).records.get_mut("a").unwrap().triaged = false;
+    rig.lp(0).decisions.get_mut("a").unwrap().now.triaged = None;
     rig.lp(0).triaging.clear();
     rig.machine.pass().await;
     assert_eq!(looks(&fake), 1);
@@ -191,7 +191,7 @@ async fn a_failing_look_retries_after_ten_then_twenty_minutes_and_gives_up_with_
     rig.machine.pass().await;
     assert_eq!(looks(&fake), 3);
     let r = rig.lp(0).records["a"].clone();
-    assert!(r.triaged && r.failed_looks == 3);
+    assert!(rig.lp(0).decisions["a"].now.triaged == Some(true) && r.failed_looks == 3);
     let reason = r.needs_human_reason.unwrap();
     assert!(reason.contains("Claude couldn't look into it"), "{reason}");
     for _ in 0..3 {
@@ -209,7 +209,7 @@ async fn a_look_that_hit_its_budget_is_not_retried() {
     }
     assert_eq!(looks(&fake), 1);
     let r = rig.lp(0).records["a"].clone();
-    assert!(r.triaged && r.failed_looks == 0);
+    assert!(rig.lp(0).decisions["a"].now.triaged == Some(true) && r.failed_looks == 0);
 }
 
 #[tokio::test]
@@ -218,11 +218,13 @@ async fn a_new_stop_is_looked_at_again() {
     rig.machine.pass().await;
     assert_eq!(looks(&fake), 1);
     let slice = rig.lp(0).records["a"].slice;
+    rig.lp(0).records.get_mut("a").unwrap().new_stop("later failure");
     rig.lp(0)
-        .records
+        .decisions
         .get_mut("a")
         .unwrap()
-        .new_stop("reviewing", "later failure", slice);
+        .now
+        .new_stop("reviewing", slice);
     rig.machine.pass().await;
     rig.machine.pass().await;
     assert_eq!(looks(&fake), 2);
@@ -287,8 +289,8 @@ async fn a_continue_decision_resumes_the_item_on_its_branch_with_the_instruction
     assert_eq!(started.last().unwrap().follow_up.as_deref(), Some("Use the other API."));
     drop(started);
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
-    let r = &rig.lp(0).records["a"];
-    assert_eq!(r.triages, Some((r.slice, 1)));
+    let slice = rig.lp(0).records["a"].slice;
+    assert_eq!(rig.lp(0).decisions["a"].now.triage_pair(), Some((slice, 1)));
     assert!(
         timeline(&mut rig)
             .iter()
@@ -311,7 +313,7 @@ async fn a_start_over_decision_starts_a_new_attempt_with_the_instructions_in_its
         (1, Some("Try a smaller change."))
     );
     drop(started);
-    assert_eq!(rig.lp(0).records["a"].triages.map(|t| t.1), Some(1));
+    assert_eq!(rig.lp(0).decisions["a"].now.triages.map(|t| t.n), Some(1));
 }
 
 #[tokio::test]
@@ -336,7 +338,7 @@ async fn a_decision_past_the_cap_is_left_for_a_person() {
     let (mut rig, fake) = stopped(vec![]).await;
     pushed(&mut rig);
     let slice = rig.lp(0).records["a"].slice;
-    rig.lp(0).records.get_mut("a").unwrap().triages = Some((slice, 2));
+    rig.lp(0).decisions.get_mut("a").unwrap().now.triages = Some(crate::backlog::decisions::Triages { slice, n: 2 });
     rig.machine.outcome_sender().send(SessionOutcome {
         project: "p0".into(),
         item_id: "a".into(),
@@ -437,7 +439,8 @@ async fn person_steps_with_no_pr_wait_for_the_steps() {
         r.needs_human_reason.unwrap(),
         "Only steps a person can do are left:\n1. Add the key\n2. Press Done"
     );
-    assert!(r.triaged && r.triages.is_none());
+    let d = &rig.lp(0).decisions["a"].now;
+    assert!(d.triaged == Some(true) && d.triages.is_none());
     assert!(!rig.lp(0).claude_on_it("a"));
 }
 
@@ -509,16 +512,15 @@ async fn a_bug_with_consent_on_is_sent_once_and_its_timeline_line_added() {
     assert_eq!(got.lock().unwrap().len(), 1);
     assert_eq!(got.lock().unwrap()[0]["title"], "Lane prep drops the sync");
     assert!(has_note(&mut rig, "Reported to Retaskable as a fix"));
-    let sig = rig.lp(0).store.runs()["a"].reported_bugs.clone();
-    assert_eq!(sig.len(), 1);
+    let sig = rig.lp(0).decisions["a"].now.reported_bug.clone();
+    assert!(sig.is_some());
     // A second look finds the same bug: never sent again for the item.
-    let r = rig.lp(0).records.get_mut("a").unwrap();
-    r.triaged = false;
+    rig.lp(0).decisions.get_mut("a").unwrap().now.triaged = None;
     rig.lp(0).triaging.clear();
     past(&mut rig);
     settle_bug(&mut rig).await;
     assert_eq!(got.lock().unwrap().len(), 1);
-    assert_eq!(rig.lp(0).records["a"].reported_bugs, sig);
+    assert_eq!(rig.lp(0).decisions["a"].now.reported_bug, sig);
 }
 
 #[tokio::test]
@@ -527,7 +529,7 @@ async fn consent_off_sends_nothing_and_adds_no_line() {
     let got = hub(&mut rig, false, json!({ "type": "bug_reported", "ok": true }));
     settle_bug(&mut rig).await;
     assert!(got.lock().unwrap().is_empty());
-    assert!(rig.lp(0).records["a"].reported_bugs.is_empty());
+    assert!(rig.lp(0).decisions["a"].now.reported_bug.is_none());
     assert!(!has_note(&mut rig, "Reported to Retaskable as a fix"));
 }
 
@@ -551,7 +553,7 @@ async fn a_refused_report_is_marked_but_adds_no_line() {
     );
     settle_bug(&mut rig).await;
     assert_eq!(got.lock().unwrap().len(), 1);
-    assert_eq!(rig.lp(0).records["a"].reported_bugs.len(), 1);
+    assert!(rig.lp(0).decisions["a"].now.reported_bug.is_some());
     assert!(!has_note(&mut rig, "Reported to Retaskable as a fix"));
 }
 
@@ -624,7 +626,7 @@ async fn an_agreeing_second_look_continues_with_its_own_instructions() {
         fake.started.lock().unwrap().last().unwrap().follow_up.as_deref(),
         Some("do this")
     );
-    assert_eq!(rig.lp(0).records["a"].triages.map(|t| t.1), Some(1));
+    assert_eq!(rig.lp(0).decisions["a"].now.triages.map(|t| t.n), Some(1));
 }
 
 #[tokio::test]

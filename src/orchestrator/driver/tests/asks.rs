@@ -116,7 +116,8 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                     }
                     let value = match op.as_str() {
                         "list" | "drafts" | "draft_list" => json!([]),
-                        "facts_get" => json!({ "paused": false }),
+                        "pause_get" => json!({ "paused": null, "log": [] }),
+                        "facts_get" => json!({}),
                         "intent_list" => Value::Array(rows.rows.lock().unwrap().clone()),
                         "intent_claim" => {
                             let mut claims = rows.claims.lock().unwrap();

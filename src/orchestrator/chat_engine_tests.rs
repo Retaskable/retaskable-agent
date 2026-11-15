@@ -96,6 +96,7 @@ async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env
         store: AskStore {
             client: Arc::new(Client::new(base)),
             repo: 1,
+            project_id: "p".into(),
             token: "t".into(),
             failures: Default::default(),
         },
