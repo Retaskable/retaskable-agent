@@ -27,14 +27,9 @@ pub const PREFER_WAIT_MS: u64 = 5_000;
 /// The longest reason sent with a refusal or a failure.
 const WHY_MAX: usize = 500;
 
-/// The first `max` characters of `text`.
-fn cut(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
-}
-
 fn why(text: &str) -> Map<String, Value> {
     let mut m = Map::new();
-    m.insert("why".into(), json!(cut(text, WHY_MAX)));
+    m.insert("why".into(), json!(crate::text::truncate(text, WHY_MAX)));
     m
 }
 
