@@ -38,6 +38,9 @@ impl MachineStore {
             Err(e) if e.kind() == ErrorKind::NotFound => Map::new(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
         };
+        let mut data = data;
+        // The old pacer's state: dropped, and gone from the file at the next write.
+        data.remove("autoConcurrency");
         let seen = elsewhere(&data);
         Ok(MachineStore { file, data, seen })
     }
@@ -55,7 +58,7 @@ impl MachineStore {
     }
 
     /// Adds a finished Codex session's tokens to today's, dropping days older than the week.
-    /// Nothing calls this yet: this agent has no session pool to report them.
+    /// A later piece calls it when a Codex session ends.
     pub fn add_codex_tokens(&mut self, input: u64, output: u64) -> Result<()> {
         self.add_tokens("codexTokens", input, output, chrono::Local::now().date_naive())
     }
@@ -68,6 +71,41 @@ impl MachineStore {
     /// Cursor's tokens today, the same way; `None` before a Cursor session reported any.
     pub fn cursor_today_tokens(&self) -> Option<u64> {
         self.tokens_on("cursorTokens", chrono::Local::now().date_naive())
+    }
+
+    /// Adds a finished Cursor session's tokens to today's, the same way (never to `spend`, which holds costs).
+    /// A later piece calls it when a Cursor session ends.
+    pub fn add_cursor_tokens(&mut self, input: u64, output: u64) -> Result<()> {
+        self.add_tokens("cursorTokens", input, output, chrono::Local::now().date_naive())
+    }
+
+    /// Records that Cursor hit its limit just now (`cursorLimitAt`, epoch ms) and writes the file.
+    pub fn stamp_cursor_limit_at(&mut self) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.data.insert("cursorLimitAt".to_string(), Value::from(now));
+        self.save()
+    }
+
+    /// When Cursor last hit its limit, in epoch ms; `None` if it never has.
+    pub fn cursor_limit_at(&self) -> Option<i64> {
+        self.data.get("cursorLimitAt").and_then(Value::as_i64)
+    }
+
+    /// Cursor's input and output tokens over the rolling 7 local days, today included; `None` before a
+    /// Cursor session reported any.
+    pub fn cursor_week_tokens(&self) -> Option<(u64, u64)> {
+        self.week_on("cursorTokens", chrono::Local::now().date_naive())
+    }
+
+    fn week_on(&self, key: &str, today: NaiveDate) -> Option<(u64, u64)> {
+        let all = self.data.get(key)?.as_object()?;
+        let sum = |field: &str| -> u64 {
+            (0..7)
+                .filter_map(|i| all.get(&day_key(today - chrono::Days::new(i))))
+                .map(|d| d[field].as_u64().unwrap_or(0))
+                .sum()
+        };
+        Some((sum("input"), sum("output")))
     }
 
     fn add_tokens(&mut self, key: &str, input: u64, output: u64, today: NaiveDate) -> Result<()> {
@@ -97,6 +135,44 @@ impl MachineStore {
         }))
     }
 
+    /// Adds a finished session's cost to the project's total for today, dropping days older than the week.
+    pub fn add_spend(&mut self, project: &str, usd: f64) -> Result<()> {
+        self.add_spend_on(project, usd, chrono::Local::now().date_naive())
+    }
+
+    /// What the project's sessions cost today on this computer.
+    pub fn spend_today(&self, project: &str) -> f64 {
+        self.spend_on(project, chrono::Local::now().date_naive())
+    }
+
+    fn add_spend_on(&mut self, project: &str, usd: f64, today: NaiveDate) -> Result<()> {
+        let all = self
+            .data
+            .entry("spend".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(all) = all.as_object_mut() else {
+            return Ok(());
+        };
+        let keep: Vec<String> = (0..7).map(|i| day_key(today - chrono::Days::new(i))).collect();
+        let days = all
+            .entry(project.to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Some(days) = days.as_object_mut() else {
+            return Ok(());
+        };
+        let day = days.entry(day_key(today)).or_insert_with(|| Value::from(0.0));
+        *day = Value::from(day.as_f64().unwrap_or(0.0) + usd);
+        days.retain(|k, _| keep.contains(k));
+        self.save()
+    }
+
+    fn spend_on(&self, project: &str, today: NaiveDate) -> f64 {
+        self.data
+            .get("spend")
+            .and_then(|s| s.get(project)?.get(day_key(today))?.as_f64())
+            .unwrap_or(0.0)
+    }
+
     /// Network access to the settings page, and its password's hash.
     pub fn network(&self) -> Option<NetworkAccess> {
         self.data.get("network").and_then(NetworkAccess::from_value)
@@ -106,6 +182,20 @@ impl MachineStore {
     /// and the settings page.
     pub fn set_network(&mut self, network: NetworkAccess) -> Result<()> {
         self.data.insert("network".to_string(), network.to_value());
+        self.save()
+    }
+
+    /// Whether the settings page has already been opened by itself on a first run.
+    pub fn settings_opened(&self) -> bool {
+        self.data
+            .get("settingsOpened")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Remembers the settings page was opened on a first run, and writes the file.
+    pub fn set_settings_opened(&mut self) -> Result<()> {
+        self.data.insert("settingsOpened".to_string(), Value::Bool(true));
         self.save()
     }
 
@@ -179,6 +269,21 @@ mod tests {
         let store = MachineStore::load(dir.path()).unwrap();
         assert!(store.tags().is_none());
         assert!(!dir.path().join(MACHINE_FILE).exists());
+    }
+
+    #[test]
+    fn the_old_pacer_state_is_dropped_at_the_next_write_and_other_keys_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MACHINE_FILE),
+            r#"{"usage":{"pct":10},"autoConcurrency":{"allowed":2},"tags":{"added":["a"]}}"#,
+        )
+        .unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        store.set_tags(TagOverrides::default()).unwrap();
+        let text = read(dir.path());
+        assert!(!text.contains("autoConcurrency"));
+        assert!(text.contains(r#""usage":{"pct":10}"#));
     }
 
     #[test]
@@ -287,5 +392,85 @@ mod tests {
         let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
         let keys: Vec<&String> = saved["codexTokens"].as_object().unwrap().keys().collect();
         assert_eq!(keys, vec!["2026-3-9"]);
+    }
+
+    #[test]
+    fn cursor_tokens_add_up_by_local_day_and_stay_apart_from_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.cursor_today_tokens(), None);
+        store.add_cursor_tokens(100, 20).unwrap();
+        store.add_cursor_tokens(5, 1).unwrap();
+        assert_eq!(store.cursor_today_tokens(), Some(126));
+        assert_eq!(store.codex_today_tokens(), None);
+        store.add_codex_tokens(7, 3).unwrap();
+        assert_eq!(store.cursor_today_tokens(), Some(126));
+        assert_eq!(store.codex_today_tokens(), Some(10));
+        let day = NaiveDate::from_ymd_opt(2026, 3, 9).unwrap();
+        store
+            .add_tokens("cursorTokens", 1, 1, day - chrono::Days::new(20))
+            .unwrap();
+        store.add_tokens("cursorTokens", 1, 1, day).unwrap();
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        let keys: Vec<&String> = saved["cursorTokens"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["2026-3-9"]);
+        assert!(saved.get("spend").is_none());
+    }
+
+    #[test]
+    fn spend_adds_up_per_project_and_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        let day = NaiveDate::from_ymd_opt(2026, 3, 9).unwrap();
+        let yesterday = day - chrono::Days::new(1);
+        store.add_spend_on("a", 1.5, yesterday).unwrap();
+        store.add_spend_on("a", 0.25, day).unwrap();
+        store.add_spend_on("a", 0.5, day).unwrap();
+        store.add_spend_on("b", 2.0, day).unwrap();
+        assert_eq!((store.spend_on("a", day), store.spend_on("b", day)), (0.75, 2.0));
+        assert_eq!(store.spend_on("a", yesterday), 1.5);
+        assert_eq!(store.spend_on("c", day), 0.0);
+        store.add_spend_on("a", 1.0, day + chrono::Days::new(10)).unwrap();
+        assert_eq!(store.spend_on("a", day), 0.0, "old days are dropped");
+    }
+
+    #[test]
+    fn cursor_tokens_sum_over_the_rolling_week_with_input_and_output_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.cursor_week_tokens(), None);
+        let today = chrono::Local::now().date_naive();
+        let ago = |n: u64| today - chrono::Days::new(n);
+        store.add_tokens("cursorTokens", 100, 100, ago(7)).unwrap();
+        store.add_tokens("cursorTokens", 1, 10, ago(6)).unwrap();
+        store.add_tokens("cursorTokens", 2, 20, ago(3)).unwrap();
+        store.add_tokens("cursorTokens", 4, 40, ago(0)).unwrap();
+        assert_eq!(store.cursor_week_tokens(), Some((7, 70)), "day 7 back is dropped");
+        assert_eq!(store.cursor_today_tokens(), Some(44));
+        store.add_tokens("cursorTokens", 1, 1, ago(0)).unwrap();
+        assert_eq!(store.cursor_week_tokens(), Some((8, 71)));
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(saved["cursorTokens"].as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn cursor_limit_at_round_trips_and_keeps_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(MACHINE_FILE),
+            r#"{"tags":{},"network":{"enabled":false},"mystery":[1]}"#,
+        )
+        .unwrap();
+        let mut store = MachineStore::load(dir.path()).unwrap();
+        assert_eq!(store.cursor_limit_at(), None);
+        let before = chrono::Utc::now().timestamp_millis();
+        store.stamp_cursor_limit_at().unwrap();
+        let at = store.cursor_limit_at().unwrap();
+        assert!(at >= before);
+        assert_eq!(MachineStore::load(dir.path()).unwrap().cursor_limit_at(), Some(at));
+        let saved: Value = serde_json::from_str(&read(dir.path())).unwrap();
+        assert_eq!(saved["mystery"], serde_json::json!([1]));
+        assert_eq!(saved["network"]["enabled"], Value::Bool(false));
+        assert!(saved.get("tags").is_some());
     }
 }

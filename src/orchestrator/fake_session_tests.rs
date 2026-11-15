@@ -42,8 +42,8 @@ pub(super) fn fake_claude(out: &str, extra: &str) -> Fake {
     }
 }
 
-/// The fake `claude` ran in `dir`, read-only, on Sonnet, with a $1.5 budget.
-pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path) {
+/// The fake `claude` ran in `dir`, read-only, on `model`, with a $1.5 budget.
+pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path, model: &str) {
     let pwd = std::fs::read_to_string(root.join("pwd.txt")).unwrap();
     assert_eq!(
         std::fs::canonicalize(pwd.trim()).unwrap(),
@@ -51,7 +51,7 @@ pub(super) fn assert_ran_read_only_in(root: &Path, dir: &Path) {
     );
     let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
     assert!(
-        args.contains("--max-budget-usd 1.5") && args.contains("sonnet"),
+        args.contains("--max-budget-usd 1.5") && args.contains(&format!("--model {model}")),
         "{args}"
     );
     assert!(
@@ -90,7 +90,56 @@ pub(super) fn roster(
         projects: vec![project],
         choice,
         env,
-        models: Default::default(),
+        cursor_models: Default::default(),
+        sessions: Default::default(),
+        local: crate::local_model::LocalModel::off(),
     };
     (dir, root, roster)
+}
+
+/// Points every engine's binary variable at the fake `claude` stub, and Cursor's `top` model at `gpt-top`, so a
+/// session on any engine runs the stub; then the stub's `args.txt` says which engine ran.
+pub(super) fn on_every_engine(roster: &mut crate::orchestrator::plan_run::Roster, root: &Path) {
+    let bin = root.join(fake_name()).to_string_lossy().into_owned();
+    roster.env = Env::new(move |k| {
+        [
+            "RETASKABLE_CLAUDE",
+            "RETASKABLE_CURSOR",
+            "RETASKABLE_PI",
+            "RETASKABLE_CODEX",
+        ]
+        .contains(&k)
+        .then(|| bin.clone())
+    });
+    roster.cursor_models.top = Some("gpt-top".into());
+}
+
+/// The arguments the fake binary was last run with, for the engine `program` (`cursor`, `codex` or `pi`).
+pub(super) fn assert_ran_on(root: &Path, program: &str) {
+    let args = std::fs::read_to_string(root.join("args.txt")).unwrap();
+    match program {
+        "cursor" => assert!(args.contains("gpt-top"), "{args}"),
+        "codex" => assert!(args.contains("exec"), "{args}"),
+        _ => assert!(
+            !args.contains("--permission-mode") && !args.contains("gpt-top"),
+            "{args}"
+        ),
+    }
+}
+
+/// The rows once a session has started (the fake `claude` sleeps first, so it is still running).
+pub(super) async fn rows_once_running(
+    sessions: &crate::orchestrator::live::sessions::Sessions,
+) -> Vec<crate::orchestrator::live::sessions::SessionRow> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let rows = sessions.snapshot();
+            if !rows.is_empty() {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a session row")
 }

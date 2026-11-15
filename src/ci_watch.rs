@@ -230,6 +230,7 @@ impl GhErrors {
 /// Runs `gh <args>`; stdout and whether it exited 0. `gh pr checks` exits non-zero for failing or pending
 /// checks while still printing them, so only a start failure or an empty stdout with an error is no answer.
 pub(crate) fn gh_out(gh: &Path, dir: &Path, args: &[&str], reg: Reg) -> Result<(String, String, bool)> {
+    crate::host_call::guard("gh", dir, args)?;
     let mut command = Command::new(gh);
     command
         .current_dir(dir)

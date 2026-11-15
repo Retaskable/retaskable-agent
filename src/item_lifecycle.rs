@@ -326,7 +326,7 @@ fn awaiting_ci_entry(cfg: &ProjectConfig) -> ItemState {
 
 /// Whether CI only runs once a change is ready (`ciWhenReady`, which only means anything with
 /// `requireCi` on too).
-fn ci_when_ready_active(cfg: &ProjectConfig) -> bool {
+pub fn ci_when_ready_active(cfg: &ProjectConfig) -> bool {
     cfg.require_ci && cfg.ci_when_ready
 }
 

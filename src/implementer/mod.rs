@@ -35,9 +35,13 @@ mod test_support;
 
 pub use code_gates::GateResult;
 pub use model::{ImplementerResult, Playtest, Question, implementer_result_schema, questions_schema};
-pub use prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt, checks_text, gate_rule, piece_decision_list};
+pub use prompt::{
+    PiecePrompt, Prompt, build_chore_prompt, build_piece_prompt, build_prompt, checks_text, gate_rule,
+    piece_decision_list,
+};
 pub use session::{
-    Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, new_session_id, run_implementer, session_spec,
+    CursorTimeKilled, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, new_session_id, run_implementer,
+    session_spec,
 };
 pub use start_files::{
     MAX_CHANGED_COMMITS, MAX_FILES, SpecChanges, StartFiles, build, item_spec_files, named_code_paths, render,

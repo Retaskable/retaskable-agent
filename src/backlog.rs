@@ -12,11 +12,24 @@
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
 pub mod asks;
+pub mod audiences;
+pub mod complete;
+pub mod deploy;
 pub mod drafts;
+pub mod expert;
+pub mod facts;
+pub mod failures;
+pub mod merge;
 pub mod runs;
+pub mod settings;
+pub mod shown;
+pub mod suggestions;
+pub mod week;
 
 use crate::env::Env;
+use crate::text::{non_blank, trim_url};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -32,14 +45,25 @@ pub const DEFAULT_URL: &str = "https://backlog.retaskable.com";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// `BacklogStore.unlinkedOnSite()`: set when a store call made with this machine's own token answers
+/// `invalid_grant` (the site unlinked it). Held in memory only and never saved, so a restart links again.
+static UNLINKED_ON_SITE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the store has answered `invalid_grant` since the last link (or since this process started).
+pub fn unlinked_on_site() -> bool {
+    UNLINKED_ON_SITE.load(Ordering::SeqCst)
+}
+
+/// A link is approved or asked for by the person: forget any `invalid_grant`.
+pub fn clear_unlinked_on_site() {
+    UNLINKED_ON_SITE.store(false, Ordering::SeqCst);
+}
+
 /// The store this agent reads: `RETASKABLE_BACKLOG_URL`, else the default. No trailing slash.
 pub fn url(env: &Env) -> String {
-    let raw = env
-        .get("RETASKABLE_BACKLOG_URL")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_URL.to_string());
-    raw.trim_end_matches('/').to_string()
+    let raw = env.get("RETASKABLE_BACKLOG_URL");
+    let raw = non_blank(raw.as_deref().unwrap_or_default()).unwrap_or(DEFAULT_URL);
+    trim_url(raw).to_string()
 }
 
 /// Every agent on the shared backlog (installers/04-every-agent-on-the-shared-backlog-shared.md): starts the
@@ -63,6 +87,9 @@ pub async fn auto_link(
     if matches!(store.get(&backlog_url), Ok(Some(_))) {
         return Ok(None); // already linked
     }
+    if unlinked_on_site() {
+        return Ok(None); // the site unlinked this machine: wait for the person's `retaskable link backlog`
+    }
     let flow = link::Link {
         http,
         store: store.as_ref(),
@@ -70,7 +97,9 @@ pub async fn auto_link(
         target: link::BACKLOG_TARGET,
         second: Duration::from_secs(1),
     };
-    flow.run(&backlog_url, on_code).await.map(Some)
+    let id = flow.run(&backlog_url, on_code).await?;
+    clear_unlinked_on_site();
+    Ok(Some(id))
 }
 
 /// backlog/06.1-an-item.md: an item's status in the store.
@@ -120,9 +149,28 @@ pub struct Item {
     pub kind: Option<String>,
     #[serde(default)]
     pub milestone: Option<String>,
+    /// The spec draft that added the item (`draft-…`), when one did.
+    #[serde(default)]
+    pub draft_id: Option<String>,
+    /// The item's size (`S`, `M`, `L`, `XL`) when the store sends one; `L` and `XL` keep `opus` (`implementer_model`).
+    #[serde(default)]
+    pub size: Option<String>,
+    /// The tier the store names for the session this claim starts (`opus`, `sonnet` or `local`,
+    /// agent/07.1-model-tiers.md); set from the `claim_next` answer's `tier`, `None` when it sent none.
+    #[serde(default)]
+    pub tier: Option<String>,
     /// While a try-out's problem reopened it (`reopen`); missing or null once the fix merges.
     #[serde(default)]
     pub reopened: Option<Reopened>,
+    /// On a `fix_main` item: the base commit it was queued for.
+    #[serde(default)]
+    pub red_sha: Option<String>,
+    /// On a `fix_main` item that ended without a merge: the commit fixing found nothing to fix.
+    #[serde(default)]
+    pub no_fix_sha: Option<String>,
+    /// The commit the item's change merged as (`merge_commit`); the rollout report matches it against git.
+    #[serde(default)]
+    pub merge_commit: Option<String>,
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the
@@ -163,14 +211,25 @@ pub struct ClaimNextAgent {
     pub base_branch: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// This computer's Claude week; left out when it has no reading (backlog/06.6 section 6.6.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<week::WeekUse>,
 }
 
 /// What `claim_next` answers: an item claimed, with the lease token that goes with it, or nothing
 /// to claim right now (paused, or nothing ready).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimNextAnswer {
-    Item { item: Box<Item>, token: String },
+    Item {
+        item: Box<Item>,
+        token: String,
+    },
     Nothing,
+    /// Tags the project needs that this computer lacks (`{ waitingFor }`): nothing is handed out until
+    /// `work_available`.
+    WaitingFor(Value),
+    /// Another computer with more of its Claude week left takes the next item; ask again after `retry_ms`.
+    Passed(week::Passed),
 }
 
 /// What `tryout_add` sends for a merged slice's after-merge try-out (backlog/06-data-and-operations.md
@@ -323,6 +382,11 @@ impl BacklogError {
             BacklogError::Unreachable(_) => None,
         }
     }
+
+    /// The store refused a suggestion's verdict because it already has an answer for it.
+    pub fn is_already_answered(&self) -> bool {
+        self.code() == Some(suggestions::ALREADY_ANSWERED)
+    }
 }
 
 impl std::fmt::Display for BacklogError {
@@ -400,18 +464,32 @@ impl Client {
             .await?;
         match body.value {
             None | Some(Value::Null) => Ok(ClaimNextAnswer::Nothing),
+            Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
+                Ok(ClaimNextAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
+            }
+            Some(Value::Object(o)) if o.contains_key("passed") => {
+                Ok(ClaimNextAnswer::Passed(week::Passed::of(&o).unwrap_or(week::Passed {
+                    to: "another computer".into(),
+                    retry_ms: 60_000,
+                })))
+            }
             Some(value) => {
                 #[derive(Deserialize)]
                 #[serde(rename_all = "camelCase")]
                 struct Answer {
                     item: Item,
                     token: String,
+                    #[serde(default)]
+                    tier: Option<String>,
                 }
-                let answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
+                let mut answer: Answer = serde_json::from_value(value).map_err(|e| BacklogError::BadAnswer {
                     status,
                     code: None,
                     message: format!("couldn't read the item it claimed: {e}"),
                 })?;
+                if answer.tier.is_some() {
+                    answer.item.tier = answer.tier;
+                }
                 Ok(ClaimNextAnswer::Item {
                     item: Box::new(answer.item),
                     token: answer.token,
@@ -526,6 +604,13 @@ impl Client {
         Ok(())
     }
 
+    /// `release_playtests`: playtests were switched off, so the store lets go of every try-out in its queue and
+    /// every item it holds in `awaiting_playtest` (docs/specs/agent/06.4-playtests.md).
+    pub async fn release_playtests(&self, repo_id: u64, token: Option<&str>) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "release_playtests", json!({})).await?;
+        Ok(())
+    }
+
     /// `tryout_groups` (docs/specs/agent/06.4-playtests.md "Grouped into sessions"): sends the
     /// planner's grouping of the waiting try-outs, under `signature` (its own, so a stale round
     /// never overwrites a newer one).
@@ -628,6 +713,17 @@ impl Client {
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
     /// answering its `value` read as `T` (`what` names it when it can't be read). A refusal keeps the
     /// store's own `error` code (`bad_request`, `not_found`, ...) so a caller can tell them apart.
+    /// An op whose answer says nothing the caller reads: only that the store took it.
+    pub async fn op_done(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(), BacklogError> {
+        self.send(repo_id, token, op, args).await.map(|_| ())
+    }
+
     pub async fn op<T: DeserializeOwned>(
         &self,
         repo_id: u64,
@@ -665,6 +761,9 @@ impl Client {
         let status = res.status();
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
+            if token.is_some() && body.error.as_deref() == Some("invalid_grant") {
+                UNLINKED_ON_SITE.store(true, Ordering::SeqCst);
+            }
             let message = body
                 .message
                 .or_else(|| body.error.clone())

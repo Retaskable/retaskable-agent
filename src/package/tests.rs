@@ -174,3 +174,17 @@ fn build_app_dir_refuses_to_run_on_windows() {
         .to_string();
     assert!(err.contains("Linux or macOS"), "{err}");
 }
+
+#[test]
+fn write_icons_puts_the_four_states_in_icons() {
+    for (os, ext) in [("win-x64", "ico"), ("linux-x64", "png"), ("mac-arm64", "png")] {
+        let dir = tempfile::tempdir().unwrap();
+        write_icons(dir.path(), &build(os, Environment::Staging)).unwrap();
+        for state in ["not_linked", "waiting", "offline", "connected"] {
+            assert!(
+                dir.path().join("icons").join(format!("{state}.{ext}")).is_file(),
+                "{os} {state}"
+            );
+        }
+    }
+}

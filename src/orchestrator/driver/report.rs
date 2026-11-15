@@ -4,6 +4,7 @@
 //! the store as `upsert_from_specs` (backlog.md section 6.4), and the items whose merge commits reached the
 //! default branch or production are sent as `landed` (section 6.5). Plain code: no model reads anything. A
 //! failure is only logged; the next fetch tries again.
+use crate::text::{is_blank, trim_url};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use serde_json::json;
 use super::{Links, ProjectLoop};
 use crate::backlog::Client;
 use crate::backlog::drafts::SpecsUpsert;
+use crate::backlog::runs::short_sha;
 use crate::config::DeployTarget;
 use crate::spec_items::{SPECS_DIR, check_spec_items};
 use crate::{lanes, smoke};
@@ -75,7 +77,8 @@ impl ProjectLoop {
             return;
         };
         if self.seen.default_branch.is_none() {
-            self.seen.default_branch = default_branch(&self.project.github_repo).await;
+            self.seen.default_branch =
+                default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
         }
         let Some(main) = self.seen.default_branch.clone() else {
             tracing::warn!(
@@ -135,8 +138,8 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         seen.sent_tree = Some(tree);
         return Ok(format!(
             "the store is at {}, not behind {}",
-            short(previous),
-            short(&commit)
+            short_sha(previous),
+            short_sha(&commit)
         ));
     }
     let files = spec_files(&ctx.repo_path, &at).await.context("reading the specs")?;
@@ -150,7 +153,7 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         seen.sent_tree = Some(tree);
         tracing::warn!(
             "not sending the Items headers at {}: {} line {}: {}",
-            short(&commit),
+            short_sha(&commit),
             cycle.spec,
             cycle.line,
             cycle.message
@@ -160,7 +163,7 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
     for p in &problems {
         tracing::warn!(
             "the Items headers at {}: {} line {}: {}; sent without it",
-            short(&commit),
+            short_sha(&commit),
             p.spec,
             p.line,
             p.message
@@ -189,7 +192,7 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         .await?;
     seen.sent_tree = Some(tree);
     landing.sent();
-    tracing::info!("sent the Items headers at {}: {} new", short(&commit), added.len());
+    tracing::info!("sent the Items headers at {}: {} new", short_sha(&commit), added.len());
     Ok("sent".into())
 }
 
@@ -202,7 +205,7 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
     let Some(main_head) = head(ctx, &ctx.main).await else {
         return Ok(format!("no {}", ctx.origin(&ctx.main)));
     };
-    let production = production.filter(|p| !p.branch.trim().is_empty());
+    let production = production.filter(|p| !is_blank(&p.branch));
     let version = production.and_then(version_url);
     let production_head = match production {
         Some(p) => head(ctx, p.branch.trim()).await,
@@ -261,7 +264,7 @@ async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
     if since.elapsed() >= DEPLOY_WAIT {
         tracing::info!(
             "production didn't serve {} within 20 minutes; the next move of its branch tries again",
-            short(&head)
+            short_sha(&head)
         );
         seen.want = None;
     }
@@ -270,7 +273,7 @@ async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
 
 /// The full sha production says it serves (`{ "sha": ... }` at `url`), or `None` while it doesn't say or names a
 /// commit this clone doesn't know.
-async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
+pub(super) async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
     let answer = (reqwest::Client::new().get(url))
         .timeout(Duration::from_secs(10))
         .send()
@@ -285,8 +288,8 @@ async fn served_sha(repo_path: &Path, url: &str) -> Option<String> {
 }
 
 /// `<url><versionPath>` (`/version.json` by default) for production with a URL, else `None`.
-fn version_url(target: &DeployTarget) -> Option<String> {
-    let url = target.url.as_deref()?.trim().trim_end_matches('/');
+pub(super) fn version_url(target: &DeployTarget) -> Option<String> {
+    let url = trim_url(target.url.as_deref()?);
     if url.is_empty() {
         return None;
     }
@@ -313,7 +316,7 @@ async fn send(ctx: &Ctx, place: &str, sha: &str, items: Vec<String>) -> Result<V
         } else {
             "in production at deploy"
         };
-        tracing::info!("{} {at} {}", moved.join(", "), short(sha));
+        tracing::info!("{} {at} {}", moved.join(", "), short_sha(sha));
     }
     Ok(moved)
 }
@@ -332,7 +335,7 @@ async fn contained(ctx: &Ctx, items: impl Iterator<Item = &Awaiting>, at: &str) 
 }
 
 /// Whether `at` has `commit` in its history; a commit this clone doesn't know isn't.
-async fn contains(repo_path: &Path, commit: &str, at: &str) -> bool {
+pub(super) async fn contains(repo_path: &Path, commit: &str, at: &str) -> bool {
     git(repo_path, &["merge-base", "--is-ancestor", commit, at])
         .await
         .is_some()
@@ -344,7 +347,7 @@ async fn head(ctx: &Ctx, branch: &str) -> Option<String> {
 }
 
 /// The top-level specs on `at` (path and text): a split spec's Items header stays in its index (06.10-spec-layout.md).
-async fn spec_files(repo_path: &Path, at: &str) -> Option<Vec<(String, String)>> {
+pub(super) async fn spec_files(repo_path: &Path, at: &str) -> Option<Vec<(String, String)>> {
     let listed = git(
         repo_path,
         &["ls-tree", "--name-only", at, "--", &format!("{SPECS_DIR}/")],
@@ -359,7 +362,7 @@ async fn spec_files(repo_path: &Path, at: &str) -> Option<Vec<(String, String)>>
 }
 
 /// A git call in the project's repo, off the async threads: its trimmed output, or `None` when it failed.
-async fn git(repo_path: &Path, args: &[&str]) -> Option<String> {
+pub(super) async fn git(repo_path: &Path, args: &[&str]) -> Option<String> {
     Some(git_out(repo_path, args).await?.trim().to_string())
 }
 
@@ -375,21 +378,15 @@ async fn git_out(repo_path: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// The repo's default branch on GitHub (`gh api repos/<repo> --jq .default_branch`).
-async fn default_branch(github_repo: &str) -> Option<String> {
+pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<String> {
     if github_repo.is_empty() {
         return None;
     }
-    let out = tokio::process::Command::new("gh")
-        .args(["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"])
-        .output()
-        .await
-        .ok()?;
+    let args = ["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"];
+    crate::host_call::guard("gh", dir, &args).ok()?;
+    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !branch.is_empty()).then_some(branch)
-}
-
-fn short(sha: &str) -> &str {
-    sha.get(..7).unwrap_or(sha)
 }
 
 #[cfg(test)]
@@ -398,6 +395,7 @@ mod tests {
 
     fn target(url: Option<&str>, version_path: Option<&str>) -> DeployTarget {
         DeployTarget {
+            rollout: None,
             branch: "main".into(),
             url: url.map(str::to_string),
             smoke: None,

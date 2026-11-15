@@ -14,7 +14,30 @@ fn agent(tags: &[&str]) -> RunTakeAgent {
             fix: "cursor".into(),
             look: "claude".into(),
         },
+        chores: None,
+        week: None,
     }
+}
+
+#[test]
+fn chores_off_is_sent_and_on_is_left_out() {
+    let mut a = agent(&[]);
+    assert!(serde_json::to_value(&a).unwrap().get("chores").is_none());
+    a.chores = Some(false);
+    assert_eq!(serde_json::to_value(&a).unwrap()["chores"], json!(false));
+}
+
+#[test]
+fn the_chore_count_is_read_and_a_bad_one_ignored() {
+    let read = |v: Value| ChoreCount::read(v.as_object().unwrap());
+    assert_eq!(
+        read(json!({ "chores": { "today": 2, "limit": 3 } })),
+        Some(ChoreCount { today: 2, limit: 3 })
+    );
+    assert_eq!(read(json!({})), None);
+    assert_eq!(read(json!({ "chores": "many" })), None);
+    assert_eq!(read(json!({ "chores": { "today": -1, "limit": 3 } })), None);
+    assert_eq!(read(json!({ "chores": { "today": 1 } })), None);
 }
 
 #[tokio::test]
@@ -255,5 +278,34 @@ fn the_agent_serializes_engines_and_uses_in_camel_case_next_to_tags() {
     assert_eq!(
         v["uses"],
         json!({ "plan": "claude", "build": "cursor", "fix": "cursor", "look": "claude" })
+    );
+}
+
+#[tokio::test]
+async fn run_take_sends_the_week_and_reads_a_pass_over() {
+    let (base, seen) = store(
+        200,
+        json!({ "value": { "passed": { "to": "box-2", "retryMs": 60000 } } }),
+    )
+    .await;
+    let mut a = agent(&[]);
+    a.week = Some(crate::backlog::week::WeekUse {
+        used: 0.7,
+        resets_at: 9,
+    });
+    let answer = Client::new(base)
+        .run_take(1, Some("tok"), &a, RunWant::Kinds(&[RunKind::Build]))
+        .await
+        .unwrap();
+    assert_eq!(
+        answer,
+        RunTakeAnswer::Passed(crate::backlog::week::Passed {
+            to: "box-2".into(),
+            retry_ms: 60_000
+        })
+    );
+    assert_eq!(
+        seen.lock().unwrap()[0]["args"]["agent"]["week"],
+        json!({ "used": 0.7, "resetsAt": 9 })
     );
 }

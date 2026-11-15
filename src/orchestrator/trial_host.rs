@@ -10,15 +10,15 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
-use super::session::{exists, quiet_timeout};
+use super::session::watch_for;
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session};
+use crate::engines::cursor::with_project;
+use crate::engines::{Role, SessionStart, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, Session, Start, publish, run_implementer, session_spec};
-use crate::tiers::{implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, SONNET, floor, implementer_model};
 use crate::trial_plan::{TRIAL_ID, TRIAL_TEXT};
 use crate::{lanes, paths};
 
@@ -35,6 +35,10 @@ pub struct TrialJob {
     pub branch: String,
     pub session_id: String,
     pub usage: Option<Value>,
+    /// The engine to start on when it isn't the implementer's chosen one.
+    pub engine: Option<crate::engines::EngineId>,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// How the trial ended. `Dropped` carries why; the trial isn't retried.
@@ -55,16 +59,24 @@ pub struct ClaudeTrial {
     choice: EngineChoiceConfig,
     data_dir: PathBuf,
     env: Env,
-    models: ModelsConfig,
+    cursor_models: CursorModels,
+    local: crate::local_model::LocalModel,
 }
 
 impl ClaudeTrial {
-    pub fn new(data_dir: PathBuf, choice: EngineChoiceConfig, env: Env, models: ModelsConfig) -> Arc<Self> {
+    pub fn new(
+        data_dir: PathBuf,
+        choice: EngineChoiceConfig,
+        env: Env,
+        cursor_models: CursorModels,
+        local: crate::local_model::LocalModel,
+    ) -> Arc<Self> {
         Arc::new(Self {
             choice,
             data_dir,
             env,
-            models,
+            cursor_models,
+            local,
         })
     }
 }
@@ -87,21 +99,22 @@ fn trial_item() -> Item {
 
 impl TrialHost for ClaudeTrial {
     fn run(&self, job: TrialJob) -> BoxFuture<'static, Result<TrialEnd>> {
-        let (choice, data_dir, env, models) = (
+        let (choice, data_dir, env, cursor_models, local) = (
             self.choice.clone(),
             self.data_dir.clone(),
             self.env.clone(),
-            self.models,
+            self.cursor_models.clone(),
+            self.local.clone(),
         );
         Box::pin(async move {
             let project = &job.project;
-            if engine_for(&choice, project.engines.as_ref(), Role::Implementer, None) != Engine::Claude {
-                return dropped("only Claude sessions run in the Rust agent yet");
-            }
-            let bin = match resolve_claude_on_path(&env) {
-                Ok(bin) if exists(&bin, &env) => bin,
-                Ok(bin) => return dropped(format!("the claude binary wasn't found ({})", bin.display())),
-                Err(e) => return dropped(format!("{e:#}")),
+            let chosen = start_engine(
+                job.engine,
+                engine_for(&choice, project.engines.as_ref(), Role::Implementer, None),
+            );
+            let placed = match place(chosen, Role::Implementer, &env, &cursor_models) {
+                Ok(placed) => placed,
+                Err(why) => return dropped(why),
             };
             let (repo, worktrees, lane, branch, base) = (
                 PathBuf::from(&project.repo_path),
@@ -113,8 +126,17 @@ impl TrialHost for ClaudeTrial {
             let cwd =
                 tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base)).await??;
             let item = trial_item();
-            let now = crate::telemetry::now_ms() / 1000;
-            let model = implementer_model(implementer_tier(job.usage.as_ref(), now, &models), &item).to_string();
+            // Like an implementer: the local model only for a Claude session, with its slot held until the session
+            // ends.
+            let ladder = placed.engine == crate::engines::EngineId::Claude;
+            let up = ladder && local.available();
+            let tier = if up && placed.local {
+                LOCAL
+            } else {
+                floor(SONNET, job.sessions.claude_at_limit(), up)
+            };
+            let local_run = if tier == LOCAL { Some(local.run().await) } else { None };
+            let model = implementer_model(tier, &item, 0).to_string();
             let mut spec = session_spec(
                 &Session {
                     template: TEMPLATE,
@@ -132,9 +154,9 @@ impl TrialHost for ClaudeTrial {
                     model,
                     budget_usd: project.budget.drafter_usd,
                     max_turns: None,
-                    engine: Some(EngineId::Claude),
-                    cursor: None,
-                    local: None,
+                    engine: Some(placed.engine),
+                    cursor: placed.cursor.clone().map(|c| with_project(project, c)),
+                    local: local_run.as_ref().map(|r| r.target.clone()),
                     sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
                 },
                 Start::Fresh,
@@ -145,11 +167,23 @@ impl TrialHost for ClaudeTrial {
                     .join(format!("{}.jsonl", job.session_id)),
                 lane: None,
             };
-            let engine = engine_of(Some(EngineId::Claude))?;
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let engine = engine_of(Some(placed.engine))?;
+            let quiet = watch_for(project, placed.engine);
             let id = job.session_id.clone();
+            let sessions = job.sessions.clone();
+            let project_id = project.id_or_derived();
             let (answer, _) = run_implementer(spec, |spec| async move {
-                run_session(engine.as_ref(), &bin, &spec, &id, Some(&sink), quiet).await
+                let listed = sessions.register_spec(&project_id, TRIAL_ID, None, Role::Implementer, &spec);
+                listed
+                    .scope(run_session(
+                        engine.as_ref(),
+                        &placed.bin,
+                        &spec,
+                        &id,
+                        Some(&sink),
+                        quiet,
+                    ))
+                    .await
             })
             .await;
             let result = match answer {

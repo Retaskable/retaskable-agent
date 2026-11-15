@@ -223,3 +223,7 @@ pub fn bug_version(build: Option<&Build>, version: &str, checkout: &Path) -> Str
         format!("{version} ({sha})")
     }
 }
+
+#[cfg(test)]
+#[path = "bug_link_tests.rs"]
+mod tests;

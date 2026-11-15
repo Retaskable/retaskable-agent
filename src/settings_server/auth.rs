@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use axum::extract::{Request, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -16,6 +18,8 @@ use std::sync::Arc;
 
 pub(super) const COOKIE_NAME: &str = "retaskable_settings_session";
 pub(super) const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
+/// How long a sign-in token from `settings_link` stays good.
+pub(super) const TOKEN_TTL_SECS: u64 = 5 * 60;
 const FAILURES_BEFORE_A_WAIT: u32 = 5;
 const FIRST_WAIT_SECS: u64 = 60;
 const MAX_WAIT_SECS: u64 = 60 * 60;
@@ -36,18 +40,36 @@ pub(super) struct FailureState {
 
 #[derive(Default)]
 pub(super) struct InnerState {
-    /// A tray-minted token, good once before it expires (section 4.2). Nothing in this agent
-    /// mints one yet — the tray's own "Settings…" link isn't ported — so this stays empty
-    /// outside tests until it is.
+    /// A token made by [`SettingsServer::settings_link`], good once before it expires (section 4.2).
     pub(super) tokens: HashMap<String, u64>,
     pub(super) sessions: HashMap<String, Session>,
     pub(super) failures: HashMap<IpAddr, FailureState>,
 }
 
 impl SettingsServer {
+    /// A new sign-in token, good once within [`TOKEN_TTL_SECS`] (section 4.2).
+    fn mint_token(&self) -> String {
+        let token = random_hex(32);
+        let expires_at = (self.now)() + TOKEN_TTL_SECS;
+        let mut state = self.state.lock().unwrap();
+        state.tokens.retain(|_, expires| *expires > (self.now)());
+        state.tokens.insert(token.clone(), expires_at);
+        token
+    }
+
+    /// The address that opens the settings page signed in: `http://127.0.0.1:<port>/settings#<token>`,
+    /// with a token made for this call (section 4.2). The fragment never reaches a log or a `Referer`.
+    pub fn settings_link(&self) -> String {
+        format!("http://127.0.0.1:{}/settings#{}", self.port, self.mint_token())
+    }
+
     /// A missing, wrong, used or old token is refused the same way (section 6): once checked,
-    /// right or wrong, it's gone.
-    pub(super) fn verify_token(&self, token: &str) -> bool {
+    /// right or wrong, it's gone. A token is taken only from this computer itself (section 4.2),
+    /// so one from another address is refused without being used up.
+    pub(super) fn verify_token(&self, token: &str, from: IpAddr) -> bool {
+        if !from.is_loopback() {
+            return false;
+        }
         let now = (self.now)();
         let mut state = self.state.lock().unwrap();
         matches!(state.tokens.remove(token), Some(expires_at) if expires_at > now)
@@ -58,20 +80,29 @@ impl SettingsServer {
     /// while network access is on (section 3.1: "Turning it off keeps the hash" so it can be
     /// turned back on, but doesn't go on signing in while it's off).
     pub(super) fn verify_password(&self, password_attempt: &str) -> bool {
-        let access = match &self.env_network_access {
-            Some(access) => access.clone(),
-            None => {
-                let Ok(machine) = MachineStore::load(&self.dir) else {
-                    return false;
-                };
-                machine.network().unwrap_or_default()
-            }
+        let Some(access) = self.live_network_access() else {
+            return false;
         };
         access.enabled
             && access
                 .password_hash
                 .as_deref()
                 .is_some_and(|hash| password::verify_password(password_attempt, hash))
+    }
+
+    /// Network access as it is right now: the variable's, else `machine.json`'s, read on each
+    /// call so a save that turns it off takes effect at once (section 4.4). `None` when the file
+    /// can't be read (fail closed).
+    fn live_network_access(&self) -> Option<crate::network::NetworkAccess> {
+        match &self.env_network_access {
+            Some(access) => Some(access.clone()),
+            None => Some(MachineStore::load(&self.dir).ok()?.network().unwrap_or_default()),
+        }
+    }
+
+    /// Whether network access is on right now (not as the agent started).
+    pub(super) fn network_on(&self) -> bool {
+        self.live_network_access().is_some_and(|a| a.enabled)
     }
 
     pub(super) fn create_session(&self) -> (String, String) {
@@ -147,9 +178,9 @@ impl SettingsServer {
     }
 
     /// Its Host is this computer's own, at the port it answered on (section 4.3): no DNS
-    /// rebinding. Network access can already make the port listen on every address (section
-    /// 4.4), but this still only accepts the loopback names; widening it to the computer's own
-    /// network addresses isn't ported yet (tracked outside this change).
+    /// rebinding. `127.0.0.1`, `localhost` and `[::1]` always; while network access is on, also
+    /// an IP literal that is one of this computer's own interface addresses, behind the
+    /// `settings-page` flag (Off: loopback only, as before). Never another name.
     pub(super) fn host_is_allowed(&self, host_header: &str) -> bool {
         let (host, port) = split_host_port(host_header);
         if let Some(port) = port
@@ -157,10 +188,18 @@ impl SettingsServer {
         {
             return false;
         }
-        matches!(
-            host.to_ascii_lowercase().as_str(),
-            "127.0.0.1" | "localhost" | "[::1]" | "::1"
-        )
+        let host = host.to_ascii_lowercase();
+        if matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+            return true;
+        }
+        let literal = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(&host);
+        let Ok(ip) = literal.parse::<IpAddr>() else {
+            return false;
+        };
+        self.network_on() && (self.own_addresses)().contains(&ip)
     }
 }
 
@@ -169,6 +208,7 @@ impl SettingsServer {
 /// away about which paths exist (agent/08-http-api.md: the port takes no command either way).
 pub(super) async fn security_envelope(
     State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
@@ -180,7 +220,8 @@ pub(super) async fn security_envelope(
     else {
         return not_found_response();
     };
-    if !settings.host_is_allowed(&host) {
+    // Another computer gets in only while network access is on, read live (section 4.4).
+    if (!peer.ip().is_loopback() && !settings.network_on()) || !settings.host_is_allowed(&host) {
         return not_found_response();
     }
     if req.method() == Method::POST {
@@ -224,20 +265,30 @@ pub(super) fn parse_cookie(header: &str, name: &str) -> Option<String> {
 }
 
 /// Splits a Host header into its hostname and, when one is given, its port. An IPv6 literal
-/// (`[::1]` or `[::1]:4700`) keeps its brackets as part of the hostname, same as a browser sends.
+/// (`[::1]` or `[::1]:4700`) keeps its brackets as part of the hostname, same as a browser sends. A port that isn't
+/// a number up to 65535 leaves the whole header as the host, which no allowed name matches.
 pub(super) fn split_host_port(host_header: &str) -> (&str, Option<u16>) {
     if let Some(after_bracket) = host_header.strip_prefix('[') {
         return match after_bracket.find(']') {
             Some(end) => {
                 let host = &host_header[..end + 2];
-                let port = after_bracket[end + 1..].strip_prefix(':').and_then(|p| p.parse().ok());
-                (host, port)
+                match after_bracket[end + 1..].strip_prefix(':') {
+                    None => (host, None),
+                    Some(p) => match p.parse() {
+                        Ok(port) if p.chars().all(|c| c.is_ascii_digit()) => (host, Some(port)),
+                        _ => (host_header, None),
+                    },
+                }
             }
             None => (host_header, None),
         };
     }
     match host_header.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => (host, port.parse().ok()),
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => match port.parse() {
+            Ok(port) => (host, Some(port)),
+            // Too big for a port: not a Host this agent answers, rather than "no port" skipping the check.
+            Err(_) => (host_header, None),
+        },
         _ => (host_header, None),
     }
 }

@@ -17,7 +17,7 @@ use super::engine::{
 };
 use super::json_result::{check_schema, extract_json, fenced_json_instructions};
 use super::resolve::resolve_pi;
-use crate::text::{clip, collapse_and_clip};
+use crate::text::{clip, collapse_and_clip, is_blank};
 
 /// Pi's own words for a usage or rate limit, from a crash's stderr (`/usage limit|rate limit/i`
 /// in `pi.ts`'s `noResult`).
@@ -160,7 +160,7 @@ impl EngineReader for PiReader {
         {
             let message = event.get("message");
             let text = message.and_then(|m| m.get("content")).map(pi_text).unwrap_or_default();
-            if !text.trim().is_empty() {
+            if !is_blank(&text) {
                 self.last_text = text;
             }
             // A failed model call ends as an assistant message with stopReason "error" and no content.

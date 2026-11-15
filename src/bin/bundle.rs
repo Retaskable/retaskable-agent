@@ -19,6 +19,8 @@ use std::process::Command;
 
 use retaskable_agent::release;
 use retaskable_agent::release_check::{self, arg};
+use retaskable_agent::tags::OsKind;
+use retaskable_agent::tray;
 
 fn main() {
     release_check::run_main(run);
@@ -118,6 +120,16 @@ fn run() -> Result<(), String> {
     let text = serde_json::to_string_pretty(&build_json).map_err(|e| format!("writing build.json: {e}"))?;
     std::fs::write(&build_json_path, text + "\n").map_err(|e| format!("writing {}: {e}", build_json_path.display()))?;
 
+    let build = release::Build {
+        os: target.clone(),
+        environment,
+        version: version.clone(),
+        commit: commit.clone(),
+    };
+    retaskable_agent::package::write_icons(&out, &build).map_err(|e| format!("{e:#}"))?;
+    let helper = place_tray_helper(&out, &target)?;
+    println!("Placed the tray helper {}", helper.display());
+
     if !native {
         println!(
             "Built {target} {version} ({commit}) at {} (cross-built: no --version or start check, since this machine can't run it)",
@@ -150,6 +162,24 @@ fn run() -> Result<(), String> {
 
     println!("Built {target} {version} ({commit}) at {}", out.display());
     Ok(())
+}
+
+/// Fetches `systray2`'s pinned npm tarball and places the target OS's tray helper beside the executable.
+fn place_tray_helper(out: &std::path::Path, target: &str) -> Result<PathBuf, String> {
+    let os = if target.starts_with("win") {
+        OsKind::Windows
+    } else if target.starts_with("mac") {
+        OsKind::Mac
+    } else {
+        OsKind::Linux
+    };
+    let url = tray::helper::tarball_url();
+    let tgz = reqwest::blocking::get(&url)
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| format!("fetching {url}: {e}"))?;
+    let bytes = tray::helper::unpack_helper(&tgz, tray::helper::SYSTRAY2_SHA256, os)?;
+    tray::helper::place_helper(out, &bytes, os)
 }
 
 /// Whether `requested` can be built on a machine whose own target is `host`: itself, or — macOS

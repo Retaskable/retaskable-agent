@@ -1,0 +1,49 @@
+{
+  "requestedUrl": "https://staging.example.com/",
+  "finalUrl": "https://staging.example.com/",
+  "categories": {
+    "performance": { "id": "performance", "title": "Performance", "score": 0.62 },
+    "accessibility": { "id": "accessibility", "title": "Accessibility", "score": 0.95 },
+    "best-practices": { "id": "best-practices", "title": "Best Practices", "score": 0.93 },
+    "seo": { "id": "seo", "title": "SEO", "score": 0.63 }
+  },
+  "audits": {
+    "largest-contentful-paint": { "id": "largest-contentful-paint", "title": "Largest Contentful Paint", "score": 0.4, "scoreDisplayMode": "numeric", "numericValue": 4200.5, "displayValue": "4.2 s" },
+    "first-contentful-paint": { "id": "first-contentful-paint", "title": "First Contentful Paint", "score": 0.95, "scoreDisplayMode": "numeric", "numericValue": 1100, "displayValue": "1.1 s" },
+    "total-blocking-time": { "id": "total-blocking-time", "title": "Total Blocking Time", "score": 0.9, "scoreDisplayMode": "numeric", "numericValue": 150, "displayValue": "150 ms" },
+    "cumulative-layout-shift": { "id": "cumulative-layout-shift", "title": "Cumulative Layout Shift", "score": 1, "scoreDisplayMode": "numeric", "numericValue": 0.02, "displayValue": "0.02" },
+    "unused-javascript": {
+      "id": "unused-javascript", "title": "Reduce unused JavaScript", "score": 0.3, "scoreDisplayMode": "metricSavings", "displayValue": "Potential savings of 900 KiB",
+      "details": { "items": [
+        { "url": "https://staging.example.com/_expo/static/js/web/entry.js" },
+        { "url": "https://staging.example.com/_expo/static/js/web/vendor.js" },
+        { "url": "https://staging.example.com/a.js" },
+        { "url": "https://staging.example.com/b.js" }
+      ] }
+    },
+    "third-party-summary": {
+      "id": "third-party-summary", "title": "Reduce the impact of third-party code", "score": 0.2, "scoreDisplayMode": "binary", "displayValue": "Third-party code blocked for 600 ms",
+      "details": { "items": [ { "url": "https://cdn.other.com/widget.js" }, { "source": { "url": "https://ads.other.net/a.js" } } ] }
+    },
+    "color-contrast": {
+      "id": "color-contrast", "title": "Background and foreground colors do not have a sufficient contrast ratio", "score": 0, "scoreDisplayMode": "binary",
+      "details": { "items": [ { "node": { "selector": "div.hero > p" } } ] }
+    },
+    "uses-http2": { "id": "uses-http2", "title": "Use HTTP/2", "score": 0.1, "scoreDisplayMode": "informative", "details": { "items": [ { "url": "https://staging.example.com/x" } ] } },
+    "is-on-https": { "id": "is-on-https", "title": "Uses HTTPS", "score": 0, "scoreDisplayMode": "manual" },
+    "viewport": { "id": "viewport", "title": "Has a viewport", "score": 0, "scoreDisplayMode": "notApplicable" },
+    "errors-in-console": { "id": "errors-in-console", "title": "No browser errors", "score": 1, "scoreDisplayMode": "binary" },
+    "is-crawlable": { "id": "is-crawlable", "title": "Page is blocked from indexing", "score": 0, "scoreDisplayMode": "binary" },
+    "csp-xss": {
+      "id": "csp-xss", "title": "Ensure CSP is effective against XSS attacks", "score": 1, "scoreDisplayMode": "informative",
+      "details": { "items": [
+        { "severity": "High", "description": "No CSP found in enforcement mode" },
+        { "severity": "Medium", "description": "Missing base-uri" }
+      ] }
+    },
+    "has-hsts": {
+      "id": "has-hsts", "title": "Use a strong HSTS policy", "score": 1, "scoreDisplayMode": "informative",
+      "details": { "items": [ { "severity": "Medium", "description": "No HSTS header found" } ] }
+    }
+  }
+}

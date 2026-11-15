@@ -68,7 +68,8 @@ pub(super) fn file_or_link_values(manifest: &str) -> Vec<String> {
 }
 
 fn word_boundary_before(bytes: &[u8], i: usize) -> bool {
-    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'
+    // `-` can be part of a bare TOML key (`out-path`), so it doesn't start a new word either.
+    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && !matches!(bytes[i - 1], b'_' | b'-')
 }
 
 fn skip_ws(s: &str) -> &str {
@@ -79,4 +80,59 @@ fn quoted_string(s: &str) -> Option<&str> {
     let s = s.strip_prefix('"')?;
     let end = s.find('"')?;
     Some(&s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comments_are_dropped_outside_strings_only() {
+        let got = strip_line_comments("a = 1 # note\n# path = \"../x\"\nb = \"has # inside\" # tail");
+        assert_eq!(got, "a = 1 \n\nb = \"has # inside\" \n");
+    }
+
+    #[test]
+    fn basic_strings_honour_escaped_quotes_and_literal_strings_do_not() {
+        // `\"` keeps the basic string open, so the `#` is still inside it.
+        assert_eq!(strip_line_comments(r#"a = "q\" # in" # out"#), "a = \"q\\\" # in\" \n");
+        // A literal string has no escapes: the backslash is plain, the quote closes it.
+        assert_eq!(strip_line_comments(r"a = 'x\' # out"), "a = 'x\\' \n");
+        // The other quote kind inside a string doesn't close it.
+        assert_eq!(strip_line_comments(r#"a = "it's # in""#), "a = \"it's # in\"\n");
+    }
+
+    #[test]
+    fn a_key_ending_in_path_is_not_a_path_key() {
+        let m = "out-path = \"../dist\"\nmy_path = \"../x\"\nsub.path = \"../y\"";
+        assert_eq!(path_eq_values(m), vec!["../y"]);
+    }
+
+    #[test]
+    fn path_values_are_read_with_or_without_spaces() {
+        let m = "a = { path = \"../a\" }\nb = {path=\"../b\"}\nc = { path   =   \"c\" }";
+        assert_eq!(path_eq_values(m), vec!["../a", "../b", "c"]);
+    }
+
+    #[test]
+    fn path_needs_a_word_boundary_an_equals_and_a_quoted_value() {
+        assert!(path_eq_values("subpath = \"../x\"").is_empty());
+        assert!(path_eq_values("my_path = \"../x\"").is_empty());
+        assert!(path_eq_values("path \"../x\"").is_empty());
+        assert!(path_eq_values("path = ../x").is_empty());
+        assert!(path_eq_values("path = \"unterminated").is_empty());
+        assert_eq!(path_eq_values("path = \"p\""), vec!["p"]);
+    }
+
+    #[test]
+    fn file_and_link_values_need_an_opening_quote() {
+        let m = r#"{"a": "file:../a", "b": "link:../b", "c": "x file:../no", "d": "file:../d"}"#;
+        assert_eq!(file_or_link_values(m), vec!["../a", "../d", "../b"]);
+    }
+
+    #[test]
+    fn file_value_without_a_closing_quote_is_skipped() {
+        assert!(file_or_link_values("\"file:../a").is_empty());
+        assert!(file_or_link_values("no prefixes here").is_empty());
+    }
 }

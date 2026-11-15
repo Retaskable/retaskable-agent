@@ -3,24 +3,33 @@
 //! ([`crate::review_run::review_lane`]), their sessions registered with the run so a beat's `stop` cuts them, and
 //! the reviewer's comment goes on the change with `gh pr comment`. What was reviewed is remembered for the run
 //! only, so a re-review reads what changed since.
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::piece_runs::{Job, piece_item, tree_sender};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 use crate::backlog::runs::RunOutcome;
-use crate::engines::{EngineId, EphemeralSessionConfig, SessionResult, SessionSpec, engine_of, run_session_tracked};
+use crate::engines::cursor::with_project;
+use crate::engines::{
+    EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
+    program_of, run_session_tracked, start_engine,
+};
 use crate::implementer::publish::run as run_command;
 use crate::implementer::{Interrupted, Playtest};
+use crate::local_model::{LocalModel, LocalSlot};
+use crate::orchestrator::live::sessions::model_name;
 use crate::review_context::{ReviewContext, piece_slice_description};
 use crate::review_run::{StageInput, review_lane};
 use crate::reviewer::{Reviewer, ReviewerResult};
 use crate::runs::Pushed;
 use crate::scouts::{Scouts, parse_scout_info};
-use crate::tiers::{OPUS, SONNET};
+use crate::tiers::{LOCAL, OPUS, SONNET, floor};
 
 const SCOUT_TEMPLATE: &str = include_str!("../../prompts/scout.md");
 const SCOUT_INFO: &str = include_str!("../../prompts/scouts.json");
@@ -60,19 +69,68 @@ fn behind_head(cwd: &Path, sha: &str) -> bool {
     crate::lanes::git_output_in_worktree(cwd, &["merge-base", "--is-ancestor", sha, "HEAD"]).is_ok()
 }
 
-async fn run_session(job: &Job, spec: SessionSpec) -> Result<SessionResult> {
-    let engine = engine_of(Some(EngineId::Claude))?;
-    let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
-    let result = run_session_tracked(
-        engine.as_ref(),
-        &job.bin,
-        &spec,
-        "",
-        None,
-        quiet,
-        Some(tree_sender(job)),
-    )
-    .await?;
+/// Where a review role runs: its `review` group's engine.
+fn placement(job: &Job, role: Role, hit: &BTreeSet<EngineId>) -> Result<Placement> {
+    let engine = job
+        .context
+        .engine_now_out(engine_for(&job.choice, job.project.engines.as_ref(), role, None), hit);
+    place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
+}
+
+/// The models the scouts (`sonnet`) and the final reviewer (`opus`) start on, each given whether the local model can run that role (`up`: scouts, reviewer). Claude at its limit reads as the floor for a role the model can run.
+fn review_models(up: (bool, bool), at_limit: bool) -> (&'static str, &'static str) {
+    (floor(SONNET, at_limit, up.0), floor(OPUS, at_limit, up.1))
+}
+
+/// The local model's slot for a review session, if it runs there: a session already set to `local`
+/// waits for the slot; a scout whose tier isn't `local` takes it when it is free
+/// right now (and then runs `local`), else carries on at once. Cursor never takes it. The slot is held until the returned value is dropped.
+async fn claim_local(local: &LocalModel, program: EngineId, role: Role, spec: &mut SessionSpec) -> Option<LocalSlot> {
+    if program != EngineId::Claude {
+        None
+    } else if spec.model == LOCAL {
+        Some(local.take().await)
+    } else if spec.model != LOCAL && role == Role::Scout && local.available() {
+        local.try_take().inspect(|_| {
+            spec.model = LOCAL.to_string();
+            spec.local = Some(local.target());
+        })
+    } else {
+        None
+    }
+}
+
+/// The engine a review session ended at the limit of, and how long until it lifts, when the usage reading said.
+type Hit = Mutex<Option<(EngineId, Option<Duration>)>>;
+
+async fn run_session(
+    job: &Job,
+    bins: &[&Placement],
+    hit: &Hit,
+    role: Role,
+    mut spec: SessionSpec,
+) -> Result<SessionResult> {
+    // A review that is going to re-run starts nothing more.
+    if hit.lock().unwrap().is_some() {
+        anyhow::bail!("an engine hit its usage limit; the review re-runs");
+    }
+    let program = spec.engine.unwrap_or(EngineId::Claude);
+    let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
+    let engine = engine_of(Some(program))?;
+    let quiet = watch_for(&job.project, program);
+    let _slot = claim_local(&job.local, program, role, &mut spec).await;
+    let mut info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
+    // A scout holds no lane.
+    if role == Role::Scout {
+        info.lane = None;
+    }
+    let run = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job)));
+    let result = job.sessions.track(info, run).await?;
+    // A session at its engine's limit sends the whole review to another engine.
+    if result.limit_hit && job.context.fall.is_some() {
+        let wait = crate::engines::engine::resets_in(result.usage.as_ref());
+        hit.lock().unwrap().get_or_insert((program, wait));
+    }
     // A cut session (a stop) isn't a failed review: the run ends `interrupted`.
     if result.subtype == "interrupted" {
         return Err(Interrupted("the review session was cut".into()).into());
@@ -80,14 +138,20 @@ async fn run_session(job: &Job, spec: SessionSpec) -> Result<SessionResult> {
     Ok(result)
 }
 
-fn session_config<'a>(job: &Job, cwd: &'a Path, model: &str, budget_usd: f64) -> EphemeralSessionConfig<'a> {
+fn session_config<'a>(
+    job: &Job,
+    cwd: &'a Path,
+    model: &str,
+    budget_usd: f64,
+    placed: &Placement,
+) -> EphemeralSessionConfig<'a> {
     EphemeralSessionConfig {
         cwd,
         budget_usd,
         model: model.to_string(),
-        local: None,
-        engine: Some(EngineId::Claude),
-        cursor: None,
+        local: (model == LOCAL).then(|| job.local.target()),
+        engine: Some(placed.engine),
+        cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
         sandbox: crate::engines::claude::sandbox_enabled(job.project.sandbox, cfg!(windows)),
         shell: true,
     }
@@ -113,14 +177,16 @@ fn requests(result: &ReviewerResult) -> String {
 }
 
 fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
+    let number = number.to_string();
     let mut cmd = Command::new(gh);
     cmd.current_dir(cwd)
-        .args(["pr", "comment", &number.to_string(), "--body-file", "-"]);
+        .args(["pr", "comment", &number, "--body-file", "-"]);
     run_command(cmd, Some(comment), "gh pr comment").map(|_| ())
 }
 
 /// Reviews the lane's change, posts the comment and says what happens next. A failure to review is `Err`: the
 /// caller ends the run `failed`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn review(
     job: &Job,
     cwd: &Path,
@@ -144,39 +210,70 @@ pub(super) async fn review(
         ),
         None => (format!("origin/{}...HEAD", project.base_branch), String::new()),
     };
-    let info = parse_scout_info(SCOUT_INFO)?;
-    let input = StageInput {
-        base_branch: &project.base_branch,
-        review: project.review,
-        common: ReviewContext {
-            item_id: &item.id,
-            title: &job.piece.title,
-            slice: 1,
-            spec_refs: "(none)",
-            slice_description: &description,
-            range: &range,
-            scope: &scope,
-            checks,
-        },
-        scouts: Scouts {
-            template: SCOUT_TEMPLATE,
-            session: session_config(job, cwd, SONNET, project.budget.scout_usd),
-        },
-        scout_info: &info,
-        reviewer: Reviewer {
-            template: REVIEWER_TEMPLATE,
-            session: session_config(job, cwd, OPUS, project.budget.reviewer_usd),
-        },
-        playtest,
-        manual_approvals: "(none)",
-    };
-    let review = review_lane(cwd, &input, |spec| run_session(job, spec)).await;
-    let review = match review {
-        Ok(r) => r,
-        Err(e) if e.downcast_ref::<Interrupted>().is_some() => {
+    let mut out = BTreeSet::new();
+    let review = loop {
+        let (scout_at, reviewer_at) = (
+            placement(job, Role::Scout, &out)?,
+            placement(job, Role::Reviewer, &out)?,
+        );
+        let info = parse_scout_info(SCOUT_INFO)?;
+        let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
+        let (scout_model, top_model) = review_models((up(&scout_at), up(&reviewer_at)), job.sessions.claude_at_limit());
+        let input = StageInput {
+            base_branch: &project.base_branch,
+            review: project.review,
+            common: ReviewContext {
+                item_id: &item.id,
+                title: &job.piece.title,
+                slice: 1,
+                spec_refs: "(none)",
+                slice_description: &description,
+                range: &range,
+                scope: &scope,
+                checks,
+            },
+            scouts: Scouts {
+                template: SCOUT_TEMPLATE,
+                session: session_config(job, cwd, scout_model, project.budget.scout_usd, &scout_at),
+            },
+            scout_info: &info,
+            reviewer: Reviewer {
+                template: REVIEWER_TEMPLATE,
+                session: session_config(job, cwd, top_model, project.budget.reviewer_usd, &reviewer_at),
+            },
+            playtest,
+            manual_approvals: "(none)",
+        };
+        let bins = [&scout_at, &reviewer_at];
+        let hit = Hit::default();
+        let review = review_lane(cwd, &input, |role, spec| run_session(job, &bins, &hit, role, spec)).await;
+        if let Err(e) = &review
+            && e.downcast_ref::<Interrupted>().is_some()
+        {
             return Ok(ends(RunOutcome::Interrupted));
         }
-        Err(e) => return Err(e),
+        let Some((engine, until)) = hit.into_inner().unwrap() else {
+            break review?;
+        };
+        // The engine is out now: the whole review re-runs on the one that takes over, once per limit hit.
+        out.insert(engine);
+        let next = job
+            .context
+            .engine_now_out(start_engine(Some(engine), crate::config::Engine::Claude), &out);
+        if program_of(next) == engine {
+            let until = until
+                .and_then(|d| chrono::Duration::from_std(d).ok())
+                .and_then(|d| chrono::Utc::now().checked_add_signed(d));
+            return Ok(ends(RunOutcome::Limited {
+                engine: engine.to_string(),
+                until,
+            }));
+        }
+        tracing::info!(
+            "{}: Hit {engine}'s usage limit; carrying on now with {}",
+            job.token,
+            program_of(next)
+        );
     };
     let (gh, dir, number, comment) = (job.gh.clone(), cwd.to_path_buf(), pushed.change.number, review.comment);
     tokio::task::spawn_blocking(move || post_comment(&gh, &dir, number, &comment))
@@ -224,4 +321,82 @@ pub(super) async fn review(
             "The review gave an unknown verdict, {other}"
         ))),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engines::engine::test_spec;
+    use crate::tiers::{OPUS, SONNET};
+
+    fn up() -> LocalModel {
+        let local = LocalModel::new(crate::config::LocalModelConfig {
+            enabled: true,
+            base_url: "http://127.0.0.1:1".into(),
+            model: "m".into(),
+        });
+        local.set_up(true);
+        local
+    }
+
+    async fn claim(local: &LocalModel, program: EngineId, role: Role, model: &str) -> (SessionSpec, bool) {
+        let mut spec = test_spec(Path::new("."), "p");
+        spec.model = model.into();
+        let slot = claim_local(local, program, role, &mut spec).await;
+        (spec, slot.is_some())
+    }
+
+    #[tokio::test]
+    async fn one_scout_takes_the_free_slot_and_the_rest_stay_on_sonnet_without_waiting() {
+        let local = up();
+        let mut first = test_spec(Path::new("."), "p");
+        first.model = SONNET.into();
+        let held = claim_local(&local, EngineId::Claude, Role::Scout, &mut first).await;
+        assert!(held.is_some());
+        assert_eq!(first.model, LOCAL);
+        assert_eq!(first.local, Some(local.target()));
+        // The first still holds the slot while the others start.
+        let mut held = test_spec(Path::new("."), "p");
+        held.model = SONNET.into();
+        let slot = claim_local(&local, EngineId::Claude, Role::Scout, &mut held).await;
+        assert!(slot.is_none());
+        assert_eq!((held.model.as_str(), held.local), (SONNET, None));
+    }
+
+    #[tokio::test]
+    async fn scouts_stay_on_sonnet_with_local_down_or_on_cursor() {
+        let off = LocalModel::off();
+        for (local, program) in [
+            (&off, EngineId::Claude),
+            (&up(), EngineId::Cursor),
+            (&up(), EngineId::Codex),
+        ] {
+            let (spec, took) = claim(local, program, Role::Scout, SONNET).await;
+            assert_eq!((spec.model.as_str(), spec.local, took), (SONNET, None, false));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scout_takes_the_free_slot_when_local_is_up() {
+        let local = up();
+        let (spec, took) = claim(&local, EngineId::Claude, Role::Scout, SONNET).await;
+        assert_eq!((spec.model.as_str(), took), (LOCAL, true));
+    }
+
+    #[tokio::test]
+    async fn the_reviewer_never_takes_the_free_slot_and_waits_only_when_its_tier_is_local() {
+        let local = up();
+        let (spec, took) = claim(&local, EngineId::Claude, Role::Reviewer, OPUS).await;
+        assert_eq!((spec.model.as_str(), took), (OPUS, false));
+        let (spec, took) = claim(&local, EngineId::Claude, Role::Reviewer, LOCAL).await;
+        assert_eq!((spec.model.as_str(), took), (LOCAL, true));
+    }
+
+    #[test]
+    fn the_reviewer_is_local_only_at_the_limit_and_only_when_local_can_run_it() {
+        assert_eq!(review_models((true, true), true), (LOCAL, LOCAL));
+        assert_eq!(review_models((true, false), true), (LOCAL, OPUS)); // a Cursor reviewer
+        assert_eq!(review_models((false, false), true), (SONNET, OPUS)); // local down
+        assert_eq!(review_models((true, true), false), (SONNET, OPUS));
+    }
 }

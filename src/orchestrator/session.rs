@@ -1,12 +1,12 @@
 //! The real implementer session starter for `claim` mode (`startItem`/`implement` in Retaskable.com's
 //! `agent/src/steps.ts`): prepares the lane, builds the prompt, runs `claude -p` and turns what it
-//! answered into the [`SessionOutcome`] the loop settles. Claude only; any other engine refuses.
+//! answered into the [`SessionOutcome`] the loop settles. The session runs on the engine the request names,
+//! placed by [`crate::engines::place`] (Claude Code, Cursor, pi or Codex).
 //! A fresh session's prompt ends with "Where to start" ([`crate::implementer::start_files`]), built in
 //! the prepared lane; a resume or a follow-up restart gets none.
 //! Left out: Claude's sandbox, and the decisions a person already gave
-//! (the claimed item doesn't carry them). The usage-window model tier (section 7.1) is picked for the
-//! implementer ([`crate::tiers::implementer_tier`]), then moved off Opus for a first try
-//! ([`crate::tiers::implementer_model`]); the other roles it covers have no sessions here yet.
+//! (the claimed item doesn't carry them). The tier the store names on the claim (section 7.1, `sonnet` when it names none) is the
+//! implementer's, then moved off Opus for a first try ([`crate::tiers::implementer_model`]).
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,29 +15,32 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 
+pub(crate) use super::cursor_guard::watch_for;
 use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, StartRequest};
-use super::fresh_start::{FreshStart, MAX_TURNS_FOLLOW_UP, fresh_for_engine, picking_up_prompt};
+use super::fresh_start::{MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
+use crate::engines::model_slots::ModelSlots;
 use crate::engines::{
-    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, program_of,
+    CouldNotStart, EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, lane_engine, place, program_of,
     run_session,
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
 use crate::implementer::{
-    ImplementerResult, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start, code_gates, new_session_id,
-    run_implementer, session_spec,
+    CursorTimeKilled, ImplementerResult, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start,
+    new_session_id, run_implementer, session_spec,
 };
 use crate::implementer::{publish, start_files};
-use crate::item_lifecycle::{ImplementerOutcome, ItemRun};
+use crate::item_lifecycle::ImplementerOutcome;
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::telemetry::now_ms;
-use crate::tiers::{implementer_model, implementer_tier};
+use crate::tiers::{LOCAL, floor, implementer_model, named_tier};
 use crate::{lanes, paths};
+pub(super) use gates::{ChecksStage, FreshRules, GateRounds, Gated, Step, gate_rounds};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
 
@@ -48,22 +51,30 @@ pub struct ClaudeStarter {
     pub(super) choice: EngineChoiceConfig,
     pub(super) env: Env,
     max_turns: u32,
-    pub(super) models: ModelsConfig,
     /// `MachineConfig::max_resume_context_tokens`: a send-back to a session over this size starts fresh.
     max_resume_context_tokens: u32,
+    /// The machine's Cursor model names, for placing a Cursor session.
+    pub(super) cursor_models: CursorModels,
     /// Sessions started and not yet ended (the loop's `activeSessions`).
     pub(super) running: Arc<AtomicU32>,
+    /// The sessions running now: each one lists itself while it runs.
+    pub(super) sessions: Sessions,
+    /// The computer's local model, for the tier ladder.
+    pub(super) local: crate::local_model::LocalModel,
 }
 
 impl ClaudeStarter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: PathBuf,
         projects: Vec<ProjectConfig>,
         choice: EngineChoiceConfig,
         env: Env,
         max_turns: u32,
-        models: ModelsConfig,
         max_resume_context_tokens: u32,
+        cursor_models: CursorModels,
+        sessions: Sessions,
+        local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
@@ -71,14 +82,27 @@ impl ClaudeStarter {
             choice,
             env,
             max_turns,
-            models,
             max_resume_context_tokens,
+            cursor_models,
             running: Arc::new(AtomicU32::new(0)),
+            sessions,
+            local,
         })
     }
 }
 
+/// Whether a fresh Claude implementer may start: `sonnet`, what a claim with no tier (and a first try) runs on, isn't
+/// capped and full. The tier arrives with the claim, so it isn't known before it. `pending` is the starts already made
+/// that haven't taken their slot yet.
+pub fn model_has_room(slots: Option<&ModelSlots>, pending: u32) -> bool {
+    slots.is_none_or(|s| s.has_room_after(crate::tiers::SONNET, pending))
+}
+
 impl SessionStarter for ClaudeStarter {
+    fn implementer_may_start(&self, pending: u32) -> bool {
+        model_has_room(crate::engines::model_slots::global(), pending)
+    }
+
     fn start(&self, request: StartRequest) -> Result<(), String> {
         let project = self
             .projects
@@ -86,26 +110,28 @@ impl SessionStarter for ClaudeStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
-        let engine = engine_for(
-            &self.choice,
-            project.engines.as_ref(),
+        // Fail before anything starts when the engine's binary isn't there: the claim goes back.
+        place(
+            config_engine(request.engine),
             Role::Implementer,
-            Some(request.lane),
-        );
-        if engine != Engine::Claude {
-            return Err("only Claude sessions run in the Rust agent yet".into());
-        }
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+            &self.env,
+            &self.cursor_models,
+        )?;
+        // The implementer's engine is set to `local` (it is Claude Code): it takes the local model while it's up.
+        let wants_local = !request.resume
+            && request.engine == EngineId::Claude
+            && engine_for(
+                &self.choice,
+                project.engines.as_ref(),
+                Role::Implementer,
+                Some(request.lane),
+            ) == Engine::Local;
         let StartRequest {
             project: project_id,
             item_id,
             lane,
             item,
             outcomes,
-            usage,
             session_id,
             engine: session_engine,
             resume,
@@ -117,10 +143,13 @@ impl SessionStarter for ClaudeStarter {
             ..
         } = request;
         let job = Job {
+            local: self.local.clone(),
+            wants_local,
             data_dir: self.data_dir.clone(),
             project,
             project_id: project_id.clone(),
-            bin,
+            env: self.env.clone(),
+            cursor_models: self.cursor_models.clone(),
             gh: self
                 .env
                 .get("RETASKABLE_GH")
@@ -128,8 +157,6 @@ impl SessionStarter for ClaudeStarter {
             max_turns: self.max_turns,
             lane,
             item,
-            usage,
-            models: self.models,
             max_resume_context_tokens: self.max_resume_context_tokens,
             session_id,
             engine: session_engine,
@@ -140,6 +167,7 @@ impl SessionStarter for ClaudeStarter {
             items,
             attempt,
             notes,
+            sessions: self.sessions.clone(),
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
         let running = self.running.clone();
@@ -228,13 +256,23 @@ impl SessionStarter for ClaudeStarter {
     }
 
     /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
-    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         None
     }
 }
 
+/// The configured engine whose program is `id`.
+fn config_engine(id: EngineId) -> Engine {
+    match id {
+        EngineId::Claude => Engine::Claude,
+        EngineId::Cursor => Engine::Cursor,
+        EngineId::Pi => Engine::Pi,
+        EngineId::Codex => Engine::Codex,
+    }
+}
+
 /// Whether the resolved binary is there: a path by itself, a bare name somewhere on `PATH`.
-pub(super) fn exists(bin: &Path, env: &Env) -> bool {
+pub(crate) fn exists(bin: &Path, env: &Env) -> bool {
     if bin.components().count() > 1 {
         return bin.is_file();
     }
@@ -245,18 +283,19 @@ pub(super) fn exists(bin: &Path, env: &Env) -> bool {
 }
 
 struct Job {
+    local: crate::local_model::LocalModel,
+    /// The implementer's engine is set to `local` (`Placement::local`).
+    wants_local: bool,
     data_dir: PathBuf,
     project: ProjectConfig,
     project_id: String,
-    bin: PathBuf,
+    env: Env,
+    cursor_models: CursorModels,
     /// The `gh` program (`RETASKABLE_GH`, or `gh` on PATH).
     gh: PathBuf,
     max_turns: u32,
     lane: u32,
     item: Item,
-    /// The latest `state.usage` reading, for picking the implementer's model tier.
-    usage: Option<Value>,
-    models: ModelsConfig,
     max_resume_context_tokens: u32,
     /// The id the session runs under (`--session-id`, or `--resume` when `resume`).
     session_id: String,
@@ -276,6 +315,7 @@ struct Job {
     /// Start over's attempt (the branch's `-r<attempt>`), and its notes for a fresh session's first prompt.
     attempt: u32,
     notes: Option<String>,
+    sessions: Sessions,
 }
 
 /// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
@@ -321,9 +361,11 @@ pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
 /// One implementer session in `cwd`: builds its spec from `start`, runs it with its transcript at
 /// `<run folder>/<name>`, and returns its answer with the stream's usage reading and the session's last
 /// context size. A `fresh` start runs under the id the driver chose and saved, so a restart of it can
-/// resume it.
+/// resume it. It runs on `engine`, placed afresh: a fresh start can have moved to another engine than the job's.
+#[allow(clippy::too_many_arguments)]
 async fn attempt(
     job: &Job,
+    engine: EngineId,
     cwd: &Path,
     start: Start<'_>,
     session_id: &str,
@@ -335,22 +377,66 @@ async fn attempt(
         data_dir,
         project,
         project_id,
-        bin,
+        env,
+        cursor_models,
         max_turns,
         lane,
         item,
-        usage,
-        models,
         items,
         notes,
         attempt: attempt_no,
+        sessions,
         ..
     } = job;
-    let now = crate::telemetry::now_ms() / 1000;
-    let tier = implementer_tier(usage.as_ref(), now, models);
-    let model = implementer_model(tier, item).to_string();
+    let placed = place(config_engine(engine), Role::Implementer, env, cursor_models).map_err(anyhow::Error::msg)?;
+    let cursor = placed.cursor.map(|c| crate::engines::cursor::with_project(project, c));
+    // Only a Claude session may use the local model; its slot is held until
+    // the session ends. A `local` model is started as `--model sonnet` by the engine, whose environment maps it onto the model.
+    // A resume stays on the backend its first transcript line names: a local session goes back to the model while
+    // it's up (else its Anthropic tier), an Anthropic one (or one with no readable transcript) never goes local.
+    let ladder = placed.engine == EngineId::Claude;
+    let up = ladder && job.local.available();
+    let resumed = matches!(start, Start::Resume { .. });
+    let was_local = resumed
+        && crate::engines::transcripts::started_on(data_dir, project_id, &item.id, session_id)
+            .is_some_and(|s| s.model == LOCAL);
+    let tier = if up && (if resumed { was_local } else { job.wants_local }) {
+        LOCAL
+    } else {
+        // The store named the tier (none is `sonnet`); `local` without the model up is `sonnet`. Claude at its
+        // limit reads as the floor tier for a fresh session only.
+        let named = floor(
+            named_tier(item.tier.as_deref()),
+            !resumed && sessions.claude_at_limit(),
+            up && !resumed,
+        );
+        if named == LOCAL && !(up && !resumed) {
+            crate::tiers::SONNET
+        } else {
+            named
+        }
+    };
+    let local_run = if tier == LOCAL {
+        Some(job.local.run().await)
+    } else {
+        None
+    };
+    let model = implementer_model(tier, item, *attempt_no).to_string();
+    let info = SessionInfo {
+        project: project_id.clone(),
+        item_id: item.id.clone(),
+        title: Some(item.title.clone()),
+        role: Role::Implementer,
+        lane: Some(*lane),
+        engine: placed.engine,
+        model: if local_run.is_some() {
+            LOCAL.to_string()
+        } else {
+            model_name(placed.engine, &model, cursor.as_ref())
+        },
+    };
     let branch = branch_name(item, *attempt_no);
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, placed.engine);
     let mut spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,
@@ -368,9 +454,9 @@ async fn attempt(
             model,
             budget_usd: project.budget.implementer_usd,
             max_turns: Some(*max_turns),
-            engine: Some(EngineId::Claude),
-            cursor: None,
-            local: None,
+            engine: Some(placed.engine),
+            cursor,
+            local: local_run.as_ref().map(|r| r.target.clone()),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,
@@ -382,16 +468,20 @@ async fn attempt(
         path: paths::run_dir(data_dir, project_id, &item.id).join(name),
         lane: Some(*lane),
     };
-    let engine = engine_of(Some(EngineId::Claude))?;
-    let (engine, id, sink) = (engine.as_ref(), session_id, &sink);
+    let runner = engine_of(Some(placed.engine))?;
+    let (runner, bin, id, sink) = (runner.as_ref(), &placed.bin, session_id, &sink);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
-    let (answer, usage) = run_implementer(spec, |spec| async move {
-        let r = run_session(engine, bin, &spec, id, Some(sink), quiet).await?;
-        *ctx = r.context_tokens;
-        Ok(r)
-    })
-    .await;
+    let (answer, usage) = sessions
+        .track(
+            info,
+            run_implementer(spec, |spec| async move {
+                let r = run_session(runner, bin, &spec, id, Some(sink), quiet).await?;
+                *ctx = r.context_tokens;
+                Ok(r)
+            }),
+        )
+        .await;
     Ok(Attempt {
         answer,
         usage,
@@ -411,7 +501,7 @@ pub(super) struct Attempt {
 /// and the id of the fresh session the job carried on in, if it did.
 type Ran = (SessionResult, Option<Value>, Option<u64>, Vec<String>, Option<String>);
 
-fn ran_out_of_turns(a: &Attempt) -> bool {
+pub(super) fn ran_out_of_turns(a: &Attempt) -> bool {
     matches!(&a.answer, Err(e) if e.downcast_ref::<MaxTurns>().is_some())
 }
 
@@ -455,186 +545,6 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// What the code gates' rounds need to know of a run.
-pub(super) struct GateRounds<'a> {
-    pub cwd: &'a Path,
-    pub base_branch: &'a str,
-    pub code_gates: crate::config::CodeGates,
-    pub max_check_rounds: u32,
-    /// The claim's fresh-start rules (06.2-implementer.md "Fresh-start rules on resume"); `None` for a run that
-    /// only ever resumes.
-    pub fresh: Option<FreshRules>,
-    /// Stage 1 of review (06.3-review.md): the lane's checks, run once the gates pass; `None` for the claim.
-    pub checks: Option<&'a ChecksStage<'a>>,
-}
-
-/// The checks a piece run puts its change through, and where their result is kept for the run's end.
-pub(super) struct ChecksStage<'a> {
-    pub checks: &'a [crate::config::CheckConfig],
-    pub backlog_path: &'a str,
-    pub on_tree: std::sync::Arc<dyn Fn(std::sync::Arc<crate::process_tree::ProcessTree>) + Send + Sync>,
-    pub result: &'a std::sync::Mutex<Option<crate::checks::StageOneResult>>,
-}
-
-impl ChecksStage<'_> {
-    /// Runs the checks in `cwd`; a blocking failure is `(names of the failing checks, the message to send back)`.
-    async fn run(&self, cwd: &Path, base: &str) -> Result<Option<(String, String)>> {
-        let (dir, base) = (cwd.to_path_buf(), base.to_string());
-        let (checks, backlog, on_tree) = (
-            self.checks.to_vec(),
-            self.backlog_path.to_string(),
-            self.on_tree.clone(),
-        );
-        let stage = tokio::task::spawn_blocking(move || {
-            crate::checks::run_registered(&dir, &base, &checks, &backlog, &*on_tree)
-        })
-        .await
-        .context("running the checks")?
-        .context("running the checks")?;
-        let failures: Vec<_> = stage.blocking_failures().into_iter().cloned().collect();
-        *self.result.lock().unwrap() = Some(stage);
-        if failures.is_empty() {
-            return Ok(None);
-        }
-        let names = failures.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ");
-        let mut message = String::from("Before Retaskable pushes your branch, its checks failed:");
-        for c in &failures {
-            let how = if c.timed_out {
-                "timed out".to_string()
-            } else {
-                format!("exit code {}", c.exit_code)
-            };
-            message += &format!(
-                "\n\n`{}` ({how}), the end of its output:\n```\n{}\n```",
-                c.command, c.output_tail
-            );
-        }
-        Ok(Some((names, message)))
-    }
-}
-
-/// When a session is replaced instead of resumed.
-#[derive(Clone, Copy)]
-pub(super) struct FreshRules {
-    pub max_turns: u32,
-    pub max_resume_context_tokens: u32,
-    /// The engine the session started on, and the lane's own engine now (if it has one).
-    pub engine: EngineId,
-    pub lane_engine: Option<EngineId>,
-    /// The engine that takes over while the one the session started on is at its usage limit.
-    pub takeover: Option<EngineId>,
-}
-
-/// What [`gate_rounds`] asks its caller to run next.
-pub(super) enum Step {
-    /// The session ran out of turns: a fresh one carries on in the same lane, uncommitted work kept.
-    OutOfTurns,
-    /// Send the findings back: resume the session.
-    Fix(String),
-    /// Send the findings to a fresh session, the old one having grown too large to resume.
-    FixFresh(String),
-}
-
-/// How [`gate_rounds`] ended.
-pub(super) enum Gated {
-    /// The answer to settle, with the gates' notes.
-    Settled(Attempt, Vec<String>),
-    /// A person is needed, for this reason.
-    GaveUp(Attempt, Vec<String>, String),
-}
-
-/// Code gates before the push (06.2-implementer.md): while the session answers `pr_opened`, the gates check the
-/// lane's change against `origin/<baseBranch>`. A finding goes back through `next` and its answer is gated too;
-/// every such round counts against `maxCheckRounds`, and past it a person is needed. Gates that can't run (a git
-/// error) are noted and the answer stands. With fresh-start rules, running out of turns restarts once. Shared by
-/// the claim and the piece runs.
-pub(super) async fn gate_rounds<F, Fut>(g: &GateRounds<'_>, mut a: Attempt, mut next: F) -> Result<Gated>
-where
-    F: FnMut(Step) -> Fut,
-    Fut: std::future::Future<Output = Result<Attempt>>,
-{
-    let mut notes = Vec::new();
-    let mut rounds = 0;
-    let mut restarted = false;
-    let mut current_engine = g.fresh.map(|f| f.engine);
-    loop {
-        if let Some(fresh) = g.fresh.filter(|_| ran_out_of_turns(&a)) {
-            if restarted {
-                let why = format!("Implementer ran out of turns ({}) twice in a row", fresh.max_turns);
-                return Ok(Gated::GaveUp(a, notes, why));
-            }
-            restarted = true;
-            notes.push(FreshStart::OutOfTurns.history_line());
-            a = next(Step::OutOfTurns).await?;
-            continue;
-        }
-        if !matches!(&a.answer, Ok(r) if r.status == "pr_opened") {
-            break;
-        }
-        let (dir, base, gates) = (g.cwd.to_path_buf(), g.base_branch.to_string(), g.code_gates);
-        let found = tokio::task::spawn_blocking(move || code_gates::run(&dir, &base, &gates))
-            .await
-            .context("running the code gates")?;
-        let found = match found {
-            Ok(found) => found.map(|f| ("code gates", f.note, f.message)),
-            Err(e) => {
-                notes.push(format!("Code gates couldn't run, so the push goes ahead: {e:#}"));
-                None
-            }
-        };
-        let found = match (found, g.checks) {
-            (Some(f), _) => f,
-            (None, None) => break,
-            (None, Some(stage)) => match stage.run(g.cwd, g.base_branch).await? {
-                Some((names, message)) => ("checks", names, message),
-                None => break,
-            },
-        };
-        let (what, note, message) = found;
-        notes.push(note.clone());
-        rounds += 1;
-        if rounds > g.max_check_rounds {
-            let why = format!(
-                "The {what} still found problems after {} rounds: {note}",
-                g.max_check_rounds
-            );
-            return Ok(Gated::GaveUp(a, notes, why));
-        }
-        let follow_up = format!("{}\n\nFix them, commit, and return the result again.", message);
-        // A session resumes only on the engine it started on, and not past `maxResumeContextTokens`.
-        let reason = g.fresh.and_then(|f| {
-            // The takeover was picked for the engine the session started on, so it only counts until a fresh start moves it.
-            let takeover = f.takeover.filter(|_| current_engine.is_none_or(|e| e == f.engine));
-            fresh_for_engine(current_engine.unwrap_or(f.engine), f.lane_engine, takeover).or_else(|| {
-                a.context_tokens
-                    .filter(|t| *t > u64::from(f.max_resume_context_tokens))
-                    .map(FreshStart::Grown)
-            })
-        });
-        a = match reason {
-            Some(reason) => {
-                notes.push(reason.history_line());
-                if let Some(f) = g.fresh {
-                    let takeover = reason_takeover(&reason);
-                    current_engine = Some(takeover.or(f.lane_engine).unwrap_or(current_engine.unwrap_or(f.engine)));
-                }
-
-                next(Step::FixFresh(follow_up)).await?
-            }
-            None => next(Step::Fix(follow_up)).await?,
-        };
-    }
-    Ok(Gated::Settled(a, notes))
-}
-
-/// The engine a fresh start for `reason` moves to for being at its usage limit.
-fn reason_takeover(reason: &FreshStart) -> Option<EngineId> {
-    match reason {
-        FreshStart::EngineLimited { to, .. } => Some(*to),
-        _ => None,
-    }
-}
-
 async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
     let rounds = GateRounds {
         cwd,
@@ -651,25 +561,28 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         checks: None,
     };
     // The session now answering, and whether it is a fresh one (so its id is reported).
-    let state = std::sync::Mutex::new((job.session_id.clone(), false));
+    let state = std::sync::Mutex::new((job.session_id.clone(), false, job.engine));
     let next = |step: Step| {
-        let current = state.lock().unwrap().0.clone();
+        let (current, _, mut engine) = state.lock().unwrap().clone();
         let (follow_up, fresh_prompt) = match &step {
             Step::OutOfTurns => (
                 picking_up_prompt(job.item.pr_url.is_some(), &job.project.base_branch, MAX_TURNS_FOLLOW_UP),
                 true,
             ),
-            Step::FixFresh(f) => (picking_up_prompt(false, &job.project.base_branch, f), true),
+            Step::FixFresh(f, to) => {
+                engine = to.unwrap_or(engine);
+                (picking_up_prompt(false, &job.project.base_branch, f), true)
+            }
             Step::Fix(f) => (f.clone(), false),
         };
         let id = if fresh_prompt { new_session_id() } else { current };
         if fresh_prompt {
-            *state.lock().unwrap() = (id.clone(), true);
+            *state.lock().unwrap() = (id.clone(), true, engine);
         }
         async move {
             if fresh_prompt {
                 let start = Start::Continuing { follow_up: &follow_up };
-                attempt(job, cwd, start, &id, true, format!("{id}.jsonl"), "").await
+                attempt(job, engine, cwd, start, &id, true, format!("{id}.jsonl"), "").await
             } else {
                 let start = Start::Resume {
                     session_id: id.clone(),
@@ -677,12 +590,12 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
                     decisions: &[],
                 };
                 let name = format!("{id}-resumed-{}.jsonl", now_ms());
-                attempt(job, cwd, start, &id, false, name, "").await
+                attempt(job, engine, cwd, start, &id, false, name, "").await
             }
         }
     };
     let gated = gate_rounds(&rounds, a, next).await?;
-    let (current, started_fresh) = state.into_inner().unwrap();
+    let (current, started_fresh, _) = state.into_inner().unwrap();
     let (a, mut notes) = match gated {
         Gated::Settled(a, notes) => (a, notes),
         Gated::GaveUp(a, notes, why) => {
@@ -753,7 +666,7 @@ async fn run(job: Job) -> Result<Ran> {
         let start = Start::Continuing {
             follow_up: follow_up.as_str(),
         };
-        let a = attempt(&job, &cwd, start, &job.session_id, true, name, "").await?;
+        let a = attempt(&job, job.engine, &cwd, start, &job.session_id, true, name, "").await?;
         return gated(&job, &cwd, a).await;
     }
     // A restart resumes the session where it left off: the lane is kept as it is (preparing it would
@@ -790,7 +703,17 @@ async fn run(job: Job) -> Result<Ran> {
             let base_ref = format!("origin/{}", job.project.base_branch);
             start_files::render(&start_files::build(crate::git_bin::program(), &cwd, &base_ref, &job.item).await)
         };
-        let a = attempt(&job, &cwd, start, &job.session_id, !resumed, name, &where_to_start).await?;
+        let a = attempt(
+            &job,
+            job.engine,
+            &cwd,
+            start,
+            &job.session_id,
+            !resumed,
+            name,
+            &where_to_start,
+        )
+        .await?;
         // The old session was stopped before Claude Code saved it (a restart moments after it began): the
         // same id starts a fresh one, as `implement` in `steps.ts` does on "No conversation found".
         if resumed && matches!(&a.answer, Err(e) if format!("{e:#}").contains("No conversation found")) {
@@ -874,7 +797,11 @@ fn session_result_for_answer(
             usage,
         ),
         Err(e) if e.downcast_ref::<SilenceKilled>().is_some() => (
-            SessionResult::Silenced(format!("went quiet and was killed: {e:#}")),
+            SessionResult::Silenced(format!("went quiet and was killed: {e:#}"), "killed_for_silence"),
+            usage,
+        ),
+        Err(e) if e.downcast_ref::<CursorTimeKilled>().is_some() => (
+            SessionResult::Silenced(format!("ran past its time limit and was killed: {e:#}"), "cursor_time"),
             usage,
         ),
         Err(e) => (
@@ -885,6 +812,21 @@ fn session_result_for_answer(
     }
 }
 
+#[path = "session_gates.rs"]
+mod gates;
+
 #[cfg(test)]
 #[path = "session_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "session_local_tests.rs"]
+mod local_tests;
+
+#[cfg(test)]
+#[path = "session_engine_tests.rs"]
+mod engine_tests;
+
+#[cfg(test)]
+#[path = "chat_engine_tests.rs"]
+mod chat_engine_tests;

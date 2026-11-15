@@ -8,6 +8,7 @@
 //! Running the session at all, and carrying out whatever [`resolve`] answers, is still the
 //! orchestrator's once it exists (see the module doc on [`crate::triage`]).
 
+use crate::text::is_blank;
 use std::future::Future;
 
 use anyhow::{Context as _, Result};
@@ -223,7 +224,7 @@ pub fn resolve(triage: &TriageResult, second_look: Option<&SecondLookResult>) ->
     if look.agree {
         Resolved {
             decision: suggest.decision(),
-            instructions: if look.instructions.trim().is_empty() {
+            instructions: if is_blank(&look.instructions) {
                 triage.instructions.clone()
             } else {
                 look.instructions.clone()

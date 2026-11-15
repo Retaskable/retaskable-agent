@@ -3,6 +3,7 @@
 //! `readOn` in `agent/src/ciCoverage.ts`. Only the GitHub-workflows half: this agent doesn't yet support
 //! other code hosts, so Woodpecker and GitLab CI (which `ciCoverage.ts` also answers `covered` for) aren't
 //! ported.
+use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -276,7 +277,7 @@ fn lines(text: &str) -> Result<Vec<Line>, Unreadable> {
     for raw in text.lines() {
         let no_comment = COMMENT_RE.replace(raw, "");
         let trimmed_end = no_comment.trim_end();
-        if trimmed_end.trim().is_empty() {
+        if is_blank(trimmed_end) {
             continue;
         }
         if has_tab_in_leading_ws(trimmed_end) {

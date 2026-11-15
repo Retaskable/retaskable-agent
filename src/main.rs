@@ -9,9 +9,16 @@ use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, lane_pool, link, local_model, network, orchestrator, release, runtime,
-    setup_check, spec_split, store, tags, telemetry, view,
+    api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
+    spec_split, store, tags, telemetry, tray,
 };
+
+mod agent_view;
+mod link_clouds;
+mod link_command;
+use agent_view::agent_view;
+use link_clouds::link_clouds;
+use link_command::{auto_link_backlog, link_command};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -148,7 +155,12 @@ async fn main() -> Result<()> {
                     .with_writer(log)
                     .init(),
                 Err(e) => {
-                    tracing_subscriber::fmt().with_env_filter(filter()).init();
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter())
+                        .with_writer(retaskable_agent::terminal_menu::console::ConsoleWriter(
+                            retaskable_agent::terminal_menu::console::ConsoleCapture::console(),
+                        ))
+                        .init();
                     tracing::warn!("couldn't open {}: {e}", logs_dir.join("retaskable.log").display());
                 }
             }
@@ -160,7 +172,13 @@ async fn main() -> Result<()> {
                 );
             }));
         }
-        None => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+        // The terminal menu keeps the console's lines in its log pane while it is up.
+        None => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_writer(retaskable_agent::terminal_menu::console::ConsoleWriter(
+                retaskable_agent::terminal_menu::console::ConsoleCapture::console(),
+            ))
+            .init(),
     }
     let cfg = config::load(&dir)?;
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
@@ -172,6 +190,10 @@ async fn main() -> Result<()> {
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
+    config::set_retiring_project_lanes(true);
+    if let Some(note) = config::retired_keys_note(&dir) {
+        tracing::info!("{note}");
+    }
     // agent-settings.md section 3.1: which program runs each kind of work (engines.md section
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
     // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
@@ -183,7 +205,9 @@ async fn main() -> Result<()> {
     // machine.json's overrides and RETASKABLE_TAGS over them. Missing is fine; broken is fatal,
     // the same as config.json.
     let machine = store::MachineStore::load(&dir)?;
-    let tag_list = log_runtime_settings(&cfg, &machine, &engine_choice, lane_count, env);
+    // One handle per computer: the watch writes its up flag, the jobs share its one slot.
+    let local = local_model::LocalModel::new(config::local_model(&cfg, env));
+    let tag_list = log_runtime_settings(&cfg, &machine, &engine_choice, lane_count, env, &local);
     // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
     // address instead, so another computer on the local network can reach the settings page.
     let network_access = network::network_access(machine.network().as_ref(), env);
@@ -217,6 +241,7 @@ async fn main() -> Result<()> {
             port,
             default_port,
             listener,
+            local,
         },
         env,
     )
@@ -257,17 +282,19 @@ struct ServeArgs<'a> {
     version: &'a str,
     build: Option<&'a release::Build>,
     exe_path: Option<&'a Path>,
-    tag_list: Vec<String>,
+    tag_list: tags::LiveTags,
     network_enabled: bool,
     port: u16,
     default_port: u16,
     listener: tokio::net::TcpListener,
+    local: local_model::LocalModel,
 }
 
 /// Runs each cloud's outbound connector, the shared backlog's auto-link, the first-run check,
 /// and the settings/health HTTP server, until the server shuts down.
 async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let ServeArgs {
+        local,
         dir,
         cfg,
         version,
@@ -289,11 +316,24 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         tracing::info!("{note}");
     }
     let lane_count = config::lanes(cfg, env);
-    let view = Arc::new(agent_view(cfg, tag_list.clone(), version, env));
+    let checks = runtime::setup_check_runner(env.clone());
+    let view = Arc::new(agent_view(
+        cfg,
+        tag_list.clone(),
+        version,
+        env,
+        dir,
+        default_port,
+        &local,
+        checks.clone(),
+    ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
+    // The tray, when it runs, is told to exit before a restart ends the process.
+    let tray_slot: Arc<std::sync::OnceLock<tray::boot::Shutdown>> = Arc::default();
+    let tray_down = tray_slot.clone();
     let exit = runtime::restart_handler(
         is_release,
         exe_path.clone(),
@@ -301,9 +341,22 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         cfg.projects.clone(),
         dir.to_path_buf(),
         view.restart.clone(),
+        Arc::new(move || {
+            if let Some(t) = tray_down.get() {
+                t();
+            }
+        }),
     );
-    let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env);
-    let latest_checks = runtime::spawn_setup_checks(is_release, env.clone());
+    let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
+    let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
+    let cloud_handles: Vec<_> = cloud_urls
+        .iter()
+        .cloned()
+        .zip(connectors.iter().map(|c| c.handle()))
+        .collect();
+    runtime::spawn_setup_checks(is_release, &checks);
+    let latest_checks = checks.shared();
+
     // The orchestrator's safety switch: off unless RETASKABLE_ORCHESTRATOR says dry, claim (runs dry until a
     // session runner exists) or runs (short runs on pieces). Read and logged once, here.
     // Where the TS agent may be listening: its default for this build, the shared default and the
@@ -327,7 +380,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let bug_version = connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default());
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
-    let live = orchestrator::live::LiveHandle::new(mode);
+    let live = view.live.clone().with_mode(mode).with_machine_dir(dir.to_path_buf());
+    let tray_sessions = live.sessions().clone();
     view.item_commands
         .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
@@ -335,10 +389,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         projects: &cfg.projects,
         lane_count,
         concurrency: cfg.machine.concurrency,
+        local: local.clone(),
         poll_every: std::time::Duration::from_secs(config::poll_interval_sec(cfg, env).into()),
         backlog_url: &backlog::url(env),
         keychain: &keychain,
         paused: &view.paused,
+        store_paused: &view.store_paused,
         item_commands: &view.item_commands,
         work: &view.work,
         live: &live,
@@ -350,26 +406,31 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             .and_then(|u| reqwest::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default(),
-        tags: tag_list,
+        tags: tag_list.clone(),
         env: env.clone(),
         engine_choice: config::engine_choice(cfg, env),
+        cursor_models: config::cursor_models(cfg, env),
         checks: latest_checks.clone(),
         bugs: bugs.clone(),
         bug_version: bug_version.clone(),
         run_starters: if mode == orchestrator::driver::OrchestratorMode::Runs {
             // One plan or look at a time on this computer: both runners hold this slot.
             let plan_or_look = orchestrator::slot::Slot::default();
+            retaskable_agent::engines::model_slots::set_global(
+                retaskable_agent::engines::model_slots::ModelSlots::new(cfg.machine.model_concurrency),
+            );
             let roster = orchestrator::plan_run::Roster {
                 data_dir: dir.to_path_buf(),
                 projects: cfg.projects.clone(),
                 choice: config::engine_choice(cfg, env),
                 env: env.clone(),
-                models: cfg.machine.models,
+                cursor_models: config::cursor_models(cfg, env),
+                sessions: live.sessions().clone(),
+                local: local.clone(),
             };
             vec![
                 orchestrator::watch_run::WatchRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
-                orchestrator::merge_run::MergeRuns::new(link::machine_name(env))
-                    as Arc<dyn orchestrator::driver::RunStarter>,
+                orchestrator::merge_run::MergeRuns::new() as Arc<dyn orchestrator::driver::RunStarter>,
                 Arc::new(orchestrator::plan_run::PlanRuns::new(
                     roster.clone(),
                     plan_or_look.clone(),
@@ -380,10 +441,12 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     data_dir: dir.to_path_buf(),
                     projects: cfg.projects.clone(),
                     choice: config::engine_choice(cfg, env),
+                    cursor_models: config::cursor_models(cfg, env),
                     env: env.clone(),
                     max_turns: cfg.machine.max_turns,
-                    models: cfg.machine.models,
-                    flags: Arc::new(retaskable_agent::flags::Flags::from_env()),
+                    machine: link::machine_name(env),
+                    sessions: live.sessions().clone(),
+                    local: local.clone(),
                 }) as Arc<dyn orchestrator::driver::RunStarter>,
             ]
         } else {
@@ -394,7 +457,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
                 env.clone(),
-                cfg.machine.models,
+                config::cursor_models(cfg, env),
+                local.clone(),
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
         trial: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
@@ -403,7 +467,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                     dir.to_path_buf(),
                     config::engine_choice(cfg, env),
                     env.clone(),
-                    cfg.machine.models,
+                    config::cursor_models(cfg, env),
+                    local.clone(),
                 ) as Arc<dyn orchestrator::trial_host::TrialHost>,
                 latest_checks.clone(),
             )
@@ -413,10 +478,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
                 env.clone(),
-                cfg.machine.models,
+                config::cursor_models(cfg, env),
                 cfg.machine.budget.daily_usd,
                 view.clone(),
+                local.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>
+        }),
+        experts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::expert_host::ClaudeExperts::new(
+                dir.to_path_buf(),
+                env.clone(),
+                config::cursor_models(cfg, env),
+            ) as Arc<dyn orchestrator::driver::ExpertHost>
         }),
         starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::session::ClaudeStarter::new(
@@ -425,12 +498,48 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::engine_choice(cfg, env),
                 env.clone(),
                 cfg.machine.max_turns,
-                cfg.machine.models,
                 cfg.machine.max_resume_context_tokens,
+                config::cursor_models(cfg, env),
+                live.sessions().clone(),
+                local.clone(),
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
     });
+    retaskable_agent::rollout::spawn_all(retaskable_agent::rollout::SpawnArgs {
+        dir,
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        item_commands: &view.item_commands,
+        machine: link::machine_name(env),
+    });
+    // deploy-requests.md section 3.2: starts only for a kind this computer can run (none yet).
+    retaskable_agent::deploy_requests::spawn_all(retaskable_agent::deploy_requests::SpawnArgs {
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        keychain: &keychain,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        machine: link::machine_name(env),
+    });
+    // agent-ci.md section 3.1.
+    let ci = retaskable_agent::agent_ci::CiLoop::new(
+        Default::default(),
+        live.clone(),
+        retaskable_agent::agent_ci::docker::in_agent_image(),
+    )
+    .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
+        retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
+    )));
+    tokio::spawn(retaskable_agent::agent_ci::run(
+        ci,
+        dir.to_path_buf(),
+        env.clone(),
+        view.item_commands.clone(),
+    ));
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
@@ -454,21 +563,93 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         network_enabled,
         env.clone(),
         || (telemetry::now_ms() / 1000) as u64,
-        move |code| exit(code),
+        {
+            let exit = exit.clone();
+            move |code| exit(code)
+        },
         keychain.clone(),
     ));
+    settings.set_saved_signal(view.settings.clone());
+    settings.set_links(links.clone());
+    // A save on the settings page changes the list the next ask carries.
+    {
+        let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
+        let mut saved = view.settings.subscribe();
+        tokio::spawn(async move {
+            while saved.changed().await.is_ok() {
+                if tags.reread(&dir, &env) {
+                    log_tags(&tags.get());
+                }
+            }
+        });
+    }
     settings.set_status_source(StatusSource {
         view: (*view).clone(),
         started: std::time::Instant::now(),
         checks: latest_checks,
         live,
     });
+    // agent-settings.md section 4.4.
+    if let Err(e) = settings.open_on_first_run(is_release, link::open_url) {
+        tracing::warn!("first-run settings page: {e:#}");
+    }
+    let quit_now = Arc::new(tokio::sync::Notify::new());
+    // tray.md section 4.2: Keep this computer awake comes back as it was left.
+    let keep_awake = Arc::new(retaskable_agent::keep_awake::KeepAwake::new(dir));
+    keep_awake.tick();
+    let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
+    let backlog_url = backlog::url(env);
+    let (backlog_links, backlog_keys, backlog_http, backlog_env) =
+        (links.clone(), keychain.clone(), http.clone(), env.clone());
+    let backlog_version = version.to_string();
+    let tray = tray::boot::boot(tray::boot::Boot {
+        args: &std::env::args().skip(1).collect::<Vec<_>>(),
+        env,
+        build,
+        exe: exe_path.as_deref(),
+        view: view.clone(),
+        clouds: cloud_handles,
+        links: links.clone(),
+        settings: settings.clone(),
+        sessions: Arc::new(move || tray_sessions.snapshot().len()),
+        restart: view.restart.clone(),
+        exit: exit.clone(),
+        quit_now: quit_now.clone(),
+        keep_awake: Some(keep_awake.clone()),
+        link_backlog: Arc::new(move || {
+            tokio::spawn(auto_link_backlog(
+                backlog_links.clone(),
+                backlog_keys.clone(),
+                backlog_http.clone(),
+                backlog_env.clone(),
+                backlog_version.clone(),
+            ));
+        }),
+        on_stopped: Box::new(move |why| {
+            tracing::warn!("Tray: the tray stopped ({why}); running headless.");
+            tracing::info!(
+                "{}",
+                link::links_line(&stopped_urls, &backlog_url, |url| matches!(
+                    stopped_keys.get(url),
+                    Ok(Some(_))
+                ))
+            );
+        }),
+    })
+    .await;
+    if let Some(tray) = tray {
+        let _ = tray_slot.set(tray);
+    }
     axum::serve(
         listener,
         api::router(version.to_string(), settings).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown())
+    .with_graceful_shutdown(shutdown(quit_now))
     .await?;
+    if let Some(tray) = tray_slot.get() {
+        // Quit, Ctrl+C or SIGTERM: the helper is told to exit and its input closed.
+        tokio::task::block_in_place(|| tray());
+    }
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }
@@ -487,71 +668,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     Ok(())
 }
 
-/// What the cloud sees of this computer.
-fn agent_view(cfg: &config::ConfigFile, tags: Vec<String>, version: &str, env: &Env) -> view::AgentView {
-    view::AgentView {
-        machine: link::machine_name(env),
-        tags,
-        projects: cfg.projects.iter().map(view::ProjectView::from).collect(),
-        version: version.to_string(),
-        lanes: config::lanes(cfg, env),
-        chore_lane: cfg.machine.chore_lane,
-        lane_sizes: lane_pool::LaneSizes::default(),
-        paused: view::PauseState::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-    }
-}
-
-/// cloud.md section 5 / environments.md section 3.4: starts one outbound link to each cloud,
-/// every project on it, and the shared backlog's auto-link beside them.
-#[allow(clippy::too_many_arguments)]
-fn link_clouds(
-    cloud_urls: &[String],
-    keychain: &Arc<dyn link::TokenStore>,
-    http: &reqwest::Client,
-    view: &Arc<view::AgentView>,
-    exit: &Arc<view::Exit>,
-    dir: &Path,
-    version: &str,
-    env: &Env,
-) -> Vec<connector::Connector> {
-    let connectors: Vec<_> = cloud_urls
-        .iter()
-        .map(|url| {
-            connector::Connector::start(
-                url,
-                keychain.clone(),
-                http.clone(),
-                view.clone(),
-                connector::Timing::default(),
-                exit.clone(),
-                dir,
-            )
-        })
-        .collect();
-    // installers/03-the-bundle-agent-bundle.md section 3.10: named once, after the connections above
-    // start, so the log says whether this build is linked — the start check greps for it, and a
-    // release build has no other way to tell.
-    let backlog_url = backlog::url(env);
+fn log_tags(tag_list: &[String]) {
     tracing::info!(
-        "{}",
-        link::links_line(cloud_urls, &backlog_url, |url| matches!(keychain.get(url), Ok(Some(_))))
+        "Tags: {}",
+        if tag_list.is_empty() {
+            "none".to_string()
+        } else {
+            tag_list.join(", ")
+        }
     );
-    // installers/04-every-agent-on-the-shared-backlog-shared.md: once this computer already holds a
-    // retaskable.com link, the shared backlog's device flow starts by itself too, opening its own
-    // `/link` page. Fire-and-forget so a slow or unreachable store doesn't delay serving `/api/health`;
-    // it isn't tried again this run (a failed or expired code waits for the next start).
-    if cloud_urls.iter().any(|url| matches!(keychain.get(url), Ok(Some(_)))) {
-        tokio::spawn(auto_link_backlog(
-            keychain.clone(),
-            http.clone(),
-            env.clone(),
-            version.to_string(),
-        ));
-    }
-    connectors
 }
 
 /// Resolves and logs this run's settings: this computer's tags, the poll interval, the local
@@ -563,18 +688,12 @@ fn log_runtime_settings(
     engine_choice: &config::EngineChoiceConfig,
     lane_count: u32,
     env: &Env,
-) -> Vec<String> {
+    local: &local_model::LocalModel,
+) -> tags::LiveTags {
     let found = tags::found_tags(&tags::machine_facts(env));
     let overrides = machine.tags();
     let tag_list = tags::effective_tags(&found, overrides.as_ref(), env);
-    tracing::info!(
-        "Tags: {}",
-        if tag_list.is_empty() {
-            "none".to_string()
-        } else {
-            tag_list.join(", ")
-        }
-    );
+    log_tags(&tag_list);
     let poll_interval_sec = config::poll_interval_sec(cfg, env);
     let local_model = config::local_model(cfg, env);
     tracing::info!(
@@ -590,7 +709,7 @@ fn log_runtime_settings(
     // orchestrator exists yet to start one.
     if local_model.enabled {
         tracing::info!("Watching the local model at {}", local_model.base_url);
-        tokio::spawn(local_model::watch(local_model.base_url.clone()));
+        tokio::spawn(local_model::watch(local.clone()));
     }
     // agent-settings.md section 3.1: the computer-wide shape of `engineChoice` (resolved per
     // project and role group above), and Cursor's model per tier. Cursor's models aren't read by
@@ -609,135 +728,13 @@ fn log_runtime_settings(
         cursor_models.implementer.as_deref().unwrap_or("auto"),
         cursor_models.scout.as_deref().unwrap_or("auto"),
     );
-    tag_list
+    tag_list.into()
 }
-
-/// `retaskable link [production|staging|local]`, or `retaskable link backlog`
-/// (installers/04-every-agent-on-the-shared-backlog-shared.md, `npm run link -- backlog`): the device
-/// flow in the terminal. The exit code.
-async fn link_command(
-    args: &[String],
-    cfg: &config::ConfigFile,
-    dir: &Path,
-    env: &Env,
-    version: &str,
-    build: Option<&release::Build>,
-) -> i32 {
-    if args == [String::from("backlog")] {
-        let keychain = link::keychain(dir, env);
-        let url = backlog::url(env);
-        return match run_link_in_terminal(&keychain, &url, link::BACKLOG_TARGET, env, version).await {
-            Ok(id) => {
-                println!(
-                    "Linked to the shared backlog as agent {id}. The refresh token is in this machine's credential store."
-                );
-                0
-            }
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        };
-    }
-    // Section 3.8 "One environment": a release build is fixed to `build.json`'s cloud, so linking
-    // to any other is refused rather than silently ignored.
-    let url = match args {
-        [] => link::cloud_url(cfg, env, build).map_err(|e| format!("{e:#}")),
-        [name] => match build {
-            Some(b) if b.environment.name() != name => Err(format!(
-                "This release build is fixed to {}, so it refuses to link to {name}.",
-                b.environment.name()
-            )),
-            _ => link::environment_url(name).map(String::from).ok_or_else(String::new),
-        },
-        _ => Err(String::new()),
-    };
-    let url = match url {
-        Ok(url) => url,
-        Err(e) => {
-            if !e.is_empty() {
-                eprintln!("{e}");
-            }
-            eprintln!("Usage: retaskable link [production|staging|local] | backlog");
-            return 2;
-        }
-    };
-    let keychain = link::keychain(dir, env);
-    match run_link_in_terminal(&keychain, &url, link::CLOUD_TARGET, env, version).await {
-        Ok(id) => {
-            println!("Linked to {url} as agent {id}. The refresh token is in this machine's credential store.");
-            // installers/04-every-agent-on-the-shared-backlog-shared.md: the shared backlog's own
-            // approval comes right after this one, opened by the agent itself.
-            auto_link_backlog(
-                keychain.clone(),
-                reqwest::Client::new(),
-                env.clone(),
-                version.to_string(),
-            )
-            .await;
-            0
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            1
-        }
-    }
-}
-
-/// Runs one device-flow link against `target` at `url` in the terminal, storing the refresh token.
-async fn run_link_in_terminal(
-    keychain: &Arc<dyn link::TokenStore>,
-    url: &str,
-    target: link::LinkTarget,
-    env: &Env,
-    version: &str,
-) -> Result<u64, String> {
-    if matches!(keychain.get(url), Ok(Some(_))) {
-        println!("Already linked to {url}. Linking again replaces that link.");
-    }
-    println!("Linking to {url}…");
-    let flow = link::Link {
-        http: reqwest::Client::new(),
-        store: keychain.as_ref(),
-        machine: link::machine_info(env, version),
-        target,
-        second: Duration::from_secs(1),
-    };
-    let shown = |code: &link::DeviceCode| {
-        println!("Go to {} and enter {}", code.verification_uri, code.user_code);
-        if !code.verification_uri_complete.is_empty() {
-            println!("(or open {})", code.verification_uri_complete);
-        }
-        println!(
-            "The code works for {} minutes. Waiting for approval…",
-            code.expires_in.div_ceil(60)
-        );
-    };
-    flow.run(url, shown).await.map_err(|e| format!("{e:#}"))
-}
-
-/// installers/04-every-agent-on-the-shared-backlog-shared.md: starts the shared backlog's device flow by
-/// itself, printing and opening its `/link` page the moment a code is ready. Logs the outcome instead of
-/// failing the caller — a failed or expired code waits for the next start, or `retaskable link backlog`.
-async fn auto_link_backlog(keychain: Arc<dyn link::TokenStore>, http: reqwest::Client, env: Env, version: String) {
-    let shown = |code: &link::DeviceCode| {
-        println!("Approve the shared backlog: {}", code.verification_uri_complete);
-        if let Err(e) = link::open_url(&code.verification_uri_complete) {
-            tracing::warn!("couldn't open the shared backlog's link page: {e:#}");
-        }
-    };
-    match backlog::auto_link(keychain, http, &env, &version, shown).await {
-        Ok(Some(id)) => tracing::info!("Linked to the shared backlog as agent {id}."),
-        Ok(None) => {}
-        Err(e) => tracing::warn!("Couldn't link to the shared backlog: {e:#}"),
-    }
-}
-
 fn filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_env("RETASKABLE_LOG").unwrap_or_else(|_| "info".into())
 }
 
-async fn shutdown() {
+async fn shutdown(quit_now: Arc<tokio::sync::Notify>) {
     #[cfg(not(windows))]
     {
         // Linux/macOS's own Quit path (a service stop, a `kill`) as well as Ctrl+C.
@@ -746,11 +743,15 @@ async fn shutdown() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = quit_now.notified() => {}
         }
     }
     #[cfg(windows)]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = quit_now.notified() => {}
+        }
     }
     tracing::info!("Stopping");
 }

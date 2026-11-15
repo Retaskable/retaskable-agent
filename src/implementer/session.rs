@@ -15,8 +15,9 @@ use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 
 use super::model::{ImplementerResult, implementer_result_schema};
-use super::prompt::{PiecePrompt, Prompt, build_piece_prompt, build_prompt};
+use super::prompt::{PiecePrompt, Prompt, build_chore_prompt, build_piece_prompt, build_prompt};
 use crate::backlog::runs::{RunKind, RunPiece};
+use crate::runs::chore::Chore;
 
 /// What an implementer session runs with, besides how it starts ([`Start`]).
 pub struct Session<'a> {
@@ -59,6 +60,13 @@ pub enum Start<'a> {
         kind: RunKind,
         piece: &'a RunPiece,
     },
+    /// A brand new session on a chore piece (section 6.7): `template` is `prompts/chore.md`.
+    Chore {
+        template: &'a str,
+        kind: RunKind,
+        piece: &'a RunPiece,
+        chore: &'a Chore,
+    },
     /// A fresh session that picks up where one just ran out of turns left off (06.2-implementer.md
     /// "at most maxTurns turns"): a new id ([`new_session_id`]), never `--resume` (a maxed-out
     /// session has nothing left to resume into), and `follow_up` as the whole prompt — never the
@@ -94,6 +102,20 @@ pub fn new_session_id() -> String {
     )
 }
 
+fn piece_prompt<'a>(s: &Session<'a>, kind: RunKind, piece: &'a RunPiece) -> PiecePrompt<'a> {
+    PiecePrompt {
+        kind,
+        piece,
+        project_type: s.project_type,
+        branch: s.branch,
+        base_branch: s.base_branch,
+        github_repo: s.github_repo,
+        checks: s.checks,
+        code_gates: s.code_gates,
+        where_to_start: s.where_to_start,
+    }
+}
+
 /// The `SessionSpec` for `s`, either starting fresh (templating the full prompt) or resuming one
 /// already running (the follow-up text alone).
 pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
@@ -116,23 +138,19 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             )?;
             (SessionStart::Fresh(new_session_id()), prompt)
         }
-        Start::Piece { template, kind, piece } => {
-            let prompt = build_piece_prompt(
-                template,
-                &PiecePrompt {
-                    kind,
-                    piece,
-                    project_type: s.project_type,
-                    branch: s.branch,
-                    base_branch: s.base_branch,
-                    github_repo: s.github_repo,
-                    checks: s.checks,
-                    code_gates: s.code_gates,
-                    where_to_start: s.where_to_start,
-                },
-            )?;
-            (SessionStart::Fresh(new_session_id()), prompt)
-        }
+        Start::Piece { template, kind, piece } => (
+            SessionStart::Fresh(new_session_id()),
+            build_piece_prompt(template, &piece_prompt(s, kind, piece))?,
+        ),
+        Start::Chore {
+            template,
+            kind,
+            piece,
+            chore,
+        } => (
+            SessionStart::Fresh(new_session_id()),
+            build_chore_prompt(template, chore, &piece_prompt(s, kind, piece))?,
+        ),
         Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),
         Start::Resume {
             session_id,
@@ -174,6 +192,19 @@ impl std::fmt::Display for SilenceKilled {
 }
 
 impl std::error::Error for SilenceKilled {}
+
+/// Marks a failed run's error as the Cursor time limit's kill (`cursor_time`, `budget.cursorMaxMinutes`,
+/// `engines::runner`): handled like a watchdog kill ([`SilenceKilled`]), resumed by id up to 3 times.
+#[derive(Debug)]
+pub struct CursorTimeKilled(pub String);
+
+impl std::fmt::Display for CursorTimeKilled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CursorTimeKilled {}
 
 /// Marks a failed run's error as a cut session's own kill (`interrupted`, `engines::runner`'s
 /// `spawn_and_read`, set when its `ProcessTree` reports `was_cut()`): something outside this
@@ -223,17 +254,6 @@ impl std::fmt::Display for LimitHit {
 
 impl std::error::Error for LimitHit {}
 
-/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead.
-fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
-    let usage = usage.filter(|u| u["status"] == "rejected")?;
-    let at = usage["resetsAt"].as_u64()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    at.checked_sub(now).map(std::time::Duration::from_secs)
-}
-
 /// Runs `spec` through `run` (the caller's [`crate::engines::run_session`]) and parses its
 /// structured answer, alongside the latest usage reading the session's stream reported — set
 /// whenever the stream sent one, whether the session went on to succeed or fail, since that
@@ -261,10 +281,12 @@ where
         let err = if r.limit_hit {
             anyhow::Error::new(LimitHit {
                 why,
-                resets_in: resets_in(usage.as_ref()),
+                resets_in: crate::engines::engine::resets_in(usage.as_ref()),
             })
         } else if r.subtype == "killed_for_silence" {
             anyhow::Error::new(SilenceKilled(why))
+        } else if r.subtype == "cursor_time" {
+            anyhow::Error::new(CursorTimeKilled(why))
         } else if r.subtype == "error_max_turns" {
             anyhow::Error::new(MaxTurns(why))
         } else if r.subtype == "interrupted" {
@@ -477,6 +499,16 @@ mod tests {
         let spec = session_spec(&session(&it, &[], cwd), Start::Fresh).unwrap();
         let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "error_during_execution", None)) }).await;
         let err = err.unwrap_err();
+        assert!(err.downcast_ref::<SilenceKilled>().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cursor_time_kill_is_tagged_as_cursor_time_killed() {
+        let it = item(&[], None);
+        let spec = session_spec(&session(&it, &[], Path::new("repo")), Start::Fresh).unwrap();
+        let (err, _) = run_implementer(spec, |_| async { Ok(result(false, "cursor_time", None)) }).await;
+        let err = err.unwrap_err();
+        assert!(err.downcast_ref::<CursorTimeKilled>().is_some(), "got {err:#}");
         assert!(err.downcast_ref::<SilenceKilled>().is_none());
     }
 

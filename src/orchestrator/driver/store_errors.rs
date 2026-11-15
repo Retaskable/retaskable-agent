@@ -12,6 +12,28 @@ impl ProjectLoop {
         self.live.failed(&self.id, now_iso8601(), message);
     }
 
+    /// A failed write for one draft or ask: the event log hears of it, nothing else changes.
+    pub(super) async fn store_failure(&mut self, op: &str, item: &str, e: &BacklogError) {
+        self.failures.add(op, item, e);
+        self.drain_failures();
+    }
+
+    /// Writes the failures spawned tasks kept as `store_error` events.
+    pub(super) fn drain_failures(&mut self) {
+        for f in self.failures.take() {
+            self.events.add_in(
+                &self.id,
+                Event::StoreError(event::StoreError {
+                    item: Some(f.item),
+                    op: Some(f.op),
+                    code: f.code.map(|c| json!(c)),
+                    error: Some(f.error),
+                    ..Default::default()
+                }),
+            );
+        }
+    }
+
     pub(super) fn store_error(&mut self, op: &str, e: &BacklogError) {
         tracing::warn!("{}: {op} failed: {e}", self.id);
         self.live.failed(&self.id, now_iso8601(), e.to_string());

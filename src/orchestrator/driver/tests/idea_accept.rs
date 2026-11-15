@@ -41,20 +41,16 @@ fn press(id: &str, idea: &str) -> IdeaCommand {
 }
 
 #[tokio::test]
-async fn a_queued_accept_is_written_up_and_acked_and_the_flag_is_recorded_each_pass() {
+async fn a_queued_accept_is_written_up_and_acked() {
     let (base, asked) = store().await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     let item_commands = rig.machine.links.item_commands.clone();
-    rig.machine.pass().await;
-    assert!(!item_commands.flag_on("p0", "ideas-session"));
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ideas-session"]));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     item_commands.set_out("p0", Some(tx));
     item_commands.push_idea(press("c1", "i1"));
     item_commands.push_idea(press("c2", "gone"));
     rig.machine.pass().await;
-    assert!(item_commands.flag_on("p0", "ideas-session"));
     let (first, second) = (rx.try_recv().unwrap(), rx.try_recv().unwrap());
     assert_eq!(first, json!({ "type": "ack", "id": "c1" }));
     assert_eq!(

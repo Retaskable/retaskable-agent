@@ -1,6 +1,6 @@
 # The Tray Agent — Spec
 
-Status: v0.1, trimmed for the agent. Builds on [environments.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/environments.md) (three environments, one agent linked to several), [cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) sections 4.2, 5, 6 and 9, [agent.md](agent.md) sections 8 to 10 and [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md). Section 2's first list is what the human asked for; everything marked **[Proposal]** is the drafter's, and is the human's call.
+Status: v0.2 (backlog `drop-game-pictures`), trimmed for the agent. Builds on [environments.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/environments.md) (three environments, one agent linked to several), [cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) sections 4.2, 5, 6 and 9, [agent.md](agent.md) sections 8 to 10 and [projects.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/projects.md). Section 2's first list is what the human asked for; everything marked **[Proposal]** is the drafter's, and is the human's call.
 
 Theme: Website
 
@@ -27,7 +27,7 @@ This spec is split: each section below is its own file in [tray/](tray/). Read t
 ## 5. What the agent runs for retaskable.com
 
 - [tray/05-what-retaskable-com-must-do-first.md](tray/05-what-retaskable-com-must-do-first.md)
-- [tray/05.3-private-galleries-and-pictures-from.md](tray/05.3-private-galleries-and-pictures-from.md): 5.3 Galleries and pictures on the computer
+- [tray/05.3-pictures-in-what-you-send.md](tray/05.3-pictures-in-what-you-send.md): 5.3 Pictures on the computer
 
 ## 6. Build order
 

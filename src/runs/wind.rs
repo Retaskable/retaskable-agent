@@ -62,3 +62,89 @@ impl RunWait {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    fn wait_with(
+        limit: Duration,
+        held: impl Fn() -> usize + Send + Sync + 'static,
+        begun: &Arc<AtomicBool>,
+    ) -> RunWait {
+        let begun = begun.clone();
+        RunWait {
+            limit,
+            held: Box::new(held),
+            begin: Box::new(move || begun.store(true, Ordering::SeqCst)),
+        }
+    }
+
+    fn count_of(project: &str) -> usize {
+        held().lock().unwrap().get(project).copied().unwrap_or(0)
+    }
+
+    #[test]
+    fn a_new_report_replaces_that_projects_count_and_others_stay() {
+        // Driver tests share this process-wide map, so look only at this test's own projects.
+        report_held("wind-test-a", 2);
+        report_held("wind-test-b", 3);
+        assert_eq!((count_of("wind-test-a"), count_of("wind-test-b")), (2, 3));
+        report_held("wind-test-a", 1);
+        assert_eq!((count_of("wind-test-a"), count_of("wind-test-b")), (1, 3));
+        // The total counts at least both projects.
+        assert!(held_count() >= 4);
+        report_held("wind-test-a", 0);
+        report_held("wind-test-b", 0);
+    }
+
+    #[test]
+    fn wait_with_nothing_held_returns_without_beginning_to_wind_down() {
+        let begun = Arc::new(AtomicBool::new(false));
+        wait_with(Duration::from_secs(60), || 0, &begun).wait();
+        assert!(!begun.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wait_begins_then_returns_once_the_runs_are_released() {
+        let begun = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counter = polls.clone();
+        // Held for the first three looks, then released.
+        let wait = wait_with(
+            Duration::from_secs(60),
+            move || {
+                if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+                    1
+                } else {
+                    0
+                }
+            },
+            &begun,
+        );
+        let started = Instant::now();
+        wait.wait();
+        assert!(begun.load(Ordering::SeqCst));
+        assert!(polls.load(Ordering::SeqCst) >= 4);
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
+    fn wait_gives_up_at_the_limit_with_runs_still_held() {
+        let begun = Arc::new(AtomicBool::new(false));
+        let wait = wait_with(Duration::from_millis(250), || 1, &begun);
+        let started = Instant::now();
+        wait.wait();
+        let took = started.elapsed();
+        assert!(begun.load(Ordering::SeqCst));
+        assert!(took >= Duration::from_millis(250), "returned early: {took:?}");
+        assert!(took < Duration::from_secs(30), "waited too long: {took:?}");
+    }
+
+    #[test]
+    fn the_real_wait_uses_the_fifteen_minute_limit() {
+        assert_eq!(RunWait::real().limit, Duration::from_secs(15 * 60));
+    }
+}

@@ -3,6 +3,7 @@
 //! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
 //! state.json.
 mod build_end;
+pub mod chore;
 mod locks;
 mod outside;
 mod wind;
@@ -76,6 +77,8 @@ pub struct PendingEnd {
     pub outcome: RunOutcome,
     pub result: Value,
     pub due: Instant,
+    /// A merge turn's end: sent as `merge_result`, not `run_done`.
+    pub merge: bool,
 }
 
 /// No lane was free for a run that needs one.
@@ -124,8 +127,21 @@ impl Runs {
         piece: &str,
         now: Instant,
     ) -> Result<(), NoLane> {
+        self.start_where(pool, token, kind, piece, now, |_| true)
+    }
+
+    /// `start`, taking only a lane `may` accepts.
+    pub fn start_where(
+        &mut self,
+        pool: &mut LanePool,
+        token: &str,
+        kind: RunKind,
+        piece: &str,
+        now: Instant,
+        may: impl Fn(u32) -> bool,
+    ) -> Result<(), NoLane> {
         let lane = if needs_lane(kind) {
-            Some(pool.claim_run(&self.project, piece).ok_or(NoLane)?)
+            Some(pool.claim_run_where(&self.project, piece, may).ok_or(NoLane)?)
         } else {
             None
         };
@@ -154,14 +170,33 @@ impl Runs {
         }
     }
 
-    /// Every live run's and held lock's token, for `run_beat`.
+    /// Every live run's and held lock's token, for `run_beat`: a merge run's turn is beaten by `merge_tokens`.
     pub fn beat_tokens(&self) -> Vec<String> {
-        let mut tokens: Vec<String> = self.live.iter().map(|r| r.token.clone()).collect();
+        let mut tokens: Vec<String> = self
+            .live
+            .iter()
+            .filter(|r| r.kind != RunKind::Merge)
+            .map(|r| r.token.clone())
+            .collect();
         tokens.extend(self.locks.tokens());
         tokens
     }
 
-    /// Applies `run_beat`'s answer: a `stop` cuts that run's trees and ends it `interrupted`, or marks that lock lost.
+    /// Whether a merge turn is live or its result not yet accepted: the store would hand the same turn out again.
+    pub fn merging(&self) -> bool {
+        self.live.iter().any(|r| r.kind == RunKind::Merge) || self.ends.iter().any(|e| e.merge)
+    }
+
+    /// The live merge runs' tokens, which are their turns, for `merge_beat`.
+    pub fn merge_tokens(&self) -> Vec<String> {
+        self.live
+            .iter()
+            .filter(|r| r.kind == RunKind::Merge)
+            .map(|r| r.token.clone())
+            .collect()
+    }
+
+    /// Applies `run_beat`'s (or `merge_beat`'s) answer: a `stop` cuts that run's trees and ends it `interrupted`, or marks that lock lost.
     pub fn apply_beat(&mut self, pool: &mut LanePool, verdicts: &HashMap<String, BeatVerdict>, now: Instant) {
         self.locks.apply_beat(verdicts);
         let stopped: Vec<String> = self
@@ -214,6 +249,7 @@ impl Runs {
         };
         let run = self.live.remove(at);
         run.stop.set();
+        let merge = run.kind == RunKind::Merge;
         if let Some(lane) = run.lane {
             pool.release(
                 lane,
@@ -228,6 +264,7 @@ impl Runs {
             outcome,
             result,
             due: now,
+            merge,
         });
         true
     }

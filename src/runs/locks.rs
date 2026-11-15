@@ -17,6 +17,8 @@ struct Held {
     name: String,
     taken: Instant,
     lost: bool,
+    /// A merge queue turn: beaten with `merge_beat`, not `run_beat`.
+    turn: bool,
 }
 
 /// A project's held locks. Clones share one table.
@@ -41,7 +43,16 @@ impl RunLocks {
             name: name.into(),
             taken,
             lost: false,
+            turn: false,
         });
+    }
+
+    /// Records a merge turn the store just gave (`merge_next`'s token): the loop beats it with `merge_beat`.
+    pub fn add_turn(&self, token: &str, name: &str, taken: Instant) {
+        self.add(token, name, taken);
+        if let Some(l) = self.table().last_mut() {
+            l.turn = true;
+        }
     }
 
     /// Forgets a lock, after `lock_drop` (or once its holder saw it lost).
@@ -55,11 +66,11 @@ impl RunLocks {
         self.table().iter().any(|l| l.token == token && !l.lost)
     }
 
-    /// The tokens to beat: every lock not lost.
+    /// The tokens to beat with `run_beat`: every lock not lost, except merge turns.
     pub fn tokens(&self) -> Vec<String> {
         self.table()
             .iter()
-            .filter(|l| !l.lost)
+            .filter(|l| !l.lost && !l.turn)
             .map(|l| l.token.clone())
             .collect()
     }
@@ -115,6 +126,17 @@ mod tests {
         locks.remove("t1");
         assert!(!locks.held("t1"));
         assert_eq!(locks.tokens(), vec!["t2".to_string()]);
+    }
+
+    #[test]
+    fn a_merge_turn_is_held_but_not_beaten_with_the_runs() {
+        let locks = RunLocks::default();
+        locks.add_turn("T", "merge-main", Instant::now());
+        assert!(locks.held("T"));
+        assert!(locks.tokens().is_empty());
+        assert_eq!(locks.count(), 1);
+        locks.apply_beat(&verdicts(&[("T", BeatVerdict::Stop)]));
+        assert!(!locks.held("T"));
     }
 
     #[test]

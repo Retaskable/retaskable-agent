@@ -1,6 +1,6 @@
 //! Running a fixed command the orchestrator itself chose — never a model's — as a child process
 //! in a checkout, outside any sandbox (docs/specs/agent/04-architecture.md section 4.2;
-//! `agent/src/proc.ts` in the TypeScript agent). Shared by galleries' shoot command (06.8) and
+//! `agent/src/proc.ts` in the TypeScript agent). Shared by
 //! stage 1's checks and npm install (06.3-review.md), which both need the same install-then-run
 //! rule and the same capped, killable command runner.
 use std::io::Read;

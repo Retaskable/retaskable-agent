@@ -4,7 +4,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::watch;
+
 use super::driver::OrchestratorMode;
+use crate::telemetry::debounce::OpenAnomaly;
+
+pub mod sessions;
 
 /// A lane a project's loop holds, and what holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +18,26 @@ pub struct HeldLane {
     pub item_id: String,
     /// The item's title, when the last read of the backlog had it.
     pub title: Option<String>,
+    /// The branch the item's slice is on, when it is known.
+    pub branch: Option<String>,
+    /// Whether a game runs in the lane (Play).
+    pub playing: bool,
+}
+
+/// An item this computer holds a lease on, as the snapshot's `items` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HeldItem {
+    pub id: String,
+    pub title: String,
+    /// The item's status, as the backlog spells it.
+    pub state: String,
+    pub lane: Option<u32>,
+    pub branch: String,
+    pub pr_url: Option<String>,
+    pub attempt: u32,
+    pub chore: bool,
+    /// An expert session's `{ startedBy, detail, queue?, ask? }` (`expert::`), the person's own conversation.
+    pub expert: Option<serde_json::Value>,
 }
 
 /// The backlog could not be reached (or answered something unreadable) on the last pass.
@@ -30,12 +55,30 @@ pub struct ProjectLive {
     /// When the last pass finished with a tick (ISO 8601); `None` before the first.
     pub last_tick: Option<String>,
     pub held: Vec<HeldLane>,
+    /// The items the loop holds a lease on, as of its last pass.
+    pub items: Vec<HeldItem>,
     /// What the last tick would have done: "would ask for work", "would start <item> on lane N".
     pub decision: Option<String>,
     /// Set while the last attempt failed; cleared by the next tick.
     pub store_error: Option<StoreFailure>,
     /// The id of the spec draft being written now, if any (it holds no lane).
     pub drafting: Option<String>,
+    /// What the idle baseline last found on the base branch (fix main), reported with the computer's state.
+    pub fix_main: Option<String>,
+    /// Why the last main sync didn't start, when it didn't.
+    pub sync_main: Option<String>,
+    /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
+    pub chores: Option<crate::backlog::runs::ChoreCount>,
+    /// The store's last vet summary; `None` before a run.
+    pub vet: Option<crate::backlog::shown::VetView>,
+    /// The store's staging smoke fact; `None` when it holds none.
+    pub smoke: Option<crate::store::SmokeState>,
+    /// When Claude's limit lifts (ISO 8601), while the loop can't start work because Claude is at its limit.
+    pub limit_resets_at: Option<String>,
+    /// The instant `limit_resets_at` was made from, so the same limit keeps the same string pass after pass.
+    pub limit_until: Option<std::time::Instant>,
+    /// The watchdog's open anomalies as of its last minute, oldest first.
+    pub anomalies: Vec<crate::telemetry::debounce::OpenAnomaly>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -45,19 +88,88 @@ pub struct LiveState {
     /// In `runs` mode, the kinds of run this computer can take (`plan`, `build`, ...); empty with no runner.
     pub run_kinds: Vec<String>,
     pub projects: BTreeMap<String, ProjectLive>,
+    /// Agent CI's slot, Docker and discovery (agent-ci.md); `None` unless the `agent-ci` loop runs.
+    pub ci: Option<crate::agent_ci::CiLive>,
+    /// How many sessions the shared pool allows at once (auto concurrency's number once it has stepped); 0 before a pass.
+    pub concurrency: u32,
+}
+
+/// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
+type Reported = (
+    u32,
+    BTreeMap<
+        String,
+        (
+            bool,
+            Option<String>,
+            Vec<OpenAnomaly>,
+            Vec<HeldLane>,
+            Vec<HeldItem>,
+            Option<crate::store::SmokeState>,
+        ),
+    >,
+);
+
+fn reported(state: &LiveState) -> Reported {
+    let projects = state
+        .projects
+        .iter()
+        .map(|(id, p)| {
+            (
+                id.clone(),
+                (
+                    p.paused,
+                    p.limit_resets_at.clone(),
+                    p.anomalies.clone(),
+                    p.held.clone(),
+                    p.items.clone(),
+                    p.smoke.clone(),
+                ),
+            )
+        })
+        .collect();
+    (state.concurrency, projects)
 }
 
 /// Shared between the loops (writers) and the status handler (reader).
 #[derive(Debug, Clone, Default)]
-pub struct LiveHandle(Arc<Mutex<LiveState>>);
+pub struct LiveHandle(Arc<Mutex<LiveState>>, sessions::Sessions, Arc<watch::Sender<u64>>);
+
+impl PartialEq for LiveHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 impl LiveHandle {
+    /// Sets the machine-wide mode, once it is known.
+    pub fn with_mode(self, mode: OrchestratorMode) -> Self {
+        self.lock().mode = mode;
+        self
+    }
+
     pub fn new(mode: OrchestratorMode) -> Self {
-        Self(Arc::new(Mutex::new(LiveState {
-            mode,
-            run_kinds: Vec::new(),
-            projects: BTreeMap::new(),
-        })))
+        Self(
+            Arc::new(Mutex::new(LiveState {
+                mode,
+                run_kinds: Vec::new(),
+                projects: BTreeMap::new(),
+                ci: None,
+                concurrency: 0,
+            })),
+            sessions::Sessions::default(),
+            Arc::default(),
+        )
+    }
+
+    /// The sessions running now; the loop registers them and the status handler reads them.
+    pub fn sessions(&self) -> &sessions::Sessions {
+        &self.1
+    }
+
+    /// Has session ends add Cursor's and Codex's tokens to machine.json in `dir`.
+    pub fn with_machine_dir(self, dir: std::path::PathBuf) -> Self {
+        Self(self.0, self.1.with_machine_dir(dir), self.2)
     }
 
     /// Says which kinds of run `runs` mode can take.
@@ -65,32 +177,126 @@ impl LiveHandle {
         self.lock().run_kinds = kinds;
     }
 
+    /// Changes whenever a project's reported fields (paused, the limit's reset, a loop appearing) or `concurrency`
+    /// change; a pass that leaves them as they were doesn't.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.2.subscribe()
+    }
+
+    /// Runs `f` on the state and signals [`subscribe`](Self::subscribe) when what the snapshot reports changed.
+    fn edit(&self, f: impl FnOnce(&mut LiveState)) {
+        let mut state = self.lock();
+        let before = reported(&state);
+        f(&mut state);
+        if reported(&state) != before {
+            self.2.send_modify(|n| *n += 1);
+        }
+    }
+
+    /// Signals [`subscribe`](Self::subscribe) so the snapshot is resent (Play main started or stopped).
+    pub fn bump(&self) {
+        self.2.send_modify(|n| *n += 1);
+    }
+
+    /// The shared pool's effective concurrency, as of the last pass.
+    pub fn set_concurrency(&self, concurrency: u32) {
+        self.edit(|s| s.concurrency = concurrency);
+    }
+
+    /// Says when Claude's limit lifts while the project can't start work for it, or nothing.
+    pub fn set_limit(&self, project: &str, until: Option<std::time::Instant>) {
+        self.edit(|s| {
+            let entry = s.projects.entry(project.to_string()).or_default();
+            if entry.limit_until != until {
+                entry.limit_until = until;
+                entry.limit_resets_at =
+                    until.map(|u| iso8601_in(u.saturating_duration_since(std::time::Instant::now())));
+            }
+        });
+    }
+
+    /// The watchdog's open anomalies for the project, as of this minute's check.
+    pub fn set_anomalies(&self, project: &str, anomalies: Vec<OpenAnomaly>) {
+        self.edit(|s| s.projects.entry(project.to_string()).or_default().anomalies = anomalies);
+    }
+
+    /// The items the project holds a lease on, as of this pass.
+    pub fn set_items(&self, project: &str, items: Vec<HeldItem>) {
+        self.edit(|s| s.projects.entry(project.to_string()).or_default().items = items);
+    }
+
     pub fn snapshot(&self) -> LiveState {
         self.lock().clone()
     }
 
+    /// The CI loop's poll writes its fields.
+    pub fn update_ci(&self, f: impl FnOnce(&mut crate::agent_ci::CiLive)) {
+        f(self.lock().ci.get_or_insert_default());
+    }
+
     /// Registers a project's loop, so the page knows it runs before its first pass ends.
     pub fn register(&self, project: &str) {
-        self.lock().projects.entry(project.to_string()).or_default();
+        self.edit(|s| {
+            s.projects.entry(project.to_string()).or_default();
+        });
     }
 
     /// A pass that ticked: replaces the entry and clears any store error.
     pub fn ticked(&self, project: &str, paused: bool, at: String, held: Vec<HeldLane>, decision: String) {
-        let mut state = self.lock();
-        let entry = state.projects.entry(project.to_string()).or_default();
-        *entry = ProjectLive {
-            paused,
-            last_tick: Some(at),
-            held,
-            decision: Some(decision),
-            store_error: None,
-            drafting: entry.drafting.take(),
-        };
+        self.edit(|state| {
+            let entry = state.projects.entry(project.to_string()).or_default();
+            *entry = ProjectLive {
+                paused,
+                last_tick: Some(at),
+                held,
+                items: std::mem::take(&mut entry.items),
+                decision: Some(decision),
+                store_error: None,
+                drafting: entry.drafting.take(),
+                fix_main: entry.fix_main.take(),
+                sync_main: entry.sync_main.take(),
+                chores: entry.chores,
+                vet: entry.vet.take(),
+                smoke: entry.smoke.take(),
+                limit_resets_at: entry.limit_resets_at.take(),
+                limit_until: entry.limit_until.take(),
+                anomalies: std::mem::take(&mut entry.anomalies),
+            };
+        });
     }
 
     /// Says which draft the project is writing now, or none.
     pub fn set_drafting(&self, project: &str, draft: Option<String>) {
         self.lock().projects.entry(project.to_string()).or_default().drafting = draft;
+    }
+
+    /// Says what the idle baseline found, or nothing.
+    pub fn set_fix_main(&self, project: &str, note: Option<String>) {
+        self.lock().projects.entry(project.to_string()).or_default().fix_main = note;
+    }
+
+    /// Says why the main sync didn't start, or nothing.
+    pub fn set_sync_main(&self, project: &str, note: Option<String>) {
+        self.lock().projects.entry(project.to_string()).or_default().sync_main = note;
+    }
+
+    /// Takes what the store's `smoke` and `vet` facts say; a change in the smoke resends the snapshot.
+    pub fn set_shown(&self, project: &str, shown: crate::backlog::shown::Shown) {
+        self.edit(|s| {
+            let entry = s.projects.entry(project.to_string()).or_default();
+            entry.smoke = shown.smoke;
+            entry.vet = shown.vet;
+        });
+    }
+
+    /// The store's smoke fact as of the last pass.
+    pub fn smoke(&self, project: &str) -> Option<crate::store::SmokeState> {
+        self.lock().projects.get(project).and_then(|p| p.smoke.clone())
+    }
+
+    /// The store's last chore count for the project.
+    pub fn set_chores(&self, project: &str, chores: crate::backlog::runs::ChoreCount) {
+        self.lock().projects.entry(project.to_string()).or_default().chores = Some(chores);
     }
 
     /// A pass that was skipped for a store error. The tick fields stay as the last good pass left them.
@@ -108,7 +314,12 @@ impl LiveHandle {
 
 /// Now, as ISO 8601 (UTC).
 pub fn now_iso8601() -> String {
-    time::OffsetDateTime::now_utc()
+    iso8601_in(std::time::Duration::ZERO)
+}
+
+/// `after` from now, as ISO 8601 (UTC).
+pub fn iso8601_in(after: std::time::Duration) -> String {
+    (time::OffsetDateTime::now_utc() + after)
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
 }
@@ -122,6 +333,8 @@ mod tests {
             lane,
             item_id: item.to_string(),
             title: None,
+            branch: None,
+            playing: false,
         }]
     }
 
@@ -170,6 +383,43 @@ mod tests {
         assert_eq!(live.snapshot().projects["p"].store_error.as_ref().unwrap().since, "t3");
     }
 
+    #[test]
+    fn subscribers_hear_only_of_changes_to_what_the_snapshot_reports() {
+        let live = LiveHandle::default();
+        let mut rx = live.subscribe();
+        let changed = |rx: &mut watch::Receiver<u64>| {
+            rx.has_changed().unwrap() && {
+                rx.borrow_and_update();
+                true
+            }
+        };
+        live.register("p");
+        assert!(changed(&mut rx), "a loop appearing");
+        live.register("p");
+        live.ticked("p", false, "t1".into(), vec![], "d".into());
+        live.ticked("p", false, "t2".into(), vec![], "e".into());
+        assert!(!changed(&mut rx), "ticks that change nothing reported");
+        live.ticked("p", false, "t2".into(), held(1, "a"), "e".into());
+        assert!(changed(&mut rx), "a held lane");
+        live.ticked("p", false, "t2".into(), held(1, "a"), "e".into());
+        assert!(!changed(&mut rx), "the same lanes again");
+        live.ticked("p", true, "t3".into(), vec![], "d".into());
+        assert!(changed(&mut rx), "paused");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        live.set_limit("p", Some(until));
+        assert!(changed(&mut rx), "limit");
+        live.ticked("p", true, "t4".into(), vec![], "d".into());
+        assert!(live.snapshot().projects["p"].limit_resets_at.is_some());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        live.set_limit("p", Some(until));
+        live.set_concurrency(0);
+        assert!(!changed(&mut rx), "same values");
+        live.set_concurrency(2);
+        assert!(changed(&mut rx), "concurrency");
+    }
+
+    // The clone is what's under test, so it must stay even though `live` isn't used by value after.
+    #[allow(clippy::redundant_clone)]
     #[test]
     fn clones_share_state_and_now_is_rfc3339() {
         let live = LiveHandle::default();

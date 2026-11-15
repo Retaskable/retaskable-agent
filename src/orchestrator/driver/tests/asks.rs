@@ -5,7 +5,7 @@ use crate::orchestrator::driver::{AskHost, AskJob, AskReply, AskStore, WAITING};
 use crate::view::AskCommand;
 
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     /// `blocked` answers: the project's pause or the daily budget.
     blocked: AtomicBool,
     /// The store can't be read.
@@ -13,7 +13,8 @@ struct Host {
     hold: AtomicBool,
     /// The session fails: the host answers that it couldn't.
     crashed: AtomicBool,
-    jobs: Mutex<Vec<AskCommand>>,
+    pub(super) jobs: Mutex<Vec<AskCommand>>,
+    engines: Mutex<Vec<Option<EngineId>>>,
     /// Tool events the session emits, a pause apart, before it answers.
     reads: Mutex<Vec<&'static str>>,
 }
@@ -31,6 +32,7 @@ impl AskHost for Host {
     }
     fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
         self.jobs.lock().unwrap().push(job.ask.clone());
+        self.engines.lock().unwrap().push(job.engine);
         let (broken, hold) = (self.broken.load(Ordering::SeqCst), self.hold.load(Ordering::SeqCst));
         let crashed = self.crashed.load(Ordering::SeqCst);
         let reads = std::mem::take(&mut *self.reads.lock().unwrap());
@@ -67,7 +69,8 @@ impl AskHost for Host {
     }
 }
 
-async fn store() -> (String, Asked) {
+/// A store that records every op, refusing the op `fail` with a 500.
+async fn store_failing(fail: &'static str) -> (String, Asked) {
     let asked: Asked = Default::default();
     let seen = asked.clone();
     let app = Router::new().route(
@@ -77,7 +80,18 @@ async fn store() -> (String, Asked) {
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
-                Json(json!({ "value": if op == "list" { json!([]) } else { Value::Null } }))
+                if op == fail {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "boom" })),
+                    );
+                }
+                let value = match op.as_str() {
+                    "list" => json!([]),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
+                    _ => Value::Null,
+                };
+                (axum::http::StatusCode::OK, Json(json!({ "value": value })))
             }
         }),
     );
@@ -88,16 +102,19 @@ async fn store() -> (String, Asked) {
 }
 
 async fn rig_with_host() -> (Rig, Arc<Host>, Asked) {
-    let (base, asked) = store().await;
+    rig_failing("").await
+}
+
+async fn rig_failing(fail: &'static str) -> (Rig, Arc<Host>, Asked) {
+    let (base, asked) = store_failing(fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude"]));
     let host = Arc::new(Host::default());
     rig.machine.asks = Some(host.clone());
     (rig, host, asked)
 }
 
-fn ask(id: &str, text: &str) -> AskCommand {
+pub(super) fn ask(id: &str, text: &str) -> AskCommand {
     AskCommand {
         project: "p0".into(),
         ask_id: id.into(),
@@ -108,11 +125,11 @@ fn ask(id: &str, text: &str) -> AskCommand {
     }
 }
 
-fn push(rig: &Rig, a: AskCommand) {
+pub(super) fn push(rig: &Rig, a: AskCommand) {
     rig.machine.links.item_commands.push_ask(a);
 }
 
-fn reports(asked: &Asked) -> Vec<Value> {
+pub(super) fn reports(asked: &Asked) -> Vec<Value> {
     (asked.lock().unwrap().iter())
         .filter(|(op, _)| op == "ask_report")
         .map(|(_, a)| a.clone())
@@ -120,7 +137,7 @@ fn reports(asked: &Asked) -> Vec<Value> {
 }
 
 /// Passes until the store has `n` ask reports.
-async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent = reports(asked);
@@ -132,7 +149,7 @@ async fn until(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     panic!("the store never got {n} ask reports: {:?}", reports(asked));
 }
 
-async fn quiet_passes(rig: &mut Rig) {
+pub(super) async fn quiet_passes(rig: &mut Rig) {
     for _ in 0..8 {
         rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -254,17 +271,6 @@ async fn a_store_error_leaves_the_ask_unanswered_until_the_store_is_back() {
 }
 
 #[tokio::test]
-async fn with_the_flag_off_an_ask_is_refused_and_nothing_runs() {
-    let (mut rig, host, asked) = rig_with_host().await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    push(&rig, ask("k1", "hello"));
-    quiet_passes(&mut rig).await;
-    assert!(host.jobs.lock().unwrap().is_empty());
-    assert!(reports(&asked).is_empty());
-    assert!(!rig.machine.links.item_commands.ask_on("p0"));
-}
-
-#[tokio::test]
 async fn a_session_that_fails_is_answered_once_and_not_run_again() {
     let (mut rig, host, asked) = rig_with_host().await;
     host.crashed.store(true, Ordering::SeqCst);
@@ -299,4 +305,86 @@ async fn progress_reports_rising_time_and_the_file_read_then_the_answer() {
     assert!(progress.iter().any(|p| p.ends_with("reading src/a.rs")), "{progress:?}");
     assert!(progress.last().unwrap().ends_with("reading src/c.rs"), "{progress:?}");
     assert!(progress[0].starts_with("Thinking for 0s"), "{progress:?}");
+}
+
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// Cursor is at its limit.
+fn start_rules(rig: &mut Rig, choice: Value, claude_out: bool, cursor_out: bool) {
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+    rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
+    if cursor_out {
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Cursor, out_for(600));
+    }
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_an_ask_on_cursor_is_answered() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    start_rules(&mut rig, json!({"roles": {"chat": "cursor"}}), true, false);
+    push(&rig, ask("k1", "hello"));
+    until(&mut rig, &asked, 1).await;
+    assert_eq!(*host.engines.lock().unwrap(), vec![None]);
+}
+
+#[tokio::test]
+async fn an_ask_on_claude_with_claude_out_is_answered_on_cursor_used_here() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, false);
+    push(&rig, ask("k1", "hello"));
+    until(&mut rig, &asked, 1).await;
+    assert_eq!(*host.engines.lock().unwrap(), vec![Some(EngineId::Cursor)]);
+}
+
+#[tokio::test]
+async fn an_ask_waits_when_no_engine_may_start() {
+    let (mut rig, host, asked) = rig_with_host().await;
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, true);
+    push(&rig, ask("k1", "hello"));
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "waiting");
+    assert!(host.jobs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_ask_report_the_store_refuses_is_logged_as_a_store_error_for_the_ask() {
+    let (mut rig, _host, _asked) = rig_failing("ask_report").await;
+    push(&rig, ask("k1", "hello"));
+    for _ in 0..40 {
+        rig.machine.pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let logged: Vec<Value> = (rig.lp(0).events().recent().iter())
+        .map(|e| e.to_value())
+        .filter(|v| v["kind"] == "store_error" && v["op"] == "ask_report")
+        .collect();
+    assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
+    assert_eq!(logged[0]["item"], "k1");
+}
+
+/// Claude at its usage limit holds an ask only when the model is down or Claude is signed out; else the ask starts
+/// (on the local model).
+#[tokio::test]
+async fn at_the_limit_an_ask_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
+    ] {
+        let (mut rig, host, _asked) = rig_with_host().await;
+        rig.machine.local = model;
+        rig.machine.claude_signed_out_until = signed_out.then(|| std::time::Instant::now() + Duration::from_secs(60));
+        rig.machine
+            .engine_limits
+            .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(3600));
+        push(&rig, ask("k1", "hello"));
+        quiet_passes(&mut rig).await;
+        assert_eq!(host.jobs.lock().unwrap().len(), usize::from(starts), "{signed_out}");
+    }
 }

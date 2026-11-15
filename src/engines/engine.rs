@@ -12,7 +12,7 @@ use serde_json::Value;
 
 /// `EngineId` in `shared/types.ts`: which AI tool a session runs on. Missing on a `SessionSpec`
 /// means `Claude`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EngineId {
     #[default]
@@ -57,7 +57,8 @@ pub struct SessionSpec {
     pub schema: Value,
     pub cwd: PathBuf,
     pub max_turns: Option<u32>,
-    /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check.
+    /// 0 (or anything <= 0) means no cap, matching `claude.ts`'s `budget > 0` check. `run_session_tracked` runs
+    /// it as 0 on a Claude subscription (`tiers::signal_on`), whatever the settings say.
     pub budget_usd: f64,
     pub start: SessionStart,
     /// A role that only reads (e.g. a scout): Cursor's `--mode ask` and a read-only allowlist,
@@ -162,8 +163,8 @@ impl EphemeralSessionConfig<'_> {
 pub struct CursorOptions {
     /// Cursor's own model name (e.g. "gpt-5", "sonnet-4.5"); empty or missing means "auto".
     pub model: Option<String>,
-    /// Extra allow entries for a writing session, beyond the fixed list (a project's checks,
-    /// galleries and `engines.allow`).
+    /// Extra allow entries for a writing session, beyond the fixed list (a project's checks
+    /// and `engines.allow`).
     pub allow: Vec<String>,
     /// The code host's CLI program to allow (`"gh"`, `"glab"`), or `None` for a project with no
     /// remote. Only meaningful when this `CursorOptions` itself is present — a `SessionSpec` with
@@ -244,6 +245,21 @@ pub struct SessionResult {
     /// A result's own token counts (`tokensOf` in `cursor.ts`): Cursor's stand-in for a cost,
     /// since it never reports one. `None` when the engine doesn't report tokens, or reported none.
     pub tokens: Option<Tokens>,
+}
+
+/// Seconds from now until a `rejected` usage reading's `resetsAt` (epoch seconds), if it has one ahead. When the weekly window is what rejected it, that is the week's reset: a
+/// top-level `rateLimitType: "seven_day"` uses its own `resetsAt`; a reading with `unifiedWindows.seven_day`
+/// rejected (or full) takes the later of that window's `resetsAt` and the top-level one.
+pub fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
+    let usage = usage.filter(|u| u["status"] == "rejected")?;
+    let mut at = usage["resetsAt"].as_u64();
+    if let Some(week) = usage.get("unifiedWindows").and_then(|w| w.get("seven_day"))
+        && (week["status"] == "rejected" || week["utilization"].as_f64().is_some_and(crate::tiers::utilization_full))
+    {
+        at = at.max(week["resetsAt"].as_u64());
+    }
+    let now = u64::try_from(crate::telemetry::now_secs()).ok()?;
+    at?.checked_sub(now).map(std::time::Duration::from_secs)
 }
 
 /// One result's token counts (`tokensOf` in `cursor.ts`). Cache tokens are left out — they're not
@@ -399,6 +415,22 @@ pub(crate) fn test_spec(cwd: &std::path::Path, prompt: &str) -> SessionSpec {
 /// A `SessionResult` test fixture shared by `write_note`'s and `run_round`'s own tests: a result
 /// with a cost, and nothing else interesting. Callers set `ok`, `subtype`, `structured` and `error`.
 #[cfg(test)]
+/// A read-only session config for tests: sonnet, $1, no engine, local or cursor settings.
+#[cfg(test)]
+pub(crate) fn test_config() -> EphemeralSessionConfig<'static> {
+    EphemeralSessionConfig {
+        cwd: std::path::Path::new("."),
+        budget_usd: 1.0,
+        model: "sonnet".into(),
+        local: None,
+        engine: None,
+        cursor: None,
+        sandbox: false,
+        shell: true,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, error: Option<&str>) -> SessionResult {
     SessionResult {
         ok,
@@ -417,7 +449,44 @@ pub(crate) fn test_result(ok: bool, subtype: &str, structured: Option<Value>, er
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    fn in_secs(n: u64) -> u64 {
+        u64::try_from(crate::telemetry::now_secs()).unwrap() + n
+    }
+
+    fn secs(d: Option<std::time::Duration>) -> u64 {
+        d.expect("a reset ahead").as_secs()
+    }
+
+    #[test]
+    fn resets_in_a_top_level_weekly_rejection_is_its_own_reset() {
+        let u = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": in_secs(500_000)});
+        assert!(secs(resets_in(Some(&u))) > 499_000);
+    }
+
+    #[test]
+    fn resets_in_a_weekly_window_rejection_takes_the_later_reset() {
+        let u = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
+            "five_hour": {"utilization": 0.4, "resetsAt": in_secs(3600)},
+            "seven_day": {"status": "rejected", "utilization": 1.0, "resetsAt": in_secs(500_000)}}});
+        assert!(secs(resets_in(Some(&u))) > 499_000);
+        let pct = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
+            "seven_day": {"utilization": 100, "resetsAt": in_secs(500_000)}}});
+        assert!(secs(resets_in(Some(&pct))) > 499_000);
+    }
+
+    #[test]
+    fn resets_in_a_five_hour_rejection_is_unchanged_and_no_rejection_is_none() {
+        let u = json!({"status": "rejected", "resetsAt": in_secs(3600), "unifiedWindows": {
+            "seven_day": {"utilization": 0.3, "resetsAt": in_secs(500_000)}}});
+        assert!(secs(resets_in(Some(&u))) <= 3600);
+        let ok = json!({"status": "allowed", "resetsAt": in_secs(3600)});
+        assert_eq!(resets_in(Some(&ok)), None);
+        assert_eq!(resets_in(None), None);
+    }
 
     #[test]
     fn signed_out_is_only_a_failed_claude_result_never_cursor() {

@@ -13,18 +13,21 @@ fn restarted(old: Rig, base: &str) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
-        tags: Vec::new(),
+        tags: Default::default(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
+        cursor_models: Default::default(),
         checks: Default::default(),
         bugs: Default::default(),
         bug_version: "test".into(),
     };
     let mut machine = Machine::new(2, 8, links);
+    machine.base_scope = "restart:".into();
     let store = Store::load(&_dir.path().join("0")).unwrap();
     let mut lp = ProjectLoop::new(
         "p0".into(),
@@ -281,7 +284,7 @@ async fn a_restart_starts_a_session_fresh_on_another_engine_when_its_engine_is_a
 }
 
 #[tokio::test]
-async fn a_restart_resumes_when_its_engine_is_limited_but_nothing_else_can_take_it() {
+async fn an_item_taking_back_its_lane_waits_while_its_engine_is_out() {
     let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
@@ -289,12 +292,157 @@ async fn a_restart_resumes_when_its_engine_is_limited_but_nothing_else_can_take_
     rig.machine.pass().await;
     let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
     let mut rig = restarted(rig, &base);
-    let limited_until = std::time::Instant::now() + Duration::from_secs(600);
-    rig.machine.engine_limits.hit(EngineId::Claude, limited_until);
+    rig.machine
+        .engine_limits
+        .hit(EngineId::Claude, std::time::Instant::now() + Duration::from_secs(600));
     let fake_after = rig.go_live();
     rig.machine.pass().await;
     drop(fake);
     let started = fake_after.started.lock().unwrap().clone();
+    assert!(started.is_empty());
+    assert!(rig.machine.pool.lane_of("p0", "a").is_some());
+}
+
+/// A claimed "a" on lanes of `engines`, the computer restarted with Claude signed out.
+async fn restarted_claude_out(engines: serde_json::Value) -> (Rig, Arc<Fake>) {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": engines })).unwrap();
+    rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": engines })).unwrap();
+    rig.machine.claude_signed_out_until = Some(std::time::Instant::now() + Duration::from_secs(600));
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    (rig, fake)
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_a_cursor_session_resumes() {
+    let (_rig, fake) = restarted_claude_out(json!(["cursor", "cursor"])).await;
+    let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert!(started[0].resume);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_and_the_start_rules_on_a_claude_session_waits_then_resumes() {
+    let (mut rig, fake) = restarted_claude_out(json!(["claude", "claude"])).await;
+    assert!(fake.started.lock().unwrap().is_empty());
+    rig.machine.claude_signed_out_until = None;
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert!(started[0].resume);
+}
+
+/// A held item saved at `needs_human` for `reason`, the computer restarted and the store
+/// listing "a" with `pr_url`; the first pass is returned.
+async fn held_needs_human(reason: &str, pr_url: Option<&str>) -> (Rig, Arc<Fake>, Asked) {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let _fake = rig.go_live();
+    rig.machine.pass().await;
+    let store = &mut rig.lp(0).store;
+    let mut runs = store.runs();
+    let record = runs.get_mut("a").unwrap();
+    record.state = "needs_human".into();
+    record.needs_human_reason = Some(reason.into());
+    store.set_runs(&runs);
+    store.save().unwrap();
+    let mut listed = item("a", "needs_person");
+    if let Some(url) = pr_url {
+        listed["prUrl"] = json!(url);
+    }
+    let (base, asked) = claim_stub(json!([listed]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    (rig, fake, asked)
+}
+
+const LIMIT: &str = crate::orchestrator::driver::settle::CURSOR_LIMIT_STOP;
+
+#[tokio::test]
+async fn a_restart_gives_back_an_item_held_only_for_cursors_limit() {
+    let (mut rig, _fake, asked) = held_needs_human(LIMIT, None).await;
+    let sent = ops(&asked);
+    let at = sent.iter().position(|o| o == "report").unwrap();
+    assert_eq!(sent[at + 1], "release");
+    let note = asked.lock().unwrap().iter().find(|(o, _)| o == "report").unwrap().1["note"].clone();
+    let machine = rig.machine.links.machine.clone();
+    assert_eq!(
+        note,
+        format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed")
+    );
+    assert!(!rig.lp(0).runs.contains_key("a"));
+    assert!(!rig.lp(0).store.runs().contains_key("a"));
+    assert!(rig.lp(0).unreleased.is_empty());
+    // A later pass gives nothing back again.
+    let before = ops(&asked).iter().filter(|o| *o == "release").count();
+    rig.machine.pass().await;
+    assert_eq!(ops(&asked).iter().filter(|o| *o == "release").count(), before);
+}
+
+#[tokio::test]
+async fn a_restart_readopts_the_other_needs_human_items() {
+    for (reason, pr) in [
+        (LIMIT, Some("https://github.com/o/p/pull/3")),
+        ("Review escalated", None),
+    ] {
+        let (mut rig, _fake, asked) = held_needs_human(reason, pr).await;
+        assert!(!ops(&asked).iter().any(|o| o == "release"));
+        assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    }
+}
+
+/// "a" restarted with Claude limited, the model `local`;
+/// takeover exists. Its first transcript line names `model`. Returns what the pass started.
+async fn restarted_limited(model: &str, local: crate::local_model::LocalModel) -> Vec<StartRequest> {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let session = fake.started.lock().unwrap()[0].session_id.clone();
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    let dir = rig._dir.path().to_path_buf();
+    let runs = crate::paths::run_dir(&dir, "p0", "a");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(
+        runs.join(format!("{session}.jsonl")),
+        format!("{{\"engine\":\"claude\",\"model\":\"{model}\"}}\n"),
+    )
+    .unwrap();
+    rig.lp(0).data_dir = Some(dir);
+    rig.machine.local = local;
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": ["claude", "claude"] })).unwrap();
+    let limited_until = std::time::Instant::now() + Duration::from_secs(600);
+    rig.machine.engine_limits.hit(EngineId::Claude, limited_until);
+    let fake_after = rig.go_live();
+    rig.machine.pass().await;
+    fake_after.started.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn at_the_limit_a_local_session_resumes_and_an_anthropic_one_waits() {
+    use crate::local_model::LocalModel;
+    let local = restarted_limited("local", LocalModel::up()).await;
+    assert_eq!(local.len(), 1);
+    assert!(local[0].resume);
+    assert_eq!(local[0].engine, EngineId::Claude);
+    assert_eq!(local[0].takeover, None);
+    // An Anthropic session is held until the reset, and never moves to the local model.
+    assert!(restarted_limited("sonnet", LocalModel::up()).await.is_empty());
+}
+
+#[tokio::test]
+async fn with_the_model_down_a_local_session_is_held_like_any_claude_one() {
+    use crate::local_model::LocalModel;
+    assert!(restarted_limited("local", LocalModel::off()).await.is_empty());
 }

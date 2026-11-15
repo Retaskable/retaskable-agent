@@ -2,6 +2,7 @@
 //! structured result, and reading that result into the `planned` result for `run_done`; and [`PlanRuns`], which
 //! runs the store's `plan` runs: one read-only planner session in the project's base checkout, one at a time on
 //! this computer.
+use crate::text::{is_blank, non_blank};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -10,17 +11,19 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Map, Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
-use super::session::{exists, quiet_timeout};
+use super::session::watch_for;
 use super::slot::{Slot, SlotGuard};
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
+use crate::engines::cursor::with_project;
+use crate::engines::engine::CursorOptions;
 use crate::engines::{
-    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of,
-    run_session_tracked,
+    EngineId, EphemeralSessionConfig, Role, TranscriptSink, describe_failure, engine_for, engine_of, place,
+    run_session_tracked, start_engine,
 };
 use crate::env::Env;
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::process_tree::ProcessTree;
 use crate::prompt::render_prompt;
 use crate::runs::winding_down;
@@ -44,8 +47,7 @@ fn specs(piece: &RunPiece) -> String {
     };
     let list: Vec<String> = list
         .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(|s| non_blank(&s).map(String::from))
         .collect();
     if list.is_empty() {
         "none (find them in `docs/specs`)".into()
@@ -158,7 +160,7 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
             return Err(format!("Piece {n} has no title."));
         }
         for field in ["what", "doneWhen"] {
-            if text(p, field).trim().is_empty() {
+            if is_blank(&text(p, field)) {
                 return Err(format!("Piece {n} (\"{title}\") has an empty {field}."));
             }
         }
@@ -202,7 +204,7 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     let mut result = Map::new();
     result.insert("pieces".into(), Value::Array(out));
     let no_flag = text(structured, "noFlag");
-    if !no_flag.trim().is_empty() {
+    if !is_blank(&no_flag) {
         result.insert("noFlag".into(), Value::String(no_flag.trim().to_string()));
     }
     Ok(Value::Object(result))
@@ -215,47 +217,80 @@ pub struct Roster {
     pub projects: Vec<ProjectConfig>,
     pub choice: EngineChoiceConfig,
     pub env: Env,
-    pub models: ModelsConfig,
+    pub cursor_models: CursorModels,
+    /// The sessions running now: a plan or look lists itself while it runs.
+    pub sessions: Sessions,
+    /// The computer's local model, for the tier ladder.
+    pub local: crate::local_model::LocalModel,
 }
 
 /// What a plan or look session runs with.
 pub(super) struct Job {
     pub data_dir: PathBuf,
     pub project: ProjectConfig,
+    pub engine: EngineId,
     pub bin: PathBuf,
+    pub cursor: Option<CursorOptions>,
     pub model: String,
+    pub sessions: Sessions,
+    /// The row the session lists itself as.
+    pub info: SessionInfo,
+    pub local: crate::local_model::LocalModel,
 }
 
 impl Roster {
-    fn on_claude(&self, role: Role, project: Option<&ProjectConfig>) -> bool {
-        let engines = project.and_then(|p| p.engines.as_ref());
-        engine_for(&self.choice, engines, role, None) == Engine::Claude
+    /// `kind` when `slot` is free; the role's engine (the machine's choice unless a project overrides it) is placed
+    /// by `begin`.
+    pub(super) fn kinds(&self, _role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
+        if slot.busy() { Vec::new() } else { vec![kind] }
     }
 
-    /// `kind`, unless the role runs on another engine (only Claude sessions run in the Rust agent yet; the role's
-    /// engine is the machine's choice unless a project overrides it) or `slot` is held.
-    pub(super) fn kinds(&self, role: Role, kind: RunKind, slot: &Slot) -> Vec<RunKind> {
-        let claude = self.on_claude(role, None) && self.projects.iter().all(|p| self.on_claude(role, Some(p)));
-        if claude && !slot.busy() { vec![kind] } else { Vec::new() }
-    }
-
-    /// Takes `slot` and sets up the session of `request` for `role` on `model`; `Err` gives the run back.
+    /// Takes `slot` and sets up the session of `request` for `role` on `model` (Claude's; Cursor's comes from the
+    /// `top` name); `Err` gives the run back, naming a binary that isn't there.
     pub(super) fn begin(
         &self,
         role: Role,
         request: &RunRequest,
         slot: &Slot,
-        model: String,
+        tier: impl FnOnce(bool) -> &'static str,
     ) -> Result<(Job, SlotGuard), String> {
-        let (project, bin) = claude_project(&self.projects, request, &self.env, |p| self.on_claude(role, Some(p)))?;
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id_or_derived() == request.project)
+            .ok_or_else(|| format!("no project {} is configured", request.project))?
+            .clone();
+        let engine = start_engine(
+            request.engine,
+            engine_for(&self.choice, project.engines.as_ref(), role, None),
+        );
+        let placed = place(engine, role, &self.env, &self.cursor_models)?;
+        // `local` only where the role is on Claude, the model is up.
+        let tier = tier(self.local.ladder_for(placed.engine == EngineId::Claude));
+        let model = tier.to_string();
         let guard = slot
             .take()
             .ok_or("a plan or look run is already running on this computer")?;
+        let info = SessionInfo {
+            project: request.project.clone(),
+            item_id: piece_id(&request.piece).to_string(),
+            title: Some(request.piece.title.clone()),
+            role,
+            lane: None,
+            engine: placed.engine,
+            model: model_name(placed.engine, &model, placed.cursor.as_ref()),
+        };
+        let cursor = placed.cursor.map(|c| with_project(&project, c));
         let job = Job {
+            sessions: self.sessions.clone(),
+            info,
             data_dir: self.data_dir.clone(),
             project,
-            bin,
+            engine: placed.engine,
+            bin: placed.bin,
+            cursor,
             model,
+            local: self.local.clone(),
         };
         Ok((job, guard))
     }
@@ -280,9 +315,9 @@ impl RunStarter for PlanRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let (job, guard) = self
-            .roster
-            .begin(Role::Planner, &request, &self.slot, tiers::chore_tier().to_string())?;
+        let (job, guard) = self.roster.begin(Role::Planner, &request, &self.slot, |local| {
+            tiers::floor(tiers::OPUS, self.roster.sessions.claude_at_limit(), local)
+        })?;
         let cut = Cut::default();
         spawn_run(guard, request.clone(), cut.clone(), plan(job, request, cut));
         Ok(())
@@ -297,29 +332,6 @@ impl Cut {
     pub(super) fn is_cut(&self) -> bool {
         self.0.lock().unwrap().as_ref().is_some_and(|t| t.was_cut())
     }
-}
-
-/// The project of `request`, and the `claude` binary, for a starter whose role runs on Claude (`on_claude`); `Err`
-/// gives the run back.
-pub(super) fn claude_project(
-    projects: &[ProjectConfig],
-    request: &RunRequest,
-    env: &Env,
-    on_claude: impl Fn(&ProjectConfig) -> bool,
-) -> Result<(ProjectConfig, PathBuf), String> {
-    let project = projects
-        .iter()
-        .find(|p| p.id_or_derived() == request.project)
-        .ok_or_else(|| format!("no project {} is configured", request.project))?
-        .clone();
-    if !on_claude(&project) {
-        return Err("only Claude sessions run in the Rust agent yet".into());
-    }
-    let bin = resolve_claude_on_path(env).map_err(|e| format!("{e:#}"))?;
-    if !exists(&bin, env) {
-        return Err(format!("the claude binary wasn't found ({})", bin.display()));
-    }
-    Ok((project, bin))
 }
 
 /// Runs `work` as the run's task, holding `guard` until it ends. The inner task is joined, so even a panic in it
@@ -366,13 +378,15 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
     } else {
         PathBuf::from(&project.repo_path)
     };
+    // Waits for the local model's slot when the tier is `local`; held until the session ends.
+    let claimed = job.local.claim(&job.model).await;
     let spec = EphemeralSessionConfig {
         cwd: &cwd,
         budget_usd: project.budget.planner_usd,
-        model: job.model.clone(),
-        local: None,
-        engine: Some(EngineId::Claude),
-        cursor: None,
+        model: tiers::claude_model_for(job.engine, &job.model),
+        local: claimed.as_ref().map(|(_, target)| target.clone()),
+        engine: Some(job.engine),
+        cursor: job.cursor.clone(),
         sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         shell: true,
     }
@@ -390,12 +404,14 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
             processes.add(&token, tree);
         }
     });
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
-    let ran = async {
-        let engine = engine_of(Some(EngineId::Claude))?;
-        run_session_tracked(engine.as_ref(), &job.bin, &spec, "plan", Some(&sink), quiet, Some(tx)).await
-    }
-    .await;
+    let quiet = watch_for(project, job.engine);
+    let ran = job
+        .sessions
+        .track(job.info.clone(), async {
+            let engine = engine_of(Some(job.engine))?;
+            run_session_tracked(engine.as_ref(), &job.bin, &spec, "plan", Some(&sink), quiet, Some(tx)).await
+        })
+        .await;
     if request.stop.stopped() || cut.is_cut() {
         return None;
     }

@@ -11,15 +11,15 @@ use serde_json::{Value, json};
 
 use super::driver::{RunRequest, RunStarter, piece_id};
 use super::plan_run::{Cut, Job, Roster, spawn_run};
-use super::session::quiet_timeout;
+use super::session::watch_for;
 pub use super::slot::Slot;
 use crate::backlog::runs::{Run, RunKind, RunOutcome};
 use crate::connector::bug_link::BugLink;
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::{EngineId, EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
+use crate::engines::{EphemeralSessionConfig, Role, TranscriptSink, engine_of, run_session_tracked};
 use crate::looks::{LookBrief, Looker, decide};
 use crate::process_tree::ProcessTree;
-use crate::tiers::{implementer_tier, mid_tier};
+use crate::tiers::{SONNET, floor};
 use crate::{lanes, paths};
 
 mod bug;
@@ -60,13 +60,9 @@ impl RunStarter for LookRuns {
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
-        let model = mid_tier(implementer_tier(
-            None,
-            crate::telemetry::now_ms() / 1000,
-            &self.roster.models,
-        ))
-        .to_string();
-        let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, model)?;
+        let (job, guard) = self.roster.begin(Role::Triager, &request, &self.slot, |local| {
+            floor(SONNET, self.roster.sessions.claude_at_limit(), local)
+        })?;
         let cut = Cut::default();
         let work = look(job, request.clone(), cut.clone(), self.bugs.clone());
         spawn_run(guard, request, cut, async move { Some(work.await) });
@@ -88,6 +84,8 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
         piece: request.piece.clone(),
         other: request.other.clone(),
     });
+    // Waits for the local model's slot when the tier is `local`; held until the session ends.
+    let claimed = job.local.claim(&job.model).await;
     let looker = Looker {
         template: TEMPLATE,
         project_type: project.project_type,
@@ -95,10 +93,10 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
         session: EphemeralSessionConfig {
             cwd: &cwd,
             budget_usd: project.budget.reviewer_usd,
-            model: job.model.clone(),
-            local: None,
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            model: crate::tiers::claude_model_for(job.engine, &job.model),
+            local: claimed.as_ref().map(|(_, target)| target.clone()),
+            engine: Some(job.engine),
+            cursor: job.cursor.clone(),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
             shell: true,
         },
@@ -116,10 +114,12 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
             processes.add(&token, tree);
         }
     });
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, job.engine);
+    let (sessions, info) = (job.sessions.clone(), job.info.clone());
     let decided = decide(&looker, &brief, |spec| async move {
-        let engine = engine_of(Some(EngineId::Claude))?;
-        run_session_tracked(engine.as_ref(), &job.bin, &spec, "look", Some(&sink), quiet, Some(tx)).await
+        let engine = engine_of(Some(job.engine))?;
+        let run = run_session_tracked(engine.as_ref(), &job.bin, &spec, "look", Some(&sink), quiet, Some(tx));
+        sessions.track(info, run).await
     })
     .await;
     match decided.result {

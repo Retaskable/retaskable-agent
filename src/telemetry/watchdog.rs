@@ -22,9 +22,16 @@ pub const NO_PROGRESS_MINUTES: u32 = 20;
 /// `LANE_MISMATCH_MS`: a lane the pool holds disagreeing with an item's own record must hold this long
 /// before it counts (a start fills the pool before the record catches up).
 pub const LANE_MISMATCH_MINUTES: u32 = 2;
+/// `RESTART_WAIT_MS`: a restart pending this long is an anomaly.
+pub const RESTART_WAIT_MS: i64 = 15 * 60_000;
+/// `DUPLICATE_SHOWN_MS`: a duplicate step start is shown this long after its second start.
+pub const DUPLICATE_SHOWN_MINUTES: i64 = 30;
 /// `REPEAT_ERRORS` in `REPEAT_WINDOW_MS`.
 pub const REPEAT_ERRORS: usize = 3;
 pub const REPEAT_WINDOW_MINUTES: i64 = 30;
+/// `SYNC_FAILURES` in `SYNC_WINDOW_MS`.
+pub const SYNC_FAILURES: usize = 3;
+pub const SYNC_WINDOW_MINUTES: i64 = 10;
 
 /// One rule's finding this minute: an anomaly it sees right now, named so the same condition keeps the
 /// same id tick to tick. `threshold_minutes` is how long it must hold, continuously, before it is reported
@@ -46,10 +53,44 @@ pub struct RecentEvent<'a> {
     pub event: &'a Event,
 }
 
+/// A pending restart, as the rules need it: when it was asked (epoch ms, `restart::Why::at`) and what it is
+/// still finishing first (`restart::Step::Waiting`'s list; empty once it is past waiting).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestartView {
+    pub at_ms: i64,
+    pub waiting_on: Vec<String>,
+}
+
+impl RestartView {
+    /// The pending restart of `state`, `None` when there isn't one.
+    pub fn of(state: &crate::restart::RestartState) -> Option<Self> {
+        let why = state.why()?;
+        let waiting_on = match state.step()? {
+            crate::restart::Step::Waiting(on) => on,
+            crate::restart::Step::Now => Vec::new(),
+        };
+        Some(Self {
+            at_ms: why.at,
+            waiting_on,
+        })
+    }
+
+    fn finishing(&self) -> String {
+        if self.waiting_on.is_empty() {
+            "nothing listed".to_string()
+        } else {
+            self.waiting_on.join(", ")
+        }
+    }
+}
+
 /// What a minute's check is given: this project's in-memory state, nothing else (section 4: "No other I/O").
 pub struct Input<'a> {
     pub project: &'a str,
     pub paused: bool,
+    /// Why new work can't start besides a pause (a claim pause, Claude signed out, every engine at its limit);
+    /// `idle_lanes` and `no_progress` say nothing while it's set.
+    pub cant_start: Option<&'a str>,
     pub runs: &'a BTreeMap<String, crate::item_lifecycle::ItemRun>,
     pub leases: &'a BTreeMap<String, String>,
     pub records: &'a BTreeMap<String, RunRecord>,
@@ -58,6 +99,7 @@ pub struct Input<'a> {
     pub actions: &'a [Action],
     pub recent: &'a [RecentEvent<'a>],
     pub now_ms: i64,
+    pub restart: Option<RestartView>,
     pub lease_idle_minutes: u32,
     pub idle_lanes_minutes: u32,
     pub no_progress_minutes: u32,
@@ -71,6 +113,9 @@ pub fn check(input: &Input) -> Vec<Found> {
     idle_lanes(input, &mut found);
     repeat_error(input, &mut found);
     no_progress(input, &mut found);
+    sync_failing(input, &mut found);
+    restart_wait(input, &mut found);
+    duplicate_step(input, &mut found);
     found
 }
 
@@ -138,7 +183,7 @@ fn double_lane(input: &Input, out: &mut Vec<Found>) {
 
 /// Lanes sit free while this project has work a tick would start or ask the store for.
 fn idle_lanes(input: &Input, out: &mut Vec<Found>) {
-    if input.paused {
+    if input.paused || input.cant_start.is_some() {
         return;
     }
     let held = input.pool.held_lanes().count() as u32;
@@ -148,14 +193,21 @@ fn idle_lanes(input: &Input, out: &mut Vec<Found>) {
         .actions
         .iter()
         .any(|a| matches!(a, Action::StartImplementer { .. } | Action::AskForWork));
-    if free == 0 || !work_ready {
+    if free == 0 || !(work_ready || input.restart.is_some()) {
         return;
     }
+    let text = match &input.restart {
+        Some(restart) => format!(
+            "{free} of {limit} lanes free while a restart is pending, finishing first: {}",
+            restart.finishing()
+        ),
+        None => format!("{free} of {limit} lanes free while work is ready to start"),
+    };
     out.push(Found {
         id: "idle_lanes".to_string(),
         rule: "idle_lanes",
         item: None,
-        text: format!("{free} of {limit} lanes free while work is ready to start"),
+        text,
         details: json!({ "free": free, "limit": limit }),
         threshold_minutes: input.idle_lanes_minutes,
     });
@@ -204,10 +256,39 @@ fn repeat_error(input: &Input, out: &mut Vec<Found>) {
     }
 }
 
+/// 3 or more failed writes of details, drafts, settings or chat to the store (`store_error` events whose
+/// `op` starts `details_`, `draft_`, `settings_` or `ask_`) in the last 10 minutes. Project-wide.
+fn sync_failing(input: &Input, out: &mut Vec<Found>) {
+    let since = input.now_ms - SYNC_WINDOW_MINUTES * 60_000;
+    let mut ops = BTreeSet::new();
+    let mut count = 0;
+    for e in input.recent.iter().filter(|e| e.at_ms >= since) {
+        if let Event::StoreError(err) = e.event
+            && let Some(op) = err.op.as_deref()
+            && ["details_", "draft_", "settings_", "ask_"]
+                .iter()
+                .any(|p| op.starts_with(p))
+        {
+            count += 1;
+            ops.insert(op);
+        }
+    }
+    if count >= SYNC_FAILURES {
+        out.push(Found {
+            id: "sync_failing".to_string(),
+            rule: "sync_failing",
+            item: None,
+            text: format!("{count} writes to the store failed in {SYNC_WINDOW_MINUTES} min"),
+            details: json!({ "count": count, "ops": ops }),
+            threshold_minutes: 0,
+        });
+    }
+}
+
 /// An item in `checking`, `reviewing` or `merging` with nothing running for it and, for the two that need a
 /// lane, holding one (so it isn't simply waiting its turn for a free one).
 fn no_progress(input: &Input, out: &mut Vec<Found>) {
-    if input.paused {
+    if input.paused || input.cant_start.is_some() {
         return;
     }
     for (item_id, run) in input.runs {
@@ -234,23 +315,111 @@ fn no_progress(input: &Input, out: &mut Vec<Found>) {
     }
 }
 
-/// Strips digits (ids, hashes, PR numbers) so the same error at different counts or ids still groups
-/// together, the way 05-item-lifecycle's retry count or a PR number would otherwise make every line unique.
+/// A restart pending for `RESTART_WAIT_MS`. It has no item; it says what the restart is still finishing first.
+fn restart_wait(input: &Input, out: &mut Vec<Found>) {
+    let Some(restart) = &input.restart else { return };
+    let pending_ms = input.now_ms - restart.at_ms;
+    if pending_ms < RESTART_WAIT_MS {
+        return;
+    }
+    out.push(Found {
+        id: "restart_wait".to_string(),
+        rule: "restart_wait",
+        item: None,
+        text: format!(
+            "a restart has been pending {} min, still finishing first: {}",
+            pending_ms / 60_000,
+            restart.finishing()
+        ),
+        details: json!({ "waitingOn": restart.waiting_on }),
+        threshold_minutes: 0,
+    });
+}
+
+/// A `step_start` with a `key` for an item and step that already has one open (no `step_end` with that key
+/// in between). Shown at once, for `DUPLICATE_SHOWN_MINUTES` after the latest repeated start. A start with
+/// no key never counts.
+fn duplicate_step(input: &Input, out: &mut Vec<Found>) {
+    let mut open: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+    let mut duplicated: BTreeMap<(&str, &str, &str), i64> = BTreeMap::new();
+    for e in input.recent {
+        match e.event {
+            Event::StepStart(s) => {
+                let Some(key) = s.key.as_deref().filter(|k| !k.is_empty()) else {
+                    continue;
+                };
+                let id = (
+                    s.item.as_deref().unwrap_or_default(),
+                    s.step.as_deref().unwrap_or_default(),
+                    key,
+                );
+                if !open.insert(id) {
+                    duplicated.insert(id, e.at_ms);
+                }
+            }
+            Event::StepEnd(s) => {
+                let key = s.key.as_deref().unwrap_or_default();
+                open.remove(&(
+                    s.item.as_deref().unwrap_or_default(),
+                    s.step.as_deref().unwrap_or_default(),
+                    key,
+                ));
+            }
+            _ => {}
+        }
+    }
+    for ((item, step, key), at_ms) in duplicated {
+        if input.now_ms - at_ms >= DUPLICATE_SHOWN_MINUTES * 60_000 {
+            continue;
+        }
+        out.push(Found {
+            id: format!("duplicate_step:{item}:{step}:{key}"),
+            rule: "duplicate_step",
+            item: Some(item.to_string()),
+            text: format!("{item} started {step} {key} twice"),
+            details: json!({ "step": step, "key": key }),
+            threshold_minutes: 0,
+        });
+    }
+}
+
+/// Strips digits and hex hashes (7 or more hex characters with at least one digit, e.g. a git SHA) so the
+/// same error at different counts, ids or commits still groups together.
 fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut last_was_digit = false;
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if word.len() >= 7 && word.chars().any(|c| c.is_ascii_digit()) {
+            out.push('#');
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
     for ch in text.chars() {
+        if ch.is_ascii_hexdigit() {
+            word.push(ch);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    // Then digit runs collapse to one `#`.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_was_digit = false;
+    for ch in out.chars() {
         if ch.is_ascii_digit() {
             if !last_was_digit {
-                out.push('#');
+                collapsed.push('#');
             }
             last_was_digit = true;
         } else {
-            out.push(ch);
+            collapsed.push(ch);
             last_was_digit = false;
         }
     }
-    out
+    collapsed
 }
 
 #[cfg(test)]

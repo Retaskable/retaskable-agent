@@ -14,5 +14,6 @@ TypeScript agent (`agent/` there) behaviour for behaviour, and port one piece at
   - State transitions are plain code.
   - The HTTP port serves only `GET /api/health` and the settings page, never a command.
   - It binds to `127.0.0.1`. The cloud link is outbound only.
+- No release flags in agent code. Ship a new behaviour On and never write its Off path: flags belong to the app and the Worker. A test in `cargo test` (`src/no_flags.rs`) fails on a flag read. See [docs/specs/no-agent-flags.md](docs/specs/no-agent-flags.md).
 - Every project has a shared backlog. There's no local mode, and no fallback when the store can't be reached (fail closed).
 - Before you commit: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.

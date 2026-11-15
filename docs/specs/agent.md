@@ -1,6 +1,6 @@
 # Retaskable — Spec
 
-Status: v0.5, trimmed for the agent: this is a copy of Retaskable.com's agent spec with what belongs to the store, the hub and the app cut out. See [TRIMMED.md](TRIMMED.md) for each cut and [README.md](README.md) for the other specs in this folder.
+Status: v0.7 (backlog `server-picks-tier`; before it `drop-game-pictures`), trimmed for the agent: this is a copy of Retaskable.com's agent spec with what belongs to the store, the hub and the app cut out. 2026-11-08: section 6.10 as built, with proposals marked **[Proposal]**. See [TRIMMED.md](TRIMMED.md) for each cut and [README.md](README.md) for the other specs in this folder.
 
 Theme: Orchestration
 
@@ -45,7 +45,6 @@ This spec is split: each section below is its own file in [agent/](agent/). Read
 - [agent/06.5-spec-drafts.md](agent/06.5-spec-drafts.md): 6.5 Spec drafts
 - [agent/06.6-ask-claude.md](agent/06.6-ask-claude.md): 6.6 Ask Claude
 - [agent/06.7-chores-never-idle.md](agent/06.7-chores-never-idle.md): 6.7 Chores: never idle
-- [agent/06.8-galleries-the-game-photographs-itself.md](agent/06.8-galleries-the-game-photographs-itself.md): 6.8 Galleries: the game photographs itself
 - [agent/06.9-triage-claude-looks-at-needs-you-first.md](agent/06.9-triage-claude-looks-at-needs-you-first.md): 6.9 Triage: Claude looks at "needs you" first
 - [agent/06.10-spec-layout.md](agent/06.10-spec-layout.md): 6.10 Spec layout
 
@@ -64,7 +63,7 @@ This spec is split: each section below is its own file in [agent/](agent/). Read
 
 ## 9. What the app and site ask of the computer
 
-- [agent/09-web-ui.md](agent/09-web-ui.md): [9.1 What the computer works out for a project's settings](agent/09.1-what-the-computer-works-out-for-a-projects-settings.md) · [9.2 What the computer reports](agent/09.2-what-the-computer-reports.md) · [9.3 What the computer does when a command asks](agent/09.3-what-the-computer-does-when-a-command-asks.md)
+- [agent/09-web-ui.md](agent/09-web-ui.md): [9.1 What the computer works out for a project's settings](agent/09.1-what-the-computer-works-out-for-a-projects-settings.md) · [9.2 What the computer reports](agent/09.2-what-the-computer-reports.md) · [9.3 What the computer does when a command asks](agent/09.3-what-the-computer-does-when-a-command-asks.md) · [Deploy requests](agent/deploy-requests.md)
 
 ## 10. Config — `.retaskable/config.json`
 

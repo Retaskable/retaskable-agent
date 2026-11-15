@@ -1,10 +1,9 @@
-use std::path::PathBuf;
-
 use super::*;
 use crate::config::{LaneEngine, RoleEngines};
-use crate::lane_pool::LaneSizes;
+use crate::engines::EngineId;
+use crate::engines::choose::Role;
+use crate::orchestrator::live::sessions::SessionInfo;
 use crate::orchestrator::live::{HeldLane, ProjectLive, StoreFailure};
-use crate::view::{PauseState, ProjectView};
 
 fn check(ok: Option<bool>, detail: &str) -> SetupCheck {
     SetupCheck {
@@ -24,36 +23,21 @@ fn checks(claude_signed_in: Option<bool>) -> SetupChecks {
         cursor: check(Some(false), "Cursor's agent isn't installed"),
         pi: None,
         codex: Some(check(Some(true), "codex-cli 0.5.0")),
+        docker: None,
     }
 }
 
 fn source(projects: &[&str]) -> StatusSource {
     StatusSource {
-        view: AgentView {
-            machine: "pc".into(),
-            tags: vec![],
-            projects: projects
+        view: crate::test_support::agent_view(
+            vec![],
+            projects
                 .iter()
-                .map(|id| ProjectView {
-                    id: id.to_string(),
-                    github_repo: format!("o/{id}"),
-                    backlog_path: "backlog".into(),
-                    repo_path: PathBuf::new(),
-                    worktrees_dir: PathBuf::new(),
-                    base_branch: String::new(),
-                    galleries: vec![],
-                    play_command: String::new(),
-                })
+                .map(|id| crate::test_support::project_view(id))
                 .collect(),
-            version: "1.2.3".into(),
-            lanes: 3,
-            chore_lane: Some(3),
-            lane_sizes: LaneSizes::default(),
-            paused: PauseState::default(),
-            item_commands: Default::default(),
-            work: Default::default(),
-            restart: Default::default(),
-        },
+            "1.2.3",
+            3,
+        ),
         started: Instant::now(),
         checks: Arc::new(Mutex::new(None)),
         live: LiveHandle::default(),
@@ -194,7 +178,30 @@ fn live(mode: OrchestratorMode, projects: &[(&str, ProjectLive)]) -> LiveState {
         mode,
         run_kinds: Vec::new(),
         projects: projects.iter().map(|(id, p)| (id.to_string(), p.clone())).collect(),
+        ci: None,
+        concurrency: 0,
     }
+}
+
+#[test]
+fn the_ci_header_carries_slots_running_docker_and_discovery_reasons_only_when_the_loop_runs() {
+    let mut l = LiveState::default();
+    assert!(serde_json::to_value(status_with(&l)).unwrap().get("ci").is_none());
+    l.ci = Some(crate::agent_ci::CiLive {
+        slots: 1,
+        docker: "stopped",
+        docker_reason: Some("Docker isn't running".into()),
+        reasons: [("a".to_string(), "No .agent-ci/image on origin/main".to_string())].into(),
+        ..Default::default()
+    });
+    let v = serde_json::to_value(status_with(&l)).unwrap();
+    assert_eq!(
+        v["ci"],
+        serde_json::json!({
+            "slots": 1, "running": 0, "docker": "stopped", "dockerReason": "Docker isn't running",
+            "discovery": [{ "project": "a", "reason": "No .agent-ci/image on origin/main" }]
+        })
+    );
 }
 
 fn status_with(live: &LiveState) -> ComputerStatus {
@@ -206,7 +213,7 @@ fn off_mode_looks_as_before_with_a_quiet_note() {
     let s = status_with(&LiveState::default());
     assert!(s.alerts.is_empty(), "off is not an error");
     assert_eq!(s.header.lanes_busy, 0);
-    assert!(s.lanes.iter().all(|l| l.state == "free" && l.item.is_none()));
+    assert!(s.lanes.iter().all(|l| l.state == "free"));
     assert_eq!(
         (s.orchestrator.mode, s.orchestrator.note.as_str()),
         ("off", "Orchestrator off")
@@ -238,7 +245,7 @@ fn dry_mode_says_it_claims_nothing_and_a_store_error_is_an_alert() {
 }
 
 #[test]
-fn a_held_lane_is_busy_with_its_holder() {
+fn held_lanes_alone_do_not_make_a_lane_busy() {
     let ticking = ProjectLive {
         last_tick: Some("2026-10-29T14:04:00Z".into()),
         held: vec![
@@ -246,29 +253,23 @@ fn a_held_lane_is_busy_with_its_holder() {
                 lane: 2,
                 item_id: "i1".into(),
                 title: Some("Add a thing".into()),
+                branch: None,
+                playing: false,
             },
             HeldLane {
                 lane: 9,
                 item_id: "gone".into(),
                 title: None,
+                branch: None,
+                playing: false,
             },
         ],
         decision: Some("would ask for work".into()),
         ..ProjectLive::default()
     };
     let s = status_with(&live(OrchestratorMode::Dry, &[("a", ticking)]));
-    assert_eq!(s.header.lanes_busy, 1, "a lane past the count is ignored");
-    let lane = &s.lanes[1];
-    assert_eq!((lane.state, lane.state_text), ("busy", "Busy"));
-    let item = lane.item.as_ref().unwrap();
-    assert_eq!(
-        (item.id.as_str(), item.title.as_str(), item.project.as_str()),
-        ("i1", "Add a thing", "a")
-    );
-    assert_eq!(s.lanes[0].state, "free");
+    assert_eq!(s.header.lanes_busy, 0, "busy lanes come from the session registry");
     let v = serde_json::to_value(&s).unwrap();
-    assert_eq!(v["lanes"][1]["item"]["title"], "Add a thing");
-    assert!(v["lanes"][0].get("item").is_none());
     assert_eq!(v["orchestrator"]["projects"][0]["decision"], "would ask for work");
 }
 
@@ -306,5 +307,204 @@ fn runs_mode_says_it_runs_on_runs_and_which_kinds() {
     assert_eq!(
         s.orchestrator.note,
         "Orchestrator running on runs: it can take build, watch runs"
+    );
+}
+
+#[test]
+fn the_chore_count_shows_only_once_the_store_has_answered_one() {
+    let none = status_with(&live(OrchestratorMode::Runs, &[("a", ProjectLive::default())]));
+    assert_eq!(none.orchestrator.projects[0].chores, None);
+    let counted = ProjectLive {
+        chores: Some(crate::backlog::runs::ChoreCount { today: 2, limit: 3 }),
+        ..Default::default()
+    };
+    let s = status_with(&live(OrchestratorMode::Runs, &[("a", counted)]));
+    assert_eq!(
+        s.orchestrator.projects[0].chores.as_deref(),
+        Some("Chores today: 2 of 3")
+    );
+}
+
+#[test]
+fn the_fix_main_note_is_reported_with_the_computers_state() {
+    let found = ProjectLive {
+        fix_main: Some("Fixing main found nothing to fix at abc1234. It tries again when main moves.".into()),
+        ..Default::default()
+    };
+    let s = status_with(&live(OrchestratorMode::Runs, &[("a", found)]));
+    assert_eq!(
+        s.orchestrator.projects[0].fix_main.as_deref(),
+        Some("Fixing main found nothing to fix at abc1234. It tries again when main moves.")
+    );
+}
+
+fn vet_of(counts: [usize; 5]) -> Option<String> {
+    let [ideas, duplicates, binned, asked, left] = counts;
+    let p = ProjectLive {
+        vet: Some(crate::backlog::shown::VetView {
+            ideas,
+            duplicates,
+            binned,
+            asked,
+            left,
+        }),
+        ..Default::default()
+    };
+    status_with(&live(OrchestratorMode::Runs, &[("a", p)]))
+        .orchestrator
+        .projects[0]
+        .vet
+        .clone()
+}
+
+#[test]
+fn the_vet_line_names_each_verdict_leaves_out_zeros_and_is_absent_before_a_run() {
+    assert_eq!(
+        vet_of([2, 1, 9, 0, 0]).as_deref(),
+        Some("12 suggestions: 2 ideas, 1 duplicate, 9 binned")
+    );
+    assert_eq!(
+        vet_of([0, 2, 0, 3, 4]).as_deref(),
+        Some("5 suggestions: 2 duplicates, 3 asked, 4 left")
+    );
+    assert_eq!(vet_of([0, 0, 1, 0, 0]).as_deref(), Some("1 suggestion: 1 binned"));
+    let none = status_with(&live(OrchestratorMode::Runs, &[("a", ProjectLive::default())]));
+    assert_eq!(none.orchestrator.projects[0].vet, None);
+}
+
+fn info(item: &str, role: Role, lane: Option<u32>) -> SessionInfo {
+    SessionInfo {
+        project: "a".into(),
+        item_id: item.into(),
+        title: Some(format!("Title {item}")),
+        role,
+        lane,
+        engine: EngineId::Codex,
+        model: "gpt-x".into(),
+    }
+}
+
+fn live_status(src: &StatusSource) -> ComputerStatus {
+    let s = settled(EngineChoiceConfig::default(), 3);
+    build(&s, src, None, &src.live.snapshot())
+}
+
+#[test]
+fn live_sessions_join_their_lane_and_the_rest_are_listed_apart() {
+    let src = source(&["a"]);
+    let reg = src.live.sessions();
+    let _g1 = reg.register(info("i1", Role::Implementer, Some(2)));
+    let _g2 = reg.register(info("ask1", Role::Assistant, None));
+    let _g3 = reg.register(info("d1", Role::Drafter, None));
+    let _g4 = reg.register(info("s1", Role::Scout, None));
+    let s = live_status(&src);
+    assert_eq!(s.header.lanes_busy, 1);
+    let lane = &s.lanes[1];
+    assert_eq!(lane.state, "busy");
+    let ses = lane.session.as_ref().unwrap();
+    assert_eq!(
+        (ses.role.as_deref(), ses.engine.as_deref(), ses.model.as_deref()),
+        (Some("implementer"), Some("codex"), Some("gpt-x"))
+    );
+    assert_eq!((ses.run_sec, ses.quiet_sec), (Some(0), Some(0)));
+    assert_eq!(s.lanes[0].state, "free");
+    let ids: Vec<&str> = s.sessions.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["ask1", "d1", "s1"]);
+}
+
+#[test]
+fn the_json_has_names_and_times_but_no_prompt_or_transcript() {
+    let src = source(&["a"]);
+    let _g = src.live.sessions().register(info("i1", Role::Implementer, Some(1)));
+    let v = serde_json::to_value(live_status(&src)).unwrap();
+    let ses = &v["lanes"][0]["session"];
+    assert_eq!(ses["runSec"], 0);
+    assert_eq!(ses["quietSec"], 0);
+    let mut keys: Vec<&String> = ses.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "engine", "id", "model", "project", "quietSec", "role", "runSec", "title"
+        ]
+    );
+}
+
+#[test]
+fn the_page_renders_lane_sessions_and_the_list_without_a_lane() {
+    let html = include_str!("../../../assets/settings.html");
+    for needle in [
+        "id=\"sessions-list\"",
+        "renderSessions(st)",
+        "run \" + secs(x.runSec)",
+        "l.session",
+    ] {
+        assert!(html.contains(needle), "{needle}");
+    }
+}
+
+#[tokio::test]
+async fn the_token_lines_show_what_ended_sessions_added() {
+    use crate::engines::engine::{EngineId, SessionResult, Tokens};
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = crate::orchestrator::live::sessions::Sessions::default().with_machine_dir(dir.path().to_path_buf());
+    let result = |input, output| SessionResult {
+        ok: true,
+        subtype: String::new(),
+        structured: None,
+        error: None,
+        cost_usd: None,
+        session_id: String::new(),
+        limit_hit: false,
+        signed_out: false,
+        context_tokens: None,
+        usage: None,
+        tokens: Some(Tokens { input, output }),
+    };
+    for (engine, r) in [(EngineId::Cursor, result(10, 3)), (EngineId::Codex, result(4, 1))] {
+        let info = crate::orchestrator::live::sessions::SessionInfo {
+            project: "p".into(),
+            item_id: "i".into(),
+            title: None,
+            role: crate::engines::choose::Role::Implementer,
+            lane: None,
+            engine,
+            model: String::new(),
+        };
+        sessions
+            .track(info, async {
+                crate::orchestrator::live::sessions::record_session_end(engine, &r)
+            })
+            .await;
+    }
+    let machine = crate::store::MachineStore::load(dir.path()).unwrap();
+    let mut s = settled(EngineChoiceConfig::default(), 1);
+    s.codex_tokens = machine.codex_today_tokens();
+    s.cursor_tokens = machine.cursor_today_tokens();
+    let status = build(&s, &source(&["a"]), None, &LiveState::default());
+    assert_eq!(row(&status, "cursor").today_tokens, Some(13));
+    assert_eq!(row(&status, "codex").today_tokens, Some(5));
+}
+
+#[test]
+fn a_signed_out_codex_and_a_missing_pi_read_right() {
+    let mut c = checks(Some(true));
+    c.codex = Some(check(Some(false), "Codex isn't signed in"));
+    c.pi = Some(check(Some(false), "pi isn't installed"));
+    let s = build(
+        &settled(EngineChoiceConfig::default(), 1),
+        &source(&[]),
+        Some(&c),
+        &LiveState::default(),
+    );
+    let codex = row(&s, "codex");
+    assert_eq!(
+        (codex.found, codex.state, codex.state_text),
+        (Some(true), "problem", "Not signed in")
+    );
+    let pi = row(&s, "pi");
+    assert_eq!(
+        (pi.found, pi.state, pi.state_text),
+        (Some(false), "off", "Not installed")
     );
 }

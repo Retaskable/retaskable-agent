@@ -219,6 +219,7 @@ fn checks(claude: SetupCheck, claude_signed_in: SetupCheck, cursor: SetupCheck) 
         cursor,
         pi: None,
         codex: None,
+        docker: None,
     }
 }
 
@@ -391,18 +392,248 @@ async fn run_timeout_kills_a_hung_process_once_the_budget_runs_out() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-// optional_engine_check
+// pi_check / codex_check
 
 #[test]
-fn optional_engine_check_passes_with_the_version_line_only_when_the_binary_ran() {
-    assert_eq!(optional_engine_check("pi", None), None);
-    assert_eq!(optional_engine_check("pi", Some(&out(1, "oops"))), None);
+fn pi_check_has_three_states() {
+    assert_eq!(pi_check(None), SetupCheck::fail("pi isn't installed", fixes::PI));
+    let long = "x".repeat(300);
+    let failed = pi_check(Some(&out_err(1, "", &format!("\n{long}\nsecond"))));
+    assert_eq!(failed, SetupCheck::fail("x".repeat(200), fixes::PI));
+    assert_eq!(pi_check(Some(&out(0, "pi 1.2.3\n"))), SetupCheck::pass("pi 1.2.3"));
+    assert_eq!(pi_check(Some(&out(0, "\n"))), SetupCheck::pass("pi"));
+}
+
+#[test]
+fn codex_check_has_four_states() {
+    let signed_in = out(0, "Logged in\n");
     assert_eq!(
-        optional_engine_check("Codex", Some(&out(0, "codex-cli 0.5.0\n"))),
-        Some(SetupCheck::pass("codex-cli 0.5.0"))
+        codex_check(None, None),
+        SetupCheck::fail("Codex isn't installed", fixes::CODEX)
     );
     assert_eq!(
-        optional_engine_check("pi", Some(&out(0, "\n"))),
-        Some(SetupCheck::pass("pi"))
+        codex_check(Some(&out_err(2, "", "bad flag\nmore")), None),
+        SetupCheck::fail("bad flag", fixes::CODEX)
     );
+    let long = "y".repeat(300);
+    assert_eq!(
+        codex_check(Some(&out_err(1, "", &long)), None),
+        SetupCheck::fail("y".repeat(200), fixes::CODEX)
+    );
+    let version = out(0, "codex-cli 0.46.0\n");
+    assert_eq!(
+        codex_check(Some(&version), Some(&signed_in)),
+        SetupCheck::pass("codex-cli 0.46.0")
+    );
+    let signed_out = codex_check(Some(&version), Some(&out(1, "")));
+    assert_eq!(
+        signed_out,
+        SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN)
+    );
+    assert_eq!(codex_check(Some(&version), None), signed_out);
+}
+
+#[test]
+fn a_signed_out_codex_leaves_the_checks_passing() {
+    let mut c = checks(
+        SetupCheck::pass("Claude Code 2.1.0"),
+        SetupCheck::pass("Claude Code is signed in"),
+        SetupCheck::fail("Cursor's agent isn't installed", fixes::CURSOR_MISSING),
+    );
+    c.codex = Some(SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN));
+    c.pi = Some(SetupCheck::fail("pi isn't installed", fixes::PI));
+    assert!(setup_checks_pass(&c));
+    assert!(engine_ready(&c));
+    assert!(claude_ready(&c));
+}
+
+#[test]
+fn pi_and_codex_lines_follow_the_found_binaries() {
+    let mut c = checks(
+        SetupCheck::pass("Claude Code 2.1.0"),
+        SetupCheck::pass("Claude Code is signed in"),
+        SetupCheck::fail("Cursor's agent isn't installed", fixes::CURSOR_MISSING),
+    );
+    c.pi = Some(SetupCheck::pass("pi 0.3.1"));
+    c.codex = Some(SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN));
+    let report = setup_check_report(&c);
+    assert!(report.contains("  ✓ pi: pi 0.3.1"));
+    assert!(report.contains("  ✗ Codex isn't signed in: run `codex login`."));
+    assert!(setup_checks_pass(&c));
+    c.codex = Some(SetupCheck::pass("codex-cli 0.46.0"));
+    assert!(setup_check_lines(&c).contains(&"✓ Codex: codex-cli 0.46.0".to_string()));
+}
+
+// docker line (agent-ci.md section 3.6)
+
+#[test]
+fn the_docker_line_shows_only_when_there_is_a_docker_check() {
+    let mut c = checks(
+        SetupCheck::pass("Claude Code 2.1.0"),
+        SetupCheck::pass("Claude Code is signed in"),
+        SetupCheck::pass("Cursor"),
+    );
+    assert!(!setup_check_report(&c).contains("Docker"));
+    c.docker = Some(SetupCheck::fail(
+        "Docker isn't running: this computer won't run CI",
+        fixes::DOCKER,
+    ));
+    let lines = setup_check_lines(&c);
+    assert_eq!(
+        lines.last().unwrap(),
+        "✗ Docker isn't running: this computer won't run CI: start Docker (or install it) on this computer."
+    );
+}
+
+#[tokio::test]
+async fn docker_check_reads_the_reason_from_the_probe() {
+    let c = docker_check("retaskable-no-such-docker", false, None).await;
+    assert_eq!(c.ok, Some(false));
+    assert!(c.detail.contains("isn't installed"));
+    let c = docker_check("docker", true, Some("img")).await;
+    assert!(c.detail.contains("own Docker image"));
+}
+
+// SetupCheckRunner and to_json
+
+mod runner_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use serde_json::json;
+    use tokio::sync::{Mutex, Notify};
+
+    use super::super::*;
+    use super::checks;
+
+    fn with_git(detail: &str) -> SetupChecks {
+        let mut c = checks(SetupCheck::pass("a"), SetupCheck::pass("b"), SetupCheck::pass("c"));
+        c.git = SetupCheck::pass(detail);
+        c
+    }
+
+    /// A probe that counts its runs and answers with the next of `answers` (the last repeats).
+    fn stub(answers: Vec<SetupChecks>) -> (Arc<AtomicUsize>, Arc<Notify>, runner::Probe) {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Notify::new());
+        let (r, g) = (runs.clone(), gate.clone());
+        let probe: runner::Probe = Box::new(move || {
+            let n = r.fetch_add(1, Ordering::SeqCst);
+            let answer = answers[n.min(answers.len() - 1)].clone();
+            let g = g.clone();
+            Box::pin(async move {
+                g.notified().await;
+                answer
+            })
+        });
+        (runs, gate, probe)
+    }
+
+    #[tokio::test]
+    async fn latest_is_none_before_the_first_run() {
+        let (_, _, probe) = stub(vec![with_git("1")]);
+        assert_eq!(SetupCheckRunner::with_probe(probe).latest(), None);
+    }
+
+    #[tokio::test]
+    async fn two_run_nows_at_once_run_the_probe_once() {
+        let (runs, gate, probe) = stub(vec![with_git("1"), with_git("2")]);
+        let runner = Arc::new(SetupCheckRunner::with_probe(probe));
+        let (a, b) = (runner.clone(), runner.clone());
+        let (a, b) = (
+            tokio::spawn(async move { a.run_now().await }),
+            tokio::spawn(async move { b.run_now().await }),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gate.notify_one();
+        assert_eq!(a.await.unwrap(), with_git("1"));
+        assert_eq!(b.await.unwrap(), with_git("1"));
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.latest(), Some(with_git("1")));
+    }
+
+    #[tokio::test]
+    async fn subscribe_ticks_on_first_and_changed_results_only() {
+        let (_, gate, probe) = stub(vec![with_git("1"), with_git("1"), with_git("2")]);
+        let runner = SetupCheckRunner::with_probe(probe);
+        let mut rx = runner.subscribe();
+        gate.notify_one();
+        runner.run_now().await;
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), Some(with_git("1")));
+        gate.notify_one();
+        runner.run_now().await;
+        assert!(!rx.has_changed().unwrap());
+        gate.notify_one();
+        runner.run_now().await;
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), Some(with_git("2")));
+    }
+
+    #[tokio::test]
+    async fn reruns_after_600_seconds_of_the_fake_clock_and_not_before() {
+        let (runs, gate, probe) = stub(vec![with_git("1")]);
+        let tick = Arc::new(Notify::new());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (t, a) = (tick.clone(), asked.clone());
+        let sleep: runner::Sleep = Box::new(move |d| {
+            let (t, a) = (t.clone(), a.clone());
+            Box::pin(async move {
+                a.lock().await.push(d);
+                t.notified().await;
+            })
+        });
+        let runner = Arc::new(SetupCheckRunner::new(probe, sleep));
+        let reported = Arc::new(AtomicUsize::new(0));
+        let r = reported.clone();
+        runner.spawn(move |_| {
+            Box::pin(async move {
+                r.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+        gate.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!((runs.load(Ordering::SeqCst), reported.load(Ordering::SeqCst)), (1, 1));
+        assert_eq!(*asked.lock().await, vec![Duration::from_secs(600)]);
+        // The clock hasn't moved: no second run.
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        tick.notify_one();
+        gate.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn to_json_has_the_camel_case_shape() {
+        let mut c = checks(
+            SetupCheck::pass("claude ok"),
+            SetupCheck::unknown("can't tell", None),
+            SetupCheck::fail("no cursor", "Install it."),
+        );
+        let v = c.to_json();
+        assert_eq!(v["git"], json!({ "ok": true, "detail": "git" }));
+        assert_eq!(v["claudeSignedIn"], json!({ "ok": null, "detail": "can't tell" }));
+        assert!(v["claudeSignedIn"].get("fix").is_none());
+        assert_eq!(
+            v["cursor"],
+            json!({ "ok": false, "detail": "no cursor", "fix": "Install it." })
+        );
+        for k in ["ghInstalled", "gh", "claude"] {
+            assert!(v.get(k).is_some(), "{k}");
+        }
+        assert_eq!(
+            v["node"],
+            json!({ "ok": true, "detail": "Not needed: this agent is a compiled program" })
+        );
+        for k in ["pi", "codex", "docker"] {
+            assert!(v.get(k).is_none(), "{k}");
+        }
+        c.pi = Some(SetupCheck::pass("pi 1"));
+        c.docker = Some(SetupCheck::pass("d"));
+        let v = c.to_json();
+        assert_eq!(v["pi"], json!({ "ok": true, "detail": "pi 1" }));
+        assert!(v.get("docker").is_some() && v.get("codex").is_none());
+    }
 }

@@ -18,39 +18,60 @@
 //! started in the background after each full pass for the live, unpaused projects whose read succeeded and
 //! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
 //! the site's item commands (Continue) that the connector queued; [`drafts`] is a project's spec draft, one at a time,
-//! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit); [`trial`] queues a new project's trial plan after asks and drafts and before items are planned, behind the `trial-plan-draft` flag.
+//! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit); [`trial`] queues a new project's trial plan after asks and drafts and before items are planned.
 mod asks;
+mod deprecations;
 mod drafts;
+mod experts;
+mod fix_main;
+mod follow;
+mod held_items;
+mod host_calls;
 mod idea_accept;
 mod item_commands;
 mod land;
 mod lane_play;
+mod main_sync;
 pub use lane_play::LanePlay;
-mod ideas_daily;
-mod ideas_round;
+mod claim;
 mod machine;
+mod mode;
+mod panic;
+mod playtest_owed;
 mod playtest_round;
 mod project;
+mod read;
 mod report;
 mod resume;
+mod run_starters;
 mod runs;
 mod settle;
 mod signed_out;
+mod spawn;
+mod start_gate;
+mod step_events;
 mod store_errors;
 mod triage_bug;
 mod triage_facts;
 mod triage_run;
 mod trial;
+mod usage_recheck;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
-pub use machine::{Links, Machine, Shared, SpawnArgs, spawn_all};
+pub use experts::{ExpertHost, ExpertJob, TurnEnd};
+pub(crate) use machine::repo_id;
+pub use machine::{Links, Machine, Shared};
 use project::Launch;
 pub use project::{
     Abandon, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,
 };
-pub use runs::{BEAT_EVERY, RunContext, RunEnd, RunEndSender, RunLoop, RunProcesses, RunRequest, RunStarter, piece_id};
+pub use runs::{
+    BEAT_EVERY, FallOver, RunContext, RunEnd, RunEndSender, RunEventSender, RunLoop, RunProcesses, RunRequest,
+    RunStarter, piece_id,
+};
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
+pub use spawn::{SpawnArgs, spawn_all};
 pub use triage_run::{LookFailure, SecondLookEnd, SecondLookRequest, TriageEnd, TriageRequest};
 
 #[cfg(test)]

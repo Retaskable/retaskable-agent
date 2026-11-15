@@ -9,11 +9,14 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseC
 
 use super::bug_link::BugOutcome;
 use super::*;
-use crate::config::GalleryConfig;
-use crate::lane_pool::LaneSizes;
 use crate::link::FileStore;
 use crate::telemetry::events::now_ms;
-use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET, PauseState, ProjectView};
+use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
+
+mod checks;
+mod commands;
+mod live;
+mod smoke;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
 struct Accepted {
@@ -91,68 +94,20 @@ fn timing() -> Timing {
         connect: Duration::from_secs(5),
         backoff: Duration::from_millis(10),
         stable: Duration::from_secs(30),
+        live_coalesce: Duration::from_millis(100),
     }
 }
 
 fn view(projects: &[&str]) -> Arc<AgentView> {
-    Arc::new(AgentView {
-        machine: "pc".into(),
-        tags: vec!["windows".into()],
-        projects: projects
+    Arc::new(crate::test_support::agent_view(
+        vec!["windows".into()],
+        projects
             .iter()
-            .map(|id| ProjectView {
-                id: id.to_string(),
-                github_repo: format!("o/{id}"),
-                backlog_path: "backlog".into(),
-                repo_path: PathBuf::new(),
-                worktrees_dir: PathBuf::new(),
-                base_branch: String::new(),
-                galleries: vec![],
-                play_command: String::new(),
-            })
+            .map(|id| crate::test_support::project_view(id))
             .collect(),
-        version: "9.9.9".into(),
-        lanes: 2,
-        chore_lane: Some(2),
-        lane_sizes: LaneSizes::default(),
-        paused: PauseState::default(),
-        item_commands: Default::default(),
-        work: Default::default(),
-        restart: Default::default(),
-    })
-}
-
-fn view_with_models_gallery(project: &str) -> Arc<AgentView> {
-    let mut v = view(&[project]);
-    Arc::get_mut(&mut v).unwrap().projects[0].galleries = vec![GalleryConfig {
-        name: "Models".to_string(),
-        command: "echo hi".to_string(),
-        out_dir: "out".to_string(),
-    }];
-    v
-}
-
-/// Starts a connector for `project` with a Models gallery, reads its hello and first snapshot,
-/// and checks the gallery starts `idle`: the shared setup for the gallery-status-resend tests,
-/// which then each send their own `galleries::set_status` calls and read what arrives next.
-async fn gallery_resend_setup(project: &str) -> (tempfile::TempDir, Connector, Accepted) {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let v = view_with_models_gallery(project);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        v,
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    let galleries = read(&mut first).await["state"]["galleries"].clone();
-    assert_eq!(galleries[0]["status"], "idle");
-    (dir, c, first)
+        "9.9.9",
+        2,
+    ))
 }
 
 /// An `exit` that does nothing, for tests that don't send Restart.
@@ -245,20 +200,43 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
     c.stop(Duration::from_secs(1)).await;
 }
 
-#[tokio::test]
-async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_changes() {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let view = view(&["one"]);
-    let c = Connector::start(
-        &url,
+fn start_connector(url: &str, store: Arc<dyn TokenStore>, view: &Arc<AgentView>, dir: &std::path::Path) -> Connector {
+    Connector::start(
+        url,
         store,
         reqwest::Client::new(),
         view.clone(),
         timing(),
         noop_exit(),
-        dir.path(),
-    );
+        dir,
+    )
+}
+
+#[tokio::test]
+async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one", "two"]);
+    let c = start_connector(&url, store, &view, dir.path());
+    let mut one = next(&mut rx).await;
+    let mut two = next(&mut rx).await;
+    for a in [&mut one, &mut two] {
+        assert_eq!(read(a).await["type"], "hello");
+        assert_eq!(read(a).await["type"], "snapshot");
+    }
+    view.settings.fire();
+    for a in [&mut one, &mut two] {
+        assert_eq!(read_not_alive(a).await["type"], "hello");
+    }
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_changes() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one"]);
+    let c = start_connector(&url, store, &view, dir.path());
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello
     let lanes = read(&mut first).await["state"]["lanes"].clone();
@@ -276,110 +254,6 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
     }
     assert_eq!(again["type"], "snapshot");
     assert_eq!(again["state"]["lanes"][0]["diskGb"], 3.3);
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn the_snapshot_reports_a_projects_gallery_info() {
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    // As `galleries::shoot` would leave it after a shoot.
-    let dest = crate::paths::gallery_dir(dir.path(), "one", "models");
-    std::fs::create_dir_all(&dest).unwrap();
-    std::fs::write(
-        dest.join("index.json"),
-        json!({
-            "name": "Models",
-            "shotAt": "2026-01-01T00:00:00Z",
-            "sha": "deadbeef",
-            "images": [{ "file": "01-first.jpg", "title": "First" }],
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let v = view_with_models_gallery("one");
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        v,
-        timing(),
-        noop_exit(),
-        dir.path(),
-    );
-    let mut a = next(&mut rx).await;
-    read(&mut a).await; // hello
-    let galleries = read(&mut a).await["state"]["galleries"].clone();
-
-    assert_eq!(
-        galleries,
-        json!([{
-            "slug": "models",
-            "name": "Models",
-            "status": "idle",
-            "shotAt": "2026-01-01T00:00:00Z",
-            "sha": "deadbeef",
-            "count": 1,
-        }])
-    );
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn the_snapshot_is_sent_again_when_a_gallerys_status_changes() {
-    // A project id of its own: `galleries::set_status` broadcasts across the whole process, and
-    // "one" is shared by plenty of other tests that never expect an extra snapshot.
-    let project = "connector-gallery-resend";
-    let (_dir, c, mut first) = gallery_resend_setup(project).await;
-
-    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
-    let mut again = read(&mut first).await;
-    while again["type"] == "alive" {
-        again = read(&mut first).await;
-    }
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn the_snapshot_is_sent_again_when_the_trial_record_changes() {
-    let project = "connector-trial-resend";
-    let (dir, c, mut first) = gallery_resend_setup(project).await;
-
-    let mut store = crate::store::Store::load(&crate::paths::project_dir(dir.path(), project)).unwrap();
-    store
-        .set_trial(crate::trial_plan::TrialRecord::opened("https://x/pr/1"))
-        .unwrap();
-    let mut again = read(&mut first).await;
-    while again["type"] == "alive" {
-        again = read(&mut first).await;
-    }
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(
-        again["state"]["trial"],
-        json!({ "state": "open", "prUrl": "https://x/pr/1" })
-    );
-    c.stop(Duration::from_secs(1)).await;
-}
-
-#[tokio::test]
-async fn a_status_change_still_arrives_when_another_projects_changes_right_after() {
-    // Two project ids of their own, as above: this test means to prove that a change on
-    // `other`, landing right after this project's own change, doesn't make the connector miss
-    // its own (the watch channel the two share keeps only the latest value).
-    let project = "connector-gallery-resend-own";
-    let other = "connector-gallery-resend-other";
-    let (_dir, c, mut first) = gallery_resend_setup(project).await;
-
-    galleries::set_status(project, "models", galleries::GalleryStatus::Shooting);
-    galleries::set_status(other, "models", galleries::GalleryStatus::Shooting);
-    let mut again = read(&mut first).await;
-    while again["type"] == "alive" {
-        again = read(&mut first).await;
-    }
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(again["state"]["galleries"][0]["status"], "shooting");
     c.stop(Duration::from_secs(1)).await;
 }
 
@@ -421,17 +295,13 @@ fn command(id: &str, name: &str, args: Value) -> Value {
 /// snapshot have been read, ready for a test to send it a command. The returned `TempDir` must
 /// be kept (as `_dir`): dropping it removes the credentials file the connector's still using.
 async fn connected_project(exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
+    connected_with(view(&["one"]), exit).await
+}
+
+async fn connected_with(v: Arc<AgentView>, exit: Arc<Exit>) -> (Connector, Accepted, tempfile::TempDir) {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
-    let c = Connector::start(
-        &url,
-        store,
-        reqwest::Client::new(),
-        view(&["one"]),
-        timing(),
-        exit,
-        dir.path(),
-    );
+    let c = Connector::start(&url, store, reqwest::Client::new(), v, timing(), exit, dir.path());
     let mut a = next(&mut rx).await;
     read(&mut a).await; // hello
     read(&mut a).await; // snapshot
@@ -482,6 +352,31 @@ async fn every_command_answered_is_logged_to_remote_log() {
 }
 
 #[tokio::test]
+async fn setup_check_acks_with_the_checks_and_is_audited() {
+    let mut v = view(&["one"]);
+    Arc::get_mut(&mut v).unwrap().settings =
+        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty(), 0);
+    let (c, mut a, dir) = connected_with(v, noop_exit()).await;
+    a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
+        .await
+        .unwrap();
+    let mut ack = read(&mut a).await;
+    while ack["type"] == "hello" {
+        ack = read(&mut a).await; // the changed result resends hello, in either order
+    }
+    assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
+    assert!(ack["answer"]["git"].is_object());
+    c.stop(Duration::from_secs(1)).await;
+    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
+    let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (line["name"].as_str(), line["outcome"].as_str()),
+        (Some("setup_check"), Some("ack"))
+    );
+    assert!(line["answerBytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
 async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     let (c, mut a, _dir) = connected_project(noop_exit()).await;
 
@@ -504,7 +399,7 @@ async fn pause_and_resume_need_computer_true_or_the_site_answered_it_itself() {
     assert_eq!(snapshot["type"], "snapshot");
     assert_eq!(
         snapshot["state"]["orchestrator"]["pausedReason"],
-        "Paused from retaskable.com by jc"
+        "This computer is paused"
     );
 
     a.ws.send(Message::text(
@@ -791,5 +686,147 @@ async fn a_bug_sent_while_off_or_unanswered_is_not_sent_with_why() {
         panic!("sent")
     };
     assert!(why.contains("isn't connected"));
+    c.stop(Duration::from_secs(1)).await;
+}
+
+fn start_with(url: &str, store: Arc<dyn TokenStore>, dir: &std::path::Path, timing: Timing) -> Connector {
+    Connector::start(
+        url,
+        store,
+        reqwest::Client::new(),
+        view(&["one"]),
+        timing,
+        noop_exit(),
+        dir,
+    )
+}
+
+async fn state_becomes(c: &Connector, want: CloudLink) {
+    until(&format!("{want:?}"), || c.connected() == want).await;
+}
+
+#[tokio::test]
+async fn a_fresh_connector_with_no_token_reads_not_linked() {
+    let (url, _, _rx) = cloud().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn TokenStore> = Arc::new(FileStore::new(dir.path().join("credentials.json"), "retaskable"));
+    let c = start_with(&url, store, dir.path(), timing());
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_token_reads_connected_while_the_cloud_accepts_and_offline_once_it_drops() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let slow = Timing {
+        backoff: Duration::from_secs(5),
+        ..timing()
+    };
+    let c = start_with(&url, store, dir.path(), slow);
+    let mut a = next(&mut rx).await;
+    state_becomes(&c, CloudLink::Connected).await;
+    close(&mut a, close::REPLACED).await;
+    state_becomes(&c, CloudLink::Offline).await;
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn invalid_grant_reads_unlinked_on_the_website_until_forgotten() {
+    async fn refuse() -> (axum::http::StatusCode, Json<Value>) {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_grant" })),
+        )
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route("/api/device/token", post(refuse));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (dir, store) = linked(&url);
+    let c = start_with(&url, store.clone(), dir.path(), timing());
+    state_becomes(&c, CloudLink::UnlinkedOnTheWebsite).await;
+    assert_eq!(store.get(&url).unwrap(), None);
+    // It stays so while waiting.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(c.connected(), CloudLink::UnlinkedOnTheWebsite);
+    c.forget().unwrap();
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn forget_deletes_the_token_closes_the_socket_and_leaves_other_clouds_connected() {
+    let (url, _, mut rx) = cloud().await;
+    let (url2, _, mut rx2) = cloud().await;
+    let (dir, store) = linked(&url);
+    store.set(&url2, "r1").unwrap();
+    let c = start_with(&url, store.clone(), dir.path(), timing());
+    let c2 = start_with(&url2, store.clone(), dir.path(), timing());
+    let mut a = next(&mut rx).await;
+    let _b = next(&mut rx2).await;
+    state_becomes(&c, CloudLink::Connected).await;
+    state_becomes(&c2, CloudLink::Connected).await;
+    c.forget().unwrap();
+    assert_eq!(store.get(&url).unwrap(), None);
+    assert_eq!(c.connected(), CloudLink::NotLinked);
+    // The socket is closed: the fake cloud's side ends.
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), a.ws.next())
+            .await
+            .expect("closed")
+        {
+            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+            Some(Ok(_)) => {}
+        }
+    }
+    // It doesn't reconnect, and the other cloud is still up and still has its token.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), rx.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(c2.connected(), CloudLink::Connected);
+    assert!(store.get(&url2).unwrap().is_some());
+    // A later link reconnects it.
+    store.set(&url, "r9").unwrap();
+    next(&mut rx).await;
+    c.stop(Duration::from_secs(1)).await;
+    c2.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn a_refresh_that_lands_after_forget_stores_nothing() {
+    use tokio::sync::Notify;
+    #[derive(Clone)]
+    struct Slow {
+        arrived: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    async fn token(State(s): State<Slow>) -> Json<Value> {
+        s.arrived.notify_one();
+        s.release.notified().await;
+        Json(json!({ "access_token": "a1", "refresh_token": "r2", "expires_in": 3600 }))
+    }
+    let slow = Slow {
+        arrived: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/api/device/token", post(token))
+        .with_state(slow.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (dir, store) = linked(&url);
+    let c = start_with(&url, store.clone(), dir.path(), timing());
+    tokio::time::timeout(Duration::from_secs(10), slow.arrived.notified())
+        .await
+        .expect("a refresh under way");
+    c.forget().unwrap();
+    slow.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(store.get(&url).unwrap(), None);
+    assert_eq!(c.connected(), CloudLink::NotLinked);
     c.stop(Duration::from_secs(1)).await;
 }

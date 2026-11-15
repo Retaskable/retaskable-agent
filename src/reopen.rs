@@ -5,7 +5,9 @@
 //! receiving the store's forwarded `tryout_problem`, deciding chore vs. item with [`may_reopen`],
 //! and resuming the session that built it (with [`resume_for_reopen`]'s message, on a new branch, in
 //! its own lane) are the not-yet-built orchestrator-loop's job, the same as
-//! [`crate::playtest_groups`] and [`crate::smoke`]. When the store keeps the item as it is (it's
+//! [`crate::playtest_groups`] and [`crate::smoke`]. Reopening can't be built yet:
+//! this agent's loop doesn't merge items, so it never records a merged slice's session and lane to resume. (A
+//! person's answer to a try-out does reach the store, which forwards a Problem or reopens the item itself.) When the store keeps the item as it is (it's
 //! being built) or doesn't know `reopen` (an older store), the caller queues a playtest-fix chore
 //! with the same notes and steps instead, so the person's report is never lost — that chore isn't
 //! ported here either.

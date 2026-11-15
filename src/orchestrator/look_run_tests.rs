@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use super::super::fake_session_tests::{assert_ran_read_only_in, cut_registered_tree, roster};
+use super::super::fake_session_tests::{
+    assert_ran_on, assert_ran_read_only_in, cut_registered_tree, on_every_engine, roster, rows_once_running,
+};
 use super::*;
 use crate::config::{Engine, EngineChoiceConfig};
 use crate::connector::bug_link::BugLink;
@@ -54,7 +56,9 @@ fn request_for(project: &str, piece: Value, other: Value) -> (RunRequest, Starte
         piece: serde_json::from_value(piece).unwrap(),
         other: other.as_object().cloned().unwrap_or_default(),
         lane: None,
+        engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees, stop })
@@ -89,6 +93,25 @@ async fn until_free(r: &Rig) {
 }
 
 #[tokio::test]
+async fn a_look_is_listed_while_it_runs_and_not_after() {
+    let r = rig(&answer(AGAIN), "sleep 1", EngineChoiceConfig::default());
+    let (req, mut s) = request(brief());
+    r.starter.start(req).unwrap();
+    let rows = rows_once_running(&r.starter.roster.sessions).await;
+    assert_eq!(rows.len(), 1);
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "pc1", Role::Triager)
+    );
+    assert_eq!((info.title.as_deref(), info.lane), (Some("Show the thing"), None));
+    assert_eq!(info.engine, crate::engines::EngineId::Claude);
+    assert!(!info.model.is_empty());
+    end_of(&mut s.ends).await;
+    assert!(r.starter.roster.sessions.snapshot().is_empty());
+}
+
+#[tokio::test]
 async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
     let r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
     let base = lanes::base_checkout_path(&PathBuf::from(&r.starter.roster.projects[0].worktrees_dir));
@@ -109,7 +132,7 @@ async fn a_decision_ends_looked_with_its_wire_json_in_the_base_checkout() {
         })
     );
     // It runs in the base checkout, read-only, on the middle tier with the reviewer's budget.
-    assert_ran_read_only_in(&r.root, &base);
+    assert_ran_read_only_in(&r.root, &base, "sonnet");
     // The prompt carries the piece and its attempts.
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(
@@ -180,15 +203,35 @@ async fn a_session_that_fails_ends_failed() {
 }
 
 #[tokio::test]
-async fn another_engine_or_a_missing_binary_gives_the_run_back() {
+async fn the_triager_role_on_another_engine_runs_that_engines_binary() {
+    for (engine, program) in [(Engine::Cursor, "cursor"), (Engine::Codex, "codex"), (Engine::Pi, "pi")] {
+        let other = EngineChoiceConfig {
+            default: Some(engine),
+            ..Default::default()
+        };
+        let mut r = rig(&answer(AGAIN), "", other);
+        let root = r.root.clone();
+        on_every_engine(&mut r.starter.roster, &root);
+        assert_eq!(r.starter.kinds(), vec![RunKind::Look]);
+        let (req, mut s) = request(brief());
+        r.starter.start(req).unwrap();
+        // The stub answers in Claude's format, so only where the session ran is judged, not how it ended.
+        end_of(&mut s.ends).await;
+        assert_ran_on(&root, program);
+    }
+}
+
+#[tokio::test]
+async fn a_missing_binary_gives_the_run_back() {
     let other = EngineChoiceConfig {
         default: Some(Engine::Codex),
         ..Default::default()
     };
-    let r = rig(&answer(AGAIN), "", other);
-    assert!(r.starter.kinds().is_empty());
+    let mut r = rig(&answer(AGAIN), "", other);
+    let gone = r.root.join("nothing-here").to_string_lossy().into_owned();
+    r.starter.roster.env = Env::new(move |k| (k == "RETASKABLE_CODEX").then(|| gone.clone()));
     let (req, _s) = request(brief());
-    assert!(r.starter.start(req).unwrap_err().contains("only Claude"));
+    assert!(r.starter.start(req).unwrap_err().contains("codex binary wasn't found"));
 
     let mut r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
     let gone = r.root.join("nothing-here").to_string_lossy().into_owned();

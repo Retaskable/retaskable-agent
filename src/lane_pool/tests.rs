@@ -106,7 +106,7 @@ fn the_chore_lane_takes_chores_and_roadmap_items_only_when_no_fix_waits() {
     assert!(pool.release(1, &item("p", "C")));
     assert_eq!(pool.claim_lane(&chore), Some(2), "a chore never takes a roadmap lane");
     assert_eq!(
-        pool.free_lane(false, None, None, |_| true),
+        pool.free_lane(false, None, |_| true),
         Some(1),
         "new roadmap work never gets the chore lane first"
     );
@@ -204,31 +204,8 @@ fn lane_scaling_holds_back_the_chore_lane_too() {
 #[test]
 fn free_lane_leaves_out_a_lane_whose_engine_cant_start() {
     let pool = LanePool::new(rules(2));
-    assert_eq!(pool.free_lane(false, None, None, |k| k != 1), Some(2));
-    assert_eq!(pool.free_lane(false, None, None, |_| false), None);
-}
-
-#[test]
-fn the_merge_turn_gets_the_next_free_lane_ahead_of_everything_else() {
-    // logicLanes.test.ts: the item holding the merge turn gets the next free lane to be checked again.
-    let mut pool = LanePool::new(rules(2));
-    assert!(pool.take(1, item("p", "C")));
-    let mut h = want("p", "H");
-    h.last_lane = Some(2);
-    pool.set_merge_turn(Some(h.clone()));
-    assert_eq!(pool.claim_lane(&want("p", "N")), None, "lane 2 is kept for H");
-    assert_eq!(
-        pool.free_lane(false, None, None, |_| true),
-        None,
-        "new work doesn't start in it either"
-    );
-    assert_eq!(pool.claim(&h), Some(2));
-    assert!(pool.release(2, &item("p", "H")));
-    assert_eq!(
-        pool.claim_lane(&want("p", "N")),
-        Some(2),
-        "once H has had its lane, lanes are everyone's again"
-    );
+    assert_eq!(pool.free_lane(false, None, |k| k != 1), Some(2));
+    assert_eq!(pool.free_lane(false, None, |_| false), None);
 }
 
 #[test]
@@ -323,4 +300,47 @@ fn the_lane_limit_caps_runs() {
     pool.set_used_pct(Some(90.0));
     assert_eq!(pool.claim_run("p", "a"), Some(1));
     assert_eq!(pool.claim_run("p", "b"), None);
+}
+
+#[test]
+fn claim_lane_where_skips_lanes_the_filter_refuses() {
+    let pool = LanePool::new(rules(3));
+    let w = want("p", "A");
+    assert_eq!(pool.claim_lane_where(&w, |k| k != 1), Some(2));
+    assert_eq!(pool.claim_lane_where(&w, |_| false), None);
+    assert_eq!(pool.claim_lane(&w), Some(1), "claim_lane is unfiltered");
+    let mut pool = LanePool::new(PoolRules {
+        chore_lane: Some(2),
+        ..rules(2)
+    });
+    assert_eq!(
+        pool.claim_lane_where(&w, |k| k == 2),
+        Some(2),
+        "the chore lane is the fallback"
+    );
+    assert_eq!(pool.claim_lane_where(&w, |_| false), None, "and it is filtered too");
+    assert_eq!(pool.claim_where(&w, |k| k != 1), Some(2));
+    assert_eq!(pool.claim_where(&w, |_| true), Some(1));
+}
+
+#[test]
+fn every_kind_of_holder_names_its_project_but_only_an_item_is_found_by_lane_of() {
+    let play = Holder::Play {
+        project: "p".into(),
+        item: "A".into(),
+    };
+    let trial = Holder::Trial { project: "p".into() };
+    for holder in [item("p", "A"), play.clone(), run("p", "A"), trial.clone()] {
+        assert_eq!(holder.project(), "p");
+    }
+    let mut pool = LanePool::new(rules(3));
+    assert!(pool.take(1, play));
+    assert!(pool.take(2, run("p", "A")));
+    assert!(pool.take(3, trial));
+    assert_eq!(
+        pool.lane_of("p", "A"),
+        None,
+        "a play, run or trial isn't the item's own lane"
+    );
+    assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2, 3]);
 }

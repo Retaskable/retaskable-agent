@@ -33,6 +33,16 @@ pub enum OnOff {
     Off,
 }
 
+/// `syncMain`: `auto` (the default) keeps the base branch caught up with main through a `sync_main` chore; `off`
+/// never starts one (team-branch.md section 4).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncMain {
+    #[default]
+    Auto,
+    Off,
+}
+
 /// `plans`: `risky` (the default) lets a plan someone asked for go ahead on that yes unless the drafter marked it
 /// risky; `ask` waits for Approve on every plan (agent/06.5-spec-drafts.md).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -53,7 +63,7 @@ pub enum Playtests {
     Off,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckConfig {
     #[serde(default)]
@@ -64,44 +74,6 @@ pub struct CheckConfig {
     pub blocking: bool,
     #[serde(default)]
     pub timeout_sec: u64,
-}
-
-/// A tab of pictures the game takes of itself (spec section 6.8).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GalleryConfig {
-    #[serde(default)]
-    pub name: String,
-    /// Run in the base checkout; writes pictures to out_dir, then exits. Empty: the game can't yet.
-    #[serde(default)]
-    pub command: String,
-    /// Relative to the repo root.
-    #[serde(default)]
-    pub out_dir: String,
-}
-
-impl GalleryConfig {
-    /// This gallery's slug (agent/09-web-ui.md section 9.1): its name in kebab case, the same way
-    /// a project's id is made from its folder name. Names its tab, its folder and the `gallery`
-    /// the hub's Shoot command names it by.
-    pub fn slug(&self) -> String {
-        kebab_case(&self.name.to_lowercase())
-    }
-}
-
-fn default_galleries() -> Vec<GalleryConfig> {
-    vec![
-        GalleryConfig {
-            name: "Models".to_string(),
-            command: String::new(),
-            out_dir: "target/models".to_string(),
-        },
-        GalleryConfig {
-            name: "UI".to_string(),
-            command: String::new(),
-            out_dir: "target/ui".to_string(),
-        },
-    ]
 }
 
 /// Scouts split the correctness scout above `max_scout_diff_lines`, and don't run below `min_scout_diff_lines`.
@@ -224,7 +196,7 @@ fn default_max_spec_chars() -> u32 {
     40_000
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectBudget {
     #[serde(default)]
@@ -241,6 +213,29 @@ pub struct ProjectBudget {
     pub ask_usd: f64,
     #[serde(default)]
     pub release_notes_usd: f64,
+    /// Minutes a Cursor session may run before it's killed (engines/04-running-cursor-agent.md);
+    /// 60 when not set, and 0 means the same.
+    #[serde(default = "default_cursor_max_minutes")]
+    pub cursor_max_minutes: u32,
+}
+
+fn default_cursor_max_minutes() -> u32 {
+    60
+}
+
+impl Default for ProjectBudget {
+    fn default() -> Self {
+        Self {
+            planner_usd: 0.0,
+            implementer_usd: 0.0,
+            scout_usd: 0.0,
+            reviewer_usd: 0.0,
+            drafter_usd: 0.0,
+            ask_usd: 0.0,
+            release_notes_usd: 0.0,
+            cursor_max_minutes: default_cursor_max_minutes(),
+        }
+    }
 }
 
 /// Where the project deploys from (environments.md section 4.1). Missing: none.
@@ -264,10 +259,25 @@ pub struct DeployTarget {
     pub smoke: Option<String>,
     #[serde(default)]
     pub version_path: Option<String>,
+    /// `deploy.production.rollout` (rollout-on-server.md section 3): the commands the store's rollout has this
+    /// computer run. A saved `site` flag is not read.
+    #[serde(default)]
+    pub rollout: Option<RolloutConfig>,
+}
+
+/// The two commands of a rollout: `traffic <percent>` sets the share of traffic on the new version, `health` says
+/// whether it is well.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolloutConfig {
+    #[serde(default)]
+    pub traffic: Option<String>,
+    #[serde(default)]
+    pub health: Option<String>,
 }
 
 /// Play on phone (play-on-phone.md section 2): builds the Android app and installs it on a phone over adb.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhoneConfig {
     #[serde(default)]
@@ -278,6 +288,52 @@ pub struct PhoneConfig {
     pub app_id: String,
     #[serde(default)]
     pub item_id: Option<String>,
+}
+
+/// The daily Lighthouse chore's setting (daily-lighthouse.md section 2): off by default. The agent only reads it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LighthouseConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_lighthouse_pages")]
+    pub pages: Vec<String>,
+    /// The hour of the day (project time zone) the chore becomes due.
+    #[serde(default = "default_lighthouse_hour")]
+    pub hour: u32,
+    #[serde(default = "default_lighthouse_min_score")]
+    pub min_score: u32,
+}
+
+fn default_lighthouse_pages() -> Vec<String> {
+    vec!["/".to_string()]
+}
+
+fn default_lighthouse_hour() -> u32 {
+    6
+}
+
+fn default_lighthouse_min_score() -> u32 {
+    90
+}
+
+/// The daily vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VetSuggestionsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for LighthouseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pages: default_lighthouse_pages(),
+            hour: default_lighthouse_hour(),
+            min_score: default_lighthouse_min_score(),
+        }
+    }
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
@@ -313,14 +369,14 @@ pub struct ProjectConfig {
     pub checks: Vec<CheckConfig>,
     #[serde(default)]
     pub play_command: String,
-    #[serde(default = "default_galleries")]
-    pub galleries: Vec<GalleryConfig>,
     #[serde(default)]
     pub playtests: Playtests,
     #[serde(default)]
     pub plans: Plans,
     #[serde(default)]
     pub chores: OnOff,
+    #[serde(default)]
+    pub sync_main: SyncMain,
     #[serde(default)]
     pub triage: OnOff,
     #[serde(default = "default_max_review_rounds")]
@@ -346,6 +402,10 @@ pub struct ProjectConfig {
     pub engines: Option<Value>,
     #[serde(default)]
     pub tuning: TuningConfig,
+    #[serde(default)]
+    pub lighthouse: LighthouseConfig,
+    #[serde(default)]
+    pub vet_suggestions: VetSuggestionsConfig,
 }
 
 impl ProjectConfig {
@@ -418,6 +478,48 @@ fn kebab_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_max_minutes_defaults_to_sixty_and_reads_the_budget() {
+        let p: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.budget.cursor_max_minutes, 60);
+        let p: ProjectConfig = serde_json::from_str(r#"{"budget":{"cursorMaxMinutes":15}}"#).unwrap();
+        assert_eq!(p.budget.cursor_max_minutes, 15);
+    }
+
+    #[test]
+    fn lighthouse_is_off_by_default_and_reads_its_fields() {
+        let p: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            p.lighthouse,
+            LighthouseConfig {
+                enabled: false,
+                pages: vec!["/".into()],
+                hour: 6,
+                min_score: 90
+            }
+        );
+        let p: ProjectConfig =
+            serde_json::from_str(r#"{"lighthouse":{"enabled":true,"pages":["/a","/b"],"hour":3,"minScore":80}}"#)
+                .unwrap();
+        assert_eq!(
+            p.lighthouse,
+            LighthouseConfig {
+                enabled: true,
+                pages: vec!["/a".into(), "/b".into()],
+                hour: 3,
+                min_score: 80
+            }
+        );
+    }
+
+    #[test]
+    fn vet_suggestions_is_off_by_default_and_reads_enabled() {
+        let p: ProjectConfig = serde_json::from_str("{}").unwrap();
+        assert!(!p.vet_suggestions.enabled);
+        let p: ProjectConfig = serde_json::from_str(r#"{"vetSuggestions":{"enabled":true}}"#).unwrap();
+        assert!(p.vet_suggestions.enabled);
+    }
 
     #[test]
     fn ci_tuning_defaults_to_ten_and_one_hundred_twenty_minutes_and_can_be_set() {
@@ -536,10 +638,10 @@ mod tests {
             worktrees_dir: String::new(),
             checks: Vec::new(),
             play_command: String::new(),
-            galleries: default_galleries(),
             playtests: Playtests::default(),
             plans: Plans::default(),
             chores: OnOff::default(),
+            sync_main: SyncMain::default(),
             triage: OnOff::default(),
             max_review_rounds: default_max_review_rounds(),
             max_conflict_rounds: default_max_conflict_rounds(),
@@ -552,6 +654,8 @@ mod tests {
             phone: None,
             engines: None,
             tuning: TuningConfig::default(),
+            lighthouse: LighthouseConfig::default(),
+            vet_suggestions: VetSuggestionsConfig::default(),
         }
     }
 }

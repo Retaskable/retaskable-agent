@@ -9,10 +9,11 @@ use super::model::{DrafterResult, DrafterStatus, Question, drafter_result_schema
 use super::prompt::build_prompt;
 use crate::config::{Engine, ProjectBudget};
 use crate::decisions::{Decision, decisions_text};
-use crate::engines::engine::{EngineId, LocalTarget};
+use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, SessionStart, describe_failure};
 use crate::implementer::session::new_session_id;
-use crate::tiers::mid_tier;
+use crate::lighthouse::is_lighthouse_request;
+use crate::tiers::{LOCAL, chore_tier, claude_model, mid_tier};
 
 /// What a drafter session runs with.
 pub struct Session<'a> {
@@ -23,15 +24,19 @@ pub struct Session<'a> {
     pub titles: &'a str,
     pub branch: &'a str,
     pub base_branch: &'a str,
+    /// Appended to a fresh prompt when the draft is tried again after a failure ([`super::failure::retry_text`]).
+    pub retry: &'a str,
     /// The engine `engines::engine_for(…, Role::Drafter, None)` chose.
     pub engine: Engine,
-    /// The implementer's tier from the usage reading (`tiers::implementer_tier`); the drafter runs
+    /// `sonnet`, or `local` at Claude's limit (`tiers::floor`); the drafter runs
     /// on [`mid_tier`] of it, so never Opus.
     pub tier: &'static str,
     pub budget: &'a ProjectBudget,
     /// The draft's worktree.
     pub cwd: &'a Path,
     pub local: Option<LocalTarget>,
+    /// On Cursor, the `top` model from `engines::place`.
+    pub cursor: Option<CursorOptions>,
 }
 
 pub enum Start<'a> {
@@ -45,12 +50,26 @@ pub enum Start<'a> {
     },
 }
 
+/// The drafter's tier from the given `tier`: a `[Lighthouse]` draft runs on the chore tier, others on
+/// the mid tier (never Opus; `local` stays `local`).
+pub fn drafter_tier(request: &str, tier: &'static str) -> &'static str {
+    if is_lighthouse_request(request) {
+        chore_tier()
+    } else {
+        mid_tier(tier)
+    }
+}
+
 /// The drafter's `SessionSpec`: it writes (no code checks, no read-only), in the draft's worktree.
 pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
     let (session_start, prompt) = match start {
         Start::Fresh => (
             SessionStart::Fresh(new_session_id()),
-            build_prompt(s.template, s.request, s.titles, s.branch, s.base_branch)?,
+            format!(
+                "{}{}",
+                build_prompt(s.template, s.request, s.titles, s.branch, s.base_branch)?,
+                s.retry
+            ),
         ),
         Start::Resume {
             session_id,
@@ -61,11 +80,13 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             format!("{follow_up}{}", decisions_text(decisions)),
         ),
     };
+    let tier = drafter_tier(s.request, s.tier);
+    let local_tier = s.engine == Engine::Claude && tier == LOCAL;
     let (engine, model) = match s.engine {
-        Engine::Claude => (Some(EngineId::Claude), mid_tier(s.tier)),
-        Engine::Cursor => (Some(EngineId::Cursor), mid_tier(s.tier)),
-        Engine::Pi => (Some(EngineId::Pi), mid_tier(s.tier)),
-        Engine::Codex => (Some(EngineId::Codex), mid_tier(s.tier)),
+        Engine::Claude => (Some(EngineId::Claude), claude_model(tier)),
+        Engine::Cursor => (Some(EngineId::Cursor), tier),
+        Engine::Pi => (Some(EngineId::Pi), tier),
+        Engine::Codex => (Some(EngineId::Codex), tier),
         Engine::Local => (None, "local"),
     };
     Ok(SessionSpec {
@@ -79,8 +100,12 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
         start: session_start,
         readonly: false,
         shell: true,
-        cursor: None,
-        local: if s.engine == Engine::Local {
+        cursor: if s.engine == Engine::Cursor {
+            s.cursor.clone()
+        } else {
+            None
+        },
+        local: if s.engine == Engine::Local || local_tier {
             s.local.clone()
         } else {
             None
@@ -94,8 +119,13 @@ pub fn parse_result(r: SessionResult, budget_usd: f64) -> Result<DrafterResult> 
     if !r.ok {
         return Err(anyhow!(describe_failure(&r, budget_usd)));
     }
+    let session_id = r.session_id;
     r.structured
-        .and_then(|v: Value| serde_json::from_value(v).ok())
+        .and_then(|v: Value| serde_json::from_value::<DrafterResult>(v).ok())
+        .map(|d| DrafterResult {
+            session_id: Some(session_id),
+            ..d
+        })
         .ok_or_else(|| anyhow!("the drafter finished but didn't answer with the result Retaskable asked for"))
 }
 
@@ -180,16 +210,55 @@ mod tests {
             titles: "- Dark mode",
             branch: "retaskable/spec-1",
             base_branch: "main",
+            retry: "",
             engine: Engine::Claude,
             tier: "opus",
             budget,
             cwd,
             local: None,
+            cursor: None,
         }
     }
 
     fn result(v: serde_json::Value) -> DrafterResult {
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_lighthouse_draft_runs_on_the_chore_tier_and_others_on_the_usage_tier() {
+        let budget = ProjectBudget::default();
+        let cwd = Path::new("wt");
+        let mut ord = s(&budget, cwd);
+        ord.tier = "haiku";
+        assert_eq!(session_spec(&ord, Start::Fresh).unwrap().model, "haiku");
+        let mut lh = s(&budget, cwd);
+        lh.tier = "haiku";
+        lh.request = "[Lighthouse] fix it";
+        assert_eq!(session_spec(&lh, Start::Fresh).unwrap().model, "sonnet");
+    }
+
+    #[test]
+    fn a_local_tier_runs_claude_on_sonnet_against_the_local_target_except_for_a_lighthouse_draft() {
+        let budget = ProjectBudget::default();
+        let cwd = Path::new("wt");
+        let target = LocalTarget {
+            base_url: "http://x".into(),
+            model: "m".into(),
+        };
+        let mut local = s(&budget, cwd);
+        local.tier = "local";
+        local.local = Some(target.clone());
+        let spec = session_spec(&local, Start::Fresh).unwrap();
+        assert_eq!((spec.model.as_str(), spec.engine), ("sonnet", Some(EngineId::Claude)));
+        assert_eq!(spec.local, Some(target));
+        local.request = "[Lighthouse] fix it";
+        let lh = session_spec(&local, Start::Fresh).unwrap();
+        assert_eq!(lh.model, "sonnet");
+        assert_eq!(drafter_tier(local.request, "local"), chore_tier());
+        let mut cursor = s(&budget, cwd);
+        cursor.tier = "sonnet";
+        cursor.engine = Engine::Cursor;
+        assert_eq!(session_spec(&cursor, Start::Fresh).unwrap().local, None);
     }
 
     #[test]

@@ -367,3 +367,192 @@ async fn saving_network_access_needs_a_long_enough_password_and_turning_it_off_k
     assert!(!saved_off.enabled);
     assert_eq!(saved_off.password_hash, Some(hash));
 }
+
+#[tokio::test]
+async fn a_successful_save_fires_the_hello_signal_and_a_refused_one_does_not() {
+    let (settings, _dir) = test_server();
+    let signal = crate::hello_settings::HelloSettings::default();
+    let mut seen = signal.subscribe();
+    seen.mark_unchanged();
+    settings.set_saved_signal(signal);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let post = |body: String| {
+        app.clone().oneshot(
+            request("POST", "/api/settings")
+                .header("Origin", format!("http://{HOST}"))
+                .header("Cookie", cookie.clone())
+                .header("X-CSRF-Token", csrf.clone())
+                .body(Body::from(body))
+                .unwrap(),
+        )
+    };
+    let res = post(r#"{"dailyUsd":5}"#.to_string()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(!seen.has_changed().unwrap());
+    let found = tags::found_tags(&tags::machine_facts(&Env::empty()));
+    let res = post(json!({ "tags": found }).to_string()).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(seen.has_changed().unwrap());
+}
+
+fn ci_server(dir: &std::path::Path, env: Env) -> Arc<SettingsServer> {
+    Arc::new(SettingsServer::new(
+        dir.to_path_buf(),
+        4700,
+        4700,
+        false,
+        env,
+        || 1_700_000_000,
+        |_: i32| {},
+        test_keychain(dir),
+    ))
+}
+
+#[tokio::test]
+async fn saving_ci_slots_validates_0_to_8_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = ci_server(dir.path(), Env::empty());
+    assert_eq!(signed_in_settings(&settings).await["ciSlots"], json!(1));
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+
+    let too_high = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 9 })).await;
+    assert_eq!(too_high.status(), StatusCode::BAD_REQUEST);
+    let negative = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": -1 })).await;
+    assert_eq!(negative.status(), StatusCode::BAD_REQUEST);
+
+    let ok = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 0 })).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.ci_slots, 0);
+    assert_eq!(signed_in_settings(&settings).await["ciSlots"], json!(0));
+}
+
+#[tokio::test]
+async fn ci_slots_is_greyed_out_and_refused_when_the_variable_sets_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = ci_server(dir.path(), Env::from_pairs([("RETASKABLE_CI_SLOTS", "4")]));
+    let body = signed_in_settings(&settings).await;
+    assert_eq!(
+        (body["ciSlots"].clone(), body["envVars"]["RETASKABLE_CI_SLOTS"].clone()),
+        (json!(4), json!(true))
+    );
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let res = post_setting(&app, &cookie, &csrf, json!({ "ciSlots": 2 })).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        json_body(res).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("RETASKABLE_CI_SLOTS")
+    );
+}
+
+fn write_project_config(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("config.json"),
+        json!({"version": 2, "projects": [{
+            "id": "app", "repoPath": "/nowhere/app",
+            "checks": [{"name": "t", "command": "CI=1 cargo test"}],
+            "engines": {"default": "claude", "allow": ["Shell(make)"]},
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn saved_engines(dir: &std::path::Path) -> Value {
+    let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    serde_json::from_str::<Value>(&text).unwrap()["projects"][0]["engines"].clone()
+}
+
+#[tokio::test]
+async fn engines_allow_refuses_bad_entries_saving_nothing_and_saves_valid_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project_config(dir.path());
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    let before = saved_engines(dir.path());
+
+    for (typed, reason) in [
+        ("Shell(*)", "Shell(*) would allow every command"),
+        ("Shell(/bin/bash)", "Shell(/bin/bash) would allow every command"),
+        (
+            "Write(docs/../../etc)",
+            "Write(docs/../../etc) writes outside the workspace",
+        ),
+        ("Shell(RM)", "RM is always denied"),
+        ("Shell(make), Shell(*)", "Shell(*) would allow every command"),
+    ] {
+        let res = post_setting(
+            &app,
+            &cookie,
+            &csrf,
+            json!({"cursorAllow": {"project": "app", "allow": typed}}),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{typed}");
+        let body = json_body(res).await;
+        assert!(
+            body.to_string()
+                .contains(&format!("Cursor can't be allowed this: {reason}")),
+            "{typed}: {body}"
+        );
+        assert_eq!(saved_engines(dir.path()), before);
+    }
+
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({"cursorAllow": {"project": "app", "allow": "Shell(just), Write(src/**)\nRead(docs/**)"}}),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(
+        saved_engines(dir.path()),
+        json!({"default": "claude", "allow": ["Shell(just)", "Write(src/**)", "Read(docs/**)"]})
+    );
+}
+
+#[tokio::test]
+async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived_programs() {
+    let dir = tempfile::tempdir().unwrap();
+    write_project_config(dir.path());
+    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    let ok = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({"engineChoice": {"default": "cursor", "roles": {"implementer": "cursor"}}}),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(saved_engines(dir.path())["allow"], json!(["Shell(make)"]));
+
+    let got = signed_in_settings(&settings).await;
+    let row = &got["cursorAllow"][0];
+    assert_eq!(row["project"], "app");
+    assert_eq!(row["allow"], json!(["Shell(make)"]));
+    assert_eq!(row["commandShells"], json!(["Shell(cargo)"]));
+    assert!(row["inForce"]["line"].as_str().unwrap().starts_with("Cursor "));
+}
+
+#[tokio::test]
+async fn cursor_allow_on_a_version_1_config_is_an_error_not_a_silent_no_save() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        json!({"repoPath": "/nowhere/app"}).to_string(),
+    )
+    .unwrap();
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    let res = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({"cursorAllow": {"project": "app", "allow": "Shell(just)"}}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}

@@ -3,10 +3,9 @@
 //! one access token for that cloud. Each says hello, sends a snapshot, and says it's alive in a quiet minute; it
 //! reconnects with backoff. Outbound only: nothing listens on a public port.
 //!
-//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, its
-//! galleries' real status and last shoot, and an orchestrator that runs no work yet (`AgentView`). A command from
-//! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause, Resume
-//! and Shoot — and refused otherwise.
+//! What it reports is what this agent has so far: the machine, its tags, each project's repo and backlog, and an orchestrator that runs no work yet (`AgentView`). A command from
+//! the site (`commands.rs`) is checked and run if it's one this agent has ported — so far Restart, Pause and Resume
+//! — and refused otherwise.
 pub mod bug_link;
 #[cfg(test)]
 mod tests;
@@ -16,6 +15,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -27,7 +27,6 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 
 use self::bug_link::BugLink;
 use crate::commands::{self, Seen};
-use crate::galleries;
 use crate::link::{CLOUD_TARGET, DeviceTokens, TokenAnswer, TokenStore, cause, environment_name};
 use crate::text::truncate;
 use crate::view::{AgentView, Exit};
@@ -40,6 +39,8 @@ pub mod close {
     pub const REPLACED: u16 = 4000;
     pub const TOKEN_EXPIRED: u16 = 4001;
     pub const UNLINKED: u16 = 4003;
+    /// A `hello`'s role is not the role the agent was linked with (chat-agent-process.md section 3).
+    pub const WRONG_ROLE: u16 = 4004;
 }
 
 /// How long the connector waits for things (connector.ts's constants); shorter in tests.
@@ -54,6 +55,8 @@ pub struct Timing {
     pub backoff: Duration,
     /// A connection that lasted this long was a good one: the next reconnect starts from the first wait again.
     pub stable: Duration,
+    /// How long a change in the loop's live state waits for others before the snapshot is sent again.
+    pub live_coalesce: Duration,
 }
 
 impl Default for Timing {
@@ -61,6 +64,7 @@ impl Default for Timing {
         Self {
             idle: Duration::from_secs(60),
             connect: Duration::from_secs(30),
+            live_coalesce: Duration::from_secs(3),
             backoff: Duration::from_secs(1),
             stable: Duration::from_secs(30),
         }
@@ -75,10 +79,23 @@ pub fn backoff(attempt: u32, unit: Duration, random: f64) -> Duration {
 }
 
 /// A number in 0..1 that differs from one call and one process to the next (each `RandomState` has fresh keys).
-fn random() -> f64 {
+pub(crate) fn random() -> f64 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u8(0);
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// What the tray shows of one cloud (tray/04-the-tray-agent.md section 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudLink {
+    /// No refresh token.
+    NotLinked,
+    /// A refresh token, but no connection open: connecting, or the cloud can't be reached.
+    Offline,
+    /// At least one project's connection is open.
+    Connected,
+    /// The cloud answered `invalid_grant` (the token is deleted), until the next link or forget.
+    UnlinkedOnTheWebsite,
 }
 
 /// One cloud's link: one access token shared by every project's connection, and those connections.
@@ -86,6 +103,33 @@ pub struct Connector {
     tokens: Arc<DeviceTokens>,
     tasks: Vec<JoinHandle<()>>,
     cloud: Arc<Cloud>,
+}
+
+/// A cloud's link state and `forget`, shareable while the [`Connector`] itself is stopped by its owner.
+#[derive(Clone)]
+pub struct CloudHandle {
+    tokens: Arc<DeviceTokens>,
+    cloud: Arc<Cloud>,
+}
+
+impl CloudHandle {
+    pub fn connected(&self) -> CloudLink {
+        if self.tokens.unlinked_on_site() {
+            CloudLink::UnlinkedOnTheWebsite
+        } else if !self.tokens.linked() {
+            CloudLink::NotLinked // also right after a forget, before its sockets have closed
+        } else if self.cloud.open.load(Ordering::SeqCst) > 0 {
+            CloudLink::Connected
+        } else {
+            CloudLink::Offline
+        }
+    }
+
+    pub fn forget(&self) -> anyhow::Result<()> {
+        let deleted = self.tokens.forget();
+        self.cloud.forgotten.send_modify(|n| *n += 1);
+        deleted
+    }
 }
 
 /// What every connection to one cloud shares.
@@ -102,6 +146,10 @@ struct Cloud {
     url: String,
     /// Each project's connection's bug-report consent and sender (bug_link.rs).
     bugs: HashMap<String, Arc<BugLink>>,
+    /// How many project connections are open now.
+    open: AtomicUsize,
+    /// Counts forgets: an open connection closes when it changes.
+    forgotten: watch::Sender<u64>,
 }
 
 impl Connector {
@@ -133,6 +181,8 @@ impl Connector {
                 .into_iter()
                 .map(|k| (k, Arc::new(BugLink::new(timing.connect))))
                 .collect(),
+            open: AtomicUsize::new(0),
+            forgotten: watch::channel(0).0,
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -162,6 +212,26 @@ impl Connector {
         self.cloud.bugs.get(project).cloned()
     }
 
+    /// This cloud's link state, as the tray shows it (connector.ts `connected`).
+    pub fn connected(&self) -> CloudLink {
+        self.handle().connected()
+    }
+
+    /// Deletes this cloud's refresh token, closes its connections and drops a token refresh under way without
+    /// storing what it gets. The connections go on waiting, unlinked, so a later link reconnects them (connector.ts
+    /// `forget`). Other clouds' connectors are untouched.
+    pub fn forget(&self) -> anyhow::Result<()> {
+        self.handle().forget()
+    }
+
+    /// What the tray holds of this connector: its link state and `forget`, while [`Connector::stop`] stays here.
+    pub fn handle(&self) -> CloudHandle {
+        CloudHandle {
+            tokens: self.tokens.clone(),
+            cloud: self.cloud.clone(),
+        }
+    }
+
     /// Stops every connection, once a token refresh under way has landed (up to `wait`): stopping in the middle of
     /// one loses the token the cloud just rotated to, and unlinks the agent at its next start.
     pub async fn stop(self, wait: Duration) {
@@ -177,7 +247,7 @@ impl Connector {
 }
 
 /// `wss://…/api/agents/connect?project=<id>`, no `project` for the agent's own hub.
-fn connect_url(url: &str, project: &str) -> String {
+pub(crate) fn connect_url(url: &str, project: &str) -> String {
     let base = format!("{}/api/agents/connect", url.replacen("http", "ws", 1));
     if project.is_empty() {
         return base;
@@ -206,10 +276,12 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
         wait
     };
     let mut stale: Option<String> = None;
+    let mut forgotten = cloud.forgotten.subscribe();
     // One project's commands, so a replay is caught across reconnects (commands.ts's `Commands` is one per
     // project's connection too).
     let mut seen = Seen::default();
     loop {
+        forgotten.mark_unchanged(); // a forget from here on closes this try's connection
         // A token that never comes (a refresh hanging on the network) is a failed try, not a link that stops.
         let answer = tokio::time::timeout(t.connect, cloud.tokens.access_token(stale.as_deref()))
             .await
@@ -227,7 +299,7 @@ async fn run(cloud: Arc<Cloud>, project: String, mut opened: Option<watch::Sende
                             let _ = opened.send(true); // the other projects may connect now
                         }
                         let since = Instant::now();
-                        let (code, reason) = connected(ws, &cloud, &project, &log, &mut seen).await;
+                        let (code, reason) = connected(ws, &cloud, &project, &log, &mut seen, &mut forgotten).await;
                         if since.elapsed() >= t.stable {
                             attempt = 0;
                         }
@@ -273,10 +345,10 @@ fn why(code: u16, reason: &str) -> String {
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+pub(crate) type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Opens the socket, signing in with the access token beside the subprotocol.
-async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
+pub(crate) async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
     let mut request = ws_url.into_client_request().map_err(|e| cause(&e))?;
     let protocols = HeaderValue::from_str(&format!("{SUBPROTOCOL}, {access_token}")).map_err(|e| cause(&e))?;
     request.headers_mut().insert("Sec-WebSocket-Protocol", protocols);
@@ -286,14 +358,27 @@ async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
 
 /// Runs an open connection: hello and a snapshot, then answers what the hub sends, and says it's alive in a quiet
 /// minute (sync-health.md section 3.1). The close code and reason when it closes.
-async fn connected(ws: Socket, cloud: &Cloud, project: &str, log: &impl Fn(String), seen: &mut Seen) -> (u16, String) {
+async fn connected(
+    ws: Socket,
+    cloud: &Cloud,
+    project: &str,
+    log: &impl Fn(String),
+    seen: &mut Seen,
+    forgotten: &mut watch::Receiver<u64>,
+) -> (u16, String) {
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let bugs = cloud.bugs.get(project);
     if let Some(bugs) = bugs {
         bugs.opened(out_tx.clone());
     }
     cloud.view.item_commands.set_out(project, Some(out_tx));
-    let closed = session(ws, cloud, project, log, seen, out_rx).await;
+    cloud.open.fetch_add(1, Ordering::SeqCst);
+    // A forget drops the socket, which closes it.
+    let closed = tokio::select! {
+        closed = session(ws, cloud, project, log, seen, out_rx) => closed,
+        _ = forgotten.changed() => (1000, "forgotten".to_string()),
+    };
+    cloud.open.fetch_sub(1, Ordering::SeqCst);
     cloud.view.item_commands.set_out(project, None);
     if let Some(bugs) = bugs {
         bugs.closed();
@@ -311,27 +396,39 @@ async fn session(
 ) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    for msg in [view.hello(project), view.snapshot(project, &cloud.dir)] {
+    for msg in [view.hello(project).await, view.snapshot(project, &cloud.dir)] {
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
     }
     let t = cloud.timing;
     let mut alive = tokio::time::interval_at(tokio::time::Instant::now() + t.idle, t.idle);
-    // The snapshot just sent has the sizes, pause and galleries as they are now; a later change sends it again.
+    // The snapshot just sent has the sizes and pause as they are now; a later change sends it again.
     let mut sizes = view.lane_sizes.subscribe();
     sizes.mark_unchanged();
     let mut paused = view.paused.subscribe();
     paused.mark_unchanged();
+    let mut store_paused = view.store_paused.subscribe();
+    store_paused.mark_unchanged();
     let mut restart = view.restart.subscribe();
     restart.mark_unchanged();
+    let mut local_down = view.local.subscribe_down();
+    local_down.mark_unchanged();
+    let mut settings_saved = view.settings.subscribe();
+    settings_saved.mark_unchanged();
+    let mut checks_changed = view.checks.subscribe();
+    checks_changed.mark_unchanged();
+    let mut live = view.live.subscribe();
+    live.mark_unchanged();
+    // When a change in the loop's state is due to be sent: later changes in the wait go in the same snapshot.
+    let mut live_due: Option<tokio::time::Instant> = None;
     let mut trial_saved = crate::store::subscribe_trial_changes();
     trial_saved.mark_unchanged();
     let mut trial_sent = view.trial_json(project, &cloud.dir);
-    let mut gallery_status = galleries::subscribe_status_changes();
-    gallery_status.mark_unchanged();
+    let mut commands_changed = view.item_commands.gates().subscribe();
+    commands_changed.mark_unchanged();
+    let mut commands_sent = view.commands_waiting_json(project);
     let mut pending = HashMap::new();
-    let mut gallery_changes = gallery_status.borrow().get(project).copied().unwrap_or(0);
     loop {
         let reply = tokio::select! {
             msg = rx.next() => match msg {
@@ -349,8 +446,21 @@ async fn session(
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
+            Ok(()) = checks_changed.changed() => Some(view.hello(project).await),
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = live.changed(), if live_due.is_none() => {
+                live_due = Some(tokio::time::Instant::now() + t.live_coalesce);
+                None
+            },
+            () = tokio::time::sleep_until(live_due.unwrap_or_else(tokio::time::Instant::now)), if live_due.is_some() => {
+                live_due = None;
+                live.mark_unchanged();
+                Some(view.snapshot(project, &cloud.dir))
+            },
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = store_paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = trial_saved.changed() => {
                 let now = view.trial_json(project, &cloud.dir);
                 if now != trial_sent {
@@ -360,10 +470,10 @@ async fn session(
                     None
                 }
             },
-            Ok(()) = gallery_status.changed() => {
-                let count = gallery_status.borrow().get(project).copied().unwrap_or(0);
-                if count != gallery_changes {
-                    gallery_changes = count;
+            Ok(()) = commands_changed.changed() => {
+                let now = view.commands_waiting_json(project);
+                if now != commands_sent {
+                    commands_sent = now;
                     Some(view.snapshot(project, &cloud.dir))
                 } else {
                     None

@@ -9,12 +9,16 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 
 /// What the fake host was asked, and what it answers.
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     answers: Mutex<Vec<Value>>,
-    jobs: Mutex<Vec<(String, bool, String)>>,
+    pub(super) jobs: Mutex<Vec<(String, bool, String)>>,
+    engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
     published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
+    /// What the classifier answers: a confident bug when set.
+    bug: AtomicBool,
+    requests: Mutex<Vec<Option<String>>>,
 }
 
 impl DraftHost for Host {
@@ -26,6 +30,8 @@ impl DraftHost for Host {
             .lock()
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
+        self.engines.lock().unwrap().push(job.engine);
+        self.requests.lock().unwrap().push(job.draft.request);
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);
         async move {
@@ -61,10 +67,27 @@ impl DraftHost for Host {
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
     }
+    fn classify(&self, _: &ProjectConfig, _: String) -> BoxFuture<'static, crate::ask::classify::Classified> {
+        use crate::ask::classify::{Classified, Kind, Sorted};
+        let kind = if self.bug.load(Ordering::SeqCst) {
+            Kind::Bug
+        } else {
+            Kind::Idea
+        };
+        async move {
+            Classified::Sorted(Sorted {
+                kind,
+                confidence: 0.9,
+                title: None,
+            })
+        }
+        .boxed()
+    }
 }
 
 /// A store whose `draft_claim_next` hands out `draft` once; every op is recorded.
-async fn store(draft: Value) -> (String, Asked) {
+/// The op `fail` is refused with a 500.
+async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
     let asked: Asked = Default::default();
     let (seen, handed) = (asked.clone(), Arc::new(AtomicBool::new(false)));
     let app = Router::new().route(
@@ -74,8 +97,18 @@ async fn store(draft: Value) -> (String, Asked) {
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                if op == fail {
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "boom" })),
+                    );
+                }
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
+                    "ideas_list" => json!({ "round": null, "ideas": [{
+                        "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
+                        "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
                     "draft_take" => json!({ "token": "lease-t", "draft": {
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
@@ -85,7 +118,7 @@ async fn store(draft: Value) -> (String, Asked) {
                     }
                     _ => Value::Null,
                 };
-                Json(json!({ "value": value }))
+                (axum::http::StatusCode::OK, Json(json!({ "value": value })))
             }
         }),
     );
@@ -100,10 +133,13 @@ fn claimed() -> Value {
 }
 
 async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
-    let (base, asked) = store(draft).await;
+    rig_failing(draft, answers, "").await
+}
+
+async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (Rig, Arc<Host>, Asked) {
+    let (base, asked) = store_failing(draft, fail).await;
     let mut rig = rig(2, &[&base]);
     rig.go_live();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["ask-claude"]));
     let host = Arc::new(Host {
         answers: Mutex::new(answers),
         ..Default::default()
@@ -438,15 +474,136 @@ async fn a_draft_with_questions_says_so_in_the_chat() {
     assert_eq!(sent[0]["text"], crate::ask::follow_up::HAS_QUESTIONS);
 }
 
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// Cursor is at its limit.
+fn start_rules(rig: &mut Rig, choice: Value, claude_out: bool, cursor_out: bool) {
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+    rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
+    if cursor_out {
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Cursor, out_for(600));
+    }
+}
+
+fn charts() -> Value {
+    json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "changeBody": "Adds charts.",
+        "itemIds": ["charts-1"], "summary": "Charts", "pieces": [{"title": "Charts", "kind": "feature"}],
+        "breakdown": {"build": [{"id": "charts-1", "line": "Draw them", "size": "M"}], "people": []}})
+}
+
 #[tokio::test]
-async fn nothing_is_posted_while_the_ask_claude_flag_is_off() {
-    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
-    let (mut rig, _host, asked) = rig_with(draft, vec![written()]).await;
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
+async fn with_claude_signed_out_a_draft_on_cursor_starts() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
+    start_rules(&mut rig, json!({"roles": {"drafter": "cursor"}}), true, false);
     reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
+    assert_eq!(*host.engines.lock().unwrap(), vec![None]);
+}
+
+#[tokio::test]
+async fn a_draft_on_claude_with_claude_out_starts_on_cursor_used_here() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, false);
+    reports(&mut rig, &asked, 2).await;
+    assert_eq!(
+        *host.engines.lock().unwrap(),
+        vec![Some(crate::engines::EngineId::Cursor)]
+    );
+}
+
+#[tokio::test]
+async fn a_draft_waits_when_no_engine_may_start() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![charts()]).await;
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, true);
+    for _ in 0..3 {
+        rig.machine.pass().await;
+    }
+    assert_eq!(claims(&asked), 0);
+    assert!(host.jobs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_draft_with_a_saved_session_waits_for_its_own_engine_instead_of_moving_to_cursor() {
+    let draft = json!({"id": "d1", "request": "Add charts", "titles": [], "sessionId": "sess-9", "branch": "retaskable/spec-d1-x"});
+    let (mut rig, host, asked) = rig_with(draft, vec![charts()]).await;
+    start_rules(&mut rig, json!({"roles": {"planner": "cursor"}}), true, false);
+    for _ in 0..3 {
+        rig.machine.pass().await;
+    }
+    assert!(host.jobs.lock().unwrap().is_empty());
+    assert!(ops(&asked).contains(&"draft_release".to_string()), "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn a_draft_report_the_store_refuses_is_logged_as_a_store_error_for_the_draft() {
+    let (mut rig, _host, _asked) = rig_failing(
+        claimed(),
+        vec![json!({"status": "failed", "summary": "x"})],
+        "draft_report",
+    )
+    .await;
+    for _ in 0..40 {
         rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(posts(&asked).is_empty());
+    let logged: Vec<Value> = (rig.lp(0).events().recent().iter())
+        .map(|e| e.to_value())
+        .filter(|v| v["kind"] == "store_error" && v["op"] == "draft_report")
+        .collect();
+    assert!(!logged.is_empty(), "{:?}", rig.lp(0).events().recent());
+    assert_eq!(logged[0]["item"], "d1");
+    assert_eq!(logged[0]["code"], "boom");
+}
+
+/// Claude at its usage limit holds a draft only without the model or sign-in.
+#[tokio::test]
+async fn at_the_limit_a_draft_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
+    ] {
+        let (mut rig, host, _asked) = rig_with(claimed(), vec![charts()]).await;
+        start_rules(&mut rig, json!({}), signed_out, false);
+        rig.machine.local = model;
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Claude, out_for(600));
+        for _ in 0..4 {
+            rig.machine.pass().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let case = signed_out;
+        assert_eq!(host.engines.lock().unwrap().len(), usize::from(starts), "{case:?}");
+    }
+}
+
+fn idea_plan() -> Value {
+    json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"], "intake": { "kinds": ["feature"] } })
+}
+
+#[tokio::test]
+async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_claim() {
+    let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
+    host.bug.store(true, Ordering::SeqCst);
+    reports(&mut rig, &asked, 2).await;
+    assert!(ops(&asked).contains(&"idea_mark_bug".to_string()), "{:?}", ops(&asked));
+    let requests = host.requests.lock().unwrap();
+    assert!(
+        requests[0].as_deref().unwrap().contains("Plan it as a fix"),
+        "{requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
+    let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
+    reports(&mut rig, &asked, 2).await;
+    assert!(!ops(&asked).contains(&"idea_mark_bug".to_string()));
+    assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }

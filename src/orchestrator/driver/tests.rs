@@ -7,7 +7,7 @@ use crate::lane_pool::Holder;
 use crate::link::TokenStore;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle};
-use crate::orchestrator::steps::StepRequest;
+use crate::orchestrator::steps::{StepDetail, StepDone, StepRequest};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::EventLog;
 use crate::telemetry::event::Entry;
@@ -52,6 +52,9 @@ async fn stub() -> (String, Arc<Mutex<Vec<String>>>) {
         post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {
+                if body["op"] == "settings_get" || body["op"] == "pause_get" || body["op"] == "facts_get" {
+                    return Json(json!({ "value": if body["op"] == "pause_get" { json!({ "paused": null, "log": [] }) } else if body["op"] == "facts_get" { json!({}) } else { Value::Null } }));
+                }
                 seen.lock().unwrap().push(body["op"].as_str().unwrap_or("").to_string());
                 Json(json!({ "value": [{ "id": "a", "title": "A", "status": "todo", "rank": 0 }] }))
             }
@@ -132,18 +135,22 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
         backlog_url: "https://backlog.example".into(),
         keychain: keys.clone(),
         paused: PauseState::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         machine: "my-pc".into(),
         environment: "retaskable.com".into(),
-        tags: Vec::new(),
+        tags: Default::default(),
         env: Env::empty(),
         engine_choice: EngineChoiceConfig::default(),
+        cursor_models: Default::default(),
         checks: Default::default(),
         bugs: Default::default(),
         bug_version: "test".into(),
     };
     let mut machine = Machine::new(lanes, 8, links);
+    static RIGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    machine.base_scope = format!("rig{}:", RIGS.fetch_add(1, Ordering::Relaxed));
     for (i, base) in bases.iter().enumerate() {
         let store = Store::load(&dir.path().join(i.to_string())).unwrap();
         let mut lp = ProjectLoop::new(
@@ -156,6 +163,13 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
             150_000,
         );
         lp.repo = Some(7);
+        // The gate is open with nothing in the store: config.json's commands run as written.
+        machine.links.item_commands.gates().open_unrecorded(&lp.id);
+        // A poll with no pass before it reads the store's pause as known and clear.
+        machine
+            .links
+            .store_paused
+            .set(&lp.id, crate::view::StorePause::NotPaused);
         machine.add(lp);
     }
     Rig {
@@ -171,6 +185,46 @@ fn would(step: &Step) -> Vec<&str> {
         Step::Ticked { would } => would.iter().map(String::as_str).collect(),
         Step::Skipped => panic!("skipped"),
     }
+}
+
+#[tokio::test]
+async fn the_tick_counts_every_registered_session() {
+    {
+        let (base, _asked) = stub().await;
+        let mut rig = rig(2, &[&base]);
+        let info = |lane| crate::orchestrator::live::sessions::SessionInfo {
+            project: "p0".into(),
+            item_id: "x".into(),
+            title: None,
+            role: crate::engines::choose::Role::Implementer,
+            lane,
+            engine: Default::default(),
+            model: "m".into(),
+        };
+        let _a = rig.live.sessions().register(info(Some(1)));
+        let _b = rig.live.sessions().register(info(None));
+        rig.machine.pass().await;
+        let tick = rig.lp(0).events().recent()[0].to_value();
+        assert_eq!(tick["sessions"], 2);
+    }
+}
+
+#[tokio::test]
+async fn the_tick_carries_the_ci_object_once_the_ci_loop_has_polled() {
+    let (base, _asked) = stub().await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.pass().await;
+    assert!(rig.lp(0).events().recent()[0].to_value().get("ci").is_none());
+    rig.live.update_ci(|c| {
+        c.slots = 1;
+        c.docker = "ok";
+    });
+    rig.machine.pass().await;
+    let tick = rig.lp(0).events().recent()[1].to_value();
+    assert_eq!(
+        tick["ci"],
+        serde_json::json!({ "slots": 1, "running": 0, "docker": "ok" })
+    );
 }
 
 #[tokio::test]
@@ -259,8 +313,8 @@ async fn an_unreachable_backlog_is_a_store_error_and_no_tick() {
     let mut rig = rig(2, &["http://127.0.0.1:1"]);
     assert_eq!(rig.machine.pass().await, vec![Step::Skipped]);
     let kinds: Vec<_> = rig.lp(0).events().recent().iter().map(Entry::kind).collect();
-    assert_eq!(kinds, vec!["store_error"]);
-    assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "list");
+    assert_eq!(kinds, vec!["store_error", "store_error"]);
+    assert_eq!(rig.lp(0).events().recent()[1].to_value()["op"], "list");
 }
 
 #[tokio::test]
@@ -360,6 +414,8 @@ async fn held_lanes_show_in_live_state_under_the_project_that_holds_them() {
         lane,
         item_id: item.into(),
         title: title.map(Into::into),
+        branch: title.map(|t| format!("retaskable/{item}-{}-s0", t.to_lowercase())),
+        playing: false,
     };
     assert_eq!(projects["p0"].held, vec![lane(1, "a", Some("A"))]);
     assert_eq!(projects["p1"].held, vec![lane(3, "b", None)]);
@@ -455,31 +511,40 @@ struct Fake {
     active: AtomicU32,
     /// Where a step leaves its item; `None` keeps its state.
     to: Mutex<Option<ItemState>>,
+    /// What the next steps hand back besides the run.
+    detail: Mutex<StepDetail>,
     /// While set, a step never ends.
     hold: AtomicBool,
     /// The next step panics.
     step_panics: AtomicBool,
     /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
     games: Mutex<Vec<Game>>,
+    /// Games that ignore `stop` (they close only when their flag is set).
+    stubborn_games: AtomicBool,
     triage: triage::Triager,
+    /// The model slots `implementer_may_start` is asked against; none is no cap.
+    slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
 }
 
 /// The directory, the command, the lane, and whether it has closed.
 type Game = (std::path::PathBuf, String, u32, Arc<AtomicBool>);
 
-struct FakeGame(Arc<AtomicBool>);
+struct FakeGame(Arc<AtomicBool>, bool);
 
 impl LanePlay for FakeGame {
     fn finished(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
     fn stop(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        if !self.1 {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 }
 
 impl Fake {
-    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, ItemRun> {
+    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, StepDone> {
+        let detail = self.detail.lock().unwrap().clone();
         if let Some(to) = *self.to.lock().unwrap() {
             run.state = to;
         }
@@ -494,7 +559,7 @@ impl Fake {
             if panics {
                 panic!("a step that goes wrong");
             }
-            run
+            StepDone { run, detail }
         }
         .boxed()
     }
@@ -531,6 +596,9 @@ async fn claim_stub_failing(
             let (fail_release, fail_skip) = (fail_release.clone(), fail_skip.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
+                if op == "settings_get" || op == "pause_get" || op == "facts_get" {
+                    return (StatusCode::OK, Json(json!({ "value": if op == "pause_get" { json!({ "paused": null, "log": [] }) } else if op == "facts_get" { json!({}) } else { Value::Null } })));
+                }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 match (op.as_str(), claim) {
                     ("release" | "park", _) if fail_release.load(Ordering::SeqCst) => {
@@ -647,7 +715,7 @@ async fn claim_next_sends_this_computers_tags() {
     let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(1, &[&base]);
     rig.go_live();
-    rig.machine.links.tags = vec!["windows".into(), "gpu".into()];
+    rig.machine.links.tags = vec!["windows".to_string(), "gpu".to_string()].into();
     rig.machine.pass().await;
     let agent = asked.lock().unwrap()[1].1["agent"].clone();
     assert_eq!(agent["tags"], json!(["windows", "gpu"]));
@@ -763,10 +831,10 @@ async fn a_finished_step_moves_the_item_and_frees_a_lane_it_no_longer_needs() {
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
     assert_eq!(
         kinds_without_claims(&mut rig),
-        ["step_start", "item_state", "lane_freed", "step_start"],
+        ["step_start", "step_end", "item_state", "lane_freed", "step_start"],
         "awaiting_merge has a step of its own"
     );
-    let moved = rig.lp(0).events().recent()[2].to_value();
+    let moved = rig.lp(0).events().recent()[3].to_value();
     assert_eq!(
         (moved["from"].as_str(), moved["to"].as_str()),
         (Some("reviewing"), Some("awaiting_merge"))
@@ -774,31 +842,6 @@ async fn a_finished_step_moves_the_item_and_frees_a_lane_it_no_longer_needs() {
     assert!(
         !ops(&asked).contains(&"list".to_string()),
         "a poll never reads the backlog"
-    );
-}
-
-#[tokio::test]
-async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
-    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base]);
-    rig.go_live();
-    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
-    let usage = json!({"status": "rejected", "resetsAt": i64::MAX});
-    rig.machine.outcome_sender().send(SessionOutcome {
-        project: "p0".into(),
-        item_id: "a".into(),
-        lane: 1,
-        result: SessionResult::NeedsHuman("the session ended without answering".into()),
-        usage: Some(usage.clone()),
-        context_tokens: None,
-        notes: vec![],
-        session_id: None,
-    });
-    rig.machine.poll().await;
-    assert_eq!(
-        rig.lp(0).store.usage(),
-        Some(usage),
-        "a session that needs a person may still have reported the reading section 7.1 needs most"
     );
 }
 
@@ -861,92 +904,41 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
     );
 }
 
-#[tokio::test]
-async fn concurrency_caps_starts_and_claims() {
-    let (base, asked) = claim_stub(json!([]), handed_out()).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    rig.machine.concurrency = 1;
-    rig.queue(0, &["q"]);
-    fake.active.store(1, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert!(fake.started.lock().unwrap().is_empty(), "no session slot left");
-    assert!(ops(&asked).is_empty(), "and no claim");
-    fake.active.store(0, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert_eq!(fake.started.lock().unwrap().len(), 1);
-    assert!(ops(&asked).is_empty(), "the one slot went to the queued item");
-}
-
-#[tokio::test]
-async fn stopping_blocks_new_claims_and_starts() {
-    let (base, asked) = claim_stub(json!([]), handed_out()).await;
-    let mut rig = rig(2, &[&base]);
-    let fake = rig.go_live();
-    rig.queue(0, &["q"]);
-    rig.machine.stopping_override = Some(true);
-    rig.machine.poll().await;
-    assert!(fake.started.lock().unwrap().is_empty(), "no start while stopping");
-    assert!(ops(&asked).is_empty(), "no claim_next while stopping");
-}
-
-#[tokio::test]
-async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
-    let (base, asked) = claim_stub(json!([]), handed_out()).await;
-    let mut rig = rig(3, &[&base]);
-    let fake = rig.go_live();
-    rig.machine.concurrency = 1;
-    rig.queue(0, &["plain", "rush"]);
-    rig.lp(0).items.get_mut("rush").unwrap().do_next = true;
-    fake.active.store(1, Ordering::SeqCst);
-    rig.machine.poll().await;
-    let started: Vec<_> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
-    assert_eq!(started, ["rush"], "only the do-next item skips the full slots");
-    assert!(ops(&asked).is_empty(), "and nothing is claimed without a slot");
-    fake.active.store(0, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert_eq!(
-        fake.started.lock().unwrap().len(),
-        2,
-        "the rush start took no slot from the plain item"
-    );
-}
-
-#[tokio::test]
-async fn the_fetch_runs_for_live_projects_and_a_failure_is_an_error_event() {
-    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(2, &[&base, &base]);
-    let repos = tempfile::tempdir().unwrap();
-    let repo = crate::test_support::repo_with_origin(repos.path());
-    rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
-    rig.lp(1).project.repo_path = repos.path().join("missing").to_string_lossy().into_owned();
-    rig.machine.fetch().await;
-    assert!(rig.lp(1).events().recent().is_empty(), "a dry project isn't fetched");
-    rig.go_live();
-    rig.pause("p0", true);
-    rig.machine.fetch().await;
-    assert!(
-        rig.lp(0).events().recent().is_empty(),
-        "a paused project is fetched too, and it worked"
-    );
-    let errors: Vec<_> = rig.lp(1).events().recent().iter().map(Entry::to_value).collect();
-    assert_eq!((errors.len(), errors[0]["where"].as_str()), (1, Some("fetch")));
-}
-
 mod approve;
 mod asks;
+mod caps_and_fetch;
+mod ci_events;
+mod claim_waiting;
+mod command_gate;
 mod commands;
+mod cursor_limit;
+mod deprecations;
 mod drafts;
+mod experts;
+mod fix_main;
+mod follow;
+mod host_call_undefined;
 mod idea_accept;
-mod ideas;
-mod ideas_daily;
 mod lane_play;
+mod local_limit_fallback;
+mod local_one_slot;
+mod main_sync;
+mod model_caps;
+mod note_rules;
 mod own_failures;
+mod playtest_answers;
 mod playtests;
 mod reporting;
 mod restart;
 mod runs;
 mod settling;
+mod shared_pause;
+mod start_blocked;
 mod starter;
+mod step_events;
+mod store_pause;
+mod stuck_release;
 mod triage;
 mod trial;
+mod usage_recheck;
+mod weekly_cutoff;

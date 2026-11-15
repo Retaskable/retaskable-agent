@@ -1,7 +1,9 @@
-//! **Play** and **Stop** in an item's lane (`play { lane: k }`, agent/04-architecture.md "Play"). The lane must hold an
+//! **Play**, **Stop** and **Restart** in an item's lane (`play { lane: k }`, agent/04-architecture.md "Play"). The lane must hold an
 //! item (the one that last used it here) with no session or step running in it, and nobody holding it now. While the
 //! game runs the lane is held as a [`Holder::Play`], so nothing else starts there; it goes back when the game closes
-//! or Stop ends it. A lane that's empty, busy building, or past `lanes` is refused (logged: the ack went out already).
+//! or Stop ends it. A Restart of a lane with a game stops it and remembers the lane in `restarting`; once the lane is given back
+//! a later poll plays it again, and if the game hasn't closed within [`crate::play::STOP_LIMIT`] the restart is dropped
+//! (while paused or stopping it only stops). A lane that's empty, busy building, or past `lanes` is refused (logged: the ack went out already).
 use super::{Links, ProjectLoop, SessionStarter};
 use crate::lane_pool::{Holder, LanePool};
 use crate::lanes::lane_path;
@@ -37,10 +39,22 @@ impl ProjectLoop {
         hold: bool,
     ) {
         self.release_finished_games(pool);
+        self.finish_restarts(pool, starter, hold);
         for command in links.item_commands.take_lane(&self.id) {
             match command {
                 ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, starter),
-                ItemCommand::Stop { lane, .. } => self.stop_lane(pool, lane),
+                ItemCommand::Stop { lane, .. } => {
+                    self.restarting.remove(&lane);
+                    self.stop_lane(pool, lane);
+                }
+                ItemCommand::RestartPlay { lane, .. } if !hold => self.restart_lane(pool, lane, starter),
+                ItemCommand::RestartPlay { lane, .. } => {
+                    self.stop_lane(pool, lane);
+                    tracing::info!(
+                        "{}: stopped lane {lane} for a restart but won't start it while paused or stopping",
+                        self.id
+                    );
+                }
                 _ => tracing::info!("{}: dropped a play while paused or stopping", self.id),
             }
         }
@@ -89,6 +103,34 @@ impl ProjectLoop {
             }),
         );
         self.playing.insert(lane, (item, game));
+    }
+
+    /// Restarts lane `lane`: a Play if no game runs there, else stops the game and plays again once it has closed.
+    fn restart_lane(&mut self, pool: &mut LanePool, lane: u32, starter: &dyn SessionStarter) {
+        if !self.playing.contains_key(&lane) {
+            return self.play_lane(pool, lane, starter);
+        }
+        self.stop_lane(pool, lane);
+        self.restarting.insert(lane, std::time::Instant::now());
+    }
+
+    /// Plays again the lanes whose game was stopped for a restart and has closed; drops one that is still open after
+    /// [`crate::play::STOP_LIMIT`], or any while `hold` (paused or stopping).
+    fn finish_restarts(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter, hold: bool) {
+        for (lane, since) in std::mem::take(&mut self.restarting) {
+            if hold {
+                tracing::info!(
+                    "{}: dropped the restart of lane {lane} while paused or stopping",
+                    self.id
+                );
+            } else if !self.playing.contains_key(&lane) {
+                self.play_lane(pool, lane, starter);
+            } else if since.elapsed() >= crate::play::STOP_LIMIT {
+                tracing::info!("{}: dropped the restart of lane {lane}: the game didn't close", self.id);
+            } else {
+                self.restarting.insert(lane, since);
+            }
+        }
     }
 
     /// Ends the game in lane `lane`, and gives the lane back if it has closed.

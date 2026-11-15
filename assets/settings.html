@@ -203,6 +203,7 @@
       <section class="block" aria-labelledby="lanes-h">
         <div class="block-head"><h2 id="lanes-h">Lanes</h2><span class="meta">Shared by every project on this computer</span></div>
         <div class="lanes" id="lane-cards"></div>
+        <div id="sessions-list" hidden aria-label="Sessions with no lane"></div>
       </section>
       <section class="block" aria-labelledby="eng-h">
         <div class="block-head"><h2 id="eng-h">Engines</h2><span class="meta">Each has its own limit and only pauses its own work</span></div>
@@ -240,6 +241,12 @@
               <p class="hint" id="pollHint" hidden></p>
               <button type="button" class="btn save" id="savePoll">Save</button>
             </div>
+            <div class="field group" id="ciGroup" hidden>
+              <label for="ciSlots">CI slots (0&ndash;8; 0 turns CI off on this computer)</label>
+              <input type="number" id="ciSlots" min="0" max="8" />
+              <p class="hint" id="ciHint" hidden></p>
+              <button type="button" class="btn save" id="saveCi">Save</button>
+            </div>
             <div class="field group" id="tagsGroup">
               <label for="tags">Tags</label>
               <textarea id="tags" rows="3" placeholder="one tag per line"></textarea>
@@ -263,6 +270,11 @@
             <div class="field"><label for="cursorScout">Scouts and small jobs</label><input id="cursorScout" type="text" placeholder="auto" /></div>
             <p class="hint" id="cursorHint" hidden></p>
             <button type="button" class="btn save" id="saveCursor">Save</button>
+          </section>
+          <section class="card group" id="cursorAllowGroup" hidden>
+            <h2>Cursor may also run</h2>
+            <p class="hint">Separate entries with commas or new lines.</p>
+            <div id="cursorAllowProjects"></div>
           </section>
           <section class="card">
             <div class="head2 inline"><h2>This page</h2><span class="chip warn">Changes need a restart</span></div>
@@ -386,6 +398,7 @@
     { groupId: "tagsGroup", hintId: "tagsHint", vars: ["RETASKABLE_TAGS"] },
     { groupId: "portGroup", hintId: "portHint", vars: ["RETASKABLE_PORT"] },
     { groupId: "pollGroup", hintId: "pollHint", vars: ["RETASKABLE_POLL_SEC"] },
+    { groupId: "ciGroup", hintId: "ciHint", vars: ["RETASKABLE_CI_SLOTS"] },
     { groupId: "localGroup", hintId: "localHint", vars: ["RETASKABLE_LOCAL_MODEL", "RETASKABLE_LOCAL_URL"] },
     { groupId: "engineGroup", hintId: "engineHint", vars: ["RETASKABLE_ENGINES"] },
     { groupId: "cursorGroup", hintId: "cursorHint", vars: ["RETASKABLE_CURSOR_MODELS"] },
@@ -418,11 +431,14 @@
     $("tags").value = s.tags.effective.join("\n");
     $("port").value = s.port;
     $("pollIntervalSec").value = s.pollIntervalSec;
+    $("ciGroup").hidden = s.ciSlots === undefined;
+    if (s.ciSlots !== undefined) $("ciSlots").value = s.ciSlots;
     $("lanesNote").textContent = s.lanes + (s.lanes === 1 ? " lane" : " lanes") + " (set on retaskable.com or in config.json).";
     $("localEnabled").checked = s.local.enabled;
     $("localModel").value = s.local.model;
     $("localBaseUrl").value = s.local.baseUrl;
     renderEngines(s.engineChoice, s.lanes);
+    renderCursorAllow(s);
     $("cursorTop").value = s.cursorModels.top || "";
     $("cursorImplementer").value = s.cursorModels.implementer || "";
     $("cursorScout").value = s.cursorModels.scout || "";
@@ -432,6 +448,55 @@
       ? "A password is already set. Empty keeps it."
       : "No password is set yet; one is needed to turn network access on.";
     applyEnvGating(s.envVars);
+  }
+
+  // engines/06-permissions-the-allowlist.md section 6.4: shown only with the flag On (the settings carry
+  // cursorAllow) and once any role or lane is on Cursor.
+  function usesCursor(c) {
+    var picks = [c.default || "claude"].concat(Object.keys(c.roles || {}).map(function (k) { return c.roles[k]; }), c.lanes || []);
+    return picks.indexOf("cursor") >= 0;
+  }
+
+  function renderCursorAllow(s) {
+    var rows = s.cursorAllow;
+    var group = $("cursorAllowGroup");
+    group.hidden = !rows || !usesCursor(s.engineChoice);
+    var box = $("cursorAllowProjects");
+    box.replaceChildren();
+    if (group.hidden) return;
+    rows.forEach(function (row) {
+      var area = h("textarea", "");
+      area.rows = 3;
+      area.placeholder = "Shell(just), Read(docs/**)";
+      area.value = (row.allow || []).join("\n");
+      area.setAttribute("aria-label", "Cursor may also run, " + row.project);
+      var reason = h("p", "hint", "");
+      reason.hidden = true;
+      var inForce = h("p", "hint", row.inForce.line);
+      if (row.inForce.problem) inForce.style.color = "var(--bad-fg)";
+      var button = h("button", "btn save", "Save");
+      button.type = "button";
+      button.addEventListener("click", function () {
+        reason.hidden = true;
+        api("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } }),
+        })
+          .then(function () { setStatus("Saved."); return loadSettings(); })
+          .catch(function (e) {
+            reason.textContent = e.message;
+            reason.style.color = "var(--bad-fg)";
+            reason.hidden = false;
+          });
+      });
+      var parts = ["div", "field", h("h3", "", row.project), area, reason, inForce];
+      if (row.commandShells.length) {
+        parts.push(h("p", "hint", "Already allowed, from your checks: " + row.commandShells.join(", ")));
+      }
+      parts.push(button);
+      box.append(h.apply(null, parts));
+    });
   }
 
   function loadSettings() {
@@ -503,6 +568,23 @@
     }));
   }
 
+  function secs(n) {
+    return n >= 3600 ? Math.floor(n / 3600) + "h " + Math.floor((n % 3600) / 60) + "m" : n >= 60 ? Math.floor(n / 60) + "m" : n + "s";
+  }
+
+  function sessionLine(x) {
+    return x.role + " · " + x.engine + " " + x.model + " · run " + secs(x.runSec) + ", quiet " + secs(x.quietSec);
+  }
+
+  function renderSessions(st) {
+    var rows = st.sessions.filter(function (x) { return x.runSec !== undefined; });
+    var box = $("sessions-list");
+    box.hidden = !rows.length;
+    box.replaceChildren.apply(box, rows.length ? [h("p", "meta", "Sessions with no lane")].concat(rows.map(function (x) {
+      return h("p", "calm", x.title + " (" + x.project + ") · " + sessionLine(x));
+    })) : []);
+  }
+
   function renderLanes(st) {
     if (!st.lanes.length) return $("lane-cards").replaceChildren(h("p", "calm", "No lanes yet: Setup has not run."));
     $("lane-cards").replaceChildren.apply(
@@ -511,8 +593,10 @@
         var chip = h("span", "chip " + l.engine, l.own ? ENGINE_WORD[l.engine] : "Default · " + ENGINE_WORD[l.engine]);
         var what = h("div", "what", h("span", "state " + l.state, l.stateText),
           l.item ? h("span", "item", l.item.title) : h("span", "item none", "Nothing yet"),
-          l.item ? h("span", "sub", l.item.project) : "");
-        return h("article", l.item ? "lane" : "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what, h("span", "note", l.note));
+          l.item ? h("span", "sub", l.item.project) : l.session ? h("span", "sub", l.session.project) : "");
+        if (l.session) what.children[1].className = "item", what.children[1].textContent = l.session.title;
+        return h("article", l.item || l.session ? "lane" : "lane idle", h("div", "row", h("span", "", "Lane " + l.k), chip), what,
+          h("span", "note", l.session ? sessionLine(l.session) : l.note));
       })
     );
   }
@@ -574,6 +658,7 @@
     renderAlerts(st);
     renderOrchestrator(st);
     renderLanes(st);
+    renderSessions(st);
     renderEngineRows(st);
     paintLaneHints();
   }
@@ -679,6 +764,9 @@
   });
   $("savePort").addEventListener("click", function () {
     save({ port: Number($("port").value) }, RESTART_MESSAGE);
+  });
+  $("saveCi").addEventListener("click", function () {
+    save({ ciSlots: Number($("ciSlots").value) });
   });
   $("savePoll").addEventListener("click", function () {
     save({ pollIntervalSec: Number($("pollIntervalSec").value) });

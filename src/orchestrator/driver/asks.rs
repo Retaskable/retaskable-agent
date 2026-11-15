@@ -14,12 +14,13 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::Shared;
-use super::project::{ProjectLoop, signed_out};
+use super::project::ProjectLoop;
+use super::start_gate::StartGate;
 use crate::ask::prompt::StateLane;
 use crate::backlog::Client;
 use crate::backlog::asks::AskReport;
 use crate::config::ProjectConfig;
-use crate::engines::{EventKind, Role, SessionEvent, engine_for, program_of};
+use crate::engines::{EventKind, Role, SessionEvent};
 use crate::lane_pool::{Holder, LanePool};
 use crate::store::RunRecord;
 use crate::view::AskCommand;
@@ -35,7 +36,11 @@ const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
 pub struct AskStore {
     pub client: Arc<Client>,
     pub repo: u64,
+    /// The project's id, for what it has spent on this computer today.
+    pub project_id: String,
     pub token: String,
+    /// Where a failed write is kept for the loop to log.
+    pub failures: crate::backlog::failures::Failures,
 }
 
 /// What an assistant session needs besides the store: the agent's own run state, for the prompt.
@@ -43,14 +48,16 @@ pub struct AskJob {
     pub project: ProjectConfig,
     pub ask: AskCommand,
     pub store: AskStore,
-    /// The project's latest `state.usage` reading, for the session's model tier.
-    pub usage: Option<Value>,
     /// The lanes this project holds.
     pub lanes: Vec<StateLane>,
     /// The runs this computer holds, by item id.
     pub runs: BTreeMap<String, RunRecord>,
     /// Where the host sends the session's summarized events as they happen; the loop reports them as progress.
     pub events: tokio::sync::mpsc::UnboundedSender<SessionEvent>,
+    /// The engine to start on when it isn't the assistant's chosen one.
+    pub engine: Option<crate::engines::EngineId>,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// The answer and what each action it asked for came to (`perform`'s results).
@@ -98,12 +105,12 @@ pub(super) struct RunningAsk {
 impl ProjectLoop {
     /// How many asks are running here now; finished ones are forgotten.
     pub(super) fn asking(&mut self) -> u32 {
+        self.drain_failures();
         self.asks.running.retain(|a| !a.task.is_finished());
         self.asks.running.len() as u32
     }
 
-    /// Takes in the asks queued for this project and starts each one that may run, or reports it waiting. Behind the
-    /// `ask-claude` flag: Off is recorded for the command, which refuses `ask`.
+    /// Takes in the asks queued for this project and starts each one that may run, or reports it waiting.
     pub(super) async fn ask_pass(
         &mut self,
         paused: bool,
@@ -112,13 +119,7 @@ impl ProjectLoop {
         host: &Arc<dyn AskHost>,
         shared: &Shared<'_>,
     ) {
-        let on = self.flags.on("ask-claude").await;
-        shared.links.item_commands.set_ask_on(&self.id, on);
-        let queued = shared.links.item_commands.take_asks(&self.id);
-        if !on {
-            return; // Off is today's behaviour: `ask` is refused as a command this agent doesn't take.
-        }
-        self.asks.waiting.extend(queued);
+        self.asks.waiting.extend(shared.links.item_commands.take_asks(&self.id));
         if self.asks.waiting.is_empty() || shared.stopping {
             return;
         }
@@ -128,19 +129,19 @@ impl ProjectLoop {
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
+        let failures = self.failures.clone();
         let store = || AskStore {
             client: self.client.clone(),
             repo,
+            project_id: self.id.clone(),
             token: token.clone(),
+            failures: failures.clone(),
         };
-        let engine = program_of(engine_for(
-            &shared.links.engine_choice,
-            self.project.engines.as_ref(),
-            Role::Assistant,
-            None,
-        ));
-        let mut hold =
-            paused || signed_out(shared) || shared.engine_limits.is_limited(engine, std::time::Instant::now());
+        let gate = StartGate::for_lanes(self, pool.rules().lanes, shared);
+        let (mut hold, start_on) = match gate.role_start(self, shared, Role::Assistant, true) {
+            Some(engine) => (paused, engine),
+            None => (true, None),
+        };
         if !hold {
             hold = match host.blocked(&store()).await {
                 Ok(blocked) => blocked,
@@ -173,10 +174,11 @@ impl ProjectLoop {
                 project: self.project.clone(),
                 ask,
                 store: store(),
-                usage: self.store.usage(),
                 lanes: self.ask_lanes(pool),
                 runs: self.records.clone(),
                 events,
+                engine: start_on,
+                sessions: self.live.sessions().clone(),
             };
             let (host, queue) = (host.clone(), shared.links.item_commands.clone());
             tracing::info!("{}: answering ask {}", self.id, job.ask.ask_id);
@@ -272,6 +274,7 @@ async fn send(store: &AskStore, id: &str, report: &AskReport) -> bool {
         Ok(()) => true,
         Err(e) => {
             tracing::warn!("ask {id}: the report didn't reach the store: {e}");
+            store.failures.add("ask_report", id, &e);
             false
         }
     }

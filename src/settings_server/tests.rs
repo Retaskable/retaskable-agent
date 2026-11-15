@@ -199,6 +199,7 @@ async fn signed_in_settings_mirror_the_found_tags_and_say_what_is_set_by_env() {
     assert_eq!(body["tags"]["effective"], json!(["linux"]));
     assert_eq!(body["envVars"]["RETASKABLE_TAGS"], json!(true));
     assert_eq!(body["envVars"]["RETASKABLE_PORT"], json!(false));
+    assert_eq!(body["envVars"]["RETASKABLE_LANES"], json!(false));
 }
 
 #[tokio::test]
@@ -407,6 +408,75 @@ async fn link_lists_the_three_environments_and_which_one_is_connected() {
     assert_eq!(production["connected"], json!(false));
 }
 
+async fn backlog_link_signed_in(settings: Arc<SettingsServer>) -> axum::response::Response {
+    let app = app(settings.clone());
+    let (cookie, _csrf) = sign_in(&app, &settings).await;
+    app.oneshot(
+        request("GET", "/api/backlog/link")
+            .header("Cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn backlog_link_body(settings: Arc<SettingsServer>) -> Value {
+    let res = backlog_link_signed_in(settings).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    json_body(res).await
+}
+
+#[tokio::test]
+async fn backlog_link_without_a_session_is_refused() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/api/backlog/link").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn backlog_link_unlinked_has_the_store_url_and_no_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let body = backlog_link_body(settings).await;
+    assert_eq!(body["linked"], json!(false));
+    assert_eq!(body["url"], json!(crate::backlog::DEFAULT_URL));
+    assert_eq!(body["waiting"], Value::Null);
+}
+
+#[tokio::test]
+async fn backlog_link_gives_the_approval_page_while_a_code_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let links = crate::link::pending::Links::new(
+        test_keychain(dir.path()),
+        reqwest::Client::new(),
+        &Env::empty(),
+        "0.1.0",
+    );
+    links.set_backlog(Some(crate::link::pending::BacklogWaiting::approve(
+        "https://b.example/link?code=X",
+    )));
+    settings.set_links(links);
+    let body = backlog_link_body(settings).await;
+    assert_eq!(body["waiting"]["url"], json!("https://b.example/link?code=X"));
+}
+
+#[tokio::test]
+async fn backlog_link_says_linked_when_the_keychain_holds_a_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let keychain = test_keychain(dir.path());
+    keychain
+        .set(&crate::backlog::url(&Env::empty()), "refresh-token")
+        .unwrap();
+    let settings = test_server_with_keychain(dir.path(), keychain);
+    let body = backlog_link_body(settings).await;
+    assert_eq!(body["linked"], json!(true));
+}
+
 #[tokio::test]
 async fn profile_without_a_session_is_refused() {
     let (settings, _dir) = test_server();
@@ -535,16 +605,22 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
     settings.set_status_source(StatusSource {
         view: crate::view::AgentView {
             machine: "pc".into(),
-            tags: vec![],
+            tags: Default::default(),
             projects: vec![],
             version: "1.2.3".into(),
             lanes: 3,
             chore_lane: None,
             lane_sizes: Default::default(),
             paused: Default::default(),
+            store_paused: Default::default(),
             item_commands: Default::default(),
             work: Default::default(),
             restart: Default::default(),
+            settings: Default::default(),
+            local: Default::default(),
+            live: Default::default(),
+            checks: Default::default(),
+            owner: Default::default(),
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),
@@ -561,4 +637,56 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
         "the config's lane count, re-read now"
     );
     assert_eq!(body["engines"].as_array().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn settings_link_makes_a_new_token_that_signs_in_once_from_loopback() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(Mutex::new(1_700_000_000u64));
+    let clock = now.clone();
+    let settings = Arc::new(SettingsServer::new(
+        dir.path().to_path_buf(),
+        4700,
+        4700,
+        false,
+        Env::empty(),
+        move || *clock.lock().unwrap(),
+        |_: i32| {},
+        test_keychain(dir.path()),
+    ));
+    let token_of = |link: String| {
+        let (url, token) = link.split_once('#').unwrap();
+        assert_eq!(url, "http://127.0.0.1:4700/settings");
+        token.to_string()
+    };
+    let (a, b) = (token_of(settings.settings_link()), token_of(settings.settings_link()));
+    assert_ne!(a, b);
+
+    let other: std::net::IpAddr = "192.168.1.5".parse().unwrap();
+    let local: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    assert!(!settings.verify_token(&a, other));
+    assert!(settings.verify_token(&a, local));
+    assert!(!settings.verify_token(&a, local));
+
+    *now.lock().unwrap() += 300;
+    assert!(!settings.verify_token(&b, local));
+    let c = token_of(settings.settings_link());
+    *now.lock().unwrap() += 299;
+    assert!(settings.verify_token(&c, local));
+}
+
+#[tokio::test]
+async fn the_page_has_the_cursor_may_also_run_box_hidden_until_a_role_is_on_cursor() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains(r#"id="cursorAllowGroup" hidden"#));
+    assert!(body.contains("Cursor may also run"));
+    assert!(body.contains("Already allowed, from your checks: "));
+    // Shown only when the settings carry cursorAllow and some role or lane picks Cursor.
+    assert!(body.contains("group.hidden = !rows || !usesCursor(s.engineChoice)"));
+    assert!(body.contains(r#"JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } })"#));
 }

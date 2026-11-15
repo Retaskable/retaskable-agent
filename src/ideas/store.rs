@@ -1,12 +1,9 @@
-//! The shared backlog's own copy of the ideas queue (backlog/06.2-operations.md): [`Ideas::list`],
-//! [`Ideas::round`] and [`Ideas::answer`] are `ideas_list`, `ideas_round` and `idea_answer`;
-//! [`queue_from_store`] folds a read into [`Queue`].
+//! The shared backlog's own copy of the ideas queue (backlog/06.2-operations.md): [`Ideas::list`] and
+//! [`Ideas::answer`] are `ideas_list` and `idea_answer`.
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::backlog::{BacklogError, Client};
-
-use super::model::{Idea, Queue};
 
 /// Waiting for an answer, written up (`accepted`), set aside for now (`later`: it may come back), or
 /// turned down for good (`never`) — `IDEA_STATES`, shared/storeIdeas.ts.
@@ -83,6 +80,14 @@ pub struct StoreIdea {
     /// Set when a person added this idea themselves; a round leaves these alone (06.2-operations.md).
     #[serde(default, rename = "addedBy")]
     pub added_by: Option<Value>,
+    /// The plan this idea is already written up as, when one is under way.
+    #[serde(default, rename = "planId")]
+    pub plan_id: Option<String>,
+    /// Already marked a bug (`idea_mark_bug`, or typed as one).
+    #[serde(default)]
+    pub bug: bool,
+    #[serde(default)]
+    pub pictures: Vec<String>,
 }
 
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
@@ -94,7 +99,7 @@ pub struct IdeasRoundInfo {
     pub login: String,
 }
 
-/// `ideas_list`'s and `ideas_round`'s answer (backlog/06.2-operations.md): the waiting ideas first,
+/// `ideas_list`'s answer (backlog/06.2-operations.md): the waiting ideas first,
 /// oldest first, then the answered ones, newest answer first.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,69 +108,8 @@ pub struct StoreIdeas {
     pub ideas: Vec<StoreIdea>,
 }
 
-/// [`refilled`](super::model::refilled)'s [`Queue`], folded from the store's own rows (`asList`,
-/// shared/storeIdeas.ts): a person's own waiting idea (`addedBy` set) is left out of `ideas`, since a
-/// round must leave those alone (backlog/06.2-operations.md).
-pub fn queue_from_store(s: &StoreIdeas) -> Queue {
-    let of = |i: &StoreIdea| {
-        let body = i.idea.clone().unwrap_or_default();
-        Idea {
-            id: i.id.clone(),
-            title: i.title.clone(),
-            experience: body.experience,
-            why: body.why,
-            why_now: body.why_now,
-            for_profiles: body.for_profiles,
-            feature: body.feature,
-            new_feature: body.new_feature,
-            waited: body.waited,
-        }
-    };
-    Queue {
-        ideas: s
-            .ideas
-            .iter()
-            .filter(|i| i.state == IdeaState::Waiting && i.added_by.is_none())
-            .map(of)
-            .collect(),
-        accepted_titles: s
-            .ideas
-            .iter()
-            .filter(|i| i.state == IdeaState::Accepted)
-            .map(|i| i.title.clone())
-            .collect(),
-        never: s
-            .ideas
-            .iter()
-            .filter(|i| i.state == IdeaState::Never)
-            .map(|i| i.title.clone())
-            .collect(),
-    }
-}
-
-/// `idea` as `ideas_round`'s own `Idea` JSON shape (shared/moreTypes.ts) sends it.
-fn idea_json(idea: &Idea) -> Value {
-    let mut v = json!({
-        "id": idea.id,
-        "title": idea.title,
-        "experience": idea.experience,
-        "why": idea.why,
-        "whyNow": idea.why_now,
-        "for": idea.for_profiles,
-        "waited": idea.waited,
-    });
-    if let Some(feature) = &idea.feature {
-        v["feature"] = json!(feature);
-    }
-    if let Some(new_feature) = &idea.new_feature {
-        v["newFeature"] = json!(new_feature);
-    }
-    v
-}
-
 /// This project's ideas on the shared backlog (backlog/06.2-operations.md): [`list`](Ideas::list) the
-/// current round, [`round`](Ideas::round) to replace the waiting ideas after a session runs, and
-/// [`answer`](Ideas::answer) a waiting one (Accept/Not now/Never).
+/// current round and [`answer`](Ideas::answer) a waiting one.
 pub struct Ideas<'a> {
     pub client: &'a Client,
     pub repo_id: u64,
@@ -180,15 +124,11 @@ impl Ideas<'_> {
             .await
     }
 
-    /// `ideas_round { ideas, after? }`: at most [`QUEUE`](super::model::QUEUE) ideas, from
-    /// [`refilled`](super::model::refilled).
-    pub async fn round(&self, ideas: &[Idea], after: Option<&str>) -> Result<StoreIdeas, BacklogError> {
-        let mut args = json!({ "ideas": ideas.iter().map(idea_json).collect::<Vec<_>>() });
-        if let Some(after) = after {
-            args["after"] = json!(after);
-        }
+    /// `idea_mark_bug { id }` (agents only, the Bugs spec section 5): moves a waiting idea to Bugs. The store refuses
+    /// with `not_found` or `conflict` once it is gone, a bug already, or its plan has started.
+    pub async fn mark_bug(&self, id: &str) -> Result<(), BacklogError> {
         self.client
-            .op(self.repo_id, self.token, "ideas_round", args, "ideas")
+            .op_done(self.repo_id, self.token, "idea_mark_bug", json!({ "id": id }))
             .await
     }
 
@@ -217,66 +157,6 @@ impl Ideas<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn store_idea(id: &str, title: &str, state: IdeaState, idea: Option<StoreIdeaBody>) -> StoreIdea {
-        StoreIdea {
-            id: id.to_string(),
-            title: title.to_string(),
-            state,
-            idea,
-            at: 0,
-            answer: None,
-            added_by: None,
-        }
-    }
-
-    #[test]
-    fn queue_from_store_folds_waiting_accepted_and_never_rows() {
-        let s = StoreIdeas {
-            round: None,
-            ideas: vec![
-                store_idea(
-                    "1",
-                    "Waiting",
-                    IdeaState::Waiting,
-                    Some(StoreIdeaBody {
-                        experience: "You see it.".to_string(),
-                        why: "Because.".to_string(),
-                        why_now: "Now.".to_string(),
-                        for_profiles: vec!["shopper".to_string()],
-                        feature: Some("inbox".to_string()),
-                        new_feature: None,
-                        waited: 2,
-                    }),
-                ),
-                store_idea("2", "No body yet", IdeaState::Waiting, None),
-                store_idea("3", "Taken", IdeaState::Accepted, None),
-                store_idea("4", "Turned down", IdeaState::Never, None),
-                store_idea("5", "Set aside", IdeaState::Later, None),
-                StoreIdea {
-                    added_by: Some(json!({ "login": "owner" })),
-                    ..store_idea("6", "A person's own idea", IdeaState::Waiting, None)
-                },
-            ],
-        };
-        let q = queue_from_store(&s);
-        assert_eq!(
-            q.ideas.len(),
-            2,
-            "only the waiting rows nobody added themselves become ideas"
-        );
-        assert_eq!(q.ideas[0].title, "Waiting");
-        assert_eq!(q.ideas[0].why_now, "Now.");
-        assert_eq!(q.ideas[0].feature, Some("inbox".to_string()));
-        assert_eq!(q.ideas[0].waited, 2);
-        assert_eq!(
-            q.ideas[1].title, "No body yet",
-            "a row with no idea body still waits, empty"
-        );
-        assert_eq!(q.ideas[1].experience, "");
-        assert_eq!(q.accepted_titles, vec!["Taken".to_string()]);
-        assert_eq!(q.never, vec!["Turned down".to_string()]);
-    }
 
     async fn fake_store(handler: axum::routing::MethodRouter) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -313,38 +193,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn round_sends_the_ideas_and_after_and_reads_the_new_round() {
-        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
-            assert_eq!(req["op"], "ideas_round");
-            assert_eq!(req["args"]["after"], "Chores");
-            let sent = &req["args"]["ideas"][0];
-            assert_eq!(sent["id"], "t-0");
-            assert_eq!(sent["feature"], "inbox");
-            assert!(sent.get("newFeature").is_none());
-            axum::Json(json!({ "value": { "round": null, "ideas": [] } }))
-        }))
-        .await;
-        let client = Client::new(base);
-        let ideas = Ideas {
-            client: &client,
-            repo_id: 1,
-            token: Some("tok"),
-        };
-        let idea = Idea {
-            id: "t-0".to_string(),
-            title: "A".to_string(),
-            experience: "x".to_string(),
-            why: "y".to_string(),
-            why_now: "z".to_string(),
-            for_profiles: vec!["shopper".to_string()],
-            feature: Some("inbox".to_string()),
-            new_feature: None,
-            waited: 0,
-        };
-        ideas.round(&[idea], Some("Chores")).await.unwrap();
-    }
-
-    #[tokio::test]
     async fn answer_sends_the_answer_and_via_command_and_reads_the_new_round() {
         let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
             assert_eq!(req["op"], "idea_answer");
@@ -366,5 +214,84 @@ mod tests {
             .answer("1", IdeaAnswer::Accept, Some("d1"), Some("owner"))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn answers_go_to_the_store_by_name() {
+        assert_eq!(IdeaAnswer::Accept.as_str(), "accept");
+        assert_eq!(IdeaAnswer::Later.as_str(), "later");
+        assert_eq!(IdeaAnswer::Never.as_str(), "never");
+    }
+
+    #[test]
+    fn a_bare_row_reads_with_every_optional_field_defaulted() {
+        let row: StoreIdea =
+            serde_json::from_value(json!({ "id": "7", "title": "T", "state": "never", "at": 5 })).unwrap();
+        assert_eq!(row.state, IdeaState::Never);
+        assert!(row.idea.is_none() && row.answer.is_none() && row.plan_id.is_none());
+        assert!(!row.bug);
+        assert!(row.pictures.is_empty());
+    }
+
+    #[test]
+    fn a_full_row_reads_the_renamed_fields() {
+        let row: StoreIdea = serde_json::from_value(json!({
+            "id": "7", "title": "T", "state": "accepted", "at": 5, "bug": true, "planId": "p1",
+            "addedBy": { "login": "me" },
+            "answer": { "by": "owner", "at": 9, "draftId": "d1" },
+            "idea": { "whyNow": "soon", "for": ["dev"], "newFeature": "x", "waited": 2 },
+        }))
+        .unwrap();
+        assert!(row.bug && row.added_by.is_some());
+        assert_eq!(row.plan_id.as_deref(), Some("p1"));
+        assert_eq!(row.answer.unwrap().draft_id.as_deref(), Some("d1"));
+        let body = row.idea.unwrap();
+        assert_eq!(body.why_now, "soon");
+        assert_eq!(body.for_profiles, ["dev"]);
+        assert_eq!(body.new_feature.as_deref(), Some("x"));
+        assert_eq!((body.waited, body.experience.as_str()), (2, ""));
+    }
+
+    #[tokio::test]
+    async fn answer_leaves_out_the_draft_and_login_when_there_are_none() {
+        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
+            assert_eq!(req["args"]["answer"], "never");
+            assert!(req["args"].get("draftId").is_none());
+            assert!(req["args"]["for"].get("login").is_none());
+            assert_eq!(req["args"]["for"]["via"], "command");
+            axum::Json(json!({ "value": { "round": null, "ideas": [] } }))
+        }))
+        .await;
+        let client = Client::new(base);
+        let ideas = Ideas {
+            client: &client,
+            repo_id: 1,
+            token: None,
+        };
+        ideas.answer("1", IdeaAnswer::Never, None, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mark_bug_sends_the_id_and_surfaces_a_refusal() {
+        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
+            assert_eq!(req["op"], "idea_mark_bug");
+            if req["args"]["id"] == "gone" {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "error": "not_found" })),
+                );
+            }
+            (axum::http::StatusCode::OK, axum::Json(json!({ "value": null })))
+        }))
+        .await;
+        let client = Client::new(base);
+        let ideas = Ideas {
+            client: &client,
+            repo_id: 1,
+            token: Some("tok"),
+        };
+        ideas.mark_bug("1").await.unwrap();
+        let err = ideas.mark_bug("gone").await.unwrap_err();
+        assert_eq!(err.code(), Some("not_found"));
     }
 }

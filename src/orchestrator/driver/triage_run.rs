@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use super::start_gate::StartGate;
 use super::{OutcomeSender, ProjectLoop, SessionStarter, Shared};
 use crate::config::OnOff;
 use crate::engines::{EngineId, Role, engine_for, program_of};
@@ -38,6 +39,10 @@ pub struct TriageRequest {
     pub usage: Option<Value>,
     /// Where the session reports how it ended.
     pub outcomes: OutcomeSender,
+    /// The engine to start on when it isn't the triager's chosen one.
+    pub engine: Option<EngineId>,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// What a second-look session needs (06.9 bullet 3): the triager's request, plus its own answer.
@@ -52,6 +57,8 @@ pub struct SecondLookRequest {
     pub triager_reason: String,
     pub triager_suggest: TriageButton,
     pub triager_instructions: String,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// How a second-look session ended: its answer, or `None` when it failed or answered with nothing usable.
@@ -117,7 +124,7 @@ impl ProjectLoop {
                 self.claude_pending.contains(item_id),
                 self.triaging.contains(item_id),
             );
-            claude_on_it(&facts, self.triage_flag && self.project.triage == OnOff::On)
+            claude_on_it(&facts, self.project.triage == OnOff::On)
         })
     }
 
@@ -139,6 +146,15 @@ impl ProjectLoop {
 
     /// Starts a triager on each stopped item that wants one while `room` session slots are free. Not while signed
     /// out, stopping or paused (the caller doesn't ask when paused), or the triager's engine is at its limit.
+    fn triager_engine(&self, shared: &Shared<'_>) -> EngineId {
+        program_of(engine_for(
+            &shared.links.engine_choice,
+            self.project.engines.as_ref(),
+            Role::Triager,
+            None,
+        ))
+    }
+
     pub(super) async fn triage_pass(
         &mut self,
         pool: &mut LanePool,
@@ -163,24 +179,15 @@ impl ProjectLoop {
                 .await;
             }
         }
-        // Behind the `triage-session` release flag: Off is today's behaviour, no looks and no `claudeOnIt`.
-        self.triage_flag = self.flags.on("triage-session").await;
-        if !self.triage_flag
-            || self.project.triage != OnOff::On
-            || shared.stopping
-            || super::project::signed_out(shared)
-        {
+        if self.project.triage != OnOff::On || shared.stopping {
             return;
         }
-        let engine = program_of(engine_for(
-            &shared.links.engine_choice,
-            self.project.engines.as_ref(),
-            Role::Triager,
-            None,
-        ));
-        if shared.engine_limits.is_limited(engine, Instant::now()) {
-            return;
-        }
+        let gate = StartGate::new(self, pool, shared);
+        let (engine, start_on) = match gate.role_start(self, shared, Role::Triager, true) {
+            Some(Some(now)) => (now, Some(now)),
+            Some(None) => (self.triager_engine(shared), None),
+            None => return,
+        };
         let now = Utc::now();
         let wanted: Vec<String> = (self.records.iter())
             .filter(|(id, r)| {
@@ -226,6 +233,8 @@ impl ProjectLoop {
                 lane,
                 usage: self.store.usage(),
                 outcomes: self.outcomes.clone(),
+                engine: start_on,
+                sessions: self.live.sessions().clone(),
             };
             match starter.triage(request) {
                 Ok(()) => *room -= 1,
@@ -310,6 +319,7 @@ impl ProjectLoop {
             triager_reason: held.reason.clone(),
             triager_suggest: held.suggest,
             triager_instructions: held.instructions.clone(),
+            sessions: self.live.sessions().clone(),
         };
         self.events.add_in(
             &self.id,
@@ -429,7 +439,7 @@ impl ProjectLoop {
         } else {
             record.triages = Some((record.slice, count + 1));
         }
-        let notes = Some(instructions.trim().to_string()).filter(|n| !n.is_empty());
+        let notes = crate::text::non_blank(instructions).map(str::to_string);
         match decision {
             TriageDecision::Continue => {
                 self.claude_pending.insert(item_id.to_string());
@@ -499,5 +509,33 @@ impl ProjectLoop {
             None => line,
         };
         self.look_note(item_id, line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_to_reason;
+
+    #[test]
+    fn a_missing_reason_becomes_the_text() {
+        let mut reason = None;
+        add_to_reason(&mut reason, "first");
+        assert_eq!(reason.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn an_empty_reason_is_replaced_not_prefixed() {
+        let mut reason = Some(String::new());
+        add_to_reason(&mut reason, "first");
+        assert_eq!(reason.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn an_existing_reason_keeps_the_text_under_it() {
+        let mut reason = Some("old".to_string());
+        add_to_reason(&mut reason, "new");
+        assert_eq!(reason.as_deref(), Some("old\n\nnew"));
+        add_to_reason(&mut reason, "newer");
+        assert_eq!(reason.as_deref(), Some("old\n\nnew\n\nnewer"));
     }
 }

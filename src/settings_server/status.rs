@@ -1,8 +1,11 @@
 //! The settings page's Now tab (agent-settings.md section 4.5): `GET /api/settings/status`, a
 //! read-only snapshot of the computer's lanes and engines, ported from `agent/src/computerStatus.ts`
-//! and `shared/computerStatus.ts`. Names and numbers only. This agent has no session pool yet, so
-//! no session runs and an engine's limit is "Not reported". Lanes the orchestrator loop holds
-//! (`orchestrator::live`) show busy; the rest are free. The shape is the same as the TypeScript
+//! and `shared/computerStatus.ts`. Names and numbers only. An engine's limit is "Not reported".
+//! Behind the `live-sessions-reporting` flag, each lane shows the session on it from the live
+//! registry (`orchestrator::live::sessions`), the `sessions` list holds every session with no lane,
+//! and lanes busy counts lanes with a session; Off, lanes the orchestrator loop holds
+//! (`orchestrator::live`) show busy, a project's spec draft is the one lane-less row, and the rest
+//! are free. A session row holds names and times, never a prompt or transcript. The shape is the same as the TypeScript
 //! agent's so the page reads either, plus an `orchestrator` block for the loop's mode and decisions.
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -19,6 +22,7 @@ use super::SettingsServer;
 use crate::config::{self, Engine, EngineChoiceConfig, LocalModelConfig};
 use crate::engines::choose::{self, Role};
 use crate::orchestrator::driver::OrchestratorMode;
+use crate::orchestrator::live::sessions::SessionRow as SessionRowLive;
 use crate::orchestrator::live::{LiveHandle, LiveState};
 use crate::setup_check::{SetupCheck, SetupChecks};
 use crate::store::MachineStore;
@@ -63,24 +67,45 @@ pub struct Lane {
     pub state: &'static str,
     pub state_text: &'static str,
     pub note: String,
-    /// The item holding it, when the orchestrator loop does.
+    /// The session on it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub item: Option<LaneItem>,
+    pub session: Option<SessionRow>,
 }
 
+/// A running session with no lane (or, on a lane, the session on it).
 #[derive(Debug, Serialize, PartialEq)]
-pub struct LaneItem {
-    pub id: String,
-    pub title: String,
-    pub project: String,
-}
-
-/// A running session with no lane.
-#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionRow {
     pub id: String,
     pub project: String,
-    pub title: &'static str,
+    pub title: String,
+    /// What the session does, and on what.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_sec: Option<u64>,
+}
+
+impl SessionRow {
+    fn live(r: &SessionRowLive) -> Self {
+        let i = &r.info;
+        Self {
+            id: i.item_id.clone(),
+            project: i.project.clone(),
+            title: i.title.clone().unwrap_or_else(|| i.item_id.clone()),
+            role: Some(format!("{:?}", i.role).to_lowercase()),
+            engine: Some(i.engine.to_string()),
+            model: Some(i.model.clone()),
+            run_sec: Some(r.started.elapsed().as_secs()),
+            quiet_sec: Some(r.last_output.elapsed().as_secs()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -117,10 +142,42 @@ pub struct ComputerStatus {
     pub header: Header,
     pub alerts: Vec<Alert>,
     pub lanes: Vec<Lane>,
-    /// Sessions that hold no lane: a project's spec draft, as a "Drafting specs" row.
+    /// Sessions that hold no lane: every one with live sessions on, else a project's spec draft.
     pub sessions: Vec<SessionRow>,
     pub engines: Vec<EngineRow>,
     pub orchestrator: Orchestrator,
+    /// The CI header (agent-ci.md section 3.1), only with the `agent-ci` loop running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci: Option<CiHeader>,
+}
+
+/// The Now tab's CI header: the slot, Docker, and each project without agent CI and why.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CiHeader {
+    pub slots: u32,
+    pub running: u32,
+    pub docker: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker_reason: Option<String>,
+    pub discovery: Vec<CiReason>,
+    /// Each running check, apart from the lanes' sessions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CiCheckRow>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CiCheckRow {
+    pub project: String,
+    pub pr: u64,
+    pub sha: String,
+    pub seconds: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CiReason {
+    pub project: String,
+    pub reason: String,
 }
 
 /// The orchestrator loop as the page shows it: a note for the whole computer and a line per project.
@@ -140,6 +197,35 @@ pub struct OrchestratorProject {
     pub paused: bool,
     pub last_tick: Option<String>,
     pub decision: Option<String>,
+    /// "Chores today: 2 of 3", once the store has answered a count.
+    pub chores: Option<String>,
+    /// What the idle baseline last found on the base branch, when it matters.
+    pub fix_main: Option<String>,
+    /// Why the last main sync didn't start, when it didn't.
+    pub sync_main: Option<String>,
+    /// The last vet run, "12 suggestions: 2 ideas, 1 duplicate, 9 binned"; absent before a run.
+    pub vet: Option<String>,
+}
+
+/// The store's vet summary as one line; zero counts are left out.
+fn vet_line(v: &crate::backlog::shown::VetView) -> String {
+    let total = v.ideas + v.duplicates + v.binned + v.asked;
+    let parts: Vec<String> = [
+        (v.ideas, "idea", "ideas"),
+        (v.duplicates, "duplicate", "duplicates"),
+        (v.binned, "binned", "binned"),
+        (v.asked, "asked", "asked"),
+        (v.left, "left", "left"),
+    ]
+    .iter()
+    .filter(|(n, ..)| *n > 0)
+    .map(|(n, one, many)| format!("{n} {}", if *n == 1 { one } else { many }))
+    .collect();
+    format!(
+        "{total} suggestion{}: {}",
+        if total == 1 { "" } else { "s" },
+        parts.join(", ")
+    )
 }
 
 fn orchestrator_note(live: &LiveState) -> String {
@@ -227,26 +313,23 @@ pub fn build(
                 state: "free",
                 state_text: "Free",
                 note: note.to_string(),
-                item: None,
+                session: None,
             }
         })
         .collect();
     let mut lanes_busy = 0;
-    for (project, p) in &live.projects {
-        for held in &p.held {
-            let Some(lane) = lanes.iter_mut().find(|l| l.k == held.lane) else {
-                continue;
-            };
-            lanes_busy += 1;
-            lane.state = "busy";
-            lane.state_text = "Busy";
-            lane.note = format!("Held for {project}");
-            lane.item = Some(LaneItem {
-                id: held.item_id.clone(),
-                title: held.title.clone().unwrap_or_else(|| held.item_id.clone()),
-                project: project.clone(),
-            });
-        }
+    let rows = source.live.sessions().snapshot();
+    let mut lane_less = Vec::new();
+    for r in &rows {
+        let Some(lane) = r.info.lane.and_then(|k| lanes.iter_mut().find(|l| l.k == k)) else {
+            lane_less.push(SessionRow::live(r));
+            continue;
+        };
+        lanes_busy += 1;
+        lane.state = "busy";
+        lane.state_text = "Busy";
+        lane.note = format!("Running for {}", r.info.project);
+        lane.session = Some(SessionRow::live(r));
     }
 
     let mut alerts = Vec::new();
@@ -308,15 +391,7 @@ pub fn build(
         },
         alerts,
         lanes,
-        sessions: (live.projects.iter())
-            .filter_map(|(project, p)| {
-                p.drafting.as_ref().map(|id| SessionRow {
-                    id: id.clone(),
-                    project: project.clone(),
-                    title: group_word("drafter"),
-                })
-            })
-            .collect(),
+        sessions: lane_less,
         engines,
         orchestrator: Orchestrator {
             mode: live.mode.name(),
@@ -329,9 +404,33 @@ pub fn build(
                     paused: p.paused,
                     last_tick: p.last_tick.clone(),
                     decision: p.decision.clone(),
+                    fix_main: p.fix_main.clone(),
+                    sync_main: p.sync_main.clone(),
+                    vet: p.vet.as_ref().map(vet_line),
+                    chores: p.chores.map(|c| format!("Chores today: {} of {}", c.today, c.limit)),
                 })
                 .collect(),
         },
+        ci: live.ci.as_ref().map(|c| CiHeader {
+            slots: c.slots,
+            running: c.running,
+            docker: c.docker,
+            docker_reason: c.docker_reason.clone(),
+            discovery: (c.reasons.iter())
+                .map(|(project, reason)| CiReason {
+                    project: project.clone(),
+                    reason: reason.clone(),
+                })
+                .collect(),
+            checks: (c.checks.iter())
+                .map(|r| CiCheckRow {
+                    project: r.project.clone(),
+                    pr: r.pr,
+                    sha: r.sha.clone(),
+                    seconds: r.started.elapsed().as_secs(),
+                })
+                .collect(),
+        }),
     }
 }
 
@@ -354,7 +453,7 @@ fn engine_row(e: Engine, settled: &Settled, checks: Option<&SetupChecks>) -> Eng
     // Local: this agent has no probe for the server, so enabled reads as "not known".
     let found = match e {
         Engine::Local => (!local.enabled).then_some(false),
-        Engine::Pi | Engine::Codex => checks.map(|_| check.is_some()),
+        Engine::Pi | Engine::Codex => checks.map(|_| check.is_some_and(|c| !c.detail.contains("isn't installed"))),
         _ => check.map(|c| c.ok == Some(true) || !c.detail.contains("isn't installed")),
     };
     let signed_in = (e == Engine::Claude).then(|| checks.and_then(|c| c.claude_signed_in.ok));
@@ -373,7 +472,9 @@ fn engine_row(e: Engine, settled: &Settled, checks: Option<&SetupChecks>) -> Eng
         };
     } else if signed_in == Some(Some(true)) {
         state_text = "Signed in";
-    } else if e == Engine::Cursor && check.is_some_and(|c| c.ok == Some(false)) {
+    } else if matches!(e, Engine::Cursor | Engine::Codex)
+        && check.is_some_and(|c| c.ok == Some(false) && c.detail.contains("isn't signed in"))
+    {
         (state, state_text) = ("problem", "Not signed in");
     }
     EngineRow {

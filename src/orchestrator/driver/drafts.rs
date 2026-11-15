@@ -4,6 +4,7 @@
 //! loop keeps only the running draft's id and session id, in memory: the store has the draft, and a
 //! claim that comes back with a session id resumes that session, so a restart carries on. What a person
 //! does with the draft afterwards is mostly not here: Edit is the `draft_edit` command (`drafts::actions`); Approve, Merge into main and Discard are carried out by `driver::land`. A claim that carries send-back notes or answers resumes the session with them, and answers are acknowledged with `draft_answer_taken`.
+use crate::text::is_blank;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -12,16 +13,23 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::Shared;
-use super::project::{ProjectLoop, signed_out};
+use super::project::ProjectLoop;
+use super::signed_out::signed_out;
+use super::start_gate::StartGate;
+use crate::ask::classify::Classified;
 use crate::ask::follow_up;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
+use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
+use crate::engines::Role;
+use crate::ideas::Ideas;
+use crate::ideas::bug_sort::sort;
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
@@ -41,6 +49,10 @@ pub struct DraftJob {
     pub follow_up: String,
     /// The project's latest `state.usage` reading, for the drafter's model tier.
     pub usage: Option<Value>,
+    /// The engine to start on when it isn't the drafter's chosen one.
+    pub engine: Option<crate::engines::EngineId>,
+    /// The sessions running now: this one is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// The parts of a draft that touch the machine: git, the code host and the engine. Faked in tests.
@@ -64,6 +76,10 @@ pub trait DraftHost: Send + Sync {
     fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
+    /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
+    fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
+        Box::pin(async { Classified::Unavailable })
+    }
 }
 
 /// The draft this project is drafting: only ids, never the draft itself.
@@ -82,7 +98,7 @@ fn follow_up(d: &ClaimedDraft) -> String {
             "The person answered your questions, in order:\n{}",
             a.answers.join("\n")
         )
-    } else if let Some(n) = d.notes.as_deref().filter(|n| !n.trim().is_empty()) {
+    } else if let Some(n) = d.notes.as_deref().filter(|n| !is_blank(n)) {
         format!("The person sent the draft back with these notes:\n{n}")
     } else if let Some(r) = &d.rebase_reason {
         rebase_request(r)
@@ -99,6 +115,7 @@ pub(super) fn rebase_request(reason: &str) -> String {
 impl ProjectLoop {
     /// Whether a draft is running here now; a finished one is forgotten.
     pub(super) fn drafting(&mut self) -> bool {
+        self.drain_failures();
         if self.draft.as_ref().is_some_and(|d| d.task.is_finished()) {
             self.draft = None;
         }
@@ -112,31 +129,61 @@ impl ProjectLoop {
         slots: &mut u32,
         host: &std::sync::Arc<dyn DraftHost>,
         shared: &Shared<'_>,
+        lanes: u32,
     ) {
-        if self.drafting() || *slots == 0 || shared.stopping || signed_out(shared) {
+        if self.drafting() || *slots == 0 || shared.stopping {
             return;
         }
+        let gate = StartGate::for_lanes(self, lanes, shared);
+        let Some(engine) = gate.role_start(self, shared, Role::Drafter, true) else {
+            return;
+        };
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let agent = claim_agent(shared.links, &self.project);
+        let mut agent = claim_agent(shared.links, &self.project);
+        agent.week = self.week_use();
         let claim = match self.client.draft_claim_next(repo, Some(&token), &agent, &[]).await {
             Ok(Some(claim)) => claim,
             Ok(None) => return,
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
-        *slots -= 1;
+        let mut claim = claim;
         let resume = claim.draft.session_id.is_some();
+        // A person's idea that is really a bug is moved to Bugs and planned as a fix; never blocks the draft.
+        if !resume && !signed_out(shared) {
+            let ideas = Ideas {
+                client: &self.client,
+                repo_id: repo,
+                token: Some(&token),
+            };
+            let project = self.project.clone();
+            let host = host.clone();
+            sort(&ideas, &mut claim.draft, |text| host.classify(&project, text)).await;
+        }
+        // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
+        let engine = if resume { None } else { engine };
+        if resume && gate.role_start(self, shared, Role::Drafter, false).is_none() {
+            let released = self
+                .client
+                .draft_release(repo, Some(&token), &claim.draft.id, &claim.token);
+            if let Err(e) = released.await {
+                tracing::warn!("{}: couldn't let go of draft {}: {e}", self.id, claim.draft.id);
+                self.store_failure("draft_release", &claim.draft.id, &e).await;
+            }
+            return;
+        }
+        *slots -= 1;
         let session_id = claim.draft.session_id.clone().unwrap_or_else(new_session_id);
         let ctx = Ctx {
             client: self.client.clone(),
-            flags: self.flags.clone(),
             repo,
             token,
             lease: claim.token,
+            failures: self.failures.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -144,6 +191,8 @@ impl ProjectLoop {
                 commands: shared.links.item_commands.clone(),
                 project: self.id.clone(),
             },
+            sessions: self.live.sessions().clone(),
+            engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
         };
         let id = claim.draft.id.clone();
@@ -171,38 +220,50 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
         machine: links.machine.clone(),
         environment: links.environment.clone(),
         base_branch: project.base_branch.clone(),
-        tags: links.tags.clone(),
+        tags: links.tags.get(),
+        week: None,
+    }
+}
+
+impl ProjectLoop {
+    /// This computer's Claude week as the store takes it, from the project's last usage readings
+    /// (backlog/06.6 section 6.6.5); `None` when there's no reading or the week has reset.
+    pub(super) fn week_use(&self) -> Option<crate::backlog::week::WeekUse> {
+        let readings = [self.store.usage(), self.store.week_usage()];
+        crate::backlog::week::WeekUse::of(readings.iter().flatten(), crate::telemetry::now_secs())
     }
 }
 
 struct Ctx {
     client: std::sync::Arc<Client>,
-    flags: std::sync::Arc<crate::flags::Flags>,
     repo: u64,
     token: String,
     lease: String,
+    failures: crate::backlog::failures::Failures,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
     /// The draft already went back to the queue once by itself.
     retried: bool,
+    engine: Option<crate::engines::EngineId>,
     approve: Approve,
+    sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 impl Ctx {
     async fn report(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
-        self.client
+        let sent = (self.client)
             .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
-            .await
+            .await;
+        if let Err(e) = &sent {
+            self.failures.add("draft_report", id, e);
+        }
+        sent
     }
 
     /// Retaskable's own message in the chat about `draft`: into the ask that wanted it, or a new conversation. The draft's
     /// state is already reported, so a message the store doesn't take is only logged.
-    /// Only with the `ask-claude` flag On: Off is today's behaviour, no message.
     async fn say(&self, draft: &ClaimedDraft, text: &str) {
-        if !self.flags.on("ask-claude").await {
-            return;
-        }
         let posted = (self.client)
             .ask_post(self.repo, Some(&self.token), text, &draft.id, draft.ask_id.as_deref())
             .await;
@@ -214,15 +275,19 @@ impl Ctx {
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
     /// failed on its retry waits for a person as `failed`.
     async fn failed(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
+        let report = DraftReport {
+            summary: Some(reason_or(report.summary.as_deref().unwrap_or(""), NO_REASON)),
+            ..report
+        };
+        let summary = report.summary.clone().unwrap_or_default();
         if self.retried {
             return self.needs_person(id, "failed", report).await;
         }
-        let summary = report.summary.as_deref().unwrap_or("it failed");
         self.report(
             id,
             DraftReport {
                 status: Some("queued".into()),
-                summary: Some(format!("Trying again by itself: {summary}")),
+                summary: Some(format!("{RETRY_PREFIX}{summary}")),
                 retried: Some(true),
                 ..Default::default()
             },
@@ -267,7 +332,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     )
     .await?;
     let failed = |why: String| DraftReport {
-        summary: Some(why),
+        summary: Some(error_reason(&why, "error")),
         ..Default::default()
     };
     let prepared = {
@@ -281,10 +346,15 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     };
     // The session now has the person's answers: the store clears them, and keeps them off the next claim.
     if draft.answer.is_some() {
-        ctx.client
+        let taken = (ctx.client)
             .draft_answer_taken(ctx.repo, Some(&ctx.token), &id, &ctx.lease)
-            .await?;
+            .await;
+        if let Err(e) = &taken {
+            ctx.failures.add("draft_answer_taken", &id, e);
+        }
+        taken?;
     }
+    let job_session = session_id.clone();
     let job = DraftJob {
         project: ctx.project.clone(),
         follow_up: follow_up(&draft),
@@ -294,6 +364,8 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         session_id,
         resume,
         usage: ctx.usage.clone(),
+        engine: ctx.engine,
+        sessions: ctx.sessions.clone(),
     };
     let result = match ctx.host.run(job).await {
         Ok(result) => result,
@@ -301,6 +373,17 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok(()),
         Err(e) => return ctx.failed(&id, failed(format!("{e:#}"))).await,
     };
+    // A Cursor draft's chat id is the one the session reported, kept so a revision's `--resume` is that chat.
+    if let Some(chat) = result.session_id.as_deref().filter(|c| *c != job_session) {
+        ctx.report(
+            &id,
+            DraftReport {
+                session_id: Some(chat.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
     let sorted = sort_fixes(&result);
     let ask = |qs: &[Question]| -> Vec<String> {
         match qs {
@@ -328,7 +411,10 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             ctx.say(&draft, follow_up::HAS_QUESTIONS).await;
             Ok(())
         }
-        (None, DrafterStatus::Failed) => ctx.failed(&id, failed(result.summary.clone())).await,
+        (None, DrafterStatus::Failed) => {
+            let why = reason_or(&result.summary, "The drafter stopped without giving a reason.");
+            ctx.failed(&id, failed(why)).await
+        }
         (None, _) => {
             let outcome = sorted.outcome;
             for fix in &sorted.fix_items {
@@ -375,12 +461,12 @@ async fn open_pr(
     let title = r
         .change_title
         .clone()
-        .filter(|t| !t.trim().is_empty())
+        .filter(|t| !is_blank(t))
         .unwrap_or_else(|| format!("Spec: {}", r.title.clone().unwrap_or_else(|| id.to_string())));
     let body = r
         .change_body
         .clone()
-        .filter(|b| !b.trim().is_empty())
+        .filter(|b| !is_blank(b))
         .unwrap_or_else(|| r.summary.clone());
     let published = {
         let (host, project, dir, branch) = (
@@ -395,7 +481,10 @@ async fn open_pr(
     let published = match published {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            let why = format!("The spec is committed but couldn't be published: {e:#}");
+            let why = format!(
+                "The spec is committed but couldn't be published: {}",
+                reason_or(&format!("{e:#}"), "no reason given")
+            );
             return ctx
                 .failed(
                     id,

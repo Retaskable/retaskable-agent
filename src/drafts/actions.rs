@@ -17,7 +17,7 @@ pub struct Where<'a> {
 
 /// The draft's branch: the one named, or the one `retaskable/spec-<id>-…` in the checkout.
 pub fn branch_of(w: &Where<'_>, id: &str, named: Option<&str>) -> Result<String> {
-    if let Some(b) = named.map(str::trim).filter(|b| !b.is_empty()) {
+    if let Some(b) = named.and_then(crate::text::non_blank) {
         return Ok(b.to_string());
     }
     let pattern = format!("refs/heads/retaskable/spec-{id}-*");

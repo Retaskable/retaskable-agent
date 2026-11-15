@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -10,6 +10,7 @@ use crate::orchestrator::session::tests::{fake_gh, fake_name, project_in};
 const COMMIT: &str = "echo 'fn a() {}' > small.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm small";
 
 struct Rig {
+    fall: Option<crate::orchestrator::driver::FallOver>,
     _dir: tempfile::TempDir,
     root: PathBuf,
     starter: Arc<PieceStarter>,
@@ -48,12 +49,15 @@ fn rig(steps: &[&str], answer: &str) -> Rig {
         data_dir: root.join("data"),
         projects: vec![project],
         choice: EngineChoiceConfig::default(),
+        cursor_models: Default::default(),
         env,
         max_turns: 50,
-        models: ModelsConfig::default(),
-        flags: Arc::new(crate::flags::Flags::fixed(&[])),
+        machine: "pc".into(),
+        sessions: Default::default(),
+        local: crate::local_model::LocalModel::off(),
     });
     Rig {
+        fall: None,
         _dir: dir,
         root,
         starter,
@@ -83,7 +87,9 @@ fn request(rig: &Rig, kind: RunKind, piece: Value) -> (RunRequest, Started) {
         piece: serde_json::from_value(piece).unwrap(),
         other: Default::default(),
         lane: Some(lanes::lane_path(&rig.root.join("worktrees"), 1)),
+        engine: None,
         ends,
+        events: crate::orchestrator::driver::RunEventSender::channel().0,
         context: crate::orchestrator::driver::RunContext::for_test(),
     };
     (request, Started { ends: rx, trees })
@@ -111,6 +117,24 @@ fn origin_has(rig: &Rig, branch: &str) -> bool {
 }
 
 const BRANCH: &str = "retaskable/pc1-show-the-thing";
+
+#[tokio::test]
+async fn a_build_run_is_listed_on_its_lane_while_it_runs_and_not_after() {
+    let r = rig(&[&format!("sleep 1; {COMMIT}")], &answer("pr_opened", ""));
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let rows = crate::orchestrator::fake_session_tests::rows_once_running(&r.starter.sessions).await;
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "pc1", Role::Implementer)
+    );
+    assert_eq!((info.title.as_deref(), info.lane), (Some("Show the thing"), Some(1)));
+    assert_eq!(info.engine, EngineId::Claude);
+    assert!(!info.model.is_empty());
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(r.starter.sessions.snapshot().is_empty());
+}
 
 #[tokio::test]
 async fn a_build_run_opens_the_change_and_ends_pr_opened() {
@@ -264,7 +288,10 @@ async fn end_with(r: &Rig) -> RunEnd {
     end_of(&mut s.ends).await
 }
 
-const FIXED: &str = "touch fixed.txt; git add -A; git -c user.name=t -c user.email=t@t commit -qm fixed";
+/// A commit that breaks `BROKEN_BY_BAD` (it passes on the base branch, where the baseline runs it) and one that fixes it.
+const BAD: &str = "touch bad.txt; git add -A; git -c user.name=t -c user.email=t@t commit -qm bad";
+const FIXED: &str = "git rm -q bad.txt; git -c user.name=t -c user.email=t@t commit -qm fixed";
+const BROKEN_BY_BAD: &str = "test ! -f bad.txt";
 
 #[tokio::test]
 async fn passing_checks_let_the_run_end_pr_opened_with_their_evidence() {
@@ -277,13 +304,13 @@ async fn passing_checks_let_the_run_end_pr_opened_with_their_evidence() {
 
 #[tokio::test]
 async fn a_blocking_failure_goes_back_to_the_session_and_a_second_round_passes() {
-    let c = check("needs-fix", "echo still-broken; test -f fixed.txt", true);
-    let r = rig_checked(&[COMMIT, FIXED], vec![c], 3);
+    let c = check("needs-fix", &format!("echo still-broken; {BROKEN_BY_BAD}"), true);
+    let r = rig_checked(&[BAD, FIXED], vec![c], 3);
     let end = end_with(&r).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened);
     let prompt = std::fs::read_to_string(r.root.join("prompt2.txt")).unwrap();
     assert!(
-        prompt.contains("still-broken") && prompt.contains("test -f fixed.txt"),
+        prompt.contains("still-broken") && prompt.contains(BROKEN_BY_BAD),
         "{prompt}"
     );
     assert_eq!(end.result["checks_summary"], "✓ needs-fix");
@@ -301,11 +328,11 @@ async fn a_non_blocking_failure_does_not_block() {
 #[tokio::test]
 async fn failing_past_max_check_rounds_fails_naming_the_checks() {
     let checks = vec![
-        check("unit", "false", true),
-        check("types", "false", true),
-        check("lint", "false", false),
+        check("unit", BROKEN_BY_BAD, true),
+        check("types", BROKEN_BY_BAD, true),
+        check("lint", BROKEN_BY_BAD, false),
     ];
-    let r = rig_checked(&[COMMIT, "true"], checks, 1);
+    let r = rig_checked(&[BAD, "true"], checks, 1);
     let end = end_with(&r).await;
     let RunOutcome::Failed(why) = end.outcome else {
         panic!("{:?}", end.outcome)
@@ -463,15 +490,114 @@ async fn cutting_a_review_session_ends_the_run_interrupted() {
     assert!(comment(&r).is_empty());
 }
 
-fn with_flag(r: &mut Rig) {
-    Arc::get_mut(&mut r.starter).unwrap().flags = Arc::new(crate::flags::Flags::fixed(&["run-limits-and-causes"]));
+/// Makes `RETASKABLE_<var>` a stub that appends its arguments to `<name>.log` and prints nothing.
+fn stub(r: &mut Rig, var: &str, name: &str) {
+    let path = r
+        .root
+        .join(format!("stub-{name}{}", if cfg!(windows) { ".cmd" } else { "" }));
+    crate::test_support::write_executable(
+        &path,
+        &format!(
+            "#!/bin/sh\ncat > /dev/null\necho \"$@\" >> '{}'\n",
+            r.root.join(format!("{name}.log")).display()
+        ),
+    );
+    let (var, path) = (var.to_string(), path.to_string_lossy().into_owned());
+    let starter = Arc::get_mut(&mut r.starter).unwrap();
+    let old = starter.env.clone();
+    starter.env = Env::new(move |k| if k == var { Some(path.clone()) } else { old.get(k) });
+}
+
+#[tokio::test]
+async fn a_piece_on_cursor_codex_or_pi_runs_that_binary() {
+    for (engine, var) in [
+        ("cursor", "RETASKABLE_CURSOR"),
+        ("codex", "RETASKABLE_CODEX"),
+        ("pi", "RETASKABLE_PI"),
+    ] {
+        let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+        stub(&mut r, var, engine);
+        let mut p = piece();
+        p["engine"] = json!(engine);
+        let (req, mut s) = request(&r, RunKind::Build, p);
+        r.starter.start(req).unwrap();
+        let end = end_of(&mut s.ends).await;
+        assert!(r.root.join(format!("{engine}.log")).exists(), "{engine} didn't run");
+        assert!(!r.root.join("prompt1.txt").exists());
+        assert_ne!(end.outcome, RunOutcome::Interrupted, "{engine}");
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_engine_is_refused_and_fails_the_run() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let mut p = piece();
+    p["engine"] = json!("steam");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    assert_eq!(
+        end_of(&mut s.ends).await.outcome,
+        RunOutcome::Failed("this computer can't run steam sessions yet".into())
+    );
+}
+
+#[tokio::test]
+async fn a_review_on_cursor_runs_scouts_on_the_scout_model_and_the_reviewer_on_top() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    stub(&mut r, "RETASKABLE_CURSOR", "cursor");
+    {
+        let starter = Arc::get_mut(&mut r.starter).unwrap();
+        starter.choice = serde_json::from_value(json!({ "roles": { "review": "cursor" } })).unwrap();
+        starter.cursor_models = serde_json::from_value(json!({ "top": "gpt-top", "scout": "gpt-scout" })).unwrap();
+        starter.projects[0].review.min_scout_diff_lines = 0;
+    }
+    let mut p = piece();
+    p["engine"] = json!("claude");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    end_of(&mut s.ends).await;
+    // The implementer stayed on Claude.
+    assert!(r.root.join("prompt1.txt").exists());
+    let log = std::fs::read_to_string(r.root.join("cursor.log")).unwrap();
+    assert!(log.contains("--model gpt-scout"), "{log}");
+    assert!(log.contains("--model gpt-top"), "{log}");
+}
+
+#[tokio::test]
+async fn a_scout_is_listed_with_no_lane_while_it_runs_and_not_after() {
+    let root = std::env::temp_dir().join(format!("scout-go-{}", std::process::id()));
+    let go = root.join("go");
+    std::fs::create_dir_all(&root).unwrap();
+    let hold = format!("while [ ! -f '{}' ]; do sleep 0.05; done", go.display());
+    let mut r = rig(&[COMMIT, &hold, &hold, &hold], &answer("pr_opened", ""));
+    Arc::get_mut(&mut r.starter).unwrap().projects[0]
+        .review
+        .min_scout_diff_lines = 0;
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let rows = loop {
+        let rows = r.starter.sessions.rows_when_running().await;
+        if !rows.is_empty() && rows.iter().all(|row| row.info.role == crate::engines::Role::Scout) {
+            break rows;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    let info = &rows[0].info;
+    assert_eq!((info.project.as_str(), info.item_id.as_str()), ("p", "pc1"));
+    assert_eq!(info.title.as_deref(), Some("Show the thing"));
+    assert_eq!((info.role, info.lane), (crate::engines::Role::Scout, None));
+    assert_eq!(info.engine, crate::engines::EngineId::Claude);
+    assert!(rows.iter().all(|row| row.info.role == crate::engines::Role::Scout));
+    std::fs::write(&go, "").unwrap();
+    end_of(&mut s.ends).await;
+    assert!(r.starter.sessions.snapshot().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
 async fn a_piece_on_an_engine_this_agent_cannot_run_ends_failed_outside_with_nothing_run() {
-    for engine in ["cursor", "steam"] {
-        let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
-        with_flag(&mut r);
+    for engine in ["steam"] {
+        let r = rig(&[COMMIT], &answer("pr_opened", ""));
         let mut p = piece();
         p["engine"] = json!(engine);
         let (req, mut s) = request(&r, RunKind::Build, p);
@@ -486,53 +612,58 @@ async fn a_piece_on_an_engine_this_agent_cannot_run_ends_failed_outside_with_not
     }
 }
 
-#[tokio::test]
-async fn with_the_flag_off_such_a_piece_is_given_back() {
-    let r = rig(&[COMMIT], &answer("pr_opened", ""));
-    let mut p = piece();
-    p["engine"] = json!("cursor");
-    let (req, mut s) = request(&r, RunKind::Build, p);
-    r.starter.start(req).unwrap();
-    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::Interrupted);
-}
-
 fn role_is_cursor(r: &mut Rig) {
     let choice = serde_json::from_value(json!({ "default": "cursor" })).unwrap();
     Arc::get_mut(&mut r.starter).unwrap().choice = choice;
 }
 
 #[tokio::test]
-async fn a_piece_naming_claude_runs_on_claude_even_when_the_role_is_cursor() {
+async fn a_build_told_to_start_on_claude_while_the_role_is_cursor_runs_on_claude() {
     let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
     role_is_cursor(&mut r);
-    let mut p = piece();
-    p["engine"] = json!("claude");
-    let (req, mut s) = request(&r, RunKind::Build, p);
+    let (mut req, mut s) = request(&r, RunKind::Build, piece());
+    req.engine = Some(crate::engines::EngineId::Claude);
+    // The review roles get the same out set, so they follow.
+    req.context.fall = Some(crate::orchestrator::driver::FallOver {
+        out: [crate::engines::EngineId::Cursor].into(),
+        used: vec![crate::engines::EngineId::Cursor, crate::engines::EngineId::Claude],
+    });
     r.starter.start(req).unwrap();
     assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(r.root.join("prompt1.txt").exists(), "the session ran on Claude");
+}
+
+#[tokio::test]
+async fn a_pieces_own_engine_that_is_out_goes_to_the_one_that_takes_over() {
+    use crate::engines::EngineId::{Claude, Cursor};
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let mut p = piece();
+    p["engine"] = json!("cursor");
+    let (mut req, mut s) = request(&r, RunKind::Build, p);
+    req.context.fall = Some(crate::orchestrator::driver::FallOver {
+        out: [Cursor].into(),
+        used: vec![Cursor, Claude],
+    });
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(r.root.join("prompt1.txt").exists(), "the session ran on Claude");
 }
 
 #[tokio::test]
 async fn a_piece_with_no_engine_follows_the_role() {
     let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
     role_is_cursor(&mut r);
-    with_flag(&mut r);
-    let (req, mut s) = request(&r, RunKind::Build, piece());
-    r.starter.start(req).unwrap();
-    let end = end_of(&mut s.ends).await;
-    assert_eq!(
-        end.outcome,
-        RunOutcome::Failed("this computer can't run cursor sessions yet".into())
-    );
+    let (req, _s) = request(&r, RunKind::Build, piece());
+    let err = r.starter.start(req).unwrap_err();
+    assert!(err.starts_with("the cursor-agent binary wasn't found"), "{err}");
 }
 
 #[tokio::test]
 async fn a_limit_ends_limited_naming_the_pieces_engine() {
-    let mut r = rig(
+    let r = rig(
         &[":"],
         r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"limit","session_id":"s"}"#,
     );
-    with_flag(&mut r);
     let mut p = piece();
     p["engine"] = json!("claude");
     let (req, mut s) = request(&r, RunKind::Build, p);
@@ -544,3 +675,210 @@ async fn a_limit_ends_limited_naming_the_pieces_engine() {
         end.outcome
     );
 }
+
+#[tokio::test]
+async fn a_chore_that_asks_questions_ends_failed_and_its_change_is_closed() {
+    let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
+    let r = rig(&[COMMIT], &answer("needs_clarification", q));
+    std::fs::write(r.root.join("gh_list"), r#"[{"number":7,"url":"https://x/pull/7"}]"#).unwrap();
+    let mut p = piece();
+    p["chore"] = json!({ "kind": "tidy" });
+    let (url, _log) = lock_store("free").await;
+    let (mut req, mut s) = request(&r, RunKind::Build, p);
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    let RunOutcome::Failed(why) = &end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("Which?"), "{why}");
+    let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap_or_default();
+    assert!(log.contains("pr close 7 --comment"), "{log}");
+}
+
+/// A store whose `lock_take` answers per `mode` ("free", "held" by another, "error"); every op body is logged.
+async fn lock_store(mode: &'static str) -> (String, Arc<Mutex<Vec<Value>>>) {
+    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    let log: Arc<Mutex<Vec<Value>>> = Default::default();
+    let app = Router::new()
+        .route(
+            "/v1/repos/{id}/ops",
+            post(
+                move |State(s): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
+                    s.lock().unwrap().push(body.clone());
+                    let value = match (body["op"].as_str().unwrap(), mode) {
+                        ("lock_take", "held") => json!({ "held": false, "by": "other-pc", "note": "pc9 on x" }),
+                        ("lock_take", _) => json!({ "held": true, "token": "L1" }),
+                        _ => Value::Null,
+                    };
+                    if mode == "error" {
+                        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))).into_response();
+                    }
+                    Json(json!({ "value": value })).into_response()
+                },
+            ),
+        )
+        .with_state(log.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), log)
+}
+
+fn ops(log: &Arc<Mutex<Vec<Value>>>) -> Vec<String> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .map(|b| b["op"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn chore_piece(kind: &str) -> Value {
+    let mut p = piece();
+    p["chore"] = json!({ "kind": kind });
+    p
+}
+
+fn on_store(req: &mut RunRequest, url: &str) {
+    req.context.client = Arc::new(crate::backlog::Client::new(url));
+}
+
+#[tokio::test]
+async fn a_tidy_chore_takes_its_lock_then_runs_then_drops_it() {
+    let (url, log) = lock_store("free").await;
+    let r = rig(
+        &[COMMIT],
+        &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
+    );
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("tidy"));
+    on_store(&mut req, &url);
+    let locks = req.context.locks.clone();
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::PrOpened), "{:?}", end.outcome);
+    assert_eq!(ops(&log), ["lock_take", "lock_drop"]);
+    let first = log.lock().unwrap()[0].clone();
+    assert_eq!(first["args"]["name"], "chore-tidy");
+    assert_eq!(first["args"]["note"], "pc1 on pc");
+    assert!(r.root.join("prompt1.txt").exists(), "the session ran");
+    assert_eq!(locks.count(), 0);
+}
+
+#[tokio::test]
+async fn a_lock_held_by_another_ends_interrupted_with_no_session() {
+    let (url, log) = lock_store("held").await;
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("tests"));
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Interrupted), "{:?}", end.outcome);
+    assert_eq!(ops(&log), ["lock_take"]);
+    assert!(!r.root.join("prompt1.txt").exists());
+}
+
+#[tokio::test]
+async fn a_store_error_ends_failed_outside_with_nothing_started() {
+    let (url, log) = lock_store("error").await;
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("bugs"));
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Failed(_)), "{:?}", end.outcome);
+    assert_eq!(end.result["outside"], true);
+    assert_eq!(ops(&log), ["lock_take"]);
+    assert!(!r.root.join("prompt1.txt").exists());
+}
+
+#[tokio::test]
+async fn a_lock_lost_mid_run_stops_the_push() {
+    use crate::backlog::runs::BeatVerdict;
+    let (url, log) = lock_store("free").await;
+    let wait = format!("touch started; while [ ! -f go ]; do sleep 0.1; done; {COMMIT}");
+    let r = rig(
+        &[&wait],
+        &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
+    );
+    let (mut req, mut s) = request(&r, RunKind::Build, chore_piece("specs"));
+    on_store(&mut req, &url);
+    let locks = req.context.locks.clone();
+    r.starter.start(req).unwrap();
+    let lane = lanes::lane_path(&r.root.join("worktrees"), 1);
+    while !lane.join("started").exists() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    locks.apply_beat(&[("L1".to_string(), BeatVerdict::Stop)].into_iter().collect());
+    std::fs::write(lane.join("go"), "").unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Interrupted), "{:?}", end.outcome);
+    assert!(!origin_has(&r, "retaskable/pc1-show-the-thing"), "nothing pushed");
+    assert_eq!(ops(&log), ["lock_take", "lock_drop"]);
+}
+
+#[tokio::test]
+async fn a_roadmap_piece_and_a_playtest_fix_send_no_lock_take() {
+    for p in [piece(), chore_piece("playtest_fix")] {
+        let (url, log) = lock_store("free").await;
+        let r = rig(
+            &[COMMIT],
+            &answer("pr_opened", r#","change_title":"T","change_body":"B""#),
+        );
+        let (mut req, mut s) = request(&r, RunKind::Build, p);
+        on_store(&mut req, &url);
+        r.starter.start(req).unwrap();
+        end_of(&mut s.ends).await;
+        assert!(ops(&log).is_empty(), "{:?}", ops(&log));
+    }
+}
+
+fn sync_piece() -> Value {
+    let mut p = piece();
+    p["chore"] = json!({ "kind": "sync_main" });
+    p["syncSha"] = json!("0123456789abcdef");
+    p["remaining"] = json!("- src/a.rs");
+    p
+}
+
+async fn sync_run(r: &Rig) -> RunEnd {
+    let (url, _log) = lock_store("free").await;
+    let (mut req, mut s) = request(r, RunKind::Build, sync_piece());
+    on_store(&mut req, &url);
+    r.starter.start(req).unwrap();
+    end_of(&mut s.ends).await
+}
+
+#[tokio::test]
+async fn a_main_sync_runs_on_its_own_branch_and_ends_pr_opened_without_a_review() {
+    let r = rig(&[COMMIT], &answer("pr_opened", r#","change_title":"Resolved it""#));
+    let end = sync_run(&r).await;
+    assert_eq!(end.outcome, RunOutcome::PrOpened);
+    let log = std::fs::read_to_string(r.root.join("gh.log")).unwrap();
+    assert!(log.contains("--title Sync: main into main (0 commits)"), "{log}");
+    assert!(!log.contains("Resolved it"), "{log}");
+    assert!(origin_has(&r, "retaskable/sync-main-0123456"));
+    assert!(!origin_has(&r, BRANCH));
+    let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
+    assert!(
+        prompt.contains("main sync") && prompt.contains("- src/a.rs"),
+        "{prompt}"
+    );
+    assert!(!r.root.join("reviewer1.txt").exists(), "no reviewer");
+    assert!(!r.root.join("count_r").exists());
+}
+
+#[tokio::test]
+async fn a_main_sync_that_asks_questions_ends_questions() {
+    let q = r#","questions":[{"question":"Which?","options":["a","b"]}]"#;
+    let r = rig(&[COMMIT], &answer("needs_clarification", q));
+    assert_eq!(sync_run(&r).await.outcome, RunOutcome::Questions);
+}
+
+#[path = "piece_runs_local_tests.rs"]
+mod local_tests;
+
+#[path = "piece_runs_model_tests.rs"]
+mod model_tests;
+
+#[path = "piece_runs_limit_tests.rs"]
+mod limit;

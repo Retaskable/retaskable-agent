@@ -47,7 +47,10 @@ payload!(Lease {
     change: String,
     state: String
 });
-payload!(Claim { answer: Value });
+payload!(Claim {
+    op: String,
+    answer: Value
+});
 payload!(StoreError {
     item: String,
     op: String,
@@ -89,6 +92,7 @@ payload!(StepStart {
 });
 payload!(StepEnd {
     item: String, step: String, key: String, ms: f64, ok: bool, outcome: String, checks: Vec<Check>,
+    lines: u64, scouts: u32,
 });
 payload!(Ci {
     item: String,
@@ -110,6 +114,14 @@ payload!(TrialOpened {
     pr_url: String
 });
 payload!(TrialDropped { reason: String });
+payload!(UsageRechecked {
+    status: String,
+    #[serde(rename = "leftPct")]
+    left_pct: i64,
+    #[serde(rename = "wasWaiting")]
+    was_waiting: bool,
+    waiting: bool
+});
 payload!(HostCallUndefined {
     cmd: String,
     args: Value
@@ -141,7 +153,7 @@ payload!(Anomaly {
 });
 payload!(
     /// One check of a `step_end`.
-    Check { name: String, ok: bool }
+    Check { name: String, ok: bool, sec: f64 }
 );
 
 /// One kind of event the log knows, by its `kind` string.
@@ -170,6 +182,7 @@ pub enum Event {
     Anomaly(Anomaly),
     TrialOpened(TrialOpened),
     TrialDropped(TrialDropped),
+    UsageRechecked(UsageRechecked),
 }
 
 fn extra_item(extra: &Map<String, Value>) -> Option<&str> {
@@ -203,6 +216,7 @@ impl Event {
             Event::RestartBack(e) => return extra_item(&e.extra),
             Event::TrialOpened(e) => return extra_item(&e.extra),
             Event::TrialDropped(e) => return extra_item(&e.extra),
+            Event::UsageRechecked(e) => return extra_item(&e.extra),
         };
         own.as_deref()
     }
@@ -389,6 +403,25 @@ mod tests {
             "host_call_undefined"
         );
         assert_eq!(Event::Anomaly(Anomaly::default()).kind(), "anomaly");
+    }
+
+    #[test]
+    fn a_step_end_keeps_a_reviews_lines_and_scouts_through_a_round_trip() {
+        let line = json!({ "at": "2026-01-01T00:00:00Z", "kind": "step_end", "item": "R-12", "ok": true, "lines": 40, "scouts": 2 });
+        let entry = Entry::from_value(&line).unwrap();
+        let Some(Event::StepEnd(end)) = entry.event() else {
+            panic!("not a step_end")
+        };
+        assert_eq!((end.lines, end.scouts), (Some(40), Some(2)));
+        assert_eq!(entry.to_value(), line);
+    }
+
+    #[test]
+    fn a_check_keeps_its_seconds_through_a_round_trip() {
+        let line = json!({ "name": "test", "ok": false, "sec": 12.5 });
+        let check: Check = serde_json::from_value(line.clone()).unwrap();
+        assert_eq!(check.sec, Some(12.5));
+        assert_eq!(serde_json::to_value(&check).unwrap(), line);
     }
 
     #[test]

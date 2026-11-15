@@ -1,6 +1,7 @@
 //! The assistant's result `{ answer, actions: [...] }` and the fixed list of actions it may take
 //! (spec 06.6). Pure code: an action that is unknown or malformed is dropped and its reason kept,
 //! so the orchestrator can report it with the answer.
+use crate::text::is_blank;
 use serde_json::{Value, json};
 
 /// One action the orchestrator will run through the same code as the command a person could send.
@@ -65,7 +66,7 @@ pub fn assistant_result_schema() -> Value {
 }
 
 fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+    v.get(key).and_then(Value::as_str).filter(|s| !is_blank(s))
 }
 
 fn id_or_null(v: &Value, key: &str) -> Option<String> {

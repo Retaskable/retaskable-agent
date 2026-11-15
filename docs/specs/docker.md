@@ -55,6 +55,7 @@ Set in the shell that runs `docker compose`, or a `.env` file beside `compose.ya
 - `CLAUDE_CODE_OAUTH_TOKEN`: a long-lived Claude Code token from `claude setup-token` (a Claude subscription's). `claude auth status` counts it as signed in, so the first-run check (first-run-check.md) does too. Or leave it unset and sign in once inside the container (`docker exec -it retaskable-agent claude`, then `/login`), or copy a `.credentials.json` into the `claude` volume; either is kept in the volume.
 - `RETASKABLE_WOODPECKER_TOKEN` (optional): Woodpecker's logs for failed checks, as on Windows.
 - `GITLAB_TOKEN` (optional): `glab`, for GitLab projects.
+- `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` (optional): the computer that runs retaskable.com's rollouts, for the `traffic` and `health` commands ([rollout-on-server.md](rollout-on-server.md) section 3, slice 3). Other projects leave them empty.
 
 The agent's sessions inherit its environment, so these reach `claude -p`, `gh` and the checks, as the same logins do on Windows through the OS store and the user's environment.
 

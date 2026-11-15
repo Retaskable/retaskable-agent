@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use crate::config::CheckConfig;
 use crate::item_lifecycle::CheckOutcome;
 use crate::lanes;
+use crate::orchestrator::steps::CheckTime;
 use crate::proc;
 
 /// How much of a check's output stage 1 keeps (06.3-review.md: "the last ~200 lines").
@@ -32,6 +33,10 @@ pub struct CheckRun {
     pub exit_code: i32,
     pub timed_out: bool,
     pub output_tail: String,
+    /// The check also fails on the base branch's commit (the baseline): not this change's fault.
+    pub preexisting: bool,
+    /// How long the run took, in seconds.
+    pub seconds: f64,
 }
 
 impl CheckRun {
@@ -52,9 +57,23 @@ pub struct StageOneResult {
 }
 
 impl StageOneResult {
-    /// The blocking checks that didn't pass, in the order they ran.
+    /// Each check's name, whether it passed and its seconds, for a `step_end`.
+    pub fn check_times(&self) -> Vec<CheckTime> {
+        (self.checks.iter())
+            .map(|c| CheckTime {
+                name: c.name.clone(),
+                ok: c.passed(),
+                sec: c.seconds,
+            })
+            .collect()
+    }
+
+    /// The blocking checks that didn't pass, in the order they ran, except those that fail on main too.
     pub fn blocking_failures(&self) -> Vec<&CheckRun> {
-        self.checks.iter().filter(|c| c.blocking && !c.passed()).collect()
+        self.checks
+            .iter()
+            .filter(|c| c.blocking && !c.passed() && !c.preexisting)
+            .collect()
     }
 
     /// `Failed` when any blocking check (or a failed install, which counts as one) didn't pass;
@@ -101,27 +120,38 @@ fn run_with(
     backlog_path: &str,
     runner: impl Fn(&str, &Path, Duration) -> Result<(i32, String, bool)>,
 ) -> Result<StageOneResult> {
+    let runs = run_all(lane_dir, checks, &runner);
+    finish(lane_dir, base_branch, backlog_path, runs)
+}
+
+/// The install when `dir` needs one, then every configured check. A failed install stops there,
+/// as the only run. Also what the baseline runs on the base checkout.
+pub(crate) fn run_all(
+    dir: &Path,
+    checks: &[CheckConfig],
+    runner: &impl Fn(&str, &Path, Duration) -> Result<(i32, String, bool)>,
+) -> Vec<CheckRun> {
     let mut runs = Vec::new();
-    if proc::needs_npm_install(lane_dir) {
-        let command = proc::npm_install_command(lane_dir);
-        let install = run_timed(lane_dir, &runner, command, command, true, proc::NPM_INSTALL_TIMEOUT);
+    if proc::needs_npm_install(dir) {
+        let command = proc::npm_install_command(dir);
+        let install = run_timed(dir, runner, command, command, true, proc::NPM_INSTALL_TIMEOUT);
         let install_failed = !install.passed();
         runs.push(install);
         if install_failed {
-            return finish(lane_dir, base_branch, backlog_path, runs);
+            return runs;
         }
     }
     for check in checks {
         runs.push(run_timed(
-            lane_dir,
-            &runner,
+            dir,
+            runner,
             &check.name,
             &check.command,
             check.blocking,
             Duration::from_secs(check.timeout_sec),
         ));
     }
-    finish(lane_dir, base_branch, backlog_path, runs)
+    runs
 }
 
 fn finish(lane_dir: &Path, base_branch: &str, backlog_path: &str, checks: Vec<CheckRun>) -> Result<StageOneResult> {
@@ -143,7 +173,10 @@ fn run_timed(
     blocking: bool,
     timeout: Duration,
 ) -> CheckRun {
-    match runner(command, lane_dir, timeout) {
+    let began = std::time::Instant::now();
+    let result = runner(command, lane_dir, timeout);
+    let seconds = began.elapsed().as_secs_f64();
+    match result {
         Ok((exit_code, output, timed_out)) => CheckRun {
             name: name.to_string(),
             command: command.to_string(),
@@ -151,6 +184,8 @@ fn run_timed(
             exit_code,
             timed_out,
             output_tail: proc::tail_lines(&output, TAIL_LINES),
+            preexisting: false,
+            seconds,
         },
         // The command itself couldn't be started at all (e.g. the shell is missing), rather than
         // running and failing: still a failed check, not a reason to abort stage 1.
@@ -161,23 +196,29 @@ fn run_timed(
             exit_code: -1,
             timed_out: false,
             output_tail: format!("{e:#}"),
+            preexisting: false,
+            seconds,
         },
     }
 }
 
 /// `checksSummary` (checks.ts): each check as "✓ name" or "✗ name (non-blocking)", one per line
-/// — the evidence a scout or the stage 3 reviewer reads for context. `CheckRun` doesn't track a
-/// duration or whether a check also fails on main (`preexisting`), so this is simpler than the
-/// TypeScript original.
+/// — the evidence a scout or the stage 3 reviewer reads for context, with " (fails on main)" for
+/// a `preexisting` failure. The durations go to the event log instead.
 pub fn checks_summary(checks: &[CheckRun]) -> String {
     checks
         .iter()
         .map(|c| {
             format!(
-                "{} {}{}",
+                "{} {}{}{}",
                 if c.passed() { "✓" } else { "✗" },
                 c.name,
-                if c.blocking { "" } else { " (non-blocking)" }
+                if c.blocking { "" } else { " (non-blocking)" },
+                if c.preexisting && !c.passed() {
+                    " (fails on main)"
+                } else {
+                    ""
+                }
             )
         })
         .collect::<Vec<_>>()
@@ -300,6 +341,7 @@ mod tests {
         assert!(result.checks[0].blocking);
         assert!(!result.checks[0].passed());
         assert!(result.checks[0].output_tail.contains("boom"));
+        assert!(result.checks[0].seconds >= 0.0);
         assert_eq!(result.outcome(), CheckOutcome::Failed);
     }
 
@@ -316,6 +358,12 @@ mod tests {
         assert_eq!(result.checks.len(), 2);
         assert_eq!(result.checks[0].name, "npm install");
         assert_eq!(result.checks[1].name, "test");
+        assert!(result.checks[1].seconds >= 0.0);
+        let times = result.check_times();
+        assert_eq!(
+            times.iter().map(|t| (t.name.as_str(), t.ok)).collect::<Vec<_>>(),
+            [("npm install", true), ("test", true)]
+        );
         assert_eq!(result.outcome(), CheckOutcome::Passed);
     }
 
@@ -328,6 +376,8 @@ mod tests {
             exit_code: 0,
             timed_out: true,
             output_tail: String::new(),
+            preexisting: false,
+            seconds: 0.0,
         };
         assert!(!run.passed());
     }
@@ -342,6 +392,8 @@ mod tests {
                 exit_code: 0,
                 timed_out: false,
                 output_tail: String::new(),
+                preexisting: false,
+                seconds: 0.0,
             },
             CheckRun {
                 name: "lint".to_string(),
@@ -350,9 +402,36 @@ mod tests {
                 exit_code: 1,
                 timed_out: false,
                 output_tail: String::new(),
+                preexisting: false,
+                seconds: 0.0,
             },
         ];
         assert_eq!(checks_summary(&checks), "✓ test\n✗ lint (non-blocking)");
+    }
+
+    #[test]
+    fn checks_summary_notes_a_preexisting_failure_as_failing_on_main() {
+        let mut test = CheckRun {
+            name: "test".to_string(),
+            command: "exit 1".to_string(),
+            blocking: true,
+            exit_code: 1,
+            timed_out: false,
+            output_tail: String::new(),
+            preexisting: true,
+            seconds: 0.0,
+        };
+        let result = |c: &CheckRun| StageOneResult {
+            checks: vec![c.clone()],
+            diff_stat: String::new(),
+            changed_files: vec![],
+            backlog_changed: false,
+        };
+        assert_eq!(checks_summary(std::slice::from_ref(&test)), "✗ test (fails on main)");
+        assert_eq!(result(&test).outcome(), CheckOutcome::Passed);
+        test.preexisting = false;
+        assert_eq!(checks_summary(std::slice::from_ref(&test)), "✗ test");
+        assert_eq!(result(&test).outcome(), CheckOutcome::Failed);
     }
 
     #[test]

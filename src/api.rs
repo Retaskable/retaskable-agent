@@ -70,7 +70,10 @@ mod tests {
             .header("Host", "127.0.0.1:4700")
             .body(Body::empty())
             .unwrap();
-        let res = router("1.2.3".to_string(), settings).oneshot(req).await.unwrap();
+        let app = router("1.2.3".to_string(), settings).layer(axum::extract::connect_info::MockConnectInfo(
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 54321)),
+        ));
+        let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 

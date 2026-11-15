@@ -4,21 +4,23 @@
 //! [`crate::playtest_groups::should_group`] says it's due, takes the [`crate::playtest_groups::TRYOUT_GROUPS_LOCK`]
 //! lock, runs the planner session and sends its grouping back with `tryout_groups`. Still missing
 //! (out of this slice): sending `tryout_add` after a merge is what ever puts something in the
-//! queue this reads, forwarding a person's playtest answer, and reopening on a Problem — nothing
-//! here does any of those.
+//! queue this reads, reopening and resuming the session that built a slice on a Problem
+//! (this agent's loop doesn't merge items, so it never records a merged slice's session and lane for
+//! [`crate::reopen`] to resume), and nothing here does either of those. A person's answer to a queued
+//! try-out goes to the store from `playtest_owed.rs`.
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
-use crate::config::{Engine, EngineChoiceConfig, ProjectConfig};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, EphemeralSessionConfig, Role, engine_for, engine_of, run_session};
+use crate::engines::cursor::with_project;
+use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
 use crate::link::TokenStore;
-use crate::orchestrator::session::{exists, quiet_timeout};
+use crate::orchestrator::session::watch_for;
 use crate::playtest_groups::{LastGrouped, Planner, PlaytestEntry, TRYOUT_GROUPS_LOCK, plan, should_group, signature};
 use crate::runs::RunLocks;
 use crate::telemetry::now_ms;
@@ -34,18 +36,20 @@ pub(super) struct Job {
     pub project: ProjectConfig,
     pub env: Env,
     pub engine_choice: EngineChoiceConfig,
+    pub cursor_models: CursorModels,
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
     /// The project's held locks in `runs` mode: the grouping lock is `lock_take`n into it and beats with the runs.
     /// `None` in `claim` mode, which uses `chore_lock`.
     pub locks: Option<RunLocks>,
+    /// The sessions running now: the round's planner is listed while it runs.
+    pub sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 /// Runs one round for `job`'s project: nothing if there's no repo id yet, no backlog link, the
 /// store can't be reached, fewer than [`crate::playtest_groups::MIN_TO_GROUP`] are waiting, or
-/// another computer holds the lock. A `Role::Planner` on anything but Claude, or a Claude binary
-/// that can't be found, also skips the round rather than failing it loudly: the next minute's pass
+/// another computer holds the lock. A planner engine whose binary can't be found also skips the round rather than failing it loudly: the next minute's pass
 /// tries again.
 pub(super) async fn run(job: Job) {
     let Some(repo) = job.repo else {
@@ -80,27 +84,13 @@ pub(super) async fn run(job: Job) {
         return;
     }
     let engine = engine_for(&job.engine_choice, job.project.engines.as_ref(), Role::Planner, None);
-    if engine != Engine::Claude {
-        tracing::info!(
-            "{}: playtest grouping round skipped: only Claude runs a planner session yet",
-            job.id
-        );
-        return;
-    }
-    let bin = match resolve_claude_on_path(&job.env) {
-        Ok(bin) => bin,
+    let placed = match place(engine, Role::Planner, &job.env, &job.cursor_models) {
+        Ok(placed) => placed,
         Err(e) => {
-            tracing::warn!("{}: playtest grouping round skipped: {e:#}", job.id);
+            tracing::warn!("{}: playtest grouping round skipped: {e}", job.id);
             return;
         }
     };
-    if !exists(&bin, &job.env) {
-        tracing::warn!(
-            "{}: playtest grouping round skipped: the claude binary wasn't found",
-            job.id
-        );
-        return;
-    }
     let lock_token = match &job.locks {
         None => {
             let answer = match job.client.lock(repo, Some(&token), TRYOUT_GROUPS_LOCK, true).await {
@@ -153,16 +143,27 @@ pub(super) async fn run(job: Job) {
             budget_usd: job.project.budget.planner_usd,
             model: "sonnet".to_string(),
             local: None,
-            engine: Some(EngineId::Claude),
-            cursor: None,
+            engine: Some(placed.engine),
+            cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
             sandbox: sandbox_enabled(job.project.sandbox, cfg!(windows)),
             shell: false,
         },
     };
-    let quiet = quiet_timeout(job.project.tuning.session_quiet_minutes);
+    let quiet = watch_for(&job.project, placed.engine);
+    let (sessions, id) = (job.sessions.clone(), job.id.clone());
     let planned = plan(&planner, &entries, |spec| async move {
-        let engine = engine_of(Some(EngineId::Claude))?;
-        run_session(engine.as_ref(), &bin, &spec, "playtest-groups", None, quiet).await
+        let engine = engine_of(Some(placed.engine))?;
+        let listed = sessions.register_spec(&id, "playtest-groups", None, Role::Planner, &spec);
+        listed
+            .scope(run_session(
+                engine.as_ref(),
+                &placed.bin,
+                &spec,
+                "playtest-groups",
+                None,
+                quiet,
+            ))
+            .await
     })
     .await;
     let still_held = match (&job.locks, &lock_token) {
@@ -348,10 +349,12 @@ mod tests {
             project,
             env,
             engine_choice: EngineChoiceConfig::default(),
+            cursor_models: Default::default(),
             machine: "my-pc".into(),
             backlog_url: base.into(),
             keychain: Arc::new(Keys),
             locks: None,
+            sessions: Default::default(),
         }
     }
 
@@ -393,6 +396,40 @@ mod tests {
         assert_eq!(groups_args["groups"][0]["keys"], json!(["k1", "k2", "k3", "k4"]));
         assert_eq!(recorded[1].1["take"], true);
         assert_eq!(recorded[3].1["take"], false);
+    }
+
+    /// A round whose planner is on Cursor, with a stub `cursor-agent` that records its arguments in `args.txt`.
+    #[cfg(unix)]
+    async fn cursor_round() -> (Vec<String>, Option<String>) {
+        let waiting = json!([
+            tryout("k1", false),
+            tryout("k2", false),
+            tryout("k3", false),
+            tryout("k4", false)
+        ]);
+        let (base, seen) = store(waiting, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("cursor.sh");
+        let script = format!(
+            "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"$@\" > '{}'\n",
+            dir.path().join("args.txt").display()
+        );
+        crate::test_support::write_executable(&bin, &script);
+        let mut j = job(&base, &bin, dir.path());
+        let path = bin.to_string_lossy().into_owned();
+        j.env = Env::new(move |k| (k == "RETASKABLE_CURSOR").then(|| path.clone()));
+        j.engine_choice.roles.planner = Some(crate::config::Engine::Cursor);
+        j.cursor_models.top = Some("gpt-top".into());
+        run(j).await;
+        (ops(&seen), std::fs::read_to_string(dir.path().join("args.txt")).ok())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_planner_on_cursor_runs_cursor_with_the_top_model() {
+        let (ops, args) = cursor_round().await;
+        assert!(ops.contains(&"chore_lock".to_string()), "{ops:?}");
+        assert!(args.unwrap().contains("gpt-top"));
     }
 
     #[tokio::test]

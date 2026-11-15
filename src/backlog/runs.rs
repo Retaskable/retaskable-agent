@@ -33,6 +33,31 @@ pub struct RunTakeAgent {
     pub engines: Vec<String>,
     /// The engine each kind's role runs on here.
     pub uses: RunTakeUses,
+    /// `false` when the project has chores off, so the store hands out no rotation chore; left out otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chores: Option<bool>,
+    /// This computer's Claude week; left out when it has no reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<super::week::WeekUse>,
+}
+
+/// The store's count of rotation chores started today and its limit (`chores: { today, limit }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChoreCount {
+    pub today: u32,
+    pub limit: u32,
+}
+
+impl ChoreCount {
+    /// The count in an answer's fields, or `None` when it is missing or malformed.
+    pub fn read(fields: &Map<String, Value>) -> Option<Self> {
+        let c = fields.get("chores")?;
+        let num = |k: &str| c.get(k)?.as_u64().and_then(|n| u32::try_from(n).ok());
+        Some(Self {
+            today: num("today")?,
+            limit: num("limit")?,
+        })
+    }
 }
 
 /// The engine each kind's role runs on: `plan` the planner, `build` and `fix` the implementer, `look` the triager.
@@ -89,6 +114,8 @@ pub enum RunTakeAnswer {
     Run(Box<Run>),
     /// A tag this computer lacks.
     WaitingFor(Value),
+    /// Another computer with more of its Claude week left takes the run; ask again after `retry_ms`.
+    Passed(super::week::Passed),
     Nothing,
 }
 
@@ -194,6 +221,12 @@ impl Client {
             Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
                 Ok(RunTakeAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
             }
+            Some(Value::Object(o)) if o.contains_key("passed") => Ok(RunTakeAnswer::Passed(
+                super::week::Passed::of(&o).unwrap_or(super::week::Passed {
+                    to: "another computer".into(),
+                    retry_ms: 60_000,
+                }),
+            )),
             Some(value) => serde_json::from_value(value)
                 .map(|run| RunTakeAnswer::Run(Box::new(run)))
                 .map_err(|e| bad(format!("couldn't read the run it sent: {e}"))),
@@ -288,10 +321,81 @@ impl Client {
             .map(|_| ())
     }
 
+    /// `add { via: "chore", items: [fix_main] }`: queues a fix main chore for the base commit `red_sha`, with the
+    /// failing checks as its `report`.
+    pub async fn add_fix_main(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        red_sha: &str,
+        report: &str,
+    ) -> Result<(), BacklogError> {
+        let item = json!({
+            "id": id,
+            "title": format!("Fix main at {}", short_sha(red_sha)),
+            "kind": "fix_main",
+            "milestone": "Chores",
+            "redSha": red_sha,
+            "remaining": report,
+        });
+        self.send(repo_id, token, "add", json!({ "via": "chore", "items": [item] }))
+            .await
+            .map(|_| ())
+    }
+
+    /// `add { via: "chore", items: [sync_main] }`: queues a main sync of `sync_sha` (main's head) into the base.
+    /// `branch` and `pr_url` are set when the merge was clean; `conflicts` are the files that clash when it wasn't.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_sync_main(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        title: &str,
+        sync_sha: &str,
+        branch: Option<&str>,
+        pr_url: Option<&str>,
+        conflicts: &[String],
+    ) -> Result<(), BacklogError> {
+        let mut item = json!({
+            "id": id,
+            "title": title,
+            "kind": "sync_main",
+            "milestone": "Chores",
+            "syncSha": sync_sha,
+        });
+        if let Some(branch) = branch {
+            item["branch"] = json!(branch);
+        }
+        if let Some(url) = pr_url {
+            item["prUrl"] = json!(url);
+        }
+        if !conflicts.is_empty() {
+            item["remaining"] = json!(format!("Conflicting files:\n- {}", conflicts.join("\n- ")));
+        }
+        self.send(repo_id, token, "add", json!({ "via": "chore", "items": [item] }))
+            .await
+            .map(|_| ())
+    }
+
+    /// `add { via: "deprecation", items: [removal item] }` (deprecate-feature.md section 3.1). An id already taken is
+    /// a `conflict`.
+    pub async fn add_removal(&self, repo_id: u64, token: Option<&str>, item: Value) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "add", json!({ "via": "deprecation", "items": [item] }))
+            .await
+            .map(|_| ())
+    }
+
     /// `runs_drop`: ends every run and lock this agent had as `interrupted`.
     pub async fn runs_drop(&self, repo_id: u64, token: Option<&str>) -> Result<(), BacklogError> {
         self.send(repo_id, token, "runs_drop", json!({})).await.map(|_| ())
     }
+}
+
+/// A commit's first 7 characters.
+pub fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 #[cfg(test)]

@@ -14,13 +14,15 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
-use super::project::signed_out;
+use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
+use crate::ask::follow_up;
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
 use crate::config::ProjectConfig;
 use crate::drafts::DrafterStatus;
 use crate::drafts::land::{deletes_head, pr_number, workflow};
+use crate::engines::{EngineId, Role};
 use crate::view::DraftCommand;
 
 /// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
@@ -65,9 +67,13 @@ struct Ctx {
     repo: u64,
     token: String,
     lease: String,
+    failures: crate::backlog::failures::Failures,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     wait: Duration,
+    /// The engine to start on when it isn't the drafter's chosen one.
+    engine: Option<EngineId>,
+    sessions: crate::orchestrator::live::sessions::Sessions,
 }
 
 impl Ctx {
@@ -75,6 +81,16 @@ impl Ctx {
         let sent = (self.client).draft_report(self.repo, Some(&self.token), id, &self.lease, &report);
         if let Err(e) = sent.await {
             tracing::warn!("a draft's report didn't reach the store: {e}");
+            self.failures.add("draft_report", id, &e);
+        }
+    }
+
+    /// Retaskable's own message about `draft`'s landing, once. The draft's state is already
+    /// reported, so a message the store doesn't take is only logged.
+    async fn say(&self, draft: &crate::backlog::drafts::ClaimedDraft, text: &str) {
+        let ask = draft.ask_id.as_deref();
+        if let Err(e) = follow_up::post_once(&self.client, self.repo, &self.token, &draft.id, ask, text).await {
+            tracing::warn!("a draft's chat message didn't reach the store: {e}");
         }
     }
 
@@ -85,6 +101,7 @@ impl Ctx {
             .await
         {
             tracing::warn!("couldn't let go of draft {id}: {e}");
+            self.failures.add("draft_release", id, &e);
         }
     }
 
@@ -156,6 +173,8 @@ impl Ctx {
             resume: true,
             follow_up: rebase_request(reason),
             usage: None,
+            engine: self.engine,
+            sessions: self.sessions.clone(),
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
         if result.status == DrafterStatus::Failed {
@@ -244,6 +263,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
             ..Default::default()
         };
         ctx.report(&id, report).await;
+        ctx.say(draft, follow_up::WAITING_FOR_MERGE).await;
         return None;
     } else if let Err(first) = ctx.merge(pr, delete, 1).await {
         // Behind the base, perhaps: rebase it when that's clean, and merge once GitHub sees the push.
@@ -294,9 +314,10 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         ..Default::default()
     };
     ctx.report(&id, report).await;
-    let item_ids = (draft.other.get("itemIds").and_then(Value::as_array))
+    let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    ctx.say(draft, &follow_up::merged(item_ids.len(), &draft.titles)).await;
     Some(Landed {
         item_ids,
         asked_by: text(&taken, "requestedBy").map(String::from),
@@ -307,7 +328,13 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
 impl ProjectLoop {
     /// Takes in this project's queued presses and starts each; tells the store the headers of the drafts that merged
     /// since the last pass, paused or not.
-    pub(super) async fn land_drafts(&mut self, host: &Arc<dyn DraftHost>, shared: &Shared<'_>, wait: Duration) {
+    pub(super) async fn land_drafts(
+        &mut self,
+        host: &Arc<dyn DraftHost>,
+        shared: &Shared<'_>,
+        wait: Duration,
+        lanes: u32,
+    ) {
         let mut merged = false;
         for task in std::mem::take(&mut self.landing.tasks) {
             if !task.is_finished() {
@@ -328,9 +355,15 @@ impl ProjectLoop {
             self.report(shared.links).await;
         }
         let presses = shared.links.item_commands.take_drafts(&self.id);
-        if presses.is_empty() || shared.stopping || signed_out(shared) {
+        if presses.is_empty() || shared.stopping {
             return;
         }
+        let gate = StartGate::for_lanes(self, lanes, shared);
+        // A rebase resumes the drafter's own session: it waits while that engine is out and never moves.
+        if gate.role_start(self, shared, Role::Drafter, false).is_none() {
+            return;
+        }
+        let engine = None;
         let Some(repo) = self.repo else { return };
         let token = match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => token,
@@ -348,6 +381,7 @@ impl ProjectLoop {
                 Ok(taken) => taken,
                 Err(e) => {
                     tracing::warn!("{}: couldn't take draft {id}: {e}", self.id);
+                    self.store_failure("draft_take", &id, &e).await;
                     continue;
                 }
             };
@@ -356,9 +390,12 @@ impl ProjectLoop {
                 repo,
                 token: token.clone(),
                 lease: taken.token.clone(),
+                failures: self.failures.clone(),
                 project: self.project.clone(),
                 host: host.clone(),
                 wait,
+                engine,
+                sessions: self.live.sessions().clone(),
             };
             let task = if matches!(press, DraftCommand::Discard { .. }) {
                 tokio::spawn(discard(ctx, id, taken))

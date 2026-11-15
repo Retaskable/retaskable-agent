@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use super::resume::takeover_in;
 use super::{Launch, Links, Machine, ProjectLoop, SessionStarter, Shared};
+use crate::engines::EngineId;
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
@@ -30,6 +32,7 @@ pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
 
 /// Watchdog kills in a row that are resumed; the next one goes to a person.
 const MAX_SILENCE_RESUMES: u32 = 3;
+const MAX_CURSOR_LIMIT_HITS: u32 = 3;
 
 /// Own failures in a row (a session that wouldn't start, or a hand-back) that are retried or handed back; the
 /// next one goes to a person.
@@ -37,6 +40,14 @@ const MAX_OWN_FAILURES: u32 = 3;
 
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
+
+/// How long a release the store keeps refusing stays listed before it is dropped:
+/// the store has expired the lease by then.
+pub(super) const STUCK_RELEASE_SECS: i64 = 24 * 60 * 60;
+
+/// The `needs_human` reason a Cursor implementer stops with after 3 limit hits in a row; the first fetch's
+/// give-back (`readopt`) matches it exactly.
+pub(super) const CURSOR_LIMIT_STOP: &str = "Cursor's usage limit was hit 3 times in a row";
 
 /// How a started session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,16 +68,16 @@ pub enum SessionResult {
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
     /// the store): the next restart readopts it and resumes the same session by id.
     Interrupted,
-    /// The session's process wouldn't start (the text says why), so nothing ran. Behind the
-    /// `own-failure-handling` flag the run keeps its lane and lease, claiming isn't paused, and the loop starts
-    /// the session again after [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure
-    /// goes to `needs_human`. With the flag Off it is a [`NeedsHuman`](Self::NeedsHuman).
+    /// The session's process wouldn't start (the text says why), so nothing ran. The run keeps
+    /// its lane and lease, claiming isn't paused, and the loop starts the session again after
+    /// [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure goes to `needs_human`.
     NotStarted(String),
-    /// The watchdog killed the session for printing nothing (the text says why). Behind the
-    /// `own-failure-handling` flag the run stays `implementing` with its lane and lease, nothing is posted to
-    /// the store, and the loop resumes the session by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row
-    /// goes to `needs_human`. With the flag Off it is a [`Failed`](Self::Failed).
-    Silenced(String),
+    /// The watchdog killed the session for printing nothing (the text says why). The run stays
+    /// `implementing` with its lane and lease, nothing is posted to the store, and the loop resumes the session
+    /// by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row goes to `needs_human`.
+    /// The text says why; the second is the `session_end` subtype (`killed_for_silence`, or `cursor_time` for
+    /// the Cursor time limit, which is handled the same way).
+    Silenced(String, &'static str),
     /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
     /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
@@ -127,6 +138,22 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
+    /// At the weekly cutoff Claude counts limited on this computer until the week's reset
+    /// ([`EngineLimits::cut_off_for_week`](crate::orchestrator::fresh_start::EngineLimits::cut_off_for_week)).
+    pub(super) fn cut_off_for_week(
+        id: &str,
+        usage: &Value,
+        limits: &mut crate::orchestrator::fresh_start::EngineLimits,
+    ) {
+        if limits.cut_off_for_week(usage) {
+            tracing::info!(
+                "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
+                id,
+                crate::config::ModelsConfig::default().week_cutoff_pct
+            );
+        }
+    }
+
     /// Gives an item's lane and lease back: its run is dropped, the lane freed (`lane_freed`), and the lease
     /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
     /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
@@ -157,7 +184,7 @@ impl ProjectLoop {
         );
         if let Some(token) = self.leases.remove(item_id) {
             let note = crate::text::truncate(why, MAX_NOTE_CHARS);
-            self.unreleased.insert(item_id.to_string(), (token, note));
+            self.list_unreleased(item_id.to_string(), token, note);
             self.save_leases();
             self.events.add_in(
                 &self.id,
@@ -165,6 +192,35 @@ impl ProjectLoop {
                     item: Some(item_id.to_string()),
                     change: Some("released".into()),
                     state: Some(state.into()),
+                    ..Default::default()
+                }),
+            );
+            self.flush_owed(shared.links).await;
+        }
+    }
+
+    /// Gives a Cursor-limited item with nothing pushed back to the shared backlog at once (engines/03 section
+    /// 3.2): the run and its record are dropped, the lane freed and the lease moved to
+    /// `unreleased` with the note and released. The computer's limit, not an own failure: no claim pause and no
+    /// `error` event (Cursor's own stamp in `engine_limits` already keeps Cursor lanes from claiming).
+    async fn give_back(&mut self, pool: &mut LanePool, item_id: &str, shared: &mut Shared<'_>) {
+        let why = format!(
+            "Given back: Cursor's usage limit was hit on {} before anything was pushed",
+            shared.links.machine
+        );
+        self.runs.remove(item_id);
+        self.items.remove(item_id);
+        self.free_lane(pool, item_id, "queued", &why);
+        if let Some(token) = self.leases.remove(item_id) {
+            let note = crate::text::truncate(&why, MAX_NOTE_CHARS);
+            self.list_unreleased(item_id.to_string(), token, note);
+            self.save_leases();
+            self.events.add_in(
+                &self.id,
+                Event::Lease(event::Lease {
+                    item: Some(item_id.to_string()),
+                    change: Some("released".into()),
+                    state: Some("queued".into()),
                     ..Default::default()
                 }),
             );
@@ -209,27 +265,36 @@ impl ProjectLoop {
         }
     }
 
-    /// Sends the releases and parks still owed. One the store refuses (or can't reach) stays listed for
+    /// Sends the releases, skips, parks and playtest answers still owed. One the store refuses (or can't reach) stays listed for
     /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
     pub(super) async fn flush_owed(&mut self, links: &Links) {
-        let Some(repo) = self
-            .repo
-            .filter(|_| !self.unreleased.is_empty() || !self.unparked.is_empty() || !self.unskipped.is_empty())
-        else {
+        self.note_playtests_setting().await;
+        let Some(repo) = self.repo.filter(|_| {
+            self.release_owed
+                || !self.unreleased.is_empty()
+                || !self.unparked.is_empty()
+                || !self.unskipped.is_empty()
+                || !self.unanswered.is_empty()
+        }) else {
             return;
         };
         let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
             return;
         };
         for (id, (lease, note)) in self.unreleased.clone() {
+            // The note is trimmed and cut at MAX_NOTE_CHARS, and a blank one sends the release alone.
+            let note = crate::text::truncate(note.trim(), MAX_NOTE_CHARS);
             // report then release (section 7.5): the note lands in the item's history while the
             // lease still holds. A refusal of either keeps both for the next pass.
-            match self.client.report(repo, Some(&token), &id, &lease, &note).await {
-                Ok(()) => {}
-                Err(e) if e.code() == Some("stale_lease") => {}
-                Err(e) => {
-                    self.store_error("report", &e);
-                    continue;
+            if !note.is_empty() {
+                match self.client.report(repo, Some(&token), &id, &lease, &note).await {
+                    Ok(()) => {}
+                    Err(e) if e.code() == Some("stale_lease") => {}
+                    Err(e) => {
+                        self.store_error("report", &e);
+                        self.drop_if_stuck(&id).await;
+                        continue;
+                    }
                 }
             }
             match self.client.release(repo, Some(&token), &id, &lease).await {
@@ -237,6 +302,7 @@ impl ProjectLoop {
                 Err(e) if e.code() == Some("stale_lease") => {}
                 Err(e) => {
                     self.store_error("release", &e);
+                    self.drop_if_stuck(&id).await;
                     continue;
                 }
             }
@@ -257,6 +323,8 @@ impl ProjectLoop {
             }
             self.unskipped.remove(&id);
         }
+        self.send_owed_answers(repo, &token).await;
+        self.send_owed_release(repo, &token).await;
         for (id, (lease, waits_for, state)) in self.unparked.clone() {
             match self.client.park(repo, Some(&token), &id, &lease, &waits_for).await {
                 Ok(()) => {}
@@ -278,6 +346,44 @@ impl ProjectLoop {
             );
         }
         self.save_leases();
+    }
+
+    /// Epoch seconds, or the test's clock.
+    pub(super) fn now_secs(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(t) = self.clock {
+            return t;
+        }
+        crate::telemetry::now_secs()
+    }
+
+    /// Lists a lease the store hasn't taken back yet; one already listed keeps the time it was first listed.
+    pub(super) fn list_unreleased(&mut self, id: String, token: String, note: String) {
+        let now = self.now_secs();
+        self.unreleased_since.entry(id.clone()).or_insert(now);
+        self.unreleased.insert(id, (token, note));
+    }
+
+    /// Drops an `unreleased` entry (and the skip owed after it) first listed
+    /// [`STUCK_RELEASE_SECS`] or more ago, with one `error` event.
+    async fn drop_if_stuck(&mut self, id: &str) {
+        let Some(&since) = self.unreleased_since.get(id) else {
+            return;
+        };
+        if self.now_secs() - since < STUCK_RELEASE_SECS {
+            return;
+        }
+        self.unreleased.remove(id);
+        self.unskipped.remove(id);
+        self.events.add_in(
+            &self.id,
+            Event::Error(event::Error {
+                item: Some(id.to_string()),
+                r#where: Some("release".into()),
+                error: Some("the release was dropped after 24 hours: the store has expired the lease by then".into()),
+                ..Default::default()
+            }),
+        );
     }
 
     /// What an item's run moving from `from` to its state now means, after a session or a step ended
@@ -308,9 +414,7 @@ impl ProjectLoop {
                     item: Some(item.to_string()),
                     from: Some(state_name(from).into()),
                     to: Some(state_name(to).into()),
-                    claude_on_it: (to == ItemState::NeedsHuman
-                        && self.triage_flag
-                        && self.project.triage == crate::config::OnOff::On)
+                    claude_on_it: (to == ItemState::NeedsHuman && self.project.triage == crate::config::OnOff::On)
                         .then(|| self.claude_on_it(item)),
                     ..Default::default()
                 }),
@@ -362,8 +466,19 @@ impl ProjectLoop {
         {
             record.impl_session_id = Some(id);
         }
-        if let Some(usage) = outcome.usage.clone().filter(crate::tiers::is_five_hour_reading) {
-            self.store.set_usage(usage);
+        if let Some(usage) = &outcome.usage {
+            Self::cut_off_for_week(&self.id, usage, shared.engine_limits);
+        }
+        let week = outcome.usage.clone().filter(crate::tiers::carries_week);
+        let five_hour = outcome.usage.clone().filter(crate::tiers::is_usage_reading);
+        if week.is_some() || five_hour.is_some() {
+            if let Some(usage) = week {
+                self.store.set_week_usage(usage);
+            }
+            if let Some(usage) = five_hour {
+                crate::tiers::note_usage(&usage);
+                self.store.set_usage(usage);
+            }
             if let Err(e) = self.store.save() {
                 tracing::warn!("{}: saving the usage reading failed: {e:#}", self.id);
             }
@@ -391,7 +506,7 @@ impl ProjectLoop {
                 ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
                 subtype: match outcome.result {
                     SessionResult::Interrupted => Some("interrupted".into()),
-                    SessionResult::Silenced(_) => Some("killed_for_silence".into()),
+                    SessionResult::Silenced(_, subtype) => Some(subtype.into()),
                     _ => None,
                 },
                 ..Default::default()
@@ -404,12 +519,9 @@ impl ProjectLoop {
             shared.engine_limits.hit(record.impl_session_engine, until);
         }
         let mut result = outcome.result;
-        let flag_on = self.flags.on("own-failure-handling").await;
         if let SessionResult::NotStarted(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
-            result = if !flag_on {
-                SessionResult::NeedsHuman(why)
-            } else if count < MAX_OWN_FAILURES {
+            result = if count < MAX_OWN_FAILURES {
                 self.own_failures.insert(item.clone(), count + 1);
                 self.silenced
                     .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
@@ -426,7 +538,7 @@ impl ProjectLoop {
                 record.not_started = false;
             }
         }
-        if flag_on && let SessionResult::Failed(why) = result {
+        if let SessionResult::Failed(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
             result = if count < MAX_OWN_FAILURES {
                 self.own_failures.insert(item.clone(), count + 1);
@@ -446,16 +558,14 @@ impl ProjectLoop {
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the own-failure count failed: {e:#}", self.id);
         }
-        if let SessionResult::Silenced(why) = result {
+        if let SessionResult::Silenced(why, subtype) = result {
             let record = self.records.get_mut(&item);
             result = match record {
-                // Off: today's behaviour, the item goes back to the queue.
-                _ if !self.flags.on("own-failure-handling").await => SessionResult::Failed(why),
                 Some(record) if record.silence_kills < MAX_SILENCE_RESUMES => {
                     record.silence_kills += 1;
                     self.silenced
                         .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
-                    SessionResult::Silenced(why)
+                    SessionResult::Silenced(why, subtype)
                 }
                 record => {
                     if let Some(record) = record {
@@ -468,10 +578,79 @@ impl ProjectLoop {
             // Any answer ends the run of kills.
             record.silence_kills = 0;
         }
+        // Cursor's usage limit (engines/03 section 3.2): waited out like a watchdog kill, three times in a row.
+        let mut give_back = false;
+        // Another engine this computer runs, and that isn't out, takes it on at once (section 3.5); never from pi.
+        let carry_on = match self.records.get(&item) {
+            Some(record)
+                if matches!(result, SessionResult::Limited { .. }) && record.impl_session_engine != EngineId::Pi =>
+            {
+                takeover_in(&self.project, pool, shared, record.impl_session_engine)
+                    .map(|to| (record.impl_session_engine, to))
+            }
+            _ => None,
+        };
+        if let Some((from, to)) = carry_on
+            && let Some(record) = self.records.get_mut(&item)
+        {
+            record.cursor_limit_hits = 0;
+            self.silenced.remove(&item);
+            self.to_resume.push(item.clone());
+            result = SessionResult::Silenced(String::new(), "killed_for_silence");
+            self.events.add_in(
+                &self.id,
+                Event::ItemState(event::ItemState {
+                    item: Some(item.clone()),
+                    from: Some("implementing".into()),
+                    to: Some("implementing".into()),
+                    note: Some(format!(
+                        "Hit {}'s usage limit; carrying on now with {}",
+                        engine_name(from),
+                        engine_name(to)
+                    )),
+                    lane: Some(outcome.lane),
+                    ..Default::default()
+                }),
+            );
+        } else if let Some(record) = self.records.get_mut(&item) {
+            let cursor_hit =
+                matches!(result, SessionResult::Limited { .. }) && record.impl_session_engine == EngineId::Cursor;
+            if !cursor_hit {
+                record.cursor_limit_hits = 0;
+            } else if self.mode == super::OrchestratorMode::Claim
+                && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none()
+            {
+                give_back = true;
+            } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
+                record.cursor_limit_hits += 1;
+                self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
+                if let SessionResult::Limited { why, .. } = result {
+                    result = SessionResult::Silenced(why, "killed_for_silence");
+                }
+                self.events.add_in(
+                    &self.id,
+                    Event::ItemState(event::ItemState {
+                        item: Some(item.clone()),
+                        from: Some("implementing".into()),
+                        to: Some("implementing".into()),
+                        note: Some("Hit Cursor's usage limit; trying again in 30 minutes".into()),
+                        lane: Some(outcome.lane),
+                        ..Default::default()
+                    }),
+                );
+            } else {
+                record.cursor_limit_hits = 0;
+                result = SessionResult::NeedsHuman(CURSOR_LIMIT_STOP.into());
+            }
+        }
+        if give_back {
+            self.give_back(pool, &item, shared).await;
+            return;
+        }
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
-            SessionResult::Silenced(_) | SessionResult::NotStarted(_) => self.save_leases(),
+            SessionResult::Silenced(..) | SessionResult::NotStarted(_) => self.save_leases(),
             SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
@@ -545,6 +724,9 @@ impl ProjectLoop {
     /// ([`moved`](Self::moved)). A step that panicked is an `error` event and leaves the run as it was.
     pub(super) async fn take_finished(&mut self, pool: &mut LanePool, links: &Links) {
         for (item, after) in self.running.finished() {
+            let outcome = after.as_ref().map_or("panicked", |a| state_name(a.run.state));
+            let detail = after.as_ref().map(|a| &a.detail);
+            self.step_ended(&item, after.is_some(), outcome, detail);
             let Some(run) = self.runs.get_mut(&item) else { continue };
             let Some(after) = after else {
                 tracing::error!("{}: a step for {item} panicked", self.id);
@@ -557,7 +739,7 @@ impl ProjectLoop {
                 self.events.add_in(&self.id, Event::Error(error));
                 continue;
             };
-            let before = std::mem::replace(run, after);
+            let before = std::mem::replace(run, after.run);
             self.moved(pool, &item, before.state, "the step ended", links).await;
         }
     }
@@ -571,11 +753,6 @@ impl ProjectLoop {
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {
-            let start = event::StepStart {
-                item: Some(item_id.clone()),
-                step: Some(state_name(run.state).into()),
-                ..Default::default()
-            };
             let request = StepRequest {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),
@@ -585,13 +762,23 @@ impl ProjectLoop {
             };
             // No step built for this state yet: the item waits where it is, and nothing is logged.
             let Some(step) = starter.advance(request) else { continue };
-            self.events.add_in(&self.id, Event::StepStart(start));
+            self.step_started(&item_id, &run);
             self.running.spawn(item_id, step);
         }
     }
 }
 
 /// The states [`SessionStarter::advance`] is asked to step: the TS step table, less `implementing`.
+/// An engine's name as a history line gives it: "Claude", "Cursor".
+fn engine_name(engine: EngineId) -> String {
+    let name = engine.to_string();
+    let mut chars = name.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or(name)
+}
+
 fn has_own_step(state: ItemState) -> bool {
     has_step(state) && state != ItemState::Implementing
 }
@@ -615,6 +802,7 @@ impl Machine {
                         &mut self.pool,
                         &mut Shared {
                             links: &self.links,
+                            local: &self.local,
                             claim_paused_until: &mut self.claim_paused_until,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
                             engine_limits: &mut self.engine_limits,

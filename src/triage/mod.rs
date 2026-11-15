@@ -5,8 +5,7 @@
 //! `start_over` as Start over, `skip` as Skip, `human` as leaving it alone, `person_steps` as
 //! waiting on a person's own steps.
 //!
-//! In `claim` mode the orchestrator loop runs it (`orchestrator::driver::triage_run`, behind the `triage-session`
-//! flag): a `needs_human` stop that `schedule::wants_triage` holds for gets one triager session, and every finding
+//! In `claim` mode the orchestrator loop runs it (`orchestrator::driver::triage_run`): a `needs_human` stop that `schedule::wants_triage` holds for gets one triager session, and every finding
 //! is carried out as `human` for now (its reason, and a `person_steps` answer's steps, are added to the item's).
 //! [`crate::commands`]'s
 //! **Continue** is carried out (queued, then done by the orchestrator loop in `claim` mode,
@@ -20,7 +19,7 @@
 //! [`bug_report::decide_bug_report`] and sent over the cloud link by the driver
 //! (`orchestrator/driver/triage_bug.rs`). Still missing: no `gh pr view`/`glab mr view` wrapper of our own to gather the PR it names either (the
 //! prompt tells the session to run those itself). A caller puts this together the same way as
-//! [`crate::ideas`] and [`crate::release_notes::write`]: gather a [`TriageContext`] from the
+//! [`crate::release_notes::write`]: gather a [`TriageContext`] from the
 //! item's own state, build a [`Triager`] with the project's words, the item's lane (or the base
 //! checkout) and `budget.reviewerUsd`, and run [`decide`] with
 //! [`crate::engines::runner::run_session`]. When that answer is `human` with a `suggest`,
@@ -29,9 +28,11 @@
 //! failure) back onto the triager's own answer with [`second_look::resolve`] before the caller
 //! carries anything out.
 pub mod bug_report;
+pub mod options_fill;
 pub mod record;
 pub mod schedule;
 pub mod second_look;
+pub mod task;
 
 use std::future::Future;
 
@@ -213,7 +214,7 @@ pub fn build_prompt(
 }
 
 /// What a triager session runs with, besides the context: the same shape as
-/// [`crate::ideas::write::Writer`] and [`crate::release_notes::write::Writer`], plus the one field
+/// [`crate::release_notes::write::Writer`], plus the one field
 /// below that's specific to triage.
 pub struct Triager<'a> {
     /// `prompts/triage.md`.

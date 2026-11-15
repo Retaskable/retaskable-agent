@@ -16,6 +16,8 @@ use anyhow::{Context, Result, bail};
 use crate::app_menu::{app_id, desktop_entry};
 use crate::release::{Build, Environment};
 use crate::release_update::sha256_file;
+use crate::tags::OsKind;
+use crate::tray::icons::{ICON_STATES, icon_file_name, tray_icon};
 
 /// The pinned AppImage runtime (type 2, x86_64): `scripts/package.ts`'s `APPIMAGE_RUNTIME`. A
 /// mismatched download is refused rather than trusted (same reasoning as `release_update`'s own
@@ -90,6 +92,24 @@ fn icon_bytes(build: &Build) -> &'static [u8] {
         Environment::Production => include_bytes!("../assets/retaskable.png"),
         Environment::Staging => include_bytes!("../assets/retaskable-staging.png"),
     }
+}
+
+/// Section 3.9's `icons/`: one tray icon per state for this build's environment, `.ico` on
+/// Windows and `.png` elsewhere, written under `dir` (where `bundle_dir` finds them).
+pub fn write_icons(dir: &Path, build: &Build) -> Result<()> {
+    let os = if build.os.starts_with("win") {
+        OsKind::Windows
+    } else {
+        OsKind::Linux
+    };
+    let icons = dir.join("icons");
+    std::fs::create_dir_all(&icons).with_context(|| format!("creating {}", icons.display()))?;
+    for state in ICON_STATES {
+        let file = icons.join(icon_file_name(state, os));
+        std::fs::write(&file, tray_icon(state, build.environment, os))
+            .with_context(|| format!("writing {}", file.display()))?;
+    }
+    Ok(())
 }
 
 /// Section 3.15's AppDir: the bundle's files, an `AppRun` symlink to `retaskable`, a desktop entry

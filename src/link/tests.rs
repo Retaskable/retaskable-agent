@@ -363,3 +363,169 @@ fn the_links_line_says_linked_only_for_a_stored_url() {
         "Links: retaskable.com not linked, staging.retaskable.com linked, backlog store backlog.retaskable.com not linked"
     );
 }
+
+// ---- pending links (the tray's "Link to" and "Waiting for you") ----
+
+use pending::{BacklogWaiting, Links};
+
+fn code_answer(user_code: &str) -> (StatusCode, Value) {
+    (
+        StatusCode::OK,
+        json!({ "device_code": "dc", "user_code": user_code, "verification_uri": "https://x/link",
+                "verification_uri_complete": format!("https://x/link?code={user_code}"), "interval": 1, "expires_in": 900 }),
+    )
+}
+
+fn links(store: Arc<dyn TokenStore>) -> (Links, Arc<StdMutex<Vec<String>>>) {
+    let opened = Arc::new(StdMutex::new(Vec::new()));
+    let seen = opened.clone();
+    let opener: pending::Opener = Arc::new(move |u| {
+        seen.lock().unwrap().push(u.to_string());
+        Ok(())
+    });
+    let machine = json!({ "machine": "pc", "os": "Windows", "agentVersion": "0.1.0" });
+    (
+        Links::with(store, reqwest::Client::new(), machine, opener, Duration::from_millis(1)),
+        opened,
+    )
+}
+
+/// Waits until `ok` holds, woken by the links' own changes.
+async fn until(links: &Links, ok: impl Fn(&Links) -> bool) {
+    let mut rx = links.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !ok(links) {
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the links never reached that state");
+}
+
+#[tokio::test]
+async fn starting_a_link_records_the_code_opens_the_page_and_clears_on_success() {
+    let fake = Arc::new(Fake::default());
+    *fake.code.lock().unwrap() = Some(code_answer("WXYZ-2345"));
+    fake.token.lock().unwrap().extend([
+        pending("authorization_pending"),
+        (StatusCode::OK, json!({ "refresh_token": "r1", "agent_id": 7 })),
+    ]);
+    let url = serve(fake.clone()).await;
+    let (_dir, store) = store();
+    let (links, opened) = links(store.clone());
+    let mut rx = links.subscribe();
+    assert!(links.start(&url));
+    assert!(!links.start(&url), "a second start while one waits does nothing");
+    rx.changed().await.unwrap();
+    until(&links, |l| {
+        l.waiting(&url).is_some() || store.get(&url).unwrap().is_some()
+    })
+    .await;
+    until(&links, |l| {
+        l.waiting(&url).is_none() && store.get(&url).unwrap().is_some()
+    })
+    .await;
+    assert_eq!(store.get(&url).unwrap().as_deref(), Some("r1"));
+    assert_eq!(*opened.lock().unwrap(), ["https://x/link?code=WXYZ-2345"]);
+    assert_eq!(
+        fake.bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b["machine"] == "pc")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_waiting_link_shows_its_code_and_a_second_start_starts_no_second_flow() {
+    let fake = Arc::new(Fake::default());
+    *fake.code.lock().unwrap() = Some(code_answer("AAAA-1111"));
+    fake.token.lock().unwrap().extend([
+        pending("authorization_pending"),
+        pending("authorization_pending"),
+        pending("authorization_pending"),
+        pending("authorization_pending"),
+        pending("authorization_pending"),
+        pending("expired_token"),
+    ]);
+    let url = serve(fake.clone()).await;
+    let (_dir, store) = store();
+    let (links, _) = links(store);
+    assert!(links.start(&url));
+    until(&links, |l| l.waiting(&url).is_some()).await;
+    assert_eq!(links.waiting(&url).unwrap().user_code, "AAAA-1111");
+    assert!(!links.start(&url));
+    until(&links, |l| l.waiting(&url).is_none()).await; // expiry clears it
+    let codes = fake
+        .bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b["machine"] == "pc")
+        .count();
+    assert_eq!(codes, 1);
+}
+
+#[tokio::test]
+async fn two_clouds_can_wait_at_once() {
+    let mut urls = Vec::new();
+    for code in ["AAAA-1111", "BBBB-2222"] {
+        let fake = Arc::new(Fake::default());
+        *fake.code.lock().unwrap() = Some(code_answer(code));
+        fake.token
+            .lock()
+            .unwrap()
+            .extend(std::iter::repeat_with(|| pending("authorization_pending")).take(2000));
+        urls.push(serve(fake).await);
+    }
+    let (_dir, store) = store();
+    let (links, _) = links(store);
+    assert!(links.start(&urls[0]) && links.start(&urls[1]));
+    until(&links, |l| {
+        l.waiting(&urls[0]).is_some() && l.waiting(&urls[1]).is_some()
+    })
+    .await;
+    assert_eq!(links.waiting(&urls[0]).unwrap().user_code, "AAAA-1111");
+    assert_eq!(links.waiting(&urls[1]).unwrap().user_code, "BBBB-2222");
+}
+
+#[tokio::test]
+async fn an_error_clears_the_waiting_state_and_a_new_start_is_allowed() {
+    let fake = Arc::new(Fake::default());
+    *fake.code.lock().unwrap() = Some((StatusCode::TOO_MANY_REQUESTS, json!({ "error": "slow" })));
+    let url = serve(fake).await;
+    let (_dir, store) = store();
+    let (links, opened) = links(store);
+    assert!(links.start(&url));
+    until(&links, |l| l.start_allowed(&url)).await;
+    assert!(opened.lock().unwrap().is_empty());
+    assert_eq!(links.waiting(&url), None);
+}
+
+#[tokio::test]
+async fn the_backlogs_waiting_state_is_set_and_cleared_and_wakes_subscribers() {
+    let (_dir, store) = store();
+    let (links, _) = links(store);
+    let mut rx = links.subscribe();
+    links.set_backlog(Some(BacklogWaiting::approve("https://b/link?code=X")));
+    rx.changed().await.unwrap();
+    let w = links.backlog().unwrap();
+    assert_eq!(
+        (w.label.as_str(), w.page_url.as_str()),
+        ("Approve the shared backlog", "https://b/link?code=X")
+    );
+    links.set_backlog(Some(BacklogWaiting::unlinked(
+        "backlog.retaskable.com",
+        "https://b/link",
+    )));
+    assert_eq!(
+        links.backlog().unwrap().label,
+        "Unlinked on backlog.retaskable.com: link again?"
+    );
+    rx.changed().await.unwrap();
+    links.set_backlog(None);
+    rx.changed().await.unwrap();
+    assert_eq!(links.backlog(), None);
+}

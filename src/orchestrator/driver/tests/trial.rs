@@ -9,6 +9,7 @@ use crate::trial_plan::{TRIAL_BRANCH, TrialRecord, TrialState};
 struct Host {
     end: Mutex<Option<TrialEnd>>,
     jobs: Mutex<Vec<(u32, String)>>,
+    engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
     /// The saved state when `run` was called.
     seen: Mutex<Vec<TrialState>>,
     hold: AtomicBool,
@@ -18,6 +19,7 @@ struct Host {
 impl TrialHost for Host {
     fn run(&self, job: TrialJob) -> BoxFuture<'static, Result<TrialEnd>> {
         self.jobs.lock().unwrap().push((job.lane, job.branch.clone()));
+        self.engines.lock().unwrap().push(job.engine);
         if let Some(p) = self.state_path.lock().unwrap().as_ref() {
             let s = Store::load(p).unwrap();
             self.seen.lock().unwrap().push(s.trial().state);
@@ -57,6 +59,7 @@ fn checks(ok: bool) -> SetupChecks {
         cursor: check(false),
         pi: None,
         codex: None,
+        docker: None,
     }
 }
 
@@ -71,7 +74,7 @@ async fn rig_with(listed: Value, end: TrialEnd) -> T {
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     rig.lp(0).project.github_repo = "o/r".into();
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["trial-plan-draft"]));
+    rig.lp(0).file_project.github_repo = "o/r".into();
     let host = Arc::new(Host {
         end: Mutex::new(Some(end)),
         ..Default::default()
@@ -161,15 +164,12 @@ async fn a_backlog_with_items_saves_skipped_and_never_starts_one_later() {
 }
 
 #[tokio::test]
-async fn it_doesnt_start_when_paused_flagged_off_failing_unchecked_or_full() {
+async fn it_doesnt_start_when_paused_failing_unchecked_or_full() {
     let mut t = empty(opened()).await;
     t.rig.pause("p0", true);
     passes(&mut t, 2).await;
-    t.rig.pause("p0", false);
-    t.rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&[]));
-    passes(&mut t, 2).await;
-    t.rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(&["trial-plan-draft"]));
     *t.checks.lock().unwrap() = Some(checks(false));
+    t.rig.pause("p0", false);
     passes(&mut t, 2).await;
     *t.checks.lock().unwrap() = None;
     passes(&mut t, 2).await;
@@ -196,4 +196,72 @@ async fn a_restart_that_finds_running_starts_no_second_trial() {
     assert!(t.host.jobs.lock().unwrap().is_empty());
     assert_eq!(saved(&mut t).state, TrialState::Failed);
     assert!(kinds(&mut t.rig).contains(&"trial_dropped".to_string()));
+}
+
+fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
+/// The engines chosen as `choice`; with `claude_out` Claude is signed out, with `cursor_out`
+/// Cursor is at its limit.
+fn start_rules(rig: &mut Rig, choice: Value, claude_out: bool, cursor_out: bool) {
+    rig.machine.links.engine_choice = serde_json::from_value(choice).unwrap();
+    rig.machine.claude_signed_out_until = claude_out.then(|| out_for(600));
+    if cursor_out {
+        rig.machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Cursor, out_for(600));
+    }
+}
+
+async fn trial_with(choice: Value, claude_out: bool, cursor_out: bool) -> T {
+    let mut t = empty(opened()).await;
+    t.host.hold.store(true, Ordering::SeqCst);
+    start_rules(&mut t.rig, choice, claude_out, cursor_out);
+    passes(&mut t, 3).await;
+    t
+}
+
+#[tokio::test]
+async fn with_claude_signed_out_a_trial_on_cursor_starts() {
+    let t = trial_with(json!({"roles": {"implementer": "cursor"}}), true, false).await;
+    assert_eq!(*t.host.engines.lock().unwrap(), vec![None]);
+}
+
+#[tokio::test]
+async fn a_trial_on_claude_with_claude_out_starts_on_cursor_used_here() {
+    let t = trial_with(json!({"roles": {"planner": "cursor"}}), true, false).await;
+    assert_eq!(
+        *t.host.engines.lock().unwrap(),
+        vec![Some(crate::engines::EngineId::Cursor)]
+    );
+}
+
+#[tokio::test]
+async fn a_trial_waits_when_no_engine_may_start() {
+    let t = trial_with(json!({"roles": {"planner": "cursor"}}), true, true).await;
+    assert!(t.host.jobs.lock().unwrap().is_empty());
+}
+
+/// Claude at its usage limit holds the trial only without the model or sign-in.
+#[tokio::test]
+async fn at_the_limit_the_trial_starts_with_the_fallback_and_waits_without_it() {
+    use crate::local_model::LocalModel;
+    for (model, signed_out, starts) in [
+        (LocalModel::up(), false, true),
+        (LocalModel::off(), false, false),
+        (LocalModel::up(), true, false),
+    ] {
+        let mut t = empty(opened()).await;
+        t.host.hold.store(true, Ordering::SeqCst);
+        start_rules(&mut t.rig, json!({}), signed_out, false);
+        t.rig.machine.local = model;
+        t.rig
+            .machine
+            .engine_limits
+            .hit(crate::engines::EngineId::Claude, out_for(600));
+        passes(&mut t, 3).await;
+        let case = signed_out;
+        assert_eq!(t.host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
+    }
 }

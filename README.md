@@ -8,6 +8,7 @@ by piece.
 ## What it does so far
 
 - It listens on `127.0.0.1`, never a public port.
+- It reads no release flags: a new behaviour ships On, with no Off path (`src/no_flags.rs` fails `cargo test` on a flag read).
   - The port is `RETASKABLE_PORT` if set, then `port` in `config.json`, then 4700.
 - `GET /api/health` answers `{"ok": true, "version": "..."}`. Every other path is a 404.
 - It reads `config.json` from `RETASKABLE_DATA_DIR`, or from `.retaskable/` in the working folder.
@@ -20,6 +21,13 @@ by piece.
 cargo run
 curl http://127.0.0.1:4700/api/health
 ```
+
+## Tray icon on Linux
+
+The tray helper (`systray2`'s prebuilt one) draws its icon through AppIndicator, so a Linux desktop needs
+`libayatana-appindicator` (Debian and Ubuntu: `libayatana-appindicator3-1`). Without it, or without a tray,
+the agent runs headless. A release bundle ships the helper beside the executable; in a checkout, set
+`RETASKABLE_TRAY_HELPER` to one.
 
 ## Check
 

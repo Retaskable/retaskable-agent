@@ -30,7 +30,7 @@ steps:
       # not memory, so cap it instead of hoping the box grows more room.
       CARGO_BUILD_JOBS: "1"
       # Several tests spawn a real subprocess and wait on a real wall-clock margin (a quiet-timeout
-      # kill, a setup-check timeout, a session outcome, the gallery shoot's background write) sized
+      # kill, a setup-check timeout, a session outcome) sized
       # for a box that can actually schedule them promptly. Cargo's test harness default (one thread
       # per core) lets dozens of those run at once on this same tight box, and under that load several
       # miss their margin together even though none of them is wrong on its own. Capped for the same

@@ -304,6 +304,7 @@ mod tests {
 
     fn item(id: &str, spec_refs: &[&str]) -> Item {
         Item {
+            merge_commit: None,
             id: id.to_string(),
             title: "Title".to_string(),
             status: ItemStatus::Building,
@@ -317,7 +318,12 @@ mod tests {
             branch: None,
             kind: None,
             milestone: None,
+            draft_id: None,
             reopened: None,
+            red_sha: None,
+            no_fix_sha: None,
+            size: None,
+            tier: None,
         }
     }
 

@@ -2,7 +2,7 @@
 //! starting work for that project alone. The lanes and the sessions across every project are the
 //! [`super::Machine`]'s.
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -12,96 +12,26 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::report;
-pub(super) use super::signed_out::signed_out;
+use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
-use crate::backlog::{ClaimNextAgent, ClaimNextAnswer, Client, Item, ItemStatus};
+use crate::backlog::settings::StoreSettings;
+use crate::backlog::{BacklogError, Client, Item, ItemStatus};
 use crate::config::ProjectConfig;
-use crate::engines::{EngineId, Role, engine_for, program_of};
-use crate::env::Env;
+use crate::engines::EngineId;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
 use crate::orchestrator::session::branch_name;
-use crate::orchestrator::steps::{Running, StepRequest, state_name};
-use crate::orchestrator::{Action, ProjectRuns, apply, decide, tick_payload};
+use crate::orchestrator::steps::{Running, StepDone, StepRequest, state_name};
+use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
 use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
+use crate::view::ItemCommands;
 
-/// The variable that switches the orchestrator on.
-pub const MODE_VAR: &str = "RETASKABLE_ORCHESTRATOR";
-
-/// What the orchestrator may do. Off by default, so installing a build never starts it by surprise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OrchestratorMode {
-    /// Nothing runs.
-    #[default]
-    Off,
-    /// Reads the backlog and writes `tick` events saying what a tick would do. Takes no action.
-    Dry,
-    /// Claims work and applies starts, but only with a [`SessionStarter`] and while the port guard
-    /// (`guard.rs`) sees no other agent on this computer. With no starter it behaves exactly like `Dry`.
-    Claim,
-    /// Takes work as short runs on pieces (pieces.md section 3), with the same port guard as `claim`. The kinds
-    /// it can take are the [`RunStarter`](super::RunStarter)s it is given; with none it drops old runs and asks for nothing.
-    Runs,
-}
-
-impl OrchestratorMode {
-    /// The mode `RETASKABLE_ORCHESTRATOR` names (`off`, `dry`, `claim` or `runs`, any case), and a warning
-    /// for a value that is none of them, which counts as `off`.
-    pub fn from_env(env: &Env) -> (Self, Option<String>) {
-        let Some(raw) = env.get(MODE_VAR) else {
-            return (Self::Off, None);
-        };
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "off" => (Self::Off, None),
-            "dry" => (Self::Dry, None),
-            "claim" => (Self::Claim, None),
-            "runs" => (Self::Runs, None),
-            other => (
-                Self::Off,
-                Some(format!(
-                    "{MODE_VAR}={other:?} isn't off, dry, claim or runs, so the orchestrator stays off."
-                )),
-            ),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Dry => "dry",
-            Self::Claim => "claim",
-            Self::Runs => "runs",
-        }
-    }
-
-    /// Reads the mode and logs it once, with the warning or the note that `claim` isn't built.
-    pub fn read_and_log(env: &Env) -> Self {
-        let (mode, warning) = Self::from_env(env);
-        if let Some(w) = warning {
-            tracing::warn!("{w}");
-        }
-        match mode {
-            Self::Off => {
-                tracing::info!("orchestrator: off (set {MODE_VAR}=dry to read the backlog and log what it would do)")
-            }
-            Self::Dry => {
-                tracing::info!("orchestrator: dry (reads the backlog, logs tick events, never claims or starts work)")
-            }
-            Self::Claim => tracing::warn!(
-                "orchestrator: claim (claims work only once a session runner is given; until then it runs dry)"
-            ),
-            Self::Runs => tracing::info!(
-                "orchestrator: runs (takes work as short runs of the kinds it can run; with none it only drops old runs)"
-            ),
-        }
-        mode
-    }
-}
+pub use super::mode::{MODE_VAR, OrchestratorMode};
 
 /// What one pass of a project's loop did.
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +133,10 @@ pub trait SessionStarter: Send + Sync {
     fn start(&self, request: StartRequest) -> Result<(), String>;
     /// Sessions running now, on every project: the pseudocode's `activeSessions`, counted against `concurrency`.
     fn active(&self) -> u32;
+    /// Whether a fresh Claude implementer start may begin now: no when `sonnet`, the model a claim with no tier runs on, has a cap and no slot free (07.1). `pending` counts the Claude implementer starts already made this pass, which haven't taken their slot yet.
+    fn implementer_may_start(&self, _pending: u32) -> bool {
+        true
+    }
     /// Start over's first step: closes the item's old PR (`gh pr close`), or drops its old branch when there is
     /// no PR. A slice that was merged is never touched. An `Err` stops the Start over, leaving the item as it is.
     fn abandon(&self, _old: Abandon) -> BoxFuture<'static, Result<(), String>> {
@@ -213,7 +147,7 @@ pub trait SessionStarter: Send + Sync {
     /// waits where it is, and the loop asks again on its next wake.
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
-    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, ItemRun>>;
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, StepDone>>;
     /// Starts a read-only triager session on a stopped item (06.9). Must not block; it reports its end through
     /// `request.outcomes` as [`SessionResult::Triage`](super::SessionResult::Triage). An `Err` counts as a failed look.
     fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
@@ -245,9 +179,20 @@ pub struct ProjectLoop {
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
     pub(super) unreleased: BTreeMap<String, (String, String)>,
+    /// When each `unreleased` entry was first listed (epoch seconds), kept in the state file; a release that
+    /// keeps failing is dropped after [`super::settle::STUCK_RELEASE_SECS`].
+    pub(super) unreleased_since: BTreeMap<String, i64>,
+    /// The test's clock, as `Machine::clock` is.
+    #[cfg(test)]
+    pub(super) clock: Option<i64>,
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
-    /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in the state file.
+    /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in memory only: a restart forgets it and the store still lists the item for a person to skip again.
     pub(super) unskipped: std::collections::BTreeSet<String>,
+    /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`. In memory only.
+    pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
+    /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`. In memory only.
+    pub(super) playtests_seen: Option<String>,
+    pub(super) release_owed: bool,
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
@@ -256,8 +201,14 @@ pub struct ProjectLoop {
     pub(super) records: BTreeMap<String, RunRecord>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
-    /// Items whose session the watchdog killed, by when it is resumed (`own-failure-handling`).
+    /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
+    pub(super) data_dir: Option<PathBuf>,
+    /// Whether the saved `state.usage` has been checked once against the weekly cutoff.
+    pub(super) week_checked: bool,
+    /// Items whose session the watchdog killed, by when it is resumed.
     pub(super) silenced: BTreeMap<String, std::time::Instant>,
+    /// Claude implementer starts made in this scheduling pass, which haven't taken a model slot yet.
+    pub(super) claude_starts: u32,
     /// Each item's own failures in a row (`state.ownFailures`): a session that wouldn't start, or a hand-back.
     pub(super) own_failures: BTreeMap<String, u32>,
     /// Items whose session was started as a `Launch::Fresh` and hasn't ended yet; one that couldn't start is
@@ -274,40 +225,55 @@ pub struct ProjectLoop {
     pub(super) guard: Option<PortGuard>,
     pub(super) events: EventLog,
     pub(super) client: Arc<Client>,
-    /// The Retaskable release flags (`ask-claude` gates the draft step's chat messages).
-    pub(super) flags: Arc<crate::flags::Flags>,
     pub(super) live: LiveHandle,
     /// GitHub's numeric id of `project.github_repo`, asked of `gh` until it answers and then kept.
     pub(super) repo: Option<u64>,
     /// The steps running for this project's items.
     pub(super) running: Running,
+    /// The steps in `running`, by item, for their `step_end`.
+    pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
+    /// What the chat was told about approved drafts that is still waiting on staging.
+    pub(super) follow: super::follow::Follow,
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
-    /// Set while this project's ideas round is running, so a second one doesn't start on top of it.
-    pub(super) ideas_round_running: Arc<AtomicBool>,
-    /// The daily ideas round's asker and last tried day ([`super::ideas_daily`]).
-    pub(super) ideas_daily: Arc<std::sync::Mutex<super::ideas_daily::State>>,
+    /// Set while this project's deprecated-specs check is running, and its asker and last checked day
+    /// ([`super::deprecations`]).
+    pub(super) deprecations_running: Arc<AtomicBool>,
+    pub(super) deprecations: Arc<std::sync::Mutex<super::deprecations::State>>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
+    /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
+    /// `work_available` wake.
+    pub(super) claim_waiting: bool,
+    /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
+    pub(super) tags_seen: u64,
+    /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
+    pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     pub(super) max_resume_context_tokens: u32,
     /// Continues waiting for a free lane (`item_commands.rs`).
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
+    /// Failed playtest answers waiting for a lane: the item and the message to resume the implementer with.
+    pub(super) playtest_fails: Vec<super::item_commands::PendingContinue>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
     pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
     pub(super) last_lane: BTreeMap<String, u32>,
     /// The games running in lanes (`play { lane }`), by lane, with the item each lane was held for.
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
+    /// Lanes whose game was stopped for a restart, with when: played again once the lane is given back (`lane_play.rs`).
+    pub(super) restarting: BTreeMap<u32, std::time::Instant>,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
+    /// Store failures of the draft and ask tasks, written to the event log by [`Self::drain_failures`].
+    pub(super) failures: crate::backlog::failures::Failures,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
@@ -320,14 +286,16 @@ pub struct ProjectLoop {
     pub(super) second_due: Vec<(String, u32, super::triage_run::Held)>,
     /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
     pub(super) claude_pending: std::collections::BTreeSet<String>,
-    /// The `triage-session` flag as of the last pass.
-    pub(super) triage_flag: bool,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
+    /// The expert sessions (`experts.rs`).
+    pub(super) experts: super::experts::Experts,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
     pub(super) backlog_items: usize,
+    /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
+    pub(super) file_project: ProjectConfig,
 }
 
 impl ProjectLoop {
@@ -342,17 +310,30 @@ impl ProjectLoop {
         max_resume_context_tokens: u32,
     ) -> Self {
         live.register(&id);
+        let file_project = project.clone();
         Self {
             run_loop: super::RunLoop::new(&id),
+            claim_waiting: false,
+            tags_seen: 0,
+            claim_logged: None,
             id,
             project,
             leases: store.leases(),
             unreleased: store.unreleased(),
-            unskipped: store.unskipped(),
+            unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
+            #[cfg(test)]
+            clock: None,
+            unskipped: Default::default(),
+            unanswered: Default::default(),
+            playtests_seen: None,
+            release_owed: false,
             unparked: store.unparked(),
             records: store.runs(),
             to_resume: Vec::new(),
+            data_dir: None,
+            week_checked: false,
             silenced: BTreeMap::new(),
+            claude_starts: 0,
             own_failures: store.own_failures(),
             fresh_launched: Default::default(),
             items: BTreeMap::new(),
@@ -364,31 +345,36 @@ impl ProjectLoop {
             guard: None,
             events,
             client: Arc::new(client),
-            flags: Arc::new(crate::flags::Flags::from_env()),
             live,
             repo: None,
             running: Running::default(),
+            open_steps: Default::default(),
             seen: report::Seen::default(),
+            follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
-            ideas_round_running: Arc::new(AtomicBool::new(false)),
-            ideas_daily: Default::default(),
+            deprecations_running: Default::default(),
+            deprecations: Default::default(),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
+            playtest_fails: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
+            restarting: BTreeMap::new(),
             draft: None,
+            failures: Default::default(),
             landing: Default::default(),
             triaging: Default::default(),
             bug_sends: Vec::new(),
             second_looking: Default::default(),
             second_due: Vec::new(),
             claude_pending: Default::default(),
-            triage_flag: false,
             asks: Default::default(),
+            experts: Default::default(),
             trial: None,
             backlog_items: 0,
+            file_project,
         }
     }
 
@@ -415,7 +401,31 @@ impl ProjectLoop {
             live,
             max_resume_context_tokens,
         )
-        .with_guard(guard))
+        .with_guard(guard)
+        .with_data_dir(dir))
+    }
+
+    /// Takes this pass's `settings_get` (`None`: not asked; an error changes nothing, so the allowed commands keep
+    /// running) into the project's allowed commands, then lays them over `file_project` as `project`.
+    pub(super) fn take_allowed_commands(
+        &mut self,
+        commands: &ItemCommands,
+        settings: Option<Result<Option<StoreSettings>, BacklogError>>,
+    ) {
+        let gates = commands.gates();
+        if let Some(dir) = &self.data_dir {
+            gates.open(dir, &self.id);
+        }
+        match settings {
+            Some(Ok(settings)) => {
+                if let Err(e) = gates.consider(&self.id, settings.as_ref(), &self.file_project) {
+                    tracing::warn!("{}: saving the allowed commands: {e:#}", self.id);
+                }
+            }
+            Some(Err(e)) => self.store_error("settings_get", &e),
+            None => {}
+        }
+        self.project = commands.allowed_config(&self.id, &self.file_project);
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
@@ -430,10 +440,11 @@ impl ProjectLoop {
 
     /// The pass's second half for a project whose items were read: records what its turns decided
     /// (`actions`, from `round_robin::plan`) against the computer's `pool`, and writes the `tick` event.
-    pub(super) fn record(
+    pub(super) async fn record(
         &mut self,
         items: Vec<Item>,
         paused: bool,
+        cant_start: Option<&'static str>,
         actions: Vec<Action>,
         pool: &LanePool,
         live: Option<Option<String>>,
@@ -453,14 +464,20 @@ impl ProjectLoop {
                     Some(HeldLane {
                         lane,
                         title: items.iter().find(|i| &i.id == item).map(|i| i.title.clone()),
+                        branch: items
+                            .iter()
+                            .find(|i| &i.id == item)
+                            .map(|i| branch_name(i, self.attempt_of(item))),
+                        playing: self.playing.contains_key(&lane),
                         item_id: item.clone(),
                     })
                 }
                 _ => None,
             })
             .collect();
-        let payload = tick_payload(paused, pool);
-        let would: Vec<String> = actions.iter().map(describe).collect();
+        let sessions = self.live.sessions().snapshot().len();
+        let payload = tick_payload(paused, pool, sessions);
+        let would: Vec<String> = actions.iter().map(super::start_gate::describe).collect();
         let decision = match actions.first() {
             None if paused => "paused: would do nothing".to_string(),
             None => "would do nothing".to_string(),
@@ -472,8 +489,13 @@ impl ProjectLoop {
             Some(Action::StartImplementer { item_id, lane }) => format!("would start {item_id} on lane {lane}"),
             Some(Action::NeedsHuman { .. }) => unreachable!("the plan lists no needs_human"),
         };
+        let held_items = self.held_items(&items, &held);
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
+        self.live.set_items(&self.id, held_items);
         let mut payload = payload;
+        if let Some(ci) = self.live.snapshot().ci {
+            payload.extra.insert("ci".into(), ci.tick_json());
+        }
         payload.states = Some(json!(states));
         // `live` is the claim answer when this pass really applied its decisions (`claim` mode with a starter).
         payload.claim = Some(json!(live.clone().flatten().unwrap_or_else(|| "not asked".into())));
@@ -489,14 +511,25 @@ impl ProjectLoop {
                 would.join(", ")
             );
         }
-        self.check_watchdog(paused, &actions, pool);
+        self.check_watchdog(paused, cant_start, &actions, pool);
         Step::Ticked { would }
+    }
+
+    /// Why no new work can start on this computer right now, for the watchdog, by the same rules `claim` uses:
+    /// a claim pause, or no lane whose engine (after fall-over) may start.
+    pub(super) fn start_blocked(&self, shared: &Shared<'_>, pool: &LanePool) -> Option<&'static str> {
+        if shared.claim_paused_until.is_some_and(|u| std::time::Instant::now() < u) {
+            return Some("claim paused");
+        }
+        let gate = StartGate::new(self, pool, shared);
+        let lanes = pool.rules().lanes;
+        (lanes > 0 && !(1..=lanes).any(|k| gate.lane_may_start(self, shared, k))).then_some("usage limit")
     }
 
     /// This minute's watchdog rules (docs/specs/agent-telemetry.md section 4): finds what's quietly gone
     /// wrong against the state this tick already has (`actions`, `pool`) and times it against findings
     /// from minutes before.
-    fn check_watchdog(&mut self, paused: bool, actions: &[Action], pool: &LanePool) {
+    fn check_watchdog(&mut self, paused: bool, cant_start: Option<&str>, actions: &[Action], pool: &LanePool) {
         let recent: Vec<watchdog::RecentEvent> = self
             .events
             .recent()
@@ -511,6 +544,7 @@ impl ProjectLoop {
         let found = watchdog::check(&watchdog::Input {
             project: &self.id,
             paused,
+            cant_start,
             runs: &self.runs,
             leases: &self.leases,
             records: &self.records,
@@ -519,18 +553,21 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            restart: watchdog::RestartView::of(crate::restart::state()),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
             idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
             no_progress_minutes: self.project.tuning.no_progress_minutes,
         });
         self.telemetry.minute(&self.id, found, now_ms, &mut self.events);
+        self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
     }
 
     /// Writes the held and the unreleased leases to the state file.
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
-        self.store.set_unskipped(&self.unskipped);
+        self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
+        self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unparked(&self.unparked);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);
@@ -567,8 +604,10 @@ impl ProjectLoop {
     /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
     /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
     /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
-    /// holds no lease and isn't here: the store hands it back when it is answered.
-    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool) {
+    /// holds no lease and isn't here: the store hands it back when it is answered. With this computer's name (`machine`), a needs_human item held only for Cursor's limit with
+    /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
+    /// give-back note, for `flush_owed` to send.
+    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, machine: &str) {
         if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
             return;
         }
@@ -578,6 +617,21 @@ impl ProjectLoop {
                 tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
                 continue;
             };
+            if item.pr_url.is_none()
+                && record.as_ref().is_some_and(|r| {
+                    r.state == "needs_human"
+                        && r.needs_human_reason.as_deref() == Some(super::settle::CURSOR_LIMIT_STOP)
+                })
+                && matches!(
+                    item.status,
+                    ItemStatus::Claimed | ItemStatus::Building | ItemStatus::NeedsPerson
+                )
+            {
+                tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
+                let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
+                self.list_unreleased(id, token, why);
+                continue;
+            }
             let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
             let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
                 Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
@@ -611,6 +665,7 @@ impl ProjectLoop {
             self.remember(&id, lane, session, record.impl_context_tokens);
             if let Some(saved) = self.records.get_mut(&id) {
                 saved.silence_kills = record.silence_kills;
+                saved.cursor_limit_hits = record.cursor_limit_hits;
                 saved.not_started = record.not_started;
                 if record.not_started {
                     self.fresh_launched.insert(id.clone());
@@ -749,12 +804,7 @@ impl ProjectLoop {
                 .map(|r| r.impl_session_engine)
                 .unwrap_or_default(),
             None if let Some(to) = on_engine => to,
-            None => program_of(engine_for(
-                &shared.links.engine_choice,
-                self.project.engines.as_ref(),
-                Role::Implementer,
-                Some(lane),
-            )),
+            None => StartGate::new(self, pool, shared).engine_now(self, shared, lane),
         };
         // A resumed session keeps its last known size; a fresh or picking-up one starts with none of its own yet.
         let context_tokens = resume
@@ -763,7 +813,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
-        let takeover = self.takeover(pool, shared, engine);
+        let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine));
         let request = StartRequest {
             project: self.id.clone(),
             item_id: item_id.to_string(),
@@ -789,7 +839,7 @@ impl ProjectLoop {
                         item: Some(item_id.to_string()),
                         lane: Some(lane),
                         role: Some("implementer".into()),
-                        engine: Some("claude".into()),
+                        engine: Some(engine.to_string()),
                         ..Default::default()
                     }),
                 );
@@ -817,128 +867,42 @@ impl ProjectLoop {
         starter: &dyn SessionStarter,
         shared: &mut Shared<'_>,
     ) -> u32 {
-        let blocked_from_starting = signed_out(shared) || shared.stopping;
+        let gate = StartGate::new(self, pool, shared);
         let mut started = 0;
-        for action in actions.iter().filter(|a| **a != Action::AskForWork) {
-            if blocked_from_starting && matches!(action, Action::StartImplementer { .. }) {
-                continue;
+        let mut todo = actions.to_vec();
+        // Starts the model cap held off a Claude lane are placed again on the lanes it leaves (a Cursor lane).
+        for round in 0..2 {
+            let mut capped = 0;
+            for action in todo.iter().filter(|a| **a != Action::AskForWork) {
+                if let Action::StartImplementer { lane, .. } = action {
+                    if shared.stopping || gate.holds(self, shared, *lane) {
+                        continue;
+                    }
+                    if self.runs_claude(shared, &gate, *lane) && self.model_full(starter) {
+                        capped += 1;
+                        continue;
+                    }
+                }
+                if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
+                    continue;
+                }
+                if let Action::StartImplementer { item_id, lane } = action {
+                    let on_claude = self.runs_claude(shared, &gate, *lane);
+                    let ok = self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await;
+                    started += u32::from(ok);
+                    self.claude_starts += u32::from(ok && on_claude);
+                }
             }
-            if !apply(&self.id, action, &mut self.runs, pool, &self.project, &mut self.events) {
-                continue;
+            if round == 1 || capped == 0 {
+                break;
             }
-            if let Action::StartImplementer { item_id, lane } = action {
-                started += u32::from(self.launch(pool, item_id, *lane, Launch::Fresh, starter, shared).await);
-            }
+            todo = self
+                .decide_gated(pool, shared, &gate, true)
+                .into_iter()
+                .filter(|a| matches!(a, Action::StartImplementer { .. }))
+                .take(capped)
+                .collect();
         }
         started
-    }
-
-    /// Asks the store for work while a lane is free and a session slot is left (`slots`, used up as work
-    /// starts), and starts what it hands out. The tick's `claim`, the last answer: the item id, `none` or
-    /// `failed`; `None` when it wasn't asked (no slot or lane, the guard, an own failure's claim pause,
-    /// Claude signed out on this computer, or no link).
-    pub(super) async fn claim(
-        &mut self,
-        pool: &mut LanePool,
-        slots: &mut u32,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) -> Option<String> {
-        if shared
-            .claim_paused_until
-            .is_some_and(|until| std::time::Instant::now() < until)
-            || signed_out(shared)
-            || shared.stopping
-        {
-            return None;
-        }
-        let mut last = None;
-        // At most once per lane, so a store that keeps handing out work no lane takes can't hold the pass.
-        for _ in 0..pool.rules().lanes {
-            let asks = decide(&self.id, false, &self.runs, pool, &self.project).contains(&Action::AskForWork);
-            if *slots == 0 || !asks {
-                break;
-            }
-            let Some((answer, more)) = self.claim_once(pool, slots, starter, shared).await else {
-                break;
-            };
-            last = Some(answer);
-            if !more {
-                break;
-            }
-        }
-        last
-    }
-
-    /// One `claim_next`, with its `claim` event: the answer and whether to ask again (something was handed out).
-    pub(super) async fn claim_once(
-        &mut self,
-        pool: &mut LanePool,
-        slots: &mut u32,
-        starter: &dyn SessionStarter,
-        shared: &mut Shared<'_>,
-    ) -> Option<(String, bool)> {
-        // Asked before every claim, so a TS agent started since is noticed at once.
-        if let Some(guard) = self.guard.clone()
-            && let Some(why) = guard.refusal().await
-        {
-            tracing::error!("{}: not claiming: {why}", self.id);
-            return None;
-        }
-        let repo = self.repo?;
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
-            Ok(Some(token)) => token,
-            Ok(None) => return None,
-            Err(e) => {
-                self.cant_start(format!("reading the backlog link: {e:#}"));
-                return None;
-            }
-        };
-        let agent = ClaimNextAgent {
-            machine: shared.links.machine.clone(),
-            environment: shared.links.environment.clone(),
-            base_branch: self.project.base_branch.clone(),
-            tags: shared.links.tags.clone(),
-        };
-        let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
-            Err(e) => {
-                self.store_error("claim_next", &e);
-                ("failed".to_string(), false)
-            }
-            Ok(ClaimNextAnswer::Nothing) => ("none".to_string(), false),
-            // Handed out again while this computer still has it: it isn't taken twice.
-            Ok(ClaimNextAnswer::Item { item, .. }) if self.runs.contains_key(&item.id) => {
-                tracing::warn!(
-                    "{}: the store handed out {} again, which this computer has",
-                    self.id,
-                    item.id
-                );
-                (item.id, false)
-            }
-            Ok(ClaimNextAnswer::Item { item, token }) => {
-                self.take_lease(&item, token, ItemState::Queued);
-                let actions = decide(&self.id, false, &self.runs, pool, &self.project);
-                *slots = slots.saturating_sub(self.apply_starts(&actions, pool, starter, shared).await);
-                // A start refused hands the item back; asking again now could only be handed it again.
-                let kept = self.runs.contains_key(&item.id);
-                (item.id, kept)
-            }
-        };
-        self.events.add_in(
-            &self.id,
-            Event::Claim(event::Claim {
-                answer: Some(json!(answer)),
-                ..Default::default()
-            }),
-        );
-        Some((answer, more))
-    }
-}
-
-fn describe(action: &Action) -> String {
-    match action {
-        Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
-        Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
-        Action::AskForWork => "ask_for_work".into(),
     }
 }

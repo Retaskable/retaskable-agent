@@ -1,11 +1,7 @@
-//! Picking the implementer's model from the 5-hour usage limit still left
-//! (docs/specs/agent/07-orchestrator-loop.md section 7.1, `agent/src/tiers.ts` in the TypeScript
-//! agent). Only the implementer's own opus/sonnet switch is built here: the other roles (scouts,
-//! the drafter, the triager, the planner, the final reviewer) have no sessions in this agent yet,
-//! and the local-model fallback and the wait-for-reset floor at `models.pauseBelowPct` aren't
-//! wired to anything that can act on them (no session starts against a local server, and no
-//! "waiting for the limit" state), so both run on `sonnet` for now, same as everything below
-//! `opusAbovePct`.
+//! Tier names and models (docs/specs/agent/07.1-model-tiers.md). The server names the tier; this maps it to a
+//! model, and keeps the weekly cutoff and the usage readings it reports. No tier is worked out from usage here.
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use serde_json::Value;
 
 use crate::backlog::Item;
@@ -13,46 +9,155 @@ use crate::config::ModelsConfig;
 
 pub const OPUS: &str = "opus";
 pub const SONNET: &str = "sonnet";
+pub const LOCAL: &str = "local";
 
-/// The model `ClaudeStarter` passes `--model` for a fresh implementer session, from the latest
-/// 5-hour usage reading kept in `state.usage` (`None` when there's none yet, which "is treated as
-/// full", i.e. `opus`).
-pub fn implementer_tier(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig) -> &'static str {
-    let Some(usage) = usage else { return OPUS };
-    if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
-        return tier_from_five_hour_window(window, now_epoch, models);
-    }
-    if let Some(pct_left) = top_level_pct_left(usage, now_epoch) {
-        return tier_from_pct_left(pct_left, models);
-    }
-    match fresh_status(usage, now_epoch) {
-        Some("allowed_warning") | Some("rejected") => SONNET,
-        _ => OPUS,
+/// The tier the server named for a claim (section 7.1, "How the tier arrives"): `opus`, `sonnet` or `local`.
+/// A missing name is `sonnet`; an unknown one is `sonnet` too, and logged.
+pub fn named_tier(name: Option<&str>) -> &'static str {
+    match name {
+        None | Some("sonnet") => SONNET,
+        Some("opus") => OPUS,
+        Some("local") => LOCAL,
+        Some(other) => {
+            tracing::warn!("the store named the unknown tier {other:?}; reading it as sonnet");
+            SONNET
+        }
     }
 }
 
-/// Whether a `rate_limit_info` reading is (or carries) the 5-hour window `implementer_tier` reads,
-/// rather than some other window a build sent alone (`parseRateLimit` in the TypeScript agent):
-/// most builds report one window per event with no `rateLimitType` at all, a build that labels its
-/// window keeps only `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts,
-/// whatever its own `rateLimitType` says. Anything else — an older build's lone `seven_day` event,
-/// say — would otherwise overwrite a usable 5-hour reading with one this agent can't read a tier
-/// from, each time Claude Code happens to report it.
-///
-/// Not yet: the weekly limit itself (a `rateLimitType: "seven_day"` rejection, which the TypeScript
-/// agent keeps instead of dropping) isn't read for anything here, so such a reading is dropped
-/// rather than kept for its own sake.
-pub fn is_five_hour_reading(usage: &Value) -> bool {
+/// `tier`, or `local` when Claude is `at_limit` on this computer (`EngineLimits::claude_at_limit`) and the local
+/// model is `local_available` (section 7.1: the floor row, never with the model down).
+pub fn floor(tier: &'static str, at_limit: bool, local_available: bool) -> &'static str {
+    if at_limit && local_available { LOCAL } else { tier }
+}
+
+/// Whether a `rate_limit_info` reading is one to keep as the usage reading (`parseRateLimit` in the TypeScript
+/// agent): the 5-hour window kept as `state.usage`, or a
+/// weekly rejection. Most builds report one window per event with no `rateLimitType` at all, a build that labels
+/// its window keeps `"five_hour"`, and a reading with `unifiedWindows.five_hour` always counts, whatever its own
+/// `rateLimitType` says. A reading labeled `"seven_day"` whose `status` is `rejected` counts too:
+/// it is what turned the session away, and its reset is the week's. Anything else — an older build's lone
+/// non-rejected `seven_day` event, say — would otherwise overwrite a usable 5-hour reading with one this agent
+/// can't read a tier from, each time Claude Code happens to report it. A weekly reading dropped here is still
+/// saved, as `state.weekUsage` (`carries_week`), so a restart keeps the weekly cutoff.
+pub fn is_usage_reading(usage: &Value) -> bool {
     if usage.get("unifiedWindows").and_then(|w| w.get("five_hour")).is_some() {
         return true;
     }
     match usage.get("rateLimitType").and_then(Value::as_str) {
+        Some("seven_day") => usage["status"] == "rejected",
         Some(rate_limit_type) => rate_limit_type == "five_hour",
         None => true,
     }
 }
 
-/// `midTier` (agent/src/tiers.ts, section 7.1): `tier`, but never Opus. The drafter and the triager
+/// Whether a reading carries the weekly window (`unifiedWindows.seven_day`, or `rateLimitType: "seven_day"`): the
+/// ones saved as `state.weekUsage`, whether or not `is_usage_reading` keeps them as `state.usage`.
+pub fn carries_week(usage: &Value) -> bool {
+    usage.get("unifiedWindows").and_then(|w| w.get("seven_day")).is_some()
+        || usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day")
+}
+
+/// The weekly window of a reading: `unifiedWindows.seven_day`, else the reading itself when its `rateLimitType` is
+/// `seven_day`.
+fn week_window(usage: &Value) -> Option<&Value> {
+    match usage.get("unifiedWindows").and_then(|w| w.get("seven_day")) {
+        Some(w) => Some(w),
+        None if usage.get("rateLimitType").and_then(Value::as_str) == Some("seven_day") => Some(usage),
+        None => None,
+    }
+}
+
+/// The week's `(utilization 0–1 read like `frac`, resetsAt)` of a reading, either shape (`week_window`); each is
+/// `None` when the reading doesn't carry it (a status-only reading), and the whole is `None` with no weekly window.
+pub fn week_reading(usage: &Value) -> Option<(Option<f64>, Option<i64>)> {
+    let w = week_window(usage)?;
+    Some((
+        w.get("utilization").and_then(Value::as_f64).map(frac),
+        w.get("resetsAt").and_then(Value::as_i64),
+    ))
+}
+
+/// Whether a window's `utilization` is full, read like `frac` (a whole number over 1 is a percentage).
+pub fn utilization_full(utilization: f64) -> bool {
+    frac(utilization) >= 1.0
+}
+
+/// A five-hour reading counts as "on a subscription" for this long after its window's reset
+/// (`onSubscription` in `agent/src/tiers.ts`).
+const SUBSCRIPTION_WEEK_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Whether Claude Code has reported a five-hour usage window in the last week, i.e. this computer is on a Claude
+/// subscription rather than an API key (`onSubscription`, docs/specs/engines/03-choosing-the-engine.md section 3.4).
+/// False with no reading, a reading that isn't a five-hour one, or one whose window reset over a week ago.
+pub fn on_subscription(usage: Option<&Value>, now_epoch: i64) -> bool {
+    usage
+        .and_then(five_hour_resets_at)
+        .is_some_and(|resets_at| resets_at >= now_epoch - SUBSCRIPTION_WEEK_SECS)
+}
+
+/// The `resetsAt` of a five-hour reading: its `unifiedWindows.five_hour`'s, else the top-level one.
+fn five_hour_resets_at(usage: &Value) -> Option<i64> {
+    if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
+        return window.get("resetsAt").and_then(Value::as_i64);
+    }
+    if usage.get("rateLimitType").and_then(Value::as_str) != Some("five_hour") && usage.get("rateLimitType").is_some() {
+        return None;
+    }
+    usage.get("resetsAt").and_then(Value::as_i64)
+}
+
+/// The computer's latest five-hour reset across every project's saved usage (0 when none). One signal for the whole
+/// machine: a project's reading counts for every session.
+#[cfg(not(test))]
+static LATEST_FIVE_HOUR_RESET: AtomicI64 = AtomicI64::new(0);
+
+// Per test thread under test, so one test's saved reading doesn't drop another test's budget.
+#[cfg(test)]
+thread_local! {
+    static LATEST_FIVE_HOUR_RESET: AtomicI64 = const { AtomicI64::new(0) };
+}
+
+fn latest_reset() -> i64 {
+    #[cfg(test)]
+    return LATEST_FIVE_HOUR_RESET.with(|a| a.load(Ordering::Relaxed));
+    #[cfg(not(test))]
+    LATEST_FIVE_HOUR_RESET.load(Ordering::Relaxed)
+}
+
+/// Notes a project's saved usage reading in the machine-wide signal.
+pub fn note_usage(usage: &Value) {
+    if let Some(resets_at) = five_hour_resets_at(usage) {
+        #[cfg(test)]
+        LATEST_FIVE_HOUR_RESET.with(|a| a.fetch_max(resets_at, Ordering::Relaxed));
+        #[cfg(not(test))]
+        LATEST_FIVE_HOUR_RESET.fetch_max(resets_at, Ordering::Relaxed);
+    }
+}
+
+/// The model name `--model` gets for a Claude session on `tier`: `sonnet` for `local`, which the local session's
+/// environment maps onto the local model (section 7.2).
+pub fn claude_model(tier: &'static str) -> &'static str {
+    if tier == LOCAL { SONNET } else { tier }
+}
+
+/// The model name a session on `engine` gets for `tier`: [`claude_model`] on Claude, the tier as it is elsewhere.
+pub fn claude_model_for(engine: crate::engines::engine::EngineId, tier: &str) -> String {
+    if engine == crate::engines::engine::EngineId::Claude && tier == LOCAL {
+        SONNET
+    } else {
+        tier
+    }
+    .to_string()
+}
+
+/// The machine-wide signal alone: some project has saved a five-hour reading from the last week.
+pub fn signal_on(now_epoch: i64) -> bool {
+    let resets_at = latest_reset();
+    on_subscription(Some(&serde_json::json!({"resetsAt": resets_at})), now_epoch)
+}
+
+/// `midTier` (agent/src/tiers.ts, section 7.1): the implementer's `tier`, but never Opus. The drafter and the triager
 /// write and read; Opus is kept for the planner and the final review.
 pub fn mid_tier(tier: &'static str) -> &'static str {
     if tier == OPUS { SONNET } else { tier }
@@ -63,69 +168,20 @@ pub fn chore_tier() -> &'static str {
     SONNET
 }
 
-/// `topTier` (section 7.1): the planner, the final reviewer and the triager's second look stay on Opus
-/// whatever the usage reading says.
-pub fn top_tier() -> &'static str {
-    OPUS
-}
-
 /// `implementerModel` (agent/src/orchestratorHelpers.ts in the TypeScript agent): where
-/// `implementer_tier` gives `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
-/// kept for retries, reopened items and the bigger ones. Only a tier of `opus` is ever moved; a tier
-/// already below it (from a usage reading, section 7.1's table) is returned unchanged.
-///
-/// Not yet: the store's claimed item (backlog/06.1-an-item.md) carries no retry count and no size
-/// (estimates.md section 3.2 — sizing came from the TypeScript agent's own planner, removed before
-/// this rule existed, so an item from the store never has one), so both are read as a first try on
-/// a size below L until the store carries them; only `reopened`, which the store does send, can keep
-/// `opus` here today.
-pub fn implementer_model(tier: &'static str, item: &Item) -> &'static str {
+/// the tier is `opus`, a roadmap item's first try instead runs on `sonnet`, so Opus is
+/// kept for a reopened item, a retry (`attempt` over 0: this agent
+/// counts Start over from 0) and an item of size L or XL (any case). Only a tier of `opus` is ever moved; a tier already below it (from a usage reading, section 7.1's
+/// table, or `local`) is returned unchanged.
+pub fn implementer_model(tier: &'static str, item: &Item, attempt: u32) -> &'static str {
     if tier != OPUS {
         return tier;
     }
-    if item.reopened.is_some() { OPUS } else { SONNET }
-}
-
-/// Decides straight from `rate_limit_info.unifiedWindows.five_hour` (newer Claude Code builds):
-/// its own `resetsAt`, missing or at or before `now`, makes it a full window (`opus`) on its own —
-/// the same as a missing `resetsAt` already does for `top_level_pct_left` and `fresh_status` below.
-/// The top-level `status` is never consulted once this window exists, since it can belong to a
-/// later, unrelated reading (`is_five_hour_reading`, settled in `src/orchestrator/driver/settle.rs`).
-fn tier_from_five_hour_window(window: &Value, now_epoch: i64, models: &ModelsConfig) -> &'static str {
-    match window.get("resetsAt").and_then(Value::as_i64) {
-        Some(resets_at) if resets_at > now_epoch => {}
-        _ => return OPUS,
-    }
-    match window.get("utilization").and_then(Value::as_f64) {
-        Some(utilization) => tier_from_pct_left(pct_left(utilization), models),
-        None => OPUS,
-    }
-}
-
-/// The older, flat `rate_limit_info.utilization` (`parseRateLimit`'s `frac(info.utilization)` in
-/// the TypeScript agent), read against the top-level `resetsAt`, when there's no
-/// `unifiedWindows.five_hour` to read instead. `None` when there's no fresh percentage to read —
-/// `implementer_tier` then falls back to `fresh_status`.
-fn top_level_pct_left(usage: &Value, now_epoch: i64) -> Option<f64> {
-    let resets_at = usage.get("resetsAt")?.as_i64()?;
-    if resets_at <= now_epoch {
-        return None;
-    }
-    let utilization = usage.get("utilization")?.as_f64()?;
-    Some(pct_left(utilization))
-}
-
-/// The old-format `rate_limit_info.status`, when its own `resetsAt` hasn't passed yet.
-fn fresh_status(usage: &Value, now_epoch: i64) -> Option<&str> {
-    let resets_at = usage.get("resetsAt")?.as_i64()?;
-    if resets_at <= now_epoch {
-        return None;
-    }
-    usage.get("status")?.as_str()
-}
-
-fn tier_from_pct_left(pct_left: f64, models: &ModelsConfig) -> &'static str {
-    if pct_left >= f64::from(models.opus_above_pct) {
+    let big = item
+        .size
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("L") || s.eq_ignore_ascii_case("XL"));
+    if item.reopened.is_some() || attempt > 0 || big {
         OPUS
     } else {
         SONNET
@@ -134,140 +190,119 @@ fn tier_from_pct_left(pct_left: f64, models: &ModelsConfig) -> &'static str {
 
 /// A usage fraction, or a whole-number percentage above 1 (`frac` in the TypeScript agent's
 /// `parseRateLimit`) — Claude Code sends either shape for the same field.
-fn frac(value: f64) -> f64 {
+pub(crate) fn frac(value: f64) -> f64 {
     if value > 1.0 { value / 100.0 } else { value }
 }
 
-/// The percentage of a 5-hour window still left, from its `utilization` (see `frac`).
-fn pct_left(utilization: f64) -> f64 {
-    (1.0 - frac(utilization)).max(0.0) * 100.0
+/// The week's `resetsAt` (epoch seconds) when `usage` says the weekly limit is cut off now: the week's used share
+/// (`unifiedWindows.seven_day.utilization`, read like `frac`) at or past `models.week_cutoff_pct`, or that window
+/// `rejected`; failing a `seven_day` window, a lone reading whose `rateLimitType` is `seven_day`, read the same way
+/// from its top-level fields. `None` with no reading, a reset that is missing or not after `now_epoch`, or no
+/// weekly figure.
+pub fn week_cutoff_until(usage: Option<&Value>, now_epoch: i64, models: &ModelsConfig) -> Option<i64> {
+    let usage = usage?;
+    let (used, resets_at) = week_reading(usage)?;
+    let rejected = week_window(usage)?.get("status").and_then(Value::as_str) == Some("rejected");
+    let cut = rejected || used.is_some_and(|u| u * 100.0 >= f64::from(models.week_cutoff_pct));
+    let resets_at = resets_at?;
+    (cut && resets_at > now_epoch).then_some(resets_at)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_named_tier_maps_and_an_unknown_one_is_sonnet() {
+        assert_eq!(super::named_tier(Some("opus")), "opus");
+        assert_eq!(super::named_tier(Some("local")), "local");
+        assert_eq!(super::named_tier(Some("gpt")), "sonnet");
+        assert_eq!(super::named_tier(None), "sonnet");
+    }
+
     use serde_json::json;
 
     use super::*;
 
     const NOW: i64 = 1_700_000_000;
-    fn models() -> ModelsConfig {
-        ModelsConfig::default()
+
+    #[test]
+    fn week_cutoff_reads_the_weekly_percentage_and_reset() {
+        let m = ModelsConfig::default();
+        let until = |u: &Value| week_cutoff_until(Some(u), NOW, &m);
+        let week = |u: Value, r: Value| json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": r}}});
+        assert_eq!(week_cutoff_until(None, NOW, &m), None);
+        assert_eq!(until(&week(json!(0.95), json!(NOW + 5))), Some(NOW + 5));
+        assert_eq!(until(&week(json!(0.96), json!(NOW + 5))), Some(NOW + 5));
+        assert_eq!(until(&week(json!(0.94), json!(NOW + 5))), None);
+        assert_eq!(until(&week(json!(96), json!(NOW + 5))), Some(NOW + 5));
+        assert_eq!(until(&week(json!(94), json!(NOW + 5))), None);
+        assert_eq!(until(&week(json!(0.99), json!(NOW - 1))), None);
+        assert_eq!(until(&week(json!(0.99), json!(NOW))), None);
+        assert_eq!(
+            until(&json!({"unifiedWindows": {"seven_day": {"utilization": 0.99}}})),
+            None
+        );
+        let rejected = json!({"unifiedWindows": {"seven_day": {"status": "rejected", "resetsAt": NOW + 7}}});
+        assert_eq!(until(&rejected), Some(NOW + 7));
+        let lone = json!({"rateLimitType": "seven_day", "status": "rejected", "resetsAt": NOW + 9});
+        assert_eq!(until(&lone), Some(NOW + 9));
+        let lone_pct = json!({"rateLimitType": "seven_day", "utilization": 0.96, "resetsAt": NOW + 9});
+        assert_eq!(until(&lone_pct), Some(NOW + 9));
+        let five =
+            json!({"rateLimitType": "five_hour", "utilization": 0.99, "status": "rejected", "resetsAt": NOW + 9});
+        assert_eq!(until(&five), None);
+        let five_only = json!({"unifiedWindows": {"five_hour": {"utilization": 0.99, "resetsAt": NOW + 9}}});
+        assert_eq!(until(&five_only), None);
+        assert_eq!(until(&json!({"status": "allowed"})), None);
     }
 
     #[test]
-    fn no_reading_is_treated_as_a_full_window() {
-        assert_eq!(implementer_tier(None, NOW, &models()), OPUS);
+    fn week_cutoff_honors_a_custom_percentage() {
+        let m = ModelsConfig {
+            week_cutoff_pct: 80,
+            ..ModelsConfig::default()
+        };
+        let w = |u: f64| json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": NOW + 5}}});
+        assert_eq!(week_cutoff_until(Some(&w(0.8)), NOW, &m), Some(NOW + 5));
+        assert_eq!(week_cutoff_until(Some(&w(0.79)), NOW, &m), None);
     }
 
     #[test]
-    fn a_window_that_already_reset_is_treated_as_full() {
-        let usage = json!({"status": "rejected", "resetsAt": NOW - 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn five_hour_utilization_at_or_above_opus_above_pct_left_is_opus() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 1}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn five_hour_utilization_below_opus_above_pct_left_is_sonnet() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.85, "resetsAt": NOW + 1}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), SONNET);
-    }
-
-    #[test]
-    fn a_custom_opus_above_pct_moves_the_boundary() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 1}}});
-        let mut models = models();
-        models.opus_above_pct = 80;
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models), SONNET);
-    }
-
-    #[test]
-    fn status_allowed_is_opus() {
-        let usage = json!({"status": "allowed", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn status_allowed_warning_is_sonnet() {
-        let usage = json!({"status": "allowed_warning", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), SONNET);
-    }
-
-    #[test]
-    fn status_rejected_is_sonnet_for_now_rather_than_waiting() {
-        let usage = json!({"status": "rejected", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), SONNET);
-    }
-
-    #[test]
-    fn an_unrecognized_status_is_treated_as_full() {
-        let usage = json!({"status": "something_new", "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn a_flat_top_level_utilization_with_no_unified_windows_is_read_too() {
-        let usage = json!({"status": "allowed", "utilization": 0.9, "resetsAt": NOW + 1});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), SONNET);
-    }
-
-    #[test]
-    fn a_utilization_given_as_a_whole_number_percentage_is_normalized_not_clamped() {
-        // Clamped to 1.0 (fully used), this would wrongly read as sonnet; as 10% used it's opus.
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 10, "resetsAt": NOW + 1}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn a_reset_five_hour_window_is_full_even_when_the_top_level_status_is_not() {
-        let usage = json!({
-            "status": "allowed_warning",
-            "resetsAt": NOW + 1,
-            "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": NOW - 1}},
-        });
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn a_five_hour_window_with_no_resets_at_is_treated_as_full() {
-        let usage = json!({"unifiedWindows": {"five_hour": {"utilization": 0.9}}});
-        assert_eq!(implementer_tier(Some(&usage), NOW, &models()), OPUS);
-    }
-
-    #[test]
-    fn a_reading_with_no_rate_limit_type_is_a_five_hour_reading() {
-        assert!(is_five_hour_reading(&json!({"status": "allowed"})));
-    }
-
-    #[test]
-    fn a_reading_labeled_five_hour_is_a_five_hour_reading() {
-        assert!(is_five_hour_reading(
-            &json!({"status": "allowed", "rateLimitType": "five_hour"})
+    fn on_subscription_reads_a_recent_five_hour_window() {
+        let w = json!({"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": NOW + 10}}});
+        assert!(on_subscription(Some(&w), NOW));
+        assert!(on_subscription(
+            Some(&json!({"status": "allowed", "resetsAt": NOW - 3600})),
+            NOW
         ));
     }
 
     #[test]
-    fn a_reading_labeled_something_else_with_no_unified_five_hour_window_is_not() {
-        assert!(!is_five_hour_reading(
-            &json!({"status": "rejected", "rateLimitType": "seven_day"})
-        ));
+    fn on_subscription_is_false_without_a_recent_five_hour_reading() {
+        assert!(!on_subscription(None, NOW));
+        let seven = json!({"rateLimitType": "seven_day", "resetsAt": NOW + 10});
+        assert!(!on_subscription(Some(&seven), NOW));
+        let old = json!({"status": "allowed", "resetsAt": NOW - 8 * 24 * 3600});
+        assert!(!on_subscription(Some(&old), NOW));
+        let old_window = json!({"unifiedWindows": {"five_hour": {"resetsAt": NOW - 8 * 24 * 3600}}});
+        assert!(!on_subscription(Some(&old_window), NOW));
     }
 
     #[test]
-    fn a_reading_with_a_unified_five_hour_window_counts_whatever_its_own_type_says() {
-        let usage = json!({
-            "rateLimitType": "seven_day",
-            "unifiedWindows": {"five_hour": {"utilization": 0.5, "resetsAt": NOW + 1}},
-        });
-        assert!(is_five_hour_reading(&usage));
+    fn a_limited_claude_reads_the_floor_only_with_the_model() {
+        assert_eq!(floor(OPUS, true, true), LOCAL);
+        assert_eq!(floor(SONNET, true, true), LOCAL);
+        assert_eq!(floor(OPUS, false, true), OPUS);
+        assert_eq!(floor(OPUS, true, false), OPUS);
+    }
+
+    #[test]
+    fn implementer_model_keeps_local() {
+        assert_eq!(implementer_model(LOCAL, &item(true), 0), LOCAL);
     }
 
     fn item(reopened: bool) -> Item {
         Item {
+            merge_commit: None,
             id: "x".into(),
             title: "x".into(),
             status: crate::backlog::ItemStatus::Todo,
@@ -281,26 +316,53 @@ mod tests {
             branch: None,
             kind: None,
             milestone: None,
+            draft_id: None,
             reopened: reopened.then(|| crate::backlog::Reopened {
                 notes: Some("n".into()),
                 at: Some("2026-10-29T00:00:00Z".into()),
                 by: None,
             }),
+            red_sha: None,
+            no_fix_sha: None,
+            size: None,
+            tier: None,
         }
     }
 
     #[test]
     fn a_first_try_at_a_full_window_runs_on_sonnet_not_opus() {
-        assert_eq!(implementer_model(OPUS, &item(false)), SONNET);
+        assert_eq!(implementer_model(OPUS, &item(false), 0), SONNET);
+    }
+
+    fn sized(size: Option<&str>) -> Item {
+        Item {
+            size: size.map(str::to_string),
+            ..item(false)
+        }
+    }
+
+    #[test]
+    fn retries_and_big_items_keep_opus() {
+        assert_eq!(implementer_model(OPUS, &sized(None), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(Some("M")), 0), SONNET);
+        assert_eq!(implementer_model(OPUS, &sized(None), 1), OPUS);
+        assert_eq!(implementer_model(OPUS, &sized(Some("L")), 0), OPUS);
+        assert_eq!(implementer_model(OPUS, &sized(Some("xl")), 0), OPUS);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
+        for tier in [SONNET, LOCAL] {
+            for (it, attempt) in [(item(true), 0), (sized(Some("XL")), 0), (sized(None), 2)] {
+                assert_eq!(implementer_model(tier, &it, attempt), tier);
+            }
+        }
     }
 
     #[test]
     fn a_reopened_item_keeps_opus() {
-        assert_eq!(implementer_model(OPUS, &item(true)), OPUS);
+        assert_eq!(implementer_model(OPUS, &item(true), 0), OPUS);
     }
 
     #[test]
     fn a_tier_already_below_opus_is_kept_whatever_the_item_is() {
-        assert_eq!(implementer_model(SONNET, &item(true)), SONNET);
+        assert_eq!(implementer_model(SONNET, &item(true), 0), SONNET);
     }
 }

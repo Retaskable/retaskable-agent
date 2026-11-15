@@ -248,3 +248,15 @@ fn numbered(path: &Path, n: u32) -> PathBuf {
     name.push(format!(".{n}"));
     PathBuf::from(name)
 }
+
+/// `bundleDir` (release.ts): where a release build finds `build.json`'s companions (`icons/`):
+/// beside the executable, or a `.app`'s `Contents/Resources/` when it sits in `Contents/MacOS/`.
+pub fn bundle_dir(exe_path: &Path) -> PathBuf {
+    let dir = exe_path.parent().unwrap_or(Path::new("."));
+    match (dir.file_name(), dir.parent()) {
+        (Some(name), Some(contents)) if name == "MacOS" && contents.file_name().is_some_and(|c| c == "Contents") => {
+            contents.join("Resources")
+        }
+        _ => dir.to_path_buf(),
+    }
+}

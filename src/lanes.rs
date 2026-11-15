@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::repo::git;
 use crate::sync::lock;
 
 mod manifest_scan;
@@ -113,10 +114,9 @@ pub fn prepare_at(
 }
 
 /// `<worktrees_dir>/_planner`: the project's shared base checkout (docs/specs/agent/06.1
-/// "Planner (retired)"), detached at `origin/<base_branch>`. Shoot (06.8) is its first user here;
-/// the baseline, Play main, phone builds and main syncs take the same checkout one at a time once
-/// they're ported. Shoot and Play main hold it through [`crate::base_hold::hold_base`]; a caller of
-/// [`prepare_base_checkout`] for anything else holds it alone until that one takes the lock too.
+/// "Planner (retired)"), detached at `origin/<base_branch>`. Play main, the baseline and
+/// the minute sync each hold it through [`crate::base_hold`], one at a time; a caller of
+/// [`prepare_base_checkout`] for anything else (phone builds) holds it alone until that takes the lock too.
 pub fn base_checkout_path(worktrees_dir: &Path) -> PathBuf {
     worktrees_dir.join("_planner")
 }
@@ -142,6 +142,13 @@ pub fn prepare_base_checkout(repo_path: &Path, worktrees_dir: &Path, base_branch
 /// The base checkout's current commit (`git rev-parse HEAD`), trimmed.
 pub fn head_sha(dir: &Path) -> Result<String> {
     Ok(git_output_in_worktree(dir, &["rev-parse", "HEAD"])?.trim().to_string())
+}
+
+/// The commit `reference` (e.g. `origin/main`) points at, seen from `dir`.
+pub fn ref_sha(dir: &Path, reference: &str) -> Result<String> {
+    Ok(git_output_in_worktree(dir, &["rev-parse", reference])?
+        .trim()
+        .to_string())
 }
 
 /// `<worktrees_dir>/smoke`: the post-merge staging smoke's own checkout
@@ -197,7 +204,8 @@ pub fn outside_paths(manifest: &str) -> Vec<String> {
         .into_iter()
         .chain(file_or_link_values(&manifest))
     {
-        if path.starts_with("..") && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
+        let climbs = path.split(['/', '\\']).next() == Some("..");
+        if climbs && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
             found.push(path);
         }
     }
@@ -207,6 +215,21 @@ pub fn outside_paths(manifest: &str) -> Vec<String> {
 /// `<worktrees_dir>/lane-<lane>`.
 pub fn lane_path(worktrees_dir: &Path, lane: u32) -> PathBuf {
     worktrees_dir.join(format!("lane-{lane}"))
+}
+
+/// The `k` of a `lane-<k>` folder.
+pub fn lane_number(dir: &Path) -> Option<u32> {
+    parse_lane_name(dir.file_name()?.to_str()?)
+}
+
+/// The `k` of a folder name that is exactly what [`lane_path`] writes: `lane-` and plain digits, no
+/// `+` sign and no leading zero (`lane-+1` and `lane-01` aren't lane 1's folder, and `parse` alone takes both).
+fn parse_lane_name(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix("lane-")?;
+    if digits.starts_with('0') && digits.len() > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn ensure_worktree(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Result<()> {
@@ -407,21 +430,12 @@ pub(crate) fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
     };
     for entry in entries {
         let entry = entry?;
-        if let Some(lane) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix("lane-"))
-            .and_then(|num| num.parse::<u32>().ok())
-        {
+        if let Some(lane) = entry.file_name().to_str().and_then(parse_lane_name) {
             found.push(lane);
         }
     }
     found.sort_unstable();
     Ok(found)
-}
-
-fn git(repo_path: &Path) -> Command {
-    crate::git_bin::command(repo_path)
 }
 
 /// A git call inside `<worktreesDir>` (a lane, in this module). These worktrees share the
@@ -763,6 +777,13 @@ mod tests {
     }
 
     #[test]
+    fn outside_paths_needs_a_real_parent_component_not_just_a_dotdot_prefix() {
+        // `..hidden` is an ordinary folder name inside the repo, not a climb out of it.
+        let cargo = "a = { path = \"..hidden/x\" }\nb = { path = \"..\\\\win\" }\nc = { path = \"..\" }\n";
+        assert_eq!(outside_paths(cargo), vec!["..\\\\win", ".."]);
+    }
+
+    #[test]
     fn outside_paths_ignores_a_commented_out_dependency() {
         let cargo = "[dependencies]\n# void_engine = { path = \"../void-engine\" }\nserde = \"1\" # path = \"../x\"\n";
         assert_eq!(outside_paths(cargo), Vec::<String>::new());
@@ -930,5 +951,20 @@ mod tests {
         assert!(outside.try_wait().unwrap().is_none(), "lane-10 keeps running");
         let _ = outside.kill();
         let _ = outside.wait();
+    }
+
+    #[test]
+    fn a_lane_folders_number_is_read_from_its_name() {
+        assert_eq!(lane_number(Path::new("worktrees/lane-3")), Some(3));
+        assert_eq!(lane_number(Path::new("lane-12")), Some(12));
+        assert_eq!(lane_number(Path::new("worktrees/smoke")), None);
+        assert_eq!(lane_number(Path::new("lane-")), None);
+        assert_eq!(lane_number(Path::new("lane-+1")), None);
+        assert_eq!(lane_number(Path::new("lane-01")), None);
+        assert_eq!(lane_number(Path::new("lane-0")), Some(0));
+        assert_eq!(lane_number(Path::new("lane-12")), Some(12));
+        assert_eq!(lane_number(Path::new("lane-x")), None);
+        assert_eq!(lane_number(Path::new("lane--1")), None);
+        assert_eq!(lane_number(Path::new("")), None);
     }
 }

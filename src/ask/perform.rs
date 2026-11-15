@@ -22,6 +22,8 @@ pub struct Perform<'a> {
     pub images_block: &'a str,
     /// The backlog list: the items a `revises` may name.
     pub items: &'a [Item],
+    /// Where a `draft_queue` the store refuses is kept, for the loop to log.
+    pub failures: Option<&'a crate::backlog::failures::Failures>,
 }
 
 /// Runs each action in order; one result per action (`{ type, ok, reason? }`, a `draft_spec`'s with the draft's
@@ -87,6 +89,9 @@ async fn run(action: &Action, cx: &Perform<'_>) -> (&'static str, Result<Option<
                 ..Default::default()
             };
             let sent = cx.client.draft_queue(cx.repo_id, cx.token, &draft).await;
+            if let (Err(e), Some(failures)) = (&sent, cx.failures) {
+                failures.add("draft_queue", cx.ask_id, e);
+            }
             ("draft_spec", sent.map(Some).map_err(|e| e.to_string()))
         }
     }

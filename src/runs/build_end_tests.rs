@@ -1,5 +1,5 @@
 use super::*;
-use crate::implementer::Question;
+use crate::implementer::{CursorTimeKilled, Question};
 use anyhow::anyhow;
 use chrono::{TimeZone, Utc};
 use std::time::Duration;
@@ -36,7 +36,7 @@ fn decided(text: &str) -> Decision {
 }
 
 fn end(r: ImplementerResult, p: Option<&Pushed>, d: &[Decision]) -> (RunOutcome, Value) {
-    end_from_answer(Ok(r), p, d, Some("claude"), Utc::now())
+    end_from_answer(Ok(r), p, d, "claude", Utc::now())
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn nothing_left_failed_waits_on_and_unknown() {
 
 #[test]
 fn session_errors() {
-    let e = |err: Error| end_from_answer(Err(err), None, &[], Some("claude"), Utc::now());
+    let e = |err: Error| end_from_answer(Err(err), None, &[], "claude", Utc::now());
     assert_eq!(
         e(Interrupted("cut".into()).into()),
         (RunOutcome::Interrupted, json!({}))
@@ -138,6 +138,10 @@ fn session_errors() {
     assert_eq!(
         e(SilenceKilled("quiet".into()).into()).0,
         RunOutcome::Failed("went quiet and was killed: quiet".into())
+    );
+    assert_eq!(
+        e(CursorTimeKilled("slow".into()).into()).0,
+        RunOutcome::Failed("ran past its time limit and was killed: slow".into())
     );
     assert_eq!(
         e(MaxTurns("turns".into()).into()).0,
@@ -167,13 +171,7 @@ fn a_usage_limit_ends_limited_with_when_it_lifts() {
             resets_in,
         })
     };
-    let (o, r) = end_from_answer(
-        Err(hit(Some(Duration::from_secs(3600)))),
-        None,
-        &[],
-        Some("claude"),
-        now,
-    );
+    let (o, r) = end_from_answer(Err(hit(Some(Duration::from_secs(3600)))), None, &[], "claude", now);
     let until = Utc.with_ymd_and_hms(2026, 1, 1, 1, 0, 0).unwrap();
     assert_eq!(
         (o, r),
@@ -185,7 +183,7 @@ fn a_usage_limit_ends_limited_with_when_it_lifts() {
             json!({})
         )
     );
-    let (o, _) = end_from_answer(Err(hit(None)), None, &[], Some("claude"), now);
+    let (o, _) = end_from_answer(Err(hit(None)), None, &[], "claude", now);
     assert_eq!(
         o,
         RunOutcome::Limited {
@@ -194,17 +192,4 @@ fn a_usage_limit_ends_limited_with_when_it_lifts() {
         }
     );
     assert!(limited_end(&anyhow!("boom"), "claude", now).is_none());
-}
-
-#[test]
-fn a_usage_limit_ends_failed_while_the_flag_is_off() {
-    let hit = Error::new(LimitHit {
-        why: "limit".into(),
-        resets_in: None,
-    });
-    let (o, _) = end_from_answer(Err(hit), None, &[], None, Utc::now());
-    assert_eq!(
-        o,
-        RunOutcome::Failed("The session ended without answering: limit".into())
-    );
 }

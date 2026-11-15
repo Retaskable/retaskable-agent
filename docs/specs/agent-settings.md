@@ -22,6 +22,7 @@ A project's own settings stay in Project settings on retaskable.com, as before.
 - **[Decided]** The page changes settings only. It never runs a command, and it never shows or changes a project's settings or the owner's.
 - **[Decided]** (2026-10-22) The human: daily budget, sessions at once and model thresholds are agent settings changed on the site, "only changeable by the owner of the agent" (the person who linked it). Everything else about a computer (links, port, local model, how often it checks, tags, Cursor settings, network access) is set only at the computer, never from the site.
 - **[Decided]** (2026-10-22) The owner's settings need no fresh sign-in: they run no code. They cost money, so they stay the owner's alone.
+- **[Decided]** (2026-11-09, [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md)) The owner's three settings moved from the computer to the server: they are kept in the project's store, in the pool record of each computer that has reported to it, and written by `pool_settings`, not by the `agent_settings` command, which is gone. The computer does not read them back; the store applies them when it sends work (the number of sessions at once, the daily budget, the tier thresholds). Settings start from the defaults (1 session, no daily cap, auto on with 1 to 8 at 75%, Opus above 50%, wait below 5%); nothing is read from an old `config.json`. There is no per-model sessions setting and no Sonnet threshold any more. The keys stay in `config.json` and the agent's own scheduling still reads them until the agent's own pool is deleted (not built), so the numbers on the computer no longer show anywhere.
 
 | Setting | Where it's changed | Kept in |
 |---|---|---|
@@ -34,17 +35,16 @@ A project's own settings stay in Project settings on retaskable.com, as before.
 | Engines (which program runs each kind of work: Claude Code, Cursor, pi, Codex or the local model) | setup, `RETASKABLE_ENGINES`, the settings page | `config.json` `engineChoice` |
 | Cursor's models | setup, `RETASKABLE_CURSOR_MODELS`, the settings page | `config.json` `cursor.models` |
 | Network access to the settings page, and its password | setup, `RETASKABLE_NETWORK_PASSWORD`, the settings page | `machine.json` `network` (the password as a scrypt hash) |
-| Daily budget | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `budget.dailyUsd` |
-| Sessions at once (concurrency, auto, per model) | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `concurrency`, `autoConcurrency`, `modelConcurrency` |
-| Model thresholds | Settings → Agents on the site, by the agent's owner only (`agent_settings`) | `config.json` `models` |
+| Daily budget | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store, in that computer's pool record (`dailyUsd`) |
+| Sessions at once (`limit`) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`limit`) |
+| Model thresholds (`opusAbovePct`, `pauseBelowPct`) | Settings → Agents on the site, by the agent's owner only (`pool_settings`) | the project's store (`models`) |
 
-### 2.1 The owner's settings: `agent_settings`
+### 2.1 The owner's settings: `pool_settings` (changed 2026-11-09)
 
-- **The command** ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1): `agent_settings { dailyUsd?, concurrency?, autoConcurrency?, modelConcurrency?, models? }`, each checked as Setup checks it (a budget from 0 to 100000, sessions whole numbers from 1 to 64, percentages from 0 to 100). Nothing else: a tag, the local model or how often it checks is no part of it, and the agent refuses one as "Not a command this agent takes".
-- **The hub** takes it only from the person who linked the computer; the agent trusts that check and re-checks nothing about who sent it. Who may send it, the owner's name in the refusal and MCP's exclusion are the hub's ([cloud.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/cloud.md) section 6.1).
-- **The agent** (`agent/src/commands.ts`) saves it at once, with no one at the computer to allow it: `saveAgentSettings` (`agent/src/siteSettings.ts`) writes the file through `saveConfigFile` (`withAgentSettings`: what isn't named stays; "Name a change." for none, thresholds out of order and auto's least above its most refused in Setup's words), then `pool.configure` and a new hello on every project, so the page shows the new values.
-- **The old ways go.** The agent refuses `computer_tags` and a `settings_request` naming a computer-only setting (`pollIntervalSec`, `local`, `cursorModels`, engines): neither command's schema has them any more.
-- **An older agent** doesn't know `agent_settings` and refuses it. An agent that does says so in its hello (`capabilities` has `agent_settings`, `AGENT_SETTINGS_CAPABILITY`).
+- **The op** (`shared/backlogPoolOps.ts`, [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md) section 5.4): `pool_settings { agent, limit?, dailyUsd?, autoConcurrency?, models? }`, checked in the ranges of `shared/pools.ts`, saved in the project's store at once. `pool_get` reads them with `allowed` and the reason to wait. The store takes `pool_settings` only from the computer's owner, who is the login of its first `health`; so it is refused until the computer has reported once to that project, and the Agents tab shows the defaults read-only until then.
+- **The site** sends it through the shown project's store (a computer that serves several projects has one pool per store, so the tab shows the shown project's). Only the keys that changed are sent. The old `agent_settings` command, its schema, the hello capability and the agent's write (`saveAgentSettings`) are gone, and the hub refuses an old page's `agent_settings` with "...saved in the project, not on the computer", the owner too.
+- **The old ways stay gone.** The hub still refuses `computer_tags` and a `settings_request` naming one of these settings or one set at the computer (`pollIntervalSec`, `local`, `cursorModels`, `lanes`), in plain words (`retiredRefusal`).
+- **A one-time note**, a dismissible banner kept on the device (`retaskable.poolSettingsNote`), says the settings moved and start from the defaults.
 
 The Agents page on the site (one card per computer, which settings are editable by the owner or read-only with how to change them at the computer, the Sample's made-up computer) is the app's: [expo.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/expo.md). The agent sends what it needs in its hello: the settings and, for the secrets, only each environment variable's name and whether it is set, never a value.
 
@@ -62,6 +62,7 @@ The Agents page on the site (one card per computer, which settings are editable 
 - **Tags**: [computer-tags.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/computer-tags.md)'s rules. A list typed in is saved as your changes to the found tags (`added`, `removed`), as before. Which work a computer with these tags takes is the store's to decide.
 - **Engines**: a default (`claude`, `cursor`, `pi`, `codex` or `local`) and, per kind of work (`planner`, `implementer`, `review`, `drafter`, `chat`, `writer`), the default or one of the five. `pi` is the pi coding tool ([engines.md](engines.md) section 13); `codex` is Codex ([engines.md](engines.md) section 14). `local` is Claude Code pinned to the local model: it falls back to the role's tier when the local model is off or down, and a resumed session stays on the backend it started on. Environment: `RETASKABLE_ENGINES`, one engine for all (`local`) or `name=engine` pairs (`default=cursor,implementer=local`). Per lane (Built): `lanes`, the engine of each lane, lane 1 first (`claude`, `codex`, `cursor` or `default`), so 2 lanes can run on Claude Code and 2 on Cursor ([engines.md](engines.md) section 3.1); the page has a select per lane, as many as the computer's lanes (or, if more were already saved, that many instead, so lowering lanes never silently drops a saved override). Environment: `default=claude,lanes=claude+claude+cursor+cursor`; a lanes list with any entry that is not `claude`, `codex`, `cursor` or `default` is left out whole, and the page refuses one. Until the computer saves its own choice, a project's older `engines.default`/`roles` still count. The website only shows it and refuses to set it (`ENGINES_AT_THE_COMPUTER`); a project's `engines.allow` (Cursor's allowlist) stays a project setting.
 - **Cursor's models**: one per tier (planning and review, building, scouts and small jobs); empty is `auto`.
+- **Cursor may also run** (per project, shown once any role or lane is on Cursor): a text box for the typed `engines.allow` entries (commas or new lines), a refused entry's reason beside it, the `allowlist_in_force` line (red when sessions won't start) and, when there are any, "Already allowed, from your checks: Shell(npm), Shell(cargo)". It saves through `POST /api/settings` (`cursorAllow`).
 - **Network access**: on or off. On needs a password of at least 8 characters, kept as `scrypt$N$r$p$salt$hash` and checked in constant time. Turning it off keeps the hash, so turning it on again needs no new one. Changes once the agent restarts.
 
 ### 3.2 Environment variables
@@ -81,7 +82,7 @@ For a computer with no screen, each can be set by a variable, read through `envV
 | `RETASKABLE_NETWORK_PASSWORD` | network access on, with this password |
 
 - **A variable wins over the file.** The agent runs on the file's settings with the variables' over them (`withEnvSettings`, in `Pool.configure`); the file keeps its own, so a save never writes a variable's value into it. A value that doesn't read (a port that isn't a number) is left out.
-- **It says so.** The settings page shows such a setting greyed out, "Set by RETASKABLE_POLL_SEC: change it there.", and refuses a change to it; setup says it instead of asking. Each is in `AGENT_ENV_VARS`, so the hello lists it as set, by name only, never its value.
+- **It says so.** The settings page shows such a setting greyed out, "Set by RETASKABLE_POLL_SEC: change it there.", and refuses a change to it; setup says it instead of asking. Each is in `AGENT_ENV_VARS`, so the hello lists it as set, by name only, never its value. In this Rust agent `AGENT_ENV_VARS` (`hello_settings.rs`) also has `RETASKABLE_LANES`, and the hello's `settings` object holds the owner's settings and the computer-only values the page shows (port, lanes, pollIntervalSec, local, engines, cursorModels, tags, networkAccess) with `envVars`; a save on the settings page sends a fresh hello on every project's connection. `settings` is in the hello. `capabilities` is `["agent_settings"]` (`AGENT_SETTINGS_CAPABILITY`) and `agent_settings` is taken. `agent_settings` is saved at once through `site_settings::save_agent_settings` and fires the same hello signal; there is no session pool yet, so nothing is configured after the save.
 
 ## 4. The settings page
 
@@ -93,8 +94,8 @@ For a computer with no screen, each can be set by a variable, read through `envV
 
 ### 4.2 Signing in on this computer
 
-- The tray's **Settings…** (and the terminal menu's) opens `http://127.0.0.1:<port>/settings#<token>`: a random token, made for that click, good once within 5 minutes. A token in the fragment never reaches a server log or a `Referer`.
-- The page takes it out of the address and posts it to `/api/settings/session`, which answers with a session cookie (`HttpOnly`, `SameSite=Strict`, 8 hours) and a CSRF token. A tray token is taken only from the computer itself (a loopback address).
+- `SettingsServer::settings_link()` makes the address the tray's **Settings…** (and the terminal menu's) opens, and the first run below opens, `http://127.0.0.1:<port>/settings#<token>`: a random token, made for that click, good once within 5 minutes. A token in the fragment never reaches a server log or a `Referer`.
+- The page takes it out of the address and posts it to `/api/settings/session`, which answers with a session cookie (`HttpOnly`, `SameSite=Strict`, 8 hours) and a CSRF token. A tray token is taken only from the computer itself (a loopback address); one from another address is refused and not used up.
 
 ### 4.3 What every request must have
 
@@ -108,7 +109,7 @@ For a computer with no screen, each can be set by a variable, read through `envV
 
 Off by default. When it was on with a password as the agent started (or `RETASKABLE_NETWORK_PASSWORD` is set), the port listens on every address (`0.0.0.0`) instead of `127.0.0.1`, and the console says the page is open on the network. Turned off while running, other computers are refused at once; the binding changes at the restart. The page is plain `http` on the local network: a password typed there crosses it unencrypted, as on any router's own page, so it's a password for this page only. The port binds `127.0.0.1` unless the person at the computer turns this on, and never takes a command either way.
 
-A release build opens the page once by itself, on its first run with no config file yet (`settingsOpened` in machine.json).
+A release build opens the page once by itself, on its first run with no config file yet (`settingsOpened` in machine.json, set when it opens, even if no browser could be started). A checkout build never opens it.
 
 ### 4.5 The Now tab and `GET /api/settings/status`
 
@@ -116,19 +117,19 @@ The page has two tabs, **Now** (the first) and **Settings**, kept in the address
 
 - `GET /api/settings/status` is read-only and answers exactly as the page does: the session cookie, the Host and loopback checks of 4.3, and 401 when signed out. It gives `ComputerStatus` (`src/settings_server/status.rs`, built from the config, the latest setup checks, the agent's own view and `machine.json`): the header (name, state, version, uptime in seconds, projects, lanes busy of total), alerts, lanes, sessions without a lane, and engines. Names and numbers only.
 - **Needs attention**: Claude Code signed out, and a paused project with its reason. Nothing is listed when nothing is wrong.
-- **Lanes** are the computer's, across every project, each with its engine (its own, or the default followed). This agent has no session pool yet, so every lane reads free and no session is listed.
-  - **Live sessions (item `live-sessions-reporting`).** Once the orchestrator runs sessions, each lane shows the session on it, and a session with no lane (an ask, a spec draft, a scout) is listed apart. A row has the project, the item or draft, the role, the engine and model, how long it has run and how long it has been quiet. It has no transcript text or prompt. The header's "lanes busy" counts lanes with a session on them. `GET /api/settings/status` gives the same rows. The cloud tick's `sessions` count is the number of rows.
+- **Lanes** are the computer's, across every project, each with its engine (its own, or the default followed). In this Rust agent each lane shows the session on it from the live registry (`orchestrator::live::sessions`) and the sessions without a lane list holds every other session (see below).
+  - **Live sessions.** Each lane shows the session on it, and a session with no lane (an ask, a spec draft, a scout) is listed apart. A row has the project, the item or draft, the role, the engine and model, how long it has run and how long it has been quiet. It has no transcript text or prompt. The page shows a lane's session as `implementer · codex gpt-x · run 12m, quiet 30s`, and the header's "lanes busy" counts lanes with a session on them. `GET /api/settings/status` gives the same rows. The cloud tick's `sessions` count is the number of rows.
 - **Engines**: found and its version (from the setup checks, re-run every ten minutes), signed in (Claude Code only), what it is used for (kinds of work and lanes), its limit ("Not reported": nothing here reads one), and today's tokens for Cursor and Codex when something records them (`machine.json`, by local day, seven days kept).
 - The page polls the status every 5 seconds while the Now tab is showing and the page is visible; a failed poll says it isn't updating and keeps the last picture. Times show in the viewer's clock.
 - The **Settings** tab holds the same fields as before, regrouped, with a save per group. Every field keeps its id and the save of 4.1. The lanes number is shown, not saved, here.
 
 ## 5. Setup
 
-`npm run link` (`agent/src/cli.ts`), once linked to retaskable.com and with someone at a terminal, asks each in turn with what it is now in brackets, which Enter keeps (`agent/src/setupQuestions.ts`): the port, the local model (on or off, then its model and address), how often to check for work, the tags ("none" for none), Cursor's model per tier ("auto" for auto), and network access with its password (not echoed, asked again when too short; on without one stays off). A setting a variable sets is said, not asked. Without a terminal nothing is asked. It saves as the page does and says "Saved. If Retaskable is running, restart it to use them." A running agent's own saves of machine.json keep the tags and network access setup wrote meanwhile.
+`retaskable link` (`link_command`), once linked to retaskable.com and with someone at a terminal, asks each in turn with what it is now in brackets, which Enter keeps (`src/setup_questions.rs`): the port, the local model (on or off, then its model and address), how often to check for work, the tags ("none" for none), Cursor's model per tier ("auto" for auto), and network access with its password (not echoed, asked again when too short; on without one stays off). A setting a variable sets is said, not asked. Without a terminal nothing is asked. It saves as the page does (the same `Saver` in `src/settings_server/save.rs`, so the same validation and refusals, asked again) and says "Saved. If Retaskable is running, restart it to use them." A running agent's own saves of machine.json keep the tags and network access setup wrote meanwhile.
 
 ## 6. Tested
 
-The agent part: `agent/src/commands.test.ts` (`agent_settings` saved at once, nothing waits at the machine, and its wire takes only the owner's fields; the old `computer_tags` and computer-only fields refused), `agent/src/siteSettings.test.ts` (`withAgentSettings`, and neither schema carrying what's set at the computer).
+The agent part (changed 2026-11-09: the agent no longer writes the owner's settings): `agent/src/commands.test.ts` (the wire takes none of the owner's fields; the old `computer_tags`, `agent_settings` and computer-only fields refused), `agent/src/siteSettings.test.ts` (neither schema carrying what's set at the computer).
 
 The computer part:
 

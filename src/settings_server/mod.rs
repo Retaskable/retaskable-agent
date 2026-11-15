@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config;
+use crate::hello_settings::{HelloSettings, env_vars_json};
 use crate::link::{self, TokenStore};
 use crate::network::{self, NetworkAccess};
 use crate::profile;
@@ -26,16 +27,18 @@ use crate::store::MachineStore;
 use crate::tags;
 
 mod auth;
-mod save;
+mod first_run;
+pub(crate) mod save;
 mod status;
 use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
-use save::{SettingsUpdate, engine_choice_json, save_error_response};
+pub(crate) use save::engine_choice_json;
+use save::{SettingsUpdate, save_error_response};
 pub use status::StatusSource;
 
 const MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// agent-settings.md section 3.2: the environment variables the settings page greys out.
-const AGENT_ENV_VARS: [&str; 8] = [
+pub(crate) const AGENT_ENV_VARS: [&str; 8] = [
     "RETASKABLE_PORT",
     "RETASKABLE_POLL_SEC",
     "RETASKABLE_TAGS",
@@ -66,6 +69,8 @@ pub struct SettingsServer {
     /// process runs.
     env_network_access: Option<NetworkAccess>,
     env: Env,
+    /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
+    own_addresses: Box<dyn Fn() -> Vec<std::net::IpAddr> + Send + Sync>,
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
     /// This machine's stored cloud tokens, for `GET /api/link` (section 9.2's "computer's link
@@ -74,6 +79,10 @@ pub struct SettingsServer {
     state: Mutex<InnerState>,
     /// The Now tab's live inputs (`status.rs`), given once at start.
     status: OnceLock<StatusSource>,
+    /// Fired after a save, so every project's connection sends a fresh hello (given once at start).
+    saved: OnceLock<HelloSettings>,
+    /// The running agent's device-link state, for `GET /api/backlog/link`'s `waiting` (given once at start).
+    links: OnceLock<link::pending::Links>,
 }
 
 impl SettingsServer {
@@ -96,12 +105,36 @@ impl SettingsServer {
             network_enabled,
             env_network_access,
             env,
+            own_addresses: Box::new(|| {
+                if_addrs::get_if_addrs()
+                    .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
+                    .unwrap_or_default()
+            }),
             now: Box::new(now),
             exit: Box::new(exit),
             keychain,
             state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
+            saved: OnceLock::new(),
+            links: OnceLock::new(),
         }
+    }
+
+    fn saver(&self) -> save::Saver<'_> {
+        save::Saver {
+            dir: &self.dir,
+            env: &self.env,
+        }
+    }
+
+    /// The signal a successful save fires.
+    pub fn set_saved_signal(&self, signal: HelloSettings) {
+        let _ = self.saved.set(signal);
+    }
+
+    /// Gives `GET /api/backlog/link` the running agent's device-link state; with none, `waiting` is null.
+    pub fn set_links(&self, links: link::pending::Links) {
+        let _ = self.links.set(links);
     }
 
     fn current_settings(&self) -> Result<Value> {
@@ -121,7 +154,7 @@ impl SettingsServer {
             .env_network_access
             .clone()
             .unwrap_or_else(|| machine.network().unwrap_or_default());
-        Ok(json!({
+        let mut settings = json!({
             "port": port,
             // agent-settings.md section 4.1: whether the saved port or network access differs
             // from what the agent runs on.
@@ -149,13 +182,32 @@ impl SettingsServer {
                 "enabled": net.enabled,
                 "hasPassword": net.password_hash.is_some(),
             },
-            "envVars": Value::Object(
-                AGENT_ENV_VARS
-                    .iter()
-                    .map(|name| ((*name).to_string(), Value::Bool(env.get(name).is_some())))
-                    .collect(),
-            ),
-        }))
+            "envVars": env_vars_json(env),
+        });
+        settings["ciSlots"] = json!(config::ci_slots(&cfg, env));
+        settings["cursorAllow"] = Self::cursor_allow_json(&cfg, env);
+        Ok(settings)
+    }
+
+    /// Each project's `engines.allow`, the programs derived from its checks, and the
+    /// allowlist file Cursor follows there (engines/06-permissions-the-allowlist.md section 6.4).
+    fn cursor_allow_json(cfg: &config::ConfigFile, env: &Env) -> Value {
+        let rows = cfg.projects.iter().map(|p| {
+            let (line, problem) = crate::engines::cursor::allowlist_in_force(std::path::Path::new(&p.repo_path), env);
+            let allow = p
+                .engines
+                .as_ref()
+                .and_then(|e| e.get("allow"))
+                .cloned()
+                .unwrap_or(json!([]));
+            json!({
+                "project": p.id_or_derived(),
+                "allow": allow,
+                "commandShells": crate::engines::cursor::command_shells(&p.checks),
+                "inForce": { "line": line, "problem": problem },
+            })
+        });
+        Value::Array(rows.collect())
     }
 
     /// `GET /api/link`'s view of each of retaskable.com's three environments, and a custom
@@ -173,6 +225,19 @@ impl SettingsServer {
             })
             .collect();
         Ok(json!({ "environments": environments }))
+    }
+
+    /// `GET /api/backlog/link`: whether this machine holds a token for the shared backlog's store, the
+    /// store's address, and the approval page while a device-link code waits.
+    fn backlog_link_view(&self) -> Value {
+        let url = crate::backlog::url(&self.env);
+        let linked = matches!(self.keychain.get(&url), Ok(Some(_)));
+        let waiting = self
+            .links
+            .get()
+            .and_then(|l| l.backlog())
+            .map(|w| json!({ "url": w.page_url, "label": w.label }));
+        json!({ "linked": linked, "url": url, "waiting": waiting })
     }
 }
 
@@ -192,6 +257,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
+        .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(settings.clone(), security_envelope))
@@ -237,7 +303,7 @@ async fn post_session(
         return bad_request("No JSON body.");
     };
     let signed_in = match (&req.token, &req.password) {
-        (Some(token), _) => settings.verify_token(token),
+        (Some(token), _) => settings.verify_token(token, addr),
         (None, Some(password)) => settings.verify_password(password),
         (None, None) => false,
     };
@@ -281,8 +347,13 @@ async fn post_settings(
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
-    match settings.apply(&update) {
-        Ok(()) => Json(json!({ "saved": true })).into_response(),
+    match settings.saver().apply(&update) {
+        Ok(()) => {
+            if let Some(signal) = settings.saved.get() {
+                signal.fire();
+            }
+            Json(json!({ "saved": true })).into_response()
+        }
         Err(e) => save_error_response(e),
     }
 }
@@ -295,6 +366,13 @@ async fn get_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMa
         Ok(value) => Json(value).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+async fn get_backlog_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+    if settings.authenticate(&headers).is_none() {
+        return unauthorized("Sign in first.");
+    }
+    Json(settings.backlog_link_view()).into_response()
 }
 
 /// `GET /api/profile?fresh=1`: every read already calls `gh api user` fresh (no cache here for
@@ -385,6 +463,8 @@ pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
     ))
 }
 
+#[cfg(test)]
+mod network_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

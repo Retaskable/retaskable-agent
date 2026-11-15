@@ -58,7 +58,7 @@ fn parse_line(line: &str) -> Option<Phone> {
     let serial = fields.next()?.to_string();
     let state = fields.next()?.to_string();
     let model = fields
-        .find_map(|f| f.strip_prefix("model:"))
+        .find_map(|f| f.strip_prefix("model:").filter(|m| !m.is_empty()))
         .map(|m| m.replace('_', " "))
         .unwrap_or_else(|| serial.clone());
     Some(Phone { serial, model, state })
@@ -351,6 +351,13 @@ mod tests {
         assert_eq!(phones[1].state, "offline");
     }
 
+    #[test]
+    fn an_empty_model_field_falls_back_to_the_serial() {
+        let phones = parse_devices("List of devices attached\nAAA device model: transport_id:1\nBBB device model:\n");
+        assert_eq!(phones[0].model, "AAA");
+        assert_eq!(phones[1].model, "BBB");
+    }
+
     // find_adb
 
     #[test]
@@ -360,7 +367,7 @@ mod tests {
         std::fs::create_dir_all(&platform_tools).unwrap();
         std::fs::write(platform_tools.join("adb"), "").unwrap();
         let home = dir.path().to_string_lossy().to_string();
-        let env = Env::from_pairs([("ANDROID_HOME", home.clone())]);
+        let env = Env::from_pairs([("ANDROID_HOME", home)]);
 
         assert_eq!(find_adb(&env, "adb", &[], None), Some(platform_tools.join("adb")));
     }
@@ -397,7 +404,7 @@ mod tests {
         let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
         std::fs::write(platform_tools.join(exe_name), "").unwrap();
         let sdk_root = dir.path().to_string_lossy().to_string();
-        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root.clone())]);
+        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root)]);
 
         assert_eq!(find_adb_on_path(&env), Some(platform_tools.join(exe_name)));
     }

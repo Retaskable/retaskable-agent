@@ -1,23 +1,24 @@
 use std::time::Duration;
-
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::*;
-use crate::backlog::ItemStatus;
-use crate::config::RoleEngines;
-use crate::orchestrator::driver::OutcomeSender;
+use crate::{backlog::ItemStatus, local_model::LocalModel, orchestrator::driver::OutcomeSender};
 
-const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
+pub(super) const FINISHED: &str = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"status":"pr_opened","summary":"done"},"total_cost_usd":0.1,"session_id":"s"}"#;
 
-struct Rig {
+pub(super) struct Rig {
     _dir: tempfile::TempDir,
-    root: PathBuf,
-    starter: Arc<ClaudeStarter>,
-    args: PathBuf,
+    pub(super) root: PathBuf,
+    pub(super) starter: Arc<ClaudeStarter>,
+    pub(super) args: PathBuf,
 }
 
 /// A project over a real repo, whose `claude` prints `lines` (or, with `None`, exits 3 at once).
-fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
+pub(super) fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
+    rig_with(lines, choice, claude, LocalModel::off())
+}
+
+pub(super) fn rig_with(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool, local: LocalModel) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let repo = crate::test_support::repo_with_origin(&root);
@@ -42,8 +43,10 @@ fn rig(lines: Option<&str>, choice: EngineChoiceConfig, claude: bool) -> Rig {
         choice,
         env,
         50,
-        ModelsConfig::default(),
         150_000,
+        Default::default(),
+        Default::default(),
+        local,
     );
     Rig {
         _dir: dir,
@@ -98,6 +101,7 @@ fn branch() -> String {
 
 fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     Item {
+        merge_commit: None,
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,
@@ -111,7 +115,12 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         branch: None,
         kind: None,
         milestone: None,
+        draft_id: None,
         reopened: None,
+        red_sha: None,
+        no_fix_sha: None,
+        size: None,
+        tier: None,
     }
 }
 
@@ -147,7 +156,7 @@ fn queued_item() -> Item {
     }
 }
 
-fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
+pub(super) fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let request = StartRequest {
         project: "p".into(),
@@ -187,6 +196,49 @@ fn answer(status: &str, questions: &str) -> String {
     format!(
         r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"status":"{status}","summary":"s","questions":{questions}}},"session_id":"s"}}"#
     )
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_implementer_is_listed_on_its_lane_while_it_runs_and_not_after() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let script = format!(
+        "#!/bin/sh\nsleep 1\ncat > /dev/null\ncat '{}'\n",
+        rig.root.join("out.jsonl").display()
+    );
+    crate::test_support::write_executable(&rig.root.join(fake_name()), &script);
+    let (request, mut rx) = request();
+    rig.starter.start(request).unwrap();
+    let rows = crate::orchestrator::fake_session_tests::rows_once_running(&rig.starter.sessions).await;
+    assert_eq!(rows.len(), 1);
+    let info = &rows[0].info;
+    assert_eq!(
+        (info.project.as_str(), info.item_id.as_str(), info.role),
+        ("p", "implementer-session", Role::Implementer)
+    );
+    assert_eq!(
+        (info.title.as_deref(), info.lane, info.engine),
+        (Some("Have a session write the code"), Some(1), EngineId::Claude)
+    );
+    assert!(!info.model.is_empty());
+    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rig.starter.sessions.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn a_session_that_cannot_start_leaves_no_row() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let starter = starter_with_unpreparable_lane(&rig);
+    let (request, mut rx) = request();
+    starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(starter.sessions.snapshot().is_empty());
 }
 
 #[tokio::test]
@@ -529,7 +581,7 @@ fn a_watchdog_kill_is_silenced_not_failed_or_needs_human() {
         "ended with killed_for_silence: no output".into(),
     )));
     assert!(
-        matches!(session_result_for_answer(killed, None).0, SessionResult::Silenced(_)),
+        matches!(session_result_for_answer(killed, None).0, SessionResult::Silenced(..)),
         "a session the watchdog killed is resumed, not requeued or sent to a person"
     );
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
@@ -560,7 +612,7 @@ fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
     )));
     assert!(matches!(
         session_result_for_answer(killed, None).0,
-        SessionResult::Silenced(_)
+        SessionResult::Silenced(..)
     ));
 
     let crashed = Err(anyhow::anyhow!("ended with error_during_execution"));
@@ -568,6 +620,18 @@ fn a_cut_sessions_error_maps_to_interrupted_not_needs_human_or_failed() {
         session_result_for_answer(crashed, None).0,
         SessionResult::NeedsHuman(_)
     ));
+}
+
+#[test]
+fn a_cursor_time_kill_is_silenced_with_its_own_subtype() {
+    let killed = Err(anyhow::Error::new(crate::implementer::CursorTimeKilled(
+        "ended with cursor_time".into(),
+    )));
+    let SessionResult::Silenced(why, subtype) = session_result_for_answer(killed, None).0 else {
+        panic!("a Cursor time kill is resumed like a watchdog kill");
+    };
+    assert!(why.starts_with("ran past its time limit and was killed"), "{why}");
+    assert_eq!(subtype, "cursor_time");
 }
 
 #[test]
@@ -615,47 +679,6 @@ async fn a_session_with_questions_sends_questions() {
     );
 }
 
-#[tokio::test]
-async fn no_usage_reading_yet_still_starts_a_first_try_on_sonnet() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    let (mut request, mut rx) = request();
-    request.usage = None;
-    rig.starter.start(request).unwrap();
-    rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
-    let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-    assert_eq!(model, Some("sonnet"), "{args}");
-}
-
-#[tokio::test]
-async fn a_reopened_item_with_no_usage_reading_starts_on_opus() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    let (mut request, mut rx) = request();
-    request.usage = None;
-    request.item.reopened = Some(crate::backlog::Reopened {
-        notes: Some("The list is empty".into()),
-        at: Some("2026-10-29T00:00:00Z".into()),
-        by: None,
-    });
-    rig.starter.start(request).unwrap();
-    rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
-    let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-    assert_eq!(model, Some("opus"), "{args}");
-}
-
-#[tokio::test]
-async fn a_usage_reading_below_opus_above_pct_starts_the_implementer_on_sonnet() {
-    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
-    let (mut request, mut rx) = request();
-    request.usage = Some(serde_json::json!({"status": "allowed_warning", "resetsAt": i64::MAX}));
-    rig.starter.start(request).unwrap();
-    rx.recv().await.unwrap();
-    let args = std::fs::read_to_string(&rig.args).unwrap();
-    let model = args.split_whitespace().skip_while(|a| *a != "--model").nth(1);
-    assert_eq!(model, Some("sonnet"), "{args}");
-}
-
 /// A starter like `rig`'s, but whose only project's repo path is missing, so preparing its lane fails.
 fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
     let mut projects = rig.starter.projects.clone();
@@ -666,8 +689,10 @@ fn starter_with_unpreparable_lane(rig: &Rig) -> Arc<ClaudeStarter> {
         EngineChoiceConfig::default(),
         rig.starter.env.clone(),
         50,
-        ModelsConfig::default(),
         150_000,
+        Default::default(),
+        Default::default(),
+        LocalModel::off(),
     )
 }
 
@@ -690,24 +715,6 @@ async fn a_resumed_session_that_cannot_prepare_its_lane_needs_a_human_not_the_qu
     starter.start(request).unwrap();
     let got = rx.recv().await.unwrap();
     assert!(matches!(got.result, SessionResult::NeedsHuman(_)), "{got:?}");
-}
-
-#[tokio::test]
-async fn another_engine_refuses_to_start() {
-    let choice = EngineChoiceConfig {
-        roles: RoleEngines {
-            implementer: Some(Engine::Cursor),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let rig = rig(Some(FINISHED), choice, true);
-    let (request, mut rx) = request();
-    assert_eq!(
-        rig.starter.start(request),
-        Err("only Claude sessions run in the Rust agent yet".to_string())
-    );
-    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]

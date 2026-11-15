@@ -66,6 +66,9 @@ pub struct DrafterResult {
     /// As the drafter wrote it; [`checked_breakdown`] decides what's kept.
     #[serde(default)]
     pub breakdown: Option<Value>,
+    /// The session's own id from the engine, set by `parse_result` (a Cursor chat's id is made by the engine).
+    #[serde(skip)]
+    pub session_id: Option<String>,
 }
 
 impl DrafterResult {
@@ -148,8 +151,7 @@ pub struct Breakdown {
 
 fn words(v: Option<&Value>, max: usize) -> String {
     let s = v.and_then(Value::as_str).unwrap_or("");
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::text::truncate(&s, max)
+    crate::text::truncate(&crate::text::squish(s), max)
 }
 
 /// The drafter's breakdown, checked: a `build` entry whose id isn't one of `item_ids`, a second entry

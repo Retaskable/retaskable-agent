@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-use super::SmokeState;
 use crate::engines::EngineId;
 use crate::fs_util::write_json_atomic;
 use crate::trial_plan::TrialRecord;
@@ -18,10 +17,20 @@ use crate::trial_plan::TrialRecord;
 const STATE_FILE: &str = "state.json";
 
 /// Top-level keys an older agent kept locally; items and drafts live only in the shared backlog
-/// store now (local-state-diet.md section 1), so these are dropped wherever found. There's no
+/// store now (local-state-diet.md section 1), and so do answers and skips owed to it (they are kept in
+/// memory only), so these are dropped wherever found. There's no
 /// time-based trimming left to do here (timelines and merged drafts' files are the store's), so,
 /// unlike the TypeScript `trimState(data, now)`, this takes no `now`.
-const LEGACY_KEYS: [&str; 2] = ["items", "drafts"];
+const LEGACY_KEYS: [&str; 8] = [
+    "items",
+    "drafts",
+    "unskipped",
+    "unanswered",
+    "playtestsSeen",
+    "releaseOwed",
+    "smoke",
+    "vet",
+];
 
 /// One leased item's run, as the TS agent's item record keeps it (`state`, `lane`, `implSessionId`,
 /// `branch`, `slice`): enough to take the item back after a restart.
@@ -78,6 +87,10 @@ pub struct RunRecord {
     /// session ends with an answer.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub silence_kills: u32,
+    /// Cursor usage-limit hits of this item's implementer in a row, kept so a restart doesn't reset it; cleared
+    /// by any other session end.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cursor_limit_hits: u32,
     /// The item's session couldn't start and is waiting to be started fresh again: its saved session id never
     /// ran, so a restart must not resume it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -164,20 +177,20 @@ impl Store {
         self.data.insert("usage".to_string(), usage);
     }
 
-    /// The last-saved `state.usage`, if any (`None` when there's no reading yet, which
-    /// [`crate::tiers::implementer_tier`] treats as a full window).
+    /// The last-saved `state.usage`, if any (`None` when there's no reading yet).
     pub fn usage(&self) -> Option<Value> {
         self.data.get("usage").cloned()
     }
 
-    /// Replaces `state.smoke` with the post-merge smoke's latest result
-    /// (docs/specs/agent/06.3-review.md: "`State.smoke = {sha, status, at, url, tail?}`").
-    /// Doesn't save on its own; call `save` after, as every other change here does.
-    pub fn set_smoke(&mut self, smoke: &SmokeState) {
-        self.data.insert(
-            "smoke".to_string(),
-            serde_json::to_value(smoke).expect("SmokeState always serializes"),
-        );
+    /// Replaces `state.weekUsage`, the last reading that carried the weekly window (kept apart from `usage`,
+    /// which is the one sent up). Doesn't save on its own; call `save` after.
+    pub fn set_week_usage(&mut self, usage: Value) {
+        self.data.insert("weekUsage".to_string(), usage);
+    }
+
+    /// The last-saved `state.weekUsage`, if any.
+    pub fn week_usage(&self) -> Option<Value> {
+        self.data.get("weekUsage").cloned()
     }
 
     /// The lease token of each item this computer holds in the shared backlog, by item id
@@ -211,18 +224,27 @@ impl Store {
             .insert("unreleased".to_string(), serde_json::json!(unreleased));
     }
 
-    /// Items a person skipped here whose `skip` the store hasn't taken yet (sent after their `release`, again
-    /// on later passes until it answers). Empty when missing.
-    pub fn unskipped(&self) -> std::collections::BTreeSet<String> {
-        self.data
-            .get("unskipped")
+    /// When each `unreleased` entry was first listed, in epoch seconds. An entry with no time (a state file
+    /// from before it was kept) counts as listed at `now`, so it gets a full day.
+    pub fn unreleased_since(&self, now: i64) -> std::collections::BTreeMap<String, i64> {
+        let saved: std::collections::BTreeMap<String, i64> = self
+            .data
+            .get("unreleased_since")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.unreleased()
+            .into_keys()
+            .map(|id| {
+                let at = saved.get(&id).copied().unwrap_or(now);
+                (id, at)
+            })
+            .collect()
     }
 
-    /// Replaces `state.unskipped`. Doesn't save on its own; call `save` after.
-    pub fn set_unskipped(&mut self, unskipped: &std::collections::BTreeSet<String>) {
-        self.data.insert("unskipped".to_string(), serde_json::json!(unskipped));
+    /// Replaces `state.unreleased_since`. Doesn't save on its own; call `save` after.
+    pub fn set_unreleased_since(&mut self, since: &std::collections::BTreeMap<String, i64>) {
+        self.data
+            .insert("unreleased_since".to_string(), serde_json::json!(since));
     }
 
     /// Leases let go while their item waits, which the store hasn't taken yet: item id to
@@ -282,14 +304,6 @@ impl Store {
         TRIAL_CHANGED.send_modify(|n| *n += 1);
         Ok(())
     }
-
-    /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses
-    /// (an older agent's file, say) rather than erroring.
-    pub fn smoke(&self) -> Option<SmokeState> {
-        self.data
-            .get("smoke")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-    }
 }
 
 fn parse_object(text: &str) -> Result<Map<String, Value>> {
@@ -329,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn the_trial_reads_as_not_started_until_set_and_survives_a_reload_beside_other_keys() {
+    fn the_trial_reads_as_not_started_until_set_beside_other_keys() {
         use crate::trial_plan::TrialState;
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Store::load(dir.path()).unwrap().trial(), TrialRecord::default());
@@ -341,6 +355,26 @@ mod tests {
         assert_eq!(again.trial(), TrialRecord::opened("https://x/pr/1"));
         assert!(read(dir.path()).contains(r#""other":{"a":1}"#));
         assert!(read(dir.path()).contains("\"trialPlan\""));
+    }
+
+    #[test]
+    fn an_old_unreleased_entry_without_a_time_reads_as_listed_now_and_a_saved_time_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"unreleased":{"a":["t","note"],"b":["u","n"]}}"#,
+        )
+        .unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(
+            store.unreleased_since(500),
+            [("a".to_string(), 500), ("b".to_string(), 500)].into()
+        );
+        store.set_unreleased_since(&[("a".to_string(), 100)].into());
+        store.save().unwrap();
+        let again = Store::load(dir.path()).unwrap();
+        let since = again.unreleased_since(500);
+        assert_eq!((since["a"], since["b"]), (100, 500));
     }
 
     #[test]
@@ -389,6 +423,18 @@ mod tests {
     }
 
     #[test]
+    fn keys_that_cached_what_the_store_holds_are_dropped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(STATE_FILE),
+            r#"{"unskipped":["a"],"unanswered":{"7":[true,null]},"playtestsSeen":"off","releaseOwed":true,"smoke":{"sha":"a"},"vet":{"day":"d"},"usage":{"pct":1}}"#,
+        )
+        .unwrap();
+        Store::load(dir.path()).unwrap();
+        assert_eq!(read(dir.path()), r#"{"usage":{"pct":1}}"#);
+    }
+
+    #[test]
     fn a_file_with_neither_legacy_key_is_left_untouched_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let original = r#"{"kept": true}"#;
@@ -411,6 +457,19 @@ mod tests {
     }
 
     #[test]
+    fn week_usage_round_trips_and_leaves_usage_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.week_usage(), None);
+        let week = serde_json::json!({"rateLimitType": "seven_day", "utilization": 0.96});
+        store.set_week_usage(week.clone());
+        store.save().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        assert_eq!(store.week_usage(), Some(week));
+        assert_eq!(store.usage(), None);
+    }
+
+    #[test]
     fn set_usage_replaces_the_usage_key_once_saved() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = Store::load(dir.path()).unwrap();
@@ -429,28 +488,6 @@ mod tests {
             saved,
             serde_json::json!({"usage": {"status": "rejected", "resetsAt": 2000}})
         );
-    }
-
-    #[test]
-    fn set_smoke_replaces_the_smoke_key_once_saved_and_reads_back_the_same_state() {
-        use super::super::SmokeStatus;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::load(dir.path()).unwrap();
-        assert!(store.smoke().is_none());
-
-        let state = SmokeState {
-            sha: "abc123".to_string(),
-            status: SmokeStatus::Running,
-            at: "2026-10-28T00:00:00.000Z".to_string(),
-            url: Some("https://staging.example.com".to_string()),
-            tail: None,
-        };
-        store.set_smoke(&state);
-        store.save().unwrap();
-
-        let reloaded = Store::load(dir.path()).unwrap();
-        assert_eq!(reloaded.smoke(), Some(state));
     }
 
     #[test]

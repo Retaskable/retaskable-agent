@@ -13,9 +13,9 @@ const LONG_RUNNING: &str = "ping -n 60 127.0.0.1 >nul";
 const LONG_RUNNING: &str = "sleep 60";
 
 fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
-    AgentView {
+    let v = AgentView {
         machine: "pc".into(),
-        tags: vec![],
+        tags: Default::default(),
         projects: vec![ProjectView {
             id: project.into(),
             github_repo: "o/one".into(),
@@ -23,7 +23,6 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
             worktrees_dir: repo.join("worktrees"),
             repo_path: repo,
             base_branch: "main".into(),
-            galleries: vec![],
             play_command: command.into(),
         }],
         version: "9.9.9".into(),
@@ -31,10 +30,18 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         chore_lane: None,
         lane_sizes: Default::default(),
         paused: Default::default(),
+        store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
-    }
+        settings: Default::default(),
+        local: Default::default(),
+        live: Default::default(),
+        checks: Default::default(),
+        owner: Default::default(),
+    };
+    v.item_commands.gates().open_unrecorded(project);
+    v
 }
 
 fn command(name: &str, args: Value) -> Value {
@@ -62,6 +69,7 @@ async fn performed(actions: Vec<Action>, v: &AgentView, items: &[Item], images: 
         ask_id: "a1",
         images_block: images,
         items,
+        failures: None,
     };
     let results = perform(&actions, &["bad one".to_string()], &cx).await;
     let sent = seen.lock().unwrap().clone();
@@ -150,6 +158,7 @@ async fn stop_then_play_of_lane_0_is_a_restart() {
         ask_id: "a1",
         images_block: "",
         items: &[],
+        failures: None,
     };
     assert_eq!(perform(&[Action::Play { lane: 0 }], &[], &cx).await[0]["ok"], true);
     assert!(crate::play::running(id));
@@ -226,6 +235,7 @@ async fn a_store_failure_is_the_actions_reason() {
         ask_id: "a1",
         images_block: "",
         items: &[],
+        failures: None,
     };
     let results = perform(&[draft("r", None)], &[], &cx).await;
     assert_eq!(results[0]["ok"], false);

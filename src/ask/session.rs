@@ -7,8 +7,9 @@ use anyhow::Result;
 use super::model::{AssistantResult, assistant_result_schema, parse_assistant_result};
 use super::prompt::{AssistantInput, build_prompt};
 use crate::config::{Engine, ProjectBudget};
-use crate::engines::engine::{EngineId, LocalTarget};
+use crate::engines::engine::{CursorOptions, EngineId, LocalTarget};
 use crate::engines::{SessionResult, SessionSpec, describe_failure, ephemeral_readonly_spec};
+use crate::tiers::{LOCAL, claude_model};
 
 /// What an assistant session runs with.
 pub struct Session<'a> {
@@ -17,18 +18,20 @@ pub struct Session<'a> {
     pub input: AssistantInput<'a>,
     /// The engine `engines::engine_for(…, Role::Ask, None)` chose.
     pub engine: Engine,
-    /// The implementer's tier from the usage reading (`tiers::implementer_tier`), used as it is.
+    /// `sonnet`, or `local` at Claude's limit (`tiers::floor`), used as it is.
     pub tier: &'static str,
     pub budget: &'a ProjectBudget,
     /// The project's base checkout, on the base branch.
     pub cwd: &'a Path,
     pub local: Option<LocalTarget>,
+    /// Only on Cursor: the `scout` model name (`engines::place`).
+    pub cursor: Option<CursorOptions>,
 }
 
 /// The assistant's `SessionSpec`: fresh and read-only, in the base checkout.
 pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
     let (engine, model) = match s.engine {
-        Engine::Claude => (Some(EngineId::Claude), s.tier),
+        Engine::Claude => (Some(EngineId::Claude), claude_model(s.tier)),
         Engine::Cursor => (Some(EngineId::Cursor), s.tier),
         Engine::Pi => (Some(EngineId::Pi), s.tier),
         Engine::Codex => (Some(EngineId::Codex), s.tier),
@@ -41,8 +44,8 @@ pub fn session_spec(s: &Session<'_>) -> Result<SessionSpec> {
         assistant_result_schema(),
         s.cwd.to_path_buf(),
         s.budget.ask_usd,
-        None,
-        if s.engine == Engine::Local {
+        s.cursor.clone(),
+        if s.engine == Engine::Local || (s.engine == Engine::Claude && s.tier == LOCAL) {
             s.local.clone()
         } else {
             None
@@ -80,6 +83,34 @@ mod tests {
     use crate::tiers::mid_tier;
 
     fn with_session<T>(engine: Engine, tier: &'static str, f: impl FnOnce(SessionSpec) -> T) -> T {
+        with_cursor(engine, tier, None, f)
+    }
+
+    fn with_local<T>(
+        engine: Engine,
+        tier: &'static str,
+        local: Option<LocalTarget>,
+        f: impl FnOnce(SessionSpec) -> T,
+    ) -> T {
+        with_all(engine, tier, None, local, f)
+    }
+
+    fn with_cursor<T>(
+        engine: Engine,
+        tier: &'static str,
+        cursor: Option<CursorOptions>,
+        f: impl FnOnce(SessionSpec) -> T,
+    ) -> T {
+        with_all(engine, tier, cursor, None, f)
+    }
+
+    fn with_all<T>(
+        engine: Engine,
+        tier: &'static str,
+        cursor: Option<CursorOptions>,
+        local: Option<LocalTarget>,
+        f: impl FnOnce(SessionSpec) -> T,
+    ) -> T {
         let budget = ProjectBudget {
             ask_usd: 1.5,
             ..Default::default()
@@ -112,7 +143,8 @@ mod tests {
             tier,
             budget: &budget,
             cwd: Path::new("base"),
-            local: None,
+            local,
+            cursor,
         };
         f(session_spec(&s).unwrap())
     }
@@ -133,6 +165,23 @@ mod tests {
     }
 
     #[test]
+    fn a_local_tier_runs_claude_on_sonnet_against_the_local_target() {
+        let target = LocalTarget {
+            base_url: "http://x".into(),
+            model: "m".into(),
+        };
+        let got = |engine| {
+            let mut got = None;
+            with_local(engine, "local", Some(target.clone()), |s| {
+                got = Some((s.model.clone(), s.local))
+            });
+            got.unwrap()
+        };
+        assert_eq!(got(Engine::Claude), ("sonnet".to_string(), Some(target.clone())));
+        assert_eq!(got(Engine::Cursor).1, None);
+    }
+
+    #[test]
     fn each_engine_gets_its_own_id_and_local_gets_no_engine() {
         with_session(Engine::Codex, "sonnet", |s| {
             assert_eq!((s.engine, s.model.as_str()), (Some(EngineId::Codex), "sonnet"));
@@ -140,6 +189,19 @@ mod tests {
         with_session(Engine::Local, "opus", |s| {
             assert_eq!((s.engine, s.model.as_str()), (None, "local"));
         });
+    }
+
+    #[test]
+    fn a_cursor_session_carries_its_model_name() {
+        let cursor = CursorOptions {
+            model: Some("fast".into()),
+            ..CursorOptions::default()
+        };
+        with_cursor(Engine::Cursor, "sonnet", Some(cursor), |s| {
+            assert_eq!(s.engine, Some(EngineId::Cursor));
+            assert_eq!(s.cursor.unwrap().model.as_deref(), Some("fast"));
+        });
+        with_session(Engine::Claude, "sonnet", |s| assert!(s.cursor.is_none()));
     }
 
     fn done(v: serde_json::Value) -> SessionResult {

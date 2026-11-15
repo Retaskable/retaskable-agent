@@ -6,7 +6,7 @@ This section is what the computer still does for those screens: what it works ou
 
 **Words a model writes for the person** follow the same plain-language rule: `prompts/drafter.md`, `implementer.md`, `reviewer.md` and `assistant.md` each end with a short closing rule, so a draft's summary, a question, a try-out's what and steps, and a chat answer are short everyday words, while the spec files the drafter writes stay precise ([plain-language.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/plain-language.md) section 7).
 
-**Images.** Every command that sends text to Claude (Ask Claude, Add spec, Send back, question answers, playtest problems, Continue and Start over notes, gallery feedback) can carry images. The agent saves them under `.retaskable/attachments/` and adds their paths after the text (section 8).
+**Images.** Every command that sends text to Claude (Ask Claude, Add spec, Send back, question answers, playtest problems, and Continue and Start over notes) can carry images. The agent saves them under `.retaskable/attachments/` and adds their paths after the text (section 8).
 
 
 - [9.1 What the computer works out for a project's settings](09.1-what-the-computer-works-out-for-a-projects-settings.md)

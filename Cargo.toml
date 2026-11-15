@@ -17,6 +17,10 @@ name = "retaskable"
 path = "src/main.rs"
 
 [[bin]]
+name = "retaskable-chat-agent"
+path = "src/bin/chat_agent.rs"
+
+[[bin]]
 name = "upload-release"
 path = "src/bin/upload_release.rs"
 
@@ -27,7 +31,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "alloc", "std"] }
 gethostname = { version = "1.1.0", default-features = false }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = "4"
 rand = "0.10.3"
 regex = "1.13.1"
@@ -41,17 +44,27 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "s
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+if-addrs = "0.15.0"
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Console",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
+tokio = { version = "1.54.1", features = ["test-util"] }
 http-body-util = "0.1.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }
 

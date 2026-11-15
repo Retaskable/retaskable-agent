@@ -11,49 +11,58 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use super::baseline_wait::BaselineStage;
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
 use super::piece_review::{ReviewState, Reviewed, review as review_change};
-use super::session::{
-    Attempt, ChecksStage, GateRounds, Gated, Step, exists, gate_rounds, piece_branch_name, quiet_timeout,
-};
+use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, watch_for};
+use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::backlog::{Item, ItemStatus};
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig, ProjectConfig, parse_engine};
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig, parse_engine};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked};
+use crate::engines::cursor::with_project;
+use crate::engines::engine::CursorOptions;
+use crate::engines::{
+    EngineId, Role, SessionStart, TranscriptSink, engine_for, engine_of, run_session_tracked, start_engine,
+};
+use crate::engines::{Placement, place};
 use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
+use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
 use crate::runs::{Pushed, end_from_answer, needs_push};
-use crate::tiers::{implementer_model, implementer_tier};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
+const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
+const SYNC_TEMPLATE: &str = include_str!("../../prompts/sync-main.md");
 
 /// Runs `build` and `fix` runs of the projects it was built with.
 pub struct PieceStarter {
     pub data_dir: PathBuf,
     pub projects: Vec<ProjectConfig>,
     pub choice: EngineChoiceConfig,
+    /// This computer's Cursor model per tier (engines/03 section 3.4).
+    pub cursor_models: CursorModels,
     pub env: Env,
     pub max_turns: u32,
-    pub models: ModelsConfig,
-    pub flags: std::sync::Arc<crate::flags::Flags>,
+    /// This computer, for a chore lock's note.
+    pub machine: String,
+    /// The sessions running now: a run's sessions list themselves while they run.
+    pub sessions: Sessions,
+    /// The computer's local model, for the tier ladder.
+    pub local: crate::local_model::LocalModel,
 }
 
 impl PieceStarter {
     /// A run on an engine this agent can't run yet isn't refused (that would send it back `interrupted`, to bounce
     /// between computers): it ends `failed`, an outside cause, so the store gives it a look that can move the
-    /// piece's engine. With `run-limits-and-causes` Off it is given back as before.
+    /// piece's engine.
     fn cannot_run(&self, request: RunRequest, engine: String) -> Result<(), String> {
-        let (ends, token, flags) = (request.ends, request.token, self.flags.clone());
+        let (ends, token) = (request.ends, request.token);
         tokio::spawn(async move {
-            let (outcome, result) = if flags.on("run-limits-and-causes").await {
-                let why = format!("this computer can't run {engine} sessions yet");
-                (RunOutcome::Failed(why), json!({ "outside": true }))
-            } else {
-                (RunOutcome::Interrupted, json!({}))
-            };
+            let why = format!("this computer can't run {engine} sessions yet");
+            let (outcome, result) = (RunOutcome::Failed(why), json!({ "outside": true }));
             ends.send(RunEnd { token, outcome, result });
         });
         Ok(())
@@ -74,47 +83,65 @@ impl RunStarter for PieceStarter {
             .clone();
         let lane = request.lane.clone().ok_or("the run has no lane")?;
         // The piece's own engine wins; an unknown name is an engine this agent can't run, not Claude.
+        // One that is out goes to the engine that takes over.
         let chosen = match request.piece.other.get("engine").and_then(Value::as_str) {
-            Some(name) => parse_engine(name).ok_or(name.to_string()),
-            None => Ok(engine_for(
-                &self.choice,
-                project.engines.as_ref(),
-                Role::Implementer,
-                None,
+            Some(name) => parse_engine(name)
+                .map(|e| request.context.engine_now(e))
+                .ok_or(name.to_string()),
+            None => Ok(start_engine(
+                request.engine,
+                engine_for(&self.choice, project.engines.as_ref(), Role::Implementer, None),
             )),
         };
         let engine = match chosen {
-            Ok(Engine::Claude) => EngineId::Claude,
-            Ok(other) => return self.cannot_run(request, other.to_string()),
+            Ok(engine) => engine,
             Err(name) => return self.cannot_run(request, name),
         };
-        let bin = resolve_claude_on_path(&self.env).map_err(|e| format!("{e:#}"))?;
-        if !exists(&bin, &self.env) {
-            return Err(format!("the claude binary wasn't found ({})", bin.display()));
-        }
+        let placement = place(engine, Role::Implementer, &self.env, &self.cursor_models)?;
+        self.run(request, project, lane, placement)
+    }
+}
+
+impl PieceStarter {
+    fn run(
+        &self,
+        request: RunRequest,
+        project: ProjectConfig,
+        lane: PathBuf,
+        placement: Placement,
+    ) -> Result<(), String> {
+        let cursor = placement.cursor.map(|c| with_project(&project, c));
         let job = Job {
             data_dir: self.data_dir.clone(),
             project,
-            bin,
+            bin: placement.bin,
             gh: self
                 .env
                 .get("RETASKABLE_GH")
                 .map_or_else(|| PathBuf::from("gh"), PathBuf::from),
             max_turns: self.max_turns,
-            models: self.models,
             lane,
             token: request.token.clone(),
             kind: request.kind,
-            engine,
+            engine: placement.engine,
+            cursor,
+            choice: self.choice.clone(),
+            cursor_models: self.cursor_models.clone(),
+            env: self.env.clone(),
             piece: request.piece,
             processes: request.processes,
-            flags: self.flags.clone(),
+            context: request.context,
+            machine: self.machine.clone(),
+            sessions: self.sessions.clone(),
+            local: self.local.clone(),
+            wants_local: placement.local,
+            lock: None,
         };
         let ends = request.ends;
         let token = request.token;
         // The inner task is joined, so even a panic in it ends in exactly one end.
         tokio::spawn(async move {
-            let (outcome, result) = match tokio::spawn(run(job)).await {
+            let (outcome, result) = match tokio::spawn(run_locked(job)).await {
                 Ok(end) => end,
                 Err(e) => (RunOutcome::Failed(format!("the run's task crashed: {e}")), json!({})),
             };
@@ -125,19 +152,44 @@ impl RunStarter for PieceStarter {
 }
 
 pub(super) struct Job {
+    pub(super) local: crate::local_model::LocalModel,
+    /// The engine was set to `local` (`Placement::local`).
+    pub(super) wants_local: bool,
     pub(super) data_dir: PathBuf,
     pub(super) project: ProjectConfig,
     pub(super) bin: PathBuf,
     pub(super) gh: PathBuf,
     pub(super) max_turns: u32,
-    pub(super) models: ModelsConfig,
     pub(super) lane: PathBuf,
     pub(super) token: String,
     pub(super) kind: RunKind,
     pub(super) engine: EngineId,
+    pub(super) cursor: Option<CursorOptions>,
+    pub(super) choice: EngineChoiceConfig,
+    pub(super) cursor_models: CursorModels,
+    pub(super) env: Env,
     pub(super) piece: RunPiece,
     pub(super) processes: RunProcesses,
-    pub(super) flags: std::sync::Arc<crate::flags::Flags>,
+    pub(super) context: crate::orchestrator::driver::RunContext,
+    pub(super) machine: String,
+    pub(super) sessions: crate::orchestrator::live::sessions::Sessions,
+    /// The token of the chore lock the run holds, checked before it pushes.
+    pub(super) lock: Option<String>,
+}
+
+impl Job {
+    /// The row one of the run's sessions lists itself as.
+    pub(super) fn session_info(&self, role: Role, engine: EngineId, model: String) -> SessionInfo {
+        SessionInfo {
+            project: self.project.id_or_derived(),
+            item_id: piece_id(&self.piece).to_string(),
+            title: Some(self.piece.title.clone()),
+            role,
+            lane: crate::lanes::lane_number(&self.lane),
+            engine,
+            model,
+        }
+    }
 }
 
 /// A sender for a session's process tree: it goes to the run as soon as the session starts, so a stop can cut it.
@@ -162,8 +214,53 @@ pub(super) fn piece_item(piece: &RunPiece) -> Item {
         id: piece_id(piece).to_string(),
         title: piece.title.clone(),
         status: ItemStatus::Building,
+        size: piece.other.get("size").and_then(Value::as_str).map(str::to_string),
         ..Item::default()
     }
+}
+
+/// Whether the piece has earlier failed attempts; one that ended `limited` counts none (pieces.md section 3.2).
+fn is_retry(piece: &RunPiece) -> bool {
+    piece
+        .attempts
+        .iter()
+        .any(|a| a.get("outcome").and_then(Value::as_str) != Some("limited"))
+}
+
+/// A chore holds its kind's store lock through the run (section 6.7): another holder leaves the chore to them
+/// (`interrupted`, nothing started), a store that can't be asked fails closed (`failed`, outside). The lock is
+/// dropped whatever the run's end. A roadmap piece and a playtest fix take none.
+async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
+    let Some(name) = chore_of(&job.piece).and_then(|c| chore_lock_name(c.kind, &job.project.base_branch)) else {
+        return run(job).await;
+    };
+    let ctx = job.context.clone();
+    let note = format!("{} on {}", piece_id(&job.piece), job.machine);
+    let token = match ctx
+        .client
+        .lock_take(ctx.repo, Some(ctx.token.as_str()), &name, Some(&note))
+        .await
+    {
+        Ok(LockTake::Held(token)) => token,
+        Ok(LockTake::HeldBy { by, note }) => {
+            let note = note.map(|n| format!(" ({n})")).unwrap_or_default();
+            tracing::info!(
+                "{}: the {name} lock is held by {by}{note}; leaving the chore to them",
+                job.token
+            );
+            return (RunOutcome::Interrupted, json!({}));
+        }
+        Err(e) => {
+            let why = format!("Couldn't take the {name} lock: {e}");
+            return (RunOutcome::Failed(why), json!({ "outside": true }));
+        }
+    };
+    ctx.locks.add(&token, &name, std::time::Instant::now());
+    job.lock = Some(token.clone());
+    let end = run(job).await;
+    let _ = ctx.client.lock_drop(ctx.repo, Some(ctx.token.as_str()), &token).await;
+    ctx.locks.remove(&token);
+    end
 }
 
 /// The run's end: its lane is prepared on the piece's branch, a session runs, the gates check it and its change is
@@ -176,7 +273,10 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         (_, Some(b)) => (b.to_string(), format!("origin/{b}")),
         (RunKind::Fix, None) => return failed("A fix run needs the piece's pushed branch, and the piece has none."),
         _ => (
-            piece_branch_name(piece_id(&job.piece), &job.piece.title),
+            match sync_of(&job).filter(|c| !c.sync_sha.is_empty()) {
+                Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
+                None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
+            },
             format!("origin/{}", job.project.base_branch),
         ),
     };
@@ -187,10 +287,26 @@ async fn run(job: Job) -> (RunOutcome, Value) {
             return (RunOutcome::Interrupted, json!({}));
         }
     };
-    match build(&job, &cwd, &branch).await {
+    let (outcome, result) = match build(&job, &cwd, &branch).await {
         Ok(end) => end,
+        Err(e) if e.is::<Outside>() => (RunOutcome::Failed(format!("{e:#}")), json!({ "outside": true })),
         Err(e) => failed(format!("{e:#}")),
+    };
+    // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
+    let Some(chore) = chore_of(&job.piece) else {
+        return (outcome, result);
+    };
+    let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
+    let outcome = chore_end(chore.kind, outcome, &result);
+    if let (true, RunOutcome::Failed(why)) = (waits, &outcome) {
+        let (gh, dir, branch, why) = (job.gh.clone(), cwd, branch, why.clone());
+        let comment = format!("Closed: a chore never waits on a person. {why}");
+        let closed = tokio::task::spawn_blocking(move || publish::close_change(&gh, &dir, &branch, &comment)).await;
+        if let Err(e) = closed.map_err(anyhow::Error::from).and_then(|r| r) {
+            tracing::warn!("{}: closing the chore's change: {e:#}", job.token);
+        }
     }
+    (outcome, result)
 }
 
 async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf> {
@@ -213,6 +329,11 @@ async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf
     .context("preparing the lane")
 }
 
+/// The piece's chore when it is a main sync.
+fn sync_of(job: &Job) -> Option<Chore> {
+    chore_of(&job.piece).filter(|c| c.kind == ChoreKind::SyncMain)
+}
+
 /// One implementer session in `cwd` (a fresh one, or the resume of a gate round's follow-up).
 async fn session(
     job: &Job,
@@ -224,8 +345,19 @@ async fn session(
 ) -> Result<Attempt> {
     let project = &job.project;
     let item = piece_item(&job.piece);
-    let now = crate::telemetry::now_ms() / 1000;
-    let model = implementer_model(implementer_tier(None, now, &job.models), &item).to_string();
+    let chore = chore_of(&job.piece);
+    // Held until the session ends. Only a Claude session may use the model, never on a resume (a gate round's fix):
+    // an Anthropic session isn't resumed against the local server.
+    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. });
+    let (tier, local_run) = tier_for(
+        chore.as_ref(),
+        may.then_some(&job.local),
+        job.wants_local,
+        !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
+    )
+    .await;
+    let model = model_for(chore.as_ref(), tier, &item, is_retry(&job.piece)).to_string();
+    let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
         &Session {
             template: "",
@@ -244,12 +376,20 @@ async fn session(
             budget_usd: project.budget.implementer_usd,
             max_turns: Some(job.max_turns),
             engine: Some(job.engine),
-            cursor: None,
-            local: None,
+            cursor: job.cursor.clone(),
+            local: local_run.as_ref().map(|r| r.target.clone()),
             sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
         },
         start,
-    )?;
+    )
+    // Our own template, not the work: the run ends `failed`, `outside`.
+    .map_err(|e| {
+        if own_prompt {
+            anyhow::Error::new(Outside(format!("{e:#}")))
+        } else {
+            e
+        }
+    })?;
     let id = match &spec.start {
         SessionStart::Fresh(id) | SessionStart::Resume(id) => id.clone(),
         SessionStart::Ephemeral => String::new(),
@@ -261,24 +401,38 @@ async fn session(
         lane: None,
     };
     let engine = engine_of(Some(job.engine))?;
-    let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+    let quiet = watch_for(project, job.engine);
     let mut context_tokens = None;
     let ctx = &mut context_tokens;
-    let (answer, usage) = run_implementer(spec, |spec| async move {
-        let r = run_session_tracked(
-            engine.as_ref(),
-            &job.bin,
-            &spec,
-            &id,
-            Some(&sink),
-            quiet,
-            Some(tree_sender(job)),
+    let info = job.session_info(
+        Role::Implementer,
+        job.engine,
+        if local_run.is_some() {
+            crate::tiers::LOCAL.to_string()
+        } else {
+            model_name(job.engine, &spec.model, job.cursor.as_ref())
+        },
+    );
+    let (answer, usage) = job
+        .sessions
+        .track(
+            info,
+            run_implementer(spec, |spec| async move {
+                let r = run_session_tracked(
+                    engine.as_ref(),
+                    &job.bin,
+                    &spec,
+                    &id,
+                    Some(&sink),
+                    quiet,
+                    Some(tree_sender(job)),
+                )
+                .await?;
+                *ctx = r.context_tokens;
+                Ok(r)
+            }),
         )
-        .await?;
-        *ctx = r.context_tokens;
-        Ok(r)
-    })
-    .await;
+        .await;
     Ok(Attempt {
         answer,
         usage,
@@ -293,10 +447,20 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let where_to_start = start_files::render(
         &start_files::build(crate::git_bin::program(), cwd, &base_ref, &piece_item(&job.piece)).await,
     );
-    let start = Start::Piece {
-        template: PIECE_TEMPLATE,
-        kind: job.kind,
-        piece: &job.piece,
+    let sync = sync_of(job).is_some();
+    let chore = chore_of(&job.piece).filter(|c| c.has_prompt() && (sync || c.kind != ChoreKind::SyncMain));
+    let start = match &chore {
+        Some(chore) => Start::Chore {
+            template: if sync { SYNC_TEMPLATE } else { CHORE_TEMPLATE },
+            kind: job.kind,
+            piece: &job.piece,
+            chore,
+        },
+        None => Start::Piece {
+            template: PIECE_TEMPLATE,
+            kind: job.kind,
+            piece: &job.piece,
+        },
     };
     let ids = Mutex::new(String::new());
     let first = session(job, cwd, branch, start, &where_to_start, &ids).await?;
@@ -305,11 +469,22 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let stage_one = Mutex::new(None);
     let (processes, token) = (job.processes.clone(), job.token.clone());
     let on_tree = std::sync::Arc::new(move |tree| processes.add(&token, tree));
+    let project_id = job.project.id_or_derived();
+    let (repo_path, worktrees_dir) = (
+        PathBuf::from(&job.project.repo_path),
+        PathBuf::from(&job.project.worktrees_dir),
+    );
     let stage = ChecksStage {
         checks: &job.project.checks,
         backlog_path: &job.project.backlog_path,
         on_tree,
         result: &stage_one,
+        baseline: Some(BaselineStage {
+            project: &project_id,
+            repo_path: &repo_path,
+            worktrees_dir: &worktrees_dir,
+            checks: &job.project.checks,
+        }),
     };
     let rounds = GateRounds {
         cwd,
@@ -321,7 +496,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     };
     let ids = &ids;
     let resume = |step: Step| {
-        let (Step::Fix(follow_up) | Step::FixFresh(follow_up)) = step else {
+        let (Step::Fix(follow_up) | Step::FixFresh(follow_up, _)) = step else {
             unreachable!("a piece run has no fresh-start rules")
         };
         let id = ids.lock().unwrap().clone();
@@ -343,11 +518,24 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             Gated::GaveUp(_, _, why) => return Ok(failed(why)),
         };
         let pushed = match &a.answer {
+            Ok(_) if job.lock.as_ref().is_some_and(|t| !job.context.locks.held(t)) => {
+                tracing::warn!("{}: the chore's lock was lost; nothing is pushed", job.token);
+                return Ok((RunOutcome::Interrupted, json!({})));
+            }
             Ok(r) if needs_push(&r.status, commits_ahead(cwd, &base_ref).await) => {
                 let title = non_empty(r.change_title.as_deref()).unwrap_or_else(|| job.piece.title.clone());
+                // A main sync keeps its own title, not the session's.
+                let sync_main = sync_of(job).map(|c| c.main);
                 let body = non_empty(r.change_body.as_deref()).unwrap_or_else(|| r.summary.clone());
                 let (gh, dir, branch, base) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string(), base.clone());
                 let published = tokio::task::spawn_blocking(move || {
+                    let title = match sync_main {
+                        Some(main) => {
+                            let n = crate::main_sync::behind_count(&dir, &base, &main)?;
+                            crate::main_sync::pr_title(&base, n as usize)
+                        }
+                        None => title,
+                    };
                     publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
                         .map(|change| Pushed { branch, change })
                 })
@@ -369,19 +557,8 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .ok()
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
-        // With `run-limits-and-causes` Off, a usage limit ends `failed` as before.
-        let limited_as = job
-            .flags
-            .on("run-limits-and-causes")
-            .await
-            .then(|| job.engine.to_string());
-        let (outcome, mut result) = end_from_answer(
-            a.answer,
-            pushed.as_ref(),
-            &decisions,
-            limited_as.as_deref(),
-            chrono::Utc::now(),
-        );
+        let engine = job.engine.to_string();
+        let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, &engine, chrono::Utc::now());
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
@@ -391,6 +568,14 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .as_ref()
             .map(|s| crate::checks::checks_summary(&s.checks))
             .unwrap_or_default();
+        // A main sync skips the scouts and the review: its checks are the evidence.
+        if sync {
+            if let Some(stage) = stage {
+                result["checks_summary"] = json!(checks);
+                result["diff_stat"] = json!(stage.diff_stat);
+            }
+            return Ok((outcome, result));
+        }
         match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
             Reviewed::Approved => {
                 if let Some(stage) = stage {
@@ -416,7 +601,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
 }
 
 fn non_empty(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    s.and_then(crate::text::non_blank).map(str::to_string)
 }
 
 /// How many commits the lane's `HEAD` has that `base_ref` hasn't; 0 when git can't say.

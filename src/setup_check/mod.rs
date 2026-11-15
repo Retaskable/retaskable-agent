@@ -14,8 +14,11 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::engines::resolve::{
-    resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
+    codex_found, pi_found, resolve_claude_on_path, resolve_codex_on_path, resolve_cursor_on_path, resolve_pi_on_path,
 };
+
+pub mod runner;
+pub use runner::SetupCheckRunner;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -26,7 +29,11 @@ mod fixes {
     pub const CLAUDE: &str = "Install Claude Code: `npm install -g @anthropic-ai/claude-code`.";
     pub const CLAUDE_SIGNED_IN: &str = "Run `claude` in a terminal on this computer and sign in.";
     pub const CURSOR_MISSING: &str = "Install Cursor's agent from cursor.com/cli, then run `cursor-agent login`.";
+    pub const DOCKER: &str = "Start Docker (or install it) on this computer.";
     pub const CURSOR: &str = "Run `cursor-agent login`.";
+    pub const PI: &str = "Install pi from pi.dev.";
+    pub const CODEX: &str = "Install Codex: `npm install -g @openai/codex`, then run `codex login`.";
+    pub const CODEX_SIGNED_IN: &str = "Run `codex login`.";
 }
 
 /// One check: `ok: None` means "couldn't tell", matching `SetupCheck` in `shared/types.ts`.
@@ -38,7 +45,7 @@ pub struct SetupCheck {
 }
 
 impl SetupCheck {
-    fn pass(detail: impl Into<String>) -> Self {
+    pub(crate) fn pass(detail: impl Into<String>) -> Self {
         Self {
             ok: Some(true),
             detail: detail.into(),
@@ -54,7 +61,7 @@ impl SetupCheck {
         }
     }
 
-    fn unknown(detail: impl Into<String>, fix: Option<&str>) -> Self {
+    pub(crate) fn unknown(detail: impl Into<String>, fix: Option<&str>) -> Self {
         Self {
             ok: None,
             detail: detail.into(),
@@ -76,6 +83,55 @@ pub struct SetupChecks {
     pub pi: Option<SetupCheck>,
     /// `codex --version`, same rules as `pi`.
     pub codex: Option<SetupCheck>,
+    /// Docker for agent CI (agent-ci.md section 3.6); `None` unless the `agent-ci` flag is On.
+    pub docker: Option<SetupCheck>,
+}
+
+impl SetupCheck {
+    fn to_json(&self) -> Value {
+        let mut v = serde_json::json!({ "ok": self.ok, "detail": self.detail });
+        if let Some(fix) = &self.fix {
+            v["fix"] = Value::String(fix.clone());
+        }
+        v
+    }
+}
+
+impl SetupChecks {
+    /// Every check unknown ("not checked"), for a runner built without a real probe.
+    pub(crate) fn all_unknown() -> Self {
+        let unknown = || SetupCheck::unknown("not checked", None);
+        Self {
+            git: unknown(),
+            gh_installed: unknown(),
+            gh: unknown(),
+            claude: unknown(),
+            claude_signed_in: unknown(),
+            cursor: unknown(),
+            pi: None,
+            codex: None,
+            docker: None,
+        }
+    }
+
+    /// `SetupChecks` in `shared/types.ts`. `node` is a stand-in: the hub's schema asks for one.
+    pub fn to_json(&self) -> Value {
+        let mut v = serde_json::json!({
+            "node": { "ok": true, "detail": "Not needed: this agent is a compiled program" },
+            "git": self.git.to_json(),
+            "ghInstalled": self.gh_installed.to_json(),
+            "gh": self.gh.to_json(),
+            "claude": self.claude.to_json(),
+            "claudeSignedIn": self.claude_signed_in.to_json(),
+            "cursor": self.cursor.to_json(),
+        });
+        for (key, check) in [("pi", &self.pi), ("codex", &self.codex), ("docker", &self.docker)] {
+            if let Some(c) = check {
+                v[key] = c.to_json();
+            }
+        }
+        v
+    }
 }
 
 struct RunOutput {
@@ -215,14 +271,30 @@ fn cursor_check(installed: bool, status: Option<&RunOutput>) -> SetupCheck {
     }
 }
 
-/// `optionalEngineCheck`: a pass naming the first line of `--version`, only when the binary ran.
-fn optional_engine_check(name: &str, r: Option<&RunOutput>) -> Option<SetupCheck> {
-    let r = r?;
+/// pi's probe (engines/09-setup.md section 9.1): not installed, a `--version` that failed (its
+/// stderr's first line), or a pass naming the first line of `--version`. pi has no sign-in check.
+fn pi_check(version: Option<&RunOutput>) -> SetupCheck {
+    version_check("pi", version, fixes::PI)
+}
+
+/// Codex's probe: pi's three states, then `codex login status` after a good `--version`.
+fn codex_check(version: Option<&RunOutput>, login: Option<&RunOutput>) -> SetupCheck {
+    let check = version_check("Codex", version, fixes::CODEX);
+    if check.ok == Some(true) && !matches!(login, Some(r) if r.code == Some(0)) {
+        return SetupCheck::fail("Codex isn't signed in", fixes::CODEX_SIGNED_IN);
+    }
+    check
+}
+
+fn version_check(name: &str, r: Option<&RunOutput>, fix: &str) -> SetupCheck {
+    let Some(r) = r else {
+        return SetupCheck::fail(format!("{name} isn't installed"), fix);
+    };
     if r.code != Some(0) {
-        return None;
+        return SetupCheck::fail(first_line(&r.stderr), fix);
     }
     let line = first_line(&r.stdout);
-    Some(SetupCheck::pass(if line.is_empty() { name.to_string() } else { line }))
+    SetupCheck::pass(if line.is_empty() { name.to_string() } else { line })
 }
 
 /// `runSetupChecks()`: runs every probe, never through a shell, the git/`gh`/engine probes
@@ -250,7 +322,8 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
     let claude_ok = claude.ok == Some(true);
     let cursor_installed = matches!(&cursor_version, Some(r) if r.code == Some(0));
 
-    let (claude_auth, cursor_status) = tokio::join!(
+    let codex_ok = matches!(&codex_version, Some(r) if r.code == Some(0));
+    let (claude_auth, cursor_status, codex_login) = tokio::join!(
         async {
             if claude_ok && !api_key {
                 run_opt(claude_bin.as_deref(), &["auth", "status"]).await
@@ -265,6 +338,18 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
                 None
             }
         },
+        async {
+            if codex_ok {
+                run(&codex_bin, &["login", "status"]).await
+            } else {
+                None
+            }
+        },
+    );
+    let dirs = crate::env_path::path_dirs(env);
+    let (pi, codex) = (
+        pi_found(env, cfg!(windows), &dirs).then(|| pi_check(pi_version.as_ref())),
+        codex_found(env, cfg!(windows), &dirs).then(|| codex_check(codex_version.as_ref(), codex_login.as_ref())),
     );
 
     SetupChecks {
@@ -274,8 +359,23 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
         claude,
         claude_signed_in: claude_signed_in_check(claude_ok, claude_auth.as_ref(), api_key),
         cursor: cursor_check(cursor_installed, cursor_status.as_ref()),
-        pi: optional_engine_check("pi", pi_version.as_ref()),
-        codex: optional_engine_check("Codex", codex_version.as_ref()),
+        pi,
+        codex,
+        docker: None,
+    }
+}
+
+/// The Docker line (agent-ci.md section 3.6): `docker version` answers and, given the project's image, it runs.
+pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, image: Option<&str>) -> SetupCheck {
+    use crate::agent_ci::docker::{DockerState, probe, probe_image};
+    let program = program.as_ref();
+    let mut state = probe(program, in_image).await;
+    if let (DockerState::Ok, Some(image)) = (&state, image) {
+        state = probe_image(program, image).await;
+    }
+    match state {
+        DockerState::Ok => SetupCheck::pass("Docker is running"),
+        DockerState::Missing(why) | DockerState::Stopped(why) => SetupCheck::fail(why, fixes::DOCKER),
     }
 }
 
@@ -319,14 +419,25 @@ pub fn setup_check_line(check: &SetupCheck) -> String {
     }
 }
 
-/// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, and Cursor only when shown.
+/// `setupCheckLines`: git, gh, Claude Code, Claude Code's sign-in, Cursor only when shown, pi and Codex only when
+/// found, and Docker only with the `agent-ci` flag On.
 /// `ghInstalled` is a separate check, not one of these lines.
 pub fn setup_check_lines(c: &SetupChecks) -> Vec<String> {
     let mut shown = vec![&c.git, &c.gh, &c.claude, &c.claude_signed_in];
     if show_cursor(c) {
         shown.push(&c.cursor);
     }
-    shown.into_iter().map(setup_check_line).collect()
+    let mut lines: Vec<String> = shown.into_iter().map(setup_check_line).collect();
+    for (name, check) in [("pi", &c.pi), ("Codex", &c.codex)] {
+        let Some(check) = check else { continue };
+        lines.push(match check.ok {
+            // A pass names the engine before its version, as Cursor's does; the check keeps the raw version.
+            Some(true) => format!("✓ {name}: {}", check.detail),
+            _ => setup_check_line(check),
+        });
+    }
+    lines.extend(c.docker.as_ref().map(setup_check_line));
+    lines
 }
 
 /// `setupCheckReport`: "Setup check:" followed by each line, indented.

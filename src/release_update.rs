@@ -19,6 +19,7 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::orchestrator::live::now_iso8601;
 use crate::release::Build;
 
 /// `shared/agentRelease.ts`'s `RELEASE_TARGETS`: the bundle's four targets, as `<os>-<arch>`.
@@ -121,6 +122,8 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 3 <= bytes.len()
+            // `from_str_radix` also takes a leading `+`, which isn't a percent-escape.
+            && bytes[i + 1..i + 3].iter().all(u8::is_ascii_hexdigit)
             && let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
         {
             out.push(byte);
@@ -413,12 +416,6 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     Ok(sha256_hex(&std::fs::read(path)?))
-}
-
-fn now_iso8601() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
 }
 
 /// Checks now and every hour after, until the process exits (`ReleaseUpdater.start`'s `setInterval` in

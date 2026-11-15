@@ -4,7 +4,7 @@
 use crate::env::Env;
 use crate::runs::RunWait;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::telemetry::event::{Event, RestartAsked, RestartExit, RestartWaiting};
@@ -36,6 +36,7 @@ pub fn restart_handler(
     projects: Vec<config::ProjectConfig>,
     data_dir: PathBuf,
     state: Arc<restart::RestartState>,
+    before_exit: Arc<dyn Fn() + Send + Sync>,
 ) -> Arc<view::Exit> {
     Arc::new(move |code: i32| {
         let state = state.clone();
@@ -61,6 +62,7 @@ pub fn restart_handler(
         let updater = updater.clone();
         let exe_path = exe_path.clone();
         let projects = projects.clone();
+        let before_exit = before_exit.clone();
         // Restarting answers the request first: the process exit happens on another thread, a
         // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
         // none in flight on its own HTTP thread, but the response still deserves to flush).
@@ -82,7 +84,10 @@ pub fn restart_handler(
                 exe_path.as_deref(),
                 &RunWait::real(),
                 &seq,
-                |code| std::process::exit(code),
+                |code| {
+                    before_exit();
+                    std::process::exit(code)
+                },
             );
         });
     })
@@ -189,30 +194,41 @@ pub fn spawn_lane_size_pollers(projects: &[config::ProjectConfig], sizes: &lane_
     }
 }
 
+/// The setup checks, plus the Docker line (agent-ci.md section 3.6) .
+async fn checks_with_docker(env: &Env) -> setup_check::SetupChecks {
+    let mut checks = setup_check::run_setup_checks(env).await;
+    let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
+    let image = image.as_deref().and_then(crate::text::non_blank);
+    let in_image = crate::agent_ci::docker::in_agent_image();
+    checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
+    checks
+}
+
+/// The runner that does the setup checks (first-run-check.md section 3.1): `checks_with_docker`
+/// with this environment.
+pub fn setup_check_runner(env: Env) -> Arc<setup_check::SetupCheckRunner> {
+    Arc::new(setup_check::SetupCheckRunner::with_probe(Box::new(move || {
+        let env = env.clone();
+        Box::pin(async move { checks_with_docker(&env).await })
+    })))
+}
+
 /// first-run-check.md section 3.1: printed once the port is up, same as `agent/src/index.ts`.
 /// Fire-and-forget so a slow or missing `gh`/`claude` doesn't delay serving `/api/health`. A
 /// release build has no terminal for `println!` to reach, so it goes to `retaskable.log` instead.
-/// The settings page's Now tab reads the latest result (agent-settings.md section 4.5), so it's
-/// kept and run again every ten minutes, quietly.
-pub fn spawn_setup_checks(is_release: bool, env: Env) -> Arc<Mutex<Option<setup_check::SetupChecks>>> {
-    let latest = Arc::new(Mutex::new(None));
-    let kept = latest.clone();
-    tokio::spawn(async move {
-        let checks = setup_check::run_setup_checks(&env).await;
-        let report = setup_check::setup_check_report(&checks);
-        if is_release {
-            tracing::info!("{report}");
-        } else {
-            println!("{report}");
-        }
-        *kept.lock().unwrap() = Some(checks);
-        loop {
-            tokio::time::sleep(Duration::from_secs(600)).await;
-            let checks = setup_check::run_setup_checks(&env).await;
-            *kept.lock().unwrap() = Some(checks);
-        }
+/// The runner keeps the latest result for the settings page's Now tab (agent-settings.md section
+/// 4.5) and runs again every ten minutes, quietly.
+pub fn spawn_setup_checks(is_release: bool, runner: &Arc<setup_check::SetupCheckRunner>) {
+    runner.spawn(move |checks| {
+        Box::pin(async move {
+            let report = setup_check::setup_check_report(&checks);
+            if is_release {
+                tracing::info!("{report}");
+            } else {
+                println!("{report}");
+            }
+        })
     });
-    latest
 }
 
 /// installers/03-the-bundle-agent-bundle.md section 3.11/3.12: a release build has no checkout
@@ -285,6 +301,9 @@ pub fn start_project(
 ) {
     let project_dir = dir.join("projects").join(project.id_or_derived());
     trim_state(&project_dir);
+    if let Some(usage) = crate::store::Store::load(&project_dir).ok().and_then(|s| s.usage()) {
+        crate::tiers::note_usage(&usage);
+    }
     // Opens this project's event log (agent-telemetry.md section 3.1), now that it's
     // configured with a real id: prunes files past KEEP_DAYS and reads the last day back.
     // Only the dry orchestrator loop (`orchestrator::driver`, RETASKABLE_ORCHESTRATOR) writes events

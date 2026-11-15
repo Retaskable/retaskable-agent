@@ -56,7 +56,7 @@ pub fn worktree_path(worktrees_dir: &Path, piece: &str) -> PathBuf {
     worktrees_dir.join(format!("merge-{piece}"))
 }
 
-fn run(git: Git, dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run(git: Git, dir: &Path, args: &[&str]) -> Result<String> {
     let output = output_std(
         git(dir)
             .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
@@ -151,6 +151,15 @@ pub fn conflict_instruction(base: &str, files: &[String]) -> String {
     format!(
         "Merge origin/{base} into your branch (a merge, not a rebase), resolve the conflicts, \
          commit and push. These files conflict:\n{list}"
+    )
+}
+
+/// What a main sync's implementer is told when the update conflicts: it is merged with a merge commit, so never rebased.
+pub fn sync_conflict_instruction(base: &str, files: &[String]) -> String {
+    let list = files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+    format!(
+        "Merge origin/{base} into your branch again (a merge, never a rebase: this sync lands with a merge commit), \
+         resolve the conflicts, commit and push. These files conflict:\n{list}"
     )
 }
 

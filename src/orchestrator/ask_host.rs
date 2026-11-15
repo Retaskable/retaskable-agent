@@ -1,6 +1,6 @@
 //! The real [`AskHost`]: reads the store for the assistant's prompt (`asks_list`, `facts_get`, the items and the
 //! drafts) and the agent's run state, runs the assistant session through `claude -p` in the project's base checkout
-//! (Claude only, like the drafter's host), carries out its actions with `ask::perform` and hands back the answer
+//! (on the engine chosen for the assistant), carries out its actions with `ask::perform` and hands back the answer
 //! and each action's result for the loop to send with `ask_report`. The session's process tree registers with
 //! `process_tree`, so a restart or Quit cuts it.
 use std::path::PathBuf;
@@ -10,19 +10,19 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 
 use super::driver::{AskHost, AskJob, AskReply, AskStore};
-use super::session::{exists, quiet_timeout};
+use super::session::watch_for;
 use crate::ask::perform::{Perform, perform};
 use crate::ask::prompt::{AssistantInput, AudienceLine, Exchange, StateDraft, StateItem, StateSummary};
 use crate::ask::session::{Session, parse_result, session_spec};
 use crate::backlog::asks::Ask;
-use crate::config::{Engine, EngineChoiceConfig, ModelsConfig};
-use crate::engines::resolve::resolve_claude_on_path;
-use crate::engines::{Role, TranscriptSink, engine_for, engine_of, run_session};
+use crate::config::{CursorModels, Engine, EngineChoiceConfig};
+use crate::engines::cursor::with_project;
+use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::Interrupted;
 use crate::implementer::session::new_session_id;
 use crate::paths;
-use crate::tiers::implementer_tier;
+use crate::tiers::{SONNET, floor};
 use crate::view::AgentView;
 
 const TEMPLATE: &str = include_str!("../../prompts/assistant.md");
@@ -31,28 +31,33 @@ pub struct ClaudeAsks {
     data_dir: PathBuf,
     choice: EngineChoiceConfig,
     env: Env,
-    models: ModelsConfig,
+    cursor_models: CursorModels,
     /// The machine's `budget.dailyUsd`; 0 is no cap.
     daily_usd: f64,
     view: Arc<AgentView>,
+    /// The computer's local model, for the tier ladder.
+    local: crate::local_model::LocalModel,
 }
 
 impl ClaudeAsks {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data_dir: PathBuf,
         choice: EngineChoiceConfig,
         env: Env,
-        models: ModelsConfig,
+        cursor_models: CursorModels,
         daily_usd: f64,
         view: Arc<AgentView>,
+        local: crate::local_model::LocalModel,
     ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
             choice,
             env,
-            models,
+            cursor_models,
             daily_usd,
             view,
+            local,
         })
     }
 }
@@ -74,33 +79,43 @@ fn status_word(status: crate::backlog::ItemStatus) -> String {
         .unwrap_or_default()
 }
 
+impl ClaudeAsks {
+    /// What the project's sessions cost today on this computer (the store keeps no spend).
+    fn spent_today(&self, project: &str) -> f64 {
+        crate::store::MachineStore::load(&self.data_dir).map_or(0.0, |m| m.spend_today(project))
+    }
+}
+
 impl AskHost for ClaudeAsks {
     fn blocked(&self, store: &AskStore) -> BoxFuture<'static, Result<bool>> {
         let (client, repo, token, daily) = (store.client.clone(), store.repo, store.token.clone(), self.daily_usd);
+        let spent = self.spent_today(&store.project_id);
         Box::pin(async move {
             let facts = client.project_facts(repo, Some(&token)).await?;
-            Ok(facts.paused || (daily > 0.0 && facts.spent_today_usd >= daily))
+            Ok(facts.paused || (daily > 0.0 && spent >= daily))
         })
     }
 
     fn run(&self, job: AskJob) -> BoxFuture<'static, Result<AskReply>> {
-        let (data_dir, choice, env, models, daily_usd, view) = (
+        let (data_dir, choice, env, cursor_models, daily_usd, view, local) = (
             self.data_dir.clone(),
             self.choice.clone(),
             self.env.clone(),
-            self.models,
+            self.cursor_models.clone(),
             self.daily_usd,
             self.view.clone(),
+            self.local.clone(),
         );
         Box::pin(async move {
             let AskJob {
                 project,
                 ask,
                 store,
-                usage,
                 lanes,
                 runs,
                 events,
+                engine,
+                sessions,
             } = job;
             let (client, repo, token) = (&store.client, store.repo, Some(store.token.as_str()));
             // Every read is the store's: one that fails leaves the ask waiting, nothing is answered without it.
@@ -108,14 +123,15 @@ impl AskHost for ClaudeAsks {
             let audiences = client.audiences(repo, token).await?;
             let items = client.list(repo, token).await?;
             let drafts = client.drafts(repo, token).await?;
-            let facts = client.project_facts(repo, token).await?;
+            let spent_today_usd =
+                crate::store::MachineStore::load(&data_dir).map_or(0.0, |m| m.spend_today(&project.id_or_derived()));
 
             let history: Vec<Exchange> = asks.iter().filter(|a| a.id != ask.ask_id).map(exchange).collect();
             let audiences: Vec<AudienceLine> = (audiences.into_iter())
                 .map(|a| AudienceLine {
                     id: a.id,
                     name: a.name,
-                    who: a.short,
+                    who: Some(a.who),
                 })
                 .collect();
             let state = StateSummary {
@@ -148,8 +164,8 @@ impl AskHost for ClaudeAsks {
                     })
                     .collect(),
                 status: "running".into(),
-                paused_reason: None,
-                spent_today_usd: facts.spent_today_usd,
+                paused_reason: view.pause_reason(&project.id_or_derived()),
+                spent_today_usd,
                 daily_usd,
             };
             let question = if ask.images_block.is_empty() {
@@ -161,24 +177,24 @@ impl AskHost for ClaudeAsks {
                 answer,
                 actions: vec![],
             };
-            if engine_for(&choice, project.engines.as_ref(), Role::Assistant, None) != Engine::Claude {
-                return Ok(reply(
-                    "Sorry, I couldn't answer that: only Claude sessions run in the Rust agent yet.".into(),
-                ));
-            }
             let sorry = |e: anyhow::Error| reply(format!("Sorry, I couldn't answer that: {e:#}"));
-            let bin = match resolve_claude_on_path(&env) {
-                Ok(bin) => bin,
-                Err(e) => return Ok(sorry(e)),
+            // The local model places as Claude Code with no local target, like `place` says.
+            let chosen = match start_engine(
+                engine,
+                engine_for(&choice, project.engines.as_ref(), Role::Assistant, None),
+            ) {
+                Engine::Local => Engine::Claude,
+                other => other,
             };
-            if !exists(&bin, &env) {
-                return Ok(reply(format!(
-                    "Sorry, I couldn't answer that: the claude binary wasn't found ({}).",
-                    bin.display()
-                )));
-            }
+            let placed = match place(chosen, Role::Assistant, &env, &cursor_models) {
+                Ok(placed) => placed,
+                Err(why) => return Ok(reply(format!("Sorry, I couldn't answer that: {why}."))),
+            };
             let repo_path = PathBuf::from(&project.repo_path);
-            let tier = implementer_tier(usage.as_ref(), crate::telemetry::now_ms() / 1000, &models);
+            let up = local.ladder_for(chosen == Engine::Claude);
+            let tier = floor(SONNET, sessions.claude_at_limit(), up);
+            // Held until the session ends.
+            let claimed = local.claim(tier).await;
             let spec = match session_spec(&Session {
                 template: TEMPLATE,
                 input: AssistantInput {
@@ -193,11 +209,12 @@ impl AskHost for ClaudeAsks {
                     reply_to: ask.reply_to.as_deref(),
                     question: &question,
                 },
-                engine: Engine::Claude,
+                engine: chosen,
                 tier,
                 budget: &project.budget,
                 cwd: &repo_path,
-                local: None,
+                local: claimed.as_ref().map(|(_, target)| target.clone()),
+                cursor: placed.cursor.clone().map(|c| with_project(&project, c)),
             }) {
                 Ok(spec) => spec,
                 Err(e) => return Ok(sorry(e)),
@@ -211,9 +228,19 @@ impl AskHost for ClaudeAsks {
                 Ok(engine) => engine,
                 Err(e) => return Ok(sorry(e)),
             };
-            let quiet = quiet_timeout(project.tuning.session_quiet_minutes);
+            let quiet = watch_for(&project, spec.engine.unwrap_or_default());
             let follower = follow(sink.path.clone(), engine_of(spec.engine)?, events);
-            let r = run_session(engine.as_ref(), &bin, &spec, &new_session_id(), Some(&sink), quiet).await;
+            let listed = sessions.register_spec(&project_id, &ask.ask_id, None, Role::Assistant, &spec);
+            let r = listed
+                .scope(run_session(
+                    engine.as_ref(),
+                    &placed.bin,
+                    &spec,
+                    &new_session_id(),
+                    Some(&sink),
+                    quiet,
+                ))
+                .await;
             follower.abort();
             let r = match r {
                 Ok(r) => r,
@@ -237,6 +264,7 @@ impl AskHost for ClaudeAsks {
                     ask_id: &ask.ask_id,
                     images_block: &ask.images_block,
                     items: &items,
+                    failures: Some(&store.failures),
                 },
             )
             .await;

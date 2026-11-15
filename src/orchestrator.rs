@@ -12,8 +12,11 @@
 //! actually starting a session (implementer-session), and the pause flag's real source (today it's
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`).
 pub mod ask_host;
+mod baseline_wait;
+mod cursor_guard;
 pub mod draft_host;
 pub mod driver;
+pub mod expert_host;
 #[cfg(all(test, unix))]
 mod fake_session_tests;
 pub mod fresh_start;
@@ -45,9 +48,10 @@ pub type ProjectRuns = BTreeMap<String, ItemRun>;
 /// The minute summary for one project (agent-telemetry.md section 3.3's `tick`), as `Pool.minute` in
 /// `agent/src/pool.ts` writes it: `status` is `paused` or `running` here. The TS agent also has `setup`
 /// (no config yet) and `waiting_for_limit` (`Orchestrator.status`); neither has a source in this crate
-/// yet. `sessions` is 0 because no session runs here yet. `states` and `claim` are left for the caller
+/// yet. `sessions` is `sessions`, the number of rows in the live session registry (every row, lane or not;
+/// agent-settings.md section 4.5); the caller passes 0 while `live-sessions-reporting` is Off. `states` and `claim` are left for the caller
 /// that knows them.
-pub fn tick_payload(paused: bool, pool: &LanePool) -> event::Tick {
+pub fn tick_payload(paused: bool, pool: &LanePool, sessions: usize) -> event::Tick {
     let busy: Vec<u32> = pool.held_lanes().collect();
     let lanes = pool.rules().lanes;
     let free = lanes.saturating_sub(busy.iter().filter(|&&k| k <= lanes).count() as u32);
@@ -56,7 +60,7 @@ pub fn tick_payload(paused: bool, pool: &LanePool) -> event::Tick {
         lanes: Some(lanes),
         busy: Some(busy),
         free: Some(free.into()),
-        sessions: Some(0.into()),
+        sessions: Some(sessions.into()),
         ..Default::default()
     }
 }
@@ -81,6 +85,19 @@ pub enum Action {
 /// items never get the same lane), and only once none can is a free lane offered to `claim_next`.
 /// The caller applies each action itself (`apply`), or, like the dry driver, none of them.
 pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, cfg: &ProjectConfig) -> Vec<Action> {
+    decide_where(project, paused, runs, pool, cfg, |_| true)
+}
+
+/// `decide`, where new work (a queued item, and the `AskForWork` check) only
+/// takes a lane `may` accepts, i.e. one whose own engine may start. Items taking back a lane they hold (`retake_lane`, `readopt`, resumes) don't go through `decide`, so aren't filtered.
+pub fn decide_where(
+    project: &str,
+    paused: bool,
+    runs: &ProjectRuns,
+    pool: &LanePool,
+    cfg: &ProjectConfig,
+    may: impl Fn(u32) -> bool,
+) -> Vec<Action> {
     let mut actions = Vec::new();
     if paused {
         return actions;
@@ -94,7 +111,9 @@ pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, 
             last_lane: scratch.lane_of(project, item_id),
             fix_queued: false,
         };
-        let Some(lane) = scratch.claim(&want) else { break };
+        let Some(lane) = scratch.claim_where(&want, &may) else {
+            break;
+        };
         let mut after = *run;
         after.claimed(cfg);
         if after.state == ItemState::NeedsHuman {
@@ -123,7 +142,7 @@ pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, 
         last_lane: None,
         fix_queued: false,
     };
-    if scratch.claim_lane(&ask_want).is_some() {
+    if scratch.claim_lane_where(&ask_want, &may).is_some() {
         actions.push(Action::AskForWork);
     }
     actions
@@ -337,6 +356,21 @@ mod tests {
     }
 
     #[test]
+    fn new_work_only_takes_lanes_the_filter_accepts() {
+        let runs = queued(&["a"]);
+        let actions = decide_where("proj", false, &runs, &pool(2), &cfg(), |k| k == 2);
+        assert_eq!(
+            actions[0],
+            Action::StartImplementer {
+                item_id: "a".into(),
+                lane: 2
+            }
+        );
+        let none = |_: u32| false;
+        assert!(decide_where("proj", false, &runs, &pool(2), &cfg(), none).is_empty());
+    }
+
+    #[test]
     fn the_tick_payload_says_running_or_paused_and_its_exact_json() {
         let mut pool = pool(3);
         assert!(pool.take(
@@ -347,8 +381,8 @@ mod tests {
             }
         ));
         let mut events = EventLog::with_now(|| 0);
-        events.add_in("proj", Event::Tick(tick_payload(false, &pool)));
-        events.add_in("proj", Event::Tick(tick_payload(true, &pool)));
+        events.add_in("proj", Event::Tick(tick_payload(false, &pool, 3)));
+        events.add_in("proj", Event::Tick(tick_payload(true, &pool, 0)));
         assert_eq!(
             events.recent()[0].to_value(),
             serde_json::json!({
@@ -359,7 +393,7 @@ mod tests {
                 "lanes": 3,
                 "busy": [2],
                 "free": 2,
-                "sessions": 0
+                "sessions": 3
             })
         );
         assert_eq!(events.recent()[1].to_value()["status"], "paused");

@@ -11,16 +11,20 @@ pub mod codex;
 pub mod cursor;
 pub mod engine;
 mod json_result;
+pub mod model_slots;
 pub mod pi;
+pub mod place;
 pub mod resolve;
 pub mod runner;
+pub mod start_rules;
 pub mod summarize;
 pub mod transcripts;
 
-pub use choose::{Role, engine_for, has_lane_engines, lane_engine, other_engine_lanes, program_of};
+pub use choose::{Role, engine_for, has_lane_engines, lane_engine, other_engine_lanes, program_of, start_engine};
 pub use engine::{
     Engine, EngineId, EngineReader, EphemeralSessionConfig, EventKind, SessionEvent, SessionResult, SessionSpec,
     SessionStart, describe_failure, engine_id_from_str, ephemeral_readonly_spec, is_signed_out, signed_out_text,
 };
-pub use runner::{CouldNotStart, TranscriptSink, engine_of, run_session, run_session_tracked};
+pub use place::{Placement, cursor_model_for, place};
+pub use runner::{CouldNotStart, TranscriptSink, Watch, engine_of, run_session, run_session_tracked};
 pub use transcripts::{StartedOn, Transcript, read_transcripts, started_on};

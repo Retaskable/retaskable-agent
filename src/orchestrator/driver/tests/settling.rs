@@ -1,6 +1,7 @@
 //! How sessions and steps that ended settle their item's lane and lease (`driver/settle.rs`).
 use super::*;
-use crate::orchestrator::driver::machine::poll_period;
+use crate::engines::EngineId;
+use crate::orchestrator::driver::spawn::poll_period;
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
 
@@ -10,7 +11,7 @@ fn done(result: ImplementerOutcome) -> SessionResult {
 
 /// A rig that has claimed "a" on lane 1 with its session ended by `result` (not yet read), the store
 /// refusing `release` while `fail_release` is set.
-async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
+pub(super) async fn ended(result: SessionResult, fail_release: &Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), fail_release.clone()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
@@ -365,7 +366,7 @@ async fn a_starter_with_no_step_for_a_state_leaves_the_item_and_logs_nothing() {
         fn active(&self) -> u32 {
             0
         }
-        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, ItemRun>> {
+        fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
             None
         }
     }
@@ -433,6 +434,7 @@ async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_reco
     let (mut rig, _fake, _asked) = ended(SessionResult::NeedsHuman("first problem".into()), &Default::default()).await;
     // No triager here: its notes are the triage tests'.
     rig.lp(0).project.triage = crate::config::OnOff::Off;
+    rig.lp(0).file_project.triage = crate::config::OnOff::Off;
     rig.machine.pass().await;
     let lp = rig.lp(0);
     let r = lp.records["a"].clone();
@@ -534,27 +536,22 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
     }
 }
 
-/// A rig with `own-failure-handling` set as asked and "a" claimed on lane 1, its first session ended by a
+/// A rig with "a" claimed on lane 1, its first session ended by a
 /// watchdog kill (not yet read).
-async fn silenced(flag: bool) -> (Rig, Arc<Fake>, Asked) {
+async fn silenced() -> (Rig, Arc<Fake>, Asked) {
     let (base, asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
-    rig.lp(0).flags = Arc::new(crate::flags::Flags::fixed(if flag {
-        &["own-failure-handling"]
-    } else {
-        &[]
-    }));
     let fake = rig.go_live();
     fake.script
         .lock()
         .unwrap()
-        .push(SessionResult::Silenced("went quiet".into()));
+        .push(SessionResult::Silenced("went quiet".into(), "killed_for_silence"));
     rig.machine.pass().await;
     (rig, fake, asked)
 }
 
 /// Makes the pending resume of "a" due now and runs a pass, with the next session ending as `next`.
-async fn resume_now(rig: &mut Rig, fake: &Fake, next: SessionResult) {
+pub(super) async fn resume_now(rig: &mut Rig, fake: &Fake, next: SessionResult) {
     fake.script.lock().unwrap().push(next);
     rig.lp(0).silenced.insert("a".into(), std::time::Instant::now());
     rig.machine.pass().await;
@@ -562,7 +559,7 @@ async fn resume_now(rig: &mut Rig, fake: &Fake, next: SessionResult) {
 
 #[tokio::test]
 async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() {
-    let (mut rig, _fake, asked) = silenced(true).await;
+    let (mut rig, _fake, asked) = silenced().await;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
@@ -580,8 +577,39 @@ async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() 
 }
 
 #[tokio::test]
+async fn a_cursor_time_kill_is_settled_like_a_watchdog_kill() {
+    let (base, _asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    let kill = || SessionResult::Silenced("ran past its time limit and was killed".into(), "cursor_time");
+    fake.script.lock().unwrap().push(kill());
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
+    assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
+    assert!(rig.machine.claim_paused_until.is_none());
+    let events = rig.lp(0).events().recent();
+    let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
+    assert_eq!(ended["subtype"], "cursor_time");
+    resume_now(&mut rig, &fake, kill()).await;
+    let started = fake.started.lock().unwrap().clone();
+    assert!(started[1].resume && started[1].session_id == started[0].session_id);
+    for _ in 0..2 {
+        rig.machine.pass().await;
+        resume_now(&mut rig, &fake, kill()).await;
+    }
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
+    assert_eq!(
+        rig.lp(0).store.runs()["a"].needs_human_reason.as_deref(),
+        Some("ran past its time limit and was killed")
+    );
+}
+
+#[tokio::test]
 async fn a_watchdog_kill_is_resumed_by_id_only_after_the_delay() {
-    let (mut rig, fake, _) = silenced(true).await;
+    let (mut rig, fake, _) = silenced().await;
     rig.machine.pass().await;
     assert_eq!(fake.started.lock().unwrap().len(), 1, "not resumed at once");
     resume_now(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
@@ -593,14 +621,24 @@ async fn a_watchdog_kill_is_resumed_by_id_only_after_the_delay() {
 
 #[tokio::test]
 async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
-    let (mut rig, fake, _) = silenced(true).await;
+    let (mut rig, fake, _) = silenced().await;
     rig.machine.pass().await;
     for _ in 0..2 {
-        resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet".into())).await;
+        resume_now(
+            &mut rig,
+            &fake,
+            SessionResult::Silenced("went quiet".into(), "killed_for_silence"),
+        )
+        .await;
         rig.machine.pass().await;
         assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     }
-    resume_now(&mut rig, &fake, SessionResult::Silenced("went quiet again".into())).await;
+    resume_now(
+        &mut rig,
+        &fake,
+        SessionResult::Silenced("went quiet again".into(), "killed_for_silence"),
+    )
+    .await;
     rig.machine.pass().await;
     assert_eq!(fake.started.lock().unwrap().len(), 4, "three resumes");
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
@@ -612,7 +650,7 @@ async fn the_fourth_watchdog_kill_in_a_row_goes_to_a_person() {
 
 #[tokio::test]
 async fn an_answer_between_watchdog_kills_resets_the_count() {
-    let (mut rig, fake, _) = silenced(true).await;
+    let (mut rig, fake, _) = silenced().await;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).store.runs()["a"].silence_kills, 1);
     resume_now(&mut rig, &fake, done(ImplementerOutcome::Finished)).await;
@@ -622,7 +660,7 @@ async fn an_answer_between_watchdog_kills_resets_the_count() {
 
 #[tokio::test]
 async fn the_watchdog_kill_count_is_kept_across_a_reload() {
-    let (mut rig, _fake, _) = silenced(true).await;
+    let (mut rig, _fake, _) = silenced().await;
     rig.machine.pass().await;
     let saved = rig.lp(0).store.runs()["a"].clone();
     assert_eq!(saved.silence_kills, 1);
@@ -631,10 +669,228 @@ async fn the_watchdog_kill_count_is_kept_across_a_reload() {
     assert_eq!(back.silence_kills, 1);
 }
 
+/// Lanes 1-2 on Claude and 3-4 on Cursor, "a" waiting to be handed out.
+async fn mixed_rig() -> (Rig, Arc<Fake>, Asked) {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(4, &[&base]);
+    rig.machine.links.engine_choice =
+        serde_json::from_value(json!({ "lanes": ["claude", "claude", "cursor", "cursor"] })).unwrap();
+    let fake = rig.go_live();
+    (rig, fake, asked)
+}
+
+pub(super) fn out_for(secs: u64) -> std::time::Instant {
+    std::time::Instant::now() + Duration::from_secs(secs)
+}
+
 #[tokio::test]
-async fn with_the_flag_off_a_watchdog_kill_gives_the_item_back_as_before() {
-    let (mut rig, _fake, asked) = silenced(false).await;
+async fn with_claude_signed_out_the_item_is_claimed_and_starts_on_a_cursor_lane() {
+    let (mut rig, fake, asked) = mixed_rig().await;
+    rig.machine.claude_signed_out_until = Some(out_for(600));
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
-    assert!(rig.machine.claim_paused_until.is_some());
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].engine, EngineId::Cursor);
+}
+
+#[tokio::test]
+async fn with_cursor_limited_the_item_starts_on_a_claude_lane() {
+    let (mut rig, fake, asked) = mixed_rig().await;
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].engine, EngineId::Claude);
+}
+
+#[tokio::test]
+async fn with_every_lanes_engine_out_nothing_is_asked_for() {
+    let (mut rig, fake, asked) = mixed_rig().await;
+    rig.machine.claude_signed_out_until = Some(out_for(600));
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(fake.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_cursor_lane_with_cursor_limited_starts_its_new_session_on_claude_used_elsewhere_here() {
+    let (base, _asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice = serde_json::from_value(json!({ "lanes": ["cursor", "claude"] })).unwrap();
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1);
+    assert_eq!((started[0].lane, started[0].engine), (1, EngineId::Claude));
+}
+
+#[tokio::test]
+async fn a_computer_on_cursor_only_with_cursor_limited_claims_nothing() {
+    let (base, asked) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.machine.links.engine_choice =
+        serde_json::from_value(json!({ "default": "cursor", "lanes": ["cursor", "cursor"] })).unwrap();
+    rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(fake.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_sessions_usage_reading_still_lands_in_state_usage() {
+    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    let usage = json!({"status": "rejected", "resetsAt": i64::MAX});
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::NeedsHuman("the session ended without answering".into()),
+        usage: Some(usage.clone()),
+        context_tokens: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.poll().await;
+    assert_eq!(
+        rig.lp(0).store.usage(),
+        Some(usage),
+        "a session that needs a person may still have reported the reading section 7.1 needs most"
+    );
+    assert!(
+        crate::tiers::signal_on(1_700_000_000),
+        "saving a five-hour reading turns the machine-wide subscription signal on"
+    );
+}
+
+async fn settle_usage(usage: Value) -> Option<Value> {
+    let (base, _asked) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    rig.lp(0).store.set_usage(json!({"status": "allowed"}));
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::NeedsHuman("the weekly limit".into()),
+        usage: Some(usage),
+        context_tokens: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.poll().await;
+    rig.lp(0).store.usage()
+}
+
+#[tokio::test]
+async fn a_weekly_rejection_is_saved_as_the_usage_reading_with_the_week_as_its_reset() {
+    let week = json!({"status": "rejected", "rateLimitType": "seven_day", "resetsAt": 4_000_000_000u64});
+    assert_eq!(settle_usage(week.clone()).await, Some(week.clone()));
+    // Claude counts limited until the week's reset, not a 30-minute pause.
+    let wait = crate::engines::engine::resets_in(Some(&week)).unwrap();
+    assert!(wait > std::time::Duration::from_secs(24 * 3600));
+}
+
+#[tokio::test]
+async fn a_non_rejected_weekly_reading_does_not_overwrite_the_usage_reading() {
+    let week = json!({"status": "allowed", "rateLimitType": "seven_day", "resetsAt": 4_000_000_000u64});
+    assert_eq!(settle_usage(week).await, Some(json!({"status": "allowed"})));
+}
+
+#[tokio::test]
+async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
+    let now = crate::telemetry::now_secs() as u64;
+    let reading = |u: f64| {
+        json!({"unifiedWindows": {
+            "five_hour": {"utilization": 0.1, "resetsAt": now + 3600},
+            "seven_day": {"utilization": u, "resetsAt": now + 86_400}}})
+    };
+    for (u, limited) in [(0.96, true), (0.94, false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.go_live();
+        at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+        rig.machine.outcome_sender().send(SessionOutcome {
+            project: "p0".into(),
+            item_id: "a".into(),
+            lane: 1,
+            result: SessionResult::NeedsHuman("x".into()),
+            usage: Some(reading(u)),
+            context_tokens: None,
+            notes: vec![],
+            session_id: None,
+        });
+        rig.machine.poll().await;
+        let t = std::time::Instant::now();
+        let id = crate::engines::EngineId::Claude;
+        assert_eq!(rig.machine.engine_limits.is_limited(id, t), limited);
+        assert!(
+            !rig.machine
+                .engine_limits
+                .is_limited(id, t + Duration::from_secs(86_402))
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
+    let now = crate::telemetry::now_secs() as u64;
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    at(&mut rig, 0, "a", ItemState::Implementing, Some(1));
+    rig.machine.outcome_sender().send(SessionOutcome {
+        project: "p0".into(),
+        item_id: "a".into(),
+        lane: 1,
+        result: SessionResult::Limited {
+            why: "five hour".into(),
+            resets_in: Some(Duration::from_secs(3600)),
+        },
+        usage: Some(json!({"unifiedWindows": {"seven_day": {"utilization": 0.96, "resetsAt": now + 86_400}}})),
+        context_tokens: None,
+        notes: vec![],
+        session_id: None,
+    });
+    rig.machine.poll().await;
+    let later = std::time::Instant::now() + Duration::from_secs(7200);
+    assert!(
+        rig.machine
+            .engine_limits
+            .is_limited(crate::engines::EngineId::Claude, later)
+    );
+}
+
+#[tokio::test]
+async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
+    let now = crate::telemetry::now_secs() as u64;
+    for (u, limited) in [(0.96, true), (0.94, false)] {
+        let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+        let mut rig = rig(2, &[&base]);
+        rig.lp(0)
+            .store
+            .set_usage(json!({"unifiedWindows": {"seven_day": {"utilization": u, "resetsAt": now + 86_400}}}));
+        rig.go_live();
+        rig.machine.poll().await;
+        let t = std::time::Instant::now();
+        assert_eq!(
+            rig.machine
+                .engine_limits
+                .is_limited(crate::engines::EngineId::Claude, t),
+            limited
+        );
+    }
 }

@@ -78,6 +78,17 @@ pub fn program_of(engine: Engine) -> EngineId {
     }
 }
 
+/// The engine a new session starts on: `now` (from the start rules) when there is one, else the `chosen` one.
+pub fn start_engine(now: Option<EngineId>, chosen: Engine) -> Engine {
+    match now {
+        Some(EngineId::Claude) => Engine::Claude,
+        Some(EngineId::Cursor) => Engine::Cursor,
+        Some(EngineId::Pi) => Engine::Pi,
+        Some(EngineId::Codex) => Engine::Codex,
+        None => chosen,
+    }
+}
+
 /// `hasLaneEngines`: whether this computer set any per-lane engine at all.
 pub fn has_lane_engines(cfg: &EngineChoiceConfig) -> bool {
     !cfg.lanes.is_empty()
