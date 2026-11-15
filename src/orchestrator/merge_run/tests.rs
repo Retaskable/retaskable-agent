@@ -52,6 +52,15 @@ fn ops(log: &Log, op: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Waits of a few milliseconds, with the unknown wait a little longer than a read.
+fn quick() -> Delays {
+    Delays {
+        ask_every: Duration::from_millis(5),
+        unknown_for: Duration::from_millis(40),
+        retry_after: Duration::from_millis(5),
+    }
+}
+
 /// A fake `gh`: `pr view … mergeCommit` answers the commit, any other `pr view` prints `view` (or sleeps first when
 /// `slow` exists), `pr merge` exits `merge-code` (default 0, printing `merge-err`); every call is logged.
 fn fake_gh(dir: &Path) -> PathBuf {
@@ -64,7 +73,21 @@ echo "$*" >> "$d/calls.log"
 case "$*" in
   *mergeCommit*) echo '{"mergeCommit":{"oid":"abc123"}}';;
   "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view";;
-  "pr merge "*) [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"; [ -f "$d/merge-err" ] && cat "$d/merge-err" >&2; exit $(cat "$d/merge-code" 2>/dev/null || echo 0);;
+  "pr merge "*)
+    [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"
+    # `fail-times` N: the first N merges are refused with `merge-err`; `advance`: base moves on first.
+    if [ -f "$d/advance" ]; then
+      rm "$d/advance"
+      export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+      git push -q origin "$(git commit-tree -p origin/main -m adv 'origin/main^{tree}')":refs/heads/main
+    fi
+    if [ -f "$d/fail-times" ] && [ "$(cat "$d/fail-times")" -gt 0 ]; then
+      echo $(( $(cat "$d/fail-times") - 1 )) > "$d/fail-times"
+      cat "$d/merge-err" >&2
+      exit 1
+    fi
+    [ -f "$d/merge-err" ] && [ ! -f "$d/fail-times" ] && cat "$d/merge-err" >&2
+    exit $(cat "$d/merge-code" 2>/dev/null || echo 0);;
 esac
 "#,
     );
@@ -116,6 +139,7 @@ async fn rig() -> Rig {
         repo_path: repo.display().to_string(),
         worktrees_dir: dir.path().join("wt").display().to_string(),
         base_branch: "main".into(),
+        max_conflict_rounds: 5,
         ..Default::default()
     };
     let piece = serde_json::from_value(json!({ "id": "p1", "title": "t", "branch": "feat", "change": 7 })).unwrap();
@@ -133,7 +157,7 @@ async fn rig() -> Rig {
 
 impl Rig {
     async fn run(&mut self) -> RunEnd {
-        let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, Duration::from_millis(10));
+        let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, quick());
         runner.start(self.request.clone()).unwrap();
         tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
             .await
@@ -216,14 +240,16 @@ async fn a_conflict_gh_sees_and_a_refusal_to_merge_both_update_the_change() {
     assert_eq!(rig.run().await.outcome, RunOutcome::Updated);
 
     let mut rig = self::rig().await;
+    // The base moves on while gh refuses: only then is the base merged in.
     set(rig.dir.path(), "merge-code", "1");
+    set(rig.dir.path(), "advance", "");
     set(
         rig.dir.path(),
         "merge-err",
         "Head branch is not up to date with the base branch",
     );
     assert_eq!(rig.run().await.outcome, RunOutcome::Updated);
-    assert!(calls(rig.dir.path()).iter().any(|c| c.starts_with("pr merge")));
+    assert_eq!(merges(&rig).len(), 1);
 }
 
 #[tokio::test]
@@ -266,7 +292,7 @@ async fn a_turn_lost_before_landing_ends_interrupted_without_merging() {
 }
 
 fn start_runner(rig: &Rig) {
-    let runner = MergeRuns::with(fake_gh(rig.dir.path()), tgit, Duration::from_millis(10));
+    let runner = MergeRuns::with(fake_gh(rig.dir.path()), tgit, quick());
     runner.start(rig.request.clone()).unwrap();
 }
 
@@ -451,4 +477,124 @@ async fn a_store_that_cant_be_asked_for_the_beat_merges_nothing() {
     let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Interrupted);
     assert!(merges(&rig).is_empty());
+}
+
+fn gh_says(rig: &Rig, why: &str, times: u32) {
+    set(rig.dir.path(), "merge-err", why);
+    set(rig.dir.path(), "fail-times", &times.to_string());
+}
+
+const NOT_READY: &str = "GraphQL: Base branch was modified. Review and try the merge again.";
+
+#[tokio::test]
+async fn a_merge_github_wasnt_ready_for_is_tried_again_and_the_turn_is_beaten_each_time() {
+    let mut rig = rig().await;
+    gh_says(&rig, NOT_READY, 2);
+    let end = rig.run().await;
+    assert_eq!(end.outcome, RunOutcome::Merged);
+    assert_eq!(merges(&rig).len(), 3);
+    assert_eq!(ops(&rig.log, "merge_beat").len(), 3);
+}
+
+#[tokio::test]
+async fn retries_stop_at_max_merge_retries_and_then_a_person_is_needed() {
+    for (cap, tries) in [(0, 1), (2, 3), (5, 6)] {
+        let mut rig = rig().await;
+        rig.request.context.config.tuning.max_merge_retries = cap;
+        gh_says(&rig, NOT_READY, 99);
+        let RunOutcome::Failed(why) = rig.run().await.outcome else {
+            panic!("should fail")
+        };
+        assert!(why.contains("Base branch was modified"), "{why}");
+        assert_eq!(merges(&rig).len(), tries, "cap {cap}");
+        // A failed run is `needs_person` to the store.
+        assert!(matches!(
+            crate::backlog::merge::MergeOutcome::of_run(&RunOutcome::Failed(why), &json!({})),
+            crate::backlog::merge::MergeOutcome::NeedsPerson { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_that_isnt_not_ready_isnt_retried() {
+    let mut rig = rig().await;
+    gh_says(
+        &rig,
+        "GraphQL: Pull request is in clean status but blocked by review",
+        99,
+    );
+    assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
+    assert_eq!(merges(&rig).len(), 1);
+}
+
+const UNKNOWN: &str = r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","state":"OPEN"}"#;
+
+#[tokio::test]
+async fn a_change_github_never_works_out_is_brought_up_to_date_after_the_wait() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "view", UNKNOWN);
+    let end = rig.run().await;
+    assert_eq!(end.outcome, RunOutcome::Updated);
+    let views = calls(rig.dir.path())
+        .iter()
+        .filter(|c| c.starts_with("pr view"))
+        .count();
+    assert!(views > 2, "{views} reads over the wait");
+    assert!(merges(&rig).is_empty());
+}
+
+#[tokio::test]
+async fn an_unknown_that_clears_within_the_wait_lands_as_usual() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "view", UNKNOWN);
+    rig.request.context.config.base_branch = "main".into();
+    let dir = rig.dir.path().to_path_buf();
+    let clear = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        set(&dir, "view", MERGEABLE);
+    });
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    clear.await.unwrap();
+}
+
+#[tokio::test]
+async fn with_no_conflict_rounds_left_an_unknown_or_a_conflict_needs_a_person_and_a_behind_merges_as_it_is() {
+    let mut rig = rig().await;
+    rig.request.context.config.max_conflict_rounds = 0;
+    set(rig.dir.path(), "view", UNKNOWN);
+    let RunOutcome::Failed(why) = rig.run().await.outcome else {
+        panic!("unknown should fail")
+    };
+    assert!(why.contains("has not worked out"), "{why}");
+
+    let mut rig = self::rig().await;
+    rig.request.context.config.max_conflict_rounds = 0;
+    set(
+        rig.dir.path(),
+        "view",
+        r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","state":"OPEN"}"#,
+    );
+    let RunOutcome::Failed(why) = rig.run().await.outcome else {
+        panic!("conflict should fail")
+    };
+    assert!(why.contains("maxConflictRounds 0"), "{why}");
+    let before = rig.origin_head("feat");
+    assert_eq!(rig.origin_head("feat"), before);
+
+    // Only behind: nothing to update with, so it lands as it is.
+    let mut rig = self::rig().await;
+    rig.request.context.config.max_conflict_rounds = 0;
+    commit(&rig.repo, "base.txt", "base");
+    trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
+    let before = rig.origin_head("feat");
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    assert_eq!(rig.origin_head("feat"), before);
+}
+
+#[tokio::test]
+async fn a_main_sync_that_github_never_works_out_needs_a_person_not_an_update() {
+    let mut rig = rig().await;
+    into_sync(&mut rig, "squash");
+    set(rig.dir.path(), "view", UNKNOWN);
+    assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
 }

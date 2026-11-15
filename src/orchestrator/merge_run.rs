@@ -23,22 +23,50 @@ use crate::runs::{MERGING, UPDATING};
 
 /// How often a PR GitHub hasn't worked out is read again.
 pub const ASK_EVERY: Duration = Duration::from_secs(15);
+/// How long a PR may stay unworked-out before the branch is brought up to date to make GitHub look again
+/// (github-workflow.md section 4.4: on 2026-11-06 one PR's mergeability never came and nothing else merged).
+pub const UNKNOWN_FOR: Duration = Duration::from_secs(5 * 60);
+/// How long a merge GitHub wasn't ready for waits before it is tried again.
+pub const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// The most `maxMergeRetries` may be set to.
+const MAX_RETRIES: u32 = 20;
+/// Conflict rounds a run has used when it starts: a piece's merge run ends with its first update (the piece goes
+/// to CI and comes back as a new run), as in the TypeScript agent, where each such run counts from none.
+const ROUNDS: u32 = 0;
+
+/// The waits of a merge run, shortened in tests.
+#[derive(Debug, Clone, Copy)]
+pub struct Delays {
+    pub ask_every: Duration,
+    pub unknown_for: Duration,
+    pub retry_after: Duration,
+}
+
+impl Default for Delays {
+    fn default() -> Self {
+        Self {
+            ask_every: ASK_EVERY,
+            unknown_for: UNKNOWN_FOR,
+            retry_after: RETRY_AFTER,
+        }
+    }
+}
 
 type Outcome = Option<(RunOutcome, Value)>;
 
 pub struct MergeRuns {
     gh: PathBuf,
     git: fn(&Path) -> Command,
-    ask_every: Duration,
+    delays: Delays,
 }
 
 impl MergeRuns {
     pub fn new() -> Arc<Self> {
-        Self::with(PathBuf::from("gh"), crate::git_bin::command, ASK_EVERY)
+        Self::with(PathBuf::from("gh"), crate::git_bin::command, Delays::default())
     }
 
-    pub fn with(gh: PathBuf, git: fn(&Path) -> Command, ask_every: Duration) -> Arc<Self> {
-        Arc::new(Self { gh, git, ask_every })
+    pub fn with(gh: PathBuf, git: fn(&Path) -> Command, delays: Delays) -> Arc<Self> {
+        Arc::new(Self { gh, git, delays })
     }
 }
 
@@ -51,7 +79,7 @@ impl RunStarter for MergeRuns {
         let job = Job {
             gh: self.gh.clone(),
             git: self.git,
-            ask_every: self.ask_every,
+            delays: self.delays,
             trees: Trees::default(),
             sync: is_sync(&request),
             request,
@@ -70,7 +98,7 @@ impl RunStarter for MergeRuns {
 struct Job {
     gh: PathBuf,
     git: fn(&Path) -> Command,
-    ask_every: Duration,
+    delays: Delays,
     trees: Trees,
     request: RunRequest,
     /// A main sync (`sync_main` chore): merged with a merge commit, never rebased.
@@ -124,6 +152,21 @@ fn wants_update(stderr: &str) -> bool {
     e.contains("not up to date") || e.contains("out of date") || e.contains("behind")
 }
 
+/// A `gh pr merge` refusal that says GitHub isn't ready to merge yet (retried on its own count), not that it
+/// didn't answer.
+fn not_ready(stderr: &str) -> bool {
+    let e = stderr.to_lowercase();
+    [
+        "base branch was modified",
+        "not mergeable",
+        "mergeable state",
+        "still being",
+        "try the merge again",
+    ]
+    .iter()
+    .any(|p| e.contains(p))
+}
+
 /// A `gh pr merge --merge` refusal because the repo doesn't allow merge commits.
 fn refuses_merge_commits(stderr: &str) -> bool {
     let e = stderr.to_lowercase();
@@ -159,7 +202,7 @@ impl Job {
         };
         let piece = super::driver::piece_id(&self.request.piece).to_string();
         let turn = self.request.token.clone();
-        let end = self.land(&turn, &pr, &branch, &piece).await;
+        let end = self.land(&turn, &pr, &branch, &piece, 0).await;
         ctx.locks.remove(&turn);
         end
     }
@@ -173,7 +216,7 @@ impl Job {
         Some((RunOutcome::Interrupted, json!({})))
     }
 
-    async fn land(&self, lock: &str, pr: &str, branch: &str, piece: &str) -> Outcome {
+    async fn land(&self, lock: &str, pr: &str, branch: &str, piece: &str, tries: u32) -> Outcome {
         let config = &self.request.context.config;
         let base = config.base_branch.clone();
         let head = format!("origin/{branch}");
@@ -187,10 +230,12 @@ impl Job {
         if self.stopped() {
             return None;
         }
-        if seen == Behind::Behind {
+        // Once the conflict rounds are used up, a change that is only behind merges as it is.
+        if seen == Behind::Behind && self.may_update() {
             return self.update(lock, branch, piece).await;
         }
-        for _ in 0..5 {
+        let asked = tokio::time::Instant::now();
+        loop {
             let view = match self
                 .gh_json::<View>(&["pr", "view", pr, "--json", "mergeable,mergeStateStatus,state"])
                 .await
@@ -204,17 +249,47 @@ impl Job {
             match view.next() {
                 Next::Merged => return self.merged(pr).await,
                 Next::Closed => return failed("The change was closed without merging."),
+                Next::Update if !self.may_update() => {
+                    let cap = self.cap();
+                    return failed(format!(
+                        "Still conflicting with {} after {ROUNDS} tries to bring it up to date (maxConflictRounds {cap}): other changes keep merging into the same lines first.",
+                        self.request.context.config.base_branch
+                    ));
+                }
                 Next::Update => return self.update(lock, branch, piece).await,
-                Next::Land => return self.merge(lock, pr, branch, piece).await,
+                Next::Land => return self.merge(lock, pr, branch, piece, tries).await,
+                Next::Unknown if asked.elapsed() >= self.delays.unknown_for => {
+                    return self.unknown_too_long(lock, branch, piece).await;
+                }
                 Next::Unknown => {
-                    tokio::time::sleep(self.ask_every).await;
+                    tokio::time::sleep(self.delays.ask_every).await;
                     if self.stopped() {
                         return None;
                     }
                 }
             }
         }
-        failed("GitHub couldn't say whether the change can merge.")
+    }
+
+    fn cap(&self) -> u32 {
+        self.request.context.config.max_conflict_rounds
+    }
+
+    /// Whether another update from the base is within `maxConflictRounds`.
+    fn may_update(&self) -> bool {
+        ROUNDS < self.cap()
+    }
+
+    /// GitHub hasn't worked the change out for as long as `unknown_for`: the branch is brought up to date, which makes
+    /// it look again; a main sync, or no rounds left, needs a person instead.
+    async fn unknown_too_long(&self, lock: &str, branch: &str, piece: &str) -> Outcome {
+        if self.sync || !self.may_update() {
+            let minutes = self.delays.unknown_for.as_secs() / 60;
+            return failed(format!(
+                "GitHub has not worked out whether the change merges for over {minutes} minutes, and bringing it up to date {ROUNDS} times did not help."
+            ));
+        }
+        self.update(lock, branch, piece).await
     }
 
     /// Merges the base into the change's branch and pushes it.
@@ -247,7 +322,7 @@ impl Job {
         }
     }
 
-    async fn merge(&self, lock: &str, pr: &str, branch: &str, piece: &str) -> Outcome {
+    async fn merge(&self, lock: &str, pr: &str, branch: &str, piece: &str, tries: u32) -> Outcome {
         if self.stopped() {
             return None;
         }
@@ -280,11 +355,30 @@ impl Job {
                     "options": ["Merge commits are allowed now", "I'll sync by hand"],
                 }] }),
             ))
-        } else if wants_update(&err) {
+        } else if wants_update(&err) && self.may_update() && self.still_behind(branch).await {
+            // The branch rules want it up to date, and it is: only then is the base merged in.
             self.update(lock, branch, piece).await
+        } else if not_ready(&err) && tries < self.request.context.config.tuning.max_merge_retries.min(MAX_RETRIES) {
+            self.request.context.locks.set_phase(lock, UPDATING);
+            tokio::time::sleep(self.delays.retry_after).await;
+            if self.stopped() {
+                return None;
+            }
+            // The turn is kept; the change is read again and the turn beaten again before the next try.
+            Box::pin(self.land(lock, pr, branch, piece, tries + 1)).await
         } else {
             failed(format!("gh pr merge failed: {}", err.trim()))
         }
+    }
+
+    /// Whether git says the base has commits the change's branch lacks.
+    async fn still_behind(&self, branch: &str) -> bool {
+        let (base, head) = (
+            self.request.context.config.base_branch.clone(),
+            format!("origin/{branch}"),
+        );
+        let seen = self.git(move |git, repo| behind(git, repo, &base, &head)).await;
+        seen == Behind::Behind
     }
 
     /// The beat just before the host call (`merge_beat`, phase `merging`): only while the store says the turn is
