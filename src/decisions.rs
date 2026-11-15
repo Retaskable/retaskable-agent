@@ -89,4 +89,36 @@ mod tests {
         assert!(text.contains("Already decided by a person"));
         assert!(text.contains("Q: Squash or merge?\n  A: Squash"));
     }
+
+    #[test]
+    fn a_question_asked_again_in_other_case_or_spacing_still_matches() {
+        let decisions = [decided("Squash or merge?", "Squash")];
+        let (answered, open) = split_asked(&[q("  SQUASH   or\nmerge?  ")], &decisions);
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].question, "Squash or merge?");
+        assert!(open.is_empty());
+    }
+
+    #[test]
+    fn different_words_are_not_the_same_question() {
+        let decisions = [decided("Squash or merge?", "Squash")];
+        let (answered, open) = split_asked(&[q("Squash or rebase?")], &decisions);
+        assert!(answered.is_empty());
+        assert_eq!(open, vec!["Squash or rebase?"]);
+    }
+
+    #[test]
+    fn no_questions_or_no_decisions_split_cleanly() {
+        let decisions = [decided("a?", "b")];
+        assert_eq!(split_asked(&[], &decisions), (vec![], vec![]));
+        let (answered, open) = split_asked(&[q("a?")], &[]);
+        assert!(answered.is_empty());
+        assert_eq!(open, vec!["a?"]);
+    }
+
+    #[test]
+    fn the_prompt_section_keeps_every_decision_in_order() {
+        let text = decisions_text(&[decided("one?", "1"), decided("two?", "2")]);
+        assert!(text.ends_with("- Q: one?\n  A: 1\n- Q: two?\n  A: 2"));
+    }
 }
