@@ -35,6 +35,7 @@ mod lane_play;
 mod main_pr;
 mod main_sync;
 mod merge_item;
+mod outbox;
 mod take_overs;
 pub use lane_play::LanePlay;
 mod ci_pass;

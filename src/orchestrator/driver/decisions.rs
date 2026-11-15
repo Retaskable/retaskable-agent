@@ -83,7 +83,7 @@ impl ProjectLoop {
         self.decisions.get(id).map(|d| &d.now)
     }
 
-    fn decisions_link(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
+    pub(super) fn decisions_link(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
         let repo = self.repo?;
         match shared.links.keychain.get(&shared.links.backlog_url) {
             Ok(Some(token)) => Some((repo, token)),

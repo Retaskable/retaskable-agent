@@ -953,6 +953,7 @@ mod merge_draft;
 mod merge_item;
 mod model_caps;
 mod note_rules;
+mod outbox;
 mod own_failures;
 mod playtest_answers;
 mod playtests;

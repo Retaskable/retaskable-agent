@@ -19,6 +19,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::Shared;
+use super::outbox::Sent;
 use super::project::ProjectLoop;
 use crate::backlog::complete::Completion;
 use crate::intents::finish_steps::{Answer, Finish, FinishHandler};
@@ -179,15 +180,12 @@ impl ProjectLoop {
             remaining: Some(String::new()),
             playtest: None,
         };
-        if let Err(e) = self.client.complete(repo, Some(&token), id, &lease, &completion).await {
-            self.store_error("complete", &e);
-            return Err(format!("The shared backlog didn't take it: {e}"));
-        }
-        self.runs.remove(id);
-        self.items.remove(id);
-        self.leases.remove(id);
-        self.records.remove(id);
-        self.save_leases();
+        // Listed and saved first, the item's decisions sent before it: a store that doesn't answer keeps the call, and the
+        // pass sends it again (`outbox.rs`). One already listed for this lease is the one sent, with its own commit.
+        let sha = match self.complete_item(repo, &token, id, &lease, completion).await {
+            Sent::Done(sent) => sent.merge_commit.unwrap_or(sha),
+            Sent::Kept(why) | Sent::Dropped(why) => return Err(format!("The shared backlog didn't take it: {why}")),
+        };
         tracing::info!("{}: finished {id} at {base} {sha}", self.id);
         Ok(json!({ "itemId": id, "sha": sha }))
     }
