@@ -33,6 +33,7 @@ Only the specs whose subject is the computer itself:
 - [small-agent-jobs.md](small-agent-jobs.md): usage recheck, keep awake, native app facts, no half emoji.
 - [pools.md](pools.md): polling the pool for tasks (an item's whole chain) and reporting them.
 - [restart-and-self-update.md](restart-and-self-update.md): restart and self-update.
+- [code-index.md](code-index.md): the index of what a project defines where, kept up to date and queried by sessions through tools (Rust only; this file is its source).
 
 - Where the server now decides, the agent copies keep only what the agent sends and runs, and link the server-side spec in Retaskable.com: [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md), [merge-queue-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/merge-queue-on-server.md), [chores-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/chores-on-server.md), [jobs-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/jobs-on-server.md) and [rollout-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/rollout-on-server.md).
 
