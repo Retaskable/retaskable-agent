@@ -593,6 +593,11 @@ impl Machine {
         let live: Vec<bool> = (self.projects.iter().zip(ready))
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
+        for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            if live {
+                lp.load_decisions(&shared!(self, stopping)).await;
+            }
+        }
         if starter.is_some() {
             self.settle_outcomes().await;
         }
@@ -619,6 +624,7 @@ impl Machine {
                         lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
                             .await;
                     }
+                    lp.flush_decisions(&shared!(self, stopping)).await;
                 }
             }
         }

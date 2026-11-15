@@ -199,6 +199,9 @@ pub struct ProjectLoop {
     /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
     /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
     pub(super) records: BTreeMap<String, RunRecord>,
+    /// Each leased item's decision facts, read from its store item and sent back as they change
+    /// (`decisions.rs`). An item whose facts couldn't be read has none.
+    pub(super) decisions: BTreeMap<String, crate::backlog::decisions::sync::ItemDecisions>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
     /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
@@ -329,6 +332,7 @@ impl ProjectLoop {
             release_owed: false,
             unparked: store.unparked(),
             records: store.runs(),
+            decisions: BTreeMap::new(),
             to_resume: Vec::new(),
             data_dir: None,
             week_checked: false,

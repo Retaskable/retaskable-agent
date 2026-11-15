@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::start_gate::StartGate;
 use super::{OutcomeSender, ProjectLoop, SessionStarter, Shared};
+use crate::backlog::decisions::Triages;
 use crate::config::OnOff;
 use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::lane_pool::LanePool;
@@ -121,6 +122,7 @@ impl ProjectLoop {
         self.records.get(item_id).is_some_and(|r| {
             let facts = needs_human_facts(
                 r,
+                self.decisions_of(item_id),
                 self.claude_pending.contains(item_id),
                 self.triaging.contains(item_id),
             );
@@ -194,7 +196,7 @@ impl ProjectLoop {
                 self.leases.contains_key(*id)
                     && !self.triaging.contains(*id)
                     && wants_triage(
-                        &needs_human_facts(r, false, false),
+                        &needs_human_facts(r, self.decisions_of(id), false, false),
                         true,
                         MAX_TRIAGES,
                         r.next_look_at.as_deref(),
@@ -409,11 +411,14 @@ impl ProjectLoop {
         for (n, step) in steps.iter().enumerate() {
             text.push_str(&format!("\n{}. {step}", n + 1));
         }
-        let Some(record) = self.records.get_mut(item_id).filter(|r| r.state == "needs_human") else {
+        let (Some(record), Some(held)) = (
+            self.records.get_mut(item_id).filter(|r| r.state == "needs_human"),
+            self.decisions.get_mut(item_id),
+        ) else {
             self.triaging.remove(item_id);
             return;
         };
-        let count = triage_count(record.triages, record.slice);
+        let count = triage_count(held.now.triage_pair(), record.slice);
         let queued = (self.continuing.iter().chain(&self.starting_over)).any(|(id, _)| id == item_id);
         let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
         let verb = match decision {
@@ -428,7 +433,7 @@ impl ProjectLoop {
             return;
         }
         self.triaging.remove(item_id);
-        record.triaged = true;
+        held.now.triaged = Some(true);
         if verb == "wait for your steps" {
             let list: Vec<String> = steps
                 .iter()
@@ -437,7 +442,10 @@ impl ProjectLoop {
                 .collect();
             record.needs_human_reason = Some(format!("Only steps a person can do are left:\n{}", list.join("\n")));
         } else {
-            record.triages = Some((record.slice, count + 1));
+            held.now.triages = Some(Triages {
+                slice: record.slice,
+                n: count + 1,
+            });
         }
         let notes = crate::text::non_blank(instructions).map(str::to_string);
         match decision {
@@ -467,11 +475,14 @@ impl ProjectLoop {
     /// The look found `text` (already shaped like "Claude looked into it: …").
     fn look_found(&mut self, item_id: &str, text: &str) {
         self.triaging.remove(item_id);
-        let Some(record) = self.records.get_mut(item_id).filter(|r| r.state == "needs_human") else {
+        let (Some(record), Some(held)) = (
+            self.records.get_mut(item_id).filter(|r| r.state == "needs_human"),
+            self.decisions.get_mut(item_id),
+        ) else {
             return;
         };
         add_to_reason(&mut record.needs_human_reason, text);
-        record.triaged = true;
+        held.now.triaged = Some(true);
         self.save_leases();
         self.look_note(item_id, text.to_string());
     }
@@ -480,13 +491,16 @@ impl ProjectLoop {
     /// given up on at the third failure; a look that hit its budget isn't retried.
     fn look_ended(&mut self, item_id: &str, note: String, why: LookFailure) {
         self.triaging.remove(item_id);
-        let Some(record) = self.records.get_mut(item_id).filter(|r| r.state == "needs_human") else {
+        let (Some(record), Some(held)) = (
+            self.records.get_mut(item_id).filter(|r| r.state == "needs_human"),
+            self.decisions.get_mut(item_id),
+        ) else {
             return;
         };
         let line = format!("Claude couldn't look into it: {note}");
         let mut retry = None;
         match why {
-            LookFailure::BudgetHit => record.triaged = true,
+            LookFailure::BudgetHit => held.now.triaged = Some(true),
             why => {
                 record.failed_looks += 1;
                 let mut wait = Duration::from_secs(60 * 10 * u64::from(record.failed_looks));
@@ -495,7 +509,7 @@ impl ProjectLoop {
                 }
                 if record.failed_looks >= MAX_FAILED_LOOKS {
                     add_to_reason(&mut record.needs_human_reason, &line);
-                    record.triaged = true;
+                    held.now.triaged = Some(true);
                 } else {
                     let at: DateTime<Utc> = Utc::now() + wait;
                     record.next_look_at = Some(at.to_rfc3339());
