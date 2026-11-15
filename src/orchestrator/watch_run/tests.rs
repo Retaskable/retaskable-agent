@@ -33,7 +33,9 @@ pub(crate) fn repo_with_ci(dir: &Path) -> PathBuf {
 }
 
 /// A fake `gh` (unix): `pr checks` prints `checks` and exits `code`, or fails when `error` exists or hangs when
-/// `hang` does; `run view` prints `log`; every call is logged to `calls.log`.
+/// `hang` does; `run view` prints `log`; every call is logged to `calls.log`. When `checks.next` exists, a read
+/// that has answered moves it (and `code.next`) into place, so the next read sees it: a change tied to a read, not
+/// to a clock.
 pub(crate) fn fake_gh(dir: &Path) -> PathBuf {
     let path = dir.join("fake_gh.sh");
     let script = r#"#!/bin/sh
@@ -46,7 +48,9 @@ case "$*" in
     [ -f "$d/hang" ] && sleep 30
     if [ -f "$d/error" ]; then echo boom >&2; exit 1; fi
     cat "$d/checks"
-    exit $(cat "$d/code" 2>/dev/null || echo 0);;
+    c=$(cat "$d/code" 2>/dev/null || echo 0)
+    if [ -f "$d/checks.next" ]; then mv "$d/checks.next" "$d/checks"; mv "$d/code.next" "$d/code"; fi
+    exit $c;;
 esac
 "#;
     write_executable(&path, script);
@@ -135,18 +139,19 @@ fn it_runs_watch_and_only_watch() {
     assert_eq!(WatchRuns::new().kinds(), [RunKind::Watch]);
 }
 
+/// The first read of the checks is pending (`gh` exits 8); every read after it passes.
+fn pending_then_pass(dir: &Path) {
+    set(dir, "checks", "t\tpending\t0\thttps://x/t\t\n");
+    set(dir, "code", "8");
+    set(dir, "code.next", "0");
+    set(dir, "checks.next", "t\tpass\t1s\thttps://x/t\t\n");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn passing_checks_end_green_after_pending_ones_settle() {
     let dir = tempfile::tempdir().unwrap();
-    set(dir.path(), "checks", "t\tpending\t0\thttps://x/t\t\n");
-    set(dir.path(), "code", "8");
-    let d = dir.path().to_path_buf();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        set(&d, "checks", "t\tpass\t1s\thttps://x/t\t\n");
-        set(&d, "code", "0");
-    });
+    pending_then_pass(dir.path());
     let end = run(dir.path(), json!({ "number": 7 }), 120).await;
     assert_eq!((end.token.as_str(), end.outcome), ("W1", RunOutcome::Green));
     assert!(calls(dir.path()).len() > 1, "it read more than once");
@@ -239,15 +244,8 @@ async fn ci_events(
 #[tokio::test]
 async fn pending_reads_then_pass_send_two_ci_events_never_a_repeat() {
     let dir = tempfile::tempdir().unwrap();
-    set(dir.path(), "checks", "t\tpending\t0\thttps://x/t\t\n");
-    set(dir.path(), "code", "8");
-    let d = dir.path().to_path_buf();
-    let (seen, end) = ci_events(dir.path(), async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        set(&d, "checks", "t\tpass\t1s\thttps://x/t\t\n");
-        set(&d, "code", "0");
-    })
-    .await;
+    pending_then_pass(dir.path());
+    let (seen, end) = ci_events(dir.path(), async {}).await;
     assert_eq!(end.outcome, RunOutcome::Green);
     let states: Vec<&str> = seen.iter().map(|(s, _)| s.as_str()).collect();
     assert_eq!(states, ["pending", "pass"]);
