@@ -134,7 +134,12 @@ fn clip(s: &str) -> String {
     }
     let start = s.char_indices().nth(n - MAX_CHARS).map_or(0, |(i, _)| i);
     let cut = &s[start..];
-    let from = cut.find('\n').map_or(0, |i| i + 1);
+    // Only a line the cut went through is partial; one the cut starts exactly at is whole.
+    let from = if s[..start].ends_with('\n') {
+        0
+    } else {
+        cut.find('\n').map_or(0, |i| i + 1)
+    };
     format!("... (earlier lines left out)\n{}", &cut[from..])
 }
 

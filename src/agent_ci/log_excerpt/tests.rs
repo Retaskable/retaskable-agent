@@ -100,3 +100,18 @@ fn a_failed_test_line_survives_a_log_full_of_printed_errors() {
     assert!(out.contains("Error: expected noise 0"));
     assert!(out.split('\n').count() <= MAX_LINES);
 }
+
+#[test]
+fn a_cut_that_lands_on_a_line_start_keeps_that_whole_line() {
+    // MAX_CHARS + 6 characters: the cut starts 6 in, exactly at the start of the `d` line.
+    let d = "d".repeat(MAX_CHARS - 5);
+    let log = format!("ccccc\n{d}\ntail");
+    let out = clip(&log);
+    assert_eq!(out, format!("... (earlier lines left out)\n{d}\ntail"));
+}
+
+#[test]
+fn a_cut_through_a_line_drops_only_that_partial_line() {
+    let log = format!("ccccc\n{}\ntail", "d".repeat(MAX_CHARS - 4));
+    assert_eq!(clip(&log), "... (earlier lines left out)\ntail");
+}
