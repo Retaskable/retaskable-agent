@@ -195,6 +195,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_different_job_being_due_is_not_due() {
+        let (base, _) = store(200, json!({ "value": { "day": "2026-11-03", "due": ["lighthouse"] } })).await;
+        assert_eq!(asker(base, Arc::default()).ask().await, None);
+    }
+
+    #[tokio::test]
+    async fn a_day_ask_that_fails_gives_no_day_and_waits_a_minute() {
+        let (base, seen) = store(500, json!({ "error": "boom" })).await;
+        let clock = Arc::new(AtomicU64::new(0));
+        let c = clock.clone();
+        let a = DayAsker::new(Arc::new(Client::new(base)), 7, Some("t".into()), move || {
+            c.load(Ordering::SeqCst)
+        });
+        assert_eq!(a.ask().await, None);
+        clock.store(UNREACHABLE_MS - 1, Ordering::SeqCst);
+        assert_eq!(a.ask().await, None);
+        assert_eq!(seen.lock().unwrap().len(), 1, "quiet inside the minute");
+        clock.store(UNREACHABLE_MS, Ordering::SeqCst);
+        a.ask().await;
+        assert_eq!(seen.lock().unwrap().len(), 2, "asks again after it");
+    }
+
+    #[tokio::test]
+    async fn an_ask_is_not_repeated_while_one_is_pending() {
+        let (base, seen) = store(200, json!({ "value": { "day": "d", "due": ["ideas"] } })).await;
+        let a = asker(base, Arc::default());
+        a.state.lock().unwrap().pending = true;
+        assert_eq!(a.ask().await, None);
+        assert!(seen.lock().unwrap().is_empty(), "nothing was sent");
+    }
+
+    #[tokio::test]
     async fn an_unreachable_store_is_not_due() {
         let a = asker("http://127.0.0.1:1".to_string(), Arc::default());
         assert_eq!(a.ask().await, None);
