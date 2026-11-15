@@ -5,10 +5,13 @@
 pub mod deps;
 mod live;
 pub mod report;
+mod runner;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -18,6 +21,7 @@ use tokio::time::Instant;
 use crate::config::ProjectConfig;
 pub use deps::{Cmd, Deps, Live};
 pub use live::{SpawnArgs, spawn_all};
+pub use runner::Runners;
 
 /// How long to wait when the store says nothing about it.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
@@ -125,6 +129,8 @@ pub struct Rollout<D: Deps> {
     sent_report: Option<Value>,
     logged: HashMap<&'static str, String>,
     sink: Box<dyn Fn(&str) + Send + Sync>,
+    /// Whether the store's last answer made this computer the project's runner, for the CI watcher.
+    runner: Option<Arc<AtomicBool>>,
 }
 
 impl<D: Deps> Rollout<D> {
@@ -149,7 +155,20 @@ impl<D: Deps> Rollout<D> {
             sent_report: None,
             logged: HashMap::new(),
             sink,
+            runner: None,
         })
+    }
+
+    /// Keeps `flag` as whether this computer is the project's runner, as the store's last poll answer said.
+    pub fn with_runner(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.runner = Some(flag);
+        self
+    }
+
+    fn set_runner(&self, on: bool) {
+        if let Some(flag) = &self.runner {
+            flag.store(on, Ordering::SeqCst);
+        }
     }
 
     /// Takes the commands as they are allowed now.
@@ -213,6 +232,8 @@ impl<D: Deps> Rollout<D> {
         if answer.epoch.is_some() {
             self.epoch = answer.epoch.clone();
         }
+        // An idle answer to another computer carries no epoch: only the runner's answers do.
+        self.set_runner(answer.held != Some(false) && answer.epoch.is_some());
         let after = |a: &Answer| a.after_ms.filter(|&ms| ms > 0).map_or(WAIT, Duration::from_millis);
         if answer.held == Some(false) {
             self.kept = None;
@@ -337,6 +358,7 @@ impl<D: Deps> Rollout<D> {
         };
         if out.is_none() {
             self.kept = None;
+            self.set_runner(false);
             self.log("result", "no longer the runner, result dropped".into());
         }
         out

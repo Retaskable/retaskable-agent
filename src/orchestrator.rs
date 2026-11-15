@@ -13,6 +13,7 @@
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`).
 pub mod ask_host;
 mod baseline_wait;
+pub mod ci_watch_host;
 mod cursor_guard;
 pub mod draft_host;
 pub mod driver;

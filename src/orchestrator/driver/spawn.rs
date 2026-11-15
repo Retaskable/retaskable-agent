@@ -48,6 +48,11 @@ pub struct SpawnArgs<'a> {
     pub asks: Option<Arc<dyn super::AskHost>>,
     /// Runs the expert sessions in `claim` mode. None runs none.
     pub experts: Option<Arc<dyn super::ExpertHost>>,
+    /// Watches the open pull requests in `claim` mode, report only, where `runners` says this computer is the project's
+    /// rollout runner. None watches none.
+    pub ci_watch: Option<Arc<dyn super::CiWatchHost>>,
+    /// Which projects this computer is the rollout runner of (written by the rollout loops).
+    pub runners: crate::rollout::Runners,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
@@ -117,6 +122,9 @@ pub fn spawn_all(args: SpawnArgs) {
         machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
             env: crate::env::Env::from_process(),
         }));
+        if let Some(watch) = args.ci_watch {
+            machine = machine.with_ci_watch(watch, args.runners);
+        }
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
         }

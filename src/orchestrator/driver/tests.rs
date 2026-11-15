@@ -932,6 +932,7 @@ mod approve;
 mod asks;
 mod caps_and_fetch;
 mod ci_events;
+mod ci_pass;
 mod claim_waiting;
 mod command_gate;
 mod commands;

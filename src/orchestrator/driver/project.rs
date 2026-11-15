@@ -300,6 +300,8 @@ pub struct ProjectLoop {
     pub(super) syncing: super::sync_now::Syncing,
     /// The expert sessions (`experts.rs`).
     pub(super) experts: super::experts::Experts,
+    /// The CI watcher's pass (`ci_pass.rs`).
+    pub(super) ci_watch: super::ci_pass::State,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
@@ -385,6 +387,7 @@ impl ProjectLoop {
             finishing: Default::default(),
             merging: Default::default(),
             opening: Default::default(),
+            ci_watch: Default::default(),
             syncing: Default::default(),
             experts: Default::default(),
             trial: None,
