@@ -88,7 +88,7 @@ async fn store_failing(fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     _ => Value::Null,
                 };
                 (axum::http::StatusCode::OK, Json(json!({ "value": value })))

@@ -395,26 +395,18 @@ fn days_in_month(y: i64, m: u32) -> u32 {
     }
 }
 
-/// Civil UTC components from epoch milliseconds (Howard Hinnant's `civil_from_days`).
+/// Civil UTC components from epoch milliseconds. An instant past the years the `time` crate holds (±9999) reads
+/// as the epoch; no log holds one.
 fn civil_from_ms(ms: i64) -> (i64, u32, u32, u32, u32, u32) {
-    let secs = ms.div_euclid(1000);
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400) as u32;
-    let hh = tod / 3600;
-    let mm = (tod % 3600) / 60;
-    let ss = tod % 60;
-    // days since 1970-01-01 → civil
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = era * 400 + yoe as i64;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d, hh, mm, ss)
+    let t = time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1000)).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    (
+        i64::from(t.year()),
+        u32::from(u8::from(t.month())),
+        u32::from(t.day()),
+        u32::from(t.hour()),
+        u32::from(t.minute()),
+        u32::from(t.second()),
+    )
 }
 
 fn ms_from_civil(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> i64 {

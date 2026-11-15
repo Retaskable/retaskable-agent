@@ -22,6 +22,7 @@
 mod asks;
 mod deprecations;
 mod drafts;
+mod experts;
 mod fix_main;
 mod follow;
 mod held_items;
@@ -58,6 +59,7 @@ mod usage_recheck;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
+pub use experts::{ExpertHost, ExpertJob, TurnEnd};
 pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared};
 use project::Launch;

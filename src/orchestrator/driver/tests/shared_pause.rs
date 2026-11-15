@@ -9,7 +9,7 @@ const OFF: u8 = 0;
 const ON: u8 = 1;
 const DOWN: u8 = 2;
 
-/// A store with an item to claim and a draft to take (each once), whose `facts_get` answers by `mode`.
+/// A store with an item to claim and a draft to take (each once), whose `pause_get` answers by `mode`.
 async fn store(mode: Arc<AtomicU32>) -> (String, Asked) {
     let asked: Asked = Default::default();
     let (seen, claimed, drafted) = (
@@ -25,10 +25,10 @@ async fn store(mode: Arc<AtomicU32>) -> (String, Asked) {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let value = match op.as_str() {
-                    "facts_get" => match mode.load(Ordering::SeqCst) as u8 {
+                    "pause_get" => match mode.load(Ordering::SeqCst) as u8 {
                         DOWN => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                        ON => json!({ "paused": true, "pausedReason": "Paused by @james for everyone" }),
-                        _ => json!({ "paused": false }),
+                        ON => json!({ "paused": { "by": "james", "at": 1, "reason": null }, "log": [] }),
+                        _ => json!({ "paused": null, "log": [] }),
                     },
                     "list" => json!([item("a", "claimed")]),
                     "claim_next" if !claimed.swap(true, Ordering::SeqCst) => {

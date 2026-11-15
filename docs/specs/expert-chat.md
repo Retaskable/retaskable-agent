@@ -50,6 +50,20 @@ Read from git after every turn, kept nowhere: files changed since the branch's m
 
 A turn's `question` becomes an `expert.ask` row the same way any other item's row reaches the shared inbox — sent to the session's own driver only, since nobody else on the project can answer it.
 
+## Built so far
+
+The session itself, one slice (`src/expert/`, `src/commands/expert.rs`, `src/orchestrator/driver/experts.rs`, `src/orchestrator/expert_host.rs`, `prompts/expert.md`). It sits on the queue of [expert-queue-on-server.md](expert-queue-on-server.md).
+
+- **Start, say, stop, end.** `expert_start` adds the item to the store (`add` with `via: "expert"`, claimed by this agent in the same step, the id `expert-<slug>`, the next number on a `conflict`), answers with `{ itemId }` and runs the first turn. Each message is one resumed `claude -p` turn. A message sent during a turn waits in the store queue and runs as the next turn, in order; `now` (and `expert_stop`) cuts the turn. A stop keeps the queue, and the next turn is told it was cut. Only the person who started a session drives it.
+- **Lane.** The session claims an ordinary free lane from the pool (the TypeScript agent adds a dedicated one), refusing the start when none is free. Its turns count against `slots` and are never held back by a pause.
+- **Park.** `expert_end` with `park`, or 30 minutes idle, commits what the lane left, pushes the branch and frees the lane; the lease is kept. The next message takes a lane again on `origin/<branch>` and starts a new Claude session there (the conversation is not resumed). A push that fails keeps the lane.
+- **Discard.** `expert_end` with `discard` clears the queue, `release`s and `skip`s the item, cuts what the lane runs, frees it and deletes the pushed branch.
+- **Beat.** Once a minute each lease is beaten (`report` with no note) and the queue is read back with `pull()`, so the site's edits, cancels and messages from another page reach the session. There is no `facts_changed` hook yet.
+- **Snapshot.** Each session is an item of the project's live view with `expert: { detail, queue, ask? }`, `detail` being `expert_working`, `expert_asking`, `expert_idle` or `expert_parked`, `queue` the waiting messages (`text`, `at` as an ISO time) and `ask` the open question with its options. Expert items are filtered out of the backlog read, so the loop never plans or claims one.
+- **Tier.** Claude only, on Sonnet, no dollar cap, `maxTurns` 300, in the engine's sandbox.
+
+Not built, and nacked or ignored: `ship` and `backlog` outcomes, `continue` from a Claude Code session id, pictures, engines other than Claude, helpers, the `expert.work` summary, the dedicated added lane and take-over, `facts_changed` wiring, and readopting a live turn after a restart (a session is held in memory; a restart drops it and its lease lapses).
+
 ## On restarts
 
 An expert turn runs under `role: "implementer"` (piece 2), so it falls under [agent/07.4-stopping-and-restarting.md](agent/07.4-stopping-and-restarting.md)'s "detached implementers" rule rather than "every other session is cut": its process is readopted after a restart — attached if still alive, resumed by session id if it finished while the agent was down, or its left-behind result answered — the same as a roadmap implementer's. **[Proposal]** a helper (piece 5), being `role: "scout"`, is cut like any other non-implementer session and is not resumed; its result, if any, is lost, the same as a scout's would be.

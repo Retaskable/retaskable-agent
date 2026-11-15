@@ -133,7 +133,7 @@ pub fn run(dir: &Path, env: &Env, default_port: u16, term: &mut Terminal) -> Res
         };
         term.said("Local model", var)?;
     } else {
-        let current = cfg.machine.local.clone();
+        let current = &cfg.machine.local;
         let mut update = LocalUpdate {
             enabled: current.enabled,
             model: current.model.clone(),
@@ -238,7 +238,7 @@ pub fn run(dir: &Path, env: &Env, default_port: u16, term: &mut Terminal) -> Res
         let mut update = CursorModelsUpdate {
             top: current.top.clone(),
             implementer: current.implementer.clone(),
-            scout: current.scout.clone(),
+            scout: current.scout,
         };
         let mut changed = false;
         let tiers = [
