@@ -133,6 +133,8 @@ pub struct Machine {
     pub(super) take_overs: bool,
     /// Finishes items a person marks Done. With none, `finish_requested` rows are left alone.
     pub(super) finish_host: Option<Arc<dyn super::finish_steps::FinishHost>>,
+    /// Runs the expert sessions' turns. With none, the expert commands are refused.
+    pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
     pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
@@ -187,6 +189,7 @@ impl Machine {
             asks: None,
             take_overs: false,
             finish_host: None,
+            experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
@@ -453,6 +456,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode run expert sessions.
+    pub fn with_experts(mut self, host: Arc<dyn super::ExpertHost>) -> Self {
+        self.experts = Some(host);
+        self
+    }
+
     /// Lets `claim` mode answer the chat's asks.
     pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
         self.asks = Some(host);
@@ -507,6 +516,7 @@ impl Machine {
                     items: Err(Fail::Cant(format!("the backlog read failed: {e}"))),
                     settings: None,
                     facts: None,
+                    shown: None,
                 }
             });
             lp.repo = done.repo;
@@ -519,6 +529,9 @@ impl Machine {
                 _ => StorePause::Unknown,
             };
             self.links.store_paused.set(&lp.id, pause);
+            if let (Ok(_), Some(Ok(shown))) = (&done.items, done.shown) {
+                lp.live.set_shown(&lp.id, shown);
+            }
             lp.take_allowed_commands(&self.links.item_commands, done.settings);
             read_items.push(match done.items {
                 Ok(items) => Some(items),
@@ -597,6 +610,11 @@ impl Machine {
         let live: Vec<bool> = (self.projects.iter().zip(ready))
             .map(|(lp, &ready)| ready && self.live(lp))
             .collect();
+        for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            if live {
+                lp.load_decisions(&shared!(self, stopping)).await;
+            }
+        }
         if starter.is_some() {
             self.settle_outcomes().await;
         }
@@ -623,6 +641,7 @@ impl Machine {
                         lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
                             .await;
                     }
+                    lp.flush_decisions(&shared!(self, stopping)).await;
                 }
             }
         }
@@ -650,6 +669,16 @@ impl Machine {
                 if live {
                     let shared = shared!(self, stopping);
                     lp.finish_pass(&host, &shared).await;
+                }
+            }
+        }
+        // Expert sessions have a person in them: their turns take slots too, and a pause doesn't hold them back.
+        if let (Some(host), Some(_)) = (self.experts.clone(), starter.as_ref()) {
+            slots = slots.saturating_sub(self.projects.iter().map(|lp| lp.experting()).sum());
+            for (lp, &live) in self.projects.iter_mut().zip(&live) {
+                if live {
+                    let shared = shared!(self, stopping);
+                    lp.expert_pass(&mut self.pool, &host, &shared).await;
                 }
             }
         }

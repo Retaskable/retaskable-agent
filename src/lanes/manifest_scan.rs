@@ -68,7 +68,8 @@ pub(super) fn file_or_link_values(manifest: &str) -> Vec<String> {
 }
 
 fn word_boundary_before(bytes: &[u8], i: usize) -> bool {
-    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'
+    // `-` can be part of a bare TOML key (`out-path`), so it doesn't start a new word either.
+    i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && !matches!(bytes[i - 1], b'_' | b'-')
 }
 
 fn skip_ws(s: &str) -> &str {
@@ -99,6 +100,12 @@ mod tests {
         assert_eq!(strip_line_comments(r"a = 'x\' # out"), "a = 'x\\' \n");
         // The other quote kind inside a string doesn't close it.
         assert_eq!(strip_line_comments(r#"a = "it's # in""#), "a = \"it's # in\"\n");
+    }
+
+    #[test]
+    fn a_key_ending_in_path_is_not_a_path_key() {
+        let m = "out-path = \"../dist\"\nmy_path = \"../x\"\nsub.path = \"../y\"";
+        assert_eq!(path_eq_values(m), vec!["../y"]);
     }
 
     #[test]

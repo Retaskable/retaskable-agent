@@ -16,7 +16,7 @@ use reqwest::Url;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
-pub use credentials::{FileStore, TokenStore, credential_file_note, credentials_file, keychain};
+pub use credentials::{FileStore, TokenStore, credential_file_note, credentials_file, keychain, keychain_for};
 
 use crate::config::ConfigFile;
 

@@ -130,6 +130,39 @@ pub enum DraftCommand {
     Discard { project: String, draft: String },
 }
 
+/// What an expert command (`expert_start`, `expert_say`, `expert_stop`, `expert_end`) asks of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpertAction {
+    Start {
+        request: String,
+    },
+    Say {
+        item: String,
+        text: String,
+        pictures: Vec<String>,
+        now: bool,
+    },
+    Stop {
+        item: String,
+    },
+    /// `outcome`: `park` or `discard`; the others are refused by the loop.
+    End {
+        item: String,
+        outcome: String,
+    },
+}
+
+/// An expert command waiting for the loop, which checks that `by` may drive the session, carries it out and answers
+/// command `command_id` (`orchestrator::driver::experts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpertCommand {
+    pub project: String,
+    pub command_id: String,
+    /// The login of whoever sent it.
+    pub by: String,
+    pub action: ExpertAction,
+}
+
 /// An `idea_accept` waiting for the loop, which writes the idea up as a draft and answers command `command_id` once the
 /// store has (`ideas::accept`).
 #[derive(Debug, Clone)]
@@ -149,6 +182,7 @@ pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
+    experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
@@ -223,6 +257,20 @@ impl ItemCommands {
         if let Some(out) = self.out.lock().unwrap_or_else(|e| e.into_inner()).get(project) {
             let _ = out.send(answer);
         }
+    }
+
+    pub fn push_expert(&self, command: ExpertCommand) {
+        self.experts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the expert commands queued for `project`, oldest first.
+    pub fn take_experts(&self, project: &str) -> Vec<ExpertCommand> {
+        let mut queue = self.experts.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project == project);
+        *queue = rest;
+        mine
     }
 
     /// Removes and returns the draft presses queued for `project`, oldest first.
@@ -479,7 +527,7 @@ impl AgentView {
         if let Some(trial) = self.trial_json(project, data_dir) {
             state["trial"] = trial;
         }
-        if let Some(smoke) = self.smoke_json(project, data_dir) {
+        if let Some(smoke) = self.smoke_json(project) {
             state["smoke"] = smoke;
         }
         if let Some(waiting) = self.commands_waiting_json(project) {
@@ -515,6 +563,9 @@ impl AgentView {
                 if let Some(pr) = &i.pr_url {
                     item["prUrl"] = json!(pr);
                 }
+                if let Some(expert) = &i.expert {
+                    item["expert"] = expert.clone();
+                }
                 item
             })
             .collect();
@@ -526,14 +577,14 @@ impl AgentView {
         Some((json!(items), milestones))
     }
 
-    /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with a
-    /// smoke to report. `tail` is kept only for a failure or timeout.
-    pub fn smoke_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
+    /// The snapshot's `smoke` (09.2): the store's `smoke` fact as the loop last read it, when there is
+    /// one. `tail` is kept only for a failure or timeout.
+    pub fn smoke_json(&self, project: &str) -> Option<Value> {
         use crate::store::SmokeStatus;
         if !self.projects.iter().any(|p| p.id == project) {
             return None;
         }
-        let mut smoke = Store::load(&paths::project_dir(data_dir, project)).ok()?.smoke()?;
+        let mut smoke = self.live.smoke(project)?;
         if !matches!(smoke.status, SmokeStatus::Failed | SmokeStatus::Timeout) {
             smoke.tail = None;
         }

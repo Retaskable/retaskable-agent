@@ -46,6 +46,8 @@ pub struct SpawnArgs<'a> {
     pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks in `claim` mode. None answers none.
     pub asks: Option<Arc<dyn super::AskHost>>,
+    /// Runs the expert sessions in `claim` mode. None runs none.
+    pub experts: Option<Arc<dyn super::ExpertHost>>,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
@@ -111,6 +113,9 @@ pub fn spawn_all(args: SpawnArgs) {
         machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
+        }
+        if let Some(experts) = args.experts {
+            machine = machine.with_experts(experts);
         }
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");

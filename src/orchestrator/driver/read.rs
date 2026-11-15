@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::machine::repo_id;
 use crate::backlog::facts::ProjectFacts;
 use crate::backlog::settings::StoreSettings;
+use crate::backlog::shown::Shown;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::link::TokenStore;
 
@@ -22,6 +23,8 @@ pub(super) struct Read {
     pub(super) settings: Option<Result<Option<StoreSettings>, BacklogError>>,
     /// The project's facts (its pause), read once the items are read.
     pub(super) facts: Option<Result<ProjectFacts, BacklogError>>,
+    /// The store's smoke and vet facts, read once the items are read; an error keeps what was shown.
+    pub(super) shown: Option<Result<Shown, BacklogError>>,
 }
 
 /// Reads one project's items. Owns what it needs, so it runs as its own task: a panic in it is that
@@ -47,6 +50,7 @@ pub(super) async fn read(
             items,
             settings: None,
             facts: None,
+            shown: None,
         };
     };
     let token = match keychain.get(&backlog_url) {
@@ -59,6 +63,7 @@ pub(super) async fn read(
                 items,
                 settings: None,
                 facts: None,
+                shown: None,
             };
         }
     };
@@ -68,7 +73,13 @@ pub(super) async fn read(
             code: Some("unauthorized".into()),
             message: "this computer holds no link to the backlog store".into(),
         })),
-        Some(ref token) => client.list(repo_id, Some(token)).await.map_err(Fail::Store),
+        Some(ref token) => (client.list(repo_id, Some(token)).await)
+            .map(|mut items| {
+                // Expert sessions are the experts module's, never planned.
+                items.retain(|i| !crate::expert::is_expert(&i.id, i.kind.as_deref()));
+                items
+            })
+            .map_err(Fail::Store),
     };
     let settings = match &token {
         Some(token) => Some(client.settings_get(repo_id, Some(token)).await),
@@ -78,10 +89,15 @@ pub(super) async fn read(
         Some(token) if items.is_ok() => Some(client.project_facts(repo_id, Some(token)).await),
         _ => None,
     };
+    let shown = match &token {
+        Some(token) if items.is_ok() => Some(client.shown(repo_id, Some(token)).await),
+        _ => None,
+    };
     Read {
         repo,
         items,
         settings,
         facts,
+        shown,
     }
 }

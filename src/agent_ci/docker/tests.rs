@@ -17,11 +17,13 @@ async fn a_program_that_is_not_there_is_missing() {
 #[cfg(unix)]
 mod stub {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// A `docker` that runs `body` for any arguments.
     fn stub(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
         let path = dir.path().join("docker");
-        crate::test_support::write_script(&path, body);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
 

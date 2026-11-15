@@ -16,6 +16,7 @@ mod baseline_wait;
 mod cursor_guard;
 pub mod draft_host;
 pub mod driver;
+pub mod expert_host;
 #[cfg(all(test, unix))]
 mod fake_session_tests;
 pub mod fresh_start;
