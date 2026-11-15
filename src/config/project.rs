@@ -125,6 +125,10 @@ pub struct TuningConfig {
     /// The most a watch waits for pending checks (`ciMaxMinutes`).
     #[serde(default = "default_ci_max_minutes")]
     pub ci_max_minutes: u32,
+    /// How many times a merge GitHub says it isn't ready for yet is tried again, 30 seconds apart, before it
+    /// needs a person (`maxMergeRetries`, 0 to 20).
+    #[serde(default = "default_max_merge_retries")]
+    pub max_merge_retries: u32,
 }
 
 impl Default for TuningConfig {
@@ -136,6 +140,7 @@ impl Default for TuningConfig {
             no_progress_minutes: default_no_progress_minutes(),
             ci_grace_minutes: default_ci_grace_minutes(),
             ci_max_minutes: default_ci_max_minutes(),
+            max_merge_retries: default_max_merge_retries(),
         }
     }
 }
@@ -150,6 +155,10 @@ fn default_ci_grace_minutes() -> u32 {
 
 fn default_ci_max_minutes() -> u32 {
     120
+}
+
+fn default_max_merge_retries() -> u32 {
+    5
 }
 
 fn default_lease_idle_minutes() -> u32 {
@@ -572,6 +581,13 @@ mod tests {
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
         let t: TuningConfig = serde_json::from_str("{}").unwrap();
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+    }
+
+    #[test]
+    fn max_merge_retries_defaults_to_five_and_can_be_set() {
+        assert_eq!(TuningConfig::default().max_merge_retries, 5);
+        let t: TuningConfig = serde_json::from_str(r#"{"maxMergeRetries":2}"#).unwrap();
+        assert_eq!(t.max_merge_retries, 2);
     }
 
     #[test]
