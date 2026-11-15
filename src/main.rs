@@ -57,10 +57,7 @@ async fn main() -> Result<()> {
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
     // the OS's own place, not the `.retaskable` a checkout uses, unless `RETASKABLE_DATA_DIR`
     // says otherwise.
-    let dir = match &build {
-        Some(b) if env.get("RETASKABLE_DATA_DIR").is_none() => release::data_dir(b, env),
-        _ => config::data_dir(env),
-    };
+    let dir = retaskable_agent::paths::data_dir(env, build.as_ref());
     // agent-telemetry.md section 5: the three commands for reading the event log and the session
     // transcripts back. Each reads straight from the data dir (a release build's own,
     // section 3.3 of the bundle spec) and exits without starting the server.

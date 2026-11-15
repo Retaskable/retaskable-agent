@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use crate::env::Env;
 
 /// The CI runner's own folder inside the data folder: its link marker, mirrors, check directories and logs.
-pub const DATA_SUBDIR: &str = "ci";
+pub const DATA_SUBDIR: &str = crate::paths::CI_SUBDIR;
 /// Slots when `AGENT_CI_SLOTS` is not set.
 pub const DEFAULT_SLOTS: u32 = 2;
 /// CPUs a check may use when `AGENT_CI_CPUS` is not set, before the cap at what Docker has.
@@ -69,21 +69,20 @@ pub struct Settings {
     pub data_dir: PathBuf,
 }
 
-/// The data folder the agent on this computer uses, apart from the CI runner's subfolder: `RETASKABLE_DATA_DIR`,
-/// else a release build's place in the OS, else `.retaskable`.
+/// The data folder the agent on this computer uses, apart from the CI runner's subfolder: found the way the code agent
+/// finds it (`paths::data_dir`).
 pub fn data_root(env: &Env) -> PathBuf {
-    if env.get("RETASKABLE_DATA_DIR").is_none()
-        && let Some(exe) = std::env::current_exe().ok()
-        && let Ok(Some(build)) = crate::release::load_build(&exe)
-    {
-        return crate::release::data_dir(&build, env);
-    }
-    crate::config::data_dir(env)
+    crate::paths::current_data_dir(env)
 }
 
 /// The runner's own folder.
 pub fn data_dir(env: &Env) -> PathBuf {
-    data_root(env).join(DATA_SUBDIR)
+    crate::paths::ci_dir(&data_root(env))
+}
+
+/// `data_dir` for a given executable, so a test can say where its `build.json` is.
+pub fn data_dir_for(env: &Env, exe: Option<&Path>) -> PathBuf {
+    crate::paths::ci_dir(&crate::paths::data_dir_for_exe(env, exe))
 }
 
 fn number(env: &Env, name: &str, default: u32) -> Result<u32> {

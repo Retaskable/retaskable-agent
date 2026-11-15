@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run(env: &Env) -> Result<()> {
-    let cfg = config::load(&config::data_dir(env))?;
+    let cfg = config::load(&chat_link::root(env))?;
     let (cloud_url, store_url) = chat_link::urls(env)?;
     let http = reqwest::Client::new();
     let cloud = Arc::new(chat_link::tokens(env, cloud_url.clone(), CLOUD_TARGET, http.clone()));
