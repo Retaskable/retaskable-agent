@@ -4,7 +4,8 @@
 //! branch (the head branch is deleted only when it is the slice's own), and `complete` tells the store, which counts
 //! the slice. The TS agent merges directly here, not through the store's merge queue (`merge_enqueue`, which the
 //! website's spec words), and so does this. The intent puller claims the row and the handler hands the item's id to
-//! this loop (`intents/merge_item.rs`); the loop answers on its next pass, because it alone knows what the item is
+//! this loop (`intents/merge_item.rs`), or, for a spec draft, queues the draft's press with the row's answer on it, and
+//! the draft landing (`land.rs`) answers; the loop answers an item on its next pass, because it alone knows what the item is
 //! doing. A paused project still merges (a person asked), and no session slot is used.
 //!
 //! The completion is what the TS agent sends for an item taken over from another computer: the implementer's own
@@ -34,6 +35,7 @@ use crate::env::Env;
 use crate::intents::merge_item::{Answer, Merge, MergeHandler};
 use crate::intents::{IntentStore, Puller, StoreLink};
 use crate::item_lifecycle::ItemState;
+use crate::view::{DraftCommand, Reply};
 
 /// How often the store is asked for merge rows (docs/specs/intent-rows.md section 3.3).
 const POLL_EVERY: Duration = Duration::from_secs(60);
@@ -89,12 +91,11 @@ impl MergeHost for GhMergeHost {
     }
 }
 
-/// GitHub's own words from a failed `gh` call, without gh's GraphQL prefix, at most 300 characters (`ghReason`).
-fn reason(err: &anyhow::Error) -> String {
-    let text = format!("{err:#}");
+/// GitHub's own words from a failed `gh` call's text, without gh's GraphQL prefix, at most 300 characters (`ghReason`).
+pub(super) fn reason(text: &str) -> String {
     let after = text
         .rfind("GraphQL: ")
-        .map_or(text.as_str(), |at| &text[at + "GraphQL: ".len()..]);
+        .map_or(text, |at| &text[at + "GraphQL: ".len()..]);
     after.trim().chars().take(300).collect()
 }
 
@@ -126,6 +127,13 @@ impl ProjectLoop {
     /// Answers the merge requests the puller handed over, then looks for new rows.
     pub(super) async fn merge_pass(&mut self, host: &Arc<dyn MergeHost>, shared: &Shared<'_>) {
         while let Ok(ask) = self.merging.waiting.try_recv() {
+            if ask.draft {
+                // A spec draft is landed by the draft path (`land.rs`), which answers the row when it is done.
+                let (project, draft, reply) = (self.id.clone(), ask.id, Reply::new(ask.reply));
+                let press = DraftCommand::MergeFor { project, draft, reply };
+                shared.links.item_commands.push_draft(press);
+                continue;
+            }
             let answer = self.merge_item(&ask.id, host, shared).await;
             let _ = ask.reply.send(answer);
         }
@@ -225,7 +233,7 @@ impl ProjectLoop {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 self.put_back(repo, &token, id, &lease, was.as_deref()).await;
-                return Err(format!("Couldn't merge #{pr}: {}", reason(&e)));
+                return Err(format!("Couldn't merge #{pr}: {}", reason(&format!("{e:#}"))));
             }
             Err(e) => {
                 self.put_back(repo, &token, id, &lease, was.as_deref()).await;

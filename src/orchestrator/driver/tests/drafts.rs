@@ -51,7 +51,7 @@ impl DraftHost for Host {
         })
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
-    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: bool) -> Result<()> {
         *self.merges.lock().unwrap() += 1;
         Ok(())
     }
