@@ -76,7 +76,8 @@ impl MergeOutcome {
             },
             RunOutcome::Updated => Self::Updated {
                 head: text(result.get("head")),
-                approved_intact: true,
+                // A piece's run ends with the update: it goes to CI again, so the approval isn't carried (pieces.md 3.2).
+                approved_intact: false,
             },
             RunOutcome::Conflict => Self::SentBack {
                 reason: text(result.get("instruction")),

@@ -329,13 +329,83 @@ async fn a_conflicting_sync_is_told_to_merge_the_base_in_again_never_to_rebase()
     );
 }
 
+/// Sets the rig's project `github` settings.
+fn github(rig: &mut Rig, settings: Value) {
+    rig.request.context.config.github = Some(settings);
+}
+
+fn merges(rig: &Rig) -> Vec<String> {
+    calls(rig.dir.path())
+        .into_iter()
+        .filter(|c| c.starts_with("pr merge"))
+        .collect()
+}
+
 #[tokio::test]
-async fn a_roadmap_piece_still_squashes_and_a_non_squash_project_still_refuses_it() {
+async fn a_piece_where_a_person_merges_lands_once_with_the_projects_method() {
+    for (method, flag) in [("squash", "--squash"), ("merge", "--merge"), ("rebase", "--rebase")] {
+        let mut rig = rig().await;
+        github(&mut rig, json!({ "land": "person", "mergeMethod": method }));
+        let end = rig.run().await;
+        assert_eq!(end.outcome, RunOutcome::Merged, "{method}");
+        assert_eq!(merges(&rig), vec![format!("pr merge 7 {flag} --delete-branch")]);
+        rig.assert_turn_released();
+    }
+}
+
+#[tokio::test]
+async fn the_branch_is_deleted_only_when_the_project_says_so() {
+    for (land, delete, want) in [
+        ("retaskable", false, "pr merge 7 --squash"),
+        ("person", false, "pr merge 7 --squash"),
+        ("retaskable", true, "pr merge 7 --squash --delete-branch"),
+    ] {
+        let mut rig = rig().await;
+        github(&mut rig, json!({ "land": land, "deleteBranch": delete }));
+        assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+        assert_eq!(merges(&rig), vec![want.to_string()], "{land} {delete}");
+    }
+}
+
+#[tokio::test]
+async fn landing_only_ever_runs_gh_pr_merge_and_never_pushes_to_the_base() {
     let mut rig = rig().await;
-    rig.request.context.config.github = Some(json!({ "mergeMethod": "rebase" }));
+    github(&mut rig, json!({ "land": "person" }));
+    let before = rig.origin_head("main");
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    assert_eq!(rig.origin_head("main"), before);
+    assert!(
+        calls(rig.dir.path()).iter().all(|c| c.starts_with("pr ")),
+        "{:?}",
+        calls(rig.dir.path())
+    );
+}
+
+#[tokio::test]
+async fn auto_merge_and_queue_lands_are_still_refused_in_plain_words() {
+    for land in ["auto_merge", "queue"] {
+        let mut rig = rig().await;
+        github(&mut rig, json!({ "land": land }));
+        let RunOutcome::Failed(why) = rig.run().await.outcome else {
+            panic!("{land} should fail")
+        };
+        assert!(why.contains("auto-merge or merge queue"), "{why}");
+        assert!(calls(rig.dir.path()).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_main_sync_is_never_a_persons_merge() {
+    let mut rig = rig().await;
+    into_sync(&mut rig, "squash");
+    github(&mut rig, json!({ "land": "person" }));
     assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
     assert!(calls(rig.dir.path()).is_empty());
-    let mut rig = self::rig().await;
+}
+
+#[tokio::test]
+async fn a_roadmap_piece_squashes_and_deletes_by_default() {
+    let mut rig = rig().await;
     assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
-    assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash --delete-branch".to_string()));
+    assert_eq!(merges(&rig), vec!["pr merge 7 --squash --delete-branch".to_string()]);
 }

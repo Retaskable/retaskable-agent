@@ -142,8 +142,13 @@ impl Job {
     async fn run(&self) -> Outcome {
         let ctx = &self.request.context;
         let flow = workflow(&ctx.config);
-        if !flow.we_merge || (!self.sync && flow.method_flag != "--squash") {
-            return failed("This project's workflow isn't one where Retaskable squash-merges into the base.");
+        // A piece on a project where a person merges runs on their word, so it lands like `retaskable` (pieces.md 3.6).
+        // A main sync is Retaskable's own merge and never a person's.
+        let lands = flow.we_merge || (flow.land == "person" && !self.sync);
+        if !lands {
+            return failed(
+                "This project's workflow hands the merge to GitHub's auto-merge or merge queue, which Retaskable doesn't do yet.",
+            );
         }
         let Some(pr) = self.request.piece.change.as_ref().and_then(change_ref) else {
             return failed("The piece has no change to merge.");
@@ -247,8 +252,12 @@ impl Job {
         if !self.request.context.locks.held(lock) {
             return self.lost();
         }
-        let method = if self.sync { "--merge" } else { "--squash" };
-        let args = ["pr", "merge", pr, method, "--delete-branch"];
+        let flow = workflow(&self.request.context.config);
+        let method = if self.sync { "--merge" } else { flow.method_flag };
+        let mut args = vec!["pr", "merge", pr, method];
+        if flow.delete_branch {
+            args.push("--delete-branch");
+        }
         let (_, err, ok) = match self.gh(&args).await {
             Ok(out) => out,
             Err(why) => return failed(why),
