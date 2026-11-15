@@ -782,3 +782,16 @@ async fn claim_next_sends_the_week_when_there_is_one_and_reads_a_pass_over() {
         .unwrap();
     assert!(seen.lock().unwrap()[0]["args"]["agent"].get("week").is_none());
 }
+
+#[test]
+fn an_items_branches_are_its_own_and_each_pieces_when_it_has_one() {
+    let item: Item = serde_json::from_value(serde_json::json!({
+        "id": "a", "title": "A", "status": "building", "rank": 1, "branch": "retaskable/a",
+        "pieces": [{ "title": "One", "branch": "retaskable/a-1" }, { "title": "Two", "branch": null }, { "title": "Three" }]
+    }))
+    .unwrap();
+    assert_eq!(item.branches().collect::<Vec<_>>(), ["retaskable/a", "retaskable/a-1"]);
+    let plain: Item =
+        serde_json::from_value(serde_json::json!({ "id": "b", "title": "B", "status": "todo", "rank": 2 })).unwrap();
+    assert_eq!(plain.branches().count(), 0);
+}

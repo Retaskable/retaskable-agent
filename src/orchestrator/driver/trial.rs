@@ -102,8 +102,11 @@ impl ProjectLoop {
         let Some(engine) = gate.role_start(self, shared, Role::Implementer, true) else {
             return;
         };
+        let Some(backlog_items) = self.backlog_items else {
+            return;
+        };
         let checks = checks.lock().unwrap().clone();
-        match should_start(&record, &self.project, checks.as_ref(), self.backlog_items) {
+        match should_start(&record, &self.project, checks.as_ref(), backlog_items) {
             Decision::Wait => {}
             Decision::Skip => {
                 self.save_trial(TrialRecord::skip());

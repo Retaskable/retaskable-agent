@@ -4,7 +4,6 @@
 //! A paused project, a computer signed out of Claude and a computer already running two rows that start work take none:
 //! the row stays open for another computer. Not the runner, nothing is even listed. No session slot is used here; the
 //! fix itself is the CI watcher's, which keeps going after the row has ended.
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -74,13 +73,14 @@ impl ProjectLoop {
             signed_out: signed_out(shared),
             work: work.clone(),
         };
+        let items = self.owned_branches();
         let handler = Arc::new(FixHandler::new(runner.clone()));
         let puller = self
             .fixes
             .puller
             .get_or_insert_with(|| Puller::default().register(handler));
         // Built when a row is won: what the watcher looks at then, held on to by the fix that runs on.
-        let (project, client, items) = (self.project.clone(), self.client.clone(), &self.items);
+        let (project, client) = (self.project.clone(), self.client.clone());
         let (fixing, logins) = (self.ci_watch.fixing.clone(), self.ci_watch.login.clone());
         let cx = move || -> FixCx {
             let judge = Arc::new(ProjectJudge {
@@ -95,7 +95,7 @@ impl ProjectLoop {
                 client,
                 repo,
                 token,
-                items: items.values().filter_map(|i| i.branch.clone()).collect::<HashSet<_>>(),
+                items,
                 allow: project.ci_watch_allow.clone(),
                 logins,
                 bell: Arc::new(move |title, body| bells.bell(title, body)),

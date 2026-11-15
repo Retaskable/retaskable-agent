@@ -133,3 +133,18 @@ async fn a_row_is_finished_once_though_the_store_keeps_listing_it() {
     assert_eq!(ops_named(&asked, "complete").len(), 1);
     assert_eq!(finishes(&asked).len(), 1);
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_finish_row_is_left_requested_for_a_computer_that_claims() {
+    let (mut rig, asked, listed) = rig_holding("", built()).await;
+    rig.go_runs();
+    push(&listed, row("4"));
+    rig.runs_quiet().await;
+    assert!(
+        ops_named(&asked, "intent_list")
+            .iter()
+            .all(|a| a["kinds"] != json!(["finish_requested"]))
+    );
+    assert!(ops_named(&asked, "intent_claim").is_empty() && ops_named(&asked, "complete").is_empty());
+    assert_eq!(listed.rows.lock().unwrap()[0]["status"], "requested");
+}

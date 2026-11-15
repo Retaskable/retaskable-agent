@@ -19,6 +19,7 @@ pub(crate) fn item(
 ) -> Item {
     Item {
         merge_commit: None,
+        pieces: Vec::new(),
         id: id.to_string(),
         title: title.to_string(),
         status,

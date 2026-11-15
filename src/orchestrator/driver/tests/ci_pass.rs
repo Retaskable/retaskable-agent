@@ -104,17 +104,24 @@ type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A fake store that records each op with its arguments and answers `ci_result` with a green head.
 async fn recording_store() -> (String, Seen) {
+    recording_store_listing(json!([])).await
+}
+
+/// [`recording_store`] whose `list` answers `items`.
+async fn recording_store_listing(items: Value) -> (String, Seen) {
     let seen: Seen = Default::default();
     let log = seen.clone();
     let app = Router::new().route(
         "/v1/repos/{id}/ops",
         post(move |Json(body): Json<Value>| {
-            let log = log.clone();
+            let (log, items) = (log.clone(), items.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 log.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let value = if op == "ci_result" {
                     json!({ "ok": true, "condition": "green" })
+                } else if op == "list" {
+                    items
                 } else {
                     json!([])
                 };
@@ -242,4 +249,62 @@ async fn the_machine_asks_the_runners_flag_of_each_live_project() {
         rig.lp(0).ci_watch.finish().await;
         assert_eq!(host.listed.load(Ordering::SeqCst), u32::from(runner), "runner {runner}");
     }
+}
+
+/// A `runs`-mode project over a store that lists `items`, watched by a host that sees `pulls`.
+async fn runs_watching(items: Value, pulls: Vec<OpenPull>, runner: bool) -> (Rig, Arc<Host>) {
+    let (base, _seen) = recording_store_listing(items).await;
+    let mut rig = rig(1, &[&base]);
+    rig.go_runs();
+    let host = Arc::new(Host {
+        pulls: Mutex::new(pulls),
+        ..Default::default()
+    });
+    rig.machine.ci_watch = Some(Arc::new(Shared(host.clone())));
+    rig.machine.runners.flag("p0").store(runner, Ordering::SeqCst);
+    (rig, host)
+}
+
+fn owned_by_a_piece() -> Value {
+    json!([{ "id": "plan-1", "title": "A plan", "status": "building", "rank": 1,
+        "pieces": [{ "title": "Piece", "state": "ready", "branch": "retaskable/1-piece" },
+                   { "title": "Next", "state": "ready", "branch": null }] }])
+}
+
+#[tokio::test]
+async fn in_runs_mode_a_branch_a_piece_owns_is_skipped_and_a_foreign_one_is_judged() {
+    let pulls = vec![pull(1, "retaskable/1-piece"), pull(2, "retaskable/2-nobody")];
+    let (mut rig, host) = runs_watching(owned_by_a_piece(), pulls, true).await;
+    rig.runs_pass().await;
+    rig.lp(0).ci_watch.finish().await;
+    assert_eq!(*host.checked.lock().unwrap(), ["sha2"]);
+}
+
+#[tokio::test]
+async fn in_runs_mode_the_runner_flag_still_gates_the_watcher() {
+    for runner in [false, true] {
+        let (mut rig, host) = runs_watching(json!([]), vec![], runner).await;
+        rig.runs_pass().await;
+        rig.lp(0).ci_watch.finish().await;
+        assert_eq!(host.listed.load(Ordering::SeqCst), u32::from(runner), "runner {runner}");
+    }
+}
+
+#[tokio::test]
+async fn in_runs_mode_the_watcher_waits_for_a_read_of_the_backlog() {
+    let (mut rig, host) = runs_watching(owned_by_a_piece(), vec![pull(1, "retaskable/1-piece")], true).await;
+    rig.machine.run_passes().await;
+    rig.lp(0).ci_watch.finish().await;
+    assert_eq!(
+        host.listed.load(Ordering::SeqCst),
+        0,
+        "no read, so no knowing which branches are owned"
+    );
+    rig.runs_pass().await;
+    rig.lp(0).ci_watch.finish().await;
+    assert_eq!(host.listed.load(Ordering::SeqCst), 1);
+    assert!(
+        host.checked.lock().unwrap().is_empty(),
+        "the piece's branch is left alone"
+    );
 }

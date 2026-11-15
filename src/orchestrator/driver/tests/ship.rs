@@ -125,3 +125,13 @@ async fn a_paused_project_still_ships_and_no_host_leaves_the_row_alone() {
     quiet_passes(&mut rig).await;
     assert!(finishes(&asked).is_empty());
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_ship_is_taken_and_ends_done() {
+    let (mut rig, asked, listed, host) = rig_shipping(Ok(None), Some("main")).await;
+    rig.go_runs();
+    push(&listed, row(json!({ "ship": true })));
+    let sent = rig.runs_until(&asked, 1).await;
+    assert_eq!(sent[0], json!({ "id": "in-1", "status": "done" }));
+    assert_eq!(*host.calls.lock().unwrap(), ["ship dev main items=0"]);
+}

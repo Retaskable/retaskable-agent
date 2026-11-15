@@ -185,7 +185,12 @@ impl ProjectLoop {
             machine: shared.links.machine.clone(),
             failures: self.failures.clone(),
         });
-        let handler = Arc::new(MergeHandler::new(self.merging.asks.clone(), self.merging.ships.clone()));
+        let mut handler = MergeHandler::new(self.merging.asks.clone(), self.merging.ships.clone());
+        if self.mode != super::OrchestratorMode::Claim {
+            // No item is held here, so one a person merges is left for a computer that claims.
+            handler = handler.without_items();
+        }
+        let handler = Arc::new(handler);
         let puller = self
             .merging
             .puller

@@ -343,3 +343,22 @@ async fn a_row_held_from_before_a_restart_is_failed_and_never_merged() {
     );
     assert!(ops_named(&asked, "claim").is_empty() && gh.calls().is_empty());
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_row_naming_an_item_is_never_claimed_and_stays_requested() {
+    let (mut rig, asked, listed, gh) = happy().await;
+    rig.go_runs();
+    push(&listed, item_row("4"));
+    push(&listed, row(json!({ "itemId": "4", "draftId": "d1" })));
+    rig.runs_quiet().await;
+    let kinds: Vec<Value> = ops_named(&asked, "intent_list");
+    assert!(
+        kinds.contains(&json!({ "kinds": ["merge_requested"] })),
+        "the store was asked: {kinds:?}"
+    );
+    assert!(ops_named(&asked, "intent_claim").is_empty(), "no row was claimed");
+    assert!(ops_named(&asked, "claim").is_empty(), "and no item");
+    assert!(gh.calls().is_empty());
+    let rows = listed.rows.lock().unwrap();
+    assert!(rows.iter().all(|r| r["status"] == "requested"), "{rows:?}");
+}

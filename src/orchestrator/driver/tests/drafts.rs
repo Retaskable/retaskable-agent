@@ -538,3 +538,37 @@ async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
     assert!(!ops(&asked).contains(&"idea_mark_bug".to_string()));
     assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_draft_is_claimed_and_run_beside_a_run_that_holds_a_lane() {
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Charts",
+        "pieces": [{"title": "Charts", "kind": "feature"}]});
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer]).await;
+    rig.go_runs();
+    let run = Holder::Run {
+        project: "p0".into(),
+        piece: "piece-1".into(),
+    };
+    assert!(rig.machine.pool.take(1, run.clone()));
+    for _ in 0..200 {
+        rig.runs_pass().await;
+        if ops(&asked).iter().filter(|o| *o == "draft_report").count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(host.jobs.lock().unwrap().len(), 1, "the draft ran");
+    assert_eq!(rig.machine.pool.holder(1), Some(&run), "and the run kept its lane");
+    assert_eq!(rig.machine.pool.held_lanes().count(), 1, "the draft took none");
+}
+
+#[tokio::test]
+async fn in_runs_mode_nothing_is_claimed_while_paused() {
+    let (mut rig, _host, asked) = rig_with(claimed(), vec![]).await;
+    rig.go_runs();
+    rig.pause("p0", true);
+    for _ in 0..5 {
+        rig.runs_pass().await;
+    }
+    assert_eq!(claims(&asked), 0);
+}

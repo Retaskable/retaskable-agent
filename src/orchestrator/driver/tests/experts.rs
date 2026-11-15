@@ -691,3 +691,47 @@ async fn an_expert_item_in_the_store_is_never_planned_by_the_loop() {
         .collect();
     assert_eq!(kept, ["b"]);
 }
+
+#[tokio::test]
+async fn in_runs_mode_an_expert_session_takes_a_lane_no_run_holds_and_its_turn_runs() {
+    let mut ex = ex().await;
+    ex.rig.go_runs();
+    let run = Holder::Run {
+        project: "p0".into(),
+        piece: "piece-1".into(),
+    };
+    assert!(ex.rig.machine.pool.take(1, run.clone()));
+    ex.start("c1", "Fix it");
+    for _ in 0..300 {
+        ex.rig.runs_pass().await;
+        ex.drain();
+        if ex.heard.iter().any(|a| a["id"] == "c1") && !ex.jobs().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let answer = ex.heard.iter().find(|a| a["id"] == "c1").cloned().unwrap();
+    assert_eq!(answer["type"], "ack", "{answer}");
+    assert_eq!(ex.jobs().len(), 1);
+    assert_eq!(ex.lane_of(ID), Some(2));
+    assert_eq!(ex.rig.machine.pool.holder(1), Some(&run));
+}
+
+#[tokio::test]
+async fn in_runs_mode_an_expert_start_with_every_lane_held_by_runs_is_refused() {
+    let mut ex = ex_lanes(1).await;
+    ex.rig.go_runs();
+    let run = Holder::Run {
+        project: "p0".into(),
+        piece: "piece-1".into(),
+    };
+    assert!(ex.rig.machine.pool.take(1, run));
+    ex.start("c1", "Fix it");
+    for _ in 0..5 {
+        ex.rig.runs_pass().await;
+    }
+    ex.drain();
+    let answer = ex.heard.iter().find(|a| a["id"] == "c1").cloned().unwrap();
+    assert_eq!(answer["type"], "nack");
+    assert!(ex.jobs().is_empty());
+}
