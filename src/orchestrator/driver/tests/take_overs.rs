@@ -110,3 +110,17 @@ async fn a_row_is_taken_over_once_though_the_store_keeps_listing_it() {
     assert_eq!(ops_named(&asked, "claim").len(), 1);
     assert_eq!(finishes(&asked).len(), 1);
 }
+
+#[tokio::test]
+async fn the_claim_carries_this_computers_claude_week_like_every_claim() {
+    let (mut rig, asked, listed) = rig_with_store(claimed("help")).await;
+    let now = crate::telemetry::now_secs() as u64;
+    rig.lp(0)
+        .store
+        .set_usage(json!({"unifiedWindows": {"seven_day": {"utilization": 0.4, "resetsAt": now + 86_400}}}));
+    push(&listed, row("4"));
+    until(&mut rig, &asked, 1).await;
+    let claim = &ops_named(&asked, "claim")[0];
+    assert_eq!(claim["agent"]["week"]["used"], json!(0.4));
+    assert!(claim["agent"]["week"]["resetsAt"].is_u64());
+}
