@@ -237,8 +237,6 @@ pub struct ProjectLoop {
     pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
-    /// What the chat was told about approved drafts that is still waiting on staging.
-    pub(super) follow: super::follow::Follow,
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
@@ -354,7 +352,6 @@ impl ProjectLoop {
             running: Running::default(),
             open_steps: Default::default(),
             seen: report::Seen::default(),
-            follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
             deprecations_running: Default::default(),
             deprecations: Default::default(),

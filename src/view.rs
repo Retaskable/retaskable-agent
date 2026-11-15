@@ -130,20 +130,6 @@ pub enum DraftCommand {
     Discard { project: String, draft: String },
 }
 
-/// A chat message for the assistant (`ask` command, spec 06.6), queued for the orchestrator loop to answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AskCommand {
-    pub project: String,
-    pub ask_id: String,
-    pub text: String,
-    /// The ask this one replies to.
-    pub reply_to: Option<String>,
-    /// The item or plan whose page it was asked on.
-    pub about: Option<String>,
-    /// The "Attached images…" block made from the saved pictures, empty when there are none.
-    pub images_block: String,
-}
-
 /// What an expert command (`expert_start`, `expert_say`, `expert_stop`, `expert_end`) asks of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpertAction {
@@ -196,7 +182,6 @@ pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
-    asks: Arc<std::sync::Mutex<Vec<AskCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
     ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
@@ -274,10 +259,6 @@ impl ItemCommands {
         }
     }
 
-    pub fn push_ask(&self, command: AskCommand) {
-        self.asks.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
     pub fn push_expert(&self, command: ExpertCommand) {
         self.experts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }
@@ -288,16 +269,6 @@ impl ItemCommands {
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
-        *queue = rest;
-        mine
-    }
-
-    /// Removes and returns the asks queued for `project`, oldest first.
-    pub fn take_asks(&self, project: &str) -> Vec<AskCommand> {
-        let mut queue = self.asks.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|a| a.project == project);
         *queue = rest;
         mine
     }
