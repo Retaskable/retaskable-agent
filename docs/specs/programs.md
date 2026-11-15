@@ -16,6 +16,14 @@ This repository builds three programs. They run together on one computer today a
 
 `src/program_boundaries_tests.rs` enforces the module rule by scanning the source for `crate::` and `retaskable_agent::` paths: `chat` and `bin/chat_agent.rs` may not name `orchestrator` or `agent_ci`; `agent_ci` and `bin/ci.rs` may not name `orchestrator` or `chat`; every other file may not name `chat` or `agent_ci`.
 
-## Known gap: the Chat Agent's projects
+## The Chat Agent's projects come from the store
 
-The Chat Agent still reads its project list (`projects[]`: repo, base branch) from the code agent's `config.json`, or names one repository with `RETASKABLE_CHAT_REPO_ID`. That is the one thing tying it to the code agent's data folder. Splitting it needs a way to learn the projects from the store it is linked to. The store has no such op today: every `role: "chat"` op is per repository and needs the repository id first (chat-agent-process.md section 5), and `/agents` is a signed-in web page. The store change needed is a read for a chat link that returns the projects the person's linked agent may serve, each with its repository id, `githubRepo` and base branch.
+The Chat Agent learns its projects from the store it is linked to, not from the code agent's `config.json` (chat-agent-process.md section 5.1, Retaskable.com#3870): `POST <store>/v1/agent/ops` with `{ "op": "projects_served", "args": {} }` and its own store access token, answering `repoId`, `githubRepo`, `defaultBranch` and `access` for each repository. It asks at start and every 5 minutes; a project that appears gets a socket, one the store stops naming loses it.
+
+- **Fail closed.** A refusal (401, 403, a bad answer) or no link clears the list: nothing is served, and the log says why. An unreachable or busy store (429, 5xx) leaves the last list, held in memory only, because every chat op needs that same store. A store that names nothing serves nothing, whatever a `config.json` on the computer says; it is never read.
+- **Base branch** is the store's `defaultBranch`. A project that works on a dev branch has its code questions answered against the default branch until the store holds `baseBranch`.
+- **`RETASKABLE_CHAT_REPO_ID`** now only limits the list to that one repository id; it names nothing the store didn't.
+- **Repo-less projects** (`projectBacklogs`) are ignored: the Chat Agent's board, hello and asks are keyed by a repository.
+- **Cloud URL** is `RETASKABLE_CLOUD_URL`, else the build's environment, else retaskable.com; the code agent's `cloud.url` isn't read.
+- **The socket** connects as `?project=<kebab of owner/name>` and says `project: { githubRepo }` with no `backlogPath`; the hub places the project by the repository, and only finds one a Coding Agent has already connected (Retaskable.com#3873).
+- This needs #3870 and #3873 deployed first.
