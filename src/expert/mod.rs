@@ -2,6 +2,7 @@
 //! (docs/specs/expert-chat.md; Retaskable.com's `agent/src/expert/session.ts` and `turns.ts`): who may drive it, how
 //! a session is titled, named and branched, the prompt a fresh session starts from, the schema each turn ends with and
 //! how that result is read back. The session itself runs in `orchestrator::driver::experts`.
+use crate::text::truncate;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -152,15 +153,11 @@ pub struct Reply {
     pub ask: Option<Question>,
 }
 
-fn cut(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
-}
-
 /// Reads a turn's structured result (`askOf` and the summary of `settle`): the summary cut to size, and a question
 /// only when it has words, with at most four options that have a label.
 pub fn parse(structured: &Value) -> Reply {
     let summary =
-        (structured.get("summary").and_then(Value::as_str)).map_or(String::new(), |s| cut(s.trim(), ANSWER_MAX));
+        (structured.get("summary").and_then(Value::as_str)).map_or(String::new(), |s| truncate(s.trim(), ANSWER_MAX));
     let ask = structured.get("question").and_then(|q| {
         let text = q.get("question")?.as_str()?.trim();
         if text.is_empty() {
@@ -174,12 +171,12 @@ pub fn parse(structured: &Value) -> Reply {
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|d| !d.is_empty());
-                (!label.is_empty()).then(|| (cut(label, 120), detail.map(|d| cut(d, 300))))
+                (!label.is_empty()).then(|| (truncate(label, 120), detail.map(|d| truncate(d, 300))))
             })
             .take(OPTIONS_MAX)
             .collect();
         Some(Question {
-            question: cut(text, 2000),
+            question: truncate(text, 2000),
             options,
         })
     });
@@ -188,7 +185,10 @@ pub fn parse(structured: &Value) -> Reply {
 
 /// The line the item's history gets for a turn's answer (`settle`): the summary, then what it asks.
 pub fn answer_line(reply: &Reply) -> String {
-    let asks = reply.ask.as_ref().map(|q| format!("Asks: {}", cut(&q.question, 300)));
+    let asks = reply
+        .ask
+        .as_ref()
+        .map(|q| format!("Asks: {}", truncate(&q.question, 300)));
     [Some(reply.summary.clone()).filter(|s| !s.is_empty()), asks]
         .into_iter()
         .flatten()
