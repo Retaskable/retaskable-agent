@@ -14,18 +14,28 @@ use crate::test_support::{git as tgit, repo_with_origin, run as trun, write_exec
 
 type Log = Arc<Mutex<(Vec<Value>, bool)>>;
 
-/// A store that answers every op with null, recording each request.
-async fn store() -> (String, Log) {
+/// A store that answers every op with null (a `merge_beat` with `held`, unless the log's flag says the turn is lost),
+/// recording each request.
+async fn store(mark: PathBuf) -> (String, Log) {
     let log: Log = Arc::new(Mutex::new((Vec::new(), false)));
     let app = Router::new()
         .route(
             "/v1/repos/{id}/ops",
-            post(|State(s): State<Log>, Json(body): Json<Value>| async move {
-                s.lock().unwrap().0.push(body);
-                Json(json!({ "value": Value::Null }))
-            }),
+            post(
+                |State((s, mark)): State<(Log, PathBuf)>, Json(body): Json<Value>| async move {
+                    let mut s = s.lock().unwrap();
+                    let value = if body["op"] == "merge_beat" {
+                        std::fs::write(&mark, "").unwrap();
+                        json!({ "held": !s.1 })
+                    } else {
+                        Value::Null
+                    };
+                    s.0.push(body);
+                    Json(json!({ "value": value }))
+                },
+            ),
         )
-        .with_state(log.clone());
+        .with_state((log.clone(), mark));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -54,7 +64,7 @@ echo "$*" >> "$d/calls.log"
 case "$*" in
   *mergeCommit*) echo '{"mergeCommit":{"oid":"abc123"}}';;
   "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view";;
-  "pr merge "*) [ -f "$d/merge-err" ] && cat "$d/merge-err" >&2; exit $(cat "$d/merge-code" 2>/dev/null || echo 0);;
+  "pr merge "*) [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"; [ -f "$d/merge-err" ] && cat "$d/merge-err" >&2; exit $(cat "$d/merge-code" 2>/dev/null || echo 0);;
 esac
 "#,
     );
@@ -100,7 +110,7 @@ async fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let repo = repo_with_feat(dir.path());
     set(dir.path(), "view", MERGEABLE);
-    let (url, log) = store().await;
+    let (url, log) = store(dir.path().join("beaten")).await;
     let (ends, rx) = RunEndSender::channel();
     let config = ProjectConfig {
         repo_path: repo.display().to_string(),
@@ -408,4 +418,37 @@ async fn a_roadmap_piece_squashes_and_deletes_by_default() {
     let mut rig = rig().await;
     assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
     assert_eq!(merges(&rig), vec!["pr merge 7 --squash --delete-branch".to_string()]);
+}
+
+#[tokio::test]
+async fn the_turn_is_beaten_with_phase_merging_before_gh_pr_merge() {
+    let mut rig = rig().await;
+    let end = rig.run().await;
+    assert_eq!(end.outcome, RunOutcome::Merged);
+    let beats = ops(&rig.log, "merge_beat");
+    assert_eq!(beats.len(), 1);
+    assert_eq!(beats[0]["args"], json!({ "token": "M1", "phase": "merging" }));
+    // The fake gh saw the store's beat already made when `pr merge` ran.
+    assert!(rig.dir.path().join("after-beat").exists());
+    assert_eq!(merges(&rig).len(), 1);
+}
+
+#[tokio::test]
+async fn a_turn_the_store_no_longer_holds_merges_nothing_and_ends_interrupted() {
+    let mut rig = rig().await;
+    rig.log.lock().unwrap().1 = true;
+    let end = rig.run().await;
+    assert_eq!(end.outcome, RunOutcome::Interrupted);
+    assert_eq!(ops(&rig.log, "merge_beat").len(), 1);
+    assert!(merges(&rig).is_empty());
+    assert!(!rig.request.context.locks.held("M1"), "the lost turn's record goes");
+}
+
+#[tokio::test]
+async fn a_store_that_cant_be_asked_for_the_beat_merges_nothing() {
+    let mut rig = rig().await;
+    rig.request.context.client = Arc::new(crate::backlog::Client::new("http://127.0.0.1:9".to_string()));
+    let end = rig.run().await;
+    assert_eq!(end.outcome, RunOutcome::Interrupted);
+    assert!(merges(&rig).is_empty());
 }

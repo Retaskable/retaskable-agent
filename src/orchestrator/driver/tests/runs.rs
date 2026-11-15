@@ -613,10 +613,21 @@ async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_wit
     assert!(context.locks.held("m1"), "the turn is in the run's locks");
 
     pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
-    let s = script.lock().unwrap();
-    assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["b1"] })]);
-    assert_eq!(s.args("merge_beat"), vec![json!({ "token": "m1", "phase": "merge" })]);
-    assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["b1"] })]);
+        assert_eq!(
+            s.args("merge_beat"),
+            vec![json!({ "token": "m1", "phase": "updating" })]
+        );
+        assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
+    }
+
+    // The run says it is at the host call: the next beat carries that phase.
+    context.locks.set_phase("m1", crate::runs::MERGING);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(120)).await;
+    let beats = script.lock().unwrap().args("merge_beat");
+    assert_eq!(beats[1], json!({ "token": "m1", "phase": "merging" }));
 }
 
 #[tokio::test]

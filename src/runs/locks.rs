@@ -7,6 +7,11 @@ use std::time::{Duration, Instant};
 use super::CEILING_MARGIN;
 use crate::backlog::runs::BeatVerdict;
 
+/// A merge turn's phase from taking it until it lands (the TypeScript agent's background beat says the same).
+pub const UPDATING: &str = "updating";
+/// A merge turn's phase from the beat just before `gh pr merge`.
+pub const MERGING: &str = "merging";
+
 /// A lock's ceiling: 1 hour for a `merge-` lock, 6 hours otherwise.
 pub fn lock_ceiling(name: &str) -> Duration {
     Duration::from_secs(if name.starts_with("merge-") { 3600 } else { 6 * 3600 })
@@ -19,6 +24,8 @@ struct Held {
     lost: bool,
     /// A merge queue turn: beaten with `merge_beat`, not `run_beat`.
     turn: bool,
+    /// What a merge turn is doing, for `merge_beat`'s `phase`: `updating`, then `merging` at the host call.
+    phase: &'static str,
 }
 
 /// A project's held locks. Clones share one table.
@@ -44,6 +51,7 @@ impl RunLocks {
             taken,
             lost: false,
             turn: false,
+            phase: UPDATING,
         });
     }
 
@@ -53,6 +61,21 @@ impl RunLocks {
         if let Some(l) = self.table().last_mut() {
             l.turn = true;
         }
+    }
+
+    /// Records what a merge turn is doing now, for the loop's beats.
+    pub fn set_phase(&self, token: &str, phase: &'static str) {
+        if let Some(l) = self.table().iter_mut().find(|l| l.token == token) {
+            l.phase = phase;
+        }
+    }
+
+    /// What a merge turn is doing: `updating` for one the table doesn't know.
+    pub fn phase(&self, token: &str) -> &'static str {
+        self.table()
+            .iter()
+            .find(|l| l.token == token)
+            .map_or(UPDATING, |l| l.phase)
     }
 
     /// Forgets a lock, after `lock_drop` (or once its holder saw it lost).
@@ -137,6 +160,16 @@ mod tests {
         assert_eq!(locks.count(), 1);
         locks.apply_beat(&verdicts(&[("T", BeatVerdict::Stop)]));
         assert!(!locks.held("T"));
+    }
+
+    #[test]
+    fn a_turns_phase_is_updating_until_it_says_merging() {
+        let locks = RunLocks::default();
+        locks.add_turn("T", "merge-main", Instant::now());
+        assert_eq!(locks.phase("T"), "updating");
+        locks.set_phase("T", MERGING);
+        assert_eq!(locks.phase("T"), "merging");
+        assert_eq!(locks.phase("unknown"), "updating");
     }
 
     #[test]

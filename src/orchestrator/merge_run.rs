@@ -13,12 +13,13 @@ use serde_json::{Value, json};
 
 use super::driver::{RunEnd, RunRequest, RunStarter};
 use super::watch_run::{Trees, change_ref};
-use crate::backlog::runs::{RunKind, RunOutcome};
+use crate::backlog::runs::{BeatVerdict, RunKind, RunOutcome};
 use crate::ci_watch::gh_out;
 use crate::drafts::land::workflow;
 use crate::merge_update::{Behind, Update, behind, conflict_instruction, sync_conflict_instruction, update_from_base};
 use crate::process_tree::{ProcessTree, with_hook};
 use crate::runs::chore::{ChoreKind, chore_of};
+use crate::runs::{MERGING, UPDATING};
 
 /// How often a PR GitHub hasn't worked out is read again.
 pub const ASK_EVERY: Duration = Duration::from_secs(15);
@@ -224,6 +225,7 @@ impl Job {
         if !self.request.context.locks.held(lock) {
             return self.lost();
         }
+        self.request.context.locks.set_phase(lock, UPDATING);
         let config = &self.request.context.config;
         let (base, dir) = (config.base_branch.clone(), PathBuf::from(&config.worktrees_dir));
         let (branch, piece) = (branch.to_string(), piece.to_string());
@@ -250,6 +252,9 @@ impl Job {
             return None;
         }
         if !self.request.context.locks.held(lock) {
+            return self.lost();
+        }
+        if !self.beat_before_merging(lock).await {
             return self.lost();
         }
         let flow = workflow(&self.request.context.config);
@@ -279,6 +284,29 @@ impl Job {
             self.update(lock, branch, piece).await
         } else {
             failed(format!("gh pr merge failed: {}", err.trim()))
+        }
+    }
+
+    /// The beat just before the host call (`merge_beat`, phase `merging`): only while the store says the turn is
+    /// still ours does anything merge. A store that can't be asked counts as not ours (fail closed); the turn then
+    /// goes back unmerged and is asked for again.
+    async fn beat_before_merging(&self, lock: &str) -> bool {
+        let ctx = &self.request.context;
+        ctx.locks.set_phase(lock, MERGING);
+        let held = ctx.client.merge_beat(ctx.repo, Some(&ctx.token), lock, MERGING).await;
+        if self.stopped() {
+            return false;
+        }
+        match held {
+            Ok(true) => true,
+            Ok(false) => {
+                ctx.locks.apply_beat(&[(lock.to_string(), BeatVerdict::Stop)].into());
+                false
+            }
+            Err(e) => {
+                tracing::warn!(turn = %lock, "the beat before merging wasn't taken, so nothing is merged: {e}");
+                false
+            }
         }
     }
 
