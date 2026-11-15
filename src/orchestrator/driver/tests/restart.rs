@@ -7,7 +7,7 @@ fn done(result: ImplementerOutcome) -> SessionResult {
 }
 
 /// The computer started again: the same state files, a new machine with its lanes free.
-fn restarted(old: Rig, base: &str) -> Rig {
+pub(super) fn restarted(old: Rig, base: &str) -> Rig {
     let Rig { keys, live, _dir, .. } = old;
     let links = Links {
         backlog_url: "https://backlog.example".into(),

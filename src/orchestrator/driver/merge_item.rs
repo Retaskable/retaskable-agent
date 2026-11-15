@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 
 use super::Shared;
 use super::drafts::claim_agent;
+use super::outbox::Sent;
 use super::project::ProjectLoop;
 use crate::backlog::Item;
 use crate::backlog::complete::{Completion, Playtest};
@@ -296,10 +297,11 @@ impl ProjectLoop {
             remaining: Some(item.remaining.clone().unwrap_or_default()),
             playtest,
         };
-        if let Err(e) = self.client.complete(repo, Some(&token), id, &lease, &completion).await {
-            self.store_error("complete", &e);
+        // Listed and saved first: the merge can't be undone, so a store that doesn't answer keeps the call, which the loop
+        // sends again on later passes, also after a restart (`outbox.rs`).
+        if let Sent::Kept(why) | Sent::Dropped(why) = self.complete_item(repo, &token, id, &lease, completion).await {
             return Err(format!(
-                "Merged #{pr}, but the shared backlog didn't take it: {e}. Its claim stays with this computer."
+                "Merged #{pr}, but the shared backlog didn't take it: {why}. It is sent again on the next pass."
             ));
         }
         tracing::info!("{}: merged #{pr} for {id}", self.id);

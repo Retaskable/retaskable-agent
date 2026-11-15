@@ -650,6 +650,7 @@ impl Machine {
         for (lp, &live) in self.projects.iter_mut().zip(&live) {
             if live {
                 lp.load_decisions(&shared!(self, stopping)).await;
+                lp.send_outbox(&shared!(self, stopping)).await;
             }
         }
         if starter.is_some() {

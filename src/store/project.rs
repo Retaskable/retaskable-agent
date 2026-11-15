@@ -242,6 +242,24 @@ impl Store {
         self.data.insert("unparked".to_string(), serde_json::json!(unparked));
     }
 
+    /// Completions the store hasn't taken yet, by item id (`state.complete_outbox`): sent again on later passes, also
+    /// after a restart. Empty when missing or unreadable.
+    pub fn complete_outbox(&self) -> std::collections::BTreeMap<String, crate::backlog::complete::Pending> {
+        self.data
+            .get("complete_outbox")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.complete_outbox`. Doesn't save on its own; call `save` after.
+    pub fn set_complete_outbox(
+        &mut self,
+        outbox: &std::collections::BTreeMap<String, crate::backlog::complete::Pending>,
+    ) {
+        self.data
+            .insert("complete_outbox".to_string(), serde_json::json!(outbox));
+    }
+
     /// What each item in `leases` is doing, by item id (`state.runs`), so a restart can carry on: the
     /// TS agent keeps these on its item record. Empty when missing or unreadable.
     pub fn runs(&self) -> std::collections::BTreeMap<String, RunRecord> {

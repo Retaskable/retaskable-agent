@@ -196,6 +196,9 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
+    /// Completions the store hasn't taken yet, by item id, kept in the state file and sent again on later passes (the TS
+    /// agent's `ItemRecord.outbox`); see `outbox.rs`.
+    pub(super) outbox: BTreeMap<String, crate::backlog::complete::Pending>,
     /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
     /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
     pub(super) records: BTreeMap<String, RunRecord>,
@@ -340,6 +343,7 @@ impl ProjectLoop {
             playtests_seen: None,
             release_owed: false,
             unparked: store.unparked(),
+            outbox: store.complete_outbox(),
             records: store.runs(),
             decisions: BTreeMap::new(),
             to_resume: Vec::new(),
@@ -577,13 +581,14 @@ impl ProjectLoop {
         self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
     }
 
-    /// Writes the held and the unreleased leases to the state file.
+    /// Writes the held and the unreleased leases, and the completions owed, to the state file.
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
         self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
         self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unparked(&self.unparked);
+        self.store.set_complete_outbox(&self.outbox);
         self.records.retain(|id, _| self.leases.contains_key(id));
         self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {

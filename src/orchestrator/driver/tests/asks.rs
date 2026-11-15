@@ -87,6 +87,11 @@ pub(super) struct Rows {
     pub(super) person_claim: Mutex<Option<(u16, Value)>>,
     /// What the store answers a `draft_take`; nothing when unset.
     pub(super) draft_take: Mutex<Option<Value>>,
+    /// What the store answers each `complete`, in order (status and body); ok once it is empty.
+    pub(super) complete_answers: Mutex<Vec<(u16, Value)>>,
+    /// The state file to look in when a `complete` arrives, and for each one whether it already listed the call.
+    pub(super) state_file: Mutex<Option<std::path::PathBuf>>,
+    pub(super) listed_on_disk: Mutex<Vec<bool>>,
 }
 
 pub(super) type Listed = Arc<Rows>;
@@ -111,6 +116,21 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                             Json(json!({ "error": "boom" })),
                         );
                     }
+                    if op == "complete" {
+                        let file = rows.state_file.lock().unwrap().clone();
+                        if let Some(file) = file {
+                            let text = std::fs::read_to_string(file).unwrap_or_default();
+                            rows.listed_on_disk
+                                .lock()
+                                .unwrap()
+                                .push(text.contains("complete_outbox"));
+                        }
+                        let mut answers = rows.complete_answers.lock().unwrap();
+                        if !answers.is_empty() {
+                            let (status, body) = answers.remove(0);
+                            return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
+                        }
+                    }
                     if op == "claim"
                         && let Some((status, body)) = rows.person_claim.lock().unwrap().clone()
                     {
@@ -123,6 +143,7 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         "list" | "drafts" | "draft_list" => json!([]),
                         "pause_get" => json!({ "paused": null, "log": [] }),
                         "facts_get" => json!({}),
+                        "details_report" => json!({ "version": 1, "details": body["args"]["patch"] }),
                         "intent_list" => Value::Array(rows.rows.lock().unwrap().clone()),
                         "intent_claim" => {
                             let mut claims = rows.claims.lock().unwrap();

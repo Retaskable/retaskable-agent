@@ -19,7 +19,8 @@ pub struct Playtest {
 
 /// What a `complete` call carries. `remaining` present (even empty) is the slice's merge: the store counts it. A
 /// call without it does not count a slice again (an older agent's, after `report { merged }`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Completion {
     /// The item is built: its change is on the base branch or the project's branch. Needs a `merge_commit`.
     pub built: bool,
@@ -27,6 +28,15 @@ pub struct Completion {
     pub on_default_branch: bool,
     pub remaining: Option<String>,
     pub playtest: Option<Playtest>,
+}
+
+/// A completion waiting to be taken by the store (`ProjectLoop::outbox`, kept in the state file): the call without a
+/// decision in it, for the lease it was made under, and when it was first listed (epoch seconds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    pub lease: String,
+    pub completion: Completion,
+    pub since: i64,
 }
 
 impl Completion {
