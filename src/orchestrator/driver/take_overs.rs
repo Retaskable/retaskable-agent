@@ -129,8 +129,8 @@ impl ProjectLoop {
                 environment: shared.links.environment.clone(),
                 base_branch: self.project.base_branch.clone(),
                 tags: shared.links.tags.get(),
-                // A claim by name: the store has no other computer to pass it to, so no week.
-                week: None,
+                // As every claim does (the TypeScript agent's `storeAgent`), so the store knows this computer's room.
+                week: self.week_use(),
             },
         });
         let handler = Arc::new(TakeOverHandler::new(self.take_overs.shared.clone()));
