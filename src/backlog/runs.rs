@@ -36,6 +36,9 @@ pub struct RunTakeAgent {
     /// `false` when the project has chores off, so the store hands out no rotation chore; left out otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chores: Option<bool>,
+    /// This computer's Claude week; left out when it has no reading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<super::week::WeekUse>,
 }
 
 /// The store's count of rotation chores started today and its limit (`chores: { today, limit }`).
@@ -111,6 +114,8 @@ pub enum RunTakeAnswer {
     Run(Box<Run>),
     /// A tag this computer lacks.
     WaitingFor(Value),
+    /// Another computer with more of its Claude week left takes the run; ask again after `retry_ms`.
+    Passed(super::week::Passed),
     Nothing,
 }
 
@@ -216,6 +221,12 @@ impl Client {
             Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
                 Ok(RunTakeAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
             }
+            Some(Value::Object(o)) if o.contains_key("passed") => Ok(RunTakeAnswer::Passed(
+                super::week::Passed::of(&o).unwrap_or(super::week::Passed {
+                    to: "another computer".into(),
+                    retry_ms: 60_000,
+                }),
+            )),
             Some(value) => serde_json::from_value(value)
                 .map(|run| RunTakeAnswer::Run(Box::new(run)))
                 .map_err(|e| bad(format!("couldn't read the run it sent: {e}"))),

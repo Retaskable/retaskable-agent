@@ -575,6 +575,7 @@ impl ProjectLoop {
             engines: engines_here(shared.links, &start),
             uses: uses_here(shared.links, self.project.engines.as_ref(), &start),
             chores: self.chores_off().then_some(false),
+            week: self.week_use(),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
@@ -588,6 +589,11 @@ impl ProjectLoop {
             Ok(RunTakeAnswer::WaitingFor(waiting)) => {
                 self.run_loop.waiting = true;
                 (json!({ "waitingFor": waiting }), false)
+            }
+            // Another computer with more of its Claude week left takes the run; nothing is claimed here.
+            Ok(RunTakeAnswer::Passed(passed)) => {
+                self.run_loop.idle = true;
+                (json!({ "passed": { "to": passed.to } }), false)
             }
             Ok(RunTakeAnswer::Run(run)) => {
                 if let Some(count) = ChoreCount::read(&run.other) {

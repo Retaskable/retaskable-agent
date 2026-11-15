@@ -31,7 +31,7 @@ impl DraftHost for Host {
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
         self.engines.lock().unwrap().push(job.engine);
-        self.requests.lock().unwrap().push(job.draft.request.clone());
+        self.requests.lock().unwrap().push(job.draft.request);
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);
         async move {
@@ -105,7 +105,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
                         "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
