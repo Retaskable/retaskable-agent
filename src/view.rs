@@ -125,10 +125,54 @@ impl ItemCommand {
 /// project is paused (agent/06.5-spec-drafts.md step 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftCommand {
-    Approve { project: String, draft: String },
-    Merge { project: String, draft: String },
-    Discard { project: String, draft: String },
+    Approve {
+        project: String,
+        draft: String,
+    },
+    Merge {
+        project: String,
+        draft: String,
+    },
+    /// A `merge_requested` row's **Merge into main**: the same press as `Merge`, with the row waiting on its answer.
+    MergeFor {
+        project: String,
+        draft: String,
+        reply: Reply,
+    },
+    Discard {
+        project: String,
+        draft: String,
+    },
 }
+
+/// Where a press's answer goes: `Ok` once the draft merged, or why it didn't. Answered once; a press dropped before it
+/// was answered (the loop stopping) leaves its waiter with no answer.
+#[derive(Debug, Clone)]
+pub struct Reply(Arc<std::sync::Mutex<Option<Sender>>>);
+
+type Sender = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+impl Reply {
+    pub fn new(sender: Sender) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(sender))))
+    }
+
+    /// Answers, the first time only.
+    pub fn send(&self, answer: Result<(), String>) {
+        if let Some(sender) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = sender.send(answer);
+        }
+    }
+}
+
+/// Two replies are equal when they are the same one.
+impl PartialEq for Reply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Reply {}
 
 /// What an expert command (`expert_start`, `expert_say`, `expert_stop`, `expert_end`) asks of a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +323,7 @@ impl ItemCommands {
         let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
             DraftCommand::Approve { project: p, .. }
             | DraftCommand::Merge { project: p, .. }
+            | DraftCommand::MergeFor { project: p, .. }
             | DraftCommand::Discard { project: p, .. } => p == project,
         });
         *queue = rest;
