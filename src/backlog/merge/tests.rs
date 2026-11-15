@@ -62,7 +62,7 @@ async fn beat_open_withdraw_and_result_send_their_arguments() {
             "T1",
             &MergeOutcome::Updated {
                 head: "h".into(),
-                approved_intact: true,
+                approved_intact: false,
             },
         )
         .await
@@ -73,7 +73,7 @@ async fn beat_open_withdraw_and_result_send_their_arguments() {
     assert_eq!(sent[0]["args"], json!({ "token": "T1", "phase": "ci" }));
     assert_eq!(
         sent[1]["args"],
-        json!({ "token": "T1", "outcome": "updated", "head": "h", "approvedIntact": true })
+        json!({ "token": "T1", "outcome": "updated", "head": "h", "approvedIntact": false })
     );
     assert_eq!(sent[2]["args"], json!({ "item": "i1" }));
 
@@ -109,4 +109,17 @@ fn every_outcome_has_its_wire_name() {
             "released"
         ]
     );
+}
+
+#[test]
+fn an_updated_run_reports_the_approval_as_not_carried() {
+    let outcome = MergeOutcome::of_run(&RunOutcome::Updated, &json!({ "head": "h1" }));
+    assert_eq!(
+        outcome,
+        MergeOutcome::Updated {
+            head: "h1".into(),
+            approved_intact: false
+        }
+    );
+    assert_eq!(outcome.wire()["approvedIntact"], json!(false));
 }

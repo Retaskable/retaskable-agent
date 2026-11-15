@@ -11,6 +11,8 @@ use crate::implementer::publish::run;
 /// What the project's `github` settings say about landing a draft's pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workflow {
+    /// The project's `land` as written: `retaskable` (the default), `person`, `auto_merge` or `queue`.
+    pub land: String,
     /// `land` is `retaskable` (the default): **Approve** merges the pull request itself.
     pub we_merge: bool,
     /// The protected branch a person's **Merge into main** squash-merges into: only when `land` is `person` and
@@ -29,6 +31,7 @@ pub fn workflow(project: &ProjectConfig) -> Workflow {
     let land = text("land").unwrap_or("retaskable");
     let protected = text("protectedBranch").unwrap_or("main");
     Workflow {
+        land: land.to_string(),
         we_merge: land == "retaskable",
         person_merges_into: (land == "person" && project.base_branch == protected).then(|| protected.to_string()),
         method_flag: match text("mergeMethod") {

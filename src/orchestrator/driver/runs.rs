@@ -316,7 +316,8 @@ impl ProjectLoop {
             }
             let mut verdicts = HashMap::new();
             for turn in self.run_loop.runs.merge_tokens() {
-                match self.client.merge_beat(repo, token, &turn, "merge").await {
+                let phase = self.run_loop.runs.locks().phase(&turn);
+                match self.client.merge_beat(repo, token, &turn, phase).await {
                     Ok(true) => {}
                     Ok(false) => {
                         verdicts.insert(turn, BeatVerdict::Stop);
