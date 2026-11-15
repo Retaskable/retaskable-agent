@@ -8,14 +8,11 @@ pub mod check;
 pub mod claim;
 pub mod container;
 pub mod discovery;
-pub mod docker;
 pub mod etag;
 pub mod exec;
 pub mod inputs;
 pub mod link;
-pub mod log_excerpt;
 pub mod mirror;
-pub mod priority;
 pub mod prs;
 pub mod report;
 pub mod settings;
@@ -153,8 +150,8 @@ impl CiLoop {
         let docker = if cfg.slots == 0 {
             Err("CI slots is 0: this computer runs no CI".to_string())
         } else {
-            match docker::probe(&self.programs.docker, false).await {
-                docker::DockerState::Ok => Ok(()),
+            match crate::docker_probe::probe(&self.programs.docker, false).await {
+                crate::docker_probe::DockerState::Ok => Ok(()),
                 state => Err(state.reason().unwrap_or("Docker is not usable").to_string()),
             }
         };
@@ -165,7 +162,7 @@ impl CiLoop {
             Ok(()) => {
                 self.logged.remove("docker");
                 if self.ncpu.is_none() {
-                    self.ncpu = docker::ncpu(&self.programs.docker).await;
+                    self.ncpu = crate::docker_probe::ncpu(&self.programs.docker).await;
                 }
             }
         }

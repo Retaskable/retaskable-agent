@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use crate::agent_ci::prs::READY_LABEL;
 use crate::backlog::ci_result::CiChecks;
 use crate::ci_checks::{actions_run_id, read_ci_checks};
 use crate::ci_fix::FixTree;
+use crate::ci_label::READY_LABEL;
 use crate::ci_pulls::{OpenPull, open_pulls};
 use crate::ci_watch::{CheckState, Reg, gh_out, parse_json};
 use crate::config::ProjectConfig;

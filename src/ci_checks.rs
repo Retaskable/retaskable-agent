@@ -10,8 +10,8 @@ use anyhow::{Result, bail};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::agent_ci::log_excerpt;
 use crate::backlog::ci_result::{CiChecks, CiState};
+use crate::ci_logs;
 use crate::ci_watch::{LOG_TAIL_LINES, Reg, gh_out};
 
 /// The most characters of the failure note, as the store keeps them (`WHAT_MAX` there).
@@ -217,7 +217,7 @@ pub fn ci_log(gh: &Path, dir: &Path, repo: &str, check: &FailedCheck, reg: Reg) 
         if end <= fence {
             return None;
         }
-        let text = log_excerpt::excerpt(&body[fence + 5..end], LOG_TAIL_LINES * 2);
+        let text = ci_logs::excerpt(&body[fence + 5..end], LOG_TAIL_LINES * 2);
         return Some(text.trim().to_string()).filter(|t| !t.is_empty());
     }
     let id = actions_run_id(&check.link)?;
@@ -225,7 +225,7 @@ pub fn ci_log(gh: &Path, dir: &Path, repo: &str, check: &FailedCheck, reg: Reg) 
     if !ok {
         return None;
     }
-    Some(log_excerpt::excerpt(&out, LOG_TAIL_LINES).trim().to_string()).filter(|t| !t.is_empty())
+    Some(ci_logs::excerpt(&out, LOG_TAIL_LINES).trim().to_string()).filter(|t| !t.is_empty())
 }
 
 /// Each failed check's log (`None` where it can't be read), for the first `LOGS_MAX` of them.
@@ -244,10 +244,10 @@ pub fn keep_failures(log: &str, max: usize) -> String {
     if log.chars().count() <= max {
         return log.to_string();
     }
-    let mut lines = log.lines().count().min(log_excerpt::MAX_LINES);
+    let mut lines = log.lines().count().min(ci_logs::MAX_LINES);
     // The excerpt keeps a tail of 60 lines and a marker: nothing narrower than this is an excerpt.
     while lines > 64 {
-        let out = log_excerpt::excerpt(log, lines);
+        let out = ci_logs::excerpt(log, lines);
         if out.chars().count() <= max {
             return out;
         }

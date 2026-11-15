@@ -70,7 +70,6 @@ pub use asks::{AskHost, AskJob, AskStore};
 pub use ci_pass::CiWatchHost;
 pub use drafts::{DraftHost, DraftJob};
 pub use experts::{ExpertHost, ExpertJob, TurnEnd};
-pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared};
 use project::Launch;
 pub use project::{
