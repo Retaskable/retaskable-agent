@@ -52,8 +52,8 @@ async fn stub() -> (String, Arc<Mutex<Vec<String>>>) {
         post(move |Json(body): Json<Value>| {
             let seen = seen.clone();
             async move {
-                if body["op"] == "settings_get" || body["op"] == "facts_get" {
-                    return Json(json!({ "value": if body["op"] == "facts_get" { json!({ "paused": false }) } else { Value::Null } }));
+                if body["op"] == "settings_get" || body["op"] == "pause_get" || body["op"] == "facts_get" {
+                    return Json(json!({ "value": if body["op"] == "pause_get" { json!({ "paused": null, "log": [] }) } else if body["op"] == "facts_get" { json!({}) } else { Value::Null } }));
                 }
                 seen.lock().unwrap().push(body["op"].as_str().unwrap_or("").to_string());
                 Json(json!({ "value": [{ "id": "a", "title": "A", "status": "todo", "rank": 0 }] }))
@@ -602,8 +602,8 @@ async fn claim_stub_failing(
                 if let Some(answer) = details_answer(&details, &op, &body["args"]) {
                     return answer;
                 }
-                if op == "settings_get" || op == "facts_get" {
-                    return (StatusCode::OK, Json(json!({ "value": if op == "facts_get" { json!({ "paused": false }) } else { Value::Null } })));
+                if op == "settings_get" || op == "pause_get" || op == "facts_get" {
+                    return (StatusCode::OK, Json(json!({ "value": if op == "pause_get" { json!({ "paused": null, "log": [] }) } else if op == "facts_get" { json!({}) } else { Value::Null } })));
                 }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 match (op.as_str(), claim) {
@@ -956,6 +956,7 @@ mod commands;
 mod cursor_limit;
 mod deprecations;
 mod drafts;
+mod experts;
 mod fix_main;
 mod follow;
 mod host_call_undefined;

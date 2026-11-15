@@ -179,9 +179,10 @@ impl Deps for Live {
     async fn staging_served(&self) -> Result<Option<String>, String> {
         let staging = self.project.deploy.staging.as_ref().ok_or("no staging branch")?;
         if staging.smoke.is_some() {
-            let store = crate::store::Store::load(&self.project_dir).map_err(|e| format!("{e:#}"))?;
-            return Ok(store
-                .smoke()
+            let (repo, token) = self.ready().await?;
+            let shown = self.client.shown(repo, Some(&token)).await.map_err(|e| e.to_string())?;
+            return Ok(shown
+                .smoke
                 .filter(|s| s.status == crate::store::SmokeStatus::Passed)
                 .map(|s| s.sha));
         }

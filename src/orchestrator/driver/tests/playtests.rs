@@ -24,7 +24,7 @@ async fn store(waiting: usize, lock_delay: Duration, fail_list: bool) -> (String
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     "tryouts_list" => {
                         let waiting: Vec<Value> = (1..=waiting)
                             .map(|n| json!({"key": format!("k{n}"), "itemId": "1", "title": "T", "what": "W", "steps": ["S"]}))
@@ -190,7 +190,7 @@ async fn runs_store(beat: Value) -> (String, Arc<Mutex<Vec<(String, Value)>>>) {
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     "tryouts_list" => {
                         let waiting: Vec<Value> = (1..=4)
                             .map(|n| json!({"key": format!("k{n}"), "itemId": "1", "title": "T", "what": "W", "steps": ["S"]}))

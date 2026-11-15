@@ -39,6 +39,8 @@ pub mod close {
     pub const REPLACED: u16 = 4000;
     pub const TOKEN_EXPIRED: u16 = 4001;
     pub const UNLINKED: u16 = 4003;
+    /// A `hello`'s role is not the role the agent was linked with (chat-agent-process.md section 3).
+    pub const WRONG_ROLE: u16 = 4004;
 }
 
 /// How long the connector waits for things (connector.ts's constants); shorter in tests.
@@ -77,7 +79,7 @@ pub fn backoff(attempt: u32, unit: Duration, random: f64) -> Duration {
 }
 
 /// A number in 0..1 that differs from one call and one process to the next (each `RandomState` has fresh keys).
-fn random() -> f64 {
+pub(crate) fn random() -> f64 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u8(0);
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
@@ -245,7 +247,7 @@ impl Connector {
 }
 
 /// `wss://…/api/agents/connect?project=<id>`, no `project` for the agent's own hub.
-fn connect_url(url: &str, project: &str) -> String {
+pub(crate) fn connect_url(url: &str, project: &str) -> String {
     let base = format!("{}/api/agents/connect", url.replacen("http", "ws", 1));
     if project.is_empty() {
         return base;
@@ -343,10 +345,10 @@ fn why(code: u16, reason: &str) -> String {
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+pub(crate) type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Opens the socket, signing in with the access token beside the subprotocol.
-async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
+pub(crate) async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
     let mut request = ws_url.into_client_request().map_err(|e| cause(&e))?;
     let protocols = HeaderValue::from_str(&format!("{SUBPROTOCOL}, {access_token}")).map_err(|e| cause(&e))?;
     request.headers_mut().insert("Sec-WebSocket-Protocol", protocols);
@@ -423,9 +425,6 @@ async fn session(
     let mut trial_saved = crate::store::subscribe_trial_changes();
     trial_saved.mark_unchanged();
     let mut trial_sent = view.trial_json(project, &cloud.dir);
-    let mut smoke_saved = crate::store::subscribe_smoke_changes();
-    smoke_saved.mark_unchanged();
-    let mut smoke_sent = view.smoke_json(project, &cloud.dir);
     let mut commands_changed = view.item_commands.gates().subscribe();
     commands_changed.mark_unchanged();
     let mut commands_sent = view.commands_waiting_json(project);
@@ -466,15 +465,6 @@ async fn session(
                 let now = view.trial_json(project, &cloud.dir);
                 if now != trial_sent {
                     trial_sent = now;
-                    Some(view.snapshot(project, &cloud.dir))
-                } else {
-                    None
-                }
-            },
-            Ok(()) = smoke_saved.changed() => {
-                let now = view.smoke_json(project, &cloud.dir);
-                if now != smoke_sent {
-                    smoke_sent = now;
                     Some(view.snapshot(project, &cloud.dir))
                 } else {
                     None

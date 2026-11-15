@@ -17,6 +17,10 @@ name = "retaskable"
 path = "src/main.rs"
 
 [[bin]]
+name = "retaskable-chat-agent"
+path = "src/bin/chat_agent.rs"
+
+[[bin]]
 name = "upload-release"
 path = "src/bin/upload_release.rs"
 
