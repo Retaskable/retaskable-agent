@@ -16,6 +16,29 @@ async fn a_head_with_nothing_reported_yet_is_pending_not_a_pass() {
 }
 
 #[tokio::test]
+async fn a_head_with_nothing_reported_past_the_ci_grace_is_a_pass_and_keeps_its_first_seen_time() {
+    let rig = Rig::new().await;
+    list(rig.dir.path(), vec![pull(1, "feat/a", "aaa")]);
+    head_is(rig.dir.path(), "aaa", vec![]);
+    let grace = rig.ci_grace_ms;
+    let mut since = HashMap::new();
+    // First seen at 1_000: within the grace it is pending, at the grace it is "no CI".
+    rig.pass(&mut since, 1_000).await.unwrap();
+    rig.pass(&mut since, 1_000 + grace - 1).await.unwrap();
+    rig.pass(&mut since, 1_000 + grace).await.unwrap();
+    let sent = rig.store.sent("ci_result");
+    let states: Vec<&Value> = sent.iter().map(|f| &f["checks"]["state"]).collect();
+    assert_eq!(states, ["pending", "pending", "pass"]);
+    assert_eq!(sent[1]["pendingSince"], 1_000);
+    assert!(sent[2].get("pendingSince").is_none());
+    assert_eq!(
+        since.values().copied().collect::<Vec<_>>(),
+        [1_000],
+        "kept, so the grace isn't restarted"
+    );
+}
+
+#[tokio::test]
 async fn every_pull_request_unreadable_ends_the_pass_with_an_error_saying_so() {
     let rig = Rig::new().await;
     // No status files for either head: `gh` fails, as with a token without the scope.

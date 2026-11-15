@@ -169,6 +169,8 @@ impl Press {
             items: &self.items,
             allow: &self.allow,
             fixing: &self.fixing,
+            // A press is for a red head: the grace for a head with no checks doesn't come into it.
+            ci_grace_ms: 0,
             hold_writes: false,
             logins: &self.logins,
             bell: &*self.bell,

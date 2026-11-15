@@ -225,6 +225,8 @@ pub(super) struct Rig {
     pub fixing: Fixing,
     /// The pass holds its write steps.
     pub hold_writes: bool,
+    /// The CI grace, in ms.
+    pub ci_grace_ms: u64,
     /// The checkout `gh` and git run in; the rig's own folder until a test makes a repo.
     pub repo: Option<PathBuf>,
     pub git: host::GitCommand,
@@ -254,6 +256,7 @@ impl Rig {
             logins: LoginCache::default(),
             fixing: Fixing::default(),
             hold_writes: false,
+            ci_grace_ms: 10 * 60_000,
             repo: None,
             git: Arc::new(crate::test_support::git),
             tip: String::new(),
@@ -285,6 +288,7 @@ impl Rig {
             items: &self.items,
             allow: &self.allow,
             fixing: &self.fixing,
+            ci_grace_ms: self.ci_grace_ms,
             hold_writes: self.hold_writes,
             logins: &self.logins,
             bell: &bell,

@@ -37,6 +37,7 @@ impl CiHost for Gh {
             what: String::new(),
             logs: vec![],
             ended_at: None,
+            nothing_reported: false,
         })
     }
     fn rerun(&self, _: u64, _: bool) -> bool {

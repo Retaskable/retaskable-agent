@@ -75,6 +75,10 @@ pub struct CiChecks {
     pub logs: Vec<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<u64>,
+    /// Not sent: no status and no check run at all were reported on the head (read as pending by the host; the pass
+    /// calls it "no CI", a pass, once the project's CI grace has gone by).
+    #[serde(skip)]
+    pub nothing_reported: bool,
 }
 
 /// What a computer ran, said back on the next call.

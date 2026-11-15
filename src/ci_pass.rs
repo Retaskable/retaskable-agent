@@ -117,6 +117,9 @@ pub struct Pass<'a> {
     pub allow: &'a [String],
     /// The heads something is under way on, shared with the Fix presses.
     pub fixing: &'a Fixing,
+    /// How long a head with no check reported at all is waited for (`tuning.ci_grace_minutes`, in ms) before it reads
+    /// as "no CI", a pass. Measured from when the head was first seen, in `since`.
+    pub ci_grace_ms: u64,
     /// Hold the write steps (`fix`, `mergeMain`): the project is paused, Claude is signed out or the fix engine is at
     /// its limit. Judging and reruns go on. A deliberate divergence from the TS agent, whose pass has no such check
     /// (`ciWatch.ts` `carryOut`) and so pushes and starts sessions through a pause. A Fix press is the owner's own
@@ -187,10 +190,20 @@ impl Pass<'_> {
                 }
             };
             let k = key(p.number, &p.head);
+            let mut checks = checks;
+            if checks.nothing_reported
+                && self.now.saturating_sub(*since.entry(k.clone()).or_insert(self.now)) >= self.ci_grace_ms
+            {
+                // Past the grace with nothing ever reported: this repository has no CI for it, as TS reads at once.
+                checks.state = CiState::Pass;
+            }
             let pending_since = match checks.state {
                 CiState::Pending => Some(*since.entry(k).or_insert(self.now)),
+                // A head with no CI keeps its first-seen time, or the grace would start over every pass.
                 CiState::Pass => {
-                    since.remove(&k);
+                    if !checks.nothing_reported {
+                        since.remove(&k);
+                    }
                     None
                 }
                 CiState::Fail => None,

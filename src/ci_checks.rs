@@ -369,21 +369,32 @@ pub fn read_ci_checks(gh: &Path, dir: &Path, repo: &str, sha: &str, reg: Reg) ->
                 what: failed_note(&st.failed, &logs, "pull request", Some(WHAT_MAX)),
                 logs,
                 ended_at: ended_at(&st.failed),
+                nothing_reported: false,
             }
         }
-        // Nothing reported yet (a push GitHub hasn't registered checks for) is not a pass: it is pending, bounded by
-        // the store's own pending window. The TS agent counts it a pass and so can merge before checks exist.
-        CommitState::Pending | CommitState::None => CiChecks {
+        // Nothing reported yet (a push GitHub hasn't registered checks for) is not a pass at once: it is pending, and
+        // the pass reads it as "no CI" (a pass) only after the project's CI grace (`Pass::ci_grace_ms`). The TS agent
+        // counts it a pass straight away and so can merge before checks exist.
+        CommitState::Pending => CiChecks {
             state: CiState::Pending,
             what: String::new(),
             logs: Vec::new(),
             ended_at: None,
+            nothing_reported: false,
+        },
+        CommitState::None => CiChecks {
+            state: CiState::Pending,
+            what: String::new(),
+            logs: Vec::new(),
+            ended_at: None,
+            nothing_reported: true,
         },
         CommitState::Pass => CiChecks {
             state: CiState::Pass,
             what: String::new(),
             logs: Vec::new(),
             ended_at: None,
+            nothing_reported: false,
         },
     })
 }

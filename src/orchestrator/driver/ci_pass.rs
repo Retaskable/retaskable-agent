@@ -161,6 +161,7 @@ impl ProjectLoop {
                 items: &items,
                 allow: &project.ci_watch_allow,
                 fixing: &fixing,
+                ci_grace_ms: u64::from(project.tuning.ci_grace_minutes) * 60_000,
                 hold_writes,
                 logins: &login,
                 bell: &|title, body| watch.bell(title, body),
