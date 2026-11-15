@@ -105,7 +105,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
                         "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
