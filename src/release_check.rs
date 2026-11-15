@@ -88,7 +88,7 @@ pub fn http_get(port: u16, path: &str) -> Result<String, String> {
     stream
         .read_to_string(&mut response)
         .map_err(|e| format!("reading the response: {e}"))?;
-    Ok(response.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    Ok(response.split_once("\r\n\r\n").map_or("", |(_, body)| body).to_string())
 }
 
 /// Polls `GET /api/health` on `port` until it answers `version`, up to 60 seconds.
@@ -291,6 +291,12 @@ mod tests {
     fn free_port_is_bindable() {
         let port = free_port().unwrap();
         assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn http_get_keeps_a_body_that_holds_a_blank_line() {
+        let port = serve_once("one\r\n\r\ntwo");
+        assert_eq!(http_get(port, "/x").unwrap(), "one\r\n\r\ntwo");
     }
 
     #[test]
