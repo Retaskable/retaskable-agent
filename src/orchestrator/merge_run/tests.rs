@@ -74,7 +74,7 @@ d=$(dirname "$0")
 echo "$*" >> "$d/calls.log"
 case "$*" in
   *mergeCommit*) echo '{"mergeCommit":{"oid":"abc123"}}';;
-  "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view";;
+  "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view"; if [ -f "$d/view.next" ]; then mv "$d/view.next" "$d/view"; fi;;
   "pr merge "*)
     [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"
     # `fail-times` N: the first N merges are refused with `merge-err`; `advance`: base moves on first.
@@ -159,7 +159,11 @@ async fn rig() -> Rig {
 
 impl Rig {
     async fn run(&mut self) -> RunEnd {
-        let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, quick());
+        self.run_with(quick()).await
+    }
+
+    async fn run_with(&mut self, delays: Delays) -> RunEnd {
+        let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, delays);
         runner.start(self.request.clone()).unwrap();
         tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
             .await
@@ -538,15 +542,16 @@ async fn a_change_github_never_works_out_is_brought_up_to_date_after_the_wait() 
 #[tokio::test]
 async fn an_unknown_that_clears_within_the_wait_lands_as_usual() {
     let mut rig = rig().await;
+    // The first read is UNKNOWN and the fake gh's next read is MERGEABLE (`view.next`): the change clears on a read, not
+    // on a clock, and the wait is long enough that a slow machine can't run it out first.
     set(rig.dir.path(), "view", UNKNOWN);
+    set(rig.dir.path(), "view.next", MERGEABLE);
     rig.request.context.config.base_branch = "main".into();
-    let dir = rig.dir.path().to_path_buf();
-    let clear = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(15)).await;
-        set(&dir, "view", MERGEABLE);
-    });
-    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
-    clear.await.unwrap();
+    let delays = Delays {
+        unknown_for: Duration::from_secs(60),
+        ..quick()
+    };
+    assert_eq!(rig.run_with(delays).await.outcome, RunOutcome::Merged);
 }
 
 #[tokio::test]
