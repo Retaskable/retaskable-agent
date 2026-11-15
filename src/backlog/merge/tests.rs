@@ -8,9 +8,13 @@ async fn enqueue_sends_the_change_and_marks_a_chore() {
         item: "chore-3",
         base: "main",
         head: "abc",
-        pr: "https://x/pull/4",
+        pr: MergePr {
+            number: 4,
+            url: "https://x/pull/4",
+        },
         land: "retaskable",
         chore: true,
+        holds_branch: true,
         ..Default::default()
     };
     let v = Client::new(base).merge_enqueue(1, Some("t"), &e).await.unwrap();
@@ -19,6 +23,9 @@ async fn enqueue_sends_the_change_and_marks_a_chore() {
     assert_eq!(sent["op"], "merge_enqueue");
     assert_eq!(sent["args"]["chore"], true);
     assert_eq!(sent["args"]["head"], "abc");
+    // The store takes `pr` as `{ number, url }` and refuses a bare string (shared/backlogMergeOps.ts `merge_enqueue`).
+    assert_eq!(sent["args"]["pr"], json!({ "number": 4, "url": "https://x/pull/4" }));
+    assert_eq!(sent["args"]["holdsBranch"], true);
     assert!(sent["args"].get("piece").is_none());
 }
 
@@ -34,9 +41,23 @@ async fn next_reads_a_turn_a_place_and_nothing() {
     let sent = seen.lock().unwrap()[0].clone();
     assert_eq!(sent["args"], json!({ "base": "main", "piece": true }));
 
-    let (base, _) = store(200, json!({ "value": { "waiting": { "place": 2, "ahead": 1 } } })).await;
+    // The store names the change ahead by its item id, or sends null when it can't name one.
+    let (base, _) = store(
+        200,
+        json!({ "value": { "waiting": { "place": 1, "ahead": "item-7" } } }),
+    )
+    .await;
     let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
-    assert_eq!(got, MergeNext::Waiting { place: 2, ahead: 1 });
+    assert_eq!(
+        got,
+        MergeNext::Waiting {
+            place: 1,
+            ahead: Some("item-7".into())
+        }
+    );
+    let (base, _) = store(200, json!({ "value": { "waiting": { "place": 1, "ahead": null } } })).await;
+    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    assert_eq!(got, MergeNext::Waiting { place: 1, ahead: None });
 
     let (base, seen) = store(200, json!({ "value": null })).await;
     let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
