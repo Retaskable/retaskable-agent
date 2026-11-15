@@ -82,6 +82,7 @@ fn pull(number: u64, branch: &str) -> OpenPull {
         head: format!("sha{number}"),
         author: None,
         mergeable: None,
+        cross_repository: false,
     }
 }
 

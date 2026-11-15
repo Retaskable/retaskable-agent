@@ -331,3 +331,47 @@ async fn the_held_key_is_dropped_when_the_carry_out_fails() {
     assert!(rig.pass(&mut since, 0).await.is_err());
     assert!(since.keys().all(|k| !k.starts_with("fixing:")), "{since:?}");
 }
+
+fn fork(mut p: Value) -> Value {
+    p["isCrossRepository"] = json!(true);
+    p
+}
+
+#[tokio::test]
+async fn a_fork_is_never_pushed_to_whoever_opened_it_or_whatever_its_branch_is_called() {
+    let mut rig = Rig::new().await;
+    let origin = rig.with_repo();
+    rig.login_is("me");
+    rig.allow = vec!["ann".into()];
+    let before = rev(&origin, BRANCH);
+    list_and_green(
+        &rig,
+        vec![
+            fork(pull_by(1, "feat/a", "Ann", "CONFLICTING")),
+            fork(pull_by(2, "feat/b", "me", "CONFLICTING")),
+            fork(pull_by(3, "claude/c", "stranger", "CONFLICTING")),
+            fork(pull_by(4, BRANCH, "stranger", "CONFLICTING")),
+            // The same shapes from a branch in the repository itself still push.
+            pull_by(5, "feat/e", "Ann", "CONFLICTING"),
+        ],
+    );
+    // The store asks for a merge on every head.
+    asks_merge_main(&rig);
+    rig.pass(&mut HashMap::new(), 0).await.unwrap();
+    let sent = rig.store.sent("ci_result");
+    for pr in 1..=4 {
+        let facts = sent.iter().find(|f| f["pr"] == pr && f["did"].is_null()).unwrap();
+        assert_eq!(facts["mayPush"], false, "{facts}");
+        assert!(facts.get("baseHead").is_none(), "{facts}");
+        assert!(
+            sent.iter().filter(|f| f["pr"] == pr).count() == 1,
+            "nothing was run for #{pr}"
+        );
+    }
+    assert_eq!(rev(&origin, BRANCH), before);
+    // Only #5 had a merge tried (feat/e isn't on origin, so it failed and pushed nothing).
+    let five: Vec<&Value> = sent.iter().filter(|f| f["pr"] == 5).collect();
+    assert_eq!(five[0]["mayPush"], true);
+    assert!(five[0].get("baseHead").is_some());
+    assert!(rig.git_log().iter().all(|l| !l.contains("push")));
+}

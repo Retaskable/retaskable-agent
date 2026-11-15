@@ -27,6 +27,8 @@ pub struct OpenPull {
     pub author: Option<String>,
     /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`, where `gh` says.
     pub mergeable: Option<String>,
+    /// Its branch is in a fork (`isCrossRepository`).
+    pub cross_repository: bool,
 }
 
 impl OpenPull {
@@ -52,6 +54,8 @@ struct Row {
     mergeable: String,
     #[serde(default)]
     author: Option<Author>,
+    #[serde(default)]
+    is_cross_repository: bool,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +80,7 @@ pub fn parse_open_pulls(json: &str) -> Result<Vec<OpenPull>> {
             head: r.head_ref_oid,
             author: r.author.map(|a| a.login).filter(|l| !l.is_empty()),
             mergeable: Some(r.mergeable).filter(|m| !m.is_empty()),
+            cross_repository: r.is_cross_repository,
         })
         .collect())
 }
@@ -95,7 +100,7 @@ pub fn open_pulls(gh: &Path, dir: &Path, repo: &str, base: &str, reg: Reg) -> Re
         "--limit",
         &limit,
         "--json",
-        "number,title,url,headRefName,headRefOid,mergeable,author",
+        "number,title,url,headRefName,headRefOid,mergeable,author,isCrossRepository",
     ];
     let (out, err, ok) = gh_out(gh, dir, &args, reg)?;
     if !ok {

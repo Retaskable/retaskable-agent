@@ -166,6 +166,12 @@ impl Pass<'_> {
     /// Whether the agent may push to the pull request's branch (`may_push_to`). The login is read (on a blocking
     /// thread) only when the pull request lists an author and none is kept yet; a failed read is no own account.
     async fn may_push(&self, p: &OpenPull) -> bool {
+        // Never a fork's pull request, whoever opened it or whatever its branch is called: `origin` is not where its
+        // branch lives, so a push by name could land on an unrelated branch of the same name. A deliberate divergence
+        // from the TS agent, which has this hole (a Retaskable.com issue is to follow); `may_push_to` is unchanged.
+        if p.cross_repository {
+            return false;
+        }
         let own = if p.author.is_some() { self.login().await } else { None };
         may_push_to(&p.branch, p.author.as_deref(), own.as_deref(), self.allow)
     }
