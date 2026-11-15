@@ -111,6 +111,9 @@ pub fn spawn_all(args: SpawnArgs) {
         }
         machine = machine.with_take_overs();
         machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
+        machine = machine.with_merge_host(Arc::new(super::merge_item::GhMergeHost {
+            env: crate::env::Env::from_process(),
+        }));
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
         }
