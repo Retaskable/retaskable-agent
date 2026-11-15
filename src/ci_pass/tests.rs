@@ -15,6 +15,7 @@ use crate::test_support::write_executable;
 
 mod fix;
 mod merge;
+mod press;
 mod rerun;
 
 pub(super) type Script = Box<dyn Fn(&Value) -> Value + Send + Sync>;
@@ -216,6 +217,8 @@ pub(super) struct Rig {
     /// The project's `ciWatchAllow`.
     pub allow: Vec<String>,
     pub logins: LoginCache,
+    /// The heads something is under way on.
+    pub fixing: Fixing,
     /// The checkout `gh` and git run in; the rig's own folder until a test makes a repo.
     pub repo: Option<PathBuf>,
     pub git: host::GitCommand,
@@ -241,6 +244,7 @@ impl Rig {
             ready_label: false,
             allow: Vec::new(),
             logins: LoginCache::default(),
+            fixing: Fixing::default(),
             repo: None,
             git: Arc::new(crate::test_support::git),
         }
@@ -270,6 +274,7 @@ impl Rig {
             token: Some("tok"),
             items: &self.items,
             allow: &self.allow,
+            fixing: &self.fixing,
             logins: &self.logins,
             bell: &bell,
             now,
