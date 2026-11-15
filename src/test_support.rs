@@ -48,7 +48,9 @@ pub(crate) fn triage_context(timeline: Vec<String>, bug_title: &str) -> TriageCo
 /// our write descriptor until that child execs, so a spawn right after the write sometimes fails.
 /// Once a spawn has succeeded nothing has the file open for writing and nothing will again, so
 /// this runs the file once, retrying while it's busy, and tests can then spawn it freely. The fake
-/// programs tests write are all harmless to run with no arguments.
+/// programs tests write are all harmless to run with no arguments. The run is in the file's own
+/// folder, so a fake that writes a relative file on that run writes it there, never into the
+/// checkout the tests run from.
 pub(crate) fn write_executable(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
     #[cfg(unix)]
@@ -58,7 +60,11 @@ pub(crate) fn write_executable(path: &Path, contents: &str) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
         loop {
-            match Command::new(path)
+            let mut probe = Command::new(path);
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                probe.current_dir(dir);
+            }
+            match probe
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -425,4 +431,17 @@ pub(crate) fn fake_gh_that_marks(dir: &Path) -> (std::path::PathBuf, std::path::
     write_executable(&gh, &script);
     let _ = std::fs::remove_file(&ran); // the helper ran the script once
     (gh, ran)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn the_first_run_of_a_written_program_is_in_its_own_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let name = format!("probe-{}.log", std::process::id());
+        let program = d.path().join("fake");
+        super::write_executable(&program, &format!("#!/bin/sh\necho ran >> {name}\n"));
+        assert!(d.path().join(&name).exists(), "the run wrote beside the program");
+        assert!(!std::path::Path::new(&name).exists(), "and not where the tests run");
+    }
 }
