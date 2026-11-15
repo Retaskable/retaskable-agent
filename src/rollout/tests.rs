@@ -460,3 +460,32 @@ fn the_agent_keeps_no_rollout_of_its_own() {
     );
     assert!(found.is_empty(), "{found:?}");
 }
+
+#[test]
+fn the_report_summary_names_production_waiting_served_and_distinct_items() {
+    let report = json!({
+        "production": "0123456789abcdef",
+        "commits": [
+            { "sha": "c3", "items": ["a", "b"], "served": true },
+            { "sha": "c2", "items": ["a"], "served": true },
+            { "sha": "c1", "items": [], "served": false },
+        ],
+    });
+    // Production is cut to 9 characters; item "a" is on two commits but counts once.
+    assert_eq!(
+        report::summary(&report),
+        "reported production 012345678, 3 waiting, 2 served, 2 items"
+    );
+}
+
+#[test]
+fn the_report_summary_copes_with_a_short_or_missing_report() {
+    assert_eq!(
+        report::summary(&json!({ "production": "abc", "commits": [] })),
+        "reported production abc, 0 waiting, 0 served, 0 items"
+    );
+    assert_eq!(
+        report::summary(&json!({})),
+        "reported production , 0 waiting, 0 served, 0 items"
+    );
+}
