@@ -129,6 +129,8 @@ pub struct Machine {
     pub(super) trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks. With none, asks are left unanswered.
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
+    /// Whether a person's take-over requests are pulled. Off unless a session starter is wired.
+    pub(super) take_overs: bool,
     /// Runs the expert sessions' turns. With none, the expert commands are refused.
     pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
@@ -183,6 +185,7 @@ impl Machine {
             drafts: None,
             trial: None,
             asks: None,
+            take_overs: false,
             experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
@@ -438,6 +441,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode take over items a person asks for.
+    pub fn with_take_overs(mut self) -> Self {
+        self.take_overs = true;
+        self
+    }
+
     /// Lets `claim` mode run expert sessions.
     pub fn with_experts(mut self, host: Arc<dyn super::ExpertHost>) -> Self {
         self.experts = Some(host);
@@ -636,6 +645,13 @@ impl Machine {
                     let shared = shared!(self, stopping);
                     lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
                 }
+            }
+        }
+        // A person taking over an item whose owner's computer is gone: no session, so no slot.
+        for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            if live && self.take_overs {
+                let shared = shared!(self, stopping);
+                lp.take_over_pass(&shared).await;
             }
         }
         // Expert sessions have a person in them: their turns take slots too, and a pause doesn't hold them back.

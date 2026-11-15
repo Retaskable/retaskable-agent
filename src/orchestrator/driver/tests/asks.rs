@@ -83,13 +83,15 @@ pub(super) struct Rows {
     pub(super) rows: Mutex<Vec<Value>>,
     /// Claim answers in order; won once it is empty.
     pub(super) claims: Mutex<Vec<Value>>,
+    /// What the store answers a person's `claim` of an item (status and body); nothing claimable when unset.
+    pub(super) person_claim: Mutex<Option<(u16, Value)>>,
 }
 
 pub(super) type Listed = Arc<Rows>;
 
 /// A store that lists the rows, records every op and refuses the op `fail` with a 500. A row ended with
 /// `intent_finish` is no longer listed open.
-async fn store_failing(fail: &'static str) -> (String, Asked, Listed) {
+pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed) {
     let asked: Asked = Default::default();
     let listed: Listed = Default::default();
     let (seen, rows) = (asked.clone(), listed.clone());
@@ -106,6 +108,11 @@ async fn store_failing(fail: &'static str) -> (String, Asked, Listed) {
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({ "error": "boom" })),
                         );
+                    }
+                    if op == "claim"
+                        && let Some((status, body)) = rows.person_claim.lock().unwrap().clone()
+                    {
+                        return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
                     }
                     let value = match op.as_str() {
                         "list" | "drafts" | "draft_list" => json!([]),
