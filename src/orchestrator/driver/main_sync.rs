@@ -59,6 +59,12 @@ impl State {
     pub(super) fn with_gh(gh: PathBuf) -> Self {
         Self { gh, ..Self::default() }
     }
+
+    /// Lets the next pass look again at once, as if the minute had passed (tests: one look that failed on a loaded
+    /// machine shouldn't decide a test whose few seconds never reach the next minute's look).
+    pub(super) fn look_again(&mut self) {
+        self.looked = None;
+    }
 }
 
 impl ProjectLoop {
