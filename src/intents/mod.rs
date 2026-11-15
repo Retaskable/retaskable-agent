@@ -8,12 +8,14 @@
 //!
 //! A kind is added by registering one [`Handler`]; the puller itself knows nothing of any kind.
 pub mod finish_steps;
+pub mod fix_requested;
 pub mod main_pr;
 pub mod merge_item;
 pub mod sync;
 pub mod take_over;
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -59,8 +61,65 @@ pub trait Handler<C>: Send + Sync {
     fn not_twice(&self) -> bool {
         false
     }
+    /// Whether a row of this kind starts a session or a run (`STARTS_WORK` in the TS agent's `intentPuller.ts`, less
+    /// `ask`, which has its own gate): a paused project, or a computer already running [`MAX_WORK_ROWS`] such rows,
+    /// leaves it open for another computer.
+    fn starts_work(&self) -> bool {
+        false
+    }
+    /// Whether a row of this kind runs a Claude session (`RUNS_SESSION`): a computer signed out of Claude leaves it open.
+    fn runs_session(&self) -> bool {
+        false
+    }
     /// Runs the claimed row.
     fn run(&self, row: IntentRow, cx: &C) -> BoxFuture<'static, Outcome>;
+}
+
+/// Rows that start work run this many at a time on a computer (`MAX_WORK_ROWS`); the rest wait, open, to be taken.
+pub const MAX_WORK_ROWS: u32 = 2;
+
+/// How many rows that start work this computer is running, over every project and kind: a clone is the same count.
+#[derive(Clone, Default)]
+pub struct Work(Arc<AtomicU32>);
+
+impl Work {
+    /// Rows running now.
+    pub fn running(&self) -> u32 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn start(&self) -> WorkGuard {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        WorkGuard(self.0.clone())
+    }
+}
+
+/// One row that starts work, counted until it ends (or is dropped).
+struct WorkGuard(Arc<AtomicU32>);
+
+impl Drop for WorkGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What this computer and the project say about taking rows that start work: the loop's own state, never the store's
+/// say-so (`intentCan`). The default holds nothing back, for a kind that starts no work.
+#[derive(Clone, Default)]
+pub struct Gates {
+    /// This computer's or the store's pause on the project.
+    pub paused: bool,
+    /// Claude Code was found signed out here.
+    pub signed_out: bool,
+    /// The rows that start work running on this computer.
+    pub work: Work,
+}
+
+impl Gates {
+    /// Whether a row of a kind with these flags is left open for now.
+    fn holds(&self, starts_work: bool, runs_session: bool) -> bool {
+        (starts_work && (self.paused || self.work.running() >= MAX_WORK_ROWS)) || (runs_session && self.signed_out)
+    }
 }
 
 /// Why a row of a not-twice kind held from before a restart ends `failed` (word for word as the TS agent says it).
@@ -193,6 +252,12 @@ impl<C> Puller<C> {
     /// rows stay as they were and the next pass tries again. The caller gates it (paused, signed out, over a limit):
     /// this takes every row it is asked to.
     pub async fn pass(&mut self, store: &Arc<dyn IntentStore>, cx: impl FnOnce() -> C) -> u32 {
+        self.pass_gated(store, &Gates::default(), cx).await
+    }
+
+    /// [`Puller::pass`] that leaves open the rows of a kind that starts work while `gates` hold it back: before the
+    /// claim, so another computer can take it, and a row it already runs counts toward [`MAX_WORK_ROWS`].
+    pub async fn pass_gated(&mut self, store: &Arc<dyn IntentStore>, gates: &Gates, cx: impl FnOnce() -> C) -> u32 {
         if self.handlers.is_empty() {
             return 0;
         }
@@ -219,6 +284,9 @@ impl<C> Puller<C> {
             else {
                 continue;
             };
+            if gates.holds(handler.starts_work(), handler.runs_session()) {
+                continue;
+            }
             match store.claim(&row.id).await {
                 Ok(Claim { won: true, .. }) => {}
                 // Lost to another computer, or held back by the board's queue: not an error.
@@ -235,7 +303,9 @@ impl<C> Puller<C> {
                 tracing::info!("intents: not running {} {} again", row.kind, row.id);
                 let (store, retry) = (store.clone(), self.retry_every);
                 let id = row.id.clone();
+                let counted = handler.starts_work().then(|| gates.work.start());
                 self.tasks.push(tokio::spawn(async move {
+                    let _counted = counted;
                     finish(&store, &id, Ending::Failed, None, Some(RESTARTED.into()), retry).await
                 }));
                 started += 1;
@@ -246,7 +316,11 @@ impl<C> Puller<C> {
             let id = row.id.clone();
             let running = handler.run(row, cx);
             let (store, beat, retry) = (store.clone(), self.beat_every, self.retry_every);
-            self.tasks.push(tokio::spawn(run_row(store, id, running, beat, retry)));
+            let counted = handler.starts_work().then(|| gates.work.start());
+            self.tasks.push(tokio::spawn(async move {
+                let _counted = counted;
+                run_row(store, id, running, beat, retry).await
+            }));
             started += 1;
         }
         started

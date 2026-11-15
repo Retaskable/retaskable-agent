@@ -98,7 +98,7 @@ async fn a_fix_that_commits_is_pushed_plainly_once_and_says_pushed() {
     );
     assert_eq!(asked[0].4, tree_of(&rig));
     gone(&rig);
-    assert!(since.keys().all(|k| !k.starts_with("fixing:")), "{since:?}");
+    assert!(!rig.fixing.holds(9, "sha9"), "the head is let go");
 }
 
 async fn nothing_pushed(rig: &mut Rig, act: impl Fn(&Path) -> bool + Send + Sync + 'static) {

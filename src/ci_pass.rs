@@ -6,14 +6,17 @@
 //! conflicting head it may push to. `mergeMain` is run (a plain push to the pull request's branch, only where
 //! `mayPush`), and so is `fix` (a write session in a throwaway worktree, then a plain push, only where `mayPush`).
 //! Scheduling (the runner, the 2 minutes) is the project loop's (`driver/ci_pass.rs`).
+//! The Fix button (`fixPullOnce`, `ciFixNow`) is [`Pass::press`] and [`press::Press`]: the same facts with `button`
+//! set, and the same carry-out, run in the background once the store has agreed to it.
 pub mod host;
+pub mod press;
 // The fake `gh` is a shell script.
 #[cfg(all(test, unix))]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -49,6 +52,44 @@ pub trait Fixer: Send + Sync {
     -> BoxFuture<'a, bool>;
 }
 
+/// The heads a judge, fix or merge is under way on (`fixing:<pr>@<sha>` in the TS agent's watcher memory), held by a
+/// pass's carry-out and by a Fix press until it ends. Shared by the pass and the presses, so neither runs a second one
+/// on the same head: that would double the attempts and could push twice.
+#[derive(Clone, Default)]
+pub struct Fixing(Arc<Mutex<HashSet<String>>>);
+
+/// A head held in [`Fixing`]; let go when dropped, however the work ended.
+pub struct FixHold {
+    held: Fixing,
+    key: String,
+}
+
+impl Drop for FixHold {
+    fn drop(&mut self) {
+        self.held.set().remove(&self.key);
+    }
+}
+
+impl Fixing {
+    fn set(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Holds `pr@sha`; `None` when something is under way on it already.
+    pub fn hold(&self, pr: u64, sha: &str) -> Option<FixHold> {
+        let key = key(pr, sha);
+        self.set().insert(key.clone()).then(|| FixHold {
+            held: self.clone(),
+            key,
+        })
+    }
+
+    /// Whether something is under way on `pr@sha`.
+    pub fn holds(&self, pr: u64, sha: &str) -> bool {
+        self.set().contains(&key(pr, sha))
+    }
+}
+
 /// One pass over a project's open pull requests.
 pub struct Pass<'a> {
     pub host: Arc<dyn CiHost>,
@@ -61,12 +102,21 @@ pub struct Pass<'a> {
     pub items: &'a HashSet<String>,
     /// The project's `ciWatchAllow`: authors whose pull requests it may push to.
     pub allow: &'a [String],
+    /// The heads something is under way on, shared with the Fix presses.
+    pub fixing: &'a Fixing,
     /// The signed-in login, kept once read.
     pub logins: &'a LoginCache,
     /// A bell line (title, body), word for word.
     pub bell: &'a (dyn Fn(&str, &str) + Sync),
     /// Now, in milliseconds: when a head is first seen pending.
     pub now: u64,
+}
+
+/// Now, in milliseconds.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// A head's checks, read on a blocking thread (the host runs programs).
@@ -77,12 +127,6 @@ async fn checks_of(host: &Arc<dyn CiHost>, sha: String) -> Result<CiChecks> {
 
 fn key(pr: u64, sha: &str) -> String {
     format!("{pr}@{sha}")
-}
-
-/// A judge, fix or merge for `pr@sha` is under way (`fixingKey`): the head is left alone meanwhile, so a second one in
-/// the same worktree can't double the attempts or push twice. Kept in the same map as the pending times.
-fn fixing_key(pr: u64, sha: &str) -> String {
-    format!("fixing:{}", key(pr, sha))
 }
 
 impl Pass<'_> {
@@ -120,13 +164,13 @@ impl Pass<'_> {
         }
         // Heads that moved on or closed are forgotten.
         let live: HashSet<String> = read.iter().map(|(p, ..)| key(p.number, &p.head)).collect();
-        since.retain(|k, _| k.starts_with("fixing:") || live.contains(k));
+        since.retain(|k, _| live.contains(k));
         // Many red in one pass is the machine, not their changes: a fact for the store to judge with.
         let red_now = read.iter().filter(|(_, c, _)| c.state == CiState::Fail).count() as u32;
         let mut found = 0;
         for (p, checks, pending_since) in read {
             // Something is under way on this head: the pass leaves it alone.
-            if since.contains_key(&fixing_key(p.number, &p.head)) {
+            if self.fixing.holds(p.number, &p.head) {
                 continue;
             }
             let may_push = self.may_push(&p).await;
@@ -162,12 +206,13 @@ impl Pass<'_> {
                 self.carry_out(&facts, answer, since).await?;
                 continue;
             }
-            // `withFixing`: the key is held for the carry-out and dropped after it, a failed one too.
-            let held = fixing_key(p.number, &p.head);
-            since.insert(held.clone(), self.now);
-            let carried = self.carry_out(&facts, answer, since).await;
-            since.remove(&held);
-            carried?;
+            // `withFixing`: the head is held for the carry-out and let go after it, a failed one too. A press that took
+            // it since the store answered is the fix under way on this head, so the pass leaves it to that.
+            let Some(_hold) = self.fixing.hold(p.number, &p.head) else {
+                tracing::info!("ci watch: pull request #{} has a fix under way, left alone", p.number);
+                continue;
+            };
+            self.carry_out(&facts, answer, since).await?;
         }
         Ok(found)
     }

@@ -26,6 +26,7 @@ mod drafts;
 mod experts;
 mod finish_steps;
 mod fix_main;
+mod fix_requests;
 mod held_items;
 mod host_calls;
 mod idea_accept;

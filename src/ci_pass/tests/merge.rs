@@ -227,7 +227,7 @@ async fn merge_main_merges_and_pushes_the_branch_plainly_and_says_pushed() {
         .output()
         .unwrap();
     assert!(!String::from_utf8_lossy(&listed.stdout).contains("merge-ci-9"));
-    assert!(since.keys().all(|k| !k.starts_with("fixing:")), "{since:?}");
+    assert!(!rig.fixing.holds(9, "sha9"), "the head is let go");
 }
 
 /// `BRANCH` and `main` both changed `c.txt`.
@@ -302,15 +302,16 @@ async fn a_head_with_something_under_way_is_left_alone_and_its_key_kept() {
             pull_by(9, "retaskable/9-b", "stranger", "MERGEABLE"),
         ],
     );
-    let mut since = HashMap::from([("fixing:8@sha8".to_string(), 1)]);
-    rig.pass(&mut since, 0).await.unwrap();
+    let hold = rig.fixing.hold(8, "sha8").unwrap();
+    rig.pass(&mut HashMap::new(), 0).await.unwrap();
     let prs: Vec<Value> = rig.store.sent("ci_result").iter().map(|f| f["pr"].clone()).collect();
     assert_eq!(prs, [json!(9)]);
-    assert_eq!(since.get("fixing:8@sha8"), Some(&1));
+    assert!(rig.fixing.holds(8, "sha8"));
     assert!(rig.git_log().is_empty());
+    drop(hold);
     // A different head of the same pull request isn't the one under way.
-    let mut since = HashMap::from([("fixing:8@old".to_string(), 1)]);
-    rig.pass(&mut since, 0).await.unwrap();
+    let _old = rig.fixing.hold(8, "old").unwrap();
+    rig.pass(&mut HashMap::new(), 0).await.unwrap();
     assert_eq!(rig.store.sent("ci_result").len(), 3);
 }
 
@@ -329,7 +330,7 @@ async fn the_held_key_is_dropped_when_the_carry_out_fails() {
     });
     let mut since = HashMap::new();
     assert!(rig.pass(&mut since, 0).await.is_err());
-    assert!(since.keys().all(|k| !k.starts_with("fixing:")), "{since:?}");
+    assert!(!rig.fixing.holds(9, "sha9"), "the head is let go");
 }
 
 fn fork(mut p: Value) -> Value {

@@ -141,6 +141,8 @@ pub struct Machine {
     pub(super) ci_watch: Option<Arc<dyn super::CiWatchHost>>,
     /// Which projects this computer is the rollout runner of: only there does the CI watcher look.
     pub(super) runners: crate::rollout::Runners,
+    /// The rows that start work this computer is running, over every project (at most two at once).
+    pub(super) work: crate::intents::Work,
     /// Runs the expert sessions' turns. With none, the expert commands are refused.
     pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
@@ -201,6 +203,7 @@ impl Machine {
             main_pr_host: None,
             ci_watch: None,
             runners: Default::default(),
+            work: Default::default(),
             experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
@@ -730,10 +733,14 @@ impl Machine {
         // The CI watcher: no session slot, and a pause doesn't hold it back; the store names the one computer that looks.
         if let Some(host) = self.ci_watch.clone() {
             let now = Instant::now();
-            for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
                 if live {
                     let token = self.links.keychain.get(&self.links.backlog_url).ok().flatten();
                     lp.ci_pass(&host, self.runners.is_runner(&lp.id), token, stopping, now);
+                    // The Fix button's rows: only the runner takes them, and not while paused or signed out.
+                    let shared = shared!(self, stopping);
+                    lp.fix_pass(&host, self.runners.flag(&lp.id), paused, &self.work, &shared)
+                        .await;
                 }
             }
         }

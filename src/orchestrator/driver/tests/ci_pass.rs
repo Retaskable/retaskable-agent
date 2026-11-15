@@ -12,7 +12,7 @@ use crate::orchestrator::driver::CiWatchHost;
 use crate::rollout::Runners;
 
 #[derive(Default)]
-struct Host {
+pub(super) struct Host {
     pulls: Mutex<Vec<OpenPull>>,
     listed: AtomicU32,
     checked: Mutex<Vec<String>>,
@@ -57,7 +57,7 @@ impl CiHost for Gh {
 }
 
 /// The fake [`CiWatchHost`]: `Host` behind an `Arc`, so the fake code host and the test see the same counts.
-struct Shared(Arc<Host>);
+pub(super) struct Shared(pub(super) Arc<Host>);
 
 impl CiWatchHost for Shared {
     fn code_host(&self, _: &ProjectConfig) -> Arc<dyn CiHost> {

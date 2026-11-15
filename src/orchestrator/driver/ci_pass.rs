@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
 use crate::backlog::ci_result::CiVerdict;
-use crate::ci_pass::{CiHost, EVERY, Fixer, Judge, Pass};
+use crate::ci_pass::{CiHost, EVERY, Fixer, Fixing, Judge, Pass, now_ms};
 use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
 
@@ -45,9 +45,9 @@ pub trait CiWatchHost: Send + Sync {
 }
 
 /// [`CiWatchHost::judge`] and [`CiWatchHost::fix`] for one project, as the pass takes them.
-struct ProjectJudge {
-    host: Arc<dyn CiWatchHost>,
-    project: ProjectConfig,
+pub(super) struct ProjectJudge {
+    pub(super) host: Arc<dyn CiWatchHost>,
+    pub(super) project: ProjectConfig,
 }
 
 impl Judge for ProjectJudge {
@@ -90,7 +90,9 @@ pub(super) struct State {
     /// When each head was first seen pending (`pr@sha`, ms), kept between passes.
     since: Arc<Mutex<HashMap<String, u64>>>,
     /// The signed-in login, kept once read (a failed read is read again on the next pass).
-    login: Arc<LoginCache>,
+    pub(super) login: Arc<LoginCache>,
+    /// The heads a pass's or a press's fix is under way on.
+    pub(super) fixing: Fixing,
 }
 
 #[cfg(test)]
@@ -101,12 +103,6 @@ impl State {
             let _ = task.await;
         }
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 impl ProjectLoop {
@@ -132,11 +128,12 @@ impl ProjectLoop {
         }
         state.looked = Some(now);
         let items: HashSet<String> = self.items.values().filter_map(|i| i.branch.clone()).collect();
-        let (client, project, since, login, id) = (
+        let (client, project, since, login, fixing, id) = (
             self.client.clone(),
             self.project.clone(),
             state.since.clone(),
             state.login.clone(),
+            state.fixing.clone(),
             self.id.clone(),
         );
         let (host, watch) = (watch.code_host(&project), watch.clone());
@@ -154,6 +151,7 @@ impl ProjectLoop {
                 token: Some(&token),
                 items: &items,
                 allow: &project.ci_watch_allow,
+                fixing: &fixing,
                 logins: &login,
                 bell: &|title, body| watch.bell(title, body),
                 now: now_ms(),
