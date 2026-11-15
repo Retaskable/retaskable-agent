@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
-use crate::backlog::ItemStatus;
 use crate::backlog::runs::{LockTake, short_sha};
 use crate::config::SyncMain;
 use crate::git_bin::command;
@@ -141,13 +140,7 @@ impl ProjectLoop {
             self.run_loop.main_sync.handled = Some(sha);
             return Ok(());
         }
-        let open = items.iter().any(|i| {
-            i.kind.as_deref() == Some("sync_main")
-                && !matches!(
-                    i.status,
-                    ItemStatus::OnMain | ItemStatus::InProduction | ItemStatus::Skipped
-                )
-        });
+        let open = crate::team_branch::held_in(&items).0;
         if !sync_due(&base, &main, behind, self.project.sync_main, open) {
             return Ok(());
         }
