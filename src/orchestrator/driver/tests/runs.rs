@@ -622,9 +622,7 @@ async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_wit
         );
         assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
     }
-
-    // The run says it is at the host call: the next beat carries that phase.
-    context.locks.set_phase("m1", crate::runs::MERGING);
+    context.locks.set_phase("m1", crate::runs::MERGING); // at the host call: the next beat says so
     pass(&mut rig, &starter, t0 + Duration::from_secs(120)).await;
     let beats = script.lock().unwrap().args("merge_beat");
     assert_eq!(beats[1], json!({ "token": "m1", "phase": "merging" }));
