@@ -124,4 +124,29 @@ impl Machine {
             }
         }
     }
+
+    /// The CI watcher and the Fix button's rows, for the `on` projects: no session slot, and a pause doesn't hold the
+    /// watcher back; the store names the one computer that looks. In `runs` mode a project is on only once a read of
+    /// its backlog went through, since the board's branches come from it.
+    pub(super) async fn ci_passes(&mut self, on: &[bool], paused: &[bool], stopping: bool) {
+        let Some(host) = self.ci_watch.clone() else { return };
+        let now = std::time::Instant::now();
+        for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
+            if on {
+                let token = self.links.keychain.get(&self.links.backlog_url).ok().flatten();
+                lp.ci_pass(&host, self.runners.is_runner(&lp.id), token, stopping, now);
+                // The Fix button's rows: only the runner takes them, and not while paused or signed out.
+                let shared = Shared {
+                    links: &self.links,
+                    local: &self.local,
+                    claim_paused_until: &mut self.claim_paused_until,
+                    claude_signed_out_until: &mut self.claude_signed_out_until,
+                    engine_limits: &mut self.engine_limits,
+                    stopping,
+                };
+                lp.fix_pass(&host, self.runners.flag(&lp.id), paused, &self.work, &shared)
+                    .await;
+            }
+        }
+    }
 }

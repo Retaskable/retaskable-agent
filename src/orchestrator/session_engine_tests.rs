@@ -55,6 +55,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
     let (outcomes, rx) = OutcomeSender::channel();
     let item = Item {
         merge_commit: None,
+        pieces: Vec::new(),
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,

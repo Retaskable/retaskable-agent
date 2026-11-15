@@ -102,6 +102,7 @@ fn branch() -> String {
 fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     Item {
         merge_commit: None,
+        pieces: Vec::new(),
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,

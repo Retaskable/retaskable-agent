@@ -48,7 +48,7 @@ pub struct SpawnArgs<'a> {
     pub asks: Option<Arc<dyn super::AskHost>>,
     /// Runs the expert sessions in `claim` and `runs` mode. None runs none.
     pub experts: Option<Arc<dyn super::ExpertHost>>,
-    /// Watches the open pull requests in `claim` mode, report only, where `runners` says this computer is the project's
+    /// Watches the open pull requests in `claim` and `runs` mode, report only, where `runners` says this computer is the project's
     /// rollout runner. None watches none.
     pub ci_watch: Option<Arc<dyn super::CiWatchHost>>,
     /// Which projects this computer is the rollout runner of (written by the rollout loops).
@@ -107,7 +107,7 @@ pub fn spawn_all(args: SpawnArgs) {
         );
     }
     let runs = args.live.snapshot().mode == OrchestratorMode::Runs;
-    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts and the trial plan.
+    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the trial plan and the CI watcher.
     if args.starter.is_some() || runs {
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
@@ -121,6 +121,9 @@ pub fn spawn_all(args: SpawnArgs) {
         if let Some(experts) = args.experts {
             machine = machine.with_experts(experts);
         }
+        if let Some(watch) = args.ci_watch {
+            machine = machine.with_ci_watch(watch, args.runners);
+        }
     }
     if let Some(starter) = args.starter {
         machine = machine.with_starter(starter);
@@ -132,9 +135,6 @@ pub fn spawn_all(args: SpawnArgs) {
         machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
             env: crate::env::Env::from_process(),
         }));
-        if let Some(watch) = args.ci_watch {
-            machine = machine.with_ci_watch(watch, args.runners);
-        }
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");
     }

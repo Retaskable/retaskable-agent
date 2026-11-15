@@ -174,6 +174,26 @@ pub struct Item {
     /// The commit the item's change merged as (`merge_commit`); the rollout report matches it against git.
     #[serde(default)]
     pub merge_commit: Option<String>,
+    /// An item worked in pieces (pieces.md): each piece as `list` answers it, of which only its branch is read.
+    #[serde(default)]
+    pub pieces: Vec<ItemPiece>,
+}
+
+/// One of an item's pieces as `list` answers it (`PublicPiece`): the branch its change is on, once it has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemPiece {
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+impl Item {
+    /// The branches the item's work is on: its own and each of its pieces'.
+    pub fn branches(&self) -> impl Iterator<Item = &str> {
+        let own = self.branch.as_deref();
+        own.into_iter()
+            .chain(self.pieces.iter().filter_map(|p| p.branch.as_deref()))
+    }
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the

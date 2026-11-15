@@ -481,7 +481,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 latest_checks.clone(),
             )
         }),
-        ci_watch: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        ci_watch: acts.then(|| {
             orchestrator::ci_watch_host::ClaudeCiWatch::new(
                 config::engine_choice(cfg, env),
                 env.clone(),

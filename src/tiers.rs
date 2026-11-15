@@ -303,6 +303,7 @@ mod tests {
     fn item(reopened: bool) -> Item {
         Item {
             merge_commit: None,
+            pieces: Vec::new(),
             id: "x".into(),
             title: "x".into(),
             status: crate::backlog::ItemStatus::Todo,

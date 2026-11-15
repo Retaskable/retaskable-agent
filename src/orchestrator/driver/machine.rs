@@ -470,6 +470,10 @@ impl Machine {
         let mut slots = self.room_total(self.concurrency).saturating_sub(self.sessions());
         self.ask_passes(&on, &paused, stopping, &mut slots).await;
         self.expert_passes(&on, stopping, &mut slots).await;
+        let watching: Vec<bool> = (self.projects.iter().zip(&on))
+            .map(|(lp, &on)| on && (self.claims(lp) || lp.backlog_items.is_some()))
+            .collect();
+        self.ci_passes(&watching, &paused, stopping).await;
         self.idea_passes(&on, stopping).await;
         self.draft_passes(&on, &paused, stopping, &mut slots).await;
         self.trial_passes(&on, &paused, stopping, &mut slots).await;
@@ -505,7 +509,7 @@ impl Machine {
         self
     }
 
-    /// Lets `claim` mode watch the open pull requests (report only) of the projects `runners` says this computer runs.
+    /// Lets `claim` and `runs` mode watch the open pull requests (report only) of the projects `runners` says this computer runs.
     pub fn with_ci_watch(mut self, host: Arc<dyn super::CiWatchHost>, runners: crate::rollout::Runners) -> Self {
         self.ci_watch = Some(host);
         self.runners = runners;
@@ -623,6 +627,9 @@ impl Machine {
             if self.acts(&self.projects[i]) {
                 self.projects[i].backlog_items = Some(items.len());
             }
+            if self.projects[i].mode == OrchestratorMode::Runs {
+                self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
+            }
             if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
@@ -739,20 +746,7 @@ impl Machine {
                 }
             }
         }
-        // The CI watcher: no session slot, and a pause doesn't hold it back; the store names the one computer that looks.
-        if let Some(host) = self.ci_watch.clone() {
-            let now = Instant::now();
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live {
-                    let token = self.links.keychain.get(&self.links.backlog_url).ok().flatten();
-                    lp.ci_pass(&host, self.runners.is_runner(&lp.id), token, stopping, now);
-                    // The Fix button's rows: only the runner takes them, and not while paused or signed out.
-                    let shared = shared!(self, stopping);
-                    lp.fix_pass(&host, self.runners.flag(&lp.id), paused, &self.work, &shared)
-                        .await;
-                }
-            }
-        }
+        self.ci_passes(&live, paused, stopping).await;
         self.expert_passes(&live, stopping, &mut slots).await;
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
         self.idea_passes(&live, stopping).await;
