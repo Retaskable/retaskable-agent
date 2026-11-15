@@ -8,7 +8,9 @@
 //!
 //! A kind is added by registering one [`Handler`]; the puller itself knows nothing of any kind.
 pub mod finish_steps;
+pub mod main_pr;
 pub mod merge_item;
+pub mod sync;
 pub mod take_over;
 
 use std::collections::BTreeSet;

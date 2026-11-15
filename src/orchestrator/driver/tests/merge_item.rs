@@ -298,7 +298,7 @@ async fn an_item_stopped_here_is_not_waiting_for_a_merge() {
 }
 
 #[tokio::test]
-async fn a_row_naming_more_than_one_is_refused_and_one_naming_a_draft_alone_is_left_unclaimed() {
+async fn a_row_naming_more_than_one_is_refused_and_one_naming_only_the_pull_request_into_main_is_left_unclaimed() {
     let (mut rig, asked, listed, gh) = happy().await;
     push(&listed, row(json!({ "itemId": "4", "draftId": "draft-1" })));
     let sent = until(&mut rig, &asked, 1).await;
@@ -306,11 +306,11 @@ async fn a_row_naming_more_than_one_is_refused_and_one_naming_a_draft_alone_is_l
         sent[0]["why"],
         "Name one item, one draft, or the pull request into main to merge."
     );
-    let mut other = row(json!({ "draftId": "draft-1" }));
+    let mut other = row(json!({ "ship": true }));
     other["id"] = json!("in-2");
     push(&listed, other);
     quiet_passes(&mut rig).await;
-    assert_eq!(finishes(&asked).len(), 1, "the draft row is nobody's yet");
+    assert_eq!(finishes(&asked).len(), 1, "the ship row is nobody's yet");
     assert!(ops_named(&asked, "intent_claim").iter().all(|c| c["id"] == "in-1"));
     assert!(ops_named(&asked, "claim").is_empty() && gh.calls().is_empty());
 }

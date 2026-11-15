@@ -12,7 +12,10 @@ pub mod base_hold;
 pub mod baseline;
 pub mod chat;
 pub mod checks;
+pub mod ci_checks;
 pub mod ci_coverage;
+pub mod ci_judge;
+pub mod ci_pulls;
 pub mod ci_watch;
 pub mod command_gate;
 pub mod commands;
@@ -97,6 +100,7 @@ pub mod start_at_login;
 pub mod store;
 mod sync;
 pub mod tags;
+pub mod team_branch;
 pub mod telemetry;
 pub mod terminal_menu;
 #[cfg(test)]

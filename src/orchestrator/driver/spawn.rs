@@ -114,6 +114,9 @@ pub fn spawn_all(args: SpawnArgs) {
         machine = machine.with_merge_host(Arc::new(super::merge_item::GhMergeHost {
             env: crate::env::Env::from_process(),
         }));
+        machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
+            env: crate::env::Env::from_process(),
+        }));
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
         }

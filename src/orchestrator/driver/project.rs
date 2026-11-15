@@ -294,6 +294,10 @@ pub struct ProjectLoop {
     pub(super) finishing: super::finish_steps::Finishing,
     /// A person's Merge into main on an item (`merge_item.rs`).
     pub(super) merging: super::merge_item::Merging,
+    /// A person's Open PR to main (`main_pr.rs`).
+    pub(super) opening: super::main_pr::Opening,
+    /// A person's Sync now (`sync_now.rs`).
+    pub(super) syncing: super::sync_now::Syncing,
     /// The expert sessions (`experts.rs`).
     pub(super) experts: super::experts::Experts,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
@@ -380,6 +384,8 @@ impl ProjectLoop {
             take_overs: Default::default(),
             finishing: Default::default(),
             merging: Default::default(),
+            opening: Default::default(),
+            syncing: Default::default(),
             experts: Default::default(),
             trial: None,
             backlog_items: 0,

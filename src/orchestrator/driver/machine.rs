@@ -135,6 +135,8 @@ pub struct Machine {
     pub(super) finish_host: Option<Arc<dyn super::finish_steps::FinishHost>>,
     /// Merges items a person presses Merge into main on. With none, `merge_requested` rows are left alone.
     pub(super) merge_host: Option<Arc<dyn super::merge_item::MergeHost>>,
+    /// Opens the pull requests a person presses Open PR to main for. With none, `main_pr_requested` rows are left alone.
+    pub(super) main_pr_host: Option<Arc<dyn super::main_pr::MainPrHost>>,
     /// Runs the expert sessions' turns. With none, the expert commands are refused.
     pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
@@ -192,6 +194,7 @@ impl Machine {
             take_overs: false,
             finish_host: None,
             merge_host: None,
+            main_pr_host: None,
             experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
@@ -422,7 +425,7 @@ impl Machine {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
             }
-            let shared = Shared {
+            let mut shared = Shared {
                 links: &self.links,
                 local: &self.local,
                 claim_paused_until: &mut claim_paused_until,
@@ -437,6 +440,12 @@ impl Machine {
                     lp.id,
                     panic_message(&*panic)
                 );
+            }
+            // A person's Sync now: no session and no slot, and a pause doesn't hold it back. With no runner, `runs`
+            // mode asks for nothing.
+            if !self.run_starters.0.is_empty() {
+                shared.stopping = stopping;
+                lp.sync_now_pass(&shared).await;
             }
         }
     }
@@ -462,6 +471,12 @@ impl Machine {
     /// Lets `claim` mode merge items a person presses Merge into main on.
     pub fn with_merge_host(mut self, host: Arc<dyn super::merge_item::MergeHost>) -> Self {
         self.merge_host = Some(host);
+        self
+    }
+
+    /// Lets `claim` mode open the pull request into main a person asks for.
+    pub fn with_main_pr_host(mut self, host: Arc<dyn super::main_pr::MainPrHost>) -> Self {
+        self.main_pr_host = Some(host);
         self
     }
 
@@ -687,6 +702,15 @@ impl Machine {
                 if live {
                     let shared = shared!(self, stopping);
                     lp.merge_pass(&host, &shared).await;
+                }
+            }
+        }
+        // A person's Open PR to main: no session, so no slot, and a pause doesn't hold it back.
+        if let Some(host) = self.main_pr_host.clone() {
+            for (lp, &live) in self.projects.iter_mut().zip(&live) {
+                if live {
+                    let shared = shared!(self, stopping);
+                    lp.main_pr_pass(&host, &shared).await;
                 }
             }
         }

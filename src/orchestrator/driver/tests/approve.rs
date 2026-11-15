@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 
 /// Every call the host was asked for, in order, and what `gh pr merge` and the rebase answer.
 #[derive(Default)]
-struct Host {
-    calls: Mutex<Vec<String>>,
-    merges: Mutex<Vec<Result<(), &'static str>>>,
+pub(super) struct Host {
+    pub(super) calls: Mutex<Vec<String>>,
+    pub(super) merges: Mutex<Vec<Result<(), &'static str>>>,
+    /// Whether each `gh pr merge` was told to squash whatever the settings say.
+    pub(super) squashes: Mutex<Vec<bool>>,
     rebase: Mutex<Option<bool>>,
     /// Answers for the next rebases, before `rebase` is asked.
     rebases: Mutex<Vec<bool>>,
@@ -22,7 +24,7 @@ struct Host {
 }
 
 impl Host {
-    fn calls(&self) -> Vec<String> {
+    pub(super) fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -42,7 +44,8 @@ impl DraftHost for Host {
     fn remove(&self, _: &ProjectConfig, id: &str) {
         self.calls.lock().unwrap().push(format!("remove {id}"));
     }
-    fn merge(&self, _: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()> {
+    fn merge(&self, _: &ProjectConfig, pr: u64, delete_branch: bool, squash: bool) -> Result<()> {
+        self.squashes.lock().unwrap().push(squash);
         self.calls
             .lock()
             .unwrap()
@@ -133,18 +136,24 @@ impl Default for Setup {
     }
 }
 
-/// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
-/// `draft_report` has gone (and, for a merge, the headers).
-async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
-    let (base, asked) = store(setup.intake.clone()).await;
-    let root = tempfile::tempdir().unwrap();
-    let repo = repo_with_origin(root.path());
+/// A checkout whose origin already holds the draft's spec.
+pub(super) fn spec_repo(root: &Path) -> PathBuf {
+    let repo = repo_with_origin(root);
     let spec = "# Charts\n\nTheme: Hosting\n\nItems:\n- **charts-1**: Draw them. Depends on: none.\n";
     std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
     std::fs::write(repo.join("docs/specs/charts.md"), spec).unwrap();
     run(git(&repo).args(["add", "-A"]));
     run(git(&repo).args(["commit", "--quiet", "-m", "spec"]));
     run(git(&repo).args(["push", "--quiet", "origin", "main"]));
+    repo
+}
+
+/// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
+/// `draft_report` has gone (and, for a merge, the headers).
+async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
+    let (base, asked) = store(setup.intake.clone()).await;
+    let root = tempfile::tempdir().unwrap();
+    let repo = spec_repo(root.path());
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
@@ -370,4 +379,30 @@ async fn a_third_conflict_after_two_hand_backs_waits_for_approval_with_the_reaso
     );
     let why = sent[0]["summary"].as_str().unwrap();
     assert!(why.contains("conflicts with main") && why.contains("2 times"), "{why}");
+}
+
+#[tokio::test]
+async fn a_merge_into_main_squashes_and_deletes_its_branch_whatever_the_settings_say() {
+    let settings =
+        Some(json!({ "land": "person", "protectedBranch": "main", "mergeMethod": "rebase", "deleteBranch": false }));
+    let (host, _asked, sent, _root) = press(Setup {
+        github: settings.clone(),
+        press: || DraftCommand::Merge {
+            project: "p0".into(),
+            draft: "d1".into(),
+        },
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls()[0], "merge 9 delete=true");
+    assert_eq!(*host.squashes.lock().unwrap(), [true]);
+    assert_eq!(sent[0]["status"], "merged");
+    // Approve on a project where Retaskable merges keeps the settings' method and delete choice.
+    let (host, _asked, _sent, _root) = press(Setup {
+        github: Some(json!({ "mergeMethod": "rebase", "deleteBranch": false })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls()[0], "merge 9 delete=false");
+    assert_eq!(*host.squashes.lock().unwrap(), [false]);
 }
