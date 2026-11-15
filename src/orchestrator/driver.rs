@@ -37,6 +37,7 @@ mod main_sync;
 mod merge_item;
 mod take_overs;
 pub use lane_play::LanePlay;
+mod ci_pass;
 mod claim;
 mod machine;
 mod mode;
@@ -62,6 +63,7 @@ mod trial;
 mod usage_recheck;
 
 pub use asks::{AskHost, AskJob, AskStore};
+pub use ci_pass::CiWatchHost;
 pub use drafts::{DraftHost, DraftJob};
 pub use experts::{ExpertHost, ExpertJob, TurnEnd};
 pub(crate) use machine::repo_id;

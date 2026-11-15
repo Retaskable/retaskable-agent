@@ -384,6 +384,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let tray_sessions = live.sessions().clone();
     view.item_commands
         .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
+    let runners = retaskable_agent::rollout::Runners::default();
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
         dir,
         projects: &cfg.projects,
@@ -473,6 +474,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 latest_checks.clone(),
             )
         }),
+        ci_watch: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+            orchestrator::ci_watch_host::ClaudeCiWatch::new(
+                config::engine_choice(cfg, env),
+                env.clone(),
+                config::cursor_models(cfg, env),
+                local.clone(),
+                live.sessions().clone(),
+            ) as Arc<dyn orchestrator::driver::CiWatchHost>
+        }),
+        runners: runners.clone(),
         asks: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
             orchestrator::ask_host::ClaudeAsks::new(
                 dir.to_path_buf(),
@@ -515,6 +526,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         store_paused: &view.store_paused,
         item_commands: &view.item_commands,
         machine: link::machine_name(env),
+        runners: &runners,
     });
     // deploy-requests.md section 3.2: starts only for a kind this computer can run (none yet).
     retaskable_agent::deploy_requests::spawn_all(retaskable_agent::deploy_requests::SpawnArgs {

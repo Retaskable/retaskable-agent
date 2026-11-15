@@ -137,6 +137,10 @@ pub struct Machine {
     pub(super) merge_host: Option<Arc<dyn super::merge_item::MergeHost>>,
     /// Opens the pull requests a person presses Open PR to main for. With none, `main_pr_requested` rows are left alone.
     pub(super) main_pr_host: Option<Arc<dyn super::main_pr::MainPrHost>>,
+    /// Watches the open pull requests, report only. With none, no pass runs.
+    pub(super) ci_watch: Option<Arc<dyn super::CiWatchHost>>,
+    /// Which projects this computer is the rollout runner of: only there does the CI watcher look.
+    pub(super) runners: crate::rollout::Runners,
     /// Runs the expert sessions' turns. With none, the expert commands are refused.
     pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
@@ -195,6 +199,8 @@ impl Machine {
             finish_host: None,
             merge_host: None,
             main_pr_host: None,
+            ci_watch: None,
+            runners: Default::default(),
             experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
@@ -474,6 +480,13 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode watch the open pull requests (report only) of the projects `runners` says this computer runs.
+    pub fn with_ci_watch(mut self, host: Arc<dyn super::CiWatchHost>, runners: crate::rollout::Runners) -> Self {
+        self.ci_watch = Some(host);
+        self.runners = runners;
+        self
+    }
+
     /// Lets `claim` mode run expert sessions.
     pub fn with_experts(mut self, host: Arc<dyn super::ExpertHost>) -> Self {
         self.experts = Some(host);
@@ -705,6 +718,16 @@ impl Machine {
                 if live {
                     let shared = shared!(self, stopping);
                     lp.main_pr_pass(&host, &shared).await;
+                }
+            }
+        }
+        // The CI watcher: no session slot, and a pause doesn't hold it back; the store names the one computer that looks.
+        if let Some(host) = self.ci_watch.clone() {
+            let now = Instant::now();
+            for (lp, &live) in self.projects.iter_mut().zip(&live) {
+                if live {
+                    let token = self.links.keychain.get(&self.links.backlog_url).ok().flatten();
+                    lp.ci_pass(&host, self.runners.is_runner(&lp.id), token, stopping, now);
                 }
             }
         }

@@ -15,6 +15,7 @@ pub mod checks;
 pub mod ci_checks;
 pub mod ci_coverage;
 pub mod ci_judge;
+pub mod ci_pass;
 pub mod ci_pulls;
 pub mod ci_watch;
 pub mod command_gate;

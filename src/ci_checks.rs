@@ -180,7 +180,7 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 }
 
 /// The run id in a GitHub Actions check's link (`.../actions/runs/<id>/job/<job>`), or `None` for any other CI.
-fn actions_run_id(link: &str) -> Option<&str> {
+pub(crate) fn actions_run_id(link: &str) -> Option<&str> {
     static R: OnceLock<Regex> = OnceLock::new();
     re(&R, r"github\.com/[^/]+/[^/]+/actions/runs/(\d+)")
         .captures(link)

@@ -1,0 +1,133 @@
+//! The CI watcher's pass on a project's loop (docs/specs/ci-watch-through-store.md section 3, item 2, report only):
+//! at most every 2 minutes, on the computer the store names as the project's rollout runner and only with the shared
+//! backlog linked, one pass over the open pull requests runs in the background (`crate::ci_pass`), one at a time.
+//! A paused project still watches (like the TS agent's `maybeWatchCi`, called before its pause check).
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use futures_util::future::BoxFuture;
+use tokio::task::JoinHandle;
+
+use super::project::ProjectLoop;
+use crate::backlog::ci_result::CiVerdict;
+use crate::ci_pass::{CiHost, EVERY, Judge, Pass};
+use crate::config::ProjectConfig;
+
+/// What the pass needs from this computer besides the store: the code host, the judge's session and the bell.
+pub trait CiWatchHost: Send + Sync {
+    /// The code host's reads and rerun for `project`.
+    fn code_host(&self, project: &ProjectConfig) -> Arc<dyn CiHost>;
+    /// The read-only session on a failing pull request: its verdict and why, `None` when it gave none.
+    fn judge(
+        &self,
+        project: &ProjectConfig,
+        pr: u64,
+        title: String,
+        branch: String,
+        what: String,
+    ) -> BoxFuture<'static, Option<(CiVerdict, String)>>;
+    /// A bell line from the store, word for word.
+    fn bell(&self, title: &str, body: &str);
+}
+
+/// [`CiWatchHost::judge`] for one project, as the pass takes it.
+struct ProjectJudge {
+    host: Arc<dyn CiWatchHost>,
+    project: ProjectConfig,
+}
+
+impl Judge for ProjectJudge {
+    fn judge<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        what: &'a str,
+    ) -> BoxFuture<'a, Option<(CiVerdict, String)>> {
+        self.host
+            .judge(&self.project, pr, title.into(), branch.into(), what.into())
+    }
+}
+
+#[derive(Default)]
+pub(super) struct State {
+    looked: Option<Instant>,
+    task: Option<JoinHandle<()>>,
+    /// When each head was first seen pending (`pr@sha`, ms), kept between passes.
+    since: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+#[cfg(test)]
+impl State {
+    /// Waits for the pass in the background, if one runs.
+    pub(super) async fn finish(&mut self) {
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+impl ProjectLoop {
+    /// Starts a pass when one is due: this computer is the project's runner, it holds the backlog link (`token`) and
+    /// knows the repo's id, no pass is still running and the last began 2 minutes ago. Not while stopping.
+    pub(super) fn ci_pass(
+        &mut self,
+        watch: &Arc<dyn CiWatchHost>,
+        runner: bool,
+        token: Option<String>,
+        stopping: bool,
+        now: Instant,
+    ) {
+        let state = &mut self.ci_watch;
+        if state.task.take_if(|t| t.is_finished()).is_some() {
+            // Its failures were logged where they happened.
+        }
+        let (Some(repo), Some(token)) = (self.repo, token) else {
+            return;
+        };
+        if stopping || !runner || state.task.is_some() || state.looked.is_some_and(|t| now.duration_since(t) < EVERY) {
+            return;
+        }
+        state.looked = Some(now);
+        let items: HashSet<String> = self.items.values().filter_map(|i| i.branch.clone()).collect();
+        let (client, project, since, id) = (
+            self.client.clone(),
+            self.project.clone(),
+            state.since.clone(),
+            self.id.clone(),
+        );
+        let (host, watch) = (watch.code_host(&project), watch.clone());
+        state.task = Some(tokio::spawn(async move {
+            let judge = ProjectJudge {
+                host: watch.clone(),
+                project,
+            };
+            let pass = Pass {
+                host,
+                judge: &judge,
+                client: &client,
+                repo,
+                token: Some(&token),
+                items: &items,
+                bell: &|title, body| watch.bell(title, body),
+                now: now_ms(),
+            };
+            // The map is only held between awaits of this task, one pass at a time.
+            let mut kept = std::mem::take(&mut *since.lock().unwrap());
+            let found = pass.run(&mut kept).await;
+            *since.lock().unwrap() = kept;
+            match found {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("{id}: ci watch: {n} new finding(s)"),
+                Err(e) => tracing::warn!("{id}: ci watch: {e:#}"),
+            }
+        }));
+    }
+}
