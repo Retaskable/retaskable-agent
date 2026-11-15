@@ -1,5 +1,6 @@
-//! docs/specs/agent-ci.md section 3.2 step 2 (Run, no token) and section 3.5 (the log kept): `docker run` of the
-//! project's image on a fetched directory, with none of the agent's environment, under a wall-clock ceiling.
+//! docs/specs/agent-ci.md section 3.2 (the steps) and section 3.5 (the log kept): `docker run` of one step with none
+//! of the agent's environment (the fetch gets the token as `T`, nothing else does), under a wall-clock ceiling, its
+//! output kept in the check's log.
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -11,17 +12,13 @@ use anyhow::{Context, Result};
 use tokio::time::timeout;
 
 use super::priority::low_priority_tokio;
-use crate::ci_watch::LOG_TAIL_LINES;
-use crate::telemetry::now_secs;
 
 /// Wall-clock ceiling of one check (agent-ci.md section 3.2).
 pub const CEILING: Duration = Duration::from_secs(45 * 60);
 /// How long a log is kept (section 3.5).
 pub const LOG_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// Where the directory is mounted inside the container.
-pub const WORKDIR: &str = "/workspace";
-/// The most of a log read back for its tail.
-const TAIL_READ_BYTES: u64 = 1 << 20;
+/// The most of a log read back.
+const TAIL_READ_BYTES: u64 = 8 << 20;
 
 /// The environment variables `docker` itself needs; nothing else of the agent's reaches it or the container.
 const DOCKER_ENV: &[&str] = &[
@@ -37,103 +34,6 @@ const DOCKER_ENV: &[&str] = &[
     "TMP",
     "XDG_RUNTIME_DIR",
 ];
-
-/// What `checks.sh` is told.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    PullRequest,
-    Push,
-}
-
-impl Mode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PullRequest => "pull_request",
-            Self::Push => "push",
-        }
-    }
-}
-
-/// One check to run.
-pub struct Check<'a> {
-    /// The `docker` program (injectable for tests).
-    pub docker: &'a OsStr,
-    pub repo: &'a str,
-    pub sha: &'a str,
-    /// The fetched directory, mounted as the working directory.
-    pub dir: &'a Path,
-    pub image: &'a str,
-    pub mode: Mode,
-    /// Where logs are kept (under the data folder).
-    pub log_dir: &'a Path,
-    pub ceiling: Duration,
-    /// `--cpus`: how much of the computer one check may use.
-    pub cpus: u32,
-}
-
-/// How a check ended.
-#[derive(Debug)]
-pub struct Outcome {
-    /// `None` when the ceiling killed it (or a signal did).
-    pub exit_code: Option<i32>,
-    pub timed_out: bool,
-    pub log_path: PathBuf,
-    /// The last `LOG_TAIL_LINES` lines of the log.
-    pub tail: String,
-}
-
-/// `retaskable-ci-<repo>-<short sha>`, with the repo cut to what a container name allows.
-pub fn container_name(repo: &str, sha: &str) -> String {
-    let repo: String = repo
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let short: String = sha.chars().take(7).collect();
-    format!("retaskable-ci-{repo}-{short}")
-}
-
-/// A host directory in the form `docker -v` accepts: on Windows the verbatim `\\?\` prefix is dropped and the
-/// separators are `/` (`C:/Users/me/ci`), which Docker Desktop reads; elsewhere the path as is.
-pub fn mount_path(dir: &Path) -> String {
-    let s = dir.to_string_lossy();
-    if cfg!(windows) {
-        s.trim_start_matches(r"\\?\").replace('\\', "/")
-    } else {
-        s.into_owned()
-    }
-}
-
-/// The `docker run` arguments of a check.
-pub fn run_args(c: &Check) -> Vec<String> {
-    let name = container_name(c.repo, c.sha);
-    let strs = [
-        "run",
-        "--rm",
-        "--name",
-        &name,
-        "--cpu-shares",
-        "128",
-        "--cpus",
-        &c.cpus.to_string(),
-        "-v",
-        &format!("{}:{WORKDIR}", mount_path(c.dir)),
-        "-w",
-        WORKDIR,
-        "-e",
-        "CI=true",
-        c.image,
-        "bash",
-        ".agent-ci/checks.sh",
-        c.mode.as_str(),
-    ];
-    strs.iter().map(|s| s.to_string()).collect()
-}
 
 /// A low-priority `docker` with its environment cleared to what docker needs (and `DOCKER_*` config).
 fn docker_command(docker: &OsStr) -> tokio::process::Command {
@@ -152,10 +52,37 @@ fn docker_command(docker: &OsStr) -> tokio::process::Command {
 
 /// `docker rm -f <name>`: removes a container still running from a cut check. Nothing there is not an error.
 pub async fn remove_stale(docker: &OsStr, name: &str) {
+    remove(docker, &[name.to_string()]).await;
+}
+
+async fn remove(docker: &OsStr, names: &[String]) {
     let mut cmd = docker_command(docker);
-    cmd.args(["rm", "-f", name]).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(["rm", "-f"])
+        .args(names)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     if let Ok(mut child) = cmd.spawn() {
         let _ = timeout(Duration::from_secs(60), child.wait()).await;
+    }
+}
+
+/// At start, removes this runner's own leftover step containers (a killed `docker run` leaves its container going):
+/// every container whose name starts with `prefix` (`steps::name_prefix`). Docker not answering is not an error:
+/// the jobs say so.
+pub async fn remove_leftovers(docker: &OsStr, prefix: &str) {
+    let mut cmd = docker_command(docker);
+    cmd.args(["ps", "-aq", "--filter", &format!("name=^{prefix}")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(Ok(out)) = timeout(Duration::from_secs(60), cmd.output()).await else {
+        return;
+    };
+    let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    if !ids.is_empty() {
+        remove(docker, &ids).await;
     }
 }
 
@@ -175,8 +102,8 @@ pub fn prune_logs(dir: &Path, now: SystemTime) {
     }
 }
 
-/// The last `LOG_TAIL_LINES` lines of the file (reading at most its last megabyte).
-fn tail_of(path: &Path) -> String {
+/// The log's text, at most its last `TAIL_READ_BYTES`.
+pub fn read_log(path: &Path) -> String {
     let read = || -> std::io::Result<Vec<u8>> {
         let mut f = File::open(path)?;
         let len = f.metadata()?.len();
@@ -185,38 +112,71 @@ fn tail_of(path: &Path) -> String {
         f.read_to_end(&mut buf)?;
         Ok(buf)
     };
-    let text = String::from_utf8_lossy(&read().unwrap_or_default()).into_owned();
-    let lines: Vec<&str> = text.lines().collect();
-    lines[lines.len().saturating_sub(LOG_TAIL_LINES)..].join("\n")
+    String::from_utf8_lossy(&read().unwrap_or_default()).into_owned()
 }
 
-/// Run the check, streaming stdout and stderr to a log file under `log_dir`; old logs are pruned first.
-pub async fn run(c: &Check<'_>) -> Result<Outcome> {
-    std::fs::create_dir_all(c.log_dir).context("creating the CI log folder")?;
-    prune_logs(c.log_dir, SystemTime::now());
-    let name = container_name(c.repo, c.sha);
-    let stamp = now_secs();
-    let log_path = c.log_dir.join(format!("{name}-{stamp}.log"));
-    let log = File::create(&log_path).context("creating the CI log")?;
-    let mut cmd = docker_command(c.docker);
-    cmd.args(run_args(c)).stdout(log.try_clone()?).stderr(log);
+/// The log of one check: `<short sha>-<event>.log`, started afresh with `header`; old logs are pruned first.
+pub fn start_log(log_dir: &Path, sha: &str, event: &str, header: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(log_dir).context("creating the CI log folder")?;
+    prune_logs(log_dir, SystemTime::now());
+    let short: String = sha.chars().take(12).collect();
+    let path = log_dir.join(format!("{short}-{event}.log"));
+    std::fs::write(
+        &path,
+        format!(
+            "{header}
+"
+        ),
+    )
+    .context("creating the CI log")?;
+    Ok(path)
+}
+
+/// One `docker run` of a step.
+pub struct Step<'a> {
+    /// The `docker` program (injectable for tests).
+    pub docker: &'a OsStr,
+    /// The container's name, so a cut run's container can be removed.
+    pub name: &'a str,
+    pub args: Vec<String>,
+    /// Put in `docker`'s own environment as `T`, for a step that takes `-e T`.
+    pub token: Option<&'a str>,
+    /// Stdout and stderr are appended here.
+    pub log: &'a Path,
+    pub ceiling: Duration,
+}
+
+/// How a step ended.
+#[derive(Debug)]
+pub struct Ended {
+    /// `None` when the ceiling killed it (or a signal did).
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+}
+
+/// Runs the step under its ceiling, appending its output to the log.
+pub async fn run(s: &Step<'_>) -> Result<Ended> {
+    let log = File::options()
+        .append(true)
+        .create(true)
+        .open(s.log)
+        .context("opening the CI log")?;
+    let mut cmd = docker_command(s.docker);
+    cmd.args(&s.args).stdout(log.try_clone()?).stderr(log);
+    if let Some(t) = s.token {
+        cmd.env("T", t);
+    }
     let mut child = cmd.spawn().context("starting docker run")?;
-    let (exit_code, timed_out) = match timeout(c.ceiling, child.wait()).await {
+    let (exit_code, timed_out) = match timeout(s.ceiling, child.wait()).await {
         Ok(status) => (status?.code(), false),
         Err(_) => {
             let _ = child.start_kill();
-            remove_stale(c.docker, &name).await;
+            remove_stale(s.docker, s.name).await;
             let _ = child.wait().await;
             (None, true)
         }
     };
-    let tail = tail_of(&log_path);
-    Ok(Outcome {
-        exit_code,
-        timed_out,
-        log_path,
-        tail,
-    })
+    Ok(Ended { exit_code, timed_out })
 }
 
 #[cfg(test)]
