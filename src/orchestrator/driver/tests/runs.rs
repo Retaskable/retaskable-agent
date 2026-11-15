@@ -987,4 +987,5 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
 }
 
 mod merged;
+mod passes;
 mod restart;

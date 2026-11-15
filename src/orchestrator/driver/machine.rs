@@ -242,9 +242,15 @@ impl Machine {
         self.outcome_sender.clone()
     }
 
-    /// Whether a project's loop really acts: `claim` mode with a starter.
-    fn live(&self, lp: &ProjectLoop) -> bool {
+    /// Whether a project's loop runs the item machinery: `claim` mode with a starter.
+    pub(super) fn claims(&self, lp: &ProjectLoop) -> bool {
         self.starter.is_some() && lp.mode == OrchestratorMode::Claim
+    }
+
+    /// Whether a project's loop acts at all: [`Self::claims`], or `runs` mode with a runner to take runs. The passes
+    /// that aren't about an item (asks, ideas) run wherever this holds.
+    pub(super) fn acts(&self, lp: &ProjectLoop) -> bool {
+        self.claims(lp) || (lp.mode == OrchestratorMode::Runs && !self.run_starters.0.is_empty())
     }
 
     /// Whether each project holds new work: this computer's pause is on, or the
@@ -269,7 +275,7 @@ impl Machine {
     /// advance their items and start what the free lanes and session slots allow, without reading the backlog
     /// or writing a `tick`. Does nothing with no starter. A panic costs this poll only.
     pub async fn poll(&mut self) {
-        let ready: Vec<bool> = self.projects.iter().map(|lp| self.live(lp)).collect();
+        let ready: Vec<bool> = self.projects.iter().map(|lp| self.claims(lp)).collect();
         if !ready.contains(&true) {
             return;
         }
@@ -299,7 +305,7 @@ impl Machine {
     /// the project's sync is put off (no fetch, no error event) and runs on the poll after it's given back.
     async fn fetch_for(&mut self, only: Option<&std::collections::HashSet<String>>) {
         let jobs: Vec<_> = (self.projects.iter())
-            .filter(|lp| self.live(lp) && only.is_none_or(|o| o.contains(&lp.id)))
+            .filter(|lp| self.claims(lp) && only.is_none_or(|o| o.contains(&lp.id)))
             .filter_map(|lp| {
                 let hold = base_hold::hold_base_for_sync(&format!("{}{}", self.base_scope, lp.id))?;
                 let repo = std::path::PathBuf::from(&lp.project.repo_path);
@@ -357,7 +363,7 @@ impl Machine {
     pub async fn deprecation_checks(&mut self, steps: &[Step]) {
         let jobs: Vec<_> = (self.projects.iter().enumerate())
             .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
+                (self.claims(lp) || lp.mode == OrchestratorMode::Runs)
                     && matches!(steps.get(*i), Some(Step::Ticked { .. }))
             })
             .map(|(_, lp)| lp)
@@ -392,7 +398,7 @@ impl Machine {
             .iter()
             .enumerate()
             .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
+                (self.claims(lp) || lp.mode == OrchestratorMode::Runs)
                     && !paused[*i]
                     && matches!(steps.get(*i), Some(Step::Ticked { .. }))
                     && lp.project.playtests != Playtests::Off
@@ -430,7 +436,7 @@ impl Machine {
         let paused = self.paused().await;
         let (mut claim_paused_until, mut signed_out_until) = (None, None);
         let mut limits = EngineLimits::default();
-        for (lp, paused) in self.projects.iter_mut().zip(paused) {
+        for (lp, paused) in self.projects.iter_mut().zip(paused.iter().copied()) {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
             }
@@ -457,6 +463,13 @@ impl Machine {
                 lp.sync_now_pass(&shared).await;
             }
         }
+        // The passes that aren't about an item: a person's ask, and a Build this.
+        let on: Vec<bool> = (self.projects.iter())
+            .map(|lp| lp.mode == OrchestratorMode::Runs && self.acts(lp))
+            .collect();
+        let mut slots = self.room_total(self.concurrency).saturating_sub(self.sessions());
+        self.ask_passes(&on, &paused, stopping, &mut slots).await;
+        self.idea_passes(&on, stopping).await;
     }
 
     /// Lets `claim` mode claim and start work.
@@ -604,7 +617,7 @@ impl Machine {
     async fn decide_and_record(&mut self, read_items: Vec<Option<Vec<Item>>>, paused: Vec<bool>) -> Vec<Step> {
         for (i, items) in read_items.iter().enumerate() {
             if let Some(items) = items
-                && self.live(&self.projects[i])
+                && self.claims(&self.projects[i])
             {
                 self.projects[i].backlog_items = items.len();
                 let machine = self.links.machine.clone();
@@ -648,7 +661,7 @@ impl Machine {
         let stopping = self.stopping();
         let starter = self.starter.clone();
         let live: Vec<bool> = (self.projects.iter().zip(ready))
-            .map(|(lp, &ready)| ready && self.live(lp))
+            .map(|(lp, &ready)| ready && self.claims(lp))
             .collect();
         for (lp, &live) in self.projects.iter_mut().zip(&live) {
             if live {
@@ -686,17 +699,8 @@ impl Machine {
                 }
             }
         }
-        let mut slots = concurrency.saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
-        // Asks have a person waiting: they take their slots first, never wait for one, and count toward `concurrency`.
-        if let (Some(host), Some(_)) = (self.asks.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
-                }
-            }
-        }
+        let mut slots = concurrency.saturating_sub(self.sessions());
+        self.ask_passes(&live, paused, stopping, &mut slots).await;
         // A person taking over an item whose owner's computer is gone: no session, so no slot.
         for (lp, &live) in self.projects.iter_mut().zip(&live) {
             if live && self.take_overs {
@@ -756,19 +760,7 @@ impl Machine {
             }
         }
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
-        for (lp, &live) in self.projects.iter_mut().zip(&live) {
-            if live {
-                let shared = Shared {
-                    links: &self.links,
-                    local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
-                    claude_signed_out_until: &mut self.claude_signed_out_until,
-                    engine_limits: &mut self.engine_limits,
-                    stopping,
-                };
-                lp.idea_pass(&shared).await;
-            }
-        }
+        self.idea_passes(&live, stopping).await;
         // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
         if let (Some(host), Some(_)) = (self.drafts.clone(), starter.as_ref()) {
             slots = slots.saturating_sub(
