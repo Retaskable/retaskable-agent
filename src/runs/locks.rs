@@ -11,6 +11,8 @@ use crate::backlog::runs::BeatVerdict;
 pub const UPDATING: &str = "updating";
 /// A merge turn's phase from the beat just before `gh pr merge`.
 pub const MERGING: &str = "merging";
+/// A merge turn's phase while GitHub's auto-merge is on and the turn waits for it.
+pub const AUTO_MERGE: &str = "auto_merge";
 
 /// A lock's ceiling: 1 hour for a `merge-` lock, 6 hours otherwise.
 pub fn lock_ceiling(name: &str) -> Duration {
