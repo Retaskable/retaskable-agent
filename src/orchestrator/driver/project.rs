@@ -199,6 +199,9 @@ pub struct ProjectLoop {
     /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
     /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
     pub(super) records: BTreeMap<String, RunRecord>,
+    /// Each leased item's decision facts, read from its store item and sent back as they change
+    /// (`decisions.rs`). An item whose facts couldn't be read has none.
+    pub(super) decisions: BTreeMap<String, crate::backlog::decisions::sync::ItemDecisions>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
     /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
@@ -288,6 +291,8 @@ pub struct ProjectLoop {
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
+    /// The expert sessions (`experts.rs`).
+    pub(super) experts: super::experts::Experts,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read.
@@ -309,8 +314,6 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         let file_project = project.clone();
-        let vet = store.vet();
-        live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
         Self {
             run_loop: super::RunLoop::new(&id),
             claim_waiting: false,
@@ -329,6 +332,7 @@ impl ProjectLoop {
             release_owed: false,
             unparked: store.unparked(),
             records: store.runs(),
+            decisions: BTreeMap::new(),
             to_resume: Vec::new(),
             data_dir: None,
             week_checked: false,
@@ -371,6 +375,7 @@ impl ProjectLoop {
             second_due: Vec::new(),
             claude_pending: Default::default(),
             asks: Default::default(),
+            experts: Default::default(),
             trial: None,
             backlog_items: 0,
             file_project,
@@ -492,9 +497,6 @@ impl ProjectLoop {
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
         self.live.set_items(&self.id, held_items);
         let mut payload = payload;
-        if let Some(ci) = self.live.snapshot().ci {
-            payload.extra.insert("ci".into(), ci.tick_json());
-        }
         payload.states = Some(json!(states));
         // `live` is the claim answer when this pass really applied its decisions (`claim` mode with a starter).
         payload.claim = Some(json!(live.clone().flatten().unwrap_or_else(|| "not asked".into())));
@@ -697,13 +699,13 @@ impl ProjectLoop {
     /// Writes the item's run into its record: its state now, `lane`, its branch and slice, `session` and
     /// `context_tokens` (the implementer session's id and its last known size). Does nothing for an item with
     /// no lease. Call `save_leases` after.
-    /// The item's Start over attempt on its current slice: 0 until a person starts it over.
+    /// How many times a person started the item over: 0 until then. The store counts attempts from 1 (an absent
+    /// `attempt` is the first), as the TS agent does, so the store's value is one more than this. 0 too while the
+    /// item's facts haven't been read: whatever names a branch from it waits for them first.
     pub(super) fn attempt_of(&self, item_id: &str) -> u32 {
-        let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
-        self.records
-            .get(item_id)
-            .filter(|r| r.slice == slice)
-            .map_or(0, |r| r.attempt)
+        self.decisions_of(item_id)
+            .and_then(|d| d.attempt)
+            .map_or(0, |n| n.saturating_sub(1))
     }
 
     pub(super) fn remember(
@@ -737,7 +739,6 @@ impl ProjectLoop {
             branch: Some(branch_name(item, attempt)),
             slice: run.slice,
             impl_context_tokens: context_tokens,
-            attempt,
             ..self.records.get(item_id).cloned().unwrap_or_default()
         };
         self.records.insert(item_id.to_string(), record);
@@ -770,6 +771,11 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        if !self.ensure_decisions(item_id, shared).await {
+            let why = "the session didn't start: the item's facts haven't been read from the shared backlog yet";
+            self.hand_back(pool, item_id, "queued", why, shared).await;
+            return false;
+        }
         let kind_fresh = matches!(kind, Launch::Fresh);
         let mut notes = None;
         let mut on_engine = None;

@@ -22,7 +22,10 @@ impl ProjectLoop {
             tracing::info!("{}: no bug report for {item_id}: the project has no hub link", self.id);
             return;
         };
-        let Some(record) = self.records.get_mut(item_id) else {
+        let Some(record) = self.records.get(item_id) else {
+            return;
+        };
+        let Some(held) = self.decisions.get_mut(item_id) else {
             return;
         };
         let words = scrub_words(
@@ -40,7 +43,7 @@ impl ProjectLoop {
             None,
             &link.known(),
         )
-        .filter(|m| !record.reported_bugs.contains(&m.signature));
+        .filter(|m| held.now.reported_bug.as_deref() != Some(m.signature.as_str()));
         let Some(message) = message else {
             tracing::info!(
                 "{}: no bug report sent for {item_id}: not agreed, empty or already reported",
@@ -48,7 +51,7 @@ impl ProjectLoop {
             );
             return;
         };
-        record.reported_bugs.push(message.signature.clone());
+        held.now.reported_bug = Some(message.signature.chars().take(500).collect());
         self.save_leases();
         let version = shared.links.bug_version.clone();
         let sent = tokio::spawn(async move { link.send(&message, &version).await });

@@ -85,6 +85,7 @@ impl ProjectLoop {
             environment: shared.links.environment.clone(),
             base_branch: self.project.base_branch.clone(),
             tags: shared.links.tags.get(),
+            week: self.week_use(),
         };
         let (answer, more) = match self.client.claim_next(repo, Some(&token), &agent).await {
             Err(e) => {
@@ -111,6 +112,28 @@ impl ProjectLoop {
                 );
                 self.claim_logged = Some(waiting);
                 return Some(("waiting".to_string(), false));
+            }
+            Ok(ClaimNextAnswer::Passed(passed)) => {
+                // Another computer with more of its Claude week left takes it; nothing is claimed here.
+                let note = json!({ "passed": { "to": passed.to } });
+                if self.claim_logged.as_ref() == Some(&note) {
+                    return Some(("passed".to_string(), false));
+                }
+                tracing::info!(
+                    "{}: left the next item for {}, which has more of its Claude week left",
+                    self.id,
+                    passed.to
+                );
+                self.events.add_in(
+                    &self.id,
+                    Event::Claim(event::Claim {
+                        op: Some("claim_next".into()),
+                        answer: Some(note.clone()),
+                        ..Default::default()
+                    }),
+                );
+                self.claim_logged = Some(note);
+                return Some(("passed".to_string(), false));
             }
             // Handed out again while this computer still has it: it isn't taken twice.
             Ok(ClaimNextAnswer::Item { item, .. }) if self.runs.contains_key(&item.id) => {

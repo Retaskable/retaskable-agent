@@ -244,6 +244,7 @@ fn snapshot_reporting_lists_the_items_held_and_the_chores_milestone() {
         pr_url: None,
         attempt: 1,
         chore,
+        expert: None,
     };
     let of = |v: &AgentView| {
         let s = v.snapshot("a", Path::new("."))["state"].clone();

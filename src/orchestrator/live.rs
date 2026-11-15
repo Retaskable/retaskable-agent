@@ -25,7 +25,7 @@ pub struct HeldLane {
 }
 
 /// An item this computer holds a lease on, as the snapshot's `items` lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HeldItem {
     pub id: String,
     pub title: String,
@@ -36,6 +36,8 @@ pub struct HeldItem {
     pub pr_url: Option<String>,
     pub attempt: u32,
     pub chore: bool,
+    /// An expert session's `{ startedBy, detail, queue?, ask? }` (`expert::`), the person's own conversation.
+    pub expert: Option<serde_json::Value>,
 }
 
 /// The backlog could not be reached (or answered something unreadable) on the last pass.
@@ -67,8 +69,10 @@ pub struct ProjectLive {
     pub sync_main: Option<String>,
     /// The store's last answer of rotation chores started today and the day's limit; `None` before one.
     pub chores: Option<crate::backlog::runs::ChoreCount>,
-    /// The last vet run's counts by verdict name; `None` before a run.
-    pub vet: Option<BTreeMap<String, usize>>,
+    /// The store's last vet summary; `None` before a run.
+    pub vet: Option<crate::backlog::shown::VetView>,
+    /// The store's staging smoke fact; `None` when it holds none.
+    pub smoke: Option<crate::store::SmokeState>,
     /// When Claude's limit lifts (ISO 8601), while the loop can't start work because Claude is at its limit.
     pub limit_resets_at: Option<String>,
     /// The instant `limit_resets_at` was made from, so the same limit keeps the same string pass after pass.
@@ -84,8 +88,6 @@ pub struct LiveState {
     /// In `runs` mode, the kinds of run this computer can take (`plan`, `build`, ...); empty with no runner.
     pub run_kinds: Vec<String>,
     pub projects: BTreeMap<String, ProjectLive>,
-    /// Agent CI's slot, Docker and discovery (agent-ci.md); `None` unless the `agent-ci` loop runs.
-    pub ci: Option<crate::agent_ci::CiLive>,
     /// How many sessions the shared pool allows at once (auto concurrency's number once it has stepped); 0 before a pass.
     pub concurrency: u32,
 }
@@ -93,7 +95,17 @@ pub struct LiveState {
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
 type Reported = (
     u32,
-    BTreeMap<String, (bool, Option<String>, Vec<OpenAnomaly>, Vec<HeldLane>, Vec<HeldItem>)>,
+    BTreeMap<
+        String,
+        (
+            bool,
+            Option<String>,
+            Vec<OpenAnomaly>,
+            Vec<HeldLane>,
+            Vec<HeldItem>,
+            Option<crate::store::SmokeState>,
+        ),
+    >,
 );
 
 fn reported(state: &LiveState) -> Reported {
@@ -109,6 +121,7 @@ fn reported(state: &LiveState) -> Reported {
                     p.anomalies.clone(),
                     p.held.clone(),
                     p.items.clone(),
+                    p.smoke.clone(),
                 ),
             )
         })
@@ -139,7 +152,6 @@ impl LiveHandle {
                 mode,
                 run_kinds: Vec::new(),
                 projects: BTreeMap::new(),
-                ci: None,
                 concurrency: 0,
             })),
             sessions::Sessions::default(),
@@ -214,11 +226,6 @@ impl LiveHandle {
         self.lock().clone()
     }
 
-    /// The CI loop's poll writes its fields.
-    pub fn update_ci(&self, f: impl FnOnce(&mut crate::agent_ci::CiLive)) {
-        f(self.lock().ci.get_or_insert_default());
-    }
-
     /// Registers a project's loop, so the page knows it runs before its first pass ends.
     pub fn register(&self, project: &str) {
         self.edit(|s| {
@@ -242,6 +249,7 @@ impl LiveHandle {
                 sync_main: entry.sync_main.take(),
                 chores: entry.chores,
                 vet: entry.vet.take(),
+                smoke: entry.smoke.take(),
                 limit_resets_at: entry.limit_resets_at.take(),
                 limit_until: entry.limit_until.take(),
                 anomalies: std::mem::take(&mut entry.anomalies),
@@ -264,9 +272,18 @@ impl LiveHandle {
         self.lock().projects.entry(project.to_string()).or_default().sync_main = note;
     }
 
-    /// Says what the last vet run found, or nothing.
-    pub fn set_vet(&self, project: &str, counts: Option<BTreeMap<String, usize>>) {
-        self.lock().projects.entry(project.to_string()).or_default().vet = counts;
+    /// Takes what the store's `smoke` and `vet` facts say; a change in the smoke resends the snapshot.
+    pub fn set_shown(&self, project: &str, shown: crate::backlog::shown::Shown) {
+        self.edit(|s| {
+            let entry = s.projects.entry(project.to_string()).or_default();
+            entry.smoke = shown.smoke;
+            entry.vet = shown.vet;
+        });
+    }
+
+    /// The store's smoke fact as of the last pass.
+    pub fn smoke(&self, project: &str) -> Option<crate::store::SmokeState> {
+        self.lock().projects.get(project).and_then(|p| p.smoke.clone())
     }
 
     /// The store's last chore count for the project.
@@ -393,6 +410,8 @@ mod tests {
         assert!(changed(&mut rx), "concurrency");
     }
 
+    // The clone is what's under test, so it must stay even though `live` isn't used by value after.
+    #[allow(clippy::redundant_clone)]
     #[test]
     fn clones_share_state_and_now_is_rfc3339() {
         let live = LiveHandle::default();

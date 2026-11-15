@@ -20,8 +20,10 @@
 //! the site's item commands (Continue) that the connector queued; [`drafts`] is a project's spec draft, one at a time,
 //! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit); [`trial`] queues a new project's trial plan after asks and drafts and before items are planned.
 mod asks;
+mod decisions;
 mod deprecations;
 mod drafts;
+mod experts;
 mod fix_main;
 mod follow;
 mod held_items;
@@ -58,6 +60,7 @@ mod usage_recheck;
 
 pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
 pub use drafts::{DraftHost, DraftJob};
+pub use experts::{ExpertHost, ExpertJob, TurnEnd};
 pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared};
 use project::Launch;

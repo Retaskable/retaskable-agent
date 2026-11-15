@@ -14,7 +14,7 @@ pub enum SmokeStatus {
 
 /// `State.smoke` (06.3-review.md: "kept in the project's state and reported to the hub as a
 /// derived result").
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmokeState {
     pub sha: String,

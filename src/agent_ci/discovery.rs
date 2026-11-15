@@ -35,3 +35,14 @@ pub async fn discover(program: &OsStr, repo: &Path, base: &str) -> Result<String
         (_, None) => Err(format!("No .agent-ci/checks.sh on origin/{base}: no agent CI")),
     }
 }
+
+/// Whether `origin/<base>` has `.agent-ci/<file>`.
+pub async fn has_file(program: &OsStr, repo: &Path, base: &str, file: &str) -> bool {
+    git(
+        program,
+        repo,
+        &["cat-file", "-e", &format!("origin/{base}:.agent-ci/{file}")],
+    )
+    .await
+    .is_ok()
+}

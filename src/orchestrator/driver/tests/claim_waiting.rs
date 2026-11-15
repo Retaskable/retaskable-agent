@@ -13,9 +13,9 @@ async fn stub(first: Value) -> (String, Asked, Arc<Mutex<Value>>) {
             let (seen, now) = (seen.clone(), now.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
-                if op == "settings_get" || op == "facts_get" {
+                if op == "settings_get" || op == "pause_get" || op == "facts_get" {
                     return Json(
-                        json!({ "value": if op == "facts_get" { json!({ "paused": false }) } else { Value::Null } }),
+                        json!({ "value": if op == "pause_get" { json!({ "paused": null, "log": [] }) } else if op == "facts_get" { json!({}) } else { Value::Null } }),
                     );
                 }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
