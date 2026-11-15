@@ -51,9 +51,17 @@ pub trait Handler<C>: Send + Sync {
     fn takes(&self, _row: &IntentRow) -> bool {
         true
     }
+    /// Whether a row of this kind must never run twice (`NOT_TWICE` in the TS agent's `intentPuller.ts`: merge, sync,
+    /// main PR). A row this computer held before a restart is then failed, not run again.
+    fn not_twice(&self) -> bool {
+        false
+    }
     /// Runs the claimed row.
     fn run(&self, row: IntentRow, cx: &C) -> BoxFuture<'static, Outcome>;
 }
+
+/// Why a row of a not-twice kind held from before a restart ends `failed` (word for word as the TS agent says it).
+const RESTARTED: &str = "This computer restarted before it finished; check, then ask again";
 
 /// The store's intent ops for one project and this computer. Faked in tests.
 pub trait IntentStore: Send + Sync {
@@ -218,6 +226,18 @@ impl<C> Puller<C> {
                 }
             }
             self.taken().insert(row.id.clone());
+            // Not in `taken` yet but listed as claimed or running: this computer held it before a restart (another
+            // computer's claim would have lost above). A kind that must not run twice ends here, unrun (TS `checkNow`).
+            if matches!(row.status.as_str(), "claimed" | "running") && handler.not_twice() {
+                tracing::info!("intents: not running {} {} again", row.kind, row.id);
+                let (store, retry) = (store.clone(), self.retry_every);
+                let id = row.id.clone();
+                self.tasks.push(tokio::spawn(async move {
+                    finish(&store, &id, Ending::Failed, None, Some(RESTARTED.into()), retry).await
+                }));
+                started += 1;
+                continue;
+            }
             let cx = built.get_or_insert_with(|| (make.take().expect("built once"))());
             tracing::info!("intents: running {} {}", row.kind, row.id);
             let id = row.id.clone();
@@ -263,11 +283,23 @@ async fn run_row(
         Outcome::Failed(why) => (Ending::Failed, None, Some(why)),
         Outcome::Abandoned => return,
     };
+    finish(&store, &id, ending, result, why, retry_every).await;
+}
+
+/// The finish, tried 3 times: a store that can't be reached is retried, then the row stays claimed and is not run again.
+async fn finish(
+    store: &Arc<dyn IntentStore>,
+    id: &str,
+    ending: Ending,
+    result: Option<Value>,
+    why: Option<String>,
+    retry_every: Duration,
+) {
     for attempt in 0..3 {
         if attempt > 0 {
             tokio::time::sleep(retry_every).await;
         }
-        match store.finish(&id, ending, result.clone(), why.clone()).await {
+        match store.finish(id, ending, result.clone(), why.clone()).await {
             Ok(_) => return,
             Err(e) => tracing::warn!("intents: {id}: the result didn't reach the store: {e}"),
         }

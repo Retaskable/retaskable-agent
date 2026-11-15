@@ -2,10 +2,22 @@
 //! TS agent): another computer's item that waits on a person becomes this computer's. The store does every check
 //! (who holds it, whether it waits, the owner's computer gone 2 hours) against its own current state and refuses in
 //! its own words; this only says which refusal it was, in plain words naming who holds the item.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{BacklogError, ClaimNextAgent, Client, Item};
+
+/// What a person's claim by name did to the item (`did` on `claim`, Retaskable.com's `shared/backlogOps.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Did {
+    Answered,
+    TriedOut,
+    Merged,
+    Continued,
+    TookOver,
+    Skipped,
+}
 
 /// What a person's claim by name answered: the item with a lease token, and what it was waiting for.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -49,7 +61,7 @@ pub fn refusal_words(code: Option<&str>, message: &str, why: Option<&Value>) -> 
 }
 
 impl Client {
-    /// `claim { id, agent, because: "person", did: "took_over" }`. A refusal comes back as plain words in `Err`,
+    /// `claim { id, agent, because: "person", did }`. A refusal comes back as plain words in `Err`,
     /// an unreachable store as its own words: nothing is claimed either way.
     pub async fn take_over(
         &self,
@@ -57,8 +69,9 @@ impl Client {
         token: Option<&str>,
         id: &str,
         agent: &ClaimNextAgent,
+        did: Did,
     ) -> Result<PersonClaim, String> {
-        let args = json!({ "id": id, "agent": agent, "because": "person", "did": "took_over" });
+        let args = json!({ "id": id, "agent": agent, "because": "person", "did": did });
         let (status, body) = self
             .send_why(repo_id, token, "claim", args)
             .await
