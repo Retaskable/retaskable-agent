@@ -12,7 +12,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backlog::expert::{ExpertFrom, ExpertRow, QueueList};
 use crate::backlog::{BacklogError, Client};
@@ -154,9 +153,7 @@ pub struct ExpertQueue<S: QueueOps> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    crate::telemetry::now_ms().max(0) as u64
 }
 
 impl<S: QueueOps> ExpertQueue<S> {

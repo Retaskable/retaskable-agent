@@ -63,9 +63,7 @@ impl Deps for Live {
     }
 
     fn now_ms(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64)
+        crate::telemetry::now_ms().max(0) as u64
     }
 
     async fn list(&self) -> Result<Vec<DeployRequest>, String> {
