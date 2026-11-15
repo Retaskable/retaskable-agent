@@ -1,7 +1,7 @@
 //! Merge into main on a spec draft from a `merge_requested { draftId }` row (`driver/merge_item.rs` hands the press to
 //! `driver/land.rs`): a fake store lists the row and hands out the draft, a fake host stands in for `git` and `gh`.
 use super::approve::{Host, spec_repo};
-use super::asks::{Listed, finishes, ops_named, push, quiet_passes, store_failing, until};
+use super::asks::{Listed, ops_named, push, store_failing, until};
 use super::*;
 use crate::config::ProjectConfig;
 use crate::orchestrator::driver::merge_item::MergeHost;
@@ -15,6 +15,15 @@ impl MergeHost for NoItems {
     }
     fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
         anyhow::bail!("a draft is merged by the draft path")
+    }
+
+    fn ship(
+        &self,
+        _: &crate::config::ProjectConfig,
+        _: &str,
+        _: &[crate::backlog::Item],
+    ) -> Result<Option<String>, crate::team_branch::ship::Stop> {
+        unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
     }
 }
 
@@ -142,15 +151,4 @@ async fn a_draft_the_store_wont_hand_over_refuses_the_row_in_its_words() {
     assert_eq!(sent[0]["status"], "refused");
     assert!(sent[0]["why"].as_str().unwrap().starts_with("Couldn't take draft d1: "));
     assert!(host.calls().is_empty());
-}
-
-#[tokio::test]
-async fn a_row_naming_only_the_pull_request_into_main_is_still_nobodys() {
-    let (mut rig, asked, listed, host, _root) =
-        rig_draft(draft("needs_person", "awaiting_approval"), person(), vec![]).await;
-    push(&listed, row(json!({ "ship": true })));
-    quiet_passes(&mut rig).await;
-    assert!(finishes(&asked).is_empty());
-    assert!(ops_named(&asked, "intent_claim").is_empty());
-    assert!(ops_named(&asked, "draft_take").is_empty() && host.calls().is_empty());
 }
