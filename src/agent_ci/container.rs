@@ -37,9 +37,17 @@ const DOCKER_ENV: &[&str] = &[
 
 /// A low-priority `docker` with its environment cleared to what docker needs (and `DOCKER_*` config).
 fn docker_command(docker: &OsStr) -> tokio::process::Command {
+    docker_command_from(docker, std::env::vars_os())
+}
+
+/// `docker_command` over the given parent environment (the agent's own, in production).
+fn docker_command_from(
+    docker: &OsStr,
+    parent: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> tokio::process::Command {
     let mut cmd = low_priority_tokio(docker);
     cmd.env_clear().stdin(Stdio::null()).kill_on_drop(true);
-    for (k, v) in std::env::vars_os() {
+    for (k, v) in parent {
         let key = k.to_string_lossy();
         let wanted =
             DOCKER_ENV.iter().any(|w| key.eq_ignore_ascii_case(w)) || key.to_ascii_uppercase().starts_with("DOCKER_");
