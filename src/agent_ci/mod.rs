@@ -242,6 +242,7 @@ impl CiLoop {
                     repo: repo.clone(),
                     mirror: mirror.clone(),
                     cpus: self.cpus(cfg),
+                    slots: cfg.slots,
                     has_warm,
                     key: key.clone(),
                     merge: merge.clone(),

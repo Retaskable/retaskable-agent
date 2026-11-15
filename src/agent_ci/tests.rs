@@ -359,6 +359,11 @@ mod stubbed {
         assert_eq!(claim["sha"], "h7");
         assert_eq!(claim["event"], "pull_request");
         assert_eq!((claim["pr"].as_u64(), claim["computer"].as_str()), (Some(7), Some("t")));
+        assert_eq!(
+            claim["slots"].as_u64(),
+            Some(1),
+            "the runner's slots, for the Agents tab"
+        );
         let fin = &r.store.args("ci_finish")[0];
         assert_eq!(
             (fin["result"].as_str(), fin["context"].as_str()),
