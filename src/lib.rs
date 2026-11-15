@@ -72,6 +72,8 @@ pub mod playtest_groups;
 pub mod proc;
 pub mod process_tree;
 pub mod profile;
+#[cfg(test)]
+mod program_boundaries_tests;
 pub mod prompt;
 pub mod release;
 pub mod release_check;
