@@ -50,27 +50,9 @@ pub fn excerpt(text: &str, max: usize) -> String {
         return clip(&lines.join("\n"));
     }
     let tail_from = lines.len() - TAIL;
-    let mut keep = BTreeSet::new();
-    for i in 0..tail_from {
-        if !fail(lines[i]) {
-            continue;
-        }
-        let mut end = i + AFTER;
-        if not_ok(lines[i]) {
-            // Its indented YAML diagnostics block, up to its `...`.
-            if let Some(j) = (i + 1..tail_from.min(i + 41)).find(|&j| ellipsis(lines[j])) {
-                end = end.max(j);
-            }
-            if let Some(j) = (i.saturating_sub(3)..i).rev().find(|&j| subtest(lines[j])) {
-                keep.insert(j);
-            }
-        }
-        for j in i..=end.min(tail_from - 1) {
-            keep.insert(j);
-        }
-    }
     // Kept lines and the gap markers between them share the budget, which also holds the last marker and the tail.
     let budget = max.saturating_sub(TAIL + 1);
+    let keep = choose(&lines, tail_from, budget);
     let mut out: Vec<String> = Vec::new();
     let mut prev: isize = -1;
     for &i in &keep {
@@ -89,6 +71,59 @@ pub fn excerpt(text: &str, max: usize) -> String {
     }
     out.extend(lines[tail_from..].iter().map(|l| l.to_string()));
     clip(&out.join("\n"))
+}
+
+/// A failed test's own line: TAP's `not ok` or the spec reporter's `✖`.
+fn failed_test(line: &str) -> bool {
+    not_ok(line) || line.contains('✖')
+}
+
+/// The lines kept before `tail_from`, in at most `budget` lines counting gap markers. A failed test's own line comes
+/// first, then the lines around it, then other error lines with theirs, so a log full of printed `Error:` lines
+/// never pushes out the line saying which test failed.
+fn choose(lines: &[&str], tail_from: usize, budget: usize) -> BTreeSet<usize> {
+    // A failing line and what follows it, and for `not ok` its subtest line just before it.
+    let block = |i: usize| -> Vec<usize> {
+        let mut b = Vec::new();
+        let mut end = i + AFTER;
+        if not_ok(lines[i]) {
+            // Its indented YAML diagnostics block, up to its `...`.
+            if let Some(j) = (i + 1..tail_from.min(i + 41)).find(|&j| ellipsis(lines[j])) {
+                end = end.max(j);
+            }
+            b.extend((i.saturating_sub(3)..i).rev().find(|&j| subtest(lines[j])));
+        }
+        b.extend(i..=end.min(tail_from - 1));
+        b
+    };
+    let failed: Vec<usize> = (0..tail_from).filter(|&i| failed_test(lines[i])).collect();
+    let other: Vec<usize> = (0..tail_from)
+        .filter(|&i| fail(lines[i]) && !failed_test(lines[i]))
+        .collect();
+    let mut keep = BTreeSet::new();
+    let lone = failed.iter().map(|&i| vec![i]);
+    let around = failed.iter().map(|&i| block(i));
+    let rest = other.iter().map(|&i| block(i));
+    for wanted in lone.chain(around).chain(rest) {
+        let mut next = keep.clone();
+        next.extend(wanted);
+        if rendered(&next) > budget {
+            continue;
+        }
+        keep = next;
+    }
+    keep
+}
+
+/// How many lines `keep` takes once printed: each line, and a marker before each gap.
+fn rendered(keep: &BTreeSet<usize>) -> usize {
+    let mut prev: isize = -1;
+    let mut n = 0;
+    for &i in keep {
+        n += if i as isize > prev + 1 { 2 } else { 1 };
+        prev = i as isize;
+    }
+    n
 }
 
 /// Keeps the end of an overlong excerpt, line by line.

@@ -83,3 +83,20 @@ fn carriage_returns_go_and_each_failure_kind_matches() {
     assert!(!fail("ok 1 - fine") && !fail("an error occurred"));
     assert_eq!(excerpt("a\r\nb\r\n", MAX_LINES), "a\nb");
 }
+
+#[test]
+fn a_failed_test_line_survives_a_log_full_of_printed_errors() {
+    let mut l: Vec<String> = (0..400).map(|i| format!("Error: expected noise {i}")).collect();
+    l.push("✖ deploy-watch lists every file the agent ships (2ms)".into());
+    l.push("  AssertionError: shared/ciAgent.ts is missing".into());
+    l.extend((0..1000).map(|i| format!("✔ passing {i}")));
+    let out = excerpt(&l.join("\n"), MAX_LINES);
+    assert!(
+        out.contains(
+            "✖ deploy-watch lists every file the agent ships (2ms)\n  AssertionError: shared/ciAgent.ts is missing"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("Error: expected noise 0"));
+    assert!(out.split('\n').count() <= MAX_LINES);
+}
