@@ -79,22 +79,26 @@ fn the_login_is_not_read_for_a_pull_request_with_no_author() {
 }
 
 const PULLS: &str = r#"[
- {"number":1,"title":"Mine","url":"https://github.com/o/r/pull/1","headRefName":"feat/a","headRefOid":"aaa1111","mergeable":"CONFLICTING","author":{"login":"ann"},"isCrossRepository":false},
- {"number":2,"title":"Fork","url":"u2","headRefName":"patch-1","headRefOid":"bbb2222","mergeable":"MERGEABLE","author":{"login":"zed"},"isCrossRepository":true},
+ {"number":1,"title":"Mine","url":"https://github.com/o/r/pull/1","headRefName":"feat/a","headRefOid":"aaa1111","mergeable":"CONFLICTING","author":{"login":"ann"}},
+ {"number":2,"title":"Fork","url":"u2","headRefName":"patch-1","headRefOid":"bbb2222","mergeable":"MERGEABLE","author":{"login":"zed"}},
  {"number":3,"title":"No head","url":"u3","headRefName":"x","headRefOid":"","mergeable":"UNKNOWN","author":null},
  {"number":4,"title":"Bot","url":"u4","headRefName":"retaskable/4-y","headRefOid":"ddd4444","mergeable":"","author":{"login":""},"future":1}
 ]"#;
 
 #[test]
-fn the_list_keeps_what_the_watcher_reads_and_skips_forks_and_headless_ones() {
+fn the_list_keeps_what_the_watcher_reads_forks_included_and_skips_headless_ones() {
     let got = parse_open_pulls(PULLS).unwrap();
-    assert_eq!(got.iter().map(|p| p.number).collect::<Vec<_>>(), [1, 4]);
+    assert_eq!(got.iter().map(|p| p.number).collect::<Vec<_>>(), [1, 2, 4]);
     assert_eq!(got[0].head, "aaa1111");
     assert_eq!(got[0].branch, "feat/a");
     assert_eq!(got[0].author.as_deref(), Some("ann"));
     assert!(got[0].conflicting());
-    assert_eq!((got[1].author.clone(), got[1].mergeable.clone()), (None, None));
-    assert!(!got[1].conflicting());
+    assert_eq!((got[2].author.clone(), got[2].mergeable.clone()), (None, None));
+    assert!(!got[2].conflicting());
+    assert_eq!(
+        (got[1].branch.as_str(), got[1].author.as_deref()),
+        ("patch-1", Some("zed"))
+    );
     assert!(parse_open_pulls("[]").unwrap().is_empty());
     assert!(parse_open_pulls("nope").is_err());
 }
@@ -105,11 +109,11 @@ fn open_pulls_asks_gh_for_the_open_ones_into_the_base() {
     let dir = tempfile::tempdir().unwrap();
     let gh = dir.path().join("fake_gh.sh");
     let script = format!(
-        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\ncase \"$*\" in\n\"pr list --repo o/r --base main --state open --limit 100 --json number,title,url,headRefName,headRefOid,mergeable,author,isCrossRepository\") cat <<'EOF'\n{PULLS}\nEOF\n;;\n*) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n"
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\ncase \"$*\" in\n\"pr list --repo o/r --base main --state open --limit 100 --json number,title,url,headRefName,headRefOid,mergeable,author\") cat <<'EOF'\n{PULLS}\nEOF\n;;\n*) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n"
     );
     crate::test_support::write_executable(&gh, &script);
     let got = open_pulls(&gh, dir.path(), "o/r", "main", &|_| {}).unwrap();
-    assert_eq!(got.len(), 2);
+    assert_eq!(got.len(), 3);
     let e = open_pulls(&gh, dir.path(), "o/r", "dev", &|_| {})
         .unwrap_err()
         .to_string();

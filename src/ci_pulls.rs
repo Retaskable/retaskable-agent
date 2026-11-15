@@ -52,8 +52,6 @@ struct Row {
     mergeable: String,
     #[serde(default)]
     author: Option<Author>,
-    #[serde(default)]
-    is_cross_repository: bool,
 }
 
 #[derive(Deserialize)]
@@ -62,15 +60,14 @@ struct Author {
     login: String,
 }
 
-/// The open pull requests in `gh pr list --json`'s output. A pull request from another repository (a fork's) is left
-/// out, and so is one with no head commit listed. A deliberate difference from the TypeScript watcher, which lists
-/// a fork's too and only skips it when its checks can't be read: the agent never pushes to a fork, and
-/// agent-ci.md section 3.1 leaves forks out of its own list for the same reason.
+/// The open pull requests in `gh pr list --json`'s output. One with no head commit listed is left out, as `ciWatchPass`
+/// does. A fork's pull request is listed like any other, as in TypeScript (whether the watcher may push to it is
+/// `may_push_to`'s rule; a fork whose checks can't be read is the pass's to skip, one pull request at a time).
 pub fn parse_open_pulls(json: &str) -> Result<Vec<OpenPull>> {
     let rows: Vec<Row> = serde_json::from_str(json.trim()).context("unreadable pull request list")?;
     Ok(rows
         .into_iter()
-        .filter(|r| !r.is_cross_repository && !r.head_ref_oid.is_empty())
+        .filter(|r| !r.head_ref_oid.is_empty())
         .map(|r| OpenPull {
             number: r.number,
             title: r.title,
@@ -98,7 +95,7 @@ pub fn open_pulls(gh: &Path, dir: &Path, repo: &str, base: &str, reg: Reg) -> Re
         "--limit",
         &limit,
         "--json",
-        "number,title,url,headRefName,headRefOid,mergeable,author,isCrossRepository",
+        "number,title,url,headRefName,headRefOid,mergeable,author",
     ];
     let (out, err, ok) = gh_out(gh, dir, &args, reg)?;
     if !ok {
