@@ -1,9 +1,9 @@
 //! A read model of a project's team branch (its base branch, when that isn't the repo's default branch; the TS
 //! agent's `teamBranch.ts`, `readTeamBranch` in `orchestratorSync.ts` and `shipRefusal` in `shared/mergePr.ts`): how far
 //! the base and main are apart, the open pull request from the base into main, whether a main sync is open and
-//! whether a slice is landing. The Open PR to main, merge control and sync kinds read it; nothing here is wired into
-//! the loop yet. Merge pattern only: the integration pattern's rebase (and `shipRefusal`'s rebase-conflict line) isn't
-//! ported, and neither is a local-only project.
+//! whether a slice is landing. The Open PR to main and merge control kinds read it (`main_pr.rs`, `ship.rs`). Merge
+//! pattern only: the integration pattern's rebase (and `shipRefusal`'s rebase-conflict line) isn't ported, and neither
+//! is a local-only project.
 use std::path::Path;
 use std::process::Command;
 
@@ -159,6 +159,7 @@ pub fn gh_reason(err: &anyhow::Error) -> String {
 }
 
 pub mod main_pr;
+pub mod ship;
 
 #[cfg(test)]
 mod tests;

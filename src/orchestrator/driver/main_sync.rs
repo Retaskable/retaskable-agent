@@ -11,9 +11,11 @@ use super::project::ProjectLoop;
 use crate::backlog::runs::{LockTake, short_sha};
 use crate::config::SyncMain;
 use crate::git_bin::command;
+use crate::intents::main_pr::Why;
 use crate::main_sync::{Attempt, attempt, behind_count, item_title, pr_body, pr_title, push, sync_due};
 use crate::merge_update::run as git;
 use crate::runs::chore::{ChoreKind, chore_lock_name};
+use crate::team_branch::need_team_branch;
 
 /// How often a project looks at whether main moved.
 const LOOK_EVERY: Duration = Duration::from_secs(60);
@@ -157,12 +159,85 @@ impl ProjectLoop {
                 return Ok(());
             }
         };
-        self.run_loop.runs().locks().add(&lock, &name, now);
+        self.run_sync(lock, &name, sha, main, now);
+        Ok(())
+    }
+
+    /// Starts the merge in the sync worktree, off the loop's thread, holding the store's `lock` until the add is done.
+    fn run_sync(&mut self, lock: String, name: &str, sha: String, main: String, now: Instant) {
+        self.run_loop.runs().locks().add(&lock, name, now);
+        let (repo_path, base) = (PathBuf::from(&self.project.repo_path), self.project.base_branch.clone());
         let worktree = Path::new(&self.project.worktrees_dir).join(WORKTREE);
         let gh = self.run_loop.main_sync.gh.clone();
         let task = tokio::task::spawn_blocking(move || sync(&repo_path, &worktree, &gh, &base, &main));
         self.run_loop.main_sync.running = Some(Running { task, lock, sha });
-        Ok(())
+    }
+
+    /// A person's Sync now (`sync_now.rs`): starts the sync at once, past the minute's gate, `handled` and `syncMain`
+    /// being off, in the TS agent's order of refusals. Answers the id of the chore item the sync will add.
+    pub(super) async fn start_sync_now(
+        &mut self,
+        repo: u64,
+        token: Option<&str>,
+        machine: &str,
+    ) -> Result<String, Why> {
+        if self.seen.default_branch.is_none() {
+            self.seen.default_branch =
+                super::report::default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
+        }
+        let main = need_team_branch(&self.project.base_branch, self.seen.default_branch.as_deref())
+            .map_err(|why| Why::Refused(why.into()))?
+            .to_string();
+        let base = self.project.base_branch.clone();
+        let in_flight = || Why::Refused(format!("A sync of {main} into {base} is already in flight."));
+        let items = match self.client.list(repo, token).await {
+            Ok(items) => items,
+            Err(e) => {
+                self.store_error("list", &e);
+                return Err(Why::Failed(format!(
+                    "Couldn't ask the store to sync {main} into {base}: {e}"
+                )));
+            }
+        };
+        // A sync this loop is running, or one open in the store (another computer's, or one waiting to be merged).
+        if self.run_loop.main_sync.running.is_some() || crate::team_branch::held_in(&items).0 {
+            return Err(in_flight());
+        }
+        let (repo_path, b, m) = (PathBuf::from(&self.project.repo_path), base.clone(), main.clone());
+        let (behind, sha) = tokio::task::spawn_blocking(move || -> Result<(u32, String)> {
+            crate::lanes::fetch_latest(&repo_path)?;
+            Ok((
+                behind_count(&repo_path, &b, &m)?,
+                git(&command, &repo_path, &["rev-parse", &format!("origin/{m}")])?,
+            ))
+        })
+        .await
+        .map_err(|e| Why::Failed(e.to_string()))?
+        .map_err(|e| Why::Failed(format!("{e:#}")))?;
+        if behind == 0 {
+            return Err(Why::Refused(format!("{base} already has all of {main}.")));
+        }
+        let id = format!("chore-sync-main-{}", short_sha(&sha));
+        if items.iter().any(|i| i.id == id) {
+            // The store keeps one sync item per main commit, whatever became of it (even skipped).
+            return Err(Why::Refused(format!(
+                "A sync of {main} into {base} was already made for {main}'s latest commit."
+            )));
+        }
+        let name = chore_lock_name(ChoreKind::SyncMain, &base).unwrap_or_default();
+        let note = format!("main sync on {machine}");
+        let lock = match self.client.lock_take(repo, token, &name, Some(&note)).await {
+            Ok(LockTake::Held(lock)) => lock,
+            Ok(LockTake::HeldBy { .. }) => return Err(in_flight()),
+            Err(e) => {
+                self.store_error("lock_take", &e);
+                return Err(Why::Failed(format!(
+                    "Couldn't ask the store to sync {main} into {base}: {e}"
+                )));
+            }
+        };
+        self.run_sync(lock, &name, sha, main, Instant::now());
+        Ok(id)
     }
 
     /// The merge attempt is in: add the item, then give the lock back whatever happened.

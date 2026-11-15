@@ -12,18 +12,18 @@ struct Fixture {
     root: tempfile::TempDir,
 }
 
-fn commit(repo: &Path, name: &str, text: &str) {
+pub(super) fn commit(repo: &Path, name: &str, text: &str) {
     std::fs::write(repo.join(name), text).unwrap();
     run_git(git(repo).args(["add", name]));
     run_git(git(repo).args(["commit", "--quiet", "-m", name]));
 }
 
-fn push(repo: &Path, branch: &str) {
+pub(super) fn push(repo: &Path, branch: &str) {
     run_git(git(repo).args(["push", "--quiet", "origin", branch]));
 }
 
 /// A fake `gh`: logs its arguments, lists no PR and prints a URL for `pr create`.
-fn fake_gh(root: &Path) -> PathBuf {
+pub(super) fn fake_gh(root: &Path) -> PathBuf {
     let path = root.join("gh");
     let log = root.join("gh.log");
     let script = format!(

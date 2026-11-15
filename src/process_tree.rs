@@ -33,30 +33,55 @@ pub struct ProcessTree {
 /// Every live [`ProcessTree`], so [`cut_all`] can reach them all: each tree adds itself in
 /// [`ProcessTree::join`] and is pruned once it's gone, by its own `Drop` or by [`cut_all`]
 /// walking the list.
-fn registry() -> &'static Mutex<Vec<Weak<ProcessTree>>> {
-    static REGISTRY: OnceLock<Mutex<Vec<Weak<ProcessTree>>>> = OnceLock::new();
+///
+/// Each entry also names the thread that joined it. Production ignores that; under test, [`cut_all`] and
+/// [`stopping`] act on this thread's trees only, since the tests share one process and a test that cuts every tree
+/// would otherwise kill the sessions of whichever others are running (they end `interrupted`).
+type Registry = Mutex<Vec<(std::thread::ThreadId, Weak<ProcessTree>)>>;
+
+fn registry() -> &'static Registry {
+    static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Set by [`cut_all`]; read back by [`stopping`].
+/// Set by [`cut_all`]; read back by [`stopping`]. Per thread under test (see [`registry`]).
+#[cfg(not(test))]
 static STOPPING: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+thread_local! {
+    static STOPPING: AtomicBool = const { AtomicBool::new(false) };
+}
+
+fn set_stopping(on: bool) {
+    #[cfg(not(test))]
+    STOPPING.store(on, Ordering::SeqCst);
+    #[cfg(test)]
+    STOPPING.with(|s| s.store(on, Ordering::SeqCst));
+}
 
 /// Whether a restart or Quit is cutting every session right now. The orchestrator loop checks
 /// this so it neither starts nor claims new work once it's true
 /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
 pub fn stopping() -> bool {
-    STOPPING.load(Ordering::SeqCst)
+    #[cfg(not(test))]
+    return STOPPING.load(Ordering::SeqCst);
+    #[cfg(test)]
+    STOPPING.with(|s| s.load(Ordering::SeqCst))
 }
 
 /// Cuts every live process tree at once: sets [`stopping`], then calls `cut()` on every
 /// registered tree and waits for all of them in parallel, [`KILL_LIMIT`] at most each (07.4's
 /// "A graceful stop waits for the kills"). Logs the pid of any tree that stayed past the limit.
 pub fn cut_all() {
-    STOPPING.store(true, Ordering::SeqCst);
+    set_stopping(true);
+    let me = std::thread::current().id();
     let trees: Vec<Arc<ProcessTree>> = {
         let mut reg = registry().lock().unwrap();
-        reg.retain(|w| w.strong_count() > 0);
-        reg.iter().filter_map(Weak::upgrade).collect()
+        reg.retain(|(_, w)| w.strong_count() > 0);
+        reg.iter()
+            .filter(|(owner, _)| !cfg!(test) || *owner == me)
+            .filter_map(|(_, w)| w.upgrade())
+            .collect()
     };
     for tree in &trees {
         tree.cut();
@@ -119,15 +144,16 @@ pub fn output_std(command: &mut std::process::Command) -> std::io::Result<std::p
 /// doesn't leave `stopping()` true, or stale entries behind, for whatever runs after it.
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
-    STOPPING.store(false, Ordering::SeqCst);
-    registry().lock().unwrap().clear();
+    set_stopping(false);
+    let me = std::thread::current().id();
+    registry().lock().unwrap().retain(|(owner, _)| *owner != me);
 }
 
 /// How many live trees the registry currently holds, pruning dead entries first.
 #[cfg(test)]
 pub(crate) fn registered_count() -> usize {
     let mut reg = registry().lock().unwrap();
-    reg.retain(|w| w.strong_count() > 0);
+    reg.retain(|(_, w)| w.strong_count() > 0);
     reg.len()
 }
 
@@ -158,7 +184,10 @@ impl ProcessTree {
             group,
             pid,
         });
-        registry().lock().unwrap().push(Arc::downgrade(&tree));
+        registry()
+            .lock()
+            .unwrap()
+            .push((std::thread::current().id(), Arc::downgrade(&tree)));
         Ok(tree)
     }
 
@@ -221,7 +250,7 @@ impl ProcessTree {
 
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        registry().lock().unwrap().retain(|w| w.strong_count() > 0);
+        registry().lock().unwrap().retain(|(_, w)| w.strong_count() > 0);
     }
 }
 
@@ -548,6 +577,22 @@ mod tests {
         );
 
         reset_for_tests();
+    }
+
+    /// The tests share one process: a `cut_all` on another test's thread must leave this one's tree running (it used to
+    /// end that test's session `interrupted`) and must not make this thread see `stopping()`.
+    #[tokio::test]
+    async fn a_cut_all_on_another_thread_leaves_this_threads_trees_alone() {
+        let (_dir, mut child, tree) = spawn_exited_tree();
+        std::thread::spawn(|| {
+            cut_all();
+            assert!(stopping());
+        })
+        .join()
+        .unwrap();
+        assert!(!tree.was_cut());
+        assert!(!stopping());
+        let _ = child.wait().await;
     }
 
     #[tokio::test]

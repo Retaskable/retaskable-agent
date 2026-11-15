@@ -296,6 +296,8 @@ pub struct ProjectLoop {
     pub(super) merging: super::merge_item::Merging,
     /// A person's Open PR to main (`main_pr.rs`).
     pub(super) opening: super::main_pr::Opening,
+    /// A person's Sync now (`sync_now.rs`).
+    pub(super) syncing: super::sync_now::Syncing,
     /// The expert sessions (`experts.rs`).
     pub(super) experts: super::experts::Experts,
     /// The CI watcher's pass (`ci_pass.rs`).
@@ -386,6 +388,7 @@ impl ProjectLoop {
             merging: Default::default(),
             opening: Default::default(),
             ci_watch: Default::default(),
+            syncing: Default::default(),
             experts: Default::default(),
             trial: None,
             backlog_items: 0,

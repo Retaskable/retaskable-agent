@@ -8,6 +8,9 @@
 //! the draft landing (`land.rs`) answers; the loop answers an item on its next pass, because it alone knows what the item is
 //! doing. A paused project still merges (a person asked), and no session slot is used.
 //!
+//! A row naming `{ ship: true }` is the other half: the merge control into main for a team branch (`ship_to_main`,
+//! `team_branch/ship.rs`). It claims nothing; the project's own pull request is merged and the dev branch started again.
+//!
 //! The completion is what the TS agent sends for an item taken over from another computer: the implementer's own
 //! `implDone` and `implRemaining` are kept only in its local record (`shared/itemDetails.ts`), so this computer has
 //! neither, and it reports the slice as merged with what the store says is left (`built` false, no merge commit). The
@@ -27,14 +30,17 @@ use tokio::sync::mpsc;
 use super::Shared;
 use super::drafts::claim_agent;
 use super::project::ProjectLoop;
+use crate::backlog::Item;
 use crate::backlog::complete::{Completion, Playtest};
 use crate::backlog::take_over::Did;
 use crate::config::ProjectConfig;
 use crate::drafts::land::{deletes_head, merge_pr, pr_number, workflow};
 use crate::env::Env;
-use crate::intents::merge_item::{Answer, Merge, MergeHandler};
+use crate::intents::main_pr::Why;
+use crate::intents::merge_item::{Answer, Merge, MergeHandler, Ship, ShipAnswer};
 use crate::intents::{IntentStore, Puller, StoreLink};
 use crate::item_lifecycle::ItemState;
+use crate::team_branch::ship::{Stop, ship};
 use crate::view::{DraftCommand, Reply};
 
 /// How often the store is asked for merge rows (docs/specs/intent-rows.md section 3.3).
@@ -49,6 +55,9 @@ pub trait MergeHost: Send + Sync {
     fn open_pr(&self, project: &ProjectConfig, branch: &str) -> Result<Option<u64>>;
     /// `gh pr merge <pr> --squash`, deleting the head branch when `delete_branch`.
     fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()>;
+    /// The merge control into main: squashes the dev branch's pull request into `main` and starts the dev branch
+    /// again from it (`team_branch::ship`); the warning to give, if any. `items` are the store's.
+    fn ship(&self, project: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop>;
 }
 
 /// The real thing: `gh`, or `RETASKABLE_GH`, run in the project's checkout.
@@ -89,6 +98,11 @@ impl MergeHost for GhMergeHost {
             delete_branch,
         )
     }
+
+    fn ship(&self, p: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop> {
+        let dir = std::path::Path::new(&p.repo_path);
+        ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, items)
+    }
 }
 
 /// GitHub's own words from a failed `gh` call's text, without gh's GraphQL prefix, at most 300 characters (`ghReason`).
@@ -104,6 +118,8 @@ pub(super) fn reason(text: &str) -> String {
 pub(super) struct Merging {
     asks: mpsc::UnboundedSender<Merge>,
     waiting: mpsc::UnboundedReceiver<Merge>,
+    ships: mpsc::UnboundedSender<Ship>,
+    ship_waiting: mpsc::UnboundedReceiver<Ship>,
     puller: Option<Puller<()>>,
     polled: Option<Instant>,
     /// How long after one look at the store the next may be.
@@ -113,9 +129,12 @@ pub(super) struct Merging {
 impl Default for Merging {
     fn default() -> Self {
         let (asks, waiting) = mpsc::unbounded_channel();
+        let (ships, ship_waiting) = mpsc::unbounded_channel();
         Self {
             asks,
             waiting,
+            ships,
+            ship_waiting,
             puller: None,
             polled: None,
             poll_every: POLL_EVERY,
@@ -135,6 +154,10 @@ impl ProjectLoop {
                 continue;
             }
             let answer = self.merge_item(&ask.id, host, shared).await;
+            let _ = ask.reply.send(answer);
+        }
+        while let Ok(ask) = self.merging.ship_waiting.try_recv() {
+            let answer = self.ship_to_main(host, shared).await;
             let _ = ask.reply.send(answer);
         }
         if shared.stopping {
@@ -161,12 +184,29 @@ impl ProjectLoop {
             machine: shared.links.machine.clone(),
             failures: self.failures.clone(),
         });
-        let handler = Arc::new(MergeHandler::new(self.merging.asks.clone()));
+        let handler = Arc::new(MergeHandler::new(self.merging.asks.clone(), self.merging.ships.clone()));
         let puller = self
             .merging
             .puller
             .get_or_insert_with(|| Puller::default().register(handler));
         puller.pass(&link, || ()).await;
+    }
+
+    /// The merge control into main: refuses or merges the dev branch's pull request and starts the dev branch again,
+    /// on a blocking thread (git and `gh` both wait). No claim and no item: it is the project's own pull request.
+    async fn ship_to_main(&mut self, host: &Arc<dyn MergeHost>, shared: &Shared<'_>) -> ShipAnswer {
+        let (main, items) = self.team_request(shared).await?;
+        let (project, host) = (self.project.clone(), host.clone());
+        let shipped = tokio::task::spawn_blocking(move || host.ship(&project, &main, &items)).await;
+        match shipped {
+            Ok(Ok(warning)) => {
+                tracing::info!("{}: shipped the dev branch into main ({warning:?})", self.id);
+                Ok(warning)
+            }
+            Ok(Err(Stop::Refused(why))) => Err(Why::Refused(why)),
+            Ok(Err(Stop::Failed(e))) => Err(Why::Failed(format!("{e:#}"))),
+            Err(e) => Err(Why::Failed(e.to_string())),
+        }
     }
 
     /// Claims item `id` by name, squash-merges its pull request and completes it, or says in words why it can't.

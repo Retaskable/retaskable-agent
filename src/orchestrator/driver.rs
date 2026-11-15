@@ -56,6 +56,7 @@ mod spawn;
 mod start_gate;
 mod step_events;
 mod store_errors;
+mod sync_now;
 mod triage_bug;
 mod triage_facts;
 mod triage_run;
