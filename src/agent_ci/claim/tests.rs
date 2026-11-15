@@ -78,7 +78,8 @@ fn the_newest_status_of_a_context_is_the_first_listed() {
     assert!(newest(&list, "other").is_none());
 }
 
-#[tokio::test]
+// On paused time: the clock moves only when every task waits, so the count is exact, not a race with real time.
+#[tokio::test(start_paused = true)]
 async fn a_refresh_is_posted_every_interval_during_a_long_run() {
     let n = AtomicU32::new(0);
     let out = refreshing(
@@ -93,10 +94,7 @@ async fn a_refresh_is_posted_every_interval_during_a_long_run() {
     )
     .await;
     assert_eq!(out, 7);
-    assert!(
-        (4..=5).contains(&n.load(Ordering::SeqCst)),
-        "{}",
-        n.load(Ordering::SeqCst)
-    );
+    // At 20, 40, 60, 80 and 100 ms; the work ends at 110.
+    assert_eq!(n.load(Ordering::SeqCst), 5);
     assert_eq!(REFRESH, Duration::from_secs(300));
 }

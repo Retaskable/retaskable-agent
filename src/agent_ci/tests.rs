@@ -268,14 +268,33 @@ mod stubbed {
     }
 
     /// A `docker` that logs each call and runs `body` for the check container only (fetch and warm succeed); a
-    /// `ps` answers `ps_ids`.
+    /// `ps` answers `ps_ids`. `body` may call `wait_gate`, which holds the check until the test calls `open_gate`.
     fn docker_stub(log: &Path, body: &str, ps_ids: &str) -> String {
         format!(
             "echo \"docker $*\" >> {l}\n[ \"$1\" = ps ] && echo '{ps_ids}'\n[ \"$1\" = run ] || exit 0\n\
              n=; p=; for a in \"$@\"; do [ \"$p\" = --name ] && n=$a; p=$a; done\n\
-             case \"$n\" in *-check) ;; *) exit 0;; esac\n{body}",
-            l = log.display()
+             case \"$n\" in *-check) ;; *) exit 0;; esac\n\
+             wait_gate() {{ while [ ! -f {g} ]; do sleep 0.01; done; }}\n{body}",
+            l = log.display(),
+            g = log.with_file_name("gate").display()
         )
+    }
+
+    /// Lets every check held at `wait_gate` finish (and any later one run straight through).
+    fn open_gate(r: &Rig) {
+        std::fs::write(r._dir.path().join("gate"), "").unwrap();
+    }
+
+    /// Waits until `cond` holds, failing after ten seconds rather than hanging.
+    async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+        let started = std::time::Instant::now();
+        while !cond() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "timed out waiting for {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn key(pr: u64, head: &str) -> CheckKey {
@@ -510,15 +529,16 @@ mod stubbed {
     async fn one_slot_runs_two_pull_requests_one_after_the_other() {
         let mut r = pr_rig("exit 0");
         let log = r._dir.path().join("calls.log");
-        let body = format!("echo begin >> {l}; sleep 1.5; echo end >> {l}", l = log.display());
+        let body = format!("echo begin >> {l}; wait_gate; echo end >> {l}", l = log.display());
         script(&r._dir.path().join("bin"), "docker", &docker_stub(&log, &body, ""));
         let keys = vec![key(7, "h7"), key(8, "h8")];
         let first = go(&mut r, keys.clone()).await;
         assert_eq!(first.len(), 1, "only one permit");
-        // Still running: the second key finds no permit.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Held at the gate, so still running: the second key finds no permit.
+        until("the first check to start", || calls(&r).contains("begin")).await;
         assert_eq!(r.ci.running.lock().unwrap().len(), 1);
         assert!(go(&mut r, keys.clone()).await.is_empty());
+        open_gate(&r);
         for t in first {
             t.await.unwrap();
         }
@@ -550,11 +570,12 @@ mod stubbed {
 
     #[tokio::test]
     async fn a_shrink_while_a_check_runs_does_not_leave_extra_permits() {
-        let mut r = pr_rig("sleep 0.4");
+        let mut r = pr_rig("wait_gate");
         let tasks = go(&mut r, vec![key(7, "h7")]).await;
-        // Docker "down" for one poll while the check holds the only permit.
+        // Docker "down" for one poll while the check, held at the gate, holds the only permit.
         r.cfg.slots = 0;
         r.ci.poll(&r.cfg).await;
+        open_gate(&r);
         for t in tasks {
             t.await.unwrap();
         }
@@ -635,7 +656,7 @@ mod stubbed {
 
     #[tokio::test]
     async fn two_loops_sharing_one_store_run_a_key_once() {
-        let mut a = pr_rig("sleep 1");
+        let mut a = pr_rig("wait_gate");
         claim_gh(&mut a, &[]);
         // The store gives the lease to the first claim and names its holder to the next.
         let taken = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -658,11 +679,13 @@ mod stubbed {
         a.ci.poll(&cfg_a).await;
         b.poll(&cfg_b).await;
         let ta = a.ci.start(&cfg_a, keys.clone()).await;
-        while !calls(&a).contains("state=pending") {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        until("a's claim", || calls(&a).contains("state=pending")).await;
+        // b asks while a's check is held at the gate, and loses.
+        for t in b.start(&cfg_b, keys).await {
+            t.await.unwrap();
         }
-        let tb = b.start(&cfg_b, keys).await;
-        for t in ta.into_iter().chain(tb) {
+        open_gate(&a);
+        for t in ta {
             t.await.unwrap();
         }
         assert_eq!(docker_runs(&a), 1, "{}", calls(&a));
@@ -731,11 +754,25 @@ mod stubbed {
 
     #[tokio::test]
     async fn a_long_run_refreshes_its_claim() {
-        let mut r = pr_rig("sleep 1");
+        let mut r = pr_rig("wait_gate");
         claim_gh(&mut r, &[]);
-        r.ci.refresh = Duration::from_millis(250);
+        r.ci.refresh = Duration::from_millis(20);
+        // The check is held at the gate until the claim has been refreshed three times.
+        let (log, gate) = (r._dir.path().join("calls.log"), r._dir.path().join("gate"));
+        let opener = tokio::spawn(async move {
+            until("three refreshes", || {
+                std::fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .matches("state=pending")
+                    .count()
+                    >= 4
+            })
+            .await;
+            std::fs::write(gate, "").unwrap();
+        });
         run_as(&mut r, "a").await;
-        // The claim, then a refresh each interval of the second-long run, then success.
+        opener.await.unwrap();
+        // The claim, then a refresh each interval of the run, then success.
         assert!(calls(&r).matches("state=pending").count() >= 4, "{}", calls(&r));
         assert_eq!(calls(&r).matches("state=success").count(), 1);
         assert!(r.store.args("ci_heartbeat").len() >= 2);
@@ -744,7 +781,7 @@ mod stubbed {
 
     #[tokio::test]
     async fn the_final_status_is_the_last_even_when_posting_it_is_slow() {
-        let mut r = pr_rig("sleep 1");
+        let mut r = pr_rig("exit 0");
         claim_gh(&mut r, &[]);
         // A `gh` that takes a while to post the final status, long enough for a refresh to come due.
         let bin = r._dir.path().join("bin");
@@ -826,11 +863,12 @@ echo '[]'",
 
     #[tokio::test]
     async fn a_push_run_takes_a_permit_like_a_pull_request_check() {
-        let mut r = pr_rig("sleep 1");
+        let mut r = pr_rig("wait_gate");
         // One slot, a pull request and the push: the push waits for the permit.
         let tasks = poll_and_start(&mut r).await;
         assert_eq!(tasks.len(), 1);
         assert_eq!(r.ci.slot().available_permits(), 0);
+        open_gate(&r);
         for t in tasks {
             t.await.unwrap();
         }

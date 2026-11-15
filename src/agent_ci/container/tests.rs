@@ -45,14 +45,14 @@ fn logs_older_than_seven_days_are_pruned() {
 #[cfg(unix)]
 mod stub {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     const TOKEN: &str = "ghp_faketokenvalue123";
 
+    /// A fake `docker` written so it can be spawned at once (`write_executable` waits out `ETXTBSY`, which `nice`
+    /// would otherwise report as a quick exit 126). Its probe run has no arguments and does nothing.
     fn stub(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("docker");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_executable(&path, &format!("#!/bin/sh\n[ -n \"$1\" ] || exit 0\n{body}\n"));
         path
     }
 
@@ -78,10 +78,6 @@ mod stub {
                 rec.display()
             ),
         );
-        // SAFETY: the test process sets these before spawning; the command clears them.
-        unsafe { std::env::set_var("GH_TOKEN", "ghp_other") };
-        // SAFETY: the test process sets these before spawning; the command clears them.
-        unsafe { std::env::set_var("GITHUB_TOKEN", "ghp_other") };
         let log = t.path().join("a.log");
         std::fs::write(&log, "header\n").unwrap();
         let out = run(&step(&docker, &log, Some(TOKEN), CEILING)).await.unwrap();
@@ -91,11 +87,31 @@ mod stub {
         let env = std::fs::read_to_string(t.path().join("rec.env")).unwrap();
         let args = std::fs::read_to_string(t.path().join("rec.args")).unwrap();
         assert!(env.contains(&format!("T={TOKEN}")) && !args.contains(TOKEN));
-        assert!(!env.contains("GH_TOKEN") && !env.contains("GITHUB_TOKEN") && !env.contains("ghp_other"));
         // A step with no token has no `T` at all.
         run(&step(&docker, &log, None, CEILING)).await.unwrap();
         let env = std::fs::read_to_string(t.path().join("rec.env")).unwrap();
         assert!(!env.lines().any(|l| l.starts_with("T=")));
+    }
+
+    #[test]
+    fn docker_gets_only_what_it_needs_from_the_agents_environment() {
+        let parent = [
+            ("GH_TOKEN", "ghp_other"),
+            ("GITHUB_TOKEN", "ghp_other"),
+            ("GLAB_TOKEN", "glpat_other"),
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/me"),
+            ("DOCKER_HOST", "unix:///run/docker.sock"),
+        ]
+        .map(|(k, v)| (k.into(), v.into()));
+        let cmd = docker_command_from(OsStr::new("docker"), parent);
+        let mut kept: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["DOCKER_HOST", "HOME", "PATH"]);
     }
 
     #[tokio::test]
