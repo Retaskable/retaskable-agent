@@ -55,7 +55,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes || gh release view "$TAG" >/dev/null
 
-      # Only the bins this commit has: `retaskable-chat-agent` arrives with its own change.
+      # The sidecar bins this commit has (`retaskable-ci`, `retaskable-chat-agent`), read from cargo metadata.
       - name: Build
         run: |
           have=$(cargo metadata --no-deps --format-version 1 | grep -o '"name":"retaskable-\(ci\|chat-agent\)","src_path"' | sed 's/"name":"\([^"]*\)".*/\1/' | sort -u)
