@@ -318,7 +318,7 @@ fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
     if idea.is_empty() {
         return nack(&cmd.id, "idea_accept needs the idea's id.".into());
     }
-    if let Err(reason) = claim_check(view) {
+    if let Err(reason) = acts_check(view) {
         return nack(&cmd.id, reason);
     }
     view.item_commands.push_idea(crate::view::IdeaCommand {
@@ -336,6 +336,15 @@ fn claim_check(view: &AgentView) -> Result<(), String> {
         Ok(())
     } else {
         Err("This computer isn't running work (the orchestrator isn't in claim mode).".into())
+    }
+}
+
+/// What isn't about an item (ideas, experts, drafts) also runs where the orchestrator runs on `runs`.
+pub(crate) fn acts_check(view: &AgentView) -> Result<(), String> {
+    if view.item_commands.acts() {
+        Ok(())
+    } else {
+        Err("This computer isn't running work (the orchestrator isn't in claim or runs mode).".into())
     }
 }
 
@@ -579,11 +588,8 @@ fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
     if draft.is_empty() {
         return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
     }
-    if !view.item_commands.claim() {
-        return nack(
-            &cmd.id,
-            "This computer isn't running work (the orchestrator isn't in claim mode).".into(),
-        );
+    if let Err(reason) = acts_check(view) {
+        return nack(&cmd.id, reason);
     }
     let (project, draft) = (project.to_string(), draft.to_string());
     view.item_commands.push_draft(match cmd.name.as_str() {

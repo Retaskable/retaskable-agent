@@ -158,7 +158,7 @@ async fn a_backlog_with_items_saves_skipped_and_never_starts_one_later() {
     let mut t = rig_with(json!([item("a", "on_main")]), opened()).await;
     passes(&mut t, 2).await;
     assert!(saved(&mut t).skipped);
-    t.rig.lp(0).backlog_items = 0;
+    t.rig.lp(0).backlog_items = Some(0);
     passes(&mut t, 2).await;
     assert!(t.host.jobs.lock().unwrap().is_empty());
 }
@@ -264,4 +264,70 @@ async fn at_the_limit_the_trial_starts_with_the_fallback_and_waits_without_it() 
         let case = signed_out;
         assert_eq!(t.host.jobs.lock().unwrap().len(), usize::from(starts), "{case:?}");
     }
+}
+
+/// A trial in `runs` mode, with `held` lanes already held by runs.
+async fn runs_trial(held: &[u32]) -> T {
+    let mut t = empty(opened()).await;
+    t.host.hold.store(true, Ordering::SeqCst);
+    t.rig.go_runs();
+    for &lane in held {
+        let run = Holder::Run {
+            project: "p0".into(),
+            piece: format!("piece-{lane}"),
+        };
+        assert!(t.rig.machine.pool.take(lane, run));
+    }
+    t
+}
+
+#[tokio::test]
+async fn in_runs_mode_the_trial_takes_a_lane_no_run_holds() {
+    let mut t = runs_trial(&[1]).await;
+    for _ in 0..3 {
+        t.rig.runs_pass().await;
+    }
+    assert_eq!(*t.host.jobs.lock().unwrap(), vec![(2, TRIAL_BRANCH.to_string())]);
+    assert!(held_by_trial(&mut t));
+    assert_eq!(
+        t.rig.machine.pool.holder(1).map(Holder::project),
+        Some("p0"),
+        "the run keeps its lane"
+    );
+}
+
+#[tokio::test]
+async fn in_runs_mode_the_trial_waits_while_runs_hold_every_lane() {
+    let mut t = runs_trial(&[1, 2]).await;
+    for _ in 0..3 {
+        t.rig.runs_pass().await;
+    }
+    assert!(t.host.jobs.lock().unwrap().is_empty());
+    assert_eq!(
+        saved(&mut t).state,
+        TrialState::NotStarted,
+        "no lane, no trial, and not skipped"
+    );
+}
+
+#[tokio::test]
+async fn in_runs_mode_the_trial_waits_for_a_read_of_the_backlog() {
+    let mut t = runs_trial(&[]).await;
+    t.rig.machine.run_passes().await;
+    assert!(
+        t.host.jobs.lock().unwrap().is_empty(),
+        "an unread backlog isn't an empty one"
+    );
+    t.rig.runs_pass().await;
+    assert_eq!(t.host.jobs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn in_runs_mode_a_backlog_with_items_skips_the_trial() {
+    let item = json!([{ "id": "a", "title": "A", "status": "todo", "rank": 1 }]);
+    let mut t = rig_with(item, opened()).await;
+    t.rig.go_runs();
+    t.rig.runs_pass().await;
+    assert!(saved(&mut t).skipped);
+    assert!(t.host.jobs.lock().unwrap().is_empty());
 }

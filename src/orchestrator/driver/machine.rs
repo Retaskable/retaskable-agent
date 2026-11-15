@@ -463,13 +463,16 @@ impl Machine {
                 lp.sync_now_pass(&shared).await;
             }
         }
-        // The passes that aren't about an item: a person's ask, and a Build this.
+        // The passes that aren't about an item: asks, experts, a Build this, drafts and the trial plan.
         let on: Vec<bool> = (self.projects.iter())
             .map(|lp| lp.mode == OrchestratorMode::Runs && self.acts(lp))
             .collect();
         let mut slots = self.room_total(self.concurrency).saturating_sub(self.sessions());
         self.ask_passes(&on, &paused, stopping, &mut slots).await;
+        self.expert_passes(&on, stopping, &mut slots).await;
         self.idea_passes(&on, stopping).await;
+        self.draft_passes(&on, &paused, stopping, &mut slots).await;
+        self.trial_passes(&on, &paused, stopping, &mut slots).await;
     }
 
     /// Lets `claim` mode claim and start work.
@@ -509,25 +512,25 @@ impl Machine {
         self
     }
 
-    /// Lets `claim` mode run expert sessions.
+    /// Lets `claim` and `runs` mode run expert sessions.
     pub fn with_experts(mut self, host: Arc<dyn super::ExpertHost>) -> Self {
         self.experts = Some(host);
         self
     }
 
-    /// Lets `claim` mode answer the chat's asks.
+    /// Lets `claim` and `runs` mode answer the chat's asks.
     pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
         self.asks = Some(host);
         self
     }
 
-    /// Lets `claim` mode claim and run spec drafts.
+    /// Lets `claim` and `runs` mode claim and run spec drafts.
     pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
         self.drafts = Some(host);
         self
     }
 
-    /// Lets `claim` mode run each new project's trial plan, once its setup `checks` pass.
+    /// Lets `claim` and `runs` mode run each new project's trial plan, once its setup `checks` pass.
     pub fn with_trial(
         mut self,
         host: Arc<dyn crate::orchestrator::trial_host::TrialHost>,
@@ -616,10 +619,11 @@ impl Machine {
     /// The pass after the reads: takes back held leases, schedules, then records each project's pass.
     async fn decide_and_record(&mut self, read_items: Vec<Option<Vec<Item>>>, paused: Vec<bool>) -> Vec<Step> {
         for (i, items) in read_items.iter().enumerate() {
-            if let Some(items) = items
-                && self.claims(&self.projects[i])
-            {
-                self.projects[i].backlog_items = items.len();
+            let Some(items) = items else { continue };
+            if self.acts(&self.projects[i]) {
+                self.projects[i].backlog_items = Some(items.len());
+            }
+            if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
             }
@@ -749,51 +753,11 @@ impl Machine {
                 }
             }
         }
-        // Expert sessions have a person in them: their turns take slots too, and a pause doesn't hold them back.
-        if let (Some(host), Some(_)) = (self.experts.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(self.projects.iter().map(|lp| lp.experting()).sum());
-            for (lp, &live) in self.projects.iter_mut().zip(&live) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.expert_pass(&mut self.pool, &host, &shared).await;
-                }
-            }
-        }
+        self.expert_passes(&live, stopping, &mut slots).await;
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
         self.idea_passes(&live, stopping).await;
-        // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
-        if let (Some(host), Some(_)) = (self.drafts.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(
-                self.projects
-                    .iter_mut()
-                    .filter_map(|lp| lp.drafting().then_some(()))
-                    .count() as u32,
-            );
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live && !paused {
-                    let shared = shared!(self, stopping);
-                    lp.draft_pass(&mut slots, &host, &shared, self.pool.rules().lanes).await;
-                }
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.land_drafts(&host, &shared, self.merge_wait, self.pool.rules().lanes)
-                        .await;
-                    let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
-                    lp.live.set_drafting(&lp.id, drafting);
-                }
-            }
-        }
-        // The trial plan comes after asks and drafts and before items are planned; it counts toward `concurrency` too.
-        if let (Some((host, checks)), Some(_)) = (self.trial.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(self.projects.iter().filter(|lp| lp.trialing()).count() as u32);
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.trial_pass(&mut self.pool, &mut slots, paused, &host, &checks, &shared)
-                        .await;
-                }
-            }
-        }
+        self.draft_passes(&live, paused, stopping, &mut slots).await;
+        self.trial_passes(&live, paused, stopping, &mut slots).await;
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))
             .map(|((lp, &ready), &paused)| {
                 ready.then(|| Candidate {

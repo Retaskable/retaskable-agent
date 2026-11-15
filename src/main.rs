@@ -384,6 +384,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let tray_sessions = live.sessions().clone();
     view.item_commands
         .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
+    view.item_commands
+        .set_runs(mode == orchestrator::driver::OrchestratorMode::Runs);
+    // The modes that run sessions of their own: asks, experts, drafts and the trial plan are built for both.
+    let acts = matches!(
+        mode,
+        orchestrator::driver::OrchestratorMode::Claim | orchestrator::driver::OrchestratorMode::Runs
+    );
     let runners = retaskable_agent::rollout::Runners::default();
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
         dir,
@@ -453,7 +460,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         } else {
             Vec::new()
         },
-        drafts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        drafts: acts.then(|| {
             orchestrator::draft_host::ClaudeDrafts::new(
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
@@ -462,7 +469,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
-        trial: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        trial: acts.then(|| {
             (
                 orchestrator::trial_host::ClaudeTrial::new(
                     dir.to_path_buf(),
@@ -485,7 +492,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             ) as Arc<dyn orchestrator::driver::CiWatchHost>
         }),
         runners: runners.clone(),
-        asks: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        asks: acts.then(|| {
             orchestrator::ask_host::ClaudeAsks::new(
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
@@ -496,7 +503,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>
         }),
-        experts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        experts: acts.then(|| {
             orchestrator::expert_host::ClaudeExperts::new(
                 dir.to_path_buf(),
                 env.clone(),
