@@ -305,3 +305,72 @@ fn private_is_anything_but_public_and_unknown_when_gh_cannot_say() {
     assert_eq!(private_from(br#"{}"#), None);
     assert_eq!(private_from(b"not json"), None);
 }
+
+/// Every provider's item, from the TypeScript's own `prepareItem` for the project "Trailhead", byte for byte.
+#[test]
+fn the_preparing_item_is_the_typescripts_word_for_word() {
+    let golden: Vec<serde_json::Value> = serde_json::from_str(include_str!("prepare_golden.json")).unwrap();
+    assert_eq!(golden.len(), Id::ALL.len());
+    for (id, want) in Id::ALL.into_iter().zip(golden) {
+        let item = prepare_item(provider(id), "Trailhead");
+        assert_eq!(serde_json::to_value(&item).unwrap(), want, "{}", id.as_str());
+        assert_eq!(item.id, format!("go-live-{}", id.as_str()));
+        assert!(item.remaining.len() <= 4000);
+    }
+}
+
+#[test]
+fn a_website_item_adds_version_json_and_the_others_do_not() {
+    let with: Vec<_> = Id::ALL
+        .into_iter()
+        .filter(|i| provider(*i).commit.is_some())
+        .map(Id::as_str)
+        .collect();
+    assert_eq!(
+        with,
+        [
+            "github-pages",
+            "cloudflare-pages",
+            "netlify",
+            "cloudflare-workers",
+            "render"
+        ]
+    );
+    let pages = prepare_item(provider(Id::CloudflarePages), "Trailhead").remaining;
+    assert!(
+        pages.contains("/version.json")
+            && pages.contains("CF_PAGES_COMMIT_SHA")
+            && pages.ends_with("Never deploy, and never add a token, password or secret to the repo.")
+    );
+    for id in [Id::CloudflareD1, Id::Itch, Id::Eas, Id::GithubReleases, Id::CloudRun] {
+        assert!(
+            !prepare_item(provider(id), "Trailhead")
+                .remaining
+                .contains("version.json")
+        );
+    }
+}
+
+#[test]
+fn an_unknown_provider_is_refused_in_the_typescripts_words() {
+    assert_eq!(provider_of(Some("itch")).unwrap().name, "itch.io");
+    for (given, said) in [
+        (Some("vercel"), "vercel"),
+        (Some("GitHub-Pages"), "GitHub-Pages"),
+        (Some(""), ""),
+        (None, "undefined"),
+    ] {
+        assert_eq!(
+            provider_of(given).err().unwrap(),
+            format!("There's no hosting provider \"{said}\".")
+        );
+    }
+}
+
+#[test]
+fn the_project_is_the_repos_own_name() {
+    assert_eq!(project_name("ann/trailhead"), "trailhead");
+    assert_eq!(project_name("trailhead"), "trailhead");
+    assert_eq!(project_name("ann/"), "ann/");
+    assert_eq!(project_name(""), "");
+}

@@ -7,7 +7,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::{BacklogError, Client};
@@ -156,6 +156,18 @@ impl Client {
             .op(repo_id, token, "deploy_beat", json!({ "id": id }), "beat answer")
             .await?;
         Ok(ok.ok)
+    }
+
+    /// `add { via: "site", items: [item] }`: the backlog item the website's Use this adds (go-live.md section 3). An id
+    /// already on the list is the store's `conflict`.
+    pub async fn add_site_item(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        item: &impl Serialize,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "via": "site", "items": [item] });
+        self.send(repo_id, token, "add", args).await.map(|_| ())
     }
 
     /// `deploy_finish { id, status, result? }`: whether the store took the report (`false`: the claim expired and

@@ -2,11 +2,14 @@
 //! repo is public, what its files say (a back end, a phone or desktop app) and the providers chosen for it. A read:
 //! nothing is written anywhere, and Retaskable never deploys. The result names the chosen providers by id only; the
 //! site looks up their limits and steps from its own table (Retaskable.com#3858), so this computer keeps the ids and
-//! the choosing here and none of the display text.
+//! the choosing here and none of the display text. The one text it does keep is the item that prepares a repo for a
+//! provider ([`prepare_item`]), which needs the provider's name, what to add and its commit variable.
 mod ids;
 mod pick;
+mod prepare;
 mod private;
 mod scan;
+mod table;
 #[cfg(test)]
 mod tests;
 
@@ -18,8 +21,10 @@ use serde_json::{Map, Value};
 use crate::config::{ProjectConfig, ProjectType};
 pub use ids::Id;
 pub use pick::{Database, Pick, Shape, pick_hosting};
+pub use prepare::{Item, prepare_item, project_name, provider_of};
 pub use private::repo_private;
 pub use scan::{Found, detect_hosting};
+pub use table::{Provider, provider};
 
 /// A phone app (Expo, React Native) or a desktop app (Electron, Tauri).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -36,6 +36,15 @@ The result is `{ project, pick }`:
 
 `pick` names the chosen providers by **id only**: where the TypeScript agent sends each provider's whole object (name, limits, steps, pictures), this sends `default`, `alternatives` and `database` (`{ default, alternatives }` or `null`) as the ids of `shared/hosting.ts`'s `HOSTING` table. The site looks the providers up from its own table ([Retaskable.com#3858](https://github.com/Retaskable/Retaskable.com/issues/3858)), so the agent keeps the ids and the choosing and none of the display text. The result is under 300 bytes for every project, far inside the 4 KB cap. A project with no `projectType` does not exist here (the config's default is `game`), so the TypeScript's "undefined type reads as a static site" has no case.
 
+## 2.2 The go-live prepare
+
+`go_live_prepare { provider }` adds the one backlog item that prepares the repo for the provider chosen (`add { via: "site", items: [item] }`, through the store, as Use this does). Neither deploys: the provider builds from the GitHub repo itself, and no token, password or secret is asked for or written. The item is `{ id: "go-live-<provider id>", title: "Get <repo name> ready for <provider name>", remaining }`, and its text is the TypeScript's `prepareItem` word for word (`src/hosting/prepare_golden.json` is that function's output for every provider and the test holds this one to it); the repo name is what follows the last `/` of `owner/name`.
+
+- A provider that isn't one of the thirteen ids (or none given) is the code's own refusal: `refused`, "There's no hosting provider \"<id>\"." (`undefined` when none), and the store is not asked.
+- The store's `conflict` (the item is already on the list: chosen before) is `done` with `already: true`, so the walkthrough carries on.
+- Any other refusal by the store is `refused` with its message. A store that can't be reached is `failed`: nothing said no.
+- The result is `{ id, title, already }`, about 100 bytes.
+
 ## 3. What is not here
 
 - The pushed commands are gone from the site; the agent has no case for them in its command handler and no `testflight_report`.
@@ -51,7 +60,7 @@ The result is `{ project, pick }`:
 
 1. **This slice (done):** the store ops and the claim, beat and finish loop, with the capability gate, and nothing ported yet to run: the loop starts for a project only once a kind is in `deploy_requests::PORTED`, so today this computer claims nothing and the website's request waits for a computer that can (the TypeScript agent).
 2. **`hosting` (done):** the picker's read (section 2.1), in `PORTED`.
-2b. `go_live_prepare`: the item that prepares the repo (`add { via: "site" }`), in `PORTED` with its arm in `Live::run`.
+2b. **`go_live_prepare` (done):** the item that prepares the repo (`add { via: "site" }`), in `PORTED` (section 2.2).
 3. `promote`: the staging-to-production fast-forward push with its checks (git, the admin check, the code host's rules), and the deploy log row.
 4. `testflight_build`: Xcode build and upload, the `testflight` log kind and its outbox, and `nativeApp` reading the store's rows. The login check above needs the code host's `admins.login`.
 5. A push from the store (`facts_changed` naming `deploy_requests`), when the Rust agent has a store link, to replace the 5-second read.

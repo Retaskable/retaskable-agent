@@ -361,14 +361,20 @@ async fn only_the_ported_kinds_are_claimable() {
     }
     assert_eq!(
         PORTED,
-        [DeployKind::Hosting],
+        [DeployKind::Hosting, DeployKind::GoLivePrepare],
         "a kind joins with its arm in Live::run and its tests"
     );
 }
 
 #[tokio::test]
-async fn hosting_needs_only_the_project_and_a_link_to_the_store() {
-    let hosting = request("dr-1", DeployKind::Hosting);
+async fn the_hosting_kinds_need_only_the_project_and_a_link_to_the_store() {
+    for kind in [DeployKind::Hosting, DeployKind::GoLivePrepare] {
+        hosting_kind_needs_only_the_project_and_a_link(kind).await;
+    }
+}
+
+async fn hosting_kind_needs_only_the_project_and_a_link(kind: DeployKind) {
+    let hosting = request("dr-1", kind);
     assert!(live("http://127.0.0.1:1", Some("tok")).can(&hosting).await);
     // No link to the store: nothing to report to, so it is left to a computer that has one.
     assert!(!live("http://127.0.0.1:1", None).can(&hosting).await);
@@ -421,4 +427,90 @@ fn a_paused_project_builds_and_promotes_nothing_but_still_reads() {
     assert!(l.paused());
     let held: Vec<_> = DeployKind::ALL.into_iter().filter(|k| waits_while_paused(*k)).collect();
     assert_eq!(held, [DeployKind::TestflightBuild, DeployKind::Promote]);
+}
+
+fn prepare_request(provider: Option<&str>) -> DeployRequest {
+    let mut r = request("dr-1", DeployKind::GoLivePrepare);
+    r.args.provider = provider.map(String::from);
+    r
+}
+
+#[tokio::test]
+async fn a_go_live_prepare_adds_the_providers_item_through_the_site_add() {
+    let (base, seen) = crate::backlog::tests::store(200, json!({ "value": {} })).await;
+    let out = live(&base, Some("tok"))
+        .run(&prepare_request(Some("cloudflare-pages")))
+        .await
+        .unwrap();
+    assert_eq!(out.status, Finish::Done);
+    assert_eq!(
+        Value::Object(out.result),
+        json!({ "id": "go-live-cloudflare-pages", "title": "Get site ready for Cloudflare Pages", "already": false })
+    );
+    let sent = seen.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["op"], "add");
+    assert_eq!(sent[0]["args"]["via"], "site");
+    let item = &sent[0]["args"]["items"][0];
+    assert_eq!(item["id"], "go-live-cloudflare-pages");
+    assert!(
+        item["remaining"]
+            .as_str()
+            .unwrap()
+            .starts_with("Prepare this project to go live on Cloudflare Pages,")
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_provider_is_refused_without_asking_the_store() {
+    let (base, seen) = crate::backlog::tests::store(200, json!({ "value": {} })).await;
+    for (given, said) in [(Some("vercel"), "vercel"), (None, "undefined")] {
+        let err = live(&base, Some("tok")).run(&prepare_request(given)).await.unwrap_err();
+        assert_eq!(
+            err,
+            RunError::Refused(format!("There's no hosting provider \"{said}\"."))
+        );
+    }
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_item_chosen_before_is_done_already() {
+    let (base, _) = crate::backlog::tests::store(
+        409,
+        json!({ "error": "conflict", "message": "go-live-itch is already on the list" }),
+    )
+    .await;
+    let out = live(&base, Some("tok"))
+        .run(&prepare_request(Some("itch")))
+        .await
+        .unwrap();
+    assert_eq!(out.status, Finish::Done);
+    assert_eq!(
+        Value::Object(out.result),
+        json!({ "id": "go-live-itch", "title": "Get site ready for itch.io", "already": true })
+    );
+}
+
+#[tokio::test]
+async fn any_other_store_refusal_is_a_refusal_with_its_message_and_an_unreachable_store_a_failure() {
+    let (base, _) = crate::backlog::tests::store(
+        400,
+        json!({ "error": "bad_request", "message": "remaining is too long" }),
+    )
+    .await;
+    assert_eq!(
+        live(&base, Some("tok"))
+            .run(&prepare_request(Some("eas")))
+            .await
+            .unwrap_err(),
+        RunError::Refused("remaining is too long".into())
+    );
+    let down = live("http://127.0.0.1:1", Some("tok"))
+        .run(&prepare_request(Some("eas")))
+        .await;
+    assert!(matches!(down, Err(RunError::Failed(why)) if why.contains("couldn't reach")));
+    // No link to the store: failed, and nothing is sent.
+    let unlinked = live(&base, None).run(&prepare_request(Some("eas"))).await;
+    assert!(matches!(unlinked, Err(RunError::Failed(why)) if why.contains("no link")));
 }

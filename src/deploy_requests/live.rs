@@ -6,18 +6,18 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
-use super::{DeployRequests, Deps, Outcome, RunError, done};
+use super::{DeployRequests, Deps, Outcome, RunError, done, go_live};
 use crate::backlog::Client;
 use crate::backlog::deploy::{DeployKind, DeployRequest, Finish};
 use crate::config::ProjectConfig;
 use crate::link::TokenStore;
 use crate::view::{PauseState, StorePause, StorePauseState};
 
-/// The kinds this computer can run: the hosting read so far. The Rust agent has no TestFlight build, promote or go-live
-/// prepare of its own yet (docs/specs/agent/deploy-requests.md section 5), so it leaves those to a computer that has,
+/// The kinds this computer can run: the hosting read and the go-live item. The Rust agent has no TestFlight build or
+/// promote of its own yet (docs/specs/agent/deploy-requests.md section 5), so it leaves those to a computer that has,
 /// and claiming a request it can't run would be declining on the site's behalf. Add a kind here with its arm in
 /// [`Live::run`].
-pub const PORTED: &[DeployKind] = &[DeployKind::Hosting];
+pub const PORTED: &[DeployKind] = &[DeployKind::Hosting, DeployKind::GoLivePrepare];
 
 /// Kinds a paused project neither builds nor pushes (`testflight_build` and `promote`): the rest are reads and the
 /// go-live item.
@@ -118,6 +118,17 @@ impl Deps for Live {
     async fn run(&self, r: &DeployRequest) -> Result<Outcome, RunError> {
         match r.kind {
             DeployKind::Hosting => Ok(done(crate::hosting::read(&self.project).await)),
+            DeployKind::GoLivePrepare => {
+                let (repo, token) = self.ready().await.map_err(RunError::Failed)?;
+                go_live::prepare(
+                    &self.client,
+                    repo,
+                    &token,
+                    &self.project.github_repo,
+                    r.args.provider.as_deref(),
+                )
+                .await
+            }
             // Unreachable: `can` never says yes to a kind without an arm here.
             _ => Err(RunError::Failed(format!(
                 "this computer can't run {} yet",
