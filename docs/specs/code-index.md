@@ -17,7 +17,7 @@ It keeps itself current:
 
 A fresh session's prompt also gets a short **map**: the index's most relevant entries for the item, about 1,500 tokens. The session starts knowing roughly what exists and where, and asks the index for the rest.
 
-**Why.** Sessions spend their first turns looking for where things live. On 2026-10-20, even with "Where to start", implementers took a median of 19 turns of 54, and 36% of the session's cost, before their first edit (`start-report`, 20 sessions), 92% of those turns a single search or read. On 2026-10-30, drafters spent 26 of 40 turns before their first write. Every turn resends the conversation; one lookup that returns three lines replaces a grep that returns forty and the reads after it.
+**Why.** Sessions spend their first turns looking for where things live. On 2026-10-20, even with "Where to start", implementers took a median of 19 turns of 54, and 36% of the session's cost, before their first edit (`start-report`, 20 sessions), 92% of those turns a single search or read. By 2026-11-14 it was 10 turns of 22 and 48% of the cost (26 sessions), so the turns have fallen but the share of cost before the first edit has not. On 2026-10-30, drafters spent 26 of 40 turns before their first write. Every turn resends the conversation; one lookup that returns three lines replaces a grep that returns forty and the reads after it.
 
 **What it is not.**
 - **Nothing to install.** CLAUDE.md's "no DB" means nothing heavy a person must install or run. The parsers compile into the agent's binary, and the saved index is one cache file in the repo's `.git` folder, never committed, synced or sent. Deleting it loses nothing.
@@ -501,7 +501,7 @@ The question is whether sessions with the index reach their first edit in fewer 
 - **Running the comparison.** Turn `repo-map` On for all but one of a project's computers, or alternate by week. Then compare at least 20 sessions in each group.
 
 **Success** is when sessions with the index have:
-- a median of 12 or fewer turns before the first edit, against 19 without, or 40% fewer if the baseline has moved
+- a median of 40% fewer turns before the first edit than the baseline measured when the comparison starts (10 on 2026-11-14, so 6 or fewer; the 2026-10-20 figure was 19)
 - a lower median share of cost before the first edit
 - the index tools in at least half of them, without nudging
 - no rise in implementer sessions ending `failed` or `needs_human`
