@@ -54,6 +54,7 @@ fn test_agent() -> ClaimNextAgent {
         environment: "Production".to_string(),
         base_branch: "main".to_string(),
         tags: Vec::new(),
+        week: None,
     }
 }
 
@@ -167,7 +168,9 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
             assert_eq!(item.tier.as_deref(), Some("opus"));
             assert_eq!(token, "lease-1");
         }
-        ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) => panic!("expected an item"),
+        ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) | ClaimNextAnswer::Passed(_) => {
+            panic!("expected an item")
+        }
     }
 }
 
@@ -744,4 +747,38 @@ fn errors_read_as_what_went_wrong() {
         message: "no such item".into(),
     };
     assert_eq!(bad.to_string(), "the backlog store answered 404: no such item");
+}
+
+#[tokio::test]
+async fn claim_next_sends_the_week_when_there_is_one_and_reads_a_pass_over() {
+    let (base, seen) = store(
+        200,
+        json!({ "value": { "passed": { "to": "box-2", "retryMs": 60000 } } }),
+    )
+    .await;
+    let agent = ClaimNextAgent {
+        week: Some(week::WeekUse {
+            used: 0.4,
+            resets_at: 5,
+        }),
+        ..test_agent()
+    };
+    let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
+    assert_eq!(
+        answer,
+        ClaimNextAnswer::Passed(week::Passed {
+            to: "box-2".into(),
+            retry_ms: 60_000
+        })
+    );
+    assert_eq!(
+        seen.lock().unwrap()[0]["args"]["agent"]["week"],
+        json!({ "used": 0.4, "resetsAt": 5 })
+    );
+    let (base, seen) = store(200, json!({ "value": null })).await;
+    Client::new(base)
+        .claim_next(1, Some("tok"), &test_agent())
+        .await
+        .unwrap();
+    assert!(seen.lock().unwrap()[0]["args"]["agent"].get("week").is_none());
 }

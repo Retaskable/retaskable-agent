@@ -34,7 +34,8 @@ pub fn keychain(data_dir: &Path, env: &Env) -> Arc<dyn TokenStore> {
 }
 
 /// [`keychain`] for another identity on the same computer: its own OS credential service name, and its own file
-/// override variable, so the Chat Agent's or CI runner's link never replaces the Coding Agent's.
+/// override variable, so the Chat Agent's or CI runner's link never replaces the Coding Agent's (chat-agent-process.md
+/// section 2: "its own agent key and identity").
 pub fn keychain_for(data_dir: &Path, env: &Env, service: &'static str, file_override: &str) -> Arc<dyn TokenStore> {
     if let Some(file) = env.get(file_override).filter(|f| !is_blank(f)) {
         return Arc::new(FileStore::new(PathBuf::from(file.trim()), service));

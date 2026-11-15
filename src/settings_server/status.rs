@@ -171,23 +171,23 @@ pub struct OrchestratorProject {
     pub fix_main: Option<String>,
     /// Why the last main sync didn't start, when it didn't.
     pub sync_main: Option<String>,
-    /// The last vet run, "12 suggestions: 2 promising, 1 duplicate, 9 not promising"; absent before a run.
+    /// The last vet run, "12 suggestions: 2 ideas, 1 duplicate, 9 binned"; absent before a run.
     pub vet: Option<String>,
 }
 
-/// The vet pass's counts by verdict as one line; zero counts are left out.
-fn vet_line(counts: &std::collections::BTreeMap<String, usize>) -> String {
-    let n = |k: &str| counts.get(k).copied().unwrap_or(0);
-    let total: usize = counts.values().sum();
+/// The store's vet summary as one line; zero counts are left out.
+fn vet_line(v: &crate::backlog::shown::VetView) -> String {
+    let total = v.ideas + v.duplicates + v.binned + v.asked;
     let parts: Vec<String> = [
-        ("promising", "promising", "promising"),
-        ("duplicate", "duplicate", "duplicates"),
-        ("not_promising", "not promising", "not promising"),
-        ("spam", "spam", "spam"),
+        (v.ideas, "idea", "ideas"),
+        (v.duplicates, "duplicate", "duplicates"),
+        (v.binned, "binned", "binned"),
+        (v.asked, "asked", "asked"),
+        (v.left, "left", "left"),
     ]
     .iter()
-    .filter(|(k, ..)| n(k) > 0)
-    .map(|(k, one, many)| format!("{} {}", n(k), if n(k) == 1 { one } else { many }))
+    .filter(|(n, ..)| *n > 0)
+    .map(|(n, one, many)| format!("{n} {}", if *n == 1 { one } else { many }))
     .collect();
     format!(
         "{total} suggestion{}: {}",
