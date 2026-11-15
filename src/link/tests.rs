@@ -565,6 +565,14 @@ fn describe_renders_a_non_string_field_as_json() {
 }
 
 #[test]
+fn describe_skips_a_null_field_like_the_next_one_down() {
+    let body = object(serde_json::json!({ "error_description": null, "error": "access_denied" }));
+    assert_eq!(describe(&body), "access_denied");
+    let all_null = object(serde_json::json!({ "error": null, "message": null }));
+    assert_eq!(describe(&all_null), r#"{"error":null,"message":null}"#);
+}
+
+#[test]
 fn describe_falls_back_to_the_whole_body() {
     assert_eq!(describe(&object(serde_json::json!({ "x": 1 }))), r#"{"x":1}"#);
 }
