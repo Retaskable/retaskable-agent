@@ -3,6 +3,7 @@
 //! backlog linked, one pass over the open pull requests runs in the background (`crate::ci_pass`), one at a time.
 //! A paused project still watches (like the TS agent's `maybeWatchCi`, called before its pause check).
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
 use crate::backlog::ci_result::CiVerdict;
-use crate::ci_pass::{CiHost, EVERY, Judge, Pass};
+use crate::ci_pass::{CiHost, EVERY, Fixer, Judge, Pass};
 use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
 
@@ -28,11 +29,22 @@ pub trait CiWatchHost: Send + Sync {
         branch: String,
         what: String,
     ) -> BoxFuture<'static, Option<(CiVerdict, String)>>;
+    /// The write session that fixes a pull request's own red, run in `dir` (a worktree on the branch): true when it
+    /// went ok. It commits and never pushes; the pass pushes.
+    fn fix(
+        &self,
+        project: &ProjectConfig,
+        pr: u64,
+        title: String,
+        branch: String,
+        what: String,
+        dir: PathBuf,
+    ) -> BoxFuture<'static, bool>;
     /// A bell line from the store, word for word.
     fn bell(&self, title: &str, body: &str);
 }
 
-/// [`CiWatchHost::judge`] for one project, as the pass takes it.
+/// [`CiWatchHost::judge`] and [`CiWatchHost::fix`] for one project, as the pass takes them.
 struct ProjectJudge {
     host: Arc<dyn CiWatchHost>,
     project: ProjectConfig,
@@ -48,6 +60,26 @@ impl Judge for ProjectJudge {
     ) -> BoxFuture<'a, Option<(CiVerdict, String)>> {
         self.host
             .judge(&self.project, pr, title.into(), branch.into(), what.into())
+    }
+}
+
+impl Fixer for ProjectJudge {
+    fn fix<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        what: &'a str,
+        dir: &'a Path,
+    ) -> BoxFuture<'a, bool> {
+        self.host.fix(
+            &self.project,
+            pr,
+            title.into(),
+            branch.into(),
+            what.into(),
+            dir.to_path_buf(),
+        )
     }
 }
 
@@ -116,6 +148,7 @@ impl ProjectLoop {
             let pass = Pass {
                 host,
                 judge: &judge,
+                fixer: &judge,
                 client: &client,
                 repo,
                 token: Some(&token),

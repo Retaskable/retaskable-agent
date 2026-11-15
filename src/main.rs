@@ -481,6 +481,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::cursor_models(cfg, env),
                 local.clone(),
                 live.sessions().clone(),
+                cfg.machine.max_turns,
             ) as Arc<dyn orchestrator::driver::CiWatchHost>
         }),
         runners: runners.clone(),

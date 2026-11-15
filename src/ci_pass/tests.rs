@@ -13,6 +13,7 @@ use super::*;
 use crate::engines::engine::{test_config, test_result};
 use crate::test_support::write_executable;
 
+mod fix;
 mod merge;
 mod rerun;
 
@@ -172,10 +173,42 @@ impl Judge for FakeJudge {
     }
 }
 
+/// What the fix session was asked: pull request, title, branch, the failed checks' note and the worktree.
+type FixAsked = (u64, String, String, String, PathBuf);
+
+/// What the fix session did in its worktree, and whether it went ok.
+type Acts = Box<dyn Fn(&Path) -> bool + Send + Sync>;
+
+/// The fix session, faked: `acts` runs in the worktree (a fake engine that commits there, say). Default: no change, ok.
+pub(super) struct FakeFixer {
+    pub asked: Mutex<Vec<FixAsked>>,
+    pub acts: Mutex<Acts>,
+}
+
+impl Fixer for FakeFixer {
+    fn fix<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        what: &'a str,
+        dir: &'a Path,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((pr, title.into(), branch.into(), what.into(), dir.to_path_buf()));
+            (self.acts.lock().unwrap())(dir)
+        })
+    }
+}
+
 pub(super) struct Rig {
     pub dir: tempfile::TempDir,
     pub store: Store,
     pub judge: FakeJudge,
+    pub fixer: FakeFixer,
     pub bells: Mutex<Vec<(String, String)>>,
     pub client: Client,
     pub items: HashSet<String>,
@@ -198,6 +231,10 @@ impl Rig {
             judge: FakeJudge {
                 asked: Mutex::default(),
                 says: Some((CiVerdict::NotChange, "the machine failed")),
+            },
+            fixer: FakeFixer {
+                asked: Mutex::default(),
+                acts: Mutex::new(Box::new(|_| true)),
             },
             bells: Mutex::default(),
             items: HashSet::new(),
@@ -227,6 +264,7 @@ impl Rig {
         Pass {
             host: self.host(),
             judge: &self.judge,
+            fixer: &self.fixer,
             client: &self.client,
             repo: 7,
             token: Some("tok"),

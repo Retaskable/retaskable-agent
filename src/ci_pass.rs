@@ -4,7 +4,7 @@
 //! then says what it did and asks again, at most [`STEPS_MAX`] times per head. It keeps no verdict of its own: the
 //! store decides and counts. `mayPush` is `may_push_to` with the signed-in login, and `baseHead` goes with a
 //! conflicting head it may push to. `mergeMain` is run (a plain push to the pull request's branch, only where
-//! `mayPush`); a `fix` that comes is not run yet.
+//! `mayPush`), and so is `fix` (a write session in a throwaway worktree, then a plain push, only where `mayPush`).
 //! Scheduling (the runner, the 2 minutes) is the project loop's (`driver/ci_pass.rs`).
 pub mod host;
 // The fake `gh` is a shell script.
@@ -12,6 +12,7 @@ pub mod host;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,10 +42,18 @@ pub trait Judge: Send + Sync {
     ) -> BoxFuture<'a, Option<(CiVerdict, String)>>;
 }
 
+/// The write session that fixes a pull request's own red.
+pub trait Fixer: Send + Sync {
+    /// Runs the session in `dir` (a worktree on the branch); true when it went ok.
+    fn fix<'a>(&'a self, pr: u64, title: &'a str, branch: &'a str, what: &'a str, dir: &'a Path)
+    -> BoxFuture<'a, bool>;
+}
+
 /// One pass over a project's open pull requests.
 pub struct Pass<'a> {
     pub host: Arc<dyn CiHost>,
     pub judge: &'a dyn Judge,
+    pub fixer: &'a dyn Fixer,
     pub client: &'a Client,
     pub repo: u64,
     pub token: Option<&'a str>,
@@ -221,6 +230,36 @@ impl Pass<'_> {
         Ok(())
     }
 
+    /// A fix session in a throwaway worktree on the branch and, when it committed cleanly, one plain push (`fixOnBranch`
+    /// in the TS agent's `git.ts`). False for a failed session, uncommitted work, no commit, a refused push or any failure.
+    async fn fix(&self, facts: &CiFacts) -> bool {
+        let host = self.host.clone();
+        let (pr, branch) = (facts.pr, facts.branch.clone());
+        let opened = tokio::task::spawn_blocking(move || host.fix_tree(pr, &branch)).await;
+        let tree = match opened {
+            Ok(Ok(tree)) => tree,
+            Ok(Err(e)) => {
+                tracing::info!("ci watch: no worktree to fix pull request #{pr}: {e:#}");
+                return false;
+            }
+            Err(_) => return false,
+        };
+        let ok = self
+            .fixer
+            .fix(pr, &facts.title, &facts.branch, &facts.checks.what, &tree.dir)
+            .await;
+        let branch = facts.branch.clone();
+        // The tree is dropped (removed) with the thread's closure.
+        match tokio::task::spawn_blocking(move || tree.push(&branch, ok)).await {
+            Ok(Ok(pushed)) => pushed,
+            Ok(Err(e)) => {
+                tracing::info!("ci watch: pushing the fix for pull request #{pr} failed: {e:#}");
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Runs one instruction and says what happened; `None` for one this slice doesn't run.
     async fn instruct(&self, facts: &CiFacts, next: CiNext, since: &mut HashMap<String, u64>) -> Option<CiDid> {
         match next {
@@ -257,14 +296,17 @@ impl Pass<'_> {
                     .unwrap_or(false);
                 Some(CiDid::MergeMain { pushed })
             }
-            // Fixing is a later slice: the head is left for the store to ask about again.
-            CiNext::Fix => {
+            // Never run where the computer may not push, as for `mergeMain`.
+            CiNext::Fix if !facts.may_push => {
                 tracing::warn!(
-                    "ci watch: the store said {next:?} for pull request #{}, which this computer doesn't run yet",
+                    "ci watch: the store said fix for pull request #{}, which this computer may not push to",
                     facts.pr
                 );
                 None
             }
+            CiNext::Fix => Some(CiDid::Fix {
+                pushed: self.fix(facts).await,
+            }),
         }
     }
 }

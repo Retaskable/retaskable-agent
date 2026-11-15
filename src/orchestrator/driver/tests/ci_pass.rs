@@ -51,6 +51,9 @@ impl CiHost for Gh {
     fn merge_main(&self, _: u64, _: &str) -> bool {
         false
     }
+    fn fix_tree(&self, _: u64, _: &str) -> anyhow::Result<crate::ci_fix::FixTree> {
+        anyhow::bail!("no worktree")
+    }
 }
 
 /// The fake [`CiWatchHost`]: `Host` behind an `Arc`, so the fake code host and the test see the same counts.
@@ -69,6 +72,17 @@ impl CiWatchHost for Shared {
         _: String,
     ) -> BoxFuture<'static, Option<(CiVerdict, String)>> {
         async { None }.boxed()
+    }
+    fn fix(
+        &self,
+        _: &ProjectConfig,
+        _: u64,
+        _: String,
+        _: String,
+        _: String,
+        _: std::path::PathBuf,
+    ) -> BoxFuture<'static, bool> {
+        async { false }.boxed()
     }
     fn bell(&self, _: &str, _: &str) {}
 }

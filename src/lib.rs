@@ -14,6 +14,7 @@ pub mod chat;
 pub mod checks;
 pub mod ci_checks;
 pub mod ci_coverage;
+pub mod ci_fix;
 pub mod ci_judge;
 pub mod ci_pass;
 pub mod ci_pulls;
