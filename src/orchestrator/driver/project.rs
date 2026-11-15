@@ -702,13 +702,13 @@ impl ProjectLoop {
     /// Writes the item's run into its record: its state now, `lane`, its branch and slice, `session` and
     /// `context_tokens` (the implementer session's id and its last known size). Does nothing for an item with
     /// no lease. Call `save_leases` after.
-    /// The item's Start over attempt on its current slice: 0 until a person starts it over.
+    /// How many times a person started the item over: 0 until then. The store counts attempts from 1 (an absent
+    /// `attempt` is the first), as the TS agent does, so the store's value is one more than this. 0 too while the
+    /// item's facts haven't been read: whatever names a branch from it waits for them first.
     pub(super) fn attempt_of(&self, item_id: &str) -> u32 {
-        let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
-        self.records
-            .get(item_id)
-            .filter(|r| r.slice == slice)
-            .map_or(0, |r| r.attempt)
+        self.decisions_of(item_id)
+            .and_then(|d| d.attempt)
+            .map_or(0, |n| n.saturating_sub(1))
     }
 
     pub(super) fn remember(
@@ -742,7 +742,6 @@ impl ProjectLoop {
             branch: Some(branch_name(item, attempt)),
             slice: run.slice,
             impl_context_tokens: context_tokens,
-            attempt,
             ..self.records.get(item_id).cloned().unwrap_or_default()
         };
         self.records.insert(item_id.to_string(), record);
@@ -775,6 +774,11 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        if !self.ensure_decisions(item_id, shared).await {
+            let why = "the session didn't start: the item's facts haven't been read from the shared backlog yet";
+            self.hand_back(pool, item_id, "queued", why, shared).await;
+            return false;
+        }
         let kind_fresh = matches!(kind, Launch::Fresh);
         let mut notes = None;
         let mut on_engine = None;

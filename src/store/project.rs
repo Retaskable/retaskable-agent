@@ -59,10 +59,6 @@ pub struct RunRecord {
     pub branch: Option<String>,
     #[serde(default)]
     pub slice: u32,
-    /// How many times a person started this slice over (Start over): the branch is `…-s<slice>-r<attempt>` once
-    /// it is above 0. Counts the item's current slice only.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub attempt: u32,
     /// Why the item is at `needs_human` now (the current stop only: a new stop replaces it, and with it the
     /// finding a triager left), for the triage session (06.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]

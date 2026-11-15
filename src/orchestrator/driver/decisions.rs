@@ -22,14 +22,32 @@ impl ProjectLoop {
             return;
         };
         for id in missing {
-            match ItemDecisions::load(&self.client, repo, Some(&token), &id).await {
-                Ok(held) => {
-                    self.decisions.insert(id, held);
-                }
-                Err(e) => {
-                    self.store_error("details_get", &e);
-                    return;
-                }
+            if !self.load_decisions_of(repo, &token, id).await {
+                return;
+            }
+        }
+    }
+
+    /// Reads one item's decisions now (an item claimed this pass has none yet). False when the store didn't answer.
+    pub(super) async fn ensure_decisions(&mut self, id: &str, shared: &Shared<'_>) -> bool {
+        if self.decisions.contains_key(id) {
+            return true;
+        }
+        let Some((repo, token)) = self.decisions_link(shared) else {
+            return false;
+        };
+        self.load_decisions_of(repo, &token, id.to_string()).await
+    }
+
+    async fn load_decisions_of(&mut self, repo: u64, token: &str, id: String) -> bool {
+        match ItemDecisions::load(&self.client, repo, Some(token), &id).await {
+            Ok(held) => {
+                self.decisions.insert(id, held);
+                true
+            }
+            Err(e) => {
+                self.store_error("details_get", &e);
+                false
             }
         }
     }
