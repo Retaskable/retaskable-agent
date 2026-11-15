@@ -169,6 +169,7 @@ impl Press {
             items: &self.items,
             allow: &self.allow,
             fixing: &self.fixing,
+            hold_writes: false,
             logins: &self.logins,
             bell: &*self.bell,
             now: now_ms(),

@@ -8,82 +8,87 @@ fn list(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn a_retaskable_or_claude_branch_is_pushed_to_whoever_opened_it() {
-    assert!(may_push_to("retaskable/7-x", None, None, &[]));
-    assert!(may_push_to("retaskable/7-x", Some("stranger"), None, &[]));
-    assert!(may_push_to("claude/fix-it", Some("stranger"), Some("me"), &[]));
-    assert!(!may_push_to("feature/retaskable/x", Some("stranger"), None, &[]));
-    assert!(!may_push_to("Retaskable/7", Some("stranger"), None, &[]));
+    assert!(may_push_to("retaskable/7-x", None, None, &[], false));
+    assert!(may_push_to("retaskable/7-x", Some("stranger"), None, &[], false));
+    assert!(may_push_to("claude/fix-it", Some("stranger"), Some("me"), &[], false));
+    assert!(!may_push_to("feature/retaskable/x", Some("stranger"), None, &[], false));
+    assert!(!may_push_to("Retaskable/7", Some("stranger"), None, &[], false));
 }
 
 #[test]
 fn the_signed_in_account_and_the_allow_list_match_without_case() {
-    assert!(may_push_to("feat/x", Some("Me"), Some("me"), &[]));
-    assert!(may_push_to("feat/x", Some("me"), Some("ME"), &[]));
-    assert!(may_push_to("feat/x", Some("Ann"), None, &list(&["ann"])));
-    assert!(may_push_to("feat/x", Some("ann"), Some("me"), &list(&["bob", "ANN"])));
-    assert!(!may_push_to("feat/x", Some("ann"), Some("me"), &list(&["bob"])));
+    assert!(may_push_to("feat/x", Some("Me"), Some("me"), &[], false));
+    assert!(may_push_to("feat/x", Some("me"), Some("ME"), &[], false));
+    assert!(may_push_to("feat/x", Some("Ann"), None, &list(&["ann"]), false));
+    assert!(may_push_to(
+        "feat/x",
+        Some("ann"),
+        Some("me"),
+        &list(&["bob", "ANN"]),
+        false
+    ));
+    assert!(!may_push_to("feat/x", Some("ann"), Some("me"), &list(&["bob"]), false));
 }
 
 #[test]
 fn no_author_or_no_login_is_never_a_match() {
-    assert!(!may_push_to("feat/x", None, Some("me"), &list(&["me"])));
-    assert!(!may_push_to("feat/x", Some(""), Some(""), &list(&[""])));
-    assert!(!may_push_to("feat/x", Some("me"), None, &[]));
-}
-
-fn pull(author: Option<&str>) -> OpenPull {
-    OpenPull {
-        number: 1,
-        title: "t".into(),
-        url: "u".into(),
-        branch: "feat/x".into(),
-        head: "abc".into(),
-        author: author.map(str::to_string),
-        mergeable: None,
-        cross_repository: false,
-    }
+    assert!(!may_push_to("feat/x", None, Some("me"), &list(&["me"]), false));
+    assert!(!may_push_to("feat/x", Some(""), Some(""), &list(&[""]), false));
+    assert!(!may_push_to("feat/x", Some("me"), None, &[], false));
 }
 
 #[test]
 fn the_login_is_kept_only_after_a_successful_non_empty_read() {
     let cache = LoginCache::default();
     let reads = Cell::new(0);
-    let fail = || {
-        reads.set(reads.get() + 1);
+    // A failed read and an empty one are read again.
+    assert_eq!(
+        cache.get(|| {
+            reads.set(reads.get() + 1);
+            None
+        }),
         None
-    };
-    // A failed read and an empty one are read again, and count as no own account meanwhile.
-    assert!(!cache.may_push(&pull(Some("me")), &[], fail));
-    assert!(!cache.may_push(&pull(Some("me")), &[], || {
-        reads.set(reads.get() + 1);
-        Some("  ".into())
-    }));
-    assert!(!cache.may_push(&pull(Some("me")), &[], fail));
-    assert_eq!(reads.get(), 3);
-    assert!(cache.may_push(&pull(Some("ME")), &[], || {
-        reads.set(reads.get() + 1);
-        Some("me\n".into())
-    }));
-    // Read once: the next pull request does not read it again.
-    assert!(cache.may_push(&pull(Some("me")), &[], || unreachable!("cached")));
+    );
+    assert_eq!(
+        cache.get(|| {
+            reads.set(reads.get() + 1);
+            Some("  ".into())
+        }),
+        None
+    );
+    assert_eq!(reads.get(), 2);
+    assert_eq!(
+        cache
+            .get(|| {
+                reads.set(reads.get() + 1);
+                Some("me\n".into())
+            })
+            .as_deref(),
+        Some("me")
+    );
+    // Read once: the next one does not read it again.
     assert_eq!(cache.get(|| unreachable!("cached")).as_deref(), Some("me"));
-    assert_eq!(reads.get(), 4);
+    assert_eq!(reads.get(), 3);
 }
 
 #[test]
-fn the_login_is_not_read_for_a_pull_request_with_no_author() {
-    let cache = LoginCache::default();
-    assert!(!cache.may_push(&pull(None), &[], || unreachable!("no author")));
-    let mut p = pull(None);
-    p.branch = "retaskable/1-x".into();
-    assert!(cache.may_push(&p, &[], || unreachable!("no author")));
+fn a_fork_is_never_pushed_to_whatever_its_branch_or_author() {
+    assert!(!may_push_to("retaskable/7-x", None, None, &[], true));
+    assert!(!may_push_to("claude/fix-it", Some("me"), Some("me"), &[], true));
+    assert!(!may_push_to("feat/x", Some("ann"), Some("me"), &list(&["ann"]), true));
+}
+
+#[test]
+fn a_row_with_no_is_cross_repository_counts_as_a_fork() {
+    let got = parse_open_pulls(r#"[{"number":1,"headRefName":"feat/a","headRefOid":"aaa"}]"#).unwrap();
+    assert!(got[0].cross_repository);
 }
 
 const PULLS: &str = r#"[
- {"number":1,"title":"Mine","url":"https://github.com/o/r/pull/1","headRefName":"feat/a","headRefOid":"aaa1111","mergeable":"CONFLICTING","author":{"login":"ann"}},
+ {"number":1,"title":"Mine","url":"https://github.com/o/r/pull/1","headRefName":"feat/a","headRefOid":"aaa1111","mergeable":"CONFLICTING","author":{"login":"ann"},"isCrossRepository":false},
  {"number":2,"title":"Fork","url":"u2","headRefName":"patch-1","headRefOid":"bbb2222","mergeable":"MERGEABLE","author":{"login":"zed"},"isCrossRepository":true},
  {"number":3,"title":"No head","url":"u3","headRefName":"x","headRefOid":"","mergeable":"UNKNOWN","author":null},
- {"number":4,"title":"Bot","url":"u4","headRefName":"retaskable/4-y","headRefOid":"ddd4444","mergeable":"","author":{"login":""},"future":1}
+ {"number":4,"title":"Bot","url":"u4","headRefName":"retaskable/4-y","headRefOid":"ddd4444","mergeable":"","author":{"login":""},"isCrossRepository":false,"future":1}
 ]"#;
 
 #[test]

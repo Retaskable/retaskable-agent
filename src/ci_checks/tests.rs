@@ -21,7 +21,8 @@ fn no_status_and_no_run_is_none_and_skipped_runs_are_left_out() {
         run("a", "completed", Some("neutral"), None),
         run("b", "completed", Some("skipped"), None),
     ];
-    assert_eq!(commit_checks_of(&[], &runs).state, CommitState::None);
+    // Checks that all skipped reported, so there is nothing to wait for.
+    assert_eq!(commit_checks_of(&[], &runs).state, CommitState::Pass);
     // A skipped run beside a passing one changes nothing.
     let runs = [
         run("a", "completed", Some("skipped"), None),
@@ -167,23 +168,38 @@ fn keep_end_marks_what_it_leaves_out() {
     assert_eq!(keep_end("abc", 0), "");
 }
 
+// What `gh api --paginate --jq .statuses[]` prints: one object per line.
 const STATUS_JSON: &str =
-    r#"[{"context":"deploy","state":"failure","target_url":"https://ci/deploy","updated_at":"2026-11-01T10:00:00Z"}]"#;
-const RUNS_JSON: &str = r#"[{"name":"test","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/42/job/9","completed_at":"2026-11-01T10:05:00Z"},{"name":"docs","status":"completed","conclusion":"skipped","html_url":"https://github.com/o/r/actions/runs/42/job/10","completed_at":"2026-11-01T10:05:00Z"}]"#;
+    r#"{"context":"deploy","state":"failure","target_url":"https://ci/deploy","updated_at":"2026-11-01T10:00:00Z"}"#;
+const RUNS_JSON: &str = r#"{"name":"test","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/42/job/9","completed_at":"2026-11-01T10:05:00Z"}
+{"name":"docs","status":"completed","conclusion":"skipped","html_url":"https://github.com/o/r/actions/runs/42/job/10","completed_at":"2026-11-01T10:05:00Z"}"#;
 
-/// A fake `gh` for commit `abc1234` of `o/r`: the two reads, a run's failed log and a CI comment.
-fn fake_gh(dir: &Path, statuses: &str, runs: &str) -> std::path::PathBuf {
+/// A fake `gh` for commit `abc1234` of `o/r`: the two reads, a run's failed log and a CI comment. A read is its
+/// first page's lines; later pages are printed only when `--paginate` was asked, as `gh` does.
+fn fake_gh_pages(dir: &Path, statuses: &[&str], runs: &[&str]) -> std::path::PathBuf {
     let gh = dir.join("fake_gh.sh");
+    let pages = |name: &str, pages: &[&str]| {
+        let first = format!("cat <<'EOF'\n{}\nEOF\n", pages[0]);
+        let more: String = pages[1..]
+            .iter()
+            .map(|p| format!("case \"$*\" in *--paginate*) cat <<'EOF'\n{p}\nEOF\n;; esac\n"))
+            .collect();
+        format!("\"api repos/o/r/commits/abc1234/{name}?per_page=100\"*) {first}{more};;\n")
+    };
     let script = format!(
-        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\ncase \"$*\" in\n\
-         \"api repos/o/r/commits/abc1234/status?per_page=100 --jq .statuses\") cat <<'EOF'\n{statuses}\nEOF\n;;\n\
-         \"api repos/o/r/commits/abc1234/check-runs?per_page=100 --jq .check_runs\") cat <<'EOF'\n{runs}\nEOF\n;;\n\
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\ncase \"$*\" in\n{}{}\
          \"run view 42 --repo o/r --log-failed\") i=1; while [ $i -le 300 ]; do echo \"line $i\"; i=$((i+1)); done; echo 'npm ERR! it broke';;\n\
          \"api repos/o/r/issues/comments/9 --jq .body\") printf 'Log:\\r\\n```\\r\\nthe comment log\\r\\n```\\r\\nbye\\r\\n';;\n\
-         *) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n"
+         *) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n",
+        pages("status", statuses),
+        pages("check-runs", runs),
     );
     crate::test_support::write_executable(&gh, &script);
     gh
+}
+
+fn fake_gh(dir: &Path, statuses: &str, runs: &str) -> std::path::PathBuf {
+    fake_gh_pages(dir, &[statuses], &[runs])
 }
 
 #[cfg(unix)]
@@ -197,8 +213,8 @@ fn commit_checks_reads_the_statuses_and_the_runs_through_gh_api() {
         st.failed.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
         ["deploy", "test"]
     );
-    // `null` where a commit has no statuses at all reads as none.
-    let gh = fake_gh(dir.path(), "null", "[]");
+    // A commit with nothing reported at all reads as none.
+    let gh = fake_gh(dir.path(), "", "");
     assert_eq!(
         commit_checks(&gh, dir.path(), "o/r", "abc1234", &|_| {}).unwrap().state,
         CommitState::None
@@ -267,16 +283,28 @@ fn read_ci_checks_gives_the_facts_of_each_state() {
     );
     assert!(c.what.chars().count() <= WHAT_MAX);
 
-    let pending = r#"[{"name":"a","status":"queued","conclusion":null,"html_url":"","completed_at":null}]"#;
-    let gh = fake_gh(dir.path(), "[]", pending);
+    let pending = r#"{"name":"a","status":"queued","conclusion":null,"html_url":"","completed_at":null}"#;
+    let gh = fake_gh(dir.path(), "", pending);
     let c = read_ci_checks(&gh, dir.path(), "o/r", "abc1234", &|_| {}).unwrap();
     assert_eq!(
         (c.state, c.what.as_str(), c.logs.len(), c.ended_at),
         (CiState::Pending, "", 0, None)
     );
 
-    // No checks at all, like green: the store treats an unchecked head as a pass.
-    let gh = fake_gh(dir.path(), "[]", "[]");
+    // Nothing reported yet is pending, not a pass.
+    let gh = fake_gh(dir.path(), "", "");
     let c = read_ci_checks(&gh, dir.path(), "o/r", "abc1234", &|_| {}).unwrap();
-    assert_eq!(c.state, CiState::Pass);
+    assert_eq!(c.state, CiState::Pending);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failure_on_the_second_page_is_read_not_taken_for_a_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = r#"{"name":"a","status":"completed","conclusion":"success","html_url":"","completed_at":null}"#;
+    let bad = r#"{"name":"z","status":"completed","conclusion":"failure","html_url":"","completed_at":null}"#;
+    let gh = fake_gh_pages(dir.path(), &[""], &[ok, bad]);
+    let st = commit_checks(&gh, dir.path(), "o/r", "abc1234", &|_| {}).unwrap();
+    assert_eq!(st.state, CommitState::Fail);
+    assert_eq!(st.failed[0].name, "z");
 }

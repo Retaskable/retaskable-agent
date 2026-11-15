@@ -13,6 +13,8 @@ use super::*;
 use crate::engines::engine::{test_config, test_result};
 use crate::test_support::write_executable;
 
+mod answers;
+mod checks;
 mod fix;
 mod merge;
 mod press;
@@ -104,7 +106,7 @@ echo "$*" >> "{d}/gh.log"
 case "$*" in
   "pr list"*) cat "{d}/list.json" ;;
   "api repos/o/r/commits/"*"/status?"*) f="{d}/$(echo "$2" | cut -d/ -f5).status"; [ -f "$f" ] && cat "$f" || {{ echo "HTTP 403" >&2; exit 1; }} ;;
-  "api repos/o/r/commits/"*"/check-runs?"*) f="{d}/$(echo "$2" | cut -d/ -f5).runs"; [ -f "$f" ] && cat "$f" || echo '[]' ;;
+  "api repos/o/r/commits/"*"/check-runs?"*) f="{d}/$(echo "$2" | cut -d/ -f5).runs"; [ -f "$f" ] && cat "$f" ;;
   "api user"*) [ -f "{d}/login" ] && cat "{d}/login" || exit 1 ;;
   "pr checks "*) cat "{d}/checks-$3.json" ;;
   "run view"*) echo "error: boom in the build" ;;
@@ -121,7 +123,8 @@ exit 0
 
 pub(super) fn pull(number: u64, branch: &str, head: &str) -> Value {
     json!({ "number": number, "title": format!("Title {number}"), "url": format!("https://github.com/o/r/pull/{number}"),
-        "headRefName": branch, "headRefOid": head, "mergeable": "MERGEABLE", "author": { "login": "ann" } })
+        "headRefName": branch, "headRefOid": head, "mergeable": "MERGEABLE", "author": { "login": "ann" },
+        "isCrossRepository": false })
 }
 
 pub(super) fn run_json(name: &str, status: &str, conclusion: Option<&str>) -> Value {
@@ -129,10 +132,11 @@ pub(super) fn run_json(name: &str, status: &str, conclusion: Option<&str>) -> Va
         "html_url": format!("https://github.com/o/r/actions/runs/42/job/{name}"), "completed_at": "2026-11-01T10:05:00Z" })
 }
 
-/// A head's check runs, as `gh api ... --jq .check_runs` prints them.
+/// A head's check runs, as `gh api ... --jq '.check_runs[]'` prints them: one object per line.
 pub(super) fn head_is(dir: &Path, sha: &str, runs: Vec<Value>) {
-    std::fs::write(dir.join(format!("{sha}.status")), "[]").unwrap();
-    std::fs::write(dir.join(format!("{sha}.runs")), Value::Array(runs).to_string()).unwrap();
+    std::fs::write(dir.join(format!("{sha}.status")), "").unwrap();
+    let lines: Vec<String> = runs.iter().map(Value::to_string).collect();
+    std::fs::write(dir.join(format!("{sha}.runs")), lines.join("\n")).unwrap();
 }
 
 pub(super) fn red(dir: &Path, sha: &str) {
@@ -219,9 +223,13 @@ pub(super) struct Rig {
     pub logins: LoginCache,
     /// The heads something is under way on.
     pub fixing: Fixing,
+    /// The pass holds its write steps.
+    pub hold_writes: bool,
     /// The checkout `gh` and git run in; the rig's own folder until a test makes a repo.
     pub repo: Option<PathBuf>,
     pub git: host::GitCommand,
+    /// `with_repo`'s branch tip: the sha a fix is judged at.
+    pub tip: String,
 }
 
 impl Rig {
@@ -245,8 +253,10 @@ impl Rig {
             allow: Vec::new(),
             logins: LoginCache::default(),
             fixing: Fixing::default(),
+            hold_writes: false,
             repo: None,
             git: Arc::new(crate::test_support::git),
+            tip: String::new(),
         }
     }
 
@@ -275,6 +285,7 @@ impl Rig {
             items: &self.items,
             allow: &self.allow,
             fixing: &self.fixing,
+            hold_writes: self.hold_writes,
             logins: &self.logins,
             bell: &bell,
             now,

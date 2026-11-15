@@ -630,9 +630,9 @@ impl Machine {
             if self.acts(&self.projects[i]) {
                 self.projects[i].backlog_items = Some(items.len());
             }
-            if self.projects[i].mode == OrchestratorMode::Runs {
-                self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
-            }
+            // The whole board's branches in both modes (TS reads the whole board too): an item another computer holds is
+            // not this one's to judge, fix or merge main into.
+            self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
             if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());

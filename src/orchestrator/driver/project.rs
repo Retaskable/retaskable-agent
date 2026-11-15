@@ -312,8 +312,8 @@ pub struct ProjectLoop {
     /// How many items the backlog held when this project was last read; `None` before a read has gone through, so
     /// nothing that needs an empty backlog (the trial plan) takes an unread one for empty.
     pub(super) backlog_items: Option<usize>,
-    /// The branches of the items and pieces the store listed when this project was last read, kept in `runs` mode,
-    /// where no item is held here: the CI watcher leaves their pull requests alone.
+    /// The branches of every item and piece the store listed when this project was last read, whoever holds them (in
+    /// `runs` mode none is held here): the CI watcher leaves their pull requests alone.
     pub(super) listed_branches: std::collections::HashSet<String>,
     /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
     pub(super) file_project: ProjectConfig,

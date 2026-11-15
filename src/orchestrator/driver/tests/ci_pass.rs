@@ -51,7 +51,7 @@ impl CiHost for Gh {
     fn merge_main(&self, _: u64, _: &str) -> bool {
         false
     }
-    fn fix_tree(&self, _: u64, _: &str) -> anyhow::Result<crate::ci_fix::FixTree> {
+    fn fix_tree(&self, _: u64, _: &str, _: &str) -> anyhow::Result<crate::ci_fix::FixTree> {
         anyhow::bail!("no worktree")
     }
 }
@@ -162,7 +162,7 @@ fn token() -> Option<String> {
 async fn a_computer_that_is_not_the_runner_lists_nothing() {
     let (mut rig, host, watch, seen) = rig_watching(vec![pull(1, "feat/a")]).await;
     let lp = rig.lp(0);
-    lp.ci_pass(&watch, false, token(), false, Instant::now());
+    lp.ci_pass(&watch, false, token(), false, false, Instant::now());
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 0);
     assert!(facts(&seen).is_empty());
@@ -172,7 +172,7 @@ async fn a_computer_that_is_not_the_runner_lists_nothing() {
 async fn the_runner_sends_each_pull_requests_facts_with_may_push_false() {
     let (mut rig, host, watch, seen) = rig_watching(vec![pull(1, "feat/a"), pull(2, "feat/b")]).await;
     let lp = rig.lp(0);
-    lp.ci_pass(&watch, true, token(), false, Instant::now());
+    lp.ci_pass(&watch, true, token(), false, false, Instant::now());
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 1);
     let sent = facts(&seen);
@@ -189,15 +189,15 @@ async fn nothing_runs_without_the_backlog_link_or_the_repos_id_or_while_stopping
     let (mut rig, host, watch, _) = rig_watching(vec![pull(1, "feat/a")]).await;
     let now = Instant::now();
     let lp = rig.lp(0);
-    lp.ci_pass(&watch, true, None, false, now);
-    lp.ci_pass(&watch, true, token(), true, now);
+    lp.ci_pass(&watch, true, None, false, false, now);
+    lp.ci_pass(&watch, true, token(), true, false, now);
     lp.repo = None;
-    lp.ci_pass(&watch, true, token(), false, now);
+    lp.ci_pass(&watch, true, token(), false, false, now);
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 0);
     // None of those spent the 2 minutes: the runner looks as soon as it can.
     lp.repo = Some(7);
-    lp.ci_pass(&watch, true, token(), false, now);
+    lp.ci_pass(&watch, true, token(), false, false, now);
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 1);
 }
@@ -209,17 +209,17 @@ async fn a_pass_looks_at_most_every_two_minutes_and_never_two_at_once() {
     let (release, hold) = mpsc::channel();
     *host.hold.lock().unwrap() = Some(hold);
     let lp = rig.lp(0);
-    lp.ci_pass(&watch, true, token(), false, t0);
+    lp.ci_pass(&watch, true, token(), false, false, t0);
     // Still running three minutes on: no second one beside it.
-    lp.ci_pass(&watch, true, token(), false, t0 + Duration::from_secs(180));
+    lp.ci_pass(&watch, true, token(), false, false, t0 + Duration::from_secs(180));
     release.send(()).unwrap();
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 1);
     // The next one waits for two minutes after the last began.
-    lp.ci_pass(&watch, true, token(), false, t0 + Duration::from_secs(119));
+    lp.ci_pass(&watch, true, token(), false, false, t0 + Duration::from_secs(119));
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 1);
-    lp.ci_pass(&watch, true, token(), false, t0 + Duration::from_secs(120));
+    lp.ci_pass(&watch, true, token(), false, false, t0 + Duration::from_secs(120));
     lp.ci_watch.finish().await;
     assert_eq!(host.listed.load(Ordering::SeqCst), 2);
 }
@@ -231,7 +231,7 @@ async fn a_retaskable_branch_a_board_item_owns_is_skipped_from_the_loops_items()
     let item = json!({ "id": "mine", "title": "Mine", "status": "claimed", "rank": 1, "branch": "retaskable/1-mine" });
     let lp = rig.lp(0);
     lp.items.insert("mine".into(), serde_json::from_value(item).unwrap());
-    lp.ci_pass(&watch, true, token(), false, Instant::now());
+    lp.ci_pass(&watch, true, token(), false, false, Instant::now());
     lp.ci_watch.finish().await;
     assert_eq!(*host.checked.lock().unwrap(), ["sha2"]);
     assert_eq!(facts(&seen).len(), 1);
@@ -306,5 +306,29 @@ async fn in_runs_mode_the_watcher_waits_for_a_read_of_the_backlog() {
     assert!(
         host.checked.lock().unwrap().is_empty(),
         "the piece's branch is left alone"
+    );
+}
+
+#[tokio::test]
+async fn in_claim_mode_a_branch_an_item_held_by_another_computer_is_skipped() {
+    // The store lists the board: this computer holds none of it, and a pull request is on another one's branch.
+    let items = json!([{ "id": "theirs", "title": "Theirs", "status": "claimed", "rank": 1,
+        "branch": "retaskable/1-theirs", "claimedBy": "another-machine" }]);
+    let (base, _seen) = recording_store_listing(items).await;
+    let mut rig = rig(1, &[&base]);
+    rig.go_live();
+    let host = Arc::new(Host {
+        pulls: Mutex::new(vec![pull(1, "retaskable/1-theirs"), pull(2, "retaskable/2-nobody")]),
+        ..Default::default()
+    });
+    rig.machine.ci_watch = Some(Arc::new(Shared(host.clone())));
+    rig.machine.runners.flag("p0").store(true, Ordering::SeqCst);
+    rig.machine.pass().await;
+    rig.lp(0).ci_watch.finish().await;
+    assert_eq!(host.listed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *host.checked.lock().unwrap(),
+        ["sha2"],
+        "only the unowned branch is looked at"
     );
 }

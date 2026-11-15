@@ -153,6 +153,10 @@ pub enum CiNext {
         #[serde(default)]
         hung: bool,
     },
+    /// A `do` this agent doesn't know (a newer store's): nothing is run for the head, and the answer's logs and bells
+    /// still are. (TS fails the whole answer on one.)
+    #[serde(other)]
+    Unknown,
 }
 
 /// A bell line, shown word for word.

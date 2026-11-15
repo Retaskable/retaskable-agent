@@ -122,7 +122,8 @@ fn next_reads_each_instruction() {
             hung: true
         }
     );
-    assert!(serde_json::from_value::<CiNext>(json!({ "do": "rebase" })).is_err());
+    // A `do` it doesn't know is not an error: a newer store may say one.
+    assert_eq!(next(json!({ "do": "rebase" })), CiNext::Unknown);
 }
 
 #[tokio::test]

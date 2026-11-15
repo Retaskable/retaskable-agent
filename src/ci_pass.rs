@@ -56,7 +56,7 @@ pub trait Fixer: Send + Sync {
 /// pass's carry-out and by a Fix press until it ends. Shared by the pass and the presses, so neither runs a second one
 /// on the same head: that would double the attempts and could push twice.
 #[derive(Clone, Default)]
-pub struct Fixing(Arc<Mutex<HashSet<String>>>);
+pub struct Fixing(Arc<Mutex<HashSet<String>>>, Arc<Mutex<HashSet<String>>>);
 
 /// A head held in [`Fixing`]; let go when dropped, however the work ended.
 pub struct FixHold {
@@ -84,6 +84,19 @@ impl Fixing {
         })
     }
 
+    /// True the first time it is asked of `pr@sha` (a held write step is said once per head, not every 2 minutes).
+    fn first_held_note(&self, pr: u64, sha: &str) -> bool {
+        self.1.lock().unwrap_or_else(|e| e.into_inner()).insert(key(pr, sha))
+    }
+
+    /// Forgets the held-write notes of heads that are not `live` any more.
+    fn forget_held_notes(&self, live: &HashSet<String>) {
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k| live.contains(k));
+    }
+
     /// Whether something is under way on `pr@sha`.
     pub fn holds(&self, pr: u64, sha: &str) -> bool {
         self.set().contains(&key(pr, sha))
@@ -104,6 +117,11 @@ pub struct Pass<'a> {
     pub allow: &'a [String],
     /// The heads something is under way on, shared with the Fix presses.
     pub fixing: &'a Fixing,
+    /// Hold the write steps (`fix`, `mergeMain`): the project is paused, Claude is signed out or the fix engine is at
+    /// its limit. Judging and reruns go on. A deliberate divergence from the TS agent, whose pass has no such check
+    /// (`ciWatch.ts` `carryOut`) and so pushes and starts sessions through a pause. A Fix press is the owner's own
+    /// request and has its own gates (`fix_requests.rs`), so it never sets this.
+    pub hold_writes: bool,
     /// The signed-in login, kept once read.
     pub logins: &'a LoginCache,
     /// A bell line (title, body), word for word.
@@ -125,6 +143,16 @@ async fn checks_of(host: &Arc<dyn CiHost>, sha: String) -> Result<CiChecks> {
     tokio::task::spawn_blocking(move || host.checks(&sha)).await?
 }
 
+/// Whether a store error is about this one answer: refused (a 4xx) or unreadable (no status), so only that head is
+/// skipped. A store that can't be reached or is failing (a 5xx) would fail every pull request the same way, so
+/// that ends the pass.
+fn is_bad_answer(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<crate::backlog::BacklogError>(),
+        Some(crate::backlog::BacklogError::BadAnswer { status, .. }) if *status < 500
+    )
+}
+
 fn key(pr: u64, sha: &str) -> String {
     format!("{pr}@{sha}")
 }
@@ -139,15 +167,22 @@ impl Pass<'_> {
             .await?
             .context("listing the open pull requests")?;
         let mut read: Vec<(OpenPull, CiChecks, Option<u64>)> = Vec::new();
+        // Pull requests of this repository whose checks couldn't be read, and the first reason.
+        let (mut own, mut unread, mut why) = (0_usize, 0_usize, None);
         for p in pulls {
             if p.branch.starts_with("retaskable/") && self.items.contains(&p.branch) {
                 continue;
             }
+            own += usize::from(!p.cross_repository);
             // A fork's pull request, or a token without the scope, can't be read: that one is skipped, not the pass.
             let checks = match checks_of(&self.host, p.head.clone()).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::info!("ci watch: pull request #{} skipped: {e:#}", p.number);
+                    if !p.cross_repository {
+                        unread += 1;
+                        why.get_or_insert(format!("#{}: {e:#}", p.number));
+                    }
                     continue;
                 }
             };
@@ -162,9 +197,15 @@ impl Pass<'_> {
             };
             read.push((p, checks, pending_since));
         }
+        // Every pull request of this repository unreadable is an outage (a token without the scope, `gh` signed out), not
+        // quiet: the pass ends with it said, so the loop's warning shows it. The TS agent skips each one at info level.
+        if let Some(why) = why.filter(|_| own > 0 && unread == own) {
+            anyhow::bail!("the checks of none of the {own} open pull request(s) could be read (first: {why})");
+        }
         // Heads that moved on or closed are forgotten.
         let live: HashSet<String> = read.iter().map(|(p, ..)| key(p.number, &p.head)).collect();
         since.retain(|k, _| live.contains(k));
+        self.fixing.forget_held_notes(&live);
         // Many red in one pass is the machine, not their changes: a fact for the store to judge with.
         let red_now = read.iter().filter(|(_, c, _)| c.state == CiState::Fail).count() as u32;
         let mut found = 0;
@@ -196,14 +237,23 @@ impl Pass<'_> {
                 base_head,
                 did: None,
             };
-            let answer = self.send(&facts).await?;
+            let answer = match self.send(&facts).await {
+                Ok(a) => a,
+                // One answer this agent can't read is that pull request's: the others are still looked at. (The TS
+                // agent ends the pass, so one such answer blocks every pull request.) An unreachable store ends it.
+                Err(e) if is_bad_answer(&e) => {
+                    tracing::warn!("ci watch: pull request #{} skipped: {e:#}", p.number);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             found += u32::from(answer.found);
             let busy = matches!(
                 answer.next,
                 Some(CiNext::Judge { .. } | CiNext::Fix | CiNext::MergeMain)
             );
             if !busy {
-                self.carry_out(&facts, answer, since).await?;
+                self.carried(&facts, answer, since).await?;
                 continue;
             }
             // `withFixing`: the head is held for the carry-out and let go after it, a failed one too. A press that took
@@ -212,7 +262,7 @@ impl Pass<'_> {
                 tracing::info!("ci watch: pull request #{} has a fix under way, left alone", p.number);
                 continue;
             };
-            self.carry_out(&facts, answer, since).await?;
+            self.carried(&facts, answer, since).await?;
         }
         Ok(found)
     }
@@ -220,14 +270,19 @@ impl Pass<'_> {
     /// Whether the agent may push to the pull request's branch (`may_push_to`). The login is read (on a blocking
     /// thread) only when the pull request lists an author and none is kept yet; a failed read is no own account.
     async fn may_push(&self, p: &OpenPull) -> bool {
-        // Never a fork's pull request, whoever opened it or whatever its branch is called: `origin` is not where its
-        // branch lives, so a push by name could land on an unrelated branch of the same name. A deliberate divergence
-        // from the TS agent, which has this hole (a Retaskable.com issue is to follow); `may_push_to` is unchanged.
-        if p.cross_repository {
-            return false;
-        }
-        let own = if p.author.is_some() { self.login().await } else { None };
-        may_push_to(&p.branch, p.author.as_deref(), own.as_deref(), self.allow)
+        // A fork's is never pushed to (`may_push_to`), so its login need not be read.
+        let own = if p.author.is_some() && !p.cross_repository {
+            self.login().await
+        } else {
+            None
+        };
+        may_push_to(
+            &p.branch,
+            p.author.as_deref(),
+            own.as_deref(),
+            self.allow,
+            p.cross_repository,
+        )
     }
 
     async fn login(&self) -> Option<String> {
@@ -244,6 +299,17 @@ impl Pass<'_> {
             .ci_result(self.repo, self.token, facts)
             .await
             .with_context(|| format!("ci_result for pull request #{}", facts.pr))
+    }
+
+    /// [`Self::carry_out`] for one head: a bad answer ends that head's carry-out only, an unreachable store the pass.
+    async fn carried(&self, facts: &CiFacts, first: CiAnswer, since: &mut HashMap<String, u64>) -> Result<()> {
+        match self.carry_out(facts, first, since).await {
+            Err(e) if is_bad_answer(&e) => {
+                tracing::warn!("ci watch: pull request #{} left as it is: {e:#}", facts.pr);
+                Ok(())
+            }
+            done => done,
+        }
     }
 
     /// Writes what the store worded, runs what it said to run and says what happened, until it has nothing more.
@@ -279,8 +345,8 @@ impl Pass<'_> {
     /// in the TS agent's `git.ts`). False for a failed session, uncommitted work, no commit, a refused push or any failure.
     async fn fix(&self, facts: &CiFacts) -> bool {
         let host = self.host.clone();
-        let (pr, branch) = (facts.pr, facts.branch.clone());
-        let opened = tokio::task::spawn_blocking(move || host.fix_tree(pr, &branch)).await;
+        let (pr, branch, sha) = (facts.pr, facts.branch.clone(), facts.sha.clone());
+        let opened = tokio::task::spawn_blocking(move || host.fix_tree(pr, &branch, &sha)).await;
         let tree = match opened {
             Ok(Ok(tree)) => tree,
             Ok(Err(e)) => {
@@ -324,6 +390,16 @@ impl Pass<'_> {
                 }
                 Some(CiDid::Rerun { rerun, ok })
             }
+            // Paused, signed out or at the limit: nothing is pushed or started and nothing said; the store asks again.
+            CiNext::Fix | CiNext::MergeMain if self.hold_writes => {
+                if self.fixing.first_held_note(facts.pr, &facts.sha) {
+                    tracing::info!(
+                        "ci watch: pull request #{} waits: the project is paused, Claude is signed out or the engine is at its limit",
+                        facts.pr
+                    );
+                }
+                None
+            }
             // The store never asks for this where it may not push, so a head it may not push to is refused here too
             // (the TS agent doesn't check): nothing is run and nothing said, the carry-out ends.
             CiNext::MergeMain if !facts.may_push => {
@@ -340,6 +416,14 @@ impl Pass<'_> {
                     .await
                     .unwrap_or(false);
                 Some(CiDid::MergeMain { pushed })
+            }
+            // A `do` this agent doesn't know: nothing is run and nothing said, the carry-out for this head ends.
+            CiNext::Unknown => {
+                tracing::warn!(
+                    "ci watch: the store said something to do for pull request #{} that this agent doesn't know, left alone",
+                    facts.pr
+                );
+                None
             }
             // Never run where the computer may not push, as for `mergeMain`.
             CiNext::Fix if !facts.may_push => {
