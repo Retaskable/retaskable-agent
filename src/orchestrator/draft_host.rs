@@ -203,8 +203,12 @@ impl DraftHost for ClaudeDrafts {
         }
     }
 
-    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()> {
-        let method = land::workflow(project).method_flag;
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool, squash: bool) -> Result<()> {
+        let method = if squash {
+            "--squash"
+        } else {
+            land::workflow(project).method_flag
+        };
         land::merge_pr(&self.gh(), Path::new(&project.repo_path), pr, method, delete_branch)
     }
 
