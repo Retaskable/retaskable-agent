@@ -135,6 +135,8 @@ pub fn update_from_base(
         if files.is_empty() {
             merged?;
         }
+        // Left as it was, as `updateFromBase` does (`git merge --abort`); the worktree goes next either way.
+        let _ = run(git, &dir, &["merge", "--abort"]);
         return Ok(Update::Conflict { files });
     }
     let head = run(git, &dir, &["rev-parse", "HEAD"])?;

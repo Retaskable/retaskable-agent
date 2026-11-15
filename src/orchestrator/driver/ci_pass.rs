@@ -1,4 +1,4 @@
-//! The CI watcher's pass on a project's loop (docs/specs/ci-watch-through-store.md section 3, item 2, report only):
+//! The CI watcher's pass on a project's loop (docs/specs/ci-watch-through-store.md section 3, item 2):
 //! at most every 2 minutes, on the computer the store names as the project's rollout runner and only with the shared
 //! backlog linked, one pass over the open pull requests runs in the background (`crate::ci_pass`), one at a time.
 //! A paused project still watches (like the TS agent's `maybeWatchCi`, called before its pause check).
@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use super::project::ProjectLoop;
 use crate::backlog::ci_result::CiVerdict;
 use crate::ci_pass::{CiHost, EVERY, Judge, Pass};
+use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
 
 /// What the pass needs from this computer besides the store: the code host, the judge's session and the bell.
@@ -56,6 +57,8 @@ pub(super) struct State {
     task: Option<JoinHandle<()>>,
     /// When each head was first seen pending (`pr@sha`, ms), kept between passes.
     since: Arc<Mutex<HashMap<String, u64>>>,
+    /// The signed-in login, kept once read (a failed read is read again on the next pass).
+    login: Arc<LoginCache>,
 }
 
 #[cfg(test)]
@@ -97,17 +100,18 @@ impl ProjectLoop {
         }
         state.looked = Some(now);
         let items: HashSet<String> = self.items.values().filter_map(|i| i.branch.clone()).collect();
-        let (client, project, since, id) = (
+        let (client, project, since, login, id) = (
             self.client.clone(),
             self.project.clone(),
             state.since.clone(),
+            state.login.clone(),
             self.id.clone(),
         );
         let (host, watch) = (watch.code_host(&project), watch.clone());
         state.task = Some(tokio::spawn(async move {
             let judge = ProjectJudge {
                 host: watch.clone(),
-                project,
+                project: project.clone(),
             };
             let pass = Pass {
                 host,
@@ -116,6 +120,8 @@ impl ProjectLoop {
                 repo,
                 token: Some(&token),
                 items: &items,
+                allow: &project.ci_watch_allow,
+                logins: &login,
                 bell: &|title, body| watch.bell(title, body),
                 now: now_ms(),
             };

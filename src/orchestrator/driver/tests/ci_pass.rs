@@ -42,6 +42,15 @@ impl CiHost for Gh {
     fn rerun(&self, _: u64, _: bool) -> bool {
         false
     }
+    fn login(&self) -> Option<String> {
+        None
+    }
+    fn base_head(&self) -> Option<String> {
+        None
+    }
+    fn merge_main(&self, _: u64, _: &str) -> bool {
+        false
+    }
 }
 
 /// The fake [`CiWatchHost`]: `Host` behind an `Arc`, so the fake code host and the test see the same counts.
@@ -73,6 +82,7 @@ fn pull(number: u64, branch: &str) -> OpenPull {
         head: format!("sha{number}"),
         author: None,
         mergeable: None,
+        cross_repository: false,
     }
 }
 

@@ -40,6 +40,7 @@ fn pull(author: Option<&str>) -> OpenPull {
         head: "abc".into(),
         author: author.map(str::to_string),
         mergeable: None,
+        cross_repository: false,
     }
 }
 
@@ -80,7 +81,7 @@ fn the_login_is_not_read_for_a_pull_request_with_no_author() {
 
 const PULLS: &str = r#"[
  {"number":1,"title":"Mine","url":"https://github.com/o/r/pull/1","headRefName":"feat/a","headRefOid":"aaa1111","mergeable":"CONFLICTING","author":{"login":"ann"}},
- {"number":2,"title":"Fork","url":"u2","headRefName":"patch-1","headRefOid":"bbb2222","mergeable":"MERGEABLE","author":{"login":"zed"}},
+ {"number":2,"title":"Fork","url":"u2","headRefName":"patch-1","headRefOid":"bbb2222","mergeable":"MERGEABLE","author":{"login":"zed"},"isCrossRepository":true},
  {"number":3,"title":"No head","url":"u3","headRefName":"x","headRefOid":"","mergeable":"UNKNOWN","author":null},
  {"number":4,"title":"Bot","url":"u4","headRefName":"retaskable/4-y","headRefOid":"ddd4444","mergeable":"","author":{"login":""},"future":1}
 ]"#;
@@ -99,6 +100,10 @@ fn the_list_keeps_what_the_watcher_reads_forks_included_and_skips_headless_ones(
         (got[1].branch.as_str(), got[1].author.as_deref()),
         ("patch-1", Some("zed"))
     );
+    assert_eq!(
+        got.iter().map(|p| p.cross_repository).collect::<Vec<_>>(),
+        [false, true, false]
+    );
     assert!(parse_open_pulls("[]").unwrap().is_empty());
     assert!(parse_open_pulls("nope").is_err());
 }
@@ -109,7 +114,7 @@ fn open_pulls_asks_gh_for_the_open_ones_into_the_base() {
     let dir = tempfile::tempdir().unwrap();
     let gh = dir.path().join("fake_gh.sh");
     let script = format!(
-        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\ncase \"$*\" in\n\"pr list --repo o/r --base main --state open --limit 100 --json number,title,url,headRefName,headRefOid,mergeable,author\") cat <<'EOF'\n{PULLS}\nEOF\n;;\n*) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n"
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\ncase \"$*\" in\n\"pr list --repo o/r --base main --state open --limit 100 --json number,title,url,headRefName,headRefOid,mergeable,author,isCrossRepository\") cat <<'EOF'\n{PULLS}\nEOF\n;;\n*) echo \"unexpected: $*\" >&2; exit 1;;\nesac\n"
     );
     crate::test_support::write_executable(&gh, &script);
     let got = open_pulls(&gh, dir.path(), "o/r", "main", &|_| {}).unwrap();
