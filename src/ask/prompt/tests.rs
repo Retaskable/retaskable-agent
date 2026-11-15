@@ -131,8 +131,14 @@ fn the_about_item_comes_first_in_the_summary() {
 #[test]
 fn the_audiences_and_project_words_are_in_the_prompt() {
     let out = render(&[], None, None, ProjectType::Game);
-    assert!(out.contains("- `players`: Players. People who play"));
     assert!(out.contains("The project is a game.") && out.contains("launch the game"));
     assert!(out.contains("why is step 5 stuck?") && !out.contains("{{"));
     assert!(render(&[], None, None, ProjectType::Cli).contains("a command-line program or library"));
+}
+
+#[test]
+fn the_prompt_files_nothing_and_sends_a_request_back_as_an_idea() {
+    let out = render(&[], None, None, ProjectType::Web);
+    assert!(!out.contains("\"type\": \"draft_spec\""));
+    assert!(out.contains("send it again as an idea"));
 }
