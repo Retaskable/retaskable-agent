@@ -291,6 +291,7 @@ pub struct ProjectLoop {
     pub(super) asks: super::asks::Asks,
     /// Items taken over from another computer, and the rows asking for it (`take_overs.rs`).
     pub(super) take_overs: super::take_overs::Pulling,
+    pub(super) finishing: super::finish_steps::Finishing,
     /// The expert sessions (`experts.rs`).
     pub(super) experts: super::experts::Experts,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
@@ -375,6 +376,7 @@ impl ProjectLoop {
             claude_pending: Default::default(),
             asks: Default::default(),
             take_overs: Default::default(),
+            finishing: Default::default(),
             experts: Default::default(),
             trial: None,
             backlog_items: 0,

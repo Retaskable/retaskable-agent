@@ -24,6 +24,7 @@ mod decisions;
 mod deprecations;
 mod drafts;
 mod experts;
+mod finish_steps;
 mod fix_main;
 mod held_items;
 mod host_calls;
