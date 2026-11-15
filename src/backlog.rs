@@ -12,6 +12,7 @@
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
 pub mod audiences;
+pub mod ci_result;
 pub mod complete;
 pub mod decisions;
 pub mod deploy;
