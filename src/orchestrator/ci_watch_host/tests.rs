@@ -67,6 +67,7 @@ fn the_bell_is_logged_not_shown() {
         Default::default(),
         LocalModel::off(),
         Sessions::default(),
+        300,
     );
     host.bell("Pull request #1 is red", "Title (at abc)");
 }

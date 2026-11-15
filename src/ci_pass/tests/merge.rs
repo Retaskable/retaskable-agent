@@ -5,15 +5,15 @@ use std::process::Command;
 use super::*;
 use crate::test_support::{git as tgit, repo_with_origin, run as trun, write_executable};
 
-const BRANCH: &str = "retaskable/9-x";
+pub(super) const BRANCH: &str = "retaskable/9-x";
 
-fn commit_file(repo: &Path, name: &str, text: &str) {
+pub(super) fn commit_file(repo: &Path, name: &str, text: &str) {
     std::fs::write(repo.join(name), text).unwrap();
     trun(tgit(repo).args(["add", name]));
     trun(tgit(repo).args(["commit", "--quiet", "-m", name]));
 }
 
-fn rev(dir: &Path, r: &str) -> String {
+pub(super) fn rev(dir: &Path, r: &str) -> String {
     let out = tgit(dir).args(["rev-parse", r]).output().unwrap();
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
@@ -21,7 +21,7 @@ fn rev(dir: &Path, r: &str) -> String {
 impl Rig {
     /// A repo with an origin that refuses a non-fast-forward, `BRANCH` on it with a change of its own and `main` moved on
     /// (one new file); git runs through a wrapper logging to `git.log`. Answers the origin's folder.
-    fn with_repo(&mut self) -> PathBuf {
+    pub(super) fn with_repo(&mut self) -> PathBuf {
         let repo = repo_with_origin(&self.dir.path().join("git"));
         let origin = repo.parent().unwrap().join("origin.git");
         trun(tgit(&origin).args(["config", "receive.denyNonFastForwards", "true"]));
@@ -49,7 +49,7 @@ impl Rig {
         origin
     }
 
-    fn git_log(&self) -> Vec<String> {
+    pub(super) fn git_log(&self) -> Vec<String> {
         std::fs::read_to_string(self.dir.path().join("git.log"))
             .unwrap_or_default()
             .lines()
@@ -74,25 +74,25 @@ fn green_head(rig: &Rig, sha: &str) {
     );
 }
 
-fn pull_by(number: u64, branch: &str, author: &str, mergeable: &str) -> Value {
+pub(super) fn pull_by(number: u64, branch: &str, author: &str, mergeable: &str) -> Value {
     let mut p = pull(number, branch, &format!("sha{number}"));
     p["author"] = json!({ "login": author });
     p["mergeable"] = json!(mergeable);
     p
 }
 
-fn list_and_green(rig: &Rig, pulls: Vec<Value>) {
+pub(super) fn list_and_green(rig: &Rig, pulls: Vec<Value>) {
     for p in &pulls {
         green_head(rig, p["headRefOid"].as_str().unwrap());
     }
     list(rig.dir.path(), pulls);
 }
 
-/// The store asks for `mergeMain` on a head's first answer, then is green.
-fn asks_merge_main(rig: &Rig) {
-    rig.store.answers(|a| {
+/// The store asks for `kind` (`mergeMain`, `fix`) on a head's first answer, then is green.
+pub(super) fn asks(rig: &Rig, kind: &'static str) {
+    rig.store.answers(move |a| {
         if a["did"].is_null() {
-            tell(json!({ "do": "mergeMain" }))
+            tell(json!({ "do": kind }))
         } else {
             green()
         }
@@ -187,7 +187,7 @@ async fn merge_main_merges_and_pushes_the_branch_plainly_and_says_pushed() {
     let origin = rig.with_repo();
     let before = rev(&origin, BRANCH);
     list_and_green(&rig, vec![pull_by(9, BRANCH, "stranger", "CONFLICTING")]);
-    asks_merge_main(&rig);
+    asks(&rig, "mergeMain");
     let mut since = HashMap::new();
     rig.pass(&mut since, 0).await.unwrap();
     let sent = rig.store.sent("ci_result");
@@ -248,7 +248,7 @@ async fn a_merge_that_conflicts_is_aborted_pushes_nothing_and_says_not_pushed() 
     conflict_on_c(&rig);
     let before = rev(&origin, BRANCH);
     list_and_green(&rig, vec![pull_by(9, BRANCH, "stranger", "CONFLICTING")]);
-    asks_merge_main(&rig);
+    asks(&rig, "mergeMain");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     let sent = rig.store.sent("ci_result");
     assert_eq!(sent[1]["did"], json!({ "kind": "mergeMain", "pushed": false }));
@@ -266,7 +266,7 @@ async fn a_merge_that_fails_part_way_says_not_pushed() {
     let before = rev(&origin, BRANCH);
     // A branch that isn't on origin (a fork's, say): there is nothing to check out.
     list_and_green(&rig, vec![pull_by(9, "retaskable/9-gone", "stranger", "CONFLICTING")]);
-    asks_merge_main(&rig);
+    asks(&rig, "mergeMain");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
@@ -283,7 +283,7 @@ async fn a_head_it_may_not_push_to_is_never_merged_even_if_the_store_asks() {
     let origin = rig.with_repo();
     let before = rev(&origin, "feat/x");
     list_and_green(&rig, vec![pull_by(9, "feat/x", "stranger", "CONFLICTING")]);
-    asks_merge_main(&rig);
+    asks(&rig, "mergeMain");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     // Nothing was run and no `did` sent: the carry-out ended.
     assert_eq!(rig.store.sent("ci_result").len(), 1);
@@ -356,7 +356,7 @@ async fn a_fork_is_never_pushed_to_whoever_opened_it_or_whatever_its_branch_is_c
         ],
     );
     // The store asks for a merge on every head.
-    asks_merge_main(&rig);
+    asks(&rig, "mergeMain");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     let sent = rig.store.sent("ci_result");
     for pr in 1..=4 {

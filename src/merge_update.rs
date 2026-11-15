@@ -82,11 +82,15 @@ struct Throwaway<'a> {
 
 impl Throwaway<'_> {
     fn clear(&self) {
-        let dir = self.dir.to_string_lossy();
-        let _ = run(self.git, self.repo, &["worktree", "remove", "--force", &dir]);
-        let _ = std::fs::remove_dir_all(&self.dir);
-        let _ = run(self.git, self.repo, &["worktree", "prune"]);
+        clear_worktree(self.git, self.repo, &self.dir);
     }
+}
+
+/// Removes a throwaway worktree of `repo` and what is left of its folder, then prunes; every step is best effort.
+pub(crate) fn clear_worktree(git: Git, repo: &Path, dir: &Path) {
+    let _ = run(git, repo, &["worktree", "remove", "--force", &dir.to_string_lossy()]);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = run(git, repo, &["worktree", "prune"]);
 }
 
 impl Drop for Throwaway<'_> {
