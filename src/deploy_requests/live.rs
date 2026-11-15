@@ -6,17 +6,18 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
-use super::{DeployRequests, Deps, Outcome, RunError};
+use super::{DeployRequests, Deps, Outcome, RunError, done};
 use crate::backlog::Client;
 use crate::backlog::deploy::{DeployKind, DeployRequest, Finish};
 use crate::config::ProjectConfig;
 use crate::link::TokenStore;
 use crate::view::{PauseState, StorePause, StorePauseState};
 
-/// The kinds this computer can run. None yet: the Rust agent has no TestFlight build, promote, hosting read or go-live
-/// prepare of its own (docs/specs/agent/deploy-requests.md section 5), so it claims nothing, and claiming a request it
-/// can't run would be declining on the site's behalf. Add a kind here with its arm in [`Live::run`].
-pub const PORTED: &[DeployKind] = &[];
+/// The kinds this computer can run: the hosting read so far. The Rust agent has no TestFlight build, promote or go-live
+/// prepare of its own yet (docs/specs/agent/deploy-requests.md section 5), so it leaves those to a computer that has,
+/// and claiming a request it can't run would be declining on the site's behalf. Add a kind here with its arm in
+/// [`Live::run`].
+pub const PORTED: &[DeployKind] = &[DeployKind::Hosting];
 
 /// Kinds a paused project neither builds nor pushes (`testflight_build` and `promote`): the rest are reads and the
 /// go-live item.
@@ -51,6 +52,12 @@ impl Live {
         Ok((repo, token))
     }
 
+    /// Whether this computer holds a link to the backlog store (`o.hosted` in the TypeScript): the hosting kinds need
+    /// nothing else of it.
+    fn linked(&self) -> bool {
+        matches!(self.keychain.get(&self.backlog_url), Ok(Some(_)))
+    }
+
     pub(super) fn paused(&self) -> bool {
         let id = self.project.id_or_derived();
         self.paused.reason(&id).is_some() || matches!(self.store_paused.get(&id), StorePause::Paused(_))
@@ -77,7 +84,11 @@ impl Deps for Live {
     }
 
     async fn can(&self, r: &DeployRequest) -> bool {
-        PORTED.contains(&r.kind) && !(waits_while_paused(r.kind) && self.paused())
+        PORTED.contains(&r.kind)
+            && !(waits_while_paused(r.kind) && self.paused())
+            && !self.project.github_repo.is_empty()
+            && !self.project.repo_path.is_empty()
+            && self.linked()
     }
 
     async fn claim(&self, id: &str) -> Result<bool, String> {
@@ -105,11 +116,14 @@ impl Deps for Live {
     }
 
     async fn run(&self, r: &DeployRequest) -> Result<Outcome, RunError> {
-        // Unreachable while PORTED is empty: `can` never says yes to a kind without an arm here.
-        Err(RunError::Failed(format!(
-            "this computer can't run {} yet",
-            r.kind.name()
-        )))
+        match r.kind {
+            DeployKind::Hosting => Ok(done(crate::hosting::read(&self.project).await)),
+            // Unreachable: `can` never says yes to a kind without an arm here.
+            _ => Err(RunError::Failed(format!(
+                "this computer can't run {} yet",
+                r.kind.name()
+            ))),
+        }
     }
 }
 

@@ -39,6 +39,7 @@ pub mod hello_settings;
 pub mod host_call;
 #[cfg(all(test, unix))]
 mod host_call_sites_tests;
+pub mod hosting;
 pub mod ideas;
 pub mod implementer;
 pub mod intents;

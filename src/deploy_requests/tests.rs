@@ -321,6 +321,8 @@ fn live(base: &str, token: Option<&str>) -> Live {
     Live {
         project: ProjectConfig {
             id: Some("proj".into()),
+            github_repo: "ann/site".into(),
+            repo_path: "site".into(),
             ..Default::default()
         },
         machine: "a-pc".into(),
@@ -352,15 +354,59 @@ async fn without_a_link_to_the_store_nothing_is_read_or_claimed() {
 }
 
 #[tokio::test]
-async fn no_kind_is_claimable_until_its_runner_is_ported() {
+async fn only_the_ported_kinds_are_claimable() {
     let l = live("http://127.0.0.1:1", Some("tok"));
     for kind in DeployKind::ALL {
         assert_eq!(l.can(&request("dr-1", kind)).await, PORTED.contains(&kind), "{kind:?}");
     }
-    assert!(
-        PORTED.is_empty(),
-        "adding a kind needs its arm in Live::run and its tests"
+    assert_eq!(
+        PORTED,
+        [DeployKind::Hosting],
+        "a kind joins with its arm in Live::run and its tests"
     );
+}
+
+#[tokio::test]
+async fn hosting_needs_only_the_project_and_a_link_to_the_store() {
+    let hosting = request("dr-1", DeployKind::Hosting);
+    assert!(live("http://127.0.0.1:1", Some("tok")).can(&hosting).await);
+    // No link to the store: nothing to report to, so it is left to a computer that has one.
+    assert!(!live("http://127.0.0.1:1", None).can(&hosting).await);
+    // No repo to read.
+    let mut bare = live("http://127.0.0.1:1", Some("tok"));
+    bare.project.repo_path.clear();
+    assert!(!bare.can(&hosting).await);
+    // A paused project still reads.
+    let paused = live("http://127.0.0.1:1", Some("tok"));
+    paused.paused.set("proj", Some("limit".into()));
+    assert!(paused.can(&hosting).await);
+}
+
+#[tokio::test]
+async fn a_hosting_request_answers_the_scan_and_the_pick_and_writes_nothing() {
+    let (base, seen) = crate::backlog::tests::store(200, json!({ "value": {} })).await;
+    let mut l = live(&base, Some("tok"));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Dockerfile"), "FROM node\nEXPOSE 8080\n").unwrap();
+    l.project.repo_path = dir.path().to_string_lossy().into_owned();
+    // No repo name for `gh` to look up: visibility unknown, so not public.
+    l.project.github_repo.clear();
+    l.project.project_type = crate::config::ProjectType::Web;
+    let out = l.run(&request("dr-1", DeployKind::Hosting)).await.unwrap();
+    assert_eq!(out.status, Finish::Done);
+    assert_eq!(
+        Value::Object(checked_result(out.result).unwrap()),
+        json!({
+            "project": { "type": "web", "public": false, "backEnd": true, "app": null },
+            "pick": {
+                "shape": "backEnd",
+                "default": "cloudflare-workers",
+                "alternatives": ["render", "cloud-run"],
+                "database": { "default": "cloudflare-d1", "alternatives": ["supabase", "neon", "turso"] },
+            },
+        })
+    );
+    assert!(seen.lock().unwrap().is_empty(), "a read sends the store nothing");
 }
 
 #[test]
