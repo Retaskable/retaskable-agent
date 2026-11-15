@@ -158,5 +158,7 @@ pub fn gh_reason(err: &anyhow::Error) -> String {
     after.trim().chars().take(300).collect()
 }
 
+pub mod main_pr;
+
 #[cfg(test)]
 mod tests;

@@ -946,6 +946,7 @@ mod idea_accept;
 mod lane_play;
 mod local_limit_fallback;
 mod local_one_slot;
+mod main_pr;
 mod main_sync;
 mod merge_item;
 mod model_caps;
