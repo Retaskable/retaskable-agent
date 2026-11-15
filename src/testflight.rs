@@ -14,7 +14,6 @@ pub fn testflight_running() -> bool {
 pub struct Running(());
 
 impl Running {
-    #[allow(dead_code)]
     pub fn begin() -> Self {
         RUNNING.fetch_add(1, Ordering::SeqCst);
         Self(())

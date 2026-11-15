@@ -277,7 +277,9 @@ fn describe(json: &Map<String, Value>) -> String {
     ["error_description", "error", "message"]
         .iter()
         .find_map(|k| {
+            // A null field says nothing (`??` in the TypeScript agent): the next one is tried.
             json.get(*k)
+                .filter(|v| !v.is_null())
                 .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
         })
         .unwrap_or_else(|| Value::Object(json.clone()).to_string())

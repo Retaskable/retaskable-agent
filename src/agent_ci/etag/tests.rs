@@ -74,11 +74,8 @@ fn a_host_get_sends_the_etag_back_and_a_304_is_the_cached_body() {
     let program = d.path().join("gh");
     crate::test_support::write_executable(
         &program,
-        &format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n*if-none-match*) printf 'HTTP/2.0 304 Not Modified\\r\\n\\r\\n'; exit 1;;\n\
-             *) printf 'HTTP/2.0 200 OK\\r\\nEtag: \"v1\"\\r\\n\\r\\n[\"body\"]';;\nesac\n",
-            d.path().join("calls.log").display()
-        ),
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\necho \"$*\" >> calls.log\ncase \"$*\" in\n*if-none-match*) printf 'HTTP/2.0 304 Not Modified\\r\\n\\r\\n'; exit 1;;\n\
+         *) printf 'HTTP/2.0 200 OK\\r\\nEtag: \"v1\"\\r\\n\\r\\n[\"body\"]';;\nesac\n",
     );
     let host = Host {
         program,
@@ -88,9 +85,10 @@ fn a_host_get_sends_the_etag_back_and_a_304_is_the_cached_body() {
     };
     assert_eq!(host.get_cached("repos/x/statuses").unwrap(), "[\"body\"]");
     assert_eq!(host.get_cached("repos/x/statuses").unwrap(), "[\"body\"]");
-    // `write_executable` runs the script once with no arguments to be sure it can start: that blank line is not a call.
     let calls = std::fs::read_to_string(d.path().join("calls.log")).unwrap();
-    let calls: Vec<&str> = calls.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(calls.len(), 2);
-    assert!(calls[1].contains("if-none-match: \"v1\""), "{calls:?}");
+    assert_eq!(calls.lines().count(), 2);
+    assert!(
+        calls.lines().nth(1).unwrap().contains("if-none-match: \"v1\""),
+        "{calls}"
+    );
 }
