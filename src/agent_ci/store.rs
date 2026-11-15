@@ -36,11 +36,16 @@ pub struct Claim<'a> {
     pub title: &'a str,
     pub author: &'a str,
     pub computer: &'a str,
+    /// How many checks this runner runs at once (`AGENT_CI_SLOTS`), for the Agents tab's "2 of 4 running"; 0 sends none.
+    pub slots: u32,
 }
 
 /// The `ci_claim` args, as the runner builds them (a push has no pull request).
 pub fn claim_args(c: &Claim) -> Value {
     let mut a = json!({ "sha": c.sha, "context": c.context, "event": c.event, "computer": c.computer });
+    if c.slots > 0 {
+        a["slots"] = json!(c.slots);
+    }
     if c.pr != 0 {
         a["pr"] = json!(c.pr);
     }
@@ -48,6 +53,15 @@ pub fn claim_args(c: &Claim) -> Value {
         if !v.is_empty() {
             a[k] = json!(v);
         }
+    }
+    a
+}
+
+/// The `ci_heartbeat` args: the lease's commit and context, and the runner's slots as a claim sends them.
+pub fn heartbeat_args(sha: &str, context: &str, slots: u32) -> Value {
+    let mut a = json!({ "sha": sha, "context": context });
+    if slots > 0 {
+        a["slots"] = json!(slots);
     }
     a
 }
