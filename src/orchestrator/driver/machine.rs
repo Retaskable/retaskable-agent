@@ -425,7 +425,7 @@ impl Machine {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
             }
-            let shared = Shared {
+            let mut shared = Shared {
                 links: &self.links,
                 local: &self.local,
                 claim_paused_until: &mut claim_paused_until,
@@ -440,6 +440,12 @@ impl Machine {
                     lp.id,
                     panic_message(&*panic)
                 );
+            }
+            // A person's Sync now: no session and no slot, and a pause doesn't hold it back. With no runner, `runs`
+            // mode asks for nothing.
+            if !self.run_starters.0.is_empty() {
+                shared.stopping = stopping;
+                lp.sync_now_pass(&shared).await;
             }
         }
     }
