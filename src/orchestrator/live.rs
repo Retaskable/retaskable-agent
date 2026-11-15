@@ -88,8 +88,6 @@ pub struct LiveState {
     /// In `runs` mode, the kinds of run this computer can take (`plan`, `build`, ...); empty with no runner.
     pub run_kinds: Vec<String>,
     pub projects: BTreeMap<String, ProjectLive>,
-    /// Agent CI's slot, Docker and discovery (agent-ci.md); `None` unless the `agent-ci` loop runs.
-    pub ci: Option<crate::agent_ci::CiLive>,
     /// How many sessions the shared pool allows at once (auto concurrency's number once it has stepped); 0 before a pass.
     pub concurrency: u32,
 }
@@ -154,7 +152,6 @@ impl LiveHandle {
                 mode,
                 run_kinds: Vec::new(),
                 projects: BTreeMap::new(),
-                ci: None,
                 concurrency: 0,
             })),
             sessions::Sessions::default(),
@@ -227,11 +224,6 @@ impl LiveHandle {
 
     pub fn snapshot(&self) -> LiveState {
         self.lock().clone()
-    }
-
-    /// The CI loop's poll writes its fields.
-    pub fn update_ci(&self, f: impl FnOnce(&mut crate::agent_ci::CiLive)) {
-        f(self.lock().ci.get_or_insert_default());
     }
 
     /// Registers a project's loop, so the page knows it runs before its first pass ends.

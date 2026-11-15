@@ -1,5 +1,5 @@
 //! The code host side of agent CI (docs/specs/agent-ci.md sections 3.3 and 3.5): commit statuses, reading them
-//! back, and the failure comment, all through `gh api` or `glab api`. The program is a parameter so tests use a
+//! back, and the failure's log comment, all through `gh api` or `glab api`. The program is a parameter so tests use a
 //! fake.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use crate::ci_watch::LOG_TAIL_LINES;
+use super::log_excerpt;
 
 // Copied from Retaskable.com's `.agent-ci/runner.mjs` (the TypeScript runner), so the orchestrator's wait is
 // unchanged: the contexts it posts, its `ME` (`agent-ci <computer>`) and its three descriptions.
@@ -27,11 +27,12 @@ pub fn running_text(me: &str) -> String {
     format!("{me}: running")
 }
 
-pub fn passed_text(me: &str, minutes: u64) -> String {
+/// `minutes` is the runner's text for it: tenths (`1.5`).
+pub fn passed_text(me: &str, minutes: &str) -> String {
     format!("{me}: passed in {minutes}m")
 }
 
-pub fn failed_text(me: &str, minutes: u64, last_error_line: &str) -> String {
+pub fn failed_text(me: &str, minutes: &str, last_error_line: &str) -> String {
     format!("{me}: failed in {minutes}m {}", last_error_line.trim())
 }
 
@@ -86,19 +87,13 @@ pub struct Host {
     pub dir: PathBuf,
 }
 
-/// The hidden marker that carries a check key in the failure comment.
-pub fn marker(key: &str) -> String {
-    format!("<!-- agent-ci-key:{key} -->")
-}
-
-/// The failure comment: its head names the check and short sha, then the last 120 log lines, then the marker.
-pub fn failure_comment(name: &str, sha: &str, key: &str, log: &str) -> String {
-    let lines: Vec<&str> = log.trim_end().lines().collect();
-    let tail = lines[lines.len().saturating_sub(LOG_TAIL_LINES)..]
-        .join("\n")
-        .replace("```", "'''");
+/// The failure comment, as the runner words it: its head names the check and short sha, then the log's failing
+/// lines and last lines.
+pub fn failure_comment(me: &str, sha: &str, log: &str) -> String {
+    let (lead, excerpt) = log_excerpt::comment_log_text(log);
     let short: String = sha.chars().take(8).collect();
-    format!("{name} failed on {short}.\n\n```\n{tail}\n```\n{}\n", marker(key))
+    let lines = excerpt.replace("```", "'''");
+    format!("{me} failed on {short}. {lead}\n\n```\n{lines}\n```\n")
 }
 
 fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
@@ -184,7 +179,7 @@ impl Host {
                 self.project()
             ),
         };
-        let v: Value = serde_json::from_str(&self.api("GET", &endpoint, &[])?)?;
+        let v: Value = serde_json::from_str(&self.get_cached(&endpoint)?)?;
         let rows = v.as_array().ok_or_else(|| anyhow!("statuses: not a list"))?;
         Ok(rows
             .iter()
@@ -208,35 +203,19 @@ impl Host {
             .collect())
     }
 
-    /// Comments the failure on the pull request (`pr`): edits this key's earlier comment if there is one, else
-    /// adds a new one.
-    pub fn post_failure_comment(&self, pr: u64, name: &str, sha: &str, key: &str, log: &str) -> Result<()> {
-        let body = failure_comment(name, sha, key, log);
-        let (list, base) = match self.kind {
-            Kind::Github => (
-                format!("repos/{}/issues/{pr}/comments?per_page=100", self.repo),
-                format!("repos/{}/issues", self.repo),
-            ),
-            Kind::Gitlab => {
-                let p = format!("projects/{}/merge_requests/{pr}/notes", self.project());
-                (format!("{p}?per_page=100"), p)
-            }
+    /// Comments the failure on the pull request (`pr`), or on the commit when there is none (`pr` is 0). The link
+    /// of the comment the status points at, when the host gave one.
+    pub fn post_log_comment(&self, me: &str, pr: u64, sha: &str, log: &str) -> Result<Option<String>> {
+        let body = failure_comment(me, sha, log);
+        let endpoint = match (self.kind, pr) {
+            (Kind::Github, 0) => format!("repos/{}/commits/{sha}/comments", self.repo),
+            (Kind::Github, _) => format!("repos/{}/issues/{pr}/comments", self.repo),
+            (Kind::Gitlab, 0) => format!("projects/{}/repository/commits/{sha}/comments", self.project()),
+            (Kind::Gitlab, _) => format!("projects/{}/merge_requests/{pr}/notes", self.project()),
         };
-        let rows: Value = serde_json::from_str(&self.api("GET", &list, &[])?)?;
-        let mark = marker(key);
-        let existing = rows
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|c| str_of(c, &["body"]).contains(&mark))
-            .and_then(|c| c.get("id").and_then(Value::as_u64));
-        let (method, endpoint) = match (self.kind, existing) {
-            (Kind::Github, Some(id)) => ("PATCH", format!("repos/{}/issues/comments/{id}", self.repo)),
-            (Kind::Github, None) => ("POST", format!("{base}/{pr}/comments")),
-            (Kind::Gitlab, Some(id)) => ("PUT", format!("{base}/{id}")),
-            (Kind::Gitlab, None) => ("POST", base),
-        };
-        self.api(method, &endpoint, &[("body", &body)]).map(|_| ())
+        let posted = self.api("POST", &endpoint, &[("body", &body)])?;
+        let v: Value = serde_json::from_str(&posted).unwrap_or(Value::Null);
+        Ok(v.get("html_url").and_then(Value::as_str).map(String::from))
     }
 }
 
@@ -245,21 +224,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn comment_keeps_the_last_120_lines_and_the_marker() {
-        let log: String = (1..=300).map(|i| format!("line {i}\n")).collect();
-        let c = failure_comment("agent-ci box", "0123456789abcdef", "k1", &log);
-        assert!(c.starts_with("agent-ci box failed on 01234567."));
-        assert!(c.contains("line 181\n") && !c.contains("line 180\n") && c.contains("line 300\n"));
-        assert!(c.contains(&marker("k1")));
-        assert_eq!(c.lines().filter(|l| l.starts_with("line ")).count(), 120);
+    fn the_comment_is_the_runners_with_the_excerpt() {
+        let log: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let c = failure_comment("agent-ci box", "0123456789abcdef", &log);
+        let head = "agent-ci box failed on 01234567. The failing lines and last lines of its log:\n\n```\n";
+        assert!(c.starts_with(head));
+        assert!(c.ends_with("line 100\n```\n") && !c.contains("lines left out"));
+        let long: String = (1..=500).map(|i| format!("line {i}\n")).collect();
+        assert!(failure_comment("m", "abc", &long).contains("... (440 lines left out)\nline 441\n"));
+        let fenced = failure_comment("m", "abc", "```");
+        assert_eq!(
+            fenced,
+            "m failed on abc. The failing lines and last lines of its log:\n\n```\n'''\n```\n"
+        );
     }
 
     #[test]
     fn descriptions_are_the_runners() {
         let m = me("box");
         assert_eq!(running_text(&m), "agent-ci box: running");
-        assert_eq!(passed_text(&m, 3), "agent-ci box: passed in 3m");
-        assert_eq!(failed_text(&m, 4, " boom "), "agent-ci box: failed in 4m boom");
+        assert_eq!(passed_text(&m, "3.0"), "agent-ci box: passed in 3.0m");
+        assert_eq!(failed_text(&m, "4.5", " boom "), "agent-ci box: failed in 4.5m boom");
     }
 
     #[cfg(unix)]
@@ -274,7 +259,7 @@ mod tests {
                 &program,
                 "#!/bin/sh\n[ -n \"$1\" ] || exit 0\nprintf 'CALL %s\\n' \"$*\" | head -1 >> calls.log\n\
                  case \"$*\" in *comments?per_page*|*notes?per_page*) cat comments.json;; \
-                 *statuses?per_page*) cat statuses.json;; esac\n",
+                 *statuses?per_page*) cat statuses.json;; *POST*comments*) cat posted.json;; esac\n",
             );
             std::fs::write(dir.join("comments.json"), "[]").unwrap();
             Host {
@@ -304,20 +289,26 @@ mod tests {
                 "abc",
                 PR_CONTEXT,
                 State::Success,
-                &passed_text(&m, 2),
+                &passed_text(&m, "2.0"),
                 Some("http://x/log"),
             )
             .unwrap();
-            h.post_status("abc", PUSH_CONTEXT, State::Failure, &failed_text(&m, 2, "bad"), None)
-                .unwrap();
+            h.post_status(
+                "abc",
+                PUSH_CONTEXT,
+                State::Failure,
+                &failed_text(&m, "2.0", "bad"),
+                None,
+            )
+            .unwrap();
             let c = calls(d.path());
             assert_eq!(
                 c[0],
                 "CALL api -X POST repos/o/r/statuses/abc -f state=pending -f context=ci/agent/pr/ci -f description=agent-ci box: running"
             );
-            assert!(c[1].ends_with("-f state=success -f context=ci/agent/pr/ci -f description=agent-ci box: passed in 2m -f target_url=http://x/log"));
+            assert!(c[1].ends_with("-f state=success -f context=ci/agent/pr/ci -f description=agent-ci box: passed in 2.0m -f target_url=http://x/log"));
             assert!(c[2].ends_with(
-                "-f state=failure -f context=ci/agent/push/ci -f description=agent-ci box: failed in 2m bad"
+                "-f state=failure -f context=ci/agent/push/ci -f description=agent-ci box: failed in 2.0m bad"
             ));
         }
 
@@ -355,24 +346,25 @@ mod tests {
         }
 
         #[test]
-        fn a_second_failure_for_a_key_edits_its_comment() {
+        fn a_failure_comment_is_posted_new_and_its_link_returned() {
             let d = tempfile::tempdir().unwrap();
             let h = host(d.path(), Kind::Github);
-            let log: String = (1..=300).map(|i| format!("line {i}\n")).collect();
-            h.post_failure_comment(7, "agent-ci box", "abc", "k1", &log).unwrap();
-            let mut c = calls(d.path());
-            assert!(c[1].starts_with("CALL api -X POST repos/o/r/issues/7/comments"));
-            let existing = serde_json::json!([{"id": 55, "body": failure_comment("agent-ci box", "abc", "k1", &log)}]);
-            std::fs::write(d.path().join("comments.json"), existing.to_string()).unwrap();
-            h.post_failure_comment(7, "agent-ci box", "abc", "k1", &log).unwrap();
-            h.post_failure_comment(7, "agent-ci box", "def", "k2", &log).unwrap();
-            c = calls(d.path());
+            std::fs::write(
+                d.path().join("posted.json"),
+                r#"{"html_url":"https://github.com/o/r/pull/7#c1"}"#,
+            )
+            .unwrap();
+            let link = h.post_log_comment("agent-ci box", 7, "abcdef0123", "boom\n").unwrap();
+            assert_eq!(link.as_deref(), Some("https://github.com/o/r/pull/7#c1"));
+            h.post_log_comment("agent-ci box", 0, "abcdef0123", "boom\n").unwrap();
+            let c = calls(d.path());
             assert!(
-                c.iter()
-                    .any(|l| l.starts_with("CALL api -X PATCH repos/o/r/issues/comments/55"))
+                c[0].starts_with(
+                    "CALL api -X POST repos/o/r/issues/7/comments -f body=agent-ci box failed on abcdef01."
+                )
             );
-            assert_eq!(c.iter().filter(|l| l.contains("-X POST")).count(), 2);
-            assert_eq!(c.iter().filter(|l| l.contains("-X PATCH")).count(), 1);
+            assert!(c[1].starts_with("CALL api -X POST repos/o/r/commits/abcdef0123/comments"));
+            assert_eq!(c.len(), 2);
         }
     }
 }

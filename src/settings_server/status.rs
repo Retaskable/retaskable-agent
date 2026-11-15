@@ -146,38 +146,6 @@ pub struct ComputerStatus {
     pub sessions: Vec<SessionRow>,
     pub engines: Vec<EngineRow>,
     pub orchestrator: Orchestrator,
-    /// The CI header (agent-ci.md section 3.1), only with the `agent-ci` loop running.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ci: Option<CiHeader>,
-}
-
-/// The Now tab's CI header: the slot, Docker, and each project without agent CI and why.
-#[derive(Debug, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CiHeader {
-    pub slots: u32,
-    pub running: u32,
-    pub docker: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub docker_reason: Option<String>,
-    pub discovery: Vec<CiReason>,
-    /// Each running check, apart from the lanes' sessions.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub checks: Vec<CiCheckRow>,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-pub struct CiCheckRow {
-    pub project: String,
-    pub pr: u64,
-    pub sha: String,
-    pub seconds: u64,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-pub struct CiReason {
-    pub project: String,
-    pub reason: String,
 }
 
 /// The orchestrator loop as the page shows it: a note for the whole computer and a line per project.
@@ -411,26 +379,6 @@ pub fn build(
                 })
                 .collect(),
         },
-        ci: live.ci.as_ref().map(|c| CiHeader {
-            slots: c.slots,
-            running: c.running,
-            docker: c.docker,
-            docker_reason: c.docker_reason.clone(),
-            discovery: (c.reasons.iter())
-                .map(|(project, reason)| CiReason {
-                    project: project.clone(),
-                    reason: reason.clone(),
-                })
-                .collect(),
-            checks: (c.checks.iter())
-                .map(|r| CiCheckRow {
-                    project: r.project.clone(),
-                    pr: r.pr,
-                    sha: r.sha.clone(),
-                    seconds: r.started.elapsed().as_secs(),
-                })
-                .collect(),
-        }),
     }
 }
 
