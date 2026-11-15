@@ -361,6 +361,9 @@ pub struct ProjectConfig {
     pub ci_covers_checks: bool,
     #[serde(default)]
     pub ci_when_ready: bool,
+    /// People whose pull requests the CI watcher may push to (`ciWatchAllow`, a server setting: shared/projectSettings.ts).
+    #[serde(default, deserialize_with = "ci_watch_allow")]
+    pub ci_watch_allow: Vec<String>,
     #[serde(default)]
     pub sandbox: SandboxMode,
     #[serde(default)]
@@ -406,6 +409,23 @@ pub struct ProjectConfig {
     pub lighthouse: LighthouseConfig,
     #[serde(default)]
     pub vet_suggestions: VetSuggestionsConfig,
+}
+
+/// The most `ciWatchAllow` entries, and the longest one: the store checks both where it saves the list; the
+/// agent keeps what fits and drops the rest, as nothing here fails a whole config over one setting.
+pub const CI_WATCH_ALLOW_MAX: usize = 50;
+pub const CI_WATCH_ALLOW_LOGIN_MAX: usize = 100;
+
+fn ci_watch_allow<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let Value::Array(list) = Value::deserialize(d)? else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .filter(|s| !s.trim().is_empty() && s.chars().count() <= CI_WATCH_ALLOW_LOGIN_MAX)
+        .take(CI_WATCH_ALLOW_MAX)
+        .collect())
 }
 
 impl ProjectConfig {
@@ -485,6 +505,29 @@ mod tests {
         assert_eq!(p.budget.cursor_max_minutes, 60);
         let p: ProjectConfig = serde_json::from_str(r#"{"budget":{"cursorMaxMinutes":15}}"#).unwrap();
         assert_eq!(p.budget.cursor_max_minutes, 15);
+    }
+
+    #[test]
+    fn ci_watch_allow_is_empty_by_default_and_keeps_only_what_the_store_would_save() {
+        let read =
+            |v: Value| serde_json::from_value::<ProjectConfig>(serde_json::json!({ "ciWatchAllow": v })).unwrap();
+        assert!(
+            serde_json::from_str::<ProjectConfig>("{}")
+                .unwrap()
+                .ci_watch_allow
+                .is_empty()
+        );
+        assert_eq!(read(serde_json::json!(["Ann", "bob"])).ci_watch_allow, ["Ann", "bob"]);
+        // Not a list, a non-text entry, a blank one and a 101-character one are dropped, not an error.
+        assert!(read(serde_json::json!("ann")).ci_watch_allow.is_empty());
+        let long = "x".repeat(101);
+        assert_eq!(
+            read(serde_json::json!(["a", 3, null, "  ", long, "x".repeat(100)])).ci_watch_allow,
+            ["a".to_string(), "x".repeat(100)]
+        );
+        let many: Vec<String> = (0..60).map(|i| format!("u{i}")).collect();
+        let got = read(serde_json::json!(many)).ci_watch_allow;
+        assert_eq!((got.len(), got[49].as_str()), (50, "u49"));
     }
 
     #[test]
@@ -634,6 +677,7 @@ mod tests {
             require_ci: false,
             ci_covers_checks: false,
             ci_when_ready: false,
+            ci_watch_allow: Vec::new(),
             sandbox: SandboxMode::default(),
             worktrees_dir: String::new(),
             checks: Vec::new(),
