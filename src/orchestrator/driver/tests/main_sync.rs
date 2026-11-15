@@ -67,6 +67,9 @@ async fn fixture(conflict: bool) -> Fixture {
 async fn settle(f: &mut Fixture) {
     for _ in 0..100 {
         let m = &mut f.rig.machine;
+        // Production looks again a minute after a look; here every pass may, so one look that failed under load
+        // (another test holding the shared git lock, a slow fake store) doesn't leave the rest of the test unlooked.
+        m.projects[0].run_loop.main_sync.look_again();
         let shared = Shared {
             links: &m.links,
             local: &m.local,
