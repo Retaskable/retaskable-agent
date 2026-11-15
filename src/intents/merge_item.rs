@@ -4,10 +4,12 @@
 //! knows the workflow, claims the item by name and runs `gh pr merge` (`driver/merge_item.rs`); the row ends `done`
 //! with no result, or `refused` in plain words.
 //!
-//! The TS agent takes `{ itemId?, draftId?, ship? }` and refuses unless exactly one is named. This runs an item or a
-//! spec draft (`draftId`, which the loop hands to its draft landing, `driver/land.rs`): a row naming only the pull
-//! request into main is left for the kind that will run it, and one naming none or more than one is refused here with
-//! the TS words.
+//! The TS agent takes `{ itemId?, draftId?, ship? }` and refuses unless exactly one is named, and so does this. An item
+//! or a spec draft (`draftId`, which the loop hands to its draft landing, `driver/land.rs`) ends `done` with no result.
+//! `{ ship: true }` is the merge control into main: the loop squashes the dev branch's pull request into main and starts
+//! the dev branch again (`driver/merge_item.rs`, `team_branch/ship.rs`), and the row ends `done` with no result, or with
+//! `{ says }` when it merged but the dev branch wasn't started again (or the merge was only queued): where the TS
+//! agent's HTTP answer carried that warning to the strip, the row's result carries it here.
 //!
 //! A kind that must never run twice (`NOT_TWICE`): a merge this computer began before a restart is failed, not run
 //! again (see [`Handler::not_twice`]).
@@ -15,11 +17,21 @@ use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
+use super::main_pr::Why;
 use super::{Handler, Outcome};
 use crate::backlog::intents::IntentRow;
 
 /// What the loop answers: `Ok` once the pull request merged and the item was completed, or why it wasn't.
 pub type Answer = Result<(), String>;
+
+/// What the loop answers a ship: the warning to show (it merged, but the dev branch wasn't started again, or the merge
+/// was only queued), or none when all went well; or why not.
+pub type ShipAnswer = Result<Option<String>, Why>;
+
+/// A person's merge control into main, with where the loop sends its answer.
+pub struct Ship {
+    pub reply: oneshot::Sender<ShipAnswer>,
+}
 
 /// A person's Merge into main on item `id`, or on spec draft `id` when `draft`, with where the loop sends its answer.
 pub struct Merge {
@@ -31,11 +43,12 @@ pub struct Merge {
 /// Asks the loop to merge items. The loop holds the receiving end and answers on its next pass.
 pub struct MergeHandler {
     asks: mpsc::UnboundedSender<Merge>,
+    ships: mpsc::UnboundedSender<Ship>,
 }
 
 impl MergeHandler {
-    pub fn new(asks: mpsc::UnboundedSender<Merge>) -> Self {
-        Self { asks }
+    pub fn new(asks: mpsc::UnboundedSender<Merge>, ships: mpsc::UnboundedSender<Ship>) -> Self {
+        Self { asks, ships }
     }
 }
 
@@ -54,20 +67,32 @@ impl<C: Send + Sync> Handler<C> for MergeHandler {
         "merge_requested"
     }
 
-    /// Everything but a row naming only the pull request into main, which a later slice runs.
-    fn takes(&self, row: &IntentRow) -> bool {
-        let (item, draft, count) = named(row);
-        item || draft || count != 1
-    }
-
     fn not_twice(&self) -> bool {
         true
     }
 
     fn run(&self, row: IntentRow, _cx: &C) -> BoxFuture<'static, Outcome> {
         let (item, draft, count) = named(&row);
-        if count != 1 || !(item || draft) {
+        if count != 1 {
             return async { Outcome::Refused(NAME_ONE.into()) }.boxed();
+        }
+        if !(item || draft) {
+            let ships = self.ships.clone();
+            return async move {
+                let (reply, answer) = oneshot::channel();
+                if ships.send(Ship { reply }).is_err() {
+                    return Outcome::Abandoned;
+                }
+                match answer.await {
+                    Ok(Ok(None)) => Outcome::Done(serde_json::Value::Null),
+                    Ok(Ok(Some(says))) => Outcome::Done(serde_json::json!({ "says": says })),
+                    Ok(Err(Why::Refused(why))) => Outcome::Refused(why),
+                    Ok(Err(Why::Failed(why))) => Outcome::Failed(why),
+                    // The loop went away before it answered (a restart): the row, held and not twice, is failed then.
+                    Err(_) => Outcome::Abandoned,
+                }
+            }
+            .boxed();
         }
         let key = if item { "itemId" } else { "draftId" };
         let id = row.args[key].as_str().unwrap_or_default().to_string();

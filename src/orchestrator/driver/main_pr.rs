@@ -141,8 +141,10 @@ impl ProjectLoop {
         puller.pass(&link, || ()).await;
     }
 
-    /// Opens the pull request from the base branch into main, or says why it can't, in the TS agent's order.
-    async fn open_main_pr(&mut self, host: &Arc<dyn MainPrHost>, shared: &Shared<'_>) -> Answer {
+    /// What a team-branch request needs before it reads anything: the default branch the team branch goes to, and the
+    /// store's items (a sync or a merge in flight is never guessed at: fail closed). Also used by the merge control
+    /// into main (`merge_item.rs`).
+    pub(super) async fn team_request(&mut self, shared: &Shared<'_>) -> Result<(String, Vec<Item>), Why> {
         if self.seen.default_branch.is_none() {
             self.seen.default_branch =
                 super::report::default_branch(&self.project.github_repo, std::path::Path::new(&self.project.repo_path))
@@ -160,14 +162,18 @@ impl ProjectLoop {
             Ok(Some(token)) => token,
             _ => return Err(refused("This computer isn't signed in to the shared backlog.")),
         };
-        // Fail closed: a sync or a merge the store couldn't be asked about is never guessed at.
-        let items = match self.client.list(repo, Some(&token)).await {
-            Ok(items) => items,
+        match self.client.list(repo, Some(&token)).await {
+            Ok(items) => Ok((main, items)),
             Err(e) => {
                 self.store_error("list", &e);
-                return Err(Why::Failed(format!("Couldn't read the shared backlog: {e}")));
+                Err(Why::Failed(format!("Couldn't read the shared backlog: {e}")))
             }
-        };
+        }
+    }
+
+    /// Opens the pull request from the base branch into main, or says why it can't, in the TS agent's order.
+    async fn open_main_pr(&mut self, host: &Arc<dyn MainPrHost>, shared: &Shared<'_>) -> Answer {
+        let (main, items) = self.team_request(shared).await?;
         let project = self.project.clone();
         let host = host.clone();
         let opened = tokio::task::spawn_blocking(move || open(host.as_ref(), &project, &main, &items)).await;
