@@ -4,10 +4,9 @@
 //! and answers `judge`, or refuses in its own words. What came back is carried out in the background by [`Press::begin`],
 //! which answers at once with "Trying a fix for pull request #N." and leaves the rest to the pull request's log.
 //!
-//! The rule that never pushes to a fork holds for the button too: where TS sends `mayPush: true` for any press, this
-//! sends it unless the pull request's branch is in a fork. The store doesn't look at `mayPush` for a press, so it answers
-//! `judge` all the same; the judge session runs (it only reads) and, if it says the change broke it, the `fix` the store
-//! asks for next is not run here (see `instruct`): the attempt is counted and nothing is pushed.
+//! The rule that never pushes to a fork holds for the button too: a press on a pull request from a fork is refused
+//! before the store is asked (TS sends `mayPush: true` for any press and would push by branch name), so no attempt is
+//! counted and no session runs.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +35,10 @@ fn already(pr: u64) -> String {
 
 fn no_longer_open(pr: u64) -> String {
     format!("Pull request #{pr} is no longer open at that commit.")
+}
+
+fn from_a_fork(pr: u64) -> String {
+    format!("Pull request #{pr} comes from a fork, so this computer won't push a fix to it.")
 }
 
 fn not_fixable(pr: u64) -> String {
@@ -76,9 +79,13 @@ impl Pass<'_> {
         let Some(p) = pulls.into_iter().find(|p| p.number == pr && p.head == sha) else {
             return Err(PressError::Refused(no_longer_open(pr)));
         };
+        // Never a fork's: refused before the store is asked, so no attempt is counted and nothing runs.
+        if p.cross_repository {
+            return Err(PressError::Refused(from_a_fork(pr)));
+        }
         let checks = checks_of(&self.host, p.head.clone()).await.map_err(broke)?;
-        // Anyone's pull request in this repository, wherever its author stands on `ciWatchAllow`; never a fork's.
-        let may_push = !p.cross_repository;
+        // Anyone's pull request in this repository, wherever its author stands on `ciWatchAllow`.
+        let may_push = true;
         let conflicting = p.conflicting();
         let base_head = if conflicting && may_push {
             let host = self.host.clone();

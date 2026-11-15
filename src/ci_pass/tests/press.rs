@@ -215,7 +215,7 @@ async fn a_press_on_a_pull_request_of_a_person_not_on_the_allow_list_says_may_pu
 }
 
 #[tokio::test]
-async fn a_fork_pull_request_is_pressed_with_may_push_false_and_nothing_is_pushed() {
+async fn a_fork_pull_request_is_refused_before_the_store_is_asked() {
     let mut rig = Rig::new().await;
     rig.with_repo();
     let mut fork = pull_by(9, BRANCH, "ann", "CONFLICTING");
@@ -224,19 +224,15 @@ async fn a_fork_pull_request_is_pressed_with_may_push_false_and_nothing_is_pushe
     red(rig.dir.path(), "sha9");
     judge_then_fix(&rig);
     let r = rig.press(Some((CiVerdict::Change, "its own break")));
-    let started = r.press.begin(9, "sha9").await.unwrap();
-    // The store takes the press all the same (it never looks at `mayPush` for the button) and says what it always says.
-    assert_eq!(started.says, "Trying a fix for pull request #9.");
-    started.done.await.unwrap();
-    let sent = rig.store.sent("ci_result");
-    assert_eq!(sent[0]["mayPush"], false);
-    assert_eq!(sent[0]["button"], true);
-    // A conflicting head the computer may not push to has no `baseHead`.
-    assert!(sent[0].get("baseHead").is_none(), "{}", sent[0]);
-    // The judge only reads, so it ran; the `fix` the store asked for next was not run and nothing was said of it.
-    assert_eq!(r.judge.asked.lock().unwrap().len(), 1);
-    let kinds: Vec<&Value> = sent.iter().map(|f| &f["did"]["kind"]).collect();
-    assert_eq!(kinds, [&Value::Null, &json!("judge")]);
+    assert_eq!(
+        r.press.begin(9, "sha9").await.err(),
+        Some(refused(
+            "Pull request #9 comes from a fork, so this computer won't push a fix to it."
+        ))
+    );
+    // No attempt counted, nothing run, nothing pushed, and the head let go.
+    assert!(rig.store.sent("ci_result").is_empty());
+    assert!(r.judge.asked.lock().unwrap().is_empty());
     assert!(r.fixer.asked.lock().unwrap().is_empty());
     assert!(rig.git_log().is_empty(), "{:?}", rig.git_log());
     assert!(!rig.fixing.holds(9, "sha9"));
