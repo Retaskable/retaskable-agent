@@ -522,13 +522,16 @@ const UNKNOWN: &str = r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","st
 async fn a_change_github_never_works_out_is_brought_up_to_date_after_the_wait() {
     let mut rig = rig().await;
     set(rig.dir.path(), "view", UNKNOWN);
+    let started = std::time::Instant::now();
     let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Updated);
-    let views = calls(rig.dir.path())
-        .iter()
-        .filter(|c| c.starts_with("pr view"))
-        .count();
-    assert!(views > 2, "{views} reads over the wait");
+    // It waited the whole window before updating. (How many reads fit in it depends on how fast the fake gh starts,
+    // which a loaded machine slows: only the wait itself is checked.)
+    assert!(
+        started.elapsed() >= quick().unknown_for,
+        "updated before the wait was over"
+    );
+    assert!(calls(rig.dir.path()).iter().any(|c| c.starts_with("pr view")));
     assert!(merges(&rig).is_empty());
 }
 
