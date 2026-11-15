@@ -1,4 +1,5 @@
-//! A rerun on the code host: what `gh` is told for `force` and `stuck`, and for the `ci-ready` label.
+//! A rerun on the code host: what `gh` is told for `force` and `stuck`, and for the `ci-ready` label. Only runs behind
+//! cancelled checks are rerun, as in the TS agent.
 use super::*;
 
 fn checks(dir: &Path, pr: u64, rows: &[(&str, &str, u64)]) {
@@ -26,7 +27,7 @@ async fn rerun_asked(rig: &Rig, next: Value) -> Value {
 }
 
 #[tokio::test]
-async fn force_runs_the_failed_and_cancelled_runs_again() {
+async fn force_runs_only_the_cancelled_runs_again_as_the_ts_agent_does() {
     let rig = Rig::new().await;
     checks(
         rig.dir.path(),
@@ -34,18 +35,23 @@ async fn force_runs_the_failed_and_cancelled_runs_again() {
         &[
             ("a", "fail", 45),
             ("b", "cancel", 46),
-            ("c", "fail", 45),
+            ("c", "cancel", 46),
             ("d", "pass", 47),
             ("e", "pending", 48),
         ],
     );
     let did = rerun_asked(&rig, json!({ "do": "rerun", "rerun": "force", "hung": false })).await;
     assert_eq!(did, json!({ "kind": "rerun", "rerun": "force", "ok": true }));
-    let runs = rig.run_calls();
-    assert_eq!(
-        runs,
-        ["run rerun 45 --failed --repo o/r", "run rerun 46 --failed --repo o/r"]
-    );
+    assert_eq!(rig.run_calls(), ["run rerun 46 --failed --repo o/r"]);
+}
+
+#[tokio::test]
+async fn a_force_rerun_of_a_plain_failed_red_starts_nothing() {
+    let rig = Rig::new().await;
+    checks(rig.dir.path(), 7, &[("a", "fail", 45)]);
+    let did = rerun_asked(&rig, json!({ "do": "rerun", "rerun": "force", "hung": false })).await;
+    assert_eq!(did, json!({ "kind": "rerun", "rerun": "force", "ok": false }));
+    assert!(rig.run_calls().is_empty(), "{:?}", rig.gh_log());
 }
 
 #[tokio::test]

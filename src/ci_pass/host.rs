@@ -155,8 +155,11 @@ impl CiHost for GhCiHost {
             // The pending runs are cancelled so they read as cancelled and run again.
             self.each_run(&self.runs_in(pr, &[CheckState::Pending]), &["cancel"]);
         }
-        // `gh run rerun --failed` takes failed and cancelled jobs alike.
-        let ids = self.runs_in(pr, &[CheckState::Fail, CheckState::Cancel]);
+        // Only the runs behind cancelled checks, as `rerunCancelledRuns` in the TS agent's gh.ts does
+        // (`actionsRuns(rows, "cancel")`, then `gh run rerun --failed`). A plain failed run is never rerun, so a
+        // force rerun of an ordinary red answers `ok: false`. That is suspected to be a TS bug: it is to be fixed in
+        // Retaskable.com first and then copied here.
+        let ids = self.runs_in(pr, &[CheckState::Cancel]);
         self.each_run(&ids, &["rerun", "--failed"])
     }
 }
