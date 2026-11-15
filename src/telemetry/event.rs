@@ -153,7 +153,11 @@ payload!(Anomaly {
 });
 payload!(
     /// One check of a `step_end`.
-    Check { name: String, ok: bool, sec: f64 }
+    Check {
+        name: String,
+        ok: bool,
+        sec: f64
+    }
 );
 
 /// One kind of event the log knows, by its `kind` string.
