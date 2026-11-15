@@ -529,3 +529,72 @@ async fn the_backlogs_waiting_state_is_set_and_cleared_and_wakes_subscribers() {
     rx.changed().await.unwrap();
     assert_eq!(links.backlog(), None);
 }
+
+fn object(v: Value) -> Map<String, Value> {
+    v.as_object().unwrap().clone()
+}
+
+#[test]
+fn text_reads_a_string_as_is_and_other_values_as_json() {
+    let json = object(serde_json::json!({ "s": "hi", "n": 5, "b": true }));
+    assert_eq!(text(&json, "s"), "hi");
+    assert_eq!(text(&json, "n"), "5");
+    assert_eq!(text(&json, "b"), "true");
+}
+
+#[test]
+fn text_of_a_missing_key_is_empty() {
+    assert_eq!(text(&object(serde_json::json!({})), "s"), "");
+}
+
+#[test]
+fn describe_prefers_error_description_then_error_then_message() {
+    let all = object(serde_json::json!({ "message": "m", "error": "e", "error_description": "d" }));
+    assert_eq!(describe(&all), "d");
+    let no_description = object(serde_json::json!({ "message": "m", "error": "e" }));
+    assert_eq!(describe(&no_description), "e");
+    assert_eq!(describe(&object(serde_json::json!({ "message": "m" }))), "m");
+}
+
+#[test]
+fn describe_renders_a_non_string_field_as_json() {
+    assert_eq!(
+        describe(&object(serde_json::json!({ "error": { "code": 7 } }))),
+        r#"{"code":7}"#
+    );
+}
+
+#[test]
+fn describe_falls_back_to_the_whole_body() {
+    assert_eq!(describe(&object(serde_json::json!({ "x": 1 }))), r#"{"x":1}"#);
+}
+
+#[test]
+fn cause_is_the_innermost_error() {
+    #[derive(Debug)]
+    struct Wrap(&'static str, Option<Box<dyn std::error::Error + 'static>>);
+    impl std::fmt::Display for Wrap {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Wrap {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref()
+        }
+    }
+    let inner = Wrap("connection refused", None);
+    let outer = Wrap(
+        "error sending request",
+        Some(Box::new(Wrap("tcp connect error", Some(Box::new(inner))))),
+    );
+    assert_eq!(cause(&outer), "connection refused");
+    assert_eq!(cause(&Wrap("alone", None)), "alone");
+}
+
+#[test]
+fn strip_scheme_drops_http_and_https_only() {
+    assert_eq!(strip_scheme("https://a.example"), "a.example");
+    assert_eq!(strip_scheme("http://127.0.0.1:3000"), "127.0.0.1:3000");
+    assert_eq!(strip_scheme("a.example"), "a.example");
+}
