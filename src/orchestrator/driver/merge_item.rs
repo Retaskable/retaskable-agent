@@ -13,8 +13,9 @@
 //! store builds the item or puts it back in the queue from that. The item's suggested playtest, which the store does
 //! keep, goes with it.
 //!
-//! Where the TS agent leaves an item it can't merge held as waiting for the person, this agent has no such stop to
-//! hold it in (it never records a person's merge wait), so the claim is given back and the row refused.
+//! Where the TS agent leaves an item it can't merge held in its wait, this agent has no such stop to hold it in (it
+//! never records a person's merge wait), so the claim is undone with the store's `park` for what the item waited for,
+//! never `release`, which would send a finished change back to `todo`. Only an item that wasn't waiting is released.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -188,12 +189,12 @@ impl ProjectLoop {
             .client
             .take_over(repo, Some(&token), id, &agent, Did::Merged)
             .await?;
-        let (item, lease) = (claim.item, claim.token);
-        // Only a finished change that waits for a person's merge is merged (`canMergeItem`); anything else is given
-        // straight back, as the store leaves nothing of its wait to carry on from.
-        let (waiting, url) = (claim.was_waiting.as_deref() == Some("merge"), item.pr_url.clone());
+        let (item, lease, was) = (claim.item, claim.token, claim.was_waiting);
+        // Only a finished change that waits for a person's merge is merged (`canMergeItem`); anything else is put
+        // back as it was (`put_back`).
+        let (waiting, url) = (was.as_deref() == Some("merge"), item.pr_url.clone());
         let Some(url) = url.filter(|_| waiting) else {
-            self.let_go(repo, &token, id, &lease).await;
+            self.put_back(repo, &token, id, &lease, was.as_deref()).await;
             return Err(NOT_WAITING.into());
         };
         let project = self.project.clone();
@@ -210,7 +211,7 @@ impl ProjectLoop {
             }
         };
         let Some(pr) = found else {
-            self.let_go(repo, &token, id, &lease).await;
+            self.put_back(repo, &token, id, &lease, was.as_deref()).await;
             return Err(
                 "Lost track of this pull request: no PR number on record, and none found open for its branch.".into(),
             );
@@ -223,11 +224,11 @@ impl ProjectLoop {
         match merged {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                self.let_go(repo, &token, id, &lease).await;
+                self.put_back(repo, &token, id, &lease, was.as_deref()).await;
                 return Err(format!("Couldn't merge #{pr}: {}", reason(&e)));
             }
             Err(e) => {
-                self.let_go(repo, &token, id, &lease).await;
+                self.put_back(repo, &token, id, &lease, was.as_deref()).await;
                 return Err(format!("Couldn't merge #{pr}: {e}"));
             }
         }
@@ -257,11 +258,18 @@ impl ProjectLoop {
         Ok(())
     }
 
-    /// Lets go of a claim taken for a merge that can't be carried out.
-    async fn let_go(&mut self, repo: u64, token: &str, id: &str, lease: &str) {
-        if let Err(e) = self.client.release(repo, Some(token), id, lease).await {
-            tracing::warn!("{}: giving {id} back failed: {e}", self.id);
-            self.store_error("release", &e);
+    /// Puts an item the claim took back as it was, for a merge that can't be carried out. The store's `release` sends
+    /// an item back to `todo`, which would requeue a finished change or lose a help or CI wait, so an item that was
+    /// waiting is parked again for what it waited for (the TS agent keeps it held in its wait). Only one that wasn't
+    /// waiting, which the TS agent releases too, is released.
+    async fn put_back(&mut self, repo: u64, token: &str, id: &str, lease: &str, was_waiting: Option<&str>) {
+        let (op, put) = match was_waiting {
+            Some(waits_for) => ("park", self.client.park(repo, Some(token), id, lease, waits_for).await),
+            None => ("release", self.client.release(repo, Some(token), id, lease).await),
+        };
+        if let Err(e) = put {
+            tracing::warn!("{}: putting {id} back ({op}) failed: {e}", self.id);
+            self.store_error(op, &e);
         }
     }
 }

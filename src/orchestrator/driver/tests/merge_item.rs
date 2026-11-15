@@ -30,7 +30,7 @@ impl Gh {
 fn ops_of(asked: &Asked) -> Vec<String> {
     let seen = asked.lock().unwrap();
     (seen.iter().map(|(op, _)| op.clone()))
-        .filter(|op| matches!(op.as_str(), "claim" | "release" | "complete"))
+        .filter(|op| matches!(op.as_str(), "claim" | "release" | "park" | "complete"))
         .collect()
 }
 
@@ -44,6 +44,13 @@ impl MergeHost for Gh {
         self.note(format!("pr merge {pr} --squash delete={delete}"));
         self.merge.clone().map_err(|e| anyhow::anyhow!(e))
     }
+}
+
+/// The one item-4 park the store had, for `waits_for`, and no release: the item goes back as it was.
+fn parked_for(asked: &Asked, waits_for: &str) {
+    let parked = ops_named(asked, "park");
+    assert_eq!(parked, [json!({ "id": "4", "token": "lease-1", "for": waits_for })]);
+    assert!(ops_named(asked, "release").is_empty());
 }
 
 fn row(args: Value) -> Value {
@@ -172,7 +179,7 @@ async fn no_pr_number_anywhere_is_refused_and_the_claim_given_back() {
         sent[0]["why"],
         "Lost track of this pull request: no PR number on record, and none found open for its branch."
     );
-    assert_eq!(ops_named(&asked, "release").len(), 1);
+    parked_for(&asked, "merge");
     assert!(ops_named(&asked, "complete").is_empty());
     assert_eq!(gh.calls().len(), 1, "only the lookup");
 }
@@ -189,11 +196,7 @@ async fn a_merge_github_refuses_is_refused_in_its_words_and_the_claim_given_back
         sent[0]["why"],
         "Couldn't merge #9: Pull request is not mergeable (mergePullRequest)"
     );
-    let released = ops_named(&asked, "release");
-    assert_eq!(
-        (released[0]["id"].as_str(), released[0]["token"].as_str()),
-        (Some("4"), Some("lease-1"))
-    );
+    parked_for(&asked, "merge");
     assert!(ops_named(&asked, "complete").is_empty());
     assert!(rig.lp(0).runs.is_empty() && rig.lp(0).leases.is_empty());
 }
@@ -236,17 +239,23 @@ async fn the_stores_refusal_of_the_claim_is_the_rows_reason_in_plain_words() {
         sent[0]["why"],
         "@bo's computer (bo-pc) is working on this right now. It'll come back to you if it needs you."
     );
-    assert!(gh.calls().is_empty() && ops_named(&asked, "release").is_empty());
+    assert!(gh.calls().is_empty() && ops_named(&asked, "release").is_empty() && ops_named(&asked, "park").is_empty());
 }
 
 #[tokio::test]
-async fn an_item_that_was_not_waiting_or_waited_for_something_else_is_given_back() {
+async fn an_item_that_waited_for_something_else_is_parked_again_and_one_not_waiting_is_released() {
     for waiting in [None, Some("help"), Some("ci")] {
         let (mut rig, asked, listed, gh) = rig_merging(claimed(waiting, waiting_item()), Ok(()), None, "person").await;
         push(&listed, item_row("4"));
         let sent = until(&mut rig, &asked, 1).await;
         assert_eq!(sent[0]["why"], "It isn't waiting for you to merge it.", "{waiting:?}");
-        assert_eq!(ops_named(&asked, "release").len(), 1, "{waiting:?}");
+        match waiting {
+            Some(waits_for) => parked_for(&asked, waits_for),
+            None => {
+                assert_eq!(ops_named(&asked, "release").len(), 1);
+                assert!(ops_named(&asked, "park").is_empty());
+            }
+        }
         assert!(gh.calls().is_empty() && ops_named(&asked, "complete").is_empty());
     }
 }
@@ -259,7 +268,7 @@ async fn an_item_with_no_pull_request_is_given_back() {
     push(&listed, item_row("4"));
     let sent = until(&mut rig, &asked, 1).await;
     assert_eq!(sent[0]["why"], "It isn't waiting for you to merge it.");
-    assert_eq!(ops_named(&asked, "release").len(), 1);
+    parked_for(&asked, "merge");
     assert!(gh.calls().is_empty());
 }
 
