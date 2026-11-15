@@ -15,7 +15,7 @@ use futures_util::future::BoxFuture;
 
 use super::Shared;
 use super::project::ProjectLoop;
-use crate::backlog::take_over::PersonClaim;
+use crate::backlog::take_over::{Did, PersonClaim};
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::intents::take_over::{TakeOverHandler, TakeOvers, Taker};
 use crate::intents::{IntentStore, Puller, StoreLink};
@@ -41,7 +41,7 @@ impl Taker for StoreTaker {
             self.agent.clone(),
             id.to_string(),
         );
-        async move { client.take_over(repo, Some(&token), &id, &agent).await }.boxed()
+        async move { client.take_over(repo, Some(&token), &id, &agent, Did::TookOver).await }.boxed()
     }
 
     fn give_back(&self, id: &str, lease: &str) -> BoxFuture<'static, ()> {

@@ -79,6 +79,7 @@ struct Fixed {
     kind: &'static str,
     outcome: Outcome,
     only: Option<&'static str>,
+    not_twice: bool,
     runs: Arc<Mutex<Vec<String>>>,
 }
 
@@ -89,6 +90,7 @@ impl Fixed {
             kind,
             outcome,
             only: None,
+            not_twice: false,
             runs: runs.clone(),
         };
         (Arc::new(h), runs)
@@ -101,6 +103,9 @@ impl Handler<u32> for Fixed {
     }
     fn takes(&self, row: &IntentRow) -> bool {
         self.only.is_none_or(|id| id == row.id)
+    }
+    fn not_twice(&self) -> bool {
+        self.not_twice
     }
     fn run(&self, row: IntentRow, cx: &u32) -> BoxFuture<'static, Outcome> {
         self.runs.lock().unwrap().push(format!("{} cx={cx}", row.id));
@@ -202,6 +207,7 @@ async fn rows_that_are_finished_or_of_another_kind_or_not_taken_are_skipped() {
         kind: "ask",
         outcome: Outcome::Done(json!({})),
         only: Some("yes"),
+        not_twice: false,
         runs: runs.clone(),
     });
     let mut p = puller(h);
@@ -379,4 +385,53 @@ async fn adding_a_kind_is_one_registration() {
     assert_eq!(fake.log()[0], "list ask,sync");
     assert_eq!(ask_runs.lock().unwrap().len(), 1);
     assert_eq!(sync_runs.lock().unwrap().len(), 1);
+}
+
+const RESTARTED: &str = r#"finish m1 Failed null "This computer restarted before it finished; check, then ask again""#;
+
+fn not_twice(kind: &'static str) -> (Arc<Fixed>, Arc<Mutex<Vec<String>>>) {
+    let (mut h, runs) = Fixed::new(kind, Outcome::Done(json!({})));
+    Arc::get_mut(&mut h).unwrap().not_twice = true;
+    (h, runs)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_not_twice_row_held_before_a_restart_is_failed_not_run() {
+    for status in ["claimed", "running"] {
+        let fake = Fake::with(vec![row("m1", "merge_requested", status)]);
+        let (h, runs) = not_twice("merge_requested");
+        let mut p = puller(h);
+        let store: Arc<dyn IntentStore> = fake.clone();
+        p.pass(&store, || 0).await;
+        settle(&mut p).await;
+        assert!(runs.lock().unwrap().is_empty());
+        assert_eq!(fake.log(), ["list merge_requested", "claim m1", RESTARTED]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_same_held_row_runs_when_its_kind_may_run_twice() {
+    let fake = Fake::with(vec![row("m1", "merge_requested", "running")]);
+    let (h, runs) = Fixed::new("merge_requested", Outcome::Done(json!({})));
+    let mut p = puller(h);
+    let store: Arc<dyn IntentStore> = fake.clone();
+    p.pass(&store, || 0).await;
+    settle(&mut p).await;
+    assert_eq!(*runs.lock().unwrap(), ["m1 cx=0"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_not_twice_row_requested_new_runs_and_one_taken_in_this_process_is_left_alone() {
+    let fake = Fake::with(vec![row("m1", "merge_requested", "requested")]);
+    let (h, runs) = not_twice("merge_requested");
+    let mut p = puller(h);
+    let store: Arc<dyn IntentStore> = fake.clone();
+    p.pass(&store, || 0).await;
+    settle(&mut p).await;
+    assert_eq!(*runs.lock().unwrap(), ["m1 cx=0"]);
+    // The store now lists it as running (our own beat made it so): taken here, so neither run nor failed.
+    fake.rows.lock().unwrap()[0].status = "running".into();
+    assert_eq!(p.pass(&store, || 0).await, 0);
+    assert_eq!(runs.lock().unwrap().len(), 1);
+    assert!(fake.log().iter().all(|l| !l.contains("Failed")));
 }
