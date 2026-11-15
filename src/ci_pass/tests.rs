@@ -13,6 +13,7 @@ use super::*;
 use crate::engines::engine::{test_config, test_result};
 use crate::test_support::write_executable;
 
+mod merge;
 mod rerun;
 
 pub(super) type Script = Box<dyn Fn(&Value) -> Value + Send + Sync>;
@@ -90,7 +91,7 @@ pub(super) fn tell(next: Value) -> Value {
 
 /// A fake `gh` over files in its folder: `pr list` prints `list.json`; a commit's statuses and check runs are
 /// `<sha>.status` and `<sha>.runs` (no file, no answer: `gh` fails); `pr checks <n>` prints `checks-<n>.json`;
-/// `run view` prints a log; a `POST` to the labels fails with "Not Found" until the label is made, when `no-label`
+/// `run view` prints a log; `api user` prints `login` (no file: `gh` fails, as when signed out); a `POST` to the labels fails with "Not Found" until the label is made, when `no-label`
 /// is there. Every call is appended to `gh.log`.
 pub(super) fn fake_gh(dir: &Path) -> PathBuf {
     let d = dir.display();
@@ -102,6 +103,7 @@ case "$*" in
   "pr list"*) cat "{d}/list.json" ;;
   "api repos/o/r/commits/"*"/status?"*) f="{d}/$(echo "$2" | cut -d/ -f5).status"; [ -f "$f" ] && cat "$f" || {{ echo "HTTP 403" >&2; exit 1; }} ;;
   "api repos/o/r/commits/"*"/check-runs?"*) f="{d}/$(echo "$2" | cut -d/ -f5).runs"; [ -f "$f" ] && cat "$f" || echo '[]' ;;
+  "api user"*) [ -f "{d}/login" ] && cat "{d}/login" || exit 1 ;;
   "pr checks "*) cat "{d}/checks-$3.json" ;;
   "run view"*) echo "error: boom in the build" ;;
   "api -X POST"*) if [ -f "{d}/no-label" ] && [ ! -f "{d}/label-made" ]; then echo "Not Found" >&2; exit 1; fi ;;
@@ -178,6 +180,12 @@ pub(super) struct Rig {
     pub client: Client,
     pub items: HashSet<String>,
     pub ready_label: bool,
+    /// The project's `ciWatchAllow`.
+    pub allow: Vec<String>,
+    pub logins: LoginCache,
+    /// The checkout `gh` and git run in; the rig's own folder until a test makes a repo.
+    pub repo: Option<PathBuf>,
+    pub git: host::GitCommand,
 }
 
 impl Rig {
@@ -194,16 +202,22 @@ impl Rig {
             bells: Mutex::default(),
             items: HashSet::new(),
             ready_label: false,
+            allow: Vec::new(),
+            logins: LoginCache::default(),
+            repo: None,
+            git: Arc::new(crate::test_support::git),
         }
     }
 
     pub fn host(&self) -> Arc<dyn CiHost> {
         Arc::new(GhCiHost {
             gh: fake_gh(self.dir.path()),
-            dir: self.dir.path().to_path_buf(),
+            dir: self.repo.clone().unwrap_or_else(|| self.dir.path().to_path_buf()),
             repo: "o/r".into(),
             base: "main".into(),
             ready_label: self.ready_label,
+            worktrees: self.dir.path().join("worktrees"),
+            git: self.git.clone(),
         })
     }
 
@@ -217,6 +231,8 @@ impl Rig {
             repo: 7,
             token: Some("tok"),
             items: &self.items,
+            allow: &self.allow,
+            logins: &self.logins,
             bell: &bell,
             now,
         }
@@ -245,7 +261,7 @@ impl Rig {
 }
 
 #[tokio::test]
-async fn each_head_is_sent_with_its_facts_and_may_push_false() {
+async fn each_head_is_sent_with_its_facts_and_may_push_by_the_rule() {
     let rig = Rig::new().await;
     list(
         rig.dir.path(),
@@ -268,10 +284,11 @@ async fn each_head_is_sent_with_its_facts_and_may_push_false() {
     assert_eq!(found, 1);
     let sent = rig.store.sent("ci_result");
     assert_eq!(sent.len(), 3);
-    for facts in &sent {
+    // Only the `retaskable/` branch may be pushed to: ann isn't signed in, allowed or the author's own.
+    for (facts, may_push) in sent.iter().zip([false, true, false]) {
         assert_eq!(
             (&facts["mayPush"], &facts["button"]),
-            (&json!(false), &json!(false)),
+            (&json!(may_push), &json!(false)),
             "{facts}"
         );
         assert_eq!(facts["redNow"], 1);
@@ -453,7 +470,7 @@ async fn a_pull_request_whose_checks_cant_be_read_is_skipped_not_the_pass() {
 }
 
 #[tokio::test]
-async fn fix_and_merge_main_are_not_run_and_end_the_carry_out() {
+async fn fix_is_not_run_and_merge_main_not_where_it_cant_push_and_either_ends_the_carry_out() {
     for next in ["fix", "mergeMain"] {
         let rig = Rig::new().await;
         list(rig.dir.path(), vec![pull(4, "feat/x", "ddd")]);
