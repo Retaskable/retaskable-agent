@@ -99,6 +99,7 @@ pub mod start_at_login;
 pub mod store;
 mod sync;
 pub mod tags;
+pub mod team_branch;
 pub mod telemetry;
 pub mod terminal_menu;
 #[cfg(test)]
