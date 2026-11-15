@@ -133,6 +133,8 @@ pub struct Machine {
     pub(super) take_overs: bool,
     /// Finishes items a person marks Done. With none, `finish_requested` rows are left alone.
     pub(super) finish_host: Option<Arc<dyn super::finish_steps::FinishHost>>,
+    /// Merges items a person presses Merge into main on. With none, `merge_requested` rows are left alone.
+    pub(super) merge_host: Option<Arc<dyn super::merge_item::MergeHost>>,
     /// Runs the expert sessions' turns. With none, the expert commands are refused.
     pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
@@ -189,6 +191,7 @@ impl Machine {
             asks: None,
             take_overs: false,
             finish_host: None,
+            merge_host: None,
             experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
@@ -456,6 +459,12 @@ impl Machine {
         self
     }
 
+    /// Lets `claim` mode merge items a person presses Merge into main on.
+    pub fn with_merge_host(mut self, host: Arc<dyn super::merge_item::MergeHost>) -> Self {
+        self.merge_host = Some(host);
+        self
+    }
+
     /// Lets `claim` mode run expert sessions.
     pub fn with_experts(mut self, host: Arc<dyn super::ExpertHost>) -> Self {
         self.experts = Some(host);
@@ -669,6 +678,15 @@ impl Machine {
                 if live {
                     let shared = shared!(self, stopping);
                     lp.finish_pass(&host, &shared).await;
+                }
+            }
+        }
+        // A person's Merge into main on an item: no session, so no slot, and a pause doesn't hold it back.
+        if let Some(host) = self.merge_host.clone() {
+            for (lp, &live) in self.projects.iter_mut().zip(&live) {
+                if live {
+                    let shared = shared!(self, stopping);
+                    lp.merge_pass(&host, &shared).await;
                 }
             }
         }

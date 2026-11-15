@@ -8,6 +8,7 @@
 //!
 //! A kind is added by registering one [`Handler`]; the puller itself knows nothing of any kind.
 pub mod finish_steps;
+pub mod merge_item;
 pub mod take_over;
 
 use std::collections::BTreeSet;
@@ -31,7 +32,7 @@ const FINISH_RETRY: Duration = Duration::from_secs(2);
 /// How a handler ended a row it ran.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// `done`, with the derived result (at most 4 KB, never a secret).
+    /// `done`, with the derived result (at most 4 KB, never a secret); `Null` is no result.
     Done(Value),
     /// `refused`: the computer understood and said no, in plain words (at most 280 characters).
     Refused(String),
@@ -278,6 +279,8 @@ async fn run_row(
         }
     };
     let (ending, result, why) = match outcome {
+        // A handler with nothing to say (a merge) ends the row with no result at all, not a null one.
+        Outcome::Done(Value::Null) => (Ending::Done, None, None),
         Outcome::Done(v) => (Ending::Done, Some(v), None),
         Outcome::Refused(why) => (Ending::Refused, None, Some(why)),
         Outcome::Failed(why) => (Ending::Failed, None, Some(why)),

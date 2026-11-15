@@ -33,6 +33,7 @@ mod item_commands;
 mod land;
 mod lane_play;
 mod main_sync;
+mod merge_item;
 mod take_overs;
 pub use lane_play::LanePlay;
 mod claim;

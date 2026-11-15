@@ -292,6 +292,8 @@ pub struct ProjectLoop {
     /// Items taken over from another computer, and the rows asking for it (`take_overs.rs`).
     pub(super) take_overs: super::take_overs::Pulling,
     pub(super) finishing: super::finish_steps::Finishing,
+    /// A person's Merge into main on an item (`merge_item.rs`).
+    pub(super) merging: super::merge_item::Merging,
     /// The expert sessions (`experts.rs`).
     pub(super) experts: super::experts::Experts,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
@@ -377,6 +379,7 @@ impl ProjectLoop {
             asks: Default::default(),
             take_overs: Default::default(),
             finishing: Default::default(),
+            merging: Default::default(),
             experts: Default::default(),
             trial: None,
             backlog_items: 0,
