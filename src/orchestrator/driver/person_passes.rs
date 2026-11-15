@@ -149,4 +149,41 @@ impl Machine {
             }
         }
     }
+
+    /// A person's Merge into main, for the `on` projects: no session, so no slot, and a pause doesn't hold it back.
+    /// What a row names is the handler's: an item is claimed by name only where items are held (`claim` mode).
+    pub(super) async fn merge_passes(&mut self, on: &[bool], stopping: bool) {
+        let Some(host) = self.merge_host.clone() else { return };
+        for (lp, &on) in self.projects.iter_mut().zip(on) {
+            if on {
+                let shared = Shared {
+                    links: &self.links,
+                    local: &self.local,
+                    claim_paused_until: &mut self.claim_paused_until,
+                    claude_signed_out_until: &mut self.claude_signed_out_until,
+                    engine_limits: &mut self.engine_limits,
+                    stopping,
+                };
+                lp.merge_pass(&host, &shared).await;
+            }
+        }
+    }
+
+    /// A person's Open PR to main, for the `on` projects: no session, so no slot, and a pause doesn't hold it back.
+    pub(super) async fn main_pr_passes(&mut self, on: &[bool], stopping: bool) {
+        let Some(host) = self.main_pr_host.clone() else { return };
+        for (lp, &on) in self.projects.iter_mut().zip(on) {
+            if on {
+                let shared = Shared {
+                    links: &self.links,
+                    local: &self.local,
+                    claim_paused_until: &mut self.claim_paused_until,
+                    claude_signed_out_until: &mut self.claude_signed_out_until,
+                    engine_limits: &mut self.engine_limits,
+                    stopping,
+                };
+                lp.main_pr_pass(&host, &shared).await;
+            }
+        }
+    }
 }

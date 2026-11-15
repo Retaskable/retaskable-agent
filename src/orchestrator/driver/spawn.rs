@@ -107,7 +107,8 @@ pub fn spawn_all(args: SpawnArgs) {
         );
     }
     let runs = args.live.snapshot().mode == OrchestratorMode::Runs;
-    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the trial plan and the CI watcher.
+    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the trial plan, the CI
+    // watcher, the merge into main and the PR into main.
     if args.starter.is_some() || runs {
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
@@ -124,17 +125,19 @@ pub fn spawn_all(args: SpawnArgs) {
         if let Some(watch) = args.ci_watch {
             machine = machine.with_ci_watch(watch, args.runners);
         }
-    }
-    if let Some(starter) = args.starter {
-        machine = machine.with_starter(starter);
-        machine = machine.with_take_overs();
-        machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
+        // A merge into main and an Open PR to main need no item held. `runs` mode leaves the rows that name an item (a
+        // merge, a take-over, Done) to a computer that claims (`MergeHandler::without_items`).
         machine = machine.with_merge_host(Arc::new(super::merge_item::GhMergeHost {
             env: crate::env::Env::from_process(),
         }));
         machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
             env: crate::env::Env::from_process(),
         }));
+    }
+    if let Some(starter) = args.starter {
+        machine = machine.with_starter(starter);
+        machine = machine.with_take_overs();
+        machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");
     }

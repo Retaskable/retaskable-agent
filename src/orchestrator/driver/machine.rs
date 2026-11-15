@@ -469,6 +469,8 @@ impl Machine {
             .collect();
         let mut slots = self.room_total(self.concurrency).saturating_sub(self.sessions());
         self.ask_passes(&on, &paused, stopping, &mut slots).await;
+        self.merge_passes(&on, stopping).await;
+        self.main_pr_passes(&on, stopping).await;
         self.expert_passes(&on, stopping, &mut slots).await;
         let watching: Vec<bool> = (self.projects.iter().zip(&on))
             .map(|(lp, &on)| on && (self.claims(lp) || lp.backlog_items.is_some()))
@@ -497,19 +499,20 @@ impl Machine {
         self
     }
 
-    /// Lets `claim` mode merge items a person presses Merge into main on.
+    /// Lets `claim` and `runs` mode merge what a person presses Merge into main on (an item only in `claim` mode).
     pub fn with_merge_host(mut self, host: Arc<dyn super::merge_item::MergeHost>) -> Self {
         self.merge_host = Some(host);
         self
     }
 
-    /// Lets `claim` mode open the pull request into main a person asks for.
+    /// Lets `claim` and `runs` mode open the pull request into main a person asks for.
     pub fn with_main_pr_host(mut self, host: Arc<dyn super::main_pr::MainPrHost>) -> Self {
         self.main_pr_host = Some(host);
         self
     }
 
-    /// Lets `claim` and `runs` mode watch the open pull requests (report only) of the projects `runners` says this computer runs.
+    /// Lets `claim` and `runs` mode watch the open pull requests (report only) of the projects `runners` says this
+    /// computer runs.
     pub fn with_ci_watch(mut self, host: Arc<dyn super::CiWatchHost>, runners: crate::rollout::Runners) -> Self {
         self.ci_watch = Some(host);
         self.runners = runners;
@@ -728,24 +731,8 @@ impl Machine {
                 }
             }
         }
-        // A person's Merge into main on an item: no session, so no slot, and a pause doesn't hold it back.
-        if let Some(host) = self.merge_host.clone() {
-            for (lp, &live) in self.projects.iter_mut().zip(&live) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.merge_pass(&host, &shared).await;
-                }
-            }
-        }
-        // A person's Open PR to main: no session, so no slot, and a pause doesn't hold it back.
-        if let Some(host) = self.main_pr_host.clone() {
-            for (lp, &live) in self.projects.iter_mut().zip(&live) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.main_pr_pass(&host, &shared).await;
-                }
-            }
-        }
+        self.merge_passes(&live, stopping).await;
+        self.main_pr_passes(&live, stopping).await;
         self.ci_passes(&live, paused, stopping).await;
         self.expert_passes(&live, stopping, &mut slots).await;
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.

@@ -124,3 +124,19 @@ async fn the_claim_carries_this_computers_claude_week_like_every_claim() {
     assert_eq!(claim["agent"]["week"]["used"], json!(0.4));
     assert!(claim["agent"]["week"]["resetsAt"].is_u64());
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_take_over_row_is_left_requested_for_a_computer_that_claims() {
+    let (mut rig, asked, listed) = rig_with_store(claimed("help")).await;
+    rig.go_runs();
+    push(&listed, row("4"));
+    rig.runs_quiet().await;
+    assert!(
+        ops_named(&asked, "intent_list")
+            .iter()
+            .all(|a| a["kinds"] != json!(["take_over_requested"]))
+    );
+    assert!(ops_named(&asked, "claim").is_empty() && ops_named(&asked, "intent_claim").is_empty());
+    assert_eq!(listed.rows.lock().unwrap()[0]["status"], "requested");
+    assert!(rig.lp(0).runs.is_empty(), "nothing is held");
+}

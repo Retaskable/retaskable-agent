@@ -44,11 +44,24 @@ pub struct Merge {
 pub struct MergeHandler {
     asks: mpsc::UnboundedSender<Merge>,
     ships: mpsc::UnboundedSender<Ship>,
+    /// Whether a row naming an item is taken. Off where no item is held (`runs` mode): the claim by name and the
+    /// item's lease are a claiming computer's, so that row stays `requested` for one (a TS agent or `claim` mode).
+    items: bool,
 }
 
 impl MergeHandler {
     pub fn new(asks: mpsc::UnboundedSender<Merge>, ships: mpsc::UnboundedSender<Ship>) -> Self {
-        Self { asks, ships }
+        Self {
+            asks,
+            ships,
+            items: true,
+        }
+    }
+
+    /// Leaves the rows naming an item unclaimed; spec drafts and the merge control into main are still taken.
+    pub fn without_items(mut self) -> Self {
+        self.items = false;
+        self
     }
 }
 
@@ -65,6 +78,10 @@ fn named(row: &IntentRow) -> (bool, bool, usize) {
 impl<C: Send + Sync> Handler<C> for MergeHandler {
     fn kind(&self) -> &'static str {
         "merge_requested"
+    }
+
+    fn takes(&self, row: &IntentRow) -> bool {
+        self.items || !named(row).0
     }
 
     fn not_twice(&self) -> bool {

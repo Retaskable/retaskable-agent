@@ -159,3 +159,15 @@ async fn a_draft_row_asks_the_loop_for_that_draft() {
     assert_eq!(running.await, Outcome::Refused("no".into()));
     answered.await.unwrap();
 }
+
+#[test]
+fn without_items_it_leaves_every_row_naming_an_item_and_takes_the_rest() {
+    let (h, _rx) = handler();
+    let h = h.without_items();
+    for args in [json!({ "itemId": "4" }), json!({ "itemId": "4", "ship": true })] {
+        assert!(!Handler::<()>::takes(&h, &row(args.clone())), "{args}");
+    }
+    for args in [json!({ "draftId": "draft-1" }), json!({ "ship": true }), json!({})] {
+        assert!(Handler::<()>::takes(&h, &row(args.clone())), "{args}");
+    }
+}
