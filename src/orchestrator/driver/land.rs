@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
+use super::merge_item::reason;
 use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
 use crate::backlog::Client;
@@ -22,7 +23,7 @@ use crate::config::ProjectConfig;
 use crate::drafts::DrafterStatus;
 use crate::drafts::land::{deletes_head, pr_number, workflow};
 use crate::engines::{EngineId, Role};
-use crate::view::DraftCommand;
+use crate::view::{DraftCommand, Reply};
 
 /// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
 const HAND_BACKS: u32 = 2;
@@ -73,9 +74,18 @@ struct Ctx {
     /// The engine to start on when it isn't the drafter's chosen one.
     engine: Option<EngineId>,
     sessions: crate::orchestrator::live::sessions::Sessions,
+    /// A `merge_requested` row waiting on how a Merge into main ended.
+    reply: Option<Reply>,
 }
 
 impl Ctx {
+    /// Tells the row waiting on this press how it ended, if one is.
+    fn answer(&self, answer: Result<(), String>) {
+        if let Some(reply) = &self.reply {
+            reply.send(answer);
+        }
+    }
+
     async fn report(&self, id: &str, report: DraftReport) {
         let sent = (self.client).draft_report(self.repo, Some(&self.token), id, &self.lease, &report);
         if let Err(e) = sent.await {
@@ -97,24 +107,29 @@ impl Ctx {
 
     /// Back to waiting for approval, the reason on its timeline.
     async fn back(&self, id: &str, why: &str) {
+        self.noted(id, format!("Couldn't merge: {why}")).await;
+    }
+
+    /// Back to waiting for approval with `note` on its timeline.
+    async fn noted(&self, id: &str, note: String) {
         let report = DraftReport {
             status: Some("needs_person".into()),
             detail: Some("awaiting_approval".into()),
-            summary: Some(format!("Couldn't merge: {why}")),
+            summary: Some(note),
             ..Default::default()
         };
         self.report(id, report).await;
     }
 
-    /// `gh pr merge`, up to `tries` times.
-    async fn merge(&self, pr: u64, delete_branch: bool, tries: u32) -> Result<(), String> {
+    /// `gh pr merge`, up to `tries` times; `squash` forces `--squash`, the settings' method flag otherwise.
+    async fn merge(&self, pr: u64, delete_branch: bool, squash: bool, tries: u32) -> Result<(), String> {
         let mut last = String::new();
         for i in 0..tries {
             if i > 0 {
                 tokio::time::sleep(self.wait).await;
             }
             let (host, project) = (self.host.clone(), self.project.clone());
-            let done = tokio::task::spawn_blocking(move || host.merge(&project, pr, delete_branch)).await;
+            let done = tokio::task::spawn_blocking(move || host.merge(&project, pr, delete_branch, squash)).await;
             match done {
                 Ok(Ok(())) => return Ok(()),
                 Ok(Err(e)) => last = format!("{e:#}"),
@@ -183,6 +198,11 @@ impl Ctx {
     }
 }
 
+/// What the row of a Merge into main is refused with when the draft can't be merged by a person (`mergeOwn`).
+fn not_waiting(id: &str) -> String {
+    format!("Draft {id} isn't waiting for you to merge it.")
+}
+
 fn text<'a>(draft: &'a TakenDraft, key: &str) -> Option<&'a str> {
     draft.draft.other.get(key).and_then(Value::as_str)
 }
@@ -231,17 +251,23 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
     let (Some(pr), true) = (pr, waiting) else {
         tracing::info!("dropped a press on {id}: it isn't waiting for approval here");
         ctx.release(&id).await;
+        ctx.answer(Err(not_waiting(&id)));
         return None;
     };
-    let delete = wf.delete_branch && draft.branch.as_deref().is_some_and(deletes_head);
+    let own_branch = draft.branch.as_deref().is_some_and(deletes_head);
+    let delete = wf.delete_branch && own_branch;
     if merge_press {
         let Some(into) = &wf.person_merges_into else {
             tracing::info!("dropped a Merge into main on {id}: this project's pattern doesn't have it");
             ctx.release(&id).await;
+            ctx.answer(Err(not_waiting(&id)));
             return None;
         };
-        if let Err(why) = ctx.merge(pr, delete, 1).await {
-            ctx.back(&id, &format!("into {into}: {why}")).await;
+        // A person's merge is always squashed, and deletes the draft's own branch whatever the settings say (`forPerson`).
+        if let Err(why) = ctx.merge(pr, own_branch, true, 1).await {
+            let why = reason(&why);
+            ctx.noted(&id, format!("Couldn't merge into {into}: {why}")).await;
+            ctx.answer(Err(format!("Couldn't merge #{pr}: {why}")));
             return None;
         }
     } else if !wf.we_merge {
@@ -254,7 +280,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         };
         ctx.report(&id, report).await;
         return None;
-    } else if let Err(first) = ctx.merge(pr, delete, 1).await {
+    } else if let Err(first) = ctx.merge(pr, delete, false, 1).await {
         // Behind the base, perhaps: rebase it when that's clean, and merge once GitHub sees the push.
         let base = &ctx.project.base_branch;
         let Some(branch) = draft.branch.as_deref() else {
@@ -264,7 +290,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         let mut hand_backs = 0;
         let why = loop {
             match ctx.rebase(&id, branch).await {
-                Ok(true) => break ctx.merge(pr, delete, MERGE_TRIES).await.err(),
+                Ok(true) => break ctx.merge(pr, delete, false, MERGE_TRIES).await.err(),
                 Ok(false) if hand_backs < HAND_BACKS => {
                     hand_backs += 1;
                     let reason = format!("it conflicts with {base}");
@@ -303,6 +329,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         ..Default::default()
     };
     ctx.report(&id, report).await;
+    ctx.answer(Ok(()));
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
@@ -361,14 +388,22 @@ impl ProjectLoop {
         for press in presses {
             let (DraftCommand::Approve { draft, .. }
             | DraftCommand::Merge { draft, .. }
+            | DraftCommand::MergeFor { draft, .. }
             | DraftCommand::Discard { draft, .. }) = &press;
             let id = draft.clone();
-            let merge_press = matches!(press, DraftCommand::Merge { .. });
+            let merge_press = matches!(press, DraftCommand::Merge { .. } | DraftCommand::MergeFor { .. });
+            let reply = match &press {
+                DraftCommand::MergeFor { reply, .. } => Some(reply.clone()),
+                _ => None,
+            };
             let agent = claim_agent(shared.links, &self.project);
             let taken = match self.client.draft_take(repo, Some(&token), &id, &agent).await {
                 Ok(taken) => taken,
                 Err(e) => {
                     tracing::warn!("{}: couldn't take draft {id}: {e}", self.id);
+                    if let Some(reply) = &reply {
+                        reply.send(Err(format!("Couldn't take draft {id}: {e}")));
+                    }
                     self.store_failure("draft_take", &id, &e).await;
                     continue;
                 }
@@ -384,6 +419,7 @@ impl ProjectLoop {
                 wait,
                 engine,
                 sessions: self.live.sessions().clone(),
+                reply,
             };
             let task = if matches!(press, DraftCommand::Discard { .. }) {
                 tokio::spawn(discard(ctx, id, taken))

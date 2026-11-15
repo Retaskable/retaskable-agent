@@ -564,7 +564,8 @@ fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
 
 /// `draft_approve { draftId }` (**Approve and merge**), `merge_pr { draftId }` (**Merge into main**) or
 /// `draft_discard { draftId }` (**Discard**): queued for the
-/// loop, which takes the draft and lands it. A `merge_pr` for an item or the team branch isn't this agent's yet.
+/// loop, which takes the draft and lands it; a `merge_pr` is squashed, as a person's merge is in the TS agent. A
+/// `merge_pr` for an item or the team branch isn't this agent's yet.
 fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let draft = cmd
         .args
