@@ -143,10 +143,10 @@ impl FixItem {
         };
         Self {
             id: id.into(),
-            title: title.chars().take(300).collect(),
+            title: crate::text::truncate(&title, 300),
             kind: "fix",
             spec_refs: Vec::new(),
-            remaining: remaining.trim().chars().take(4000).collect(),
+            remaining: crate::text::truncate(remaining.trim(), 4000),
             requested_by: None,
         }
     }

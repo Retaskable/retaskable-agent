@@ -51,7 +51,7 @@ impl ProjectLoop {
             );
             return;
         };
-        held.now.reported_bug = Some(message.signature.chars().take(500).collect());
+        held.now.reported_bug = Some(crate::text::truncate(&message.signature, 500));
         self.save_leases();
         let version = shared.links.bug_version.clone();
         let sent = tokio::spawn(async move { link.send(&message, &version).await });

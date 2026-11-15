@@ -171,7 +171,7 @@ pub fn client_id(ask_id: &str) -> String {
             }
         })
         .collect();
-    id.chars().take(60).collect()
+    crate::text::truncate(&id, 60)
 }
 
 /// What a filed idea carries from the ask beside its words: the message's pictures (store ids), the ask's audience

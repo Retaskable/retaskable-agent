@@ -74,7 +74,7 @@ fn a_host_get_sends_the_etag_back_and_a_304_is_the_cached_body() {
     let program = d.path().join("gh");
     crate::test_support::write_executable(
         &program,
-        "#!/bin/sh\necho \"$*\" >> calls.log\ncase \"$*\" in\n*if-none-match*) printf 'HTTP/2.0 304 Not Modified\\r\\n\\r\\n'; exit 1;;\n\
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\necho \"$*\" >> calls.log\ncase \"$*\" in\n*if-none-match*) printf 'HTTP/2.0 304 Not Modified\\r\\n\\r\\n'; exit 1;;\n\
          *) printf 'HTTP/2.0 200 OK\\r\\nEtag: \"v1\"\\r\\n\\r\\n[\"body\"]';;\nesac\n",
     );
     let host = Host {
