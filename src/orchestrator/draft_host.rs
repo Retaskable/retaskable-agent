@@ -209,7 +209,15 @@ impl DraftHost for ClaudeDrafts {
         } else {
             land::workflow(project).method_flag
         };
-        land::merge_pr(&self.gh(), Path::new(&project.repo_path), pr, method, delete_branch)
+        let (gh, dir) = (self.gh(), Path::new(&project.repo_path));
+        // `squash` is only ever a person's Merge into main (`driver/land.rs`): it goes in as the head stood a moment
+        // ago, so a push since then is refused. The TS agent's `mergeForPerson` passes none (`merge.ts:318`).
+        let head = if squash {
+            Some(land::pr_head(&gh, dir, pr)?)
+        } else {
+            None
+        };
+        land::merge_pr(&gh, dir, pr, method, delete_branch, head.as_deref())
     }
 
     fn close(&self, project: &ProjectConfig, pr: u64) -> Result<()> {

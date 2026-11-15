@@ -117,6 +117,7 @@ fn fx() -> Fx {
 R='{root}'
 echo "$*" >> "$R/gh.log"
 case "$*" in
+"pr list"*"--state merged"*) cat "$R/merged.json" 2>/dev/null || echo '[]';;
 "pr list"*) cat "$R/list.json";;
 "pr view"*)
   n=$(cat "$R/views" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$R/views"
@@ -265,11 +266,63 @@ fn a_merge_that_was_only_queued_leaves_dev_alone() {
 }
 
 #[test]
-fn a_look_after_the_merge_that_fails_reads_as_not_merged() {
+fn a_look_after_the_merge_that_fails_twice_reads_as_not_merged() {
     let fx = fx();
     fx.write("view2.fail", "");
+    fx.write("view3.fail", "");
     assert!(says(fx.ship(&[])).starts_with("PR #7 didn't go in straight away"));
     assert_eq!(fx.origin_has("dev"), Some(fx.dev.clone()));
+}
+
+#[test]
+fn a_look_after_the_merge_that_fails_once_is_asked_again() {
+    let fx = fx();
+    fx.write("view2.fail", "");
+    fx.write(
+        "view3.json",
+        &format!(r#"{{"state":"MERGED","headRefOid":"{}"}}"#, fx.dev),
+    );
+    assert_eq!(fx.ship(&[]).unwrap(), None);
+    assert_eq!(fx.origin_has("dev"), Some(fx.main.clone()));
+}
+
+/// `gh pr list --state merged` says pull request 7 from dev into main merged with `head`.
+fn merged_at(fx: &Fx, head: &str) {
+    fx.write(
+        "merged.json",
+        &format!(r#"[{{"number":6,"mergedAt":"2026-01-01T00:00:00Z","headRefOid":"old"}},{{"number":7,"mergedAt":"2026-02-01T00:00:00Z","headRefOid":"{head}"}}]"#),
+    );
+}
+
+fn unfinished(fx: &Fx) -> Option<(u64, String)> {
+    crate::lanes::fetch_latest(&fx.repo).unwrap();
+    unfinished_restart(&fx.at("gh"), &fx.repo, "o/r", "dev", "main").unwrap()
+}
+
+#[test]
+fn a_squashed_dev_branch_that_was_never_restarted_is_found_and_restarted_once() {
+    let fx = fx();
+    merged_at(&fx, &fx.dev);
+    let (number, head) = unfinished(&fx).expect("dev still stands at the head that merged");
+    assert_eq!((number, head.as_str()), (7, fx.dev.as_str()));
+    assert_eq!(start_again_from_main(&fx.repo, "dev", "main", &head), None);
+    assert_eq!(fx.origin_has("dev"), Some(fx.main.clone()));
+    assert_eq!(fx.origin_has("main"), Some(fx.main.clone()), "main was never written");
+    // Done: nothing more to finish, and `gh` isn't even asked.
+    let asked = fx.log().len();
+    assert_eq!(unfinished(&fx), None);
+    assert_eq!(fx.log().len(), asked);
+}
+
+#[test]
+fn a_dev_branch_that_moved_on_since_the_merge_is_not_a_restart_to_finish() {
+    let fx = fx();
+    merged_at(&fx, "somethingelse");
+    assert_eq!(unfinished(&fx), None);
+    assert_eq!(fx.origin_has("dev"), Some(fx.dev.clone()));
+    // No merged pull request at all is nothing to finish either.
+    let fx = self::fx();
+    assert_eq!(unfinished(&fx), None);
 }
 
 #[test]
