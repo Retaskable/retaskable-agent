@@ -85,6 +85,8 @@ pub(super) struct Rows {
     pub(super) claims: Mutex<Vec<Value>>,
     /// What the store answers a person's `claim` of an item (status and body); nothing claimable when unset.
     pub(super) person_claim: Mutex<Option<(u16, Value)>>,
+    /// What the store answers a `draft_take`; nothing when unset.
+    pub(super) draft_take: Mutex<Option<Value>>,
 }
 
 pub(super) type Listed = Arc<Rows>;
@@ -115,6 +117,9 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
                     }
                     let value = match op.as_str() {
+                        "draft_take" if rows.draft_take.lock().unwrap().is_some() => {
+                            rows.draft_take.lock().unwrap().clone().unwrap()
+                        }
                         "list" | "drafts" | "draft_list" => json!([]),
                         "pause_get" => json!({ "paused": null, "log": [] }),
                         "facts_get" => json!({}),

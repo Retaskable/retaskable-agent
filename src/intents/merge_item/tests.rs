@@ -19,11 +19,11 @@ fn it_is_a_not_twice_kind() {
 }
 
 #[test]
-fn it_leaves_a_row_naming_only_a_draft_or_only_the_pull_request_into_main() {
+fn it_leaves_a_row_naming_only_the_pull_request_into_main() {
     let (h, _rx) = handler();
     let takes = |args| Handler::<()>::takes(&h, &row(args));
     assert!(takes(json!({ "itemId": "4" })));
-    assert!(!takes(json!({ "draftId": "draft-1" })));
+    assert!(takes(json!({ "draftId": "draft-1" })));
     assert!(!takes(json!({ "ship": true })));
     // Naming none or several is refused here, so it is taken.
     assert!(takes(json!({})));
@@ -58,7 +58,7 @@ async fn the_loops_answer_ends_the_row_done_with_no_result() {
     let running = Handler::<()>::run(&h, row(json!({ "itemId": "4" })), &());
     let answered = tokio::spawn(async move {
         let ask = rx.recv().await.unwrap();
-        assert_eq!(ask.id, "4");
+        assert_eq!((ask.id.as_str(), ask.draft), ("4", false));
         ask.reply.send(Ok(())).unwrap();
     });
     assert_eq!(running.await, Outcome::Done(Value::Null));
@@ -85,4 +85,17 @@ async fn a_loop_that_goes_away_leaves_the_row_for_the_store() {
         Handler::<()>::run(&h, row(json!({ "itemId": "4" })), &()).await,
         Outcome::Abandoned
     );
+}
+
+#[tokio::test]
+async fn a_draft_row_asks_the_loop_for_that_draft() {
+    let (h, mut rx) = handler();
+    let running = Handler::<()>::run(&h, row(json!({ "draftId": "draft-1" })), &());
+    let answered = tokio::spawn(async move {
+        let ask = rx.recv().await.unwrap();
+        assert_eq!((ask.id.as_str(), ask.draft), ("draft-1", true));
+        ask.reply.send(Err("no".into())).unwrap();
+    });
+    assert_eq!(running.await, Outcome::Refused("no".into()));
+    answered.await.unwrap();
 }
