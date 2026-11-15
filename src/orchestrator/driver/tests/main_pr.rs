@@ -221,3 +221,19 @@ async fn a_paused_project_still_opens_it_and_no_host_leaves_the_row_alone() {
     quiet_passes(&mut rig).await;
     assert!(finishes(&asked).is_empty());
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_request_opens_the_pull_request() {
+    let (mut rig, asked, listed, host) = rig_opening(host(team_branch()), Some("main")).await;
+    rig.go_runs();
+    push(&listed, row());
+    let sent = rig.runs_until(&asked, 1).await;
+    assert_eq!(
+        sent[0],
+        json!({ "id": "in-1", "status": "done", "result": { "url": "https://github.com/o/r/pull/9" } })
+    );
+    assert_eq!(
+        host.calls().last().map(String::as_str),
+        Some("create main dev: 2 slices")
+    );
+}

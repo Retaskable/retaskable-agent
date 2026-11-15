@@ -106,6 +106,13 @@ impl State {
 }
 
 impl ProjectLoop {
+    /// The branches of board items, whose pull requests the watcher leaves to their own work: the items held here
+    /// (`claim` mode) and those the store listed with their pieces (`runs` mode).
+    pub(super) fn owned_branches(&self) -> HashSet<String> {
+        let held = self.items.values().filter_map(|i| i.branch.clone());
+        held.chain(self.listed_branches.iter().cloned()).collect()
+    }
+
     /// Starts a pass when one is due: this computer is the project's runner, it holds the backlog link (`token`) and
     /// knows the repo's id, no pass is still running and the last began 2 minutes ago. Not while stopping.
     pub(super) fn ci_pass(
@@ -116,6 +123,7 @@ impl ProjectLoop {
         stopping: bool,
         now: Instant,
     ) {
+        let items = self.owned_branches();
         let state = &mut self.ci_watch;
         if state.task.take_if(|t| t.is_finished()).is_some() {
             // Its failures were logged where they happened.
@@ -127,7 +135,6 @@ impl ProjectLoop {
             return;
         }
         state.looked = Some(now);
-        let items: HashSet<String> = self.items.values().filter_map(|i| i.branch.clone()).collect();
         let (client, project, since, login, fixing, id) = (
             self.client.clone(),
             self.project.clone(),

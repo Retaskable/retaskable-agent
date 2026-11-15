@@ -435,6 +435,7 @@ fn draft_edit_commits_and_pushes() {
 mod approve;
 mod expert;
 mod more;
+mod runs_mode;
 mod setup_check;
 use more::run_cmd;
 

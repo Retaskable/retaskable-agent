@@ -4,7 +4,7 @@
 //! answers `pending` here. Refused outside `claim` mode, where nothing runs.
 use serde_json::{Value, json};
 
-use super::{Command, PENDING, claim_check, nack};
+use super::{Command, PENDING, acts_check, nack};
 use crate::view::{AgentView, ExpertAction, ExpertCommand};
 
 /// The longest request or message (`shared/cloudCommands.ts`).
@@ -73,7 +73,7 @@ pub(super) fn expert(cmd: &Command, project: &str, view: &AgentView) -> Value {
         Ok(a) => a,
         Err(reason) => return nack(&cmd.id, reason),
     };
-    if let Err(reason) = claim_check(view) {
+    if let Err(reason) = acts_check(view) {
         return nack(&cmd.id, reason);
     }
     view.item_commands.push_expert(ExpertCommand {

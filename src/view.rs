@@ -224,6 +224,7 @@ pub struct IdeaCommand {
 #[derive(Debug, Clone, Default)]
 pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
+    runs: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
@@ -248,6 +249,17 @@ impl ItemCommands {
 
     pub fn claim(&self) -> bool {
         self.claim.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Set once at start: whether the orchestrator really runs in `runs` mode.
+    pub fn set_runs(&self, runs: bool) {
+        self.runs.store(runs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the orchestrator runs the passes that aren't about an item (experts, ideas, drafts): `claim` or `runs`.
+    /// The item commands and lane play stay [`claim`](Self::claim) only.
+    pub fn acts(&self) -> bool {
+        self.claim() || self.runs.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// A project's `cfg` as it may run: with the allowed commands over it. Everything that runs a project

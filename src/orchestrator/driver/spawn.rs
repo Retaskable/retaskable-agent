@@ -40,15 +40,15 @@ pub struct SpawnArgs<'a> {
     pub tags: crate::tags::LiveTags,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
-    /// Runs spec drafts in `claim` mode. None claims no draft.
+    /// Runs spec drafts in `claim` and `runs` mode. None claims no draft.
     pub drafts: Option<Arc<dyn super::DraftHost>>,
-    /// Runs the trial plan in `claim` mode, with the setup checks it waits on. None runs none.
+    /// Runs the trial plan in `claim` and `runs` mode, with the setup checks it waits on. None runs none.
     pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
-    /// Answers the chat's asks in `claim` mode. None answers none.
+    /// Answers the chat's asks in `claim` and `runs` mode. None answers none.
     pub asks: Option<Arc<dyn super::AskHost>>,
-    /// Runs the expert sessions in `claim` mode. None runs none.
+    /// Runs the expert sessions in `claim` and `runs` mode. None runs none.
     pub experts: Option<Arc<dyn super::ExpertHost>>,
-    /// Watches the open pull requests in `claim` mode, report only, where `runners` says this computer is the project's
+    /// Watches the open pull requests in `claim` and `runs` mode, report only, where `runners` says this computer is the project's
     /// rollout runner. None watches none.
     pub ci_watch: Option<Arc<dyn super::CiWatchHost>>,
     /// Which projects this computer is the rollout runner of (written by the rollout loops).
@@ -106,24 +106,15 @@ pub fn spawn_all(args: SpawnArgs) {
                 .collect(),
         );
     }
-    if let Some(starter) = args.starter {
-        machine = machine.with_starter(starter);
+    let runs = args.live.snapshot().mode == OrchestratorMode::Runs;
+    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the trial plan, the CI
+    // watcher, the merge into main and the PR into main.
+    if args.starter.is_some() || runs {
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
         }
         if let Some((host, checks)) = args.trial {
             machine = machine.with_trial(host, checks);
-        }
-        machine = machine.with_take_overs();
-        machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
-        machine = machine.with_merge_host(Arc::new(super::merge_item::GhMergeHost {
-            env: crate::env::Env::from_process(),
-        }));
-        machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
-            env: crate::env::Env::from_process(),
-        }));
-        if let Some(watch) = args.ci_watch {
-            machine = machine.with_ci_watch(watch, args.runners);
         }
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
@@ -131,6 +122,22 @@ pub fn spawn_all(args: SpawnArgs) {
         if let Some(experts) = args.experts {
             machine = machine.with_experts(experts);
         }
+        if let Some(watch) = args.ci_watch {
+            machine = machine.with_ci_watch(watch, args.runners);
+        }
+        // A merge into main and an Open PR to main need no item held. `runs` mode leaves the rows that name an item (a
+        // merge, a take-over, Done) to a computer that claims (`MergeHandler::without_items`).
+        machine = machine.with_merge_host(Arc::new(super::merge_item::GhMergeHost {
+            env: crate::env::Env::from_process(),
+        }));
+        machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
+            env: crate::env::Env::from_process(),
+        }));
+    }
+    if let Some(starter) = args.starter {
+        machine = machine.with_starter(starter);
+        machine = machine.with_take_overs();
+        machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");
     }

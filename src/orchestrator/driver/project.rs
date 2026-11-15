@@ -309,8 +309,12 @@ pub struct ProjectLoop {
     pub(super) fixes: super::fix_requests::FixRows,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
-    /// How many items the backlog held when this project was last read.
-    pub(super) backlog_items: usize,
+    /// How many items the backlog held when this project was last read; `None` before a read has gone through, so
+    /// nothing that needs an empty backlog (the trial plan) takes an unread one for empty.
+    pub(super) backlog_items: Option<usize>,
+    /// The branches of the items and pieces the store listed when this project was last read, kept in `runs` mode,
+    /// where no item is held here: the CI watcher leaves their pull requests alone.
+    pub(super) listed_branches: std::collections::HashSet<String>,
     /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
     pub(super) file_project: ProjectConfig,
 }
@@ -398,7 +402,8 @@ impl ProjectLoop {
             syncing: Default::default(),
             experts: Default::default(),
             trial: None,
-            backlog_items: 0,
+            backlog_items: None,
+            listed_branches: Default::default(),
             file_project,
         }
     }

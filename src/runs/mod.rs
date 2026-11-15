@@ -117,6 +117,14 @@ impl Runs {
         &self.live
     }
 
+    /// The live runs that hold a session of their own: every kind but a watch (it polls) and a merge (it only
+    /// calls `gh`).
+    pub fn sessions(&self) -> u32 {
+        (self.live.iter())
+            .filter(|r| !matches!(r.kind, RunKind::Watch | RunKind::Merge))
+            .count() as u32
+    }
+
     /// Starts a run the store handed out. `build` and `fix` take a lane from `pool` (the piece's last one if free);
     /// with none free nothing starts and the caller ends the token as `interrupted`.
     pub fn start(

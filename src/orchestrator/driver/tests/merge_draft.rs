@@ -152,3 +152,15 @@ async fn a_draft_the_store_wont_hand_over_refuses_the_row_in_its_words() {
     assert!(sent[0]["why"].as_str().unwrap().starts_with("Couldn't take draft d1: "));
     assert!(host.calls().is_empty());
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_draft_row_is_merged_and_ends_done() {
+    let (mut rig, asked, listed, host, _root) =
+        rig_draft(draft("needs_person", "awaiting_approval"), person(), vec![]).await;
+    rig.go_runs();
+    push(&listed, row(json!({ "draftId": "d1" })));
+    let sent = rig.runs_until(&asked, 1).await;
+    assert_eq!(sent[0], json!({ "id": "in-1", "status": "done" }));
+    assert_eq!(host.calls(), ["merge 9 delete=true", "remove d1", "fetch"]);
+    assert_eq!(reports(&asked)[0]["status"], "merged");
+}
