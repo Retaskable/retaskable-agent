@@ -19,6 +19,9 @@ pub fn hello(env: &Env, version: &str, project: &ProjectConfig) -> Value {
         "machine": info["machine"],
         "role": ROLE,
         "capabilities": [CHAT_CONTEXT_CAPABILITY],
+        // The hub's hello schema requires a `policy` object (shared/cloud.ts); a Chat Agent has no local policy to say,
+        // so it's empty. Without it the hub drops the hello and the Chat Agent is never attached to its project.
+        "policy": {},
         "project": { "githubRepo": project.github_repo, "backlogPath": project.backlog_path },
         "tags": [],
     })
@@ -78,6 +81,8 @@ mod tests {
             (json!("hello"), json!("chat"), json!("box"))
         );
         assert_eq!(h["capabilities"], json!(["chat_context"]));
+        // The hub's schema requires `policy` (an object, every field optional): without it the hello is dropped.
+        assert_eq!(h["policy"], json!({}));
         assert_eq!(h["project"], json!({ "githubRepo": "o/r", "backlogPath": "backlog" }));
         assert!(h.get("lanes").is_none() && h.get("settings").is_none());
     }
