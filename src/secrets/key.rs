@@ -86,7 +86,21 @@ impl Keys {
     pub fn for_reading(&self) -> Result<Option<DataKey>, String> {
         match &self.source {
             Source::Given(key) => Ok(Some(key.clone())),
-            Source::FileToMake(_) | Source::NoKey => Ok(None),
+            Source::NoKey => Ok(None),
+            // No file at start: look again, since this process's first save or another program sharing the data folder
+            // (the CI runner in Docker) may have made it since. Once read it is kept.
+            Source::FileToMake(file) => {
+                let mut cached = lock(&self.cached);
+                if cached.is_none() {
+                    *cached = match from_file(file) {
+                        Source::Given(key) => Some(key),
+                        Source::FileToMake(_) => None,
+                        Source::Broken(why) => return Err(why),
+                        _ => None,
+                    };
+                }
+                Ok(cached.clone())
+            }
             Source::Broken(why) => Err(why.clone()),
             Source::Os { store, account } => {
                 let mut cached = lock(&self.cached);
@@ -114,8 +128,17 @@ impl Keys {
         match &self.source {
             Source::FileToMake(file) => {
                 let key = DataKey::generate();
-                write_key_file(file, &key).map_err(|_| format!("Couldn't write the key file {}.", file.display()))?;
-                Ok(key)
+                match write_key_file(file, &key) {
+                    Ok(()) => {
+                        *lock(&self.cached) = Some(key.clone());
+                        Ok(key)
+                    }
+                    // Another program sharing the data folder made it first: use theirs, never a second key.
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => self
+                        .for_reading()?
+                        .ok_or_else(|| format!("Couldn't read the key file {}.", file.display())),
+                    Err(_) => Err(format!("Couldn't write the key file {}.", file.display())),
+                }
             }
             Source::Os { store, account } => {
                 let key = DataKey::generate();

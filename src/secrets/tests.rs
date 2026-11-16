@@ -562,6 +562,44 @@ fn a_headless_key_comes_from_a_file_and_the_first_save_makes_it() {
     assert_eq!(state(&rig.secrets(&env), "GH_TOKEN").0, Source::Saved);
 }
 
+#[test]
+fn the_process_that_made_the_key_file_reads_with_it_and_saves_again_under_it() {
+    // A computer with no key file at start (a fresh Docker data volume): the first save makes it, and the same running
+    // process must read with it after (the page showed "Unreadable") and save again under it (a second save failed).
+    let rig = Rig::new(&[]);
+    let file = rig.dir.path().join("secrets.key");
+    let env = [("RETASKABLE_SECRETS_KEY_FILE", file.to_str().unwrap())];
+    let secrets = rig.secrets(&env);
+    save(&secrets, &[("GH_TOKEN", json!(TOKEN))]);
+    assert_eq!(state(&secrets, "GH_TOKEN").0, Source::Saved);
+    let key = std::fs::read_to_string(&file).unwrap();
+    save(&secrets, &[("GITLAB_TOKEN", json!("glpat-second"))]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), key, "one key, never a second");
+    assert_eq!(state(&secrets, "GH_TOKEN").0, Source::Saved);
+    assert_eq!(state(&secrets, "GITLAB_TOKEN").0, Source::Saved);
+}
+
+#[test]
+fn a_key_file_another_program_made_after_start_is_used_not_replaced() {
+    // Two programs on one data folder (the agent and the CI runner in Docker), both started with no key file: the
+    // second to save uses the first one's key.
+    let rig = Rig::new(&[]);
+    let file = rig.dir.path().join("secrets.key");
+    let env = [("RETASKABLE_SECRETS_KEY_FILE", file.to_str().unwrap())];
+    let first = rig.secrets(&env);
+    let second = rig.secrets(&env);
+    save(&first, &[("GH_TOKEN", json!(TOKEN))]);
+    let key = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        state(&second, "GH_TOKEN").0,
+        Source::Saved,
+        "reads the key the other made"
+    );
+    save(&second, &[("GITLAB_TOKEN", json!("glpat-second"))]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), key);
+    assert_eq!(state(&first, "GITLAB_TOKEN").0, Source::Saved);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_key_file_others_can_read_is_refused() {
