@@ -73,14 +73,16 @@ impl PageHost {
         matches!(state.tokens.remove(token), Some(expires_at) if expires_at > now)
     }
 
-    /// Matches a password against this computer's network-access hash, constant time (section 3.1). Only while
-    /// network access is on (section 3.1: "Turning it off keeps the hash" so it can be turned back on, but doesn't go
-    /// on signing in while it's off).
-    pub(super) fn verify_password(&self, password_attempt: &str) -> bool {
+    /// Matches a password against the stored network-access hash, constant time (section 3.1). Only while network
+    /// access is on (section 3.1: "Turning it off keeps the hash" so it can be turned back on, but doesn't go on
+    /// signing in while it's off), unless the program says a password also signs in from this computer itself
+    /// (`Access::password_signs_in_locally`): another computer never signs in with network access off.
+    pub(crate) fn verify_password(&self, password_attempt: &str, from: IpAddr) -> bool {
         let Some(access) = self.access.network_access() else {
             return false;
         };
-        access.enabled
+        let may_try = access.enabled || (self.access.password_signs_in_locally() && from.to_canonical().is_loopback());
+        may_try
             && access
                 .password_hash
                 .as_deref()

@@ -129,3 +129,23 @@ fn host_may_be_an_own_address_only_while_network_access_is_on() {
     assert!(!on.host_is_allowed("evil.example.com:4700"));
     assert!(!server_with_own(false, own).host_is_allowed("192.168.1.20:4700"));
 }
+
+#[test]
+fn a_password_signs_in_only_while_network_access_is_on_unless_the_program_says_otherwise() {
+    let hash = crate::password::hash_password("a long enough one");
+    let access = |enabled| {
+        Some(NetworkAccess {
+            enabled,
+            password_hash: Some(hash.clone()),
+        })
+    };
+    let local: IpAddr = "127.0.0.1".parse().unwrap();
+    let remote: IpAddr = "192.168.1.30".parse().unwrap();
+    // The code agent's rule: off means no password, even from this computer.
+    let off = host(4700, access(false));
+    assert!(!off.verify_password("a long enough one", local));
+    let on = host(4700, access(true));
+    assert!(on.verify_password("a long enough one", remote) && !on.verify_password("wrong", remote));
+    // Unreadable is off.
+    assert!(!host(4700, None).verify_password("a long enough one", local));
+}

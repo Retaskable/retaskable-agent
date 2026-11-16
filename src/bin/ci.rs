@@ -1,9 +1,12 @@
 //! `retaskable-ci`: CI for GitHub repos, a separate process from the Coding Agent (docs/specs/agent-ci.md). `link`
 //! links it to the shared backlog as `role: "ci"`; `run` keeps checking the repos in `AGENT_CI_REPO`; `once <sha>...`
-//! checks just the pull requests (or main) at those commits and exits.
+//! checks just the pull requests (or main) at those commits and exits. `serve-settings`, `set-password` and `network`
+//! are for a computer with no code agent, whose settings page this then hosts (section 3.9).
+use std::io::{BufRead, IsTerminal};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use retaskable_agent::agent_ci::serve;
 use retaskable_agent::agent_ci::store::StoreOps;
 use retaskable_agent::agent_ci::{self, CiLoop, Settings, link as ci_link};
 use retaskable_agent::env::Env;
@@ -16,7 +19,13 @@ const USAGE: &str = "retaskable-ci: CI for GitHub repos, run as its own process.
 
 Usage:
   retaskable-ci link            Link this computer's CI runner to the shared backlog (role ci).
-  retaskable-ci run             Check the repos in AGENT_CI_REPO or settings.json, again and again.
+  retaskable-ci run [--settings-port N]
+                                Check the repos in AGENT_CI_REPO or settings.json, again and again. With
+                                --settings-port (or AGENT_CI_SETTINGS_PORT) it also hosts the settings page.
+  retaskable-ci serve-settings [--port N]
+                                Host the settings page alone (default port 4702) and print its one-time sign-in link.
+  retaskable-ci set-password    Set the password the page signs in with (asked twice, never echoed; or piped on stdin).
+  retaskable-ci network on|off  Let other computers reach the page (needs a password; from the next start). Off by default.
   retaskable-ci once <sha>...   Check just the pull requests or main at these commits, then exit.
   retaskable-ci --version
 
@@ -28,6 +37,8 @@ Environment:
   AGENT_CI_SLOTS        checks at once (default 2; 0 runs nothing)
   AGENT_CI_CPUS         --cpus for each check (default 8, capped at what Docker has)
   AGENT_CI_NAME         the name in each status (default: this computer's hostname)
+  AGENT_CI_SETTINGS_PORT  the settings page's port, 1024 to 65535 (default 4702); it listens on 127.0.0.1 only
+                        unless `network on`
   RETASKABLE_DATA_DIR   the data folder (the CI runner keeps its files in its ci subfolder)";
 
 #[tokio::main]
@@ -43,7 +54,42 @@ async fn main() -> Result<()> {
         Some("--version") => println!("{VERSION}"),
         Some("--help" | "-h" | "help") | None => println!("{USAGE}"),
         Some("link") => ci_link::run(&env, VERSION, |line| println!("{line}")).await?,
+        Some("serve-settings") => {
+            let port = serve::port(&env, flag(&args[1..], "--port")?.as_deref())?;
+            tokio::select! {
+                served = serve::serve(&env, port, VERSION, |line| println!("{line}")) => served?,
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        }
+        Some("set-password") => {
+            serve::set_password(&env, &new_password()?)?;
+            println!(
+                "Saved. It signs in on this computer; `retaskable-ci network on` lets other computers use it too."
+            );
+        }
+        Some("network") => {
+            let on = match args.get(1).map(String::as_str) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => bail!("Usage: retaskable-ci network on|off"),
+            };
+            serve::set_network(&env, on)?;
+            println!(
+                "Network access is {}. It takes effect the next time the settings page starts.",
+                if on { "on" } else { "off" }
+            );
+        }
         Some("run") => {
+            // The settings page beside the checks, so the panel's CI status is the running loop's own.
+            let flagged = flag(&args[1..], "--settings-port")?;
+            if flagged.is_some() || env.get(serve::PORT_VAR).is_some() {
+                let (page_env, port) = (env.clone(), serve::port(&env, flagged.as_deref())?);
+                tokio::spawn(async move {
+                    if let Err(e) = serve::serve(&page_env, port, VERSION, |line| println!("{line}")).await {
+                        tracing::error!("The settings page isn't up: {e:#}");
+                    }
+                });
+            }
             let (ci, cfg, secrets) = start(&env)?;
             let (reload_env, dir) = (env.clone(), cfg.data_dir.clone());
             // A token saved on the settings page (another process) reaches the checks started after the next poll.
@@ -67,6 +113,32 @@ async fn main() -> Result<()> {
         Some(other) => bail!("Unknown command {other:?}.\n\n{USAGE}"),
     }
     Ok(())
+}
+
+/// The value after `name` in `args` (`--port 4702`), or none when the flag is absent.
+fn flag(args: &[String], name: &str) -> Result<Option<String>> {
+    match args.iter().position(|a| a == name) {
+        None => Ok(None),
+        Some(at) => match args.get(at + 1) {
+            Some(value) => Ok(Some(value.clone())),
+            None => bail!("{name} needs a value."),
+        },
+    }
+}
+
+/// The new password: asked twice without echo at a terminal, else the first line of stdin. Never from an argument,
+/// which would sit in the process list and the shell's history.
+fn new_password() -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        let first = rpassword::prompt_password("New password (at least 8 characters): ")?;
+        if rpassword::prompt_password("Again: ")? != first {
+            bail!("The two passwords differ; nothing was saved.");
+        }
+        return Ok(first);
+    }
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(serve::password_from_line(&line))
 }
 
 /// The loop and its settings, with the store's merge lock behind `automerge` when this computer is linked.

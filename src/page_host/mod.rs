@@ -41,6 +41,13 @@ pub(crate) const MAX_BODY_BYTES: usize = 16 * 1024;
 pub trait Access: Send + Sync {
     /// `None` when it can't be read, which is refused like "off" (fail closed).
     fn network_access(&self) -> Option<NetworkAccess>;
+
+    /// Whether a password set while network access is off still signs in from this computer itself. The code agent's
+    /// is for the network only (the tray's link is how it signs in locally), so it says no; the CI runner on a
+    /// computer with no tray has nothing else to sign in with once its first link is spent, so it says yes.
+    fn password_signs_in_locally(&self) -> bool {
+        false
+    }
 }
 
 /// One page's server-side state: one instance shared (behind an `Arc`) by every request.
@@ -159,7 +166,7 @@ async fn post_session(
     };
     let signed_in = match (&req.token, &req.password) {
         (Some(token), _) => host.verify_token(token, addr),
-        (None, Some(password)) => host.verify_password(password),
+        (None, Some(password)) => host.verify_password(password, addr),
         (None, None) => false,
     };
     if !signed_in {

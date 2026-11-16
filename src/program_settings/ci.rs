@@ -10,7 +10,7 @@
 //! each on its own.
 //!
 //! The file also holds a `network` key (`{ "enabled": false, "passwordHash": "scrypt$..." }`, off by default) when this
-//! runner hosts the settings page on a computer with no code agent (agent-ci.md section 3.8). It is set by
+//! runner hosts the settings page on a computer with no code agent (agent-ci.md section 3.9). It is set by
 //! `retaskable-ci set-password` and `network`, never by the page, and the page's view never carries it.
 use std::path::Path;
 
