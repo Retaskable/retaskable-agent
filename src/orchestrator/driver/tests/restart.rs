@@ -449,3 +449,26 @@ async fn with_the_model_down_a_local_session_is_held_like_any_claude_one() {
     use crate::local_model::LocalModel;
     assert!(restarted_limited("local", LocalModel::off()).await.is_empty());
 }
+
+#[tokio::test]
+async fn retaking_a_lane_ignores_a_claim_by_a_gone_item_but_not_a_live_item_of_another_project() {
+    let (base, _) = claim_stub(json!([]), handed_out()).await;
+    let mut rig = rig(3, &[&base]);
+    let held = |project: &str, item: &str| Holder::Item {
+        project: project.into(),
+        item: item.into(),
+    };
+    let m = &mut rig.machine;
+    assert!(m.pool.take(1, held("p0", "gone")));
+    assert!(m.pool.take(2, held("other", "live")));
+    assert!(
+        m.projects[0].retake_lane(&mut m.pool, "a", 1),
+        "this project's gone item's claim is stale"
+    );
+    assert!(
+        !m.projects[0].retake_lane(&mut m.pool, "a", 2),
+        "another project's item still blocks"
+    );
+    assert_eq!(m.pool.holder(2), Some(&held("other", "live")));
+    assert_eq!(m.pool.holder(1), Some(&held("p0", "a")));
+}

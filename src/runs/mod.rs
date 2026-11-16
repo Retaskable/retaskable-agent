@@ -171,7 +171,8 @@ impl Runs {
         Ok(())
     }
 
-    /// Gives back every lane this project's runs hold by a stale claim.
+    /// Gives back every lane this project's runs hold by a stale claim. A stopped run's lane goes while the run is
+    /// still in `live` (its trees may be shutting down), as in the TS agent (#3923).
     fn free_stale_claims(&self, pool: &mut LanePool) {
         let stale: Vec<(u32, Holder)> = pool
             .held_lanes()

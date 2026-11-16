@@ -736,11 +736,12 @@ impl ProjectLoop {
             item: item_id.to_string(),
         };
         // A lane claimed by an item whose record is gone is stale and doesn't block taking it back.
-        let items = &self.items;
+        // Only this project's own items can be judged by its `items`: the pool is shared by every project.
+        let (id, items) = (&self.id, &self.items);
         let taken = pool.take_over(
             lane,
             holder,
-            |h| matches!(h, Holder::Item { item, .. } if !items.contains_key(item)),
+            |h| matches!(h, Holder::Item { project, item } if project == id && !items.contains_key(item)),
         );
         if taken {
             self.events.add_in(
