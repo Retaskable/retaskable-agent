@@ -381,6 +381,24 @@ fn the_page_has_the_add_project_card_and_its_script_builds_no_markup_and_holds_n
     assert!(served.contains("RT.projects = {") && !served.contains("{{PROJECTS_JS}}"));
 }
 
+#[test]
+fn each_project_is_a_row_with_a_state_chip_and_the_profile_is_read_again_after_every_settings_load() {
+    let js = include_str!("../../assets/settings-projects.js");
+    assert!(js.contains("\"proj\"") && js.contains("\"Working\"") && js.contains("\"Paused for every computer\""));
+    // A GH_TOKEN saved on the page must show in "Who this computer works as" without a restart: the profile is
+    // fetched by loadSettings (run after every save), not only once at sign-in.
+    let page = include_str!("../../assets/settings.html");
+    let load = page
+        .split("function loadSettings()")
+        .nth(1)
+        .unwrap()
+        .split("\n  }")
+        .next()
+        .unwrap();
+    assert!(load.contains("loadProfile()"));
+    assert_eq!(page.matches("api(\"/api/profile\")").count(), 1);
+}
+
 impl Rig {
     async fn pause(&self, id: &str, paused: bool) -> (StatusCode, Value) {
         let req = request("POST", &format!("/api/projects/{id}/paused"))
