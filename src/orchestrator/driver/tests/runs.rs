@@ -24,6 +24,8 @@ struct Script {
     beat: Value,
     /// A refusal code for `run_done`.
     done_refused: Option<&'static str>,
+    /// The store is out of reach: every op is answered 503 (and logged), and nothing is handed out.
+    down: bool,
 }
 
 type Shared_ = Arc<Mutex<Script>>;
@@ -52,6 +54,7 @@ async fn store() -> (String, Shared_) {
                 let ok = |v: Value| (StatusCode::OK, Json(json!({ "value": v })));
                 let refuse = |status, code| (status, Json(json!({ "error": code, "message": code })));
                 match body["op"].as_str().unwrap() {
+                    _ if s.down => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))),
                     "runs_drop" if s.drop_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
                     "run_take" => ok(s.takes.pop_front().unwrap_or(Value::Null)),
                     "run_beat" => ok(s.beat.clone()),
@@ -910,5 +913,6 @@ async fn cursor_limited_build() -> FakeRuns {
 
 mod engines;
 mod merged;
+mod outage;
 mod passes;
 mod restart;

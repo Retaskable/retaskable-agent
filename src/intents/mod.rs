@@ -30,7 +30,7 @@ use crate::backlog::{BacklogError, Client};
 
 /// How often a running row tells the store it is alive (the store lets an `ask` claim go after 3 minutes without).
 pub const BEAT_EVERY: Duration = Duration::from_secs(60);
-/// How long to wait before sending a finish the store didn't take again (three tries).
+/// How long to wait before sending a finish the store didn't take again (the first few tries).
 const FINISH_RETRY: Duration = Duration::from_secs(2);
 
 /// How a handler ended a row it ran.
@@ -380,7 +380,17 @@ async fn run_row(
     finish(&store, &id, ending, result, why, retry_every).await;
 }
 
-/// The finish, tried 3 times: a store that can't be reached is retried, then the row stays claimed and is not run again.
+/// How long a finish the store doesn't take is kept and sent again before it is given up on.
+const FINISH_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
+/// The wait between tries once the first few quick ones are used.
+const FINISH_SLOW: Duration = Duration::from_secs(30);
+
+/// The finish, sent again until the store answers (the owner's outage rule, 2026-11-16: "it should be able to finish
+/// what it's doing but it can't pick up the next thing till the store is back."): a few quick tries, then one every
+/// [`FINISH_SLOW`] for up to [`FINISH_KEPT`]. The row stays in `taken` and its task stays counted meanwhile, so
+/// nothing runs it again. The store takes the finish of a claim that lapsed while no other computer claimed the row;
+/// any answer, `ok: false` (another computer has it) included, ends the tries. An improvement over the TypeScript
+/// agent (`intentPuller.ts`), which tries three times and then leaves the row claimed.
 async fn finish(
     store: &Arc<dyn IntentStore>,
     id: &str,
@@ -389,16 +399,22 @@ async fn finish(
     why: Option<String>,
     retry_every: Duration,
 ) {
-    for attempt in 0..3 {
+    let mut waited = Duration::ZERO;
+    for attempt in 0u32.. {
         if attempt > 0 {
-            tokio::time::sleep(retry_every).await;
+            let pause = if attempt < 3 { retry_every } else { FINISH_SLOW };
+            tokio::time::sleep(pause).await;
+            waited += pause;
         }
         match store.finish(id, ending, result.clone(), why.clone()).await {
             Ok(_) => return,
-            Err(e) => tracing::warn!("intents: {id}: the result didn't reach the store: {e}"),
+            Err(e) if waited >= FINISH_KEPT => {
+                tracing::error!("intents: {id}: the result never reached the store in 24 hours; giving it up: {e}");
+                return;
+            }
+            Err(e) => tracing::warn!("intents: {id}: the result didn't reach the store, keeping it: {e}"),
         }
     }
-    tracing::error!("intents: {id}: the result never reached the store; it isn't run again");
 }
 
 #[cfg(test)]

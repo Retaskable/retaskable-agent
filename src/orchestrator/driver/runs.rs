@@ -312,6 +312,8 @@ impl ProjectLoop {
             if !tokens.is_empty() {
                 match self.client.run_beat(repo, token, &tokens).await {
                     Ok(verdicts) => self.run_loop.runs.apply_beat(pool, &verdicts, now),
+                    // A beat that can't reach the store cuts nothing: the run goes on and its end is kept (owner's
+                    // outage rule, 2026-11-16, docs/specs/agent/07.5-what-a-claim-and-a-give-back-send.md). Only the store's `stop` does.
                     Err(e) => self.store_error("run_beat", &e),
                 }
             }

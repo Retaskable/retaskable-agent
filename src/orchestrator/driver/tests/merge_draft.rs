@@ -176,3 +176,18 @@ async fn in_runs_mode_a_draft_row_is_merged_and_ends_done() {
     assert_eq!(host.calls(), ["merge 9 delete=true", "remove d1", "fetch"]);
     assert_eq!(reports(&asked)[0]["status"], "merged");
 }
+
+#[tokio::test]
+async fn a_merged_report_the_store_cant_take_is_kept_and_sent_when_it_is_back() {
+    let (mut rig, asked, listed, host, _root) =
+        rig_draft(draft("needs_person", "awaiting_approval"), person(), vec![]).await;
+    listed.down_for.lock().unwrap().insert("draft_report".into(), 3);
+    push(&listed, row(json!({ "draftId": "d1" })));
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "done");
+    // The merge happened once; its report went 4 times: 3 refused with a 500, then taken.
+    assert_eq!(host.calls(), ["merge 9 delete=true", "remove d1", "fetch"]);
+    let got = reports(&asked);
+    assert_eq!(got.len(), 4);
+    assert!(got.iter().all(|r| r["status"] == "merged" && r["token"] == "lease-d"));
+}

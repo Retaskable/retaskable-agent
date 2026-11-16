@@ -413,6 +413,13 @@ impl BacklogError {
         }
     }
 
+    /// The store answered and refused for a reason of its own (it names a code, e.g. `stale_lease`): sending the same
+    /// call again can't change that. An unreachable store, a 5xx or an answer this agent can't read is not one: the
+    /// call is kept and sent again.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, BacklogError::BadAnswer { status, code: Some(_), .. } if *status < 500)
+    }
+
     /// The store refused a suggestion's verdict because it already has an answer for it.
     pub fn is_already_answered(&self) -> bool {
         self.code() == Some(suggestions::ALREADY_ANSWERED)

@@ -302,28 +302,39 @@ async fn a_running_row_beats_every_interval_until_it_ends() {
     assert_eq!(beats(&fake), 3, "no beats after the finish");
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_finish_the_store_refuses_is_tried_three_times() {
-    let fake = Fake::with(vec![row("in-1", "ask", "requested")]);
-    *fake.finishes.lock().unwrap() = VecDeque::from([Err(bad()), Err(bad()), Ok(true)]);
-    let (h, _) = Fixed::new("ask", Outcome::Done(json!({})));
-    let mut p = puller(h);
-    let store: Arc<dyn IntentStore> = fake.clone();
-    p.pass(&store, || 0).await;
-    settle(&mut p).await;
-    let finishes = fake.log().iter().filter(|l| l.starts_with("finish")).count();
-    assert_eq!(finishes, 3);
+fn finishes(fake: &Fake) -> usize {
+    fake.log().iter().filter(|l| l.starts_with("finish")).count()
+}
 
-    let fake = Fake::with(vec![row("in-2", "ask", "requested")]);
-    *fake.finishes.lock().unwrap() = VecDeque::from([Err(bad()), Err(bad()), Err(bad()), Ok(true)]);
+#[tokio::test(start_paused = true)]
+async fn a_finish_the_store_cannot_take_is_kept_and_sent_until_it_is_back() {
+    let fake = Fake::with(vec![row("in-1", "ask", "requested")]);
+    // Down for far more than the old three tries, then back.
+    *fake.finishes.lock().unwrap() = std::iter::repeat_with(|| Err(bad())).take(10).collect();
     let (h, _) = Fixed::new("ask", Outcome::Done(json!({})));
     let mut p = puller(h);
     let store: Arc<dyn IntentStore> = fake.clone();
     p.pass(&store, || 0).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(finishes(&fake), 3, "still trying");
+    assert_eq!(p.active(), 1, "the row is still this computer's");
+    assert_eq!(p.pass(&store, || 0).await, 0, "and is not run again");
+    tokio::time::sleep(FINISH_SLOW * 10).await;
+    assert_eq!(finishes(&fake), 11, "sent until the store took it, then no more");
     settle(&mut p).await;
-    let finishes = fake.log().iter().filter(|l| l.starts_with("finish")).count();
-    assert_eq!(finishes, 3, "gives up after three; the row is not run again");
-    assert_eq!(p.pass(&store, || 0).await, 0);
+    assert_eq!(p.active(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_finish_answered_not_ok_ends_the_tries() {
+    let fake = Fake::with(vec![row("in-1", "ask", "requested")]);
+    *fake.finishes.lock().unwrap() = VecDeque::from([Err(bad()), Ok(false)]);
+    let (h, _) = Fixed::new("ask", Outcome::Done(json!({})));
+    let mut p = puller(h);
+    let store: Arc<dyn IntentStore> = fake.clone();
+    p.pass(&store, || 0).await;
+    tokio::time::sleep(FINISH_SLOW * 3).await;
+    assert_eq!(finishes(&fake), 2, "moved on: dropped");
 }
 
 #[tokio::test(start_paused = true)]

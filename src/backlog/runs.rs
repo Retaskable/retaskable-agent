@@ -233,15 +233,30 @@ impl Client {
         }
     }
 
-    /// `run_beat { tokens }`: each token's verdict.
+    /// `run_beat { tokens }`: each token's verdict. The store answers `{ runs: { <token>: "ok" | "stop" } }`
+    /// (`shared/backlogPieceOps.ts`); a bare map of verdicts is read the same. `stop` means the piece was taken or
+    /// changed, or the lock lost: the work is not this computer's any more. An unreachable store is an error, never a
+    /// `stop`, so a failed beat cuts nothing.
     pub async fn run_beat(
         &self,
         repo_id: u64,
         token: Option<&str>,
         tokens: &[String],
     ) -> Result<HashMap<String, BeatVerdict>, BacklogError> {
-        self.op(repo_id, token, "run_beat", json!({ "tokens": tokens }), "beat verdicts")
-            .await
+        let answer: Value = self
+            .op(repo_id, token, "run_beat", json!({ "tokens": tokens }), "beat verdicts")
+            .await?;
+        let verdicts = match answer {
+            Value::Object(mut o) if matches!(o.get("runs"), Some(Value::Object(_))) => {
+                o.remove("runs").unwrap_or_default()
+            }
+            other => other,
+        };
+        serde_json::from_value(verdicts).map_err(|e| BacklogError::BadAnswer {
+            status: 200,
+            code: None,
+            message: format!("couldn't read the beat verdicts it sent: {e}"),
+        })
     }
 
     /// `run_done { token, outcome, result }`. A `stale_run` refusal is `RunDoneError::Stale`.

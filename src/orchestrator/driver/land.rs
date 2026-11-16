@@ -28,6 +28,9 @@ use crate::view::{DraftCommand, Reply};
 
 /// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
 const HAND_BACKS: u32 = 2;
+/// How long a final report the store doesn't take is kept and sent again.
+const FINAL_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Tries at the merge once the branch is rebased, and the wait between them.
 const MERGE_TRIES: u32 = 5;
 pub(super) const MERGE_WAIT: Duration = Duration::from_secs(2);
@@ -103,6 +106,33 @@ impl Ctx {
         if let Err(e) = sent.await {
             tracing::warn!("a draft's report didn't reach the store: {e}");
             self.failures.add("draft_report", id, &e);
+        }
+    }
+
+    /// A draft's last word, `merged` or `discarded`: the change is already made, so the store must hear of it (the
+    /// owner's outage rule, 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next
+    /// thing till the store is back."). Sent again every [`Self::wait`] while the store can't be reached or answers
+    /// 5xx, for up to [`FINAL_KEPT`]. A refusal that names a code (the draft moved on: `stale_lease`) drops it. The
+    /// store takes it from the holder a draft moved from while it is still moving. An improvement over the TS agent
+    /// (`draftMove.ts`), which sends once and ignores a failure.
+    async fn report_final(&self, id: &str, report: DraftReport) {
+        let mut waited = Duration::ZERO;
+        loop {
+            let e = match (self.client)
+                .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
+                .await
+            {
+                Ok(()) => return,
+                Err(e) => e,
+            };
+            self.failures.add("draft_report", id, &e);
+            if e.is_refusal() || waited >= FINAL_KEPT {
+                tracing::warn!("a draft's final report was dropped: {e}");
+                return;
+            }
+            tracing::warn!("a draft's final report didn't reach the store, keeping it: {e}");
+            tokio::time::sleep(self.wait).await;
+            waited += self.wait.max(Duration::from_millis(1));
         }
     }
 
@@ -247,7 +277,7 @@ async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
         detail: Some("discarded".into()),
         ..Default::default()
     };
-    ctx.report(&id, report).await;
+    ctx.report_final(&id, report).await;
     None
 }
 
@@ -340,7 +370,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         )),
         ..Default::default()
     };
-    ctx.report(&id, report).await;
+    ctx.report_final(&id, report).await;
     ctx.answer(Ok(()));
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())

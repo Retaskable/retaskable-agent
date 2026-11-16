@@ -37,6 +37,11 @@ struct State {
     run_for: Duration,
     finished: Vec<Finished>,
     flushes: usize,
+    /// How many `deploy_finish` sends fail as unreachable before one is answered.
+    finish_down: usize,
+    /// The store answers `ok: false` once reachable: another computer has it.
+    finish_moved_on: bool,
+    finish_tries: usize,
 }
 
 #[derive(Clone, Default)]
@@ -83,8 +88,15 @@ impl Deps for Fake {
         Ok(true)
     }
     async fn finish(&self, id: &str, status: Finish, result: Option<Map<String, Value>>) -> Result<bool, String> {
-        self.state(|s| s.finished.push((id.into(), status, result)));
-        Ok(true)
+        self.state(|s| {
+            s.finish_tries += 1;
+            if s.finish_down > 0 {
+                s.finish_down -= 1;
+                return Err("the store is down".into());
+            }
+            s.finished.push((id.into(), status, result));
+            Ok(!s.finish_moved_on)
+        })
     }
     async fn flush_logs(&self) {
         self.state(|s| s.flushes += 1);
@@ -567,4 +579,38 @@ async fn a_push_lists_the_requests_at_once_and_the_timer_goes_on_without_one() {
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert_eq!(rounds(), 5);
     task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_result_the_store_could_not_take_is_kept_and_sent_when_it_is_back() {
+    let fake = Fake::with(vec![
+        request("dr-1", DeployKind::Hosting),
+        request("dr-2", DeployKind::Hosting),
+    ]);
+    fake.state(|s| s.finish_down = 4);
+    let mut loop_ = DeployRequests::new(fake.clone());
+    loop_.cycle().await;
+    settle().await;
+    // Still held: not run again, nothing sent yet, and the request stays this computer's.
+    assert!(loop_.running() > 0);
+    fake.state(|s| assert!(s.finished.is_empty()));
+    loop_.cycle().await;
+    fake.state(|s| assert_eq!(s.ran.len(), 2, "nothing is run twice while a result is owed"));
+    tokio::time::sleep(WAIT * 4).await;
+    fake.state(|s| assert_eq!(s.finished.len(), 2));
+    assert_eq!(loop_.running(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_result_the_store_says_moved_on_is_dropped_and_not_sent_again() {
+    let fake = Fake::with(vec![request("dr-1", DeployKind::Hosting)]);
+    fake.state(|s| {
+        s.finish_down = 1;
+        s.finish_moved_on = true;
+    });
+    let mut loop_ = DeployRequests::new(fake.clone());
+    loop_.cycle().await;
+    tokio::time::sleep(WAIT * 3).await;
+    fake.state(|s| assert_eq!(s.finish_tries, 2));
+    assert_eq!(loop_.running(), 0);
 }

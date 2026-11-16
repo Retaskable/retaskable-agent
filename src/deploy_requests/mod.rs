@@ -152,14 +152,41 @@ async fn execute<D: Deps>(deps: &D, r: &DeployRequest) {
         Err(RunError::Refused(reason)) => (Finish::Refused, why(&reason)),
         Err(RunError::Failed(reason)) => (Finish::Failed, why(&reason)),
     };
-    match deps.finish(&r.id, status, Some(result)).await {
-        Ok(true) => {}
-        // The claim went stale and another computer holds it: its answer is the one that counts.
-        Ok(false) => tracing::info!(
-            "deploys: {} ended after its claim expired; the store dropped the result",
-            r.id
-        ),
-        Err(e) => tracing::warn!("deploys: couldn't report {}: {e}", r.id),
+    finish(deps, &r.id, status, result).await;
+}
+
+/// How long a result the store doesn't take is kept and sent again before it is given up on: by then the store has
+/// long since reopened the request for another computer.
+const FINISH_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Sends the result, and again every [`WAIT`] while the store can't be reached or doesn't take it (the owner's outage
+/// rule, 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next thing till the
+/// store is back."). Until it answers the request stays in `running`, so it is neither run again nor claimed anew.
+/// The store takes the finish of a claim that lapsed while no other computer claimed the request since; `ok: false`
+/// says another computer has it, and is the only answer that drops the result besides [`FINISH_KEPT`]. An
+/// improvement over the TypeScript agent, which sends `deploy_finish` once and loses the result when that fails.
+async fn finish<D: Deps>(deps: &D, id: &str, status: Finish, result: Map<String, Value>) {
+    let mut waited = Duration::ZERO;
+    loop {
+        match deps.finish(id, status, Some(result.clone())).await {
+            Ok(true) => return,
+            // The claim went stale and another computer holds it: its answer is the one that counts.
+            Ok(false) => {
+                tracing::info!("deploys: {id} ended after its claim moved on; the store dropped the result");
+                return;
+            }
+            Err(e) if waited >= FINISH_KEPT => {
+                tracing::error!("deploys: {id}: the result never reached the store in 24 hours, giving it up: {e}");
+                return;
+            }
+            Err(e) => {
+                if waited.is_zero() {
+                    tracing::warn!("deploys: couldn't report {id}, keeping the result until the store takes it: {e}");
+                }
+                tokio::time::sleep(WAIT).await;
+                waited += WAIT;
+            }
+        }
     }
 }
 

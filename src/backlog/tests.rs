@@ -795,3 +795,19 @@ fn an_items_branches_are_its_own_and_each_pieces_when_it_has_one() {
         serde_json::from_value(serde_json::json!({ "id": "b", "title": "B", "status": "todo", "rank": 2 })).unwrap();
     assert_eq!(plain.branches().count(), 0);
 }
+
+#[test]
+fn only_a_coded_answer_below_500_is_a_refusal_the_call_is_dropped_for() {
+    let bad = |status, code: Option<&str>| BacklogError::BadAnswer {
+        status,
+        code: code.map(String::from),
+        message: "m".into(),
+    };
+    assert!(bad(409, Some("stale_lease")).is_refusal());
+    assert!(
+        !bad(500, Some("internal")).is_refusal(),
+        "a 5xx is the store being down"
+    );
+    assert!(!bad(502, None).is_refusal());
+    assert!(!BacklogError::Unreachable("down".into()).is_refusal());
+}

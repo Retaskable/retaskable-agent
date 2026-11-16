@@ -13,7 +13,7 @@ use super::prs::PrMeta;
 use super::report::{self, Host, Kind, State};
 use super::settings::Repo;
 use super::steps::{self, Plan};
-use super::store::{self, Claim, Claimed};
+use super::store::{self, CiStore, Claim, Claimed};
 use super::{CheckKey, Programs, container};
 use crate::backlog::runs::short_sha;
 use crate::telemetry::EventLog;
@@ -205,7 +205,7 @@ pub async fn run(j: Job) -> Ran {
 }
 
 /// The run's result goes in the project's history (`ci_finish`); the status is already the truth, so a store that
-/// can't be reached only loses the record, after three tries.
+/// can't be reached after three tries leaves the record to [`keep_finishing`].
 async fn finish(j: &Job, done: &Done) {
     let context = context_of(&j.key);
     let mut args = json!({
@@ -231,15 +231,52 @@ async fn finish(j: &Job, done: &Done) {
             }
         }
     }
+    let (store, repo) = (j.merge.store().clone(), j.repo.github_repo.clone());
+    if !try_finish(&store, &repo, &args, j.finish_pause).await {
+        // The check's own work is done (and `land` goes on), so the record is kept and sent from the side, not
+        // held up in this slot.
+        tokio::spawn(keep_finishing(store, repo, args));
+    }
+}
+
+/// `ci_finish`, tried [`FINISH_TRIES`] times `pause` apart. Whether the store took it.
+async fn try_finish(
+    store: &Arc<dyn CiStore>,
+    repo: &str,
+    args: &serde_json::Value,
+    pause: std::time::Duration,
+) -> bool {
     for _ in 0..FINISH_TRIES {
-        match j.merge.store().op(&j.repo.github_repo, "ci_finish", args.clone()).await {
-            Ok(_) => return,
+        match store.op(repo, "ci_finish", args.clone()).await {
+            Ok(_) => return true,
             Err(e) => {
                 tracing::warn!("agent CI: ci_finish: {e}");
-                tokio::time::sleep(j.finish_pause).await;
+                tokio::time::sleep(pause).await;
             }
         }
     }
+    false
+}
+
+/// How often a `ci_finish` the store didn't take is sent again, and for how long.
+const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+const KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Sends the run record again every [`KEEP_EVERY`] until the store answers or [`KEPT`] passes (the owner's outage rule,
+/// 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next thing till the store is
+/// back."). The store takes a `ci_finish` from the computer whose lease lapsed while nobody else took the check. An
+/// improvement over the TS runner, which tries three times and loses the record. In memory: a restart forgets it, as
+/// the next runner's check would record the commit anyway.
+async fn keep_finishing(store: Arc<dyn CiStore>, repo: String, args: serde_json::Value) {
+    let mut waited = std::time::Duration::ZERO;
+    while waited < KEPT {
+        tokio::time::sleep(KEEP_EVERY).await;
+        waited += KEEP_EVERY;
+        if store.op(&repo, "ci_finish", args.clone()).await.is_ok() {
+            return;
+        }
+    }
+    tracing::error!("agent CI: ci_finish never reached the store in 24 hours; giving it up");
 }
 
 /// How a check ended: its verdict, its minutes as the runner words them, and the failure comment's link.
@@ -414,3 +451,6 @@ mod tests {
         assert_eq!(minutes_text(125_000), "2.1");
     }
 }
+
+#[cfg(test)]
+mod finish_tests;
