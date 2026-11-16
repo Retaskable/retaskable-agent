@@ -160,6 +160,7 @@ impl DraftHost for ClaudeDrafts {
             let sink = TranscriptSink {
                 path: paths::run_dir(&data_dir, &project.id_or_derived(), &draft.id).join("drafter.jsonl"),
                 lane: None,
+                append: false,
             };
             let engine = engine_of(spec.engine)?;
             let quiet = watch_for(project, spec.engine.unwrap_or_default());

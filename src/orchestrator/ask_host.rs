@@ -228,6 +228,7 @@ async fn ask(
     let sink = TranscriptSink {
         path: paths::run_dir(&data_dir, &project_id, &id).join("assistant.jsonl"),
         lane: None,
+        append: false,
     };
     let engine = match engine_of(spec.engine) {
         Ok(engine) => engine,

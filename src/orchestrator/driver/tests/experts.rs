@@ -2,199 +2,15 @@
 //! host whose turns are scripted.
 use super::*;
 use crate::config::ProjectConfig;
+use crate::engines::engine::{EventKind, SessionEvent};
 use crate::expert::claude_sessions::Continued;
+use crate::expert::history::Turn;
 use crate::expert::{Question, Reply};
 use crate::implementer::publish::Published;
-use crate::orchestrator::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
+use crate::orchestrator::driver::{ExpertHost, ExpertJob, HelperJob, Opened, ShipJob, TurnEnd, WorkRead};
 use crate::view::{ExpertAction, ExpertCommand};
-use axum::http::StatusCode;
-use std::collections::BTreeSet;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
-
-#[derive(Default)]
-struct St {
-    ops: Asked,
-    rows: Mutex<Vec<Value>>,
-    /// The continuation notes `expert_continues_set` wrote, by item.
-    notes: Mutex<serde_json::Map<String, Value>>,
-    /// Ids `add` refuses as taken.
-    taken_ids: Mutex<BTreeSet<String>>,
-    seq: AtomicU32,
-    /// What `draft_queue` and `release` are refused with (a 4xx code), while set.
-    queue_refused: AtomicBool,
-    release_refused: Mutex<Option<&'static str>>,
-    /// What `expert_ship` is refused with (a store code, or `down` for a 5xx), while set; and whether the next one is
-    /// taken but its reply is lost.
-    ship_op_refused: Mutex<Option<&'static str>>,
-    ship_reply_lost: AtomicBool,
-}
-
-impl St {
-    fn handle(&self, body: Value) -> (StatusCode, Json<Value>) {
-        let op = body["op"].as_str().unwrap_or("").to_string();
-        let args = body["args"].clone();
-        self.ops.lock().unwrap().push((op.clone(), args.clone()));
-        let ok = |v: Value| (StatusCode::OK, Json(json!({ "value": v })));
-        let conflict = || {
-            (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "conflict", "message": "taken" })),
-            )
-        };
-        let item = args["itemId"].as_str().unwrap_or("").to_string();
-        let mut rows = self.rows.lock().unwrap();
-        match op.as_str() {
-            "list" => ok(json!([])),
-            "facts_get" => ok(json!({ "paused": false })),
-            "add" => {
-                let it = &args["items"][0];
-                let id = it["id"].as_str().unwrap_or("").to_string();
-                if !self.taken_ids.lock().unwrap().insert(id.clone()) {
-                    return conflict();
-                }
-                let item = json!({ "id": id, "title": it["title"], "status": "claimed", "rank": 1 });
-                ok(json!({ "item": item, "token": format!("lease-{id}") }))
-            }
-            "expert_queue_add" => {
-                let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-                let at = crate::telemetry::now_ms() + i64::from(n);
-                let id = format!("q-{n}");
-                rows.push(json!({
-                    "itemId": item, "id": id, "text": args["text"], "at": at, "by": args["by"], "state": "queued",
-                    "pictureIds": args.get("pictureIds").cloned().unwrap_or(json!([]))
-                }));
-                ok(json!({ "id": id }))
-            }
-            "expert_queue_take" => {
-                let ids: Vec<String> = serde_json::from_value(args["ids"].clone()).unwrap_or_default();
-                let mut got = vec![];
-                for id in ids {
-                    match rows.iter_mut().find(|r| r["id"] == id && r["itemId"] == item) {
-                        Some(r) => {
-                            r["state"] = json!("taken");
-                            got.push(r.clone());
-                        }
-                        None => return conflict(),
-                    }
-                }
-                ok(json!({ "rows": got }))
-            }
-            "expert_queue_done" => {
-                let ids: Vec<Value> = args["ids"].as_array().cloned().unwrap_or_default();
-                rows.retain(|r| !(r["itemId"] == item && ids.contains(&r["id"])));
-                ok(json!({ "ok": true }))
-            }
-            "expert_continues_set" => {
-                self.notes.lock().unwrap().insert(item, args["from"].clone());
-                ok(Value::Null)
-            }
-            "draft_queue" if self.queue_refused.load(Ordering::SeqCst) => conflict(),
-            "draft_queue" => ok(json!({ "draft": { "id": "draft-1" } })),
-            "release" if self.release_refused.lock().unwrap().is_some() => {
-                let code = self.release_refused.lock().unwrap().unwrap();
-                let status = if code == "stale_lease" {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                };
-                (status, Json(json!({ "error": code, "message": code })))
-            }
-            "expert_ship" => {
-                let refused = *self.ship_op_refused.lock().unwrap();
-                let lost = self.ship_reply_lost.swap(false, Ordering::SeqCst);
-                let status = match refused {
-                    Some("not_found") => StatusCode::NOT_FOUND,
-                    Some("bad_request") => StatusCode::BAD_REQUEST,
-                    Some("forbidden") => StatusCode::FORBIDDEN,
-                    Some("conflict" | "stale_lease") => StatusCode::CONFLICT,
-                    Some(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                    None if lost => StatusCode::INTERNAL_SERVER_ERROR,
-                    None => {
-                        return ok(
-                            json!({ "piece": format!("{}#1", args["id"].as_str().unwrap_or("")), "pieces": [] }),
-                        );
-                    }
-                };
-                let code = refused.unwrap_or("down");
-                (status, Json(json!({ "error": code, "message": code })))
-            }
-            "revise" => ok(json!({ "revised": "applied", "status": "todo" })),
-            "expert_queue_clear" => {
-                rows.retain(|r| r["itemId"] != item);
-                ok(Value::Null)
-            }
-            "expert_queue_list" => {
-                let mut sessions = serde_json::Map::new();
-                for r in rows.iter() {
-                    let k = r["itemId"].as_str().unwrap_or("").to_string();
-                    sessions
-                        .entry(k)
-                        .or_insert_with(|| json!([]))
-                        .as_array_mut()
-                        .unwrap()
-                        .push(r.clone());
-                }
-                ok(json!({ "sessions": sessions, "continues": *self.notes.lock().unwrap() }))
-            }
-            _ => ok(Value::Null),
-        }
-    }
-
-    fn count(&self, op: &str) -> usize {
-        self.ops.lock().unwrap().iter().filter(|(o, _)| o == op).count()
-    }
-
-    fn args(&self, op: &str) -> Vec<Value> {
-        (self.ops.lock().unwrap().iter())
-            .filter(|(o, _)| o == op)
-            .map(|(_, a)| a.clone())
-            .collect()
-    }
-
-    /// A message the site wrote, which this computer didn't.
-    fn site_says(&self, item: &str, text: &str) {
-        let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.rows.lock().unwrap().push(json!({
-            "itemId": item, "id": format!("q-{n}"), "text": text,
-            "at": crate::telemetry::now_ms() + i64::from(n), "by": "ada", "state": "queued"
-        }));
-    }
-
-    fn cancel(&self, id: &str) {
-        self.rows.lock().unwrap().retain(|r| r["id"] != id);
-    }
-}
-
-async fn store() -> (String, Arc<St>) {
-    let st = Arc::new(St::default());
-    let s = st.clone();
-    let app = Router::new()
-        .route(
-            "/v1/repos/{id}/ops",
-            post(move |Json(body): Json<Value>| {
-                let s = s.clone();
-                async move { s.handle(body) }
-            }),
-        )
-        // Every picture the store is asked for is its own name, but `0…ff`, which it doesn't have.
-        .route(
-            "/v1/repos/{id}/pictures/{picture}",
-            axum::routing::get(
-                |axum::extract::Path((_, picture)): axum::extract::Path<(u64, String)>| async move {
-                    if picture.contains("-0000-4000-8000-0000000000ff") {
-                        (StatusCode::NOT_FOUND, b"{}".to_vec())
-                    } else {
-                        (StatusCode::OK, picture.into_bytes())
-                    }
-                },
-            ),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), st)
-}
 
 #[derive(Debug, Clone)]
 struct Ran {
@@ -226,10 +42,31 @@ struct Host {
     carried: Mutex<Vec<(String, String)>>,
     /// Whether a continued session's file is still readable for its handover.
     file_gone: AtomicBool,
+    /// Each helper started: (number, lane, own, from); whether they wait for `helper_go` (or their stop), and why they
+    /// fail while that is set.
+    helper_runs: Mutex<Vec<(u32, u32, bool, String)>>,
+    helper_hold: AtomicBool,
+    helper_go: Arc<Notify>,
+    helper_fails: Mutex<Option<String>>,
+    /// The turn takes messages as it works while set (a stand-in for a Claude turn with an open input): each message
+    /// it is sent, whether it says it took them, and whether its input has closed already.
+    steering: AtomicBool,
+    steered: Arc<Mutex<Vec<String>>>,
+    steer_takes: AtomicBool,
+    steer_closed: AtomicBool,
+    /// With a summary, the first message it takes ends a turn with that answer before the last.
+    steer_turn: Mutex<Option<String>>,
+    /// Turns end at the usage limit while set.
+    limited: AtomicBool,
+    /// The helpers the next turn asks for.
+    asks: Mutex<Vec<crate::expert::helpers::Asked>>,
+    /// What the work read answers, and each read asked: (lane, helpers).
+    read: Mutex<WorkRead>,
+    reads: Mutex<Vec<(Option<u32>, u32)>>,
 }
 
 impl ExpertHost for Host {
-    fn turn(&self, job: ExpertJob) -> BoxFuture<'static, TurnEnd> {
+    fn turn(&self, mut job: ExpertJob) -> BoxFuture<'static, TurnEnd> {
         self.jobs.lock().unwrap().push(Ran {
             message: job.message.clone(),
             session_id: job.session_id.clone(),
@@ -239,18 +76,54 @@ impl ExpertHost for Host {
         });
         let (hold, go) = (self.hold.load(Ordering::SeqCst), self.go.clone());
         let ask = self.question.lock().unwrap().take();
+        let helpers = std::mem::take(&mut *self.asks.lock().unwrap());
+        let limited = self.limited.load(Ordering::SeqCst);
+        let steering = self.steering.load(Ordering::SeqCst);
+        let (takes, closed) = (
+            self.steer_takes.load(Ordering::SeqCst),
+            self.steer_closed.load(Ordering::SeqCst),
+        );
+        let steered = self.steered.clone();
+        let steer_turn = self.steer_turn.lock().unwrap().clone();
         async move {
-            if hold {
+            if steering && let Some(mut input) = job.steer.take() {
+                if closed {
+                    input.close();
+                }
+                loop {
+                    tokio::select! {
+                        () = go.notified() => break,
+                        () = job.stop.notified() => return TurnEnd::Stopped,
+                        Some(text) = input.next_message() => {
+                            steered.lock().unwrap().push(text);
+                            if let Some(said) = &steer_turn {
+                                input.turn_ended(crate::engines::engine::SessionResult {
+                                    ok: true,
+                                    structured: Some(json!({ "summary": said })),
+                                    ..Default::default()
+                                });
+                            }
+                            if takes {
+                                input.took();
+                            }
+                        }
+                    }
+                }
+            } else if hold {
                 tokio::select! {
                     () = go.notified() => {}
                     () = job.stop.notified() => return TurnEnd::Stopped,
                 }
+            }
+            if limited {
+                return TurnEnd::Limited("You've hit your limit".into());
             }
             TurnEnd::Done {
                 session_id: job.session_id.unwrap_or_else(|| "sess-1".into()),
                 reply: Reply {
                     summary: format!("Did: {}", job.message),
                     ask,
+                    helpers,
                 },
             }
         }
@@ -299,6 +172,60 @@ impl ExpertHost for Host {
             }
         }
         .boxed()
+    }
+
+    fn history(
+        &self,
+        _: &ProjectConfig,
+        _: &str,
+        session_id: Option<&str>,
+        from: Option<&str>,
+    ) -> BoxFuture<'static, (Vec<Turn>, Vec<Turn>)> {
+        let said = |at: i64, text: &str, saying: Option<&str>| Turn {
+            at,
+            events: vec![SessionEvent {
+                at,
+                kind: EventKind::Text,
+                text: text.into(),
+            }],
+            said: saying.map(str::to_string),
+        };
+        let earlier = from.map(|f| vec![said(10, &format!("earlier {f}"), Some("Fix it"))]);
+        let own = session_id.map(|id| vec![said(100, &format!("first {id}"), None), said(200, "second", None)]);
+        async move { (earlier.unwrap_or_default(), own.unwrap_or_default()) }.boxed()
+    }
+
+    fn helper(&self, job: HelperJob) -> BoxFuture<'static, crate::expert::helpers::Ended> {
+        use crate::expert::helpers::Ended;
+        self.helper_runs
+            .lock()
+            .unwrap()
+            .push((job.n, job.lane, job.own, job.from.clone()));
+        let (hold, go) = (self.helper_hold.load(Ordering::SeqCst), self.helper_go.clone());
+        let fails = self.helper_fails.lock().unwrap().clone();
+        async move {
+            if hold {
+                tokio::select! {
+                    () = go.notified() => {}
+                    () = job.stop.notified() => return Ended::Stopped,
+                }
+            }
+            match fails {
+                Some(why) => Ended::Failed(why),
+                None => Ended::Finished(format!("found {}", job.task)),
+            }
+        }
+        .boxed()
+    }
+
+    fn work(&self, _: &ProjectConfig, lane: Option<u32>, _: &str, helpers: u32) -> BoxFuture<'static, WorkRead> {
+        self.reads.lock().unwrap().push((lane, helpers));
+        let mut read = self.read.lock().unwrap().clone();
+        // Without a lane only the pull requests are read.
+        if lane.is_none() {
+            read.work = None;
+        }
+        async move { read }.boxed()
     }
 
     fn discard(&self, _: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()> {
@@ -442,11 +369,18 @@ impl Ex {
 const ID: &str = "expert-fix-it";
 
 mod backlog;
+mod fake_store;
+use fake_store::{St, store};
 mod carry;
+mod helpers;
+mod history;
+mod limit;
 mod pictures;
 mod ship;
 mod ship_runs;
+mod steer;
 mod wake;
+mod work;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.
 async fn started(x: &mut Ex) {
@@ -754,22 +688,84 @@ async fn the_beat_touches_the_lease_and_reads_the_store_queue_back() {
     assert_eq!(x.jobs()[1].message, "from the site");
 }
 
+/// Another project's session holds this computer's added lane.
+fn hold_added(x: &mut Ex) -> crate::lane_pool::Holder {
+    let other = crate::lane_pool::Holder::Item {
+        project: "p1".into(),
+        item: "expert-other".into(),
+    };
+    assert!(x.rig.machine.pool.claim_added(other.clone()).is_some());
+    other
+}
+
 #[tokio::test]
-async fn with_no_lane_free_a_start_is_refused() {
+async fn with_the_added_lane_held_a_start_adds_a_parked_session_and_says_why() {
     let mut x = ex_lanes(1).await;
-    let other = crate::lane_pool::Want {
+    let other = hold_added(&mut x);
+    x.start("s1", "Fix it");
+    let a = x.answer("s1").await;
+    assert_eq!(
+        (a["type"].as_str(), a["answer"]["itemId"].as_str()),
+        (Some("ack"), Some(ID)),
+        "{a}"
+    );
+    assert_eq!(x.st.count("add"), 1);
+    x.quiet().await;
+    assert_eq!((x.detail(ID).as_deref(), x.lane_of(ID)), (Some("expert_parked"), None));
+    assert!(
+        x.jobs().is_empty() && x.st.count("expert_queue_add") == 0,
+        "the request isn't sent"
+    );
+    let said: Vec<String> = (x.st.args("report").iter())
+        .filter_map(|n| n["note"].as_str().map(String::from))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "Another expert session has this computer's added lane: park or finish it first. The session is parked and your request wasn't sent: send it again to try."
+        ]
+    );
+    // A message is refused the same way until the lane is free, then takes it, on a fresh branch from the base.
+    x.say("m1", ID, "again", false);
+    let a = x.answer("m1").await;
+    assert_eq!(
+        a["reason"],
+        "Another expert session has this computer's added lane: park or finish it first."
+    );
+    assert!(x.rig.machine.pool.release(x.rig.machine.pool.added_lane(), &other));
+    x.say("m2", ID, "again", false);
+    x.answer("m2").await;
+    x.until("its turn", |x| x.jobs().len() == 1).await;
+    assert!(x.jobs()[0].prepare && !x.jobs()[0].from_branch);
+    assert_eq!(x.lane_of(ID), Some(2));
+}
+
+#[tokio::test]
+async fn a_session_starts_in_the_added_lane_beside_the_lanes_and_gives_it_back_on_a_park() {
+    let mut x = ex_lanes(1).await;
+    x.quiet().await;
+    assert_eq!(
+        x.rig.live.snapshot().added_lane,
+        Some(2),
+        "the sheet is told it is free"
+    );
+    x.start("s1", "Fix it");
+    x.answer("s1").await;
+    x.until("idle", |x| x.detail(ID).as_deref() == Some("expert_idle"))
+        .await;
+    assert_eq!(x.lane_of(ID), Some(2), "one more than the computer's lanes");
+    assert_eq!(x.rig.live.snapshot().added_lane, None, "and it is held now");
+    let work = crate::lane_pool::Want {
         project: "p0".into(),
         item: "other".into(),
         chore: false,
         last_lane: None,
         fix_queued: false,
     };
-    assert!(x.rig.machine.pool.claim(&other).is_some());
-    x.start("s1", "Fix it");
-    let a = x.answer("s1").await;
-    assert_eq!(a["type"], "nack");
-    assert!(a["reason"].as_str().unwrap().contains("No lane"), "{a}");
-    assert_eq!(x.st.count("add"), 0);
+    assert_eq!(x.rig.machine.pool.claim(&work), Some(1), "no lane sits out for it");
+    x.end("e1", ID, "park");
+    x.answer("e1").await;
+    assert!(x.rig.machine.pool.added_free());
 }
 
 #[tokio::test]
@@ -822,25 +818,27 @@ async fn in_runs_mode_an_expert_session_takes_a_lane_no_run_holds_and_its_turn_r
     let answer = ex.heard.iter().find(|a| a["id"] == "c1").cloned().unwrap();
     assert_eq!(answer["type"], "ack", "{answer}");
     assert_eq!(ex.jobs().len(), 1);
-    assert_eq!(ex.lane_of(ID), Some(2));
+    assert_eq!(ex.lane_of(ID), Some(3), "the added lane, beside the two");
     assert_eq!(ex.rig.machine.pool.holder(1), Some(&run));
 }
 
 #[tokio::test]
-async fn in_runs_mode_an_expert_start_with_every_lane_held_by_runs_is_refused() {
+async fn in_runs_mode_an_expert_start_while_the_added_lane_is_held_starts_parked() {
     let mut ex = ex_lanes(1).await;
     ex.rig.go_runs();
     let run = Holder::Run {
         project: "p0".into(),
         piece: "piece-1".into(),
     };
-    assert!(ex.rig.machine.pool.take(1, run));
+    assert!(ex.rig.machine.pool.take(1, run.clone()), "every lane held by runs");
+    assert!(ex.rig.machine.pool.claim_added(run).is_some(), "and the added one");
     ex.start("c1", "Fix it");
     for _ in 0..5 {
         ex.rig.runs_pass().await;
     }
     ex.drain();
     let answer = ex.heard.iter().find(|a| a["id"] == "c1").cloned().unwrap();
-    assert_eq!(answer["type"], "nack");
+    assert_eq!(answer["type"], "ack", "{answer}");
     assert!(ex.jobs().is_empty());
+    assert_eq!(ex.detail(ID).as_deref(), Some("expert_parked"));
 }

@@ -45,6 +45,10 @@ pub struct TranscriptSink {
     pub path: PathBuf,
     /// The implementer's lane, when this session has one (`started_on`'s `lane`).
     pub lane: Option<u32>,
+    /// Carry on in the file when the session is resumed (`flags: "a"` in `runner.ts`): each run's meta line starts
+    /// its part, which is how an expert session's earlier turns are read back (`expert::history`). Any other start
+    /// replaces the file, as does a resumed one without this.
+    pub append: bool,
 }
 
 /// The transcript's own header line, following `transcripts.rs`'s `started_on`/`read_transcripts`:
@@ -70,7 +74,12 @@ fn open_sink(sink: &TranscriptSink, spec: &SessionSpec) -> Result<std::fs::File>
     if let Some(parent) = sink.path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut file = std::fs::File::create(&sink.path).with_context(|| format!("creating {}", sink.path.display()))?;
+    let mut file = if sink.append && matches!(spec.start, super::engine::SessionStart::Resume(_)) {
+        std::fs::OpenOptions::new().create(true).append(true).open(&sink.path)
+    } else {
+        std::fs::File::create(&sink.path)
+    }
+    .with_context(|| format!("creating {}", sink.path.display()))?;
     use std::io::Write as _;
     writeln!(file, "{}", meta_line(spec, sink.lane)).context("writing the transcript's meta line")?;
     Ok(file)
@@ -106,6 +115,8 @@ struct SpawnSpec<'a> {
     /// `cut` and kill it while this loop is still reading its output. `None` when nothing needs to
     /// reach in, which is every real session today: nothing yet calls `ProcessTree::cut` on one.
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
+    /// An open input (`steer.rs`): the prompt goes in as a message and the input stays open for more.
+    steer: Option<super::steer::Steer>,
 }
 
 /// What a silent session's own `SessionResult` says, once the watchdog has killed it
@@ -202,9 +213,16 @@ async fn spawn_and_read(
 
     let mut stdin = child.stdin.take().context("session has no stdin")?;
     let prompt = spec.prompt.to_string();
-    let write_prompt = tokio::spawn(async move {
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-    });
+    let mut steered = None;
+    let mut write_prompt = None;
+    match spec.steer {
+        Some(steer) => steered = Some(super::steer::Running::start(steer, stdin, &prompt)),
+        None => {
+            write_prompt = Some(tokio::spawn(async move {
+                let _ = stdin.write_all(prompt.as_bytes()).await;
+            }));
+        }
+    }
 
     let mut stderr = child.stderr.take().context("session has no stderr")?;
     let drain_stderr = tokio::spawn(async move {
@@ -260,7 +278,13 @@ async fn spawn_and_read(
             use std::io::Write as _;
             let _ = writeln!(file, "{line}");
         }
+        if let Some(steered) = steered.as_mut() {
+            steered.line(&line);
+        }
         if let Some(r) = reader.line(&line, spec.known_session_id) {
+            if let Some(steered) = steered.as_mut() {
+                steered.result(&r);
+            }
             result = Some(r);
             if let Some(wait) = spec.end_after_result {
                 ends_at.get_or_insert_with(|| tokio::time::Instant::now() + wait);
@@ -268,7 +292,12 @@ async fn spawn_and_read(
         }
     }
 
-    let _ = write_prompt.await;
+    if let Some(write_prompt) = write_prompt {
+        let _ = write_prompt.await;
+    }
+    if let Some(steered) = steered {
+        steered.end().await;
+    }
     let stderr_text = drain_stderr.await.unwrap_or_default();
     let status = child.wait().await.context("waiting for the session to exit")?;
 
@@ -303,6 +332,20 @@ pub async fn run_session(
     run_session_tracked(engine, bin, spec, known_session_id, sink, watch, None).await
 }
 
+/// [`run_session_tracked`] with an open input (`steer.rs`): Claude Code only. The session takes the messages the
+/// handle sends as it works, and its output says when each is taken and when a turn ends before the last.
+pub async fn run_session_steered(
+    engine: &dyn Engine,
+    bin: &Path,
+    spec: &SessionSpec,
+    known_session_id: &str,
+    sink: Option<&TranscriptSink>,
+    watch: Watch,
+    steer: super::steer::Steer,
+) -> Result<SessionResult> {
+    run_session_with(engine, bin, spec, known_session_id, sink, watch, None, Some(steer)).await
+}
+
 /// `spec` with no dollar cap, when `on_subscription` and it has one.
 fn uncapped_on(spec: &SessionSpec, on_subscription: bool) -> Option<SessionSpec> {
     (on_subscription && spec.budget_usd > 0.0).then(|| SessionSpec {
@@ -321,6 +364,20 @@ pub async fn run_session_tracked(
     watch: Watch,
     tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
 ) -> Result<SessionResult> {
+    run_session_with(engine, bin, spec, known_session_id, sink, watch, tree_tx, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_with(
+    engine: &dyn Engine,
+    bin: &Path,
+    spec: &SessionSpec,
+    known_session_id: &str,
+    sink: Option<&TranscriptSink>,
+    watch: Watch,
+    tree_tx: Option<tokio::sync::oneshot::Sender<Arc<ProcessTree>>>,
+    steer: Option<super::steer::Steer>,
+) -> Result<SessionResult> {
     // A Claude session is held to its model's slot until it ends; Cursor, pi and Codex count toward `concurrency` only.
     let _slot = match super::model_slots::global() {
         Some(slots) if spec.engine.unwrap_or_default() == EngineId::Claude => Some(slots.acquire(&spec.model).await),
@@ -331,10 +388,14 @@ pub async fn run_session_tracked(
     let spec = uncapped.as_ref().unwrap_or(spec);
     engine.prepare(spec)?;
     let file = sink.map(|sink| open_sink(sink, spec)).transpose()?;
+    let mut args = engine.args(spec);
+    if steer.is_some() {
+        args.extend(super::steer::ARGS.iter().map(|a| (*a).to_string()));
+    }
     let result = spawn_and_read(
         SpawnSpec {
             bin,
-            args: &engine.args(spec),
+            args: &args,
             envs: &engine.env(spec),
             cwd: &spec.cwd,
             prompt: &engine.prompt(spec),
@@ -342,6 +403,7 @@ pub async fn run_session_tracked(
             end_after_result: engine.ends_on_result().then_some(END_AFTER_RESULT),
             watch,
             tree_tx,
+            steer,
         },
         engine.reader(spec),
         file,
