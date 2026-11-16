@@ -98,6 +98,12 @@ impl Access for MachineAccess {
             None => Some(MachineStore::load(&self.dir).ok()?.network().unwrap_or_default()),
         }
     }
+
+    /// A password set on the page also signs in from this computer itself (2026-11-16, the owner couldn't sign in with
+    /// the password they set): a computer with no tray (Docker, a server) has nothing else once its link is spent.
+    fn password_signs_in_locally(&self) -> bool {
+        true
+    }
 }
 
 /// The page's own state is `page_host`'s; its fields (`dir`, `port`, `env`, `now`) read through this.
