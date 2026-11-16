@@ -373,13 +373,19 @@ async fn without_a_link_to_the_store_nothing_is_read_or_claimed() {
 async fn only_the_ported_kinds_are_claimable() {
     let l = live("http://127.0.0.1:1", Some("tok"));
     for kind in DeployKind::ALL {
-        // A promote also needs the project's branches (promote_tests.rs): this project names none.
-        let ported = PORTED.contains(&kind) && kind != DeployKind::Promote;
+        // A promote also needs the project's branches (promote_tests.rs), a TestFlight build the setting and a Mac
+        // (testflight_tests.rs): this project has none of them.
+        let ported = PORTED.contains(&kind) && !matches!(kind, DeployKind::Promote | DeployKind::TestflightBuild);
         assert_eq!(l.can(&request("dr-1", kind)).await, ported, "{kind:?}");
     }
     assert_eq!(
         PORTED,
-        [DeployKind::Hosting, DeployKind::GoLivePrepare, DeployKind::Promote],
+        [
+            DeployKind::Hosting,
+            DeployKind::GoLivePrepare,
+            DeployKind::Promote,
+            DeployKind::TestflightBuild
+        ],
         "a kind joins with its arm in Live::run and its tests"
     );
 }

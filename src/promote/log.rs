@@ -151,6 +151,35 @@ impl DeployLog {
             let mut queue = self.queue.lock().unwrap();
             queue.remove(0);
             self.persist(&queue);
+            drop(queue);
+            self.prune(&head);
+        }
+    }
+
+    /// A TestFlight row leaves this computer's own `testflight.log` (beside the queue's file) once the store has
+    /// answered it, as the TypeScript's `prune`; a file left empty is removed. Anything else, or no such line, does
+    /// nothing. The line is matched whole, as it was written.
+    fn prune(&self, row: &Queued) {
+        if row.kind != crate::testflight::LOG_KIND {
+            return;
+        }
+        let file = self.file.with_file_name(crate::testflight::LOG_FILE);
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            return;
+        };
+        let want = serde_json::to_string(&row.entry).unwrap_or_default();
+        let mut lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        let Some(at) = lines.iter().position(|l| *l == want) else {
+            return;
+        };
+        lines.remove(at);
+        let done = if lines.is_empty() {
+            std::fs::remove_file(&file)
+        } else {
+            std::fs::write(&file, lines.join("\n") + "\n")
+        };
+        if let Err(e) = done {
+            tracing::warn!("logs: couldn't prune {}: {e}", file.display());
         }
     }
 }

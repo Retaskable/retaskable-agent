@@ -4,10 +4,10 @@
 //! names is `refs/heads/<production>`. The project's CI deploys what's pushed; Retaskable deploys nothing. Each push
 //! that gets to GitHub is a row of the store's deploy log ([`log`]), kept on disk until the store has it.
 mod git;
-mod host;
+pub(crate) mod host;
 pub mod log;
 mod run;
-mod site;
+pub(crate) mod site;
 #[cfg(test)]
 pub(crate) mod tests;
 

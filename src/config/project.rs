@@ -330,6 +330,23 @@ fn default_lighthouse_min_score() -> u32 {
     90
 }
 
+/// `release` (`cfg.release` in `agent/src/testflight.ts`): this computer's TestFlight settings. Each is on only for the
+/// boolean `true`, as the TypeScript reads them: a saved `"yes"` or `1` is off, never an error.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseConfig {
+    /// `release.testflight`: this computer builds for TestFlight when the website asks.
+    #[serde(default, deserialize_with = "only_true")]
+    pub testflight: bool,
+    /// `release.testflightAnyMember`: it builds for any member's request, not only its owner's.
+    #[serde(default, deserialize_with = "only_true")]
+    pub testflight_any_member: bool,
+}
+
+fn only_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Value::deserialize(d)? == Value::Bool(true))
+}
+
 /// The daily vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -422,6 +439,8 @@ pub struct ProjectConfig {
     pub lighthouse: LighthouseConfig,
     #[serde(default)]
     pub vet_suggestions: VetSuggestionsConfig,
+    #[serde(default)]
+    pub release: ReleaseConfig,
 }
 
 /// The most `ciWatchAllow` entries, and the longest one: the store checks both where it saves the list; the
@@ -518,6 +537,20 @@ mod tests {
         assert_eq!(p.budget.cursor_max_minutes, 60);
         let p: ProjectConfig = serde_json::from_str(r#"{"budget":{"cursorMaxMinutes":15}}"#).unwrap();
         assert_eq!(p.budget.cursor_max_minutes, 15);
+    }
+
+    #[test]
+    fn release_testflight_settings_are_on_only_for_the_boolean_true() {
+        let read = |v: Value| serde_json::from_value::<ProjectConfig>(serde_json::json!({ "release": v })).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProjectConfig>("{}").unwrap().release,
+            ReleaseConfig::default()
+        );
+        let on = read(serde_json::json!({ "testflight": true, "testflightAnyMember": true })).release;
+        assert!(on.testflight && on.testflight_any_member);
+        let off = read(serde_json::json!({ "testflight": "true", "testflightAnyMember": 1 })).release;
+        assert!(!off.testflight && !off.testflight_any_member, "never an error");
+        assert!(!read(serde_json::json!({ "testflight": null })).release.testflight);
     }
 
     #[test]
@@ -720,6 +753,7 @@ mod tests {
             tuning: TuningConfig::default(),
             lighthouse: LighthouseConfig::default(),
             vet_suggestions: VetSuggestionsConfig::default(),
+            release: ReleaseConfig::default(),
         }
     }
 }

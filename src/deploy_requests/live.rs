@@ -7,18 +7,22 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
-use super::{DeployRequests, Deps, Outcome, RunError, done, go_live, promote};
+use super::{DeployRequests, Deps, Outcome, RunError, done, go_live, promote, testflight};
 use crate::backlog::Client;
 use crate::backlog::deploy::{DeployKind, DeployRequest, Finish};
 use crate::config::ProjectConfig;
 use crate::link::TokenStore;
 use crate::view::{PauseState, StorePause, StorePauseState};
 
-/// The kinds this computer can run: the hosting read, the go-live item and promote. The Rust agent has no TestFlight
-/// build of its own yet (docs/specs/agent/deploy-requests.md section 5), so it leaves that to a computer that has,
-/// and claiming a request it can't run would be declining on the site's behalf. Add a kind here with its arm in
-/// [`Live::run`].
-pub const PORTED: &[DeployKind] = &[DeployKind::Hosting, DeployKind::GoLivePrepare, DeployKind::Promote];
+/// The kinds this computer can run: the hosting read, the go-live item, promote and the TestFlight build. A kind joins
+/// it when its runner is ported, with its arm in [`Live::run`]; `can` then holds it to what it needs (a TestFlight build
+/// is claimed only by a Mac with Xcode's project, the setting on and the issuer's login).
+pub const PORTED: &[DeployKind] = &[
+    DeployKind::Hosting,
+    DeployKind::GoLivePrepare,
+    DeployKind::Promote,
+    DeployKind::TestflightBuild,
+];
 
 /// Kinds a paused project neither builds nor pushes (`testflight_build` and `promote`): the rest are reads and the
 /// go-live item.
@@ -70,6 +74,15 @@ impl Live {
         p
     }
 
+    /// What a TestFlight build asks of this computer.
+    fn testflight_tools(&self) -> crate::testflight::RealTools {
+        crate::testflight::RealTools {
+            repo: PathBuf::from(&self.project.repo_path),
+            github_repo: self.project.github_repo.clone(),
+            gh: self.gh.clone(),
+        }
+    }
+
     /// Sends the deploy log's rows to the store, unless a send was refused too lately (`due`).
     async fn send_logs(&self, due: bool) {
         let Ok((repo, token)) = self.ready().await else {
@@ -110,6 +123,9 @@ impl Deps for Live {
     }
 
     async fn can(&self, r: &DeployRequest) -> bool {
+        if r.kind == DeployKind::TestflightBuild && !testflight::can(&self.project, &self.testflight_tools(), r).await {
+            return false;
+        }
         PORTED.contains(&r.kind)
             && !(waits_while_paused(r.kind) && self.paused())
             && !self.project.github_repo.is_empty()
@@ -167,11 +183,13 @@ impl Deps for Live {
                 self.send_logs(false).await;
                 out
             }
-            // Unreachable: `can` never says yes to a kind without an arm here.
-            _ => Err(RunError::Failed(format!(
-                "this computer can't run {} yet",
-                r.kind.name()
-            ))),
+            DeployKind::TestflightBuild => {
+                let log = self.promoter().log;
+                let out = testflight::run(&self.project, &self.testflight_tools(), &log, &self.project_dir, r).await;
+                // The row is on disk by now; send it at once rather than a pass later.
+                self.send_logs(false).await;
+                out
+            }
         }
     }
 }

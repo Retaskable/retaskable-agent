@@ -15,11 +15,11 @@ The agent restarts to update after nearly every merge, and a restart used to kil
 - **[Decided]** A restart lists "a TestFlight build" among what it finishes first, for at most 45 minutes (`TESTFLIGHT_FIRST_MS`), then goes even if the build hangs. Quit when idle waits for it with no cap.
 - **[Decided]** While a restart waits only on rollouts or a TestFlight build (the long waits), implementers keep starting.
 - **[Decided]** Under Production only, the `environments` read answers a production-only view (no staging head or serves, `productionHead` the default branch's head, `productionServes` what production's version URL answers, `behind: []`, `behindCount: 0`, `blocked` "This project's merges go straight to production: there's nothing to promote.", no rows). This is on always; the agent reads no flag ([no-agent-flags.md](no-agent-flags.md)).
-- **[Proposal]** The wait is a hook, `testflight::testflight_running()` (`src/testflight.rs`), true while any `testflight::Running` guard is held. The Rust agent has no TestFlight build of its own yet, so nothing takes a guard and the hook is false; whatever later runs a build holds a `Running` for exactly as long as the build runs. Porting the build, and the `environments` read's production-only answer, is outside this item.
+- **[Proposal]** The wait is a hook, `testflight::testflight_running()` (`src/testflight.rs`), true while any `testflight::Running` guard is held. The build (`src/testflight/`, deploy-requests.md section 2.4) takes a guard per repo with `Running::take`, held for exactly as long as the build runs. Porting the build, and the `environments` read's production-only answer, is outside this item.
 
 ## 3. Behavior, in build order
 
-1. `testflight_running()` and the `Running` guard (`src/testflight.rs`): in the code; a build takes a guard when it is ported.
+1. `testflight_running()` and the `Running` guard (`src/testflight.rs`): in the code; a build takes a guard (`Running::take`, one per repo).
 2. In the code: the restart's waiting list (`src/restart.rs`) and quit's gain "a TestFlight build"; a wait that is only rollouts or builds counts as long; the finish-first cap is 45 minutes while a build runs.
 3. The `environments` production-only answer, as in section 2, without a flag.
 4. **Tests:** the waiting list with and without a build; the long-wait rule; the 45-minute cap; the production-only answer's fields. Ends with `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.

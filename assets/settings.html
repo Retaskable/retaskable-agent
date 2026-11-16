@@ -133,6 +133,13 @@
   .choice label span:first-child { font-weight: 500; }
   .choice select { flex: 0 1 200px; }
   .hint { font-size: 13px; color: var(--muted); }
+  .secret { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(240px, 2fr); gap: 8px 20px; padding: 12px 0; border-top: 1px solid var(--line); align-items: center; }
+  .secret:first-child { border-top: 0; padding-top: 0; }
+  .secret .who { display: flex; flex-direction: column; gap: 2px; }
+  .secret .now { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .secret .now input { flex: 1; min-width: 180px; }
+  .secret code { font-size: 12px; color: var(--muted); }
+  @media (max-width: 640px) { .secret { grid-template-columns: 1fr; } }
   .field { display: flex; flex-direction: column; gap: 6px; }
   .field label { font-size: 14px; font-weight: 500; }
   input[type=text], input[type=number], input[type=password], textarea, select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--field); border-radius: 8px; background: var(--card); color: var(--fg); }
@@ -275,6 +282,12 @@
             <h2>Cursor may also run</h2>
             <p class="hint">Separate entries with commas or new lines.</p>
             <div id="cursorAllowProjects"></div>
+          </section>
+          <section class="card" id="secretsCard" hidden>
+            <h2>Secrets</h2>
+            <p class="hint" id="secretsHint"></p>
+            <div id="secretRows"></div>
+            <button type="button" class="btn save" id="saveSecrets">Save</button>
           </section>
           <section class="card">
             <div class="head2 inline"><h2>This page</h2><span class="chip warn">Changes need a restart</span></div>
@@ -448,6 +461,54 @@
       ? "A password is already set. Empty keeps it."
       : "No password is set yet; one is needed to turn network access on.";
     applyEnvGating(s.envVars);
+    renderSecrets(s);
+  }
+
+  // agent-settings.md section 3.3: each token's state and fingerprint, never its value (the page never has it). One
+  // the environment sets is locked; the others take a new value, or Clear, from this computer only.
+  var secretStates = [];
+  var secretsOpen = false;
+  var clearing = {};
+  var SECRET_WORDS = { env: "From the environment", saved: "Saved on this computer", unset: "Not set", unreadable: "Unreadable: save it again" };
+
+  function renderSecrets(s) {
+    secretStates = Array.isArray(s.secrets) ? s.secrets : [];
+    clearing = {};
+    $("secretsCard").hidden = !secretStates.length;
+    // Inputs only where a save can work: this computer, and a key to seal with.
+    secretsOpen = s.canSaveSecrets === true && !s.secretsNote;
+    $("saveSecrets").hidden = !secretsOpen;
+    $("secretsHint").textContent = !s.canSaveSecrets
+      ? "Set secrets on the computer itself: from here they'd cross the network."
+      : s.secretsNote || "An environment variable wins over one saved here. A saved one reaches new sessions, not running ones.";
+    var rows = $("secretRows");
+    rows.replaceChildren();
+    secretStates.forEach(function (t) {
+      var who = h("div", "who", h("strong", "", t.label), h("span", "hint", t.name + " · " + t.use));
+      var now = h("div", "now", h("span", t.source === "env" || t.source === "saved" ? "chip ok" : t.source === "unreadable" ? "chip bad" : "chip", SECRET_WORDS[t.source] || t.source));
+      if (t.fingerprint) now.append(h("code", "", "sha256 " + t.fingerprint));
+      if (t.source === "env") {
+        now.append(h("span", "hint", "Set by " + t.name + ": change it there."));
+      } else if (secretsOpen) {
+        var input = h("input", "");
+        input.id = "secret-" + t.name;
+        input.type = "password";
+        input.autocomplete = "off";
+        input.placeholder = t.source === "saved" ? "Empty keeps the one saved" : "Paste it to save it";
+        input.setAttribute("aria-label", t.label);
+        now.append(input);
+        if (t.source === "saved" || t.source === "unreadable") {
+          var clear = h("button", "btn", "Clear");
+          clear.type = "button";
+          clear.addEventListener("click", function () {
+            clearing[t.name] = !clearing[t.name];
+            clear.textContent = clearing[t.name] ? "Clears on Save" : "Clear";
+          });
+          now.append(clear);
+        }
+      }
+      rows.append(h("div", "secret", who, now));
+    });
   }
 
   // engines/06-permissions-the-allowlist.md section 6.4: shown only with the flag On (the settings carry
@@ -788,6 +849,18 @@
     var update = { enabled: $("networkEnabled").checked };
     if (password) update.password = password;
     save({ network: update }, RESTART_MESSAGE);
+  });
+  $("saveSecrets").addEventListener("click", function () {
+    var changes = {};
+    secretStates.forEach(function (t) {
+      if (t.source === "env") return;
+      var field = $("secret-" + t.name);
+      var value = field ? field.value.trim() : "";
+      if (value) changes[t.name] = value;
+      else if (clearing[t.name]) changes[t.name] = null;
+    });
+    if (!Object.keys(changes).length) return setStatus("Nothing to save.");
+    save({ secrets: changes });
   });
   $("restart").addEventListener("click", function () {
     setStatus("Restarting…");
