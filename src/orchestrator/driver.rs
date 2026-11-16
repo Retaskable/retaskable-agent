@@ -52,6 +52,7 @@ mod project;
 mod read;
 mod report;
 mod resume;
+mod revise;
 mod run_starters;
 mod runs;
 mod settle;

@@ -39,7 +39,7 @@ impl MergeHost for NoItems {
     }
 }
 
-fn row(args: Value) -> Value {
+pub(super) fn row(args: Value) -> Value {
     json!({ "id": "in-1", "kind": "merge_requested", "status": "requested", "issuedBy": "ana", "args": args })
 }
 
@@ -49,12 +49,12 @@ fn draft(status: &str, detail: &str) -> Value {
         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts", "itemIds": ["charts-1"] } })
 }
 
-fn person() -> Option<Value> {
+pub(super) fn person() -> Option<Value> {
     Some(json!({ "land": "person", "protectedBranch": "main", "mergeMethod": "rebase" }))
 }
 
 /// A live project with the draft in the store, on a checkout whose origin holds its spec; `merges` are `gh pr merge`'s answers.
-async fn rig_draft(
+pub(super) async fn rig_draft(
     taken: Value,
     github: Option<Value>,
     merges: Vec<Result<(), &'static str>>,

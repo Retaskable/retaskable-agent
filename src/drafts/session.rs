@@ -187,7 +187,7 @@ pub fn sort_fixes(result: &DrafterResult) -> Sorted {
         .collect::<Vec<_>>();
     let only_fixes = !fix_items.is_empty()
         && result.change_title.is_none()
-        && result.entry_ids().is_empty()
+        && result.entry_ids(None).is_empty()
         && result.pieces.iter().all(|p| p.kind.as_deref() == Some("fix"));
     let outcome = if only_fixes && result.status == DrafterStatus::PrOpened {
         Outcome::QueuedFixes

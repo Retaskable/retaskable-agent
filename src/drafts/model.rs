@@ -66,19 +66,32 @@ pub struct DrafterResult {
     /// As the drafter wrote it; [`checked_breakdown`] decides what's kept.
     #[serde(default)]
     pub breakdown: Option<Value>,
+    /// Only for a plan that revises an item: what is left of it once the change is in. As the drafter wrote it;
+    /// [`super::revision::to_revision`] decides what's kept.
+    #[serde(default)]
+    pub revision: Option<super::revision::RawRevision>,
     /// The session's own id from the engine, set by `parse_result` (a Cursor chat's id is made by the engine).
     #[serde(skip)]
     pub session_id: Option<String>,
 }
 
 impl DrafterResult {
-    /// `entryIds` (drafts.ts): every backlog entry it added, in order. A lone `itemId` is a list of one.
-    pub fn entry_ids(&self) -> Vec<String> {
-        match (&self.item_ids, &self.item_id) {
-            (Some(ids), _) => ids.clone(),
-            (None, Some(id)) => vec![id.clone()],
-            (None, None) => Vec::new(),
+    /// `entryIds` (drafts.ts): every backlog entry it added, in order. A lone `itemId` is a list of one. The item a
+    /// plan revises is never one of its new entries (card-revisions.md section 3.3), so `revises` is left out.
+    pub fn entry_ids(&self, revises: Option<&str>) -> Vec<String> {
+        let kept = |id: &&str| !id.is_empty() && Some(*id) != revises;
+        let mut ids: Vec<String> = Vec::new();
+        for id in (self.item_ids.iter().flatten().map(|i| i.trim())).filter(kept) {
+            if !ids.iter().any(|s| s == id) {
+                ids.push(id.to_string());
+            }
         }
+        if ids.is_empty()
+            && let Some(id) = self.item_id.as_deref().map(str::trim).filter(kept)
+        {
+            ids.push(id.to_string());
+        }
+        ids
     }
 }
 
@@ -117,6 +130,11 @@ pub fn drafter_result_schema() -> Value {
                 },
                 "required": ["id", "title", "remaining", "specRefs"]
             } },
+            "revision": {
+                "type": "object",
+                "properties": { "id": { "type": "string" }, "remaining": { "type": "string" } },
+                "required": ["id", "remaining"]
+            },
             "summary": { "type": "string" },
             "risk": { "type": "string" },
             "questions": { "type": "array", "items": {
@@ -257,7 +275,7 @@ mod tests {
 
     #[test]
     fn entry_ids_reads_a_lone_item_id_as_a_list_of_one() {
-        let ids = |v| result(v).entry_ids();
+        let ids = |v| result(v).entry_ids(None);
         let base = |extra: Value| {
             let mut v = json!({ "status": "pr_opened", "summary": "s" });
             v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());

@@ -66,6 +66,10 @@ pub struct ClaimedDraft {
     /// The chat ask the draft was asked for in (none for Add spec and feedback drafts).
     #[serde(default)]
     pub ask_id: Option<String>,
+    /// The drafter's block for the item the plan revises, set by the draft step before the session starts
+    /// (`drafts::revision::revision_text`); never read from the store.
+    #[serde(skip)]
+    pub revising: Option<String>,
     /// Any other field of the draft.
     #[serde(flatten)]
     pub other: Map<String, Value>,
@@ -117,6 +121,18 @@ pub struct DraftReport {
     /// The drafter's checked breakdown, as the store's details take it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<Value>,
+    /// The item the plan revises: `Some(None)` sends `null`, which clears it (the plan is new work after all).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revises: Option<Option<String>>,
+    /// What is left of that item once the change is in: `Some(None)` sends `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<Option<Remaining>>,
+}
+
+/// A revision as `draft_report` takes it (`{ remaining }`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Remaining {
+    pub remaining: String,
 }
 
 /// A fix the drafter returned: added as a `todo` item "Fix: …" (chat-specs.md section 13.5).

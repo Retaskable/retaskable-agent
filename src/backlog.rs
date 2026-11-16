@@ -22,6 +22,7 @@ pub mod facts;
 pub mod failures;
 pub mod intents;
 pub mod merge;
+pub mod revise;
 pub mod runs;
 pub mod served;
 pub mod settings;
