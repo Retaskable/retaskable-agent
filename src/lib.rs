@@ -113,6 +113,7 @@ pub mod settings_server;
 pub mod setup_check;
 pub mod setup_questions;
 pub mod shutdown;
+pub mod sidecars;
 pub mod site_settings;
 pub mod smoke;
 pub mod spec_items;
