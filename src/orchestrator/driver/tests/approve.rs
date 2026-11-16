@@ -21,6 +21,9 @@ pub(super) struct Host {
     rebases: Mutex<Vec<bool>>,
     /// The follow-up of each drafter run.
     runs: Mutex<Vec<String>>,
+    /// Where each pull request stands on the code host (open when not listed), and every look at one.
+    pub(super) states: Mutex<std::collections::HashMap<u64, crate::drafts::land::PrState>>,
+    pub(super) looked: Mutex<Vec<u64>>,
 }
 
 impl Host {
@@ -59,6 +62,16 @@ impl DraftHost for Host {
     fn close(&self, _: &ProjectConfig, pr: u64) -> Result<()> {
         self.calls.lock().unwrap().push(format!("close {pr}"));
         Ok(())
+    }
+    fn pr_state(&self, _: &ProjectConfig, pr: u64) -> Result<crate::drafts::land::PrState> {
+        self.looked.lock().unwrap().push(pr);
+        Ok(self
+            .states
+            .lock()
+            .unwrap()
+            .get(&pr)
+            .copied()
+            .unwrap_or(crate::drafts::land::PrState::Open))
     }
     fn rebase(&self, _: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
         self.calls.lock().unwrap().push(format!("rebase {id} {branch}"));

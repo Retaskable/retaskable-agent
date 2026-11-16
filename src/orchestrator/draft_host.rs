@@ -232,6 +232,10 @@ impl DraftHost for ClaudeDrafts {
         land::close_pr(&self.gh(), Path::new(&project.repo_path), pr)
     }
 
+    fn pr_state(&self, project: &ProjectConfig, pr: u64) -> Result<land::PrState> {
+        land::pr_state(&self.gh(), Path::new(&project.repo_path), pr)
+    }
+
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
         let dir = self.prepare(project, id, branch)?;
         land::rebase(crate::git_bin::program(), &dir, branch, &project.base_branch)
