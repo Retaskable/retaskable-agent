@@ -213,6 +213,7 @@ mod tests {
             deploy: DeployConfig {
                 staging,
                 production: None,
+                ..Default::default()
             },
             ..ProjectConfig::default()
         }

@@ -6,6 +6,9 @@
 mod deps;
 mod go_live;
 mod live;
+mod promote;
+#[cfg(all(test, unix))]
+mod promote_tests;
 #[cfg(test)]
 mod tests;
 
@@ -67,6 +70,8 @@ impl<D: Deps + 'static> DeployRequests<D> {
     /// One round: lists the open requests and claims the ones this computer can run. Resolves once they are taken
     /// (not when they end: each runs on its own task). Returns how long to wait before the next round.
     pub async fn cycle(&mut self) -> Duration {
+        // A deploy log row the store didn't take is sent again, whether or not the list can be read.
+        self.deps.flush_logs().await;
         let rows = match self.deps.list().await {
             Ok(rows) => rows,
             Err(e) => {

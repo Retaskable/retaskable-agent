@@ -536,8 +536,9 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         machine: link::machine_name(env),
         runners: &runners,
     });
-    // deploy-requests.md section 3.2: starts only for a kind this computer can run (none yet).
+    // deploy-requests.md section 3.2: starts only for a kind this computer can run.
     retaskable_agent::deploy_requests::spawn_all(retaskable_agent::deploy_requests::SpawnArgs {
+        dir,
         projects: &cfg.projects,
         backlog_url: &backlog::url(env),
         keychain: &keychain,
