@@ -100,10 +100,12 @@ fn piece() -> Value {
 }
 
 async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
-    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+    let end = tokio::time::timeout(Duration::from_secs(120), rx.recv())
         .await
         .expect("an end")
-        .expect("the channel stays open")
+        .expect("the channel stays open");
+    crate::backlog::store_contract::check(crate::backlog::runs::RunKind::Build, &end);
+    end
 }
 
 fn origin_has(rig: &Rig, branch: &str) -> bool {

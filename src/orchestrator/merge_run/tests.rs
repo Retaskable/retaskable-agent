@@ -73,7 +73,7 @@ fn fake_gh(dir: &Path) -> PathBuf {
 d=$(dirname "$0")
 echo "$*" >> "$d/calls.log"
 case "$*" in
-  *mergeCommit*) echo '{"mergeCommit":{"oid":"abc123"}}';;
+  *mergeCommit*) echo '{"mergeCommit":{"oid":"abc1234567890abcdef1234567890abcdef12345"}}';;
   "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view"; if [ -f "$d/view.next" ]; then mv "$d/view.next" "$d/view"; fi;;
   "pr merge "*)
     [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"
@@ -165,10 +165,16 @@ impl Rig {
     async fn run_with(&mut self, delays: Delays) -> RunEnd {
         let runner = MergeRuns::with(fake_gh(self.dir.path()), tgit, delays);
         runner.start(self.request.clone()).unwrap();
-        tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
+        let end = tokio::time::timeout(Duration::from_secs(20), self.ends.recv())
             .await
             .expect("the run ended")
-            .unwrap()
+            .unwrap();
+        // The loop ends a merge turn with `merge_result`, whose outcomes and fields are `run_done`'s for a merge run
+        // (backlogPieceOps.ts `endPieceRun`), except a `questions` end, which becomes `needs_person`.
+        if end.outcome != RunOutcome::Questions {
+            crate::backlog::store_contract::check(RunKind::Merge, &end);
+        }
+        end
     }
 
     /// The turn is let go of here and no lock is taken or dropped: the loop reports `merge_result`.
@@ -194,7 +200,10 @@ async fn a_mergeable_up_to_date_change_is_squash_merged_and_ends_merged_with_the
     let mut rig = rig().await;
     let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Merged);
-    assert_eq!(end.result, json!({ "commit": "abc123" }));
+    assert_eq!(
+        end.result,
+        json!({ "commit": "abc1234567890abcdef1234567890abcdef12345" })
+    );
     let calls = calls(rig.dir.path());
     assert!(
         calls.contains(&"pr merge 7 --squash --delete-branch".to_string()),

@@ -65,10 +65,12 @@ fn brief() -> Value {
 }
 
 async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
-    tokio::time::timeout(Duration::from_secs(60), rx.recv())
+    let end = tokio::time::timeout(Duration::from_secs(60), rx.recv())
         .await
         .expect("an end")
-        .expect("the channel stays open")
+        .expect("the channel stays open");
+    crate::backlog::store_contract::check(crate::backlog::runs::RunKind::Plan, &end);
+    end
 }
 
 #[tokio::test]

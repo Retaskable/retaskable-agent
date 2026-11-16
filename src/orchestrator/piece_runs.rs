@@ -31,7 +31,7 @@ use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
-use crate::runs::{Pushed, end_from_answer, needs_push};
+use crate::runs::{Pushed, end_from_answer, needs_push, person_steps_end};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
@@ -298,7 +298,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
     let Some(chore) = chore_of(&job.piece) else {
-        return (outcome, result);
+        return person_steps_end(outcome, result);
     };
     let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
     let outcome = chore_end(chore.kind, outcome, &result);
@@ -310,7 +310,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
             tracing::warn!("{}: closing the chore's change: {e:#}", job.token);
         }
     }
-    (outcome, result)
+    person_steps_end(outcome, result)
 }
 
 async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf> {
