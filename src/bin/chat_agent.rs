@@ -16,6 +16,7 @@ use retaskable_agent::chat::{link as chat_link, project, served};
 use retaskable_agent::connector::Timing;
 use retaskable_agent::env::Env;
 use retaskable_agent::link::{BACKLOG_TARGET, CLOUD_TARGET};
+use retaskable_agent::program_settings::chat as chat_settings;
 use retaskable_agent::program_status::{self, Linked, Report, StatusWriter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -102,8 +103,11 @@ async fn run(env: &Env) -> Result<()> {
                 running.retain(|_, (_, h)| !h.is_finished());
             }
             _ = tick.tick() => {
-                let outcome = served::fetch(&store, &store_tokens, env).await;
+                // The settings file is read again each refresh, so a change on the settings page applies without a restart.
+                let (only, settings_error) = chat_settings::only_repo(env, &chat_link::data_dir(env));
+                let outcome = served::fetch(&store, &store_tokens, only.as_deref()).await;
                 let (next, error) = served::next(&list, outcome);
+                let error = error.or(settings_error);
                 match &error {
                     Some(why) => tracing::warn!("Chat Agent couldn't learn its projects: {why}"),
                     None if next.is_empty() => tracing::info!(

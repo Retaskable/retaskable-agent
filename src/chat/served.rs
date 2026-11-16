@@ -7,10 +7,8 @@
 //! a repository, and it has no way to place a repo-less project yet.
 use std::time::Duration;
 
-use super::project::REPO_ID_VAR;
 use crate::backlog::served::Served;
 use crate::backlog::{BacklogError, Client};
-use crate::env::Env;
 use crate::link::{DeviceTokens, TokenAnswer};
 
 /// How often the list is asked again, so a project one of the person's agents has just connected to shows up.
@@ -36,20 +34,14 @@ pub enum Outcome {
     Refused(String),
 }
 
-/// `RETASKABLE_CHAT_REPO_ID`: when set, only that repository id is served (and nothing if the store doesn't name it).
-fn only(env: &Env) -> Option<String> {
-    env.get(REPO_ID_VAR)
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-/// The answer as the projects to serve: repo-less projects left out, a repo id that isn't a number skipped.
-pub fn wanted(served: &Served, env: &Env) -> Vec<Wanted> {
-    let only = only(env);
+/// The answer as the projects to serve: repo-less projects left out, a repo id that isn't a number skipped. `only` is
+/// the one repository id to serve (`program_settings::chat`: `RETASKABLE_CHAT_REPO_ID`, else the settings file), and
+/// nothing is served if the store doesn't name it.
+pub fn wanted(served: &Served, only: Option<&str>) -> Vec<Wanted> {
     served
         .projects
         .iter()
-        .filter(|p| only.as_ref().is_none_or(|id| *id == p.repo_id))
+        .filter(|p| only.is_none_or(|id| id == p.repo_id))
         .filter_map(|p| {
             Some(Wanted {
                 repo_id: p.repo_id.parse().ok()?,
@@ -61,7 +53,7 @@ pub fn wanted(served: &Served, env: &Env) -> Vec<Wanted> {
 }
 
 /// Asks the store with the link's access token, once more with a fresh token when the first is refused as stale.
-pub async fn fetch(client: &Client, tokens: &DeviceTokens, env: &Env) -> Outcome {
+pub async fn fetch(client: &Client, tokens: &DeviceTokens, only: Option<&str>) -> Outcome {
     let mut stale: Option<String> = None;
     loop {
         let token = match tokens.access_token(stale.as_deref()).await {
@@ -75,7 +67,7 @@ pub async fn fetch(client: &Client, tokens: &DeviceTokens, env: &Env) -> Outcome
                 return Outcome::Unavailable("Chat Agent couldn't reach the shared backlog to sign in.".into());
             }
         };
-        match classify(client.projects_served(&token).await, env) {
+        match classify(client.projects_served(&token).await, only) {
             Some(outcome) => return outcome,
             None if stale.is_none() => stale = Some(token),
             None => return Outcome::Refused("The shared backlog says this Chat Agent isn't signed in.".into()),
@@ -84,9 +76,9 @@ pub async fn fetch(client: &Client, tokens: &DeviceTokens, env: &Env) -> Outcome
 }
 
 /// How the store's answer reads. `None`: a token it no longer takes (401), worth one fresh token.
-pub fn classify(answer: Result<Served, BacklogError>, env: &Env) -> Option<Outcome> {
+pub fn classify(answer: Result<Served, BacklogError>, only: Option<&str>) -> Option<Outcome> {
     Some(match answer {
-        Ok(served) => Outcome::Served(wanted(&served, env)),
+        Ok(served) => Outcome::Served(wanted(&served, only)),
         Err(BacklogError::BadAnswer { status: 401, .. }) => return None,
         Err(e @ BacklogError::Unreachable(_)) => Outcome::Unavailable(e.to_string()),
         Err(e @ BacklogError::BadAnswer { status, .. }) if status == 429 || status >= 500 => {
@@ -137,7 +129,7 @@ mod tests {
 
     #[test]
     fn the_list_is_the_stores_with_its_default_branch_and_nothing_repo_less() {
-        let got = wanted(&answer(), &Env::empty());
+        let got = wanted(&answer(), None);
         let names: Vec<_> = got
             .iter()
             .map(|w| (w.repo_id, w.github_repo.as_str(), w.base_branch.as_str()))
@@ -147,17 +139,15 @@ mod tests {
 
     #[test]
     fn the_override_serves_only_that_repository() {
-        let env = Env::from_pairs([(REPO_ID_VAR, " 2 ")]);
-        let got = wanted(&answer(), &env);
+        let got = wanted(&answer(), Some("2"));
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].github_repo, "o/b");
-        let none = Env::from_pairs([(REPO_ID_VAR, "99")]);
-        assert!(wanted(&answer(), &none).is_empty());
+        assert!(wanted(&answer(), Some("99")).is_empty());
     }
 
     #[test]
     fn a_refusal_clears_the_list_and_a_busy_store_keeps_it() {
-        let before = wanted(&answer(), &Env::empty());
+        let before = wanted(&answer(), None);
         let (kept, err) = next(&before, Outcome::Unavailable("down".into()));
         assert_eq!((kept.len(), err.as_deref()), (2, Some("down")));
         let (cleared, err) = next(&before, Outcome::Refused("403".into()));
@@ -167,9 +157,9 @@ mod tests {
     }
 
     /// Asks a fake store with token `t`, the way `fetch` does once it has one.
-    async fn ask(status: u16, reply: serde_json::Value, env: &Env) -> Outcome {
+    async fn ask(status: u16, reply: serde_json::Value, only: Option<&str>) -> Outcome {
         let (url, _) = store(status, reply).await;
-        classify(Client::new(url).projects_served("t").await, env).expect("not a 401")
+        classify(Client::new(url).projects_served("t").await, only).expect("not a 401")
     }
 
     #[tokio::test]
@@ -177,12 +167,12 @@ mod tests {
         let ok = json!({ "value": { "projects": [
             { "repoId": "5", "githubRepo": "o/r", "defaultBranch": "main", "access": "read" }
         ], "projectBacklogs": [] }});
-        let got = ask(200, ok, &Env::empty()).await;
+        let got = ask(200, ok, None).await;
         assert!(matches!(&got, Outcome::Served(l) if l.len() == 1 && l[0].repo_id == 5));
         let refused = ask(
             403,
             json!({ "error": "forbidden", "message": "Only a Chat Agent" }),
-            &Env::empty(),
+            None,
         )
         .await;
         let (list, err) = next(&[], refused);
@@ -197,22 +187,17 @@ mod tests {
             r#"{"version":2,"projects":[{"id":"x","repoPath":"x","githubRepo":"o/x","baseBranch":"main","backlogPath":"b"}]}"#,
         )
         .unwrap();
-        let env = Env::from_pairs([("RETASKABLE_DATA_DIR", dir.path().to_str().unwrap())]);
         let none = json!({ "value": { "projects": [], "projectBacklogs": [] } });
-        assert_eq!(ask(200, none, &env).await, Outcome::Served(vec![]));
+        assert_eq!(ask(200, none, None).await, Outcome::Served(vec![]));
     }
 
     #[tokio::test]
     async fn an_unreachable_or_busy_store_keeps_the_list_and_says_why() {
-        let before = wanted(&answer(), &Env::empty());
-        let down = classify(
-            Client::new("http://127.0.0.1:1").projects_served("t").await,
-            &Env::empty(),
-        )
-        .unwrap();
+        let before = wanted(&answer(), None);
+        let down = classify(Client::new("http://127.0.0.1:1").projects_served("t").await, None).unwrap();
         let (kept, err) = next(&before, down);
         assert!(kept == before && err.is_some());
-        let busy = ask(503, json!({ "error": "unavailable", "message": "busy" }), &Env::empty()).await;
+        let busy = ask(503, json!({ "error": "unavailable", "message": "busy" }), None).await;
         assert_eq!(next(&before, busy).0, before);
         let stale = classify(
             Err(BacklogError::BadAnswer {
@@ -220,7 +205,7 @@ mod tests {
                 code: None,
                 message: String::new(),
             }),
-            &Env::empty(),
+            None,
         );
         assert!(stale.is_none());
     }
@@ -234,8 +219,8 @@ mod tests {
             { "repoId": "1", "githubRepo": "o/a", "defaultBranch": "main", "access": "write" },
             { "repoId": "2", "githubRepo": "o/b", "defaultBranch": "main", "access": "write" }
         ], "projectBacklogs": [] }});
-        let (a, _) = next(&[], ask(200, first, &Env::empty()).await);
-        let (b, _) = next(&a, ask(200, second, &Env::empty()).await);
+        let (a, _) = next(&[], ask(200, first, None).await);
+        let (b, _) = next(&a, ask(200, second, None).await);
         assert_eq!((a.len(), b.len()), (1, 2));
     }
 

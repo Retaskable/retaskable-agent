@@ -98,6 +98,8 @@ pub struct CiLoop {
     docker_state: &'static str,
     /// The status file's writer, and whether the store link is there now.
     status: Option<StatusFile>,
+    /// Why the last re-read of the settings failed (`lastError` in the status file), until one succeeds.
+    settings_error: Option<String>,
 }
 
 impl CiLoop {
@@ -116,6 +118,7 @@ impl CiLoop {
             refresh: claim::REFRESH,
             docker_state: "unknown",
             status: None,
+            settings_error: None,
             remote: Arc::new(Repo::url),
             merge: None,
             metas: Arc::default(),
@@ -143,6 +146,32 @@ impl CiLoop {
         self
     }
 
+    /// Reads the settings again (the file in the runner's folder, under the environment). New ones replace `cfg`, so
+    /// slots, CPUs, repos and the name apply on the next poll; a file that can't be read or has a bad field keeps the
+    /// old ones, said once in the log and kept as `lastError` in the status file until a read works.
+    pub fn reload(&mut self, cfg: &mut Settings, read: impl FnOnce() -> anyhow::Result<Settings>) {
+        match read() {
+            Ok(new) => {
+                self.logged.remove("settings");
+                self.settings_error = None;
+                if new != *cfg {
+                    tracing::info!(
+                        "settings changed: {} slot(s), {} cpu(s), {} repo(s)",
+                        new.slots,
+                        new.cpus,
+                        new.repos.len()
+                    );
+                    *cfg = new;
+                }
+            }
+            Err(e) => {
+                let why = format!("{e:#}");
+                self.say_once("settings", &format!("keeping the old settings: {why}"));
+                self.settings_error = Some(why);
+            }
+        }
+    }
+
     /// One write of the status file, if there is a writer.
     fn write_status(&self, cfg: &Settings) {
         let Some((writer, linked, env_set)) = &self.status else {
@@ -159,7 +188,7 @@ impl CiLoop {
                     store: linked(),
                     cloud: None,
                 },
-                last_error: None,
+                last_error: self.settings_error.clone(),
                 env_set: env_set.clone(),
                 extra,
             },
@@ -422,11 +451,13 @@ impl CiLoop {
     }
 }
 
-/// The loop, until the process stops: recovery first, then a poll and what it starts, each `POLL`.
-pub async fn run(mut ci: CiLoop, cfg: Settings) {
+/// The loop, until the process stops: recovery first, then a poll and what it starts, each `POLL`. `read` is the
+/// settings read again before each poll (`CiLoop::reload`).
+pub async fn run(mut ci: CiLoop, mut cfg: Settings, mut read: impl FnMut() -> anyhow::Result<Settings>) {
     ci.write_status(&cfg);
     ci.recover(&cfg).await;
     loop {
+        ci.reload(&mut cfg, &mut read);
         let keys = ci.poll(&cfg).await;
         ci.start(&cfg, keys).await;
         ci.write_status(&cfg);
@@ -461,5 +492,7 @@ pub async fn once(mut ci: CiLoop, cfg: Settings, shas: &[String]) -> usize {
     tried.len()
 }
 
+#[cfg(test)]
+mod reload_tests;
 #[cfg(test)]
 mod tests;

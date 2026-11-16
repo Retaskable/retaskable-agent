@@ -15,9 +15,12 @@ const USAGE: &str = "retaskable-ci: CI for GitHub repos, run as its own process.
 
 Usage:
   retaskable-ci link            Link this computer's CI runner to the shared backlog (role ci).
-  retaskable-ci run             Check the repos in AGENT_CI_REPO, again and again.
+  retaskable-ci run             Check the repos in AGENT_CI_REPO or settings.json, again and again.
   retaskable-ci once <sha>...   Check just the pull requests or main at these commits, then exit.
   retaskable-ci --version
+
+Settings: <data folder>/ci/settings.json (repos, slots, cpus, name), read again on each poll; the
+environment below wins over it, field by field.
 
 Environment:
   AGENT_CI_REPO         owner/repo, comma-separated for several (owner/repo@branch for a base other than main)
@@ -41,8 +44,10 @@ async fn main() -> Result<()> {
         Some("link") => ci_link::run(&env, VERSION, |line| println!("{line}")).await?,
         Some("run") => {
             let (ci, cfg) = start(&env)?;
+            let (reload_env, dir) = (env.clone(), cfg.data_dir.clone());
+            let reload = move || Settings::load_in(&reload_env, dir.clone());
             tokio::select! {
-                _ = agent_ci::run(ci, cfg) => {}
+                _ = agent_ci::run(ci, cfg, reload) => {}
                 _ = tokio::signal::ctrl_c() => {}
             }
         }
@@ -61,7 +66,7 @@ async fn main() -> Result<()> {
 
 /// The loop and its settings, with the store's merge lock behind `automerge` when this computer is linked.
 fn start(env: &Env) -> Result<(CiLoop, Settings)> {
-    let cfg = Settings::from_env(env)?;
+    let cfg = Settings::load(env)?;
     let url = ci_link::store_url(env)?;
     let keychain = ci_link::token_store(env);
     if !matches!(keychain.get(&url), Ok(Some(_))) {
