@@ -16,9 +16,11 @@ pub(crate) fn secret_rows(secrets: &Secrets) -> Vec<Value> {
         .into_iter()
         .map(|s| {
             let mut row = json!({
-                "name": s.def.name,
-                "label": s.def.label,
-                "use": s.def.usage,
+                "name": s.name,
+                // A variable a person added has no label or use; the page shows its name.
+                "custom": s.def.is_none(),
+                "label": s.def.map(|d| d.label),
+                "use": s.def.map(|d| d.usage),
                 "source": s.source.as_str(),
                 // What deleting the saved one goes back to: the environment's value, or nothing.
                 "envSet": s.env_set,

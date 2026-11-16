@@ -1,7 +1,8 @@
 //! `retaskable secret set|reset|list` and `retaskable-ci secret set|reset|list` (agent-settings.md section 3.3): saving a secret
 //! from a terminal, for a computer with no browser to hand (a container). The value is asked for without echo at a
 //! terminal, or read from the first line of stdin when piped, and never taken from an argument (it would sit in the
-//! process list and the shell's history). It is checked against the program's own secret names and sealed under the
+//! process list and the shell's history). The name is one of the program's own secrets or any other variable name the
+//! rules allow (`names.rs`), and it is sealed under the
 //! data key like a save on the settings page (a key file named by `RETASKABLE_SECRETS_KEY_FILE` is made on the first
 //! save), and nothing fails open: with no key, nothing is saved. Touches no process environment and runs no `gh`; a
 //! running program picks the saved value up as it does one saved on the page (the CI runner live, the code agent at
@@ -12,7 +13,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use serde_json::{Map, Value};
 
-use super::{Owner, Secrets, fingerprint};
+use super::{Owner, Secrets, fingerprint, names};
 use crate::env::Env;
 use crate::link;
 
@@ -33,8 +34,9 @@ pub(crate) fn run_with(
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["list"] => Ok(list(secrets)),
         ["set", name] => {
+            // A name beyond the program's own is a variable the person adds: `plan` checks it under the same rules as the page.
             if !names.contains(name) {
-                bail!("{name} isn't a secret this program takes. Names: {}.", names.join(", "));
+                names::check_name(name).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             // Before asking for the value, so a computer that can't save never takes one.
             if let Some(why) = secrets.save_problem() {
@@ -55,8 +57,9 @@ pub(crate) fn run_with(
             ))
         }
         ["reset", name] => {
+            // A name beyond the program's own is a variable the person adds: `plan` checks it under the same rules as the page.
             if !names.contains(name) {
-                bail!("{name} isn't a secret this program takes. Names: {}.", names.join(", "));
+                names::check_name(name).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             let mut change = Map::new();
             change.insert((*name).to_string(), Value::Null);
@@ -68,7 +71,7 @@ pub(crate) fn run_with(
         ["reset", _, ..] => bail!("`secret reset` takes only the name."),
         ["set", _, ..] => bail!("`secret set` takes only the name: the value is asked for, never an argument."),
         _ => bail!(
-            "Usage: secret set <NAME> | secret reset <NAME> | secret list\nNames: {}.",
+            "Usage: secret set <NAME> | secret reset <NAME> | secret list\nKnown names: {} (or any other variable name the rules allow).",
             names.join(", ")
         ),
     }
@@ -82,8 +85,8 @@ fn list(secrets: &Secrets) -> String {
         .map(|s| {
             let source = s.source.as_str();
             match s.fingerprint {
-                Some(print) => format!("{}  {source}  {print}", s.def.name),
-                None => format!("{}  {source}", s.def.name),
+                Some(print) => format!("{}  {source}  {print}", s.name),
+                None => format!("{}  {source}", s.name),
             }
         })
         .collect::<Vec<_>>()

@@ -10,7 +10,6 @@
   var STATE_WORDS = { running: "Running", stopped: "Stopped", unlinked: "Not linked", notInstalled: "Not installed on this computer" };
   var STATE_TONE = { running: "chip ok", stopped: "chip", unlinked: "chip warn", notInstalled: "chip" };
   var STATE_SHORT = { running: "Running", stopped: "Stopped", unlinked: "Not linked", notInstalled: "Not installed" };
-  var SECRET_WORDS = { env: "From the environment", saved: "Saved on this computer", unset: "Not set", unreadable: "Unreadable: save it again" };
 
   function seen(ms) {
     return ms ? "last seen " + new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "never seen running";
@@ -74,37 +73,17 @@
     return kind === "number" ? Number(v) : v;
   }
 
+  // The secrets of a program, in the editor of settings-secrets.js: kept by program, so a repaint after a save starts fresh.
+  var editors = {};
+
   function secretRows(p) {
     var open = p.canSaveSecrets === true && !p.secretsNote;
     var box = h("div", "");
     box.append(h("h3", "", "Secrets"), h("p", "hint", !p.canSaveSecrets
       ? "Set secrets on the computer itself: from here they'd cross the network."
-      : p.secretsNote || "A secret saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches checks and sessions started after it."));
-    p.secrets.forEach(function (t) {
-      var now = h("div", "now", h("span", t.source === "env" || t.source === "saved" ? "chip ok" : t.source === "unreadable" ? "chip bad" : "chip", SECRET_WORDS[t.source] || t.source));
-      if (t.fingerprint) now.append(h("code", "", "sha256 " + t.fingerprint));
-      if (open) {
-        var input = h("input", "");
-        input.id = "ps-secret-" + p.id + "-" + t.name;
-        input.type = "password";
-        input.autocomplete = "off";
-        input.placeholder = t.source === "saved" ? "Empty keeps the one saved" : "Paste it to save it";
-        input.setAttribute("aria-label", t.label);
-        now.append(input);
-        if (t.source === "saved" || t.source === "unreadable") {
-          // Deletes the saved one now; the environment's value (if it had one at start) is used again.
-          var reset = h("button", "btn", t.envSet ? "Use the environment's value" : "Clear");
-          reset.type = "button";
-          reset.addEventListener("click", function () {
-            var change = {};
-            change[t.name] = null;
-            postProgram(p, { settings: {}, secrets: change });
-          });
-          now.append(reset);
-        }
-      }
-      box.append(h("div", "secret", h("div", "who", h("strong", "", t.label), h("span", "hint", t.name + " · " + t.use)), now));
-    });
+      : p.secretsNote || "Add a variable of any name, or set one the program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches checks and sessions started after it, but never a check's container. Values are never shown again."));
+    editors[p.id] = RT.secrets.editor({ key: p.id, rows: p.secrets, rules: p.secretRules, open: open });
+    box.append(editors[p.id].el);
     return box;
   }
 
@@ -128,13 +107,11 @@
       var v = read(p, f[0], f[2]);
       if (v !== undefined) settings[f[0]] = v;
     });
-    p.secrets.forEach(function (t) {
-      var el = $("ps-secret-" + p.id + "-" + t.name);
-      var v = el ? el.value.trim() : "";
-      if (v) secrets[t.name] = v;
-    });
+    var r = editors[p.id].collect();
+    if (r.errors.length) return RT.setStatus("Fix the variables marked before saving.", true);
+    secrets = r.changes;
     var body = { settings: settings };
-    if (Object.keys(secrets).length) body.secrets = secrets;
+    if (r.count) body.secrets = secrets;
     postProgram(p, body);
   }
 

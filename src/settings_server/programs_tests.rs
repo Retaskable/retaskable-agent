@@ -554,3 +554,117 @@ fn both_compose_files_share_one_data_volume_and_both_containers_run_as_uid_1000(
     assert!(dockerfile.contains("RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key"));
     assert!(include_str!("../../docker/agent/Dockerfile").contains("chown -R node:node /work /data"));
 }
+
+#[tokio::test]
+async fn a_custom_variable_is_sealed_into_that_programs_file_listed_masked_and_refused_names_write_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_status(&ci_dir(root), program_status::CI_RUNNER, NOW, true, &[], None);
+    let (settings, app, cookie, csrf) = signed_in_app(root).await;
+    settings.set_program_keys(Some(Arc::new(MemStore::default())));
+    for (secrets, says) in [
+        (json!({"PATH": "x"}), "system variable"),
+        (json!({"LD_PRELOAD": "x"}), "load or run"),
+        (json!({"RETASKABLE_PORT": "x"}), "namespace"),
+        (json!({"bad name": TOKEN}), "letters, digits"),
+    ] {
+        let res = post_program(&app, &cookie, &csrf, "ci-runner", json!({"secrets": secrets})).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{secrets}");
+        let body = json_body(res).await.to_string();
+        assert!(body.contains(says) && !body.contains(TOKEN), "{body}");
+    }
+    assert!(!ci_dir(root).join("settings.json").exists());
+    let res = post_program(
+        &app,
+        &cookie,
+        &csrf,
+        "ci-runner",
+        json!({"secrets": {"REGISTRY_TOKEN": TOKEN, "GH_TOKEN": null}}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let file = std::fs::read_to_string(ci_dir(root).join("settings.json")).unwrap();
+    assert!(file.contains("\"REGISTRY_TOKEN\": \"v1:") && !file.contains(TOKEN));
+    assert!(
+        std::env::var("REGISTRY_TOKEN").is_err(),
+        "the page's own environment is untouched"
+    );
+    let all = get_programs(&app, &cookie).await;
+    assert!(!all.to_string().contains(TOKEN));
+    let ci = program(&all, "ci-runner");
+    let row = ci["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "REGISTRY_TOKEN")
+        .unwrap();
+    assert_eq!((&row["custom"], &row["source"]), (&json!(true), &json!("saved")));
+    assert_eq!(row["fingerprint"], crate::secrets::fingerprint(TOKEN));
+    assert_eq!(ci["secretRules"]["maxName"], 128);
+    // Deleting it.
+    let res = post_program(
+        &app,
+        &cookie,
+        &csrf,
+        "ci-runner",
+        json!({"secrets": {"REGISTRY_TOKEN": null}}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let ci = program(&get_programs(&app, &cookie).await, "ci-runner").clone();
+    assert!(
+        ci["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["name"] != "REGISTRY_TOKEN")
+    );
+}
+
+#[test]
+fn the_secrets_editor_is_in_both_pages_as_text_only_with_the_rows_and_the_advanced_box() {
+    let js = include_str!("../../assets/settings-secrets.js");
+    // Shown as text, never as markup; no network call of its own (the pages' scripts save).
+    assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML") && !js.contains("fetch("));
+    assert!(!js.contains("eval(") && !js.contains("new Function"));
+    for needle in [
+        "e.g. FOO",
+        "e.g. bar",
+        "+ Add variable",
+        "Advanced mode",
+        "Simple mode",
+        "Environment variable name is required",
+        "Duplicate environment variable name",
+        "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}",
+        " saved\"",
+        "h(\"textarea\"",
+    ] {
+        assert!(js.contains(needle), "{needle}");
+    }
+    for (name, page) in [
+        ("settings.html", include_str!("../../assets/settings.html")),
+        ("settings-ci.html", include_str!("../../assets/settings-ci.html")),
+    ] {
+        assert_eq!(
+            page.matches("{{SECRETS_JS}}").count(),
+            1,
+            "{name}: once, in the helpers' script"
+        );
+        assert!(
+            !page.contains("ps-secret-") && !page.contains("\"secret-\""),
+            "{name}: the old fields are gone"
+        );
+    }
+    assert!(include_str!("../../assets/settings-programs.js").contains("RT.secrets.editor("));
+    assert!(include_str!("../../assets/settings.html").contains("RT.secrets.editor("));
+    // The look: a red bin and the labelled input groups, in the shared stylesheet both pages use.
+    let css = include_str!("../../assets/settings-base.css");
+    assert!(css.contains(".bin {") && css.contains(".ig-l {") && css.contains(".envrow {"));
+    assert!(
+        css.contains(".envrow { grid-template-columns: 1fr 44px; }"),
+        "rows stack at phone width"
+    );
+    for file in [js, css] {
+        assert!(file.lines().count() < 1000);
+    }
+}

@@ -61,16 +61,10 @@ fn set_saves_the_value_sealed_under_a_key_file_made_on_first_use_and_list_never_
 fn a_name_the_program_doesnt_take_is_refused_before_a_value_is_asked_for() {
     let root = tempfile::tempdir().unwrap();
     let s = secrets(root.path(), &Env::empty(), Some(Arc::new(MemStore::default())));
-    let err = run_with(
-        &s,
-        Owner::CiRunner,
-        &args(&["set", "CLAUDE_CODE_OAUTH_TOKEN"]),
-        never_asked,
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("GH_TOKEN"), "{err}");
-    let err = run_with(&s, Owner::CodeAgent, &args(&["set", "NOPE"]), never_asked).unwrap_err();
-    assert!(err.to_string().contains("isn't a secret"), "{err}");
+    let err = run_with(&s, Owner::CiRunner, &args(&["set", "LD_PRELOAD"]), never_asked).unwrap_err();
+    assert!(err.to_string().contains("LD_PRELOAD"), "{err}");
+    let err = run_with(&s, Owner::CodeAgent, &args(&["set", "NOT A NAME"]), never_asked).unwrap_err();
+    assert!(err.to_string().contains("letters, digits"), "{err}");
 }
 
 #[test]
@@ -154,5 +148,5 @@ fn set_is_allowed_with_the_environment_set_and_reset_deletes_it_and_lists_the_en
     assert!(out.contains("Deleted") && !out.contains(TOKEN));
     let listed = run_with(&s, Owner::CiRunner, &args(&["list"]), never_asked).unwrap();
     assert!(listed.starts_with("GH_TOKEN  env"), "{listed}");
-    assert!(run_with(&s, Owner::CiRunner, &args(&["reset", "NOPE"]), never_asked).is_err());
+    assert!(run_with(&s, Owner::CiRunner, &args(&["reset", "PATH"]), never_asked).is_err());
 }

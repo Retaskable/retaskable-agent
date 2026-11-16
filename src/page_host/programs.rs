@@ -128,6 +128,7 @@ impl PageHost {
                     let secrets = self.secrets_for(p.owner, status.as_ref());
                     row["secrets"] = Value::Array(secret_rows(&secrets));
                     row["secretsNote"] = json!(secrets.save_problem());
+                    row["secretRules"] = crate::secrets::names::rules_json();
                     row["canSaveSecrets"] = json!(can_save_secrets);
                     row["applies"] = json!(p.applies);
                 }
