@@ -144,6 +144,28 @@ impl LanePool {
         self.rules.scaling.is_some() && k > self.limit() && !self.rules.other_engine_lanes.contains(&k)
     }
 
+    /// The added lane (docs/specs/expert-chat.md "The added lane"): lane `lanes + 1`, for an expert session, kept
+    /// beside the others so its build stays warm. The computer has at most one.
+    pub fn added_lane(&self) -> u32 {
+        self.rules.lanes + 1
+    }
+
+    /// Whether the added lane is free: no session, Play or run of any project here holds it.
+    pub fn added_free(&self) -> bool {
+        !self.held.contains_key(&self.added_lane())
+    }
+
+    /// Takes the added lane for `holder`, or `None` when it is held. It runs alongside every other lane, so no lane
+    /// sits out for it and `free_lane` doesn't count it.
+    pub fn claim_added(&mut self, holder: Holder) -> Option<u32> {
+        if !self.added_free() {
+            return None;
+        }
+        let k = self.added_lane();
+        self.held.insert(k, holder);
+        Some(k)
+    }
+
     /// `freeLane`: a free lane, `prefer` if it's free (an item's last lane), otherwise the first. With a chore lane,
     /// `side` asks for that lane and otherwise it's never offered; without one every lane is the same.
     /// `may` leaves out lanes whose own engine can't start now.
@@ -153,7 +175,12 @@ impl LanePool {
         let open = |k: u32| !self.held.contains_key(&k) && may(k);
         let limit = self.limit();
         let exempt = |k: u32| r.other_engine_lanes.contains(&k);
-        let busy = self.held.keys().filter(|k| !exempt(**k)).count() as u32;
+        // The added lane runs alongside the others: it is no lane that is busy, and none sits out for it.
+        let busy = self
+            .held
+            .keys()
+            .filter(|k| !exempt(**k) && **k != self.added_lane())
+            .count() as u32;
         let full = busy >= limit;
         if full && r.other_engine_lanes.is_empty() {
             return None;
@@ -245,10 +272,11 @@ impl LanePool {
         Some(k)
     }
 
-    /// Takes lane `k` for `holder` (a Play in an item's lane, or new work in a lane `free_lane` offered). False, and
-    /// nothing changes, when it's out of range or someone holds it already: one holder per lane, always.
+    /// Takes lane `k` for `holder` (a Play in an item's lane, or new work in a lane `free_lane` offered; the added
+    /// lane too, for a session's shipped item the loop takes back). False, and nothing changes, when it's out of
+    /// range or someone holds it already: one holder per lane, always.
     pub fn take(&mut self, k: u32, holder: Holder) -> bool {
-        if k == 0 || k > self.rules.lanes || self.held.contains_key(&k) {
+        if k == 0 || k > self.added_lane() || self.held.contains_key(&k) {
             return false;
         }
         self.held.insert(k, holder);

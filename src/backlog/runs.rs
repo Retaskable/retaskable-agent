@@ -269,6 +269,35 @@ fn plan_brief(mut value: Value) -> Value {
     value
 }
 
+/// A piece has no `id` of its own: the store sends its number `n` and the item as `item` (`start` in
+/// `shared/backlogPieceOps.ts`). The agent knows the piece by its record's id, `<item>-piece-<n>`
+/// (`PieceRuns.recordId` in `pieceRuns.ts`), put in as the piece's `id`; the item's title goes in as `itemTitle`, for
+/// the branch's name. A piece that has an `id` already is left as it is.
+fn piece_record(mut value: Value) -> Value {
+    let Some(run) = value.as_object_mut() else {
+        return value;
+    };
+    let item = run.get("item").and_then(Value::as_object);
+    let item_id = item
+        .and_then(|i| i.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let item_title = item.and_then(|i| i.get("title")).cloned();
+    let Some(Value::Object(piece)) = run.get_mut("piece") else {
+        return value;
+    };
+    if piece.contains_key("id") {
+        return value;
+    }
+    if let (Some(item), Some(n)) = (item_id, piece.get("n").and_then(Value::as_u64)) {
+        piece.insert("id".into(), Value::String(format!("{item}-piece-{n}")));
+        if let Some(title) = item_title {
+            piece.insert("itemTitle".into(), title);
+        }
+    }
+    value
+}
+
 impl Client {
     /// `run_take { agent, kinds }` or `{ agent, piece }`. A `null` value is `Nothing`.
     pub async fn run_take(
@@ -299,7 +328,7 @@ impl Client {
                     retry_ms: 60_000,
                 }),
             )),
-            Some(value) => serde_json::from_value(plan_brief(value))
+            Some(value) => serde_json::from_value(piece_record(plan_brief(value)))
                 .map(|run| RunTakeAnswer::Run(Box::new(run)))
                 .map_err(|e| bad(format!("couldn't read the run it sent: {e}"))),
         }

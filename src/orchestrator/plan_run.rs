@@ -400,6 +400,7 @@ async fn plan(job: Job, request: RunRequest, cut: Cut) -> Option<(RunOutcome, Va
         path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&request.piece))
             .join(format!("plan-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
+        append: false,
     };
     let (tx, rx) = tokio::sync::oneshot::channel::<Arc<ProcessTree>>();
     let (processes, token, seen) = (request.processes.clone(), request.token.clone(), cut.clone());

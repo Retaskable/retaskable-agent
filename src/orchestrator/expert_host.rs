@@ -9,13 +9,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 
-use super::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
+use super::driver::{ExpertHost, ExpertJob, HelperJob, Opened, ShipJob, TurnEnd, WorkRead};
 use super::session::watch_for;
 use crate::config::{CursorModels, Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
-use crate::engines::{EngineId, Role, SessionSpec, SessionStart, TranscriptSink, engine_of, place, run_session};
+use crate::engines::{
+    EngineId, Role, SessionSpec, SessionStart, TranscriptSink, engine_of, place, run_session, run_session_steered,
+    run_session_tracked,
+};
 use crate::env::Env;
 use crate::expert::claude_sessions::Continued;
+use crate::expert::helpers::{self, Ended};
+use crate::expert::history::{self, Turn};
+use crate::expert::work;
 use crate::expert::{self, claude_sessions};
 use crate::git_bin::command;
 use crate::implementer::publish::publish;
@@ -26,6 +32,8 @@ use crate::{lanes, paths};
 
 /// What a turn is cut at (`maxTurns` of an expert session).
 const MAX_TURNS: u32 = 300;
+/// The lighter tier a helper runs on (`scoutTier` on Claude).
+const HELPER_MODEL: &str = "haiku";
 
 pub struct ClaudeExperts {
     data_dir: PathBuf,
@@ -69,7 +77,7 @@ async fn prepare(job: &ExpertJob) -> Result<PathBuf> {
     .await?
 }
 
-async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
+async fn run_turn(host: &ClaudeExperts, mut job: ExpertJob) -> Result<TurnEnd> {
     let project = &job.project;
     let placed = place(Engine::Claude, Role::Implementer, &host.env, &host.cursor_models)
         .map_err(|why| anyhow::anyhow!("{why}"))?;
@@ -105,20 +113,24 @@ async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
     let sink = TranscriptSink {
         path: paths::run_dir(&host.data_dir, &project_id, &job.item).join(format!("{id}.jsonl")),
         lane: Some(job.lane),
+        append: true,
     };
     let engine = engine_of(Some(EngineId::Claude))?;
     let quiet = watch_for(project, EngineId::Claude);
     let listed = job
         .sessions
         .register_spec(&project_id, &job.item, None, Role::Implementer, &spec);
-    let run = listed.scope(run_session(
-        engine.as_ref(),
-        &placed.bin,
-        &spec,
-        &id,
-        Some(&sink),
-        quiet,
-    ));
+    // With an open input the turn takes the person's messages as it works (`engines::steer`).
+    let steer = job.steer.take();
+    let session = async {
+        match steer {
+            Some(steer) => {
+                run_session_steered(engine.as_ref(), &placed.bin, &spec, &id, Some(&sink), quiet, steer).await
+            }
+            None => run_session(engine.as_ref(), &placed.bin, &spec, &id, Some(&sink), quiet).await,
+        }
+    };
+    let run = listed.scope(session);
     let r = tokio::select! {
         r = run => r?,
         () = job.stop.notified() => {
@@ -132,7 +144,11 @@ async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
     }
     if !r.ok {
         let why = r.error.clone().unwrap_or_else(|| r.subtype.clone());
-        return Ok(TurnEnd::Failed(why));
+        return Ok(if r.limit_hit {
+            TurnEnd::Limited(why)
+        } else {
+            TurnEnd::Failed(why)
+        });
     }
     let session_id = if r.session_id.is_empty() {
         id
@@ -141,6 +157,105 @@ async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
     };
     let reply = expert::parse(&r.structured.unwrap_or_default());
     Ok(TurnEnd::Done { session_id, reply })
+}
+
+/// Makes lane `lane` ready for a lane helper: on its own branch, from the session's last commit (the session's branch,
+/// as this repository has it: nothing of it is pushed).
+fn prepare_helper_lane(project: &ProjectConfig, lane: u32, branch: &str, from: &str) -> Result<PathBuf> {
+    let (repo, trees) = (PathBuf::from(&project.repo_path), worktrees(project));
+    let dir = lanes::lane_path(&trees, lane);
+    lanes::prepare_at(&repo, &trees, &dir, branch, from)
+}
+
+/// One helper: a scout on the lighter tier, read-only in the session's lane or, with a lane of its own, changing files
+/// there. Its result is the `result` of its structured output.
+async fn run_helper(host: &ClaudeExperts, job: HelperJob) -> Result<Ended> {
+    let project = job.project.clone();
+    let placed =
+        place(Engine::Claude, Role::Scout, &host.env, &host.cursor_models).map_err(|why| anyhow::anyhow!("{why}"))?;
+    let own_branch = helpers::branch(&job.from, job.n);
+    let cwd = if job.own {
+        let (p, lane, b, from) = (project.clone(), job.lane, own_branch.clone(), job.from.clone());
+        tokio::task::spawn_blocking(move || prepare_helper_lane(&p, lane, &b, &from)).await??
+    } else {
+        lanes::lane_path(&worktrees(&project), job.lane)
+    };
+    let id = new_session_id();
+    let (branch, from) = if job.own {
+        (&own_branch, Some(job.from.as_str()))
+    } else {
+        (&job.from, None)
+    };
+    let spec = SessionSpec {
+        engine: Some(EngineId::Claude),
+        model: HELPER_MODEL.to_string(),
+        prompt: helpers::prompt(&job.task, branch, from)?,
+        schema: helpers::schema(),
+        cwd: cwd.clone(),
+        max_turns: Some(MAX_TURNS),
+        budget_usd: 0.0,
+        start: SessionStart::Fresh(id.clone()),
+        readonly: !job.own,
+        shell: true,
+        cursor: None,
+        local: None,
+        sandbox: sandbox_enabled(project.sandbox, cfg!(windows)),
+    };
+    let project_id = project.id_or_derived();
+    let sink = TranscriptSink {
+        path: paths::run_dir(&host.data_dir, &project_id, &job.item).join(format!("{id}.jsonl")),
+        lane: Some(job.lane),
+        append: false,
+    };
+    let engine = engine_of(Some(EngineId::Claude))?;
+    let quiet = watch_for(&project, EngineId::Claude);
+    let listed = job
+        .sessions
+        .register_spec(&project_id, &job.item, None, Role::Scout, &spec);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let run = listed.scope(run_session_tracked(
+        engine.as_ref(),
+        &placed.bin,
+        &spec,
+        &id,
+        Some(&sink),
+        quiet,
+        Some(tx),
+    ));
+    tokio::pin!(run);
+    let mut tree = None;
+    let mut rx = Some(rx);
+    let r = loop {
+        tokio::select! {
+            r = &mut run => break r?,
+            Ok(t) = async { rx.as_mut().expect("polled while set").await }, if rx.is_some() => {
+                tree = Some(t);
+                rx = None;
+            }
+            () = job.stop.notified() => {
+                // Only this helper's own processes: a read helper shares the session's lane, and its turn goes on.
+                if let Some(t) = tree.take() {
+                    t.cut();
+                    let _ = tokio::task::spawn_blocking(move || t.kill_and_wait(crate::process_tree::KILL_LIMIT)).await;
+                }
+                if job.own {
+                    let dir = cwd.clone();
+                    let _ = tokio::task::spawn_blocking(move || lanes::kill_processes_in(&dir)).await;
+                }
+                return Ok(Ended::Stopped);
+            }
+        }
+    };
+    if r.subtype == "interrupted" {
+        return Ok(Ended::Failed("a restart cut it".into()));
+    }
+    if !r.ok {
+        return Ok(Ended::Failed(r.error.clone().unwrap_or_else(|| r.subtype.clone())));
+    }
+    Ok(match helpers::result_of(&r.structured.unwrap_or_default()) {
+        Some(result) => Ended::Finished(result),
+        None => Ended::Failed(r.subtype),
+    })
 }
 
 impl ExpertHost for ClaudeExperts {
@@ -270,6 +385,73 @@ impl ExpertHost for ClaudeExperts {
                 Ok(Err(e)) => Err(format!("{e:#}")),
                 Err(e) => Err(format!("{e}")),
             }
+        })
+    }
+
+    fn helper(&self, job: HelperJob) -> BoxFuture<'static, Ended> {
+        let host = Self {
+            data_dir: self.data_dir.clone(),
+            env: self.env.clone(),
+            cursor_models: self.cursor_models.clone(),
+        };
+        Box::pin(async move {
+            match run_helper(&host, job).await {
+                Ok(end) => end,
+                Err(e) => Ended::Failed(format!("{e:#}")),
+            }
+        })
+    }
+
+    fn history(
+        &self,
+        project: &ProjectConfig,
+        item: &str,
+        session_id: Option<&str>,
+        from: Option<&str>,
+    ) -> BoxFuture<'static, (Vec<Turn>, Vec<Turn>)> {
+        let own = session_id
+            .map(|id| paths::run_dir(&self.data_dir, &project.id_or_derived(), item).join(format!("{id}.jsonl")));
+        let root = from.map(|id| (claude_sessions::projects_root(&self.env), id.to_string()));
+        Box::pin(async move {
+            let read = tokio::task::spawn_blocking(move || {
+                let earlier = root
+                    .and_then(|(root, id)| claude_sessions::session_file(&root, &id))
+                    .map(|f| history::claude_turns(&f))
+                    .unwrap_or_default();
+                let own = own.map(|f| history::read_turns(&f)).unwrap_or_default();
+                (earlier, own)
+            })
+            .await;
+            read.unwrap_or_default()
+        })
+    }
+
+    fn work(
+        &self,
+        project: &ProjectConfig,
+        lane: Option<u32>,
+        branch: &str,
+        helpers: u32,
+    ) -> BoxFuture<'static, WorkRead> {
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        let (repo, base, branch) = (
+            PathBuf::from(&project.repo_path),
+            format!("origin/{}", project.base_branch),
+            branch.to_string(),
+        );
+        let dir = lane.map(|l| lanes::lane_path(&worktrees(project), l));
+        Box::pin(async move {
+            let read = tokio::task::spawn_blocking(move || {
+                let work = dir.and_then(|d| work::read(&d, &base, &branch).ok());
+                // `gh` finds the repository from the checkout, as every other host call here does.
+                let prs = work::prs(&gh, &repo, &branch, helpers).ok();
+                WorkRead { work, prs }
+            })
+            .await;
+            read.unwrap_or_default()
         })
     }
 

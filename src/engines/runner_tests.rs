@@ -45,6 +45,7 @@ fn spec<'a>(
         end_after_result,
         watch,
         tree_tx,
+        steer: None,
     }
 }
 
@@ -529,6 +530,7 @@ async fn spawn_and_read_tees_the_sessions_raw_lines_to_the_sink_after_opening_it
         &TranscriptSink {
             path: sink_path.clone(),
             lane: Some(3),
+            append: false,
         },
         &base_spec(dir.path()),
     )
@@ -554,6 +556,38 @@ async fn spawn_and_read_tees_the_sessions_raw_lines_to_the_sink_after_opening_it
     assert_eq!(lines[1], line);
 }
 
+#[test]
+fn only_a_resumed_session_that_appends_carries_on_in_its_run_file() {
+    use crate::engines::engine::SessionStart;
+    let dir = tempfile::tempdir().unwrap();
+    let sink = |append| TranscriptSink {
+        path: dir.path().join("s.jsonl"),
+        lane: None,
+        append,
+    };
+    let with = |start: SessionStart| SessionSpec {
+        start,
+        ..base_spec(dir.path())
+    };
+    let metas = || {
+        std::fs::read_to_string(dir.path().join("s.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("retaskable_meta"))
+            .count()
+    };
+    open_sink(&sink(true), &with(SessionStart::Fresh("s".into()))).unwrap();
+    assert_eq!(metas(), 1);
+    open_sink(&sink(true), &with(SessionStart::Resume("s".into()))).unwrap();
+    open_sink(&sink(true), &with(SessionStart::Resume("s".into()))).unwrap();
+    assert_eq!(metas(), 3, "each turn's meta line starts its part");
+    open_sink(&sink(false), &with(SessionStart::Resume("s".into()))).unwrap();
+    assert_eq!(metas(), 1, "a resumed run that doesn't append replaces the file");
+    open_sink(&sink(true), &with(SessionStart::Resume("s".into()))).unwrap();
+    open_sink(&sink(true), &with(SessionStart::Fresh("s".into()))).unwrap();
+    assert_eq!(metas(), 1, "a fresh start replaces it");
+}
+
 #[tokio::test]
 async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_started_on_and_read_transcripts() {
     let dir = tempfile::tempdir().unwrap();
@@ -562,6 +596,7 @@ async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_st
     let sink = TranscriptSink {
         path: crate::paths::run_dir(data_dir.path(), "proj", "A1").join("sess-1.jsonl"),
         lane: Some(2),
+        append: false,
     };
 
     let result = run_session(
@@ -597,6 +632,7 @@ fn a_claude_session_on_the_local_model_records_local_in_its_header_and_started_o
     let sink = TranscriptSink {
         path: crate::paths::run_dir(dir.path(), "proj", "A1").join("drafter.jsonl"),
         lane: None,
+        append: false,
     };
     open_sink(&sink, &local).unwrap();
     let started = crate::engines::transcripts::started_on(dir.path(), "proj", "A1", "drafter").unwrap();

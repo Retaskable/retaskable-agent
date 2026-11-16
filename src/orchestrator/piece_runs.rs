@@ -276,7 +276,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         _ => (
             match sync_of(&job).filter(|c| !c.sync_sha.is_empty()) {
                 Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
-                None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
+                None => piece_branch_name(&job.piece),
             },
             format!("origin/{}", job.project.base_branch),
         ),
@@ -284,8 +284,11 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     let cwd = match prepare(&job, &branch, start_point).await {
         Ok(cwd) => cwd,
         Err(e) => {
+            // `failed`, as the TypeScript agent ends a run whose lane threw: the store counts it against the
+            // piece, so it waits for a person after a few. `interrupted` put it back at once, and this computer
+            // took it again every pass.
             tracing::warn!("{}: preparing the lane: {e:#}", job.token);
-            return (RunOutcome::Interrupted, json!({}));
+            return failed(format!("Couldn't prepare the lane: {e:#}"));
         }
     };
     let (outcome, result) = match build(&job, &cwd, &branch).await {
@@ -400,6 +403,7 @@ async fn session(
         path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&job.piece))
             .join(format!("{id}-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
+        append: false,
     };
     let engine = engine_of(Some(job.engine))?;
     let quiet = watch_for(project, job.engine);

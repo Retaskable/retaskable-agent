@@ -23,7 +23,10 @@
 //! mode. In `runs` mode (`ship_runs.rs`) the store takes the open change as the item's piece (`expert_ship`), so runs
 //! on any computer carry it, and the session and its lane are let go.
 //!
-//! Not built here: engines other than Claude, and the session's work summary (`expert.work`).
+//! The session's work (what its branch changed, its commits, its pull requests) is read after each turn and carried in
+//! the snapshot as `expert.work` (`work.rs`).
+//!
+//! Not built here: engines other than Claude.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,6 +44,7 @@ use crate::backlog::expert::{ExpertItem, ShipOwed};
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
+use crate::expert::history;
 use crate::expert::{self, Detail, Question, Reply};
 use crate::expert_queue::{BEAT_MS, ExpertQueue, OwnedQueue, Queued, is_local};
 use crate::implementer::publish::Published;
@@ -51,8 +55,15 @@ use crate::view::{ExpertAction, ExpertCommand};
 
 mod backlog;
 mod carry;
+mod helpers;
+mod limit;
 mod ship;
 mod ship_runs;
+mod steer;
+mod work;
+
+pub use helpers::HelperJob;
+pub use work::WorkRead;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -74,6 +85,8 @@ pub struct ExpertJob {
     pub stop: Arc<Notify>,
     /// The sessions running now: the turn is listed while it runs.
     pub sessions: Sessions,
+    /// The open input the turn takes the person's messages on as it works (Claude only), when the host can.
+    pub steer: Option<crate::engines::steer::Steer>,
 }
 
 /// A session's change to open (`ship.rs`): its work, saved and pushed as the item's own branch, and its change.
@@ -107,6 +120,8 @@ pub enum TurnEnd {
     },
     Stopped,
     Failed(String),
+    /// It ended at the usage limit: the queue waits for the limit to lift (`limit.rs`).
+    Limited(String),
 }
 
 /// The parts of an expert session that touch the machine and the engine. Faked in tests.
@@ -127,6 +142,27 @@ pub trait ExpertHost: Send + Sync {
     /// Saves what the lane left uncommitted, pushes its work as `job.target` and opens the change, or finds the one
     /// already open for it. An `Err` says why, and leaves the session as it was.
     fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Opened, String>>;
+    /// The turns of the session's own run files (`session_id`'s `.jsonl`) and, for a session that continues one, of the
+    /// Claude Code conversation it carries on: `(earlier, own)`, each oldest first (`session_history`).
+    fn history(
+        &self,
+        project: &ProjectConfig,
+        item: &str,
+        session_id: Option<&str>,
+        from: Option<&str>,
+    ) -> BoxFuture<'static, (Vec<history::Turn>, Vec<history::Turn>)>;
+    /// Reads the session's work: its lane's git (when it has a lane) and its pull requests, for `branch` and the
+    /// `helpers` lane helpers' branches. A part the machine can't read is left out.
+    fn work(
+        &self,
+        project: &ProjectConfig,
+        lane: Option<u32>,
+        branch: &str,
+        helpers: u32,
+    ) -> BoxFuture<'static, WorkRead>;
+    /// Runs one helper (a scout on the lighter tier): read-only in `job.lane`, the session's own, or, with `job.own`,
+    /// in a lane of its own made ready on `<from>-h<n>` from the session's last commit.
+    fn helper(&self, job: HelperJob) -> BoxFuture<'static, crate::expert::helpers::Ended>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -136,6 +172,8 @@ struct Turn {
     stop: Arc<Notify>,
     /// The queue rows this turn is running.
     ids: Vec<String>,
+    /// Its open input, while it takes messages as it works (`steer.rs`).
+    steering: Option<steer::Steering>,
 }
 
 struct Session {
@@ -168,6 +206,19 @@ struct Session {
     request: String,
     /// The conversation so far, oldest first: the person's messages and the answers (a handed-off plan's request).
     talk: Vec<String>,
+    /// What its branch has now, for the right panel; the read in flight and when the pull requests were last read.
+    work: Option<crate::expert::work::Work>,
+    reading: Option<work::Reading>,
+    prs_at: Option<Instant>,
+    /// How many helpers it has started: its lane helpers' branches are `<branch>-h<n>`.
+    helpers: u32,
+    /// The helpers running or waiting for a lane, the results waiting for the session's next turn, and whether the
+    /// session was idle when the newest came in (so it is told at once).
+    helping: Vec<helpers::Helper>,
+    results: Vec<String>,
+    tell_now: bool,
+    /// While set and in the future, the queue waits for Claude's usage limit to lift (`limit.rs`).
+    limit_until: Option<Instant>,
 }
 
 /// A project's expert sessions, by item id.
@@ -186,6 +237,8 @@ pub(super) struct Experts {
     pub(super) idle: Duration,
     /// How often the lease and the queue are beaten and read back.
     pub(super) beat_every: Duration,
+    /// The least a queue held at the usage limit waits (`limit.rs`).
+    pub(super) limit_floor: Duration,
 }
 
 impl Experts {
@@ -209,6 +262,7 @@ impl Default for Experts {
             beat_at: None,
             idle: expert::IDLE,
             beat_every: Duration::from_millis(BEAT_MS),
+            limit_floor: limit::AT_LEAST,
         }
     }
 }
@@ -224,6 +278,9 @@ struct Cx<'a> {
     host: &'a Arc<dyn ExpertHost>,
     sessions: Sessions,
     queue: Arc<ExpertQueue<OwnedQueue>>,
+    /// Which engines are at their usage limit, and until when.
+    limits: crate::orchestrator::fresh_start::EngineLimits,
+    limit_floor: Duration,
     /// Whether this project's item loop can take a shipped item over (`claim` mode).
     ships: bool,
     /// The store socket said the queue changed (`facts_changed` naming `expert_queue`): the beat is due now.
@@ -310,6 +367,9 @@ impl ProjectLoop {
                 if let Some(plan) = s.plan.as_ref().filter(|_| s.detail == Detail::Handed) {
                     expert["plan"] = json!(plan);
                 }
+                if let Some(work) = &s.work {
+                    expert["work"] = work.to_json();
+                }
                 HeldItem {
                     id: id.clone(),
                     title: s.title.clone(),
@@ -381,6 +441,8 @@ impl ProjectLoop {
             host,
             sessions: self.live.sessions().clone(),
             queue,
+            limits: shared.engine_limits.clone(),
+            limit_floor: ex.limit_floor,
             ships: self.mode == super::OrchestratorMode::Claim,
             woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
@@ -398,6 +460,11 @@ impl ProjectLoop {
             answer(cmd, r);
         }
         reap(&cx, &mut ex).await;
+        work::poll(&cx, &mut ex).await;
+        helpers::poll(&cx, &mut ex, pool).await;
+        for (id, s) in ex.sessions.iter_mut() {
+            steer::poll(&cx, id, s).await;
+        }
         beat(&cx, &mut ex).await;
         start_turns(&cx, &mut ex, pool).await;
         park_idle(&cx, &mut ex, pool).await;
@@ -429,7 +496,7 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             now,
         } => {
             let s = driven(ex, item, &cmd.by)?;
-            say(cx, s, item, text, pictures, *now).await?;
+            say(cx, pool, s, item, text, pictures, *now).await?;
             Ok(Value::Null)
         }
         ExpertAction::Stop { item } => {
@@ -441,12 +508,55 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             Ok(Value::Null)
         }
         ExpertAction::End { item, outcome } => end(cx, ex, pool, &cmd.by, item, outcome).await,
+        ExpertAction::Helper { item, task, lane } => {
+            let s = driven(ex, item, &cmd.by)?;
+            let helper = helpers::start(cx, item, s, task, *lane).await?;
+            Ok(json!({ "helper": helper }))
+        }
+        ExpertAction::History { item, before, limit } => session_history(cx, ex, &cmd.by, item, *before, *limit).await,
     }
+}
+
+/// `session_history`: any member may ask, but a continued session's Claude Code conversation is its starter's.
+async fn session_history(
+    cx: &Cx<'_>,
+    ex: &Experts,
+    by: &str,
+    item: &str,
+    before: Option<i64>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let s = (ex.sessions.get(item)).ok_or("That's not an expert session.")?;
+    let from = cx
+        .queue
+        .continued_from(item)
+        .filter(|_| by == s.started_by)
+        .map(|f| f.session_id);
+    let (earlier, own) = cx
+        .host
+        .history(cx.project, item, s.session_id.as_deref(), from.as_deref())
+        .await;
+    // The running turn is `watch`'s: its meta line is the last, so it goes.
+    let own = if s.turn.is_some() {
+        &own[..own.len().saturating_sub(1)]
+    } else {
+        &own[..]
+    };
+    let all: Vec<history::Turn> = earlier.iter().chain(own).cloned().collect();
+    Ok(history::answer(
+        &all,
+        history::Pick {
+            before,
+            limit,
+            running: false,
+        },
+    ))
 }
 
 /// Queues the person's message for the session; with `now` the running turn is cut and the message goes next.
 async fn say(
     cx: &Cx<'_>,
+    pool: &LanePool,
     s: &mut Session,
     item: &str,
     text: &str,
@@ -456,12 +566,21 @@ async fn say(
     if let Some(plan) = s.plan.as_ref().filter(|_| s.detail == Detail::Handed) {
         return Err(expert::handed_refusal(plan));
     }
+    // A parked session takes the added lane first: with another session in it the message is refused, as it is there.
+    if s.lane.is_none() && !pool.added_free() {
+        return Err(expert::ADDED_LANE_TAKEN.into());
+    }
     let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
-    s.queue.push(row);
+    s.queue.push(row.clone());
     s.stopped = false;
+    // The person is here, so what waited at the usage limit tries again with their message.
+    s.limit_until = None;
     if now && let Some(t) = &s.turn {
         // The person's word goes first: the turn is cut and their message is the next one.
         t.stop.notify_one();
+    } else if !now {
+        // A turn running takes it as it works; any other waits for its turn (`steer.rs`).
+        steer::try_send(cx, item, s, &row).await;
     }
     Ok(())
 }
@@ -482,15 +601,12 @@ async fn start(
         .and_then(|f| carry::open_session(cx, ex, by, &f.session_id))
     {
         let s = driven(ex, &open, by)?;
-        say(cx, s, &open, request, &[], false).await?;
+        say(cx, pool, s, &open, request, &[], false).await?;
         return Ok(json!({ "itemId": open }));
     }
     let title = from
         .as_ref()
         .map_or_else(|| expert::title(request), |f| f.title.clone());
-    if pool.claim_lane(&cx.want("")).is_none() {
-        return Err("No lane is free for a new expert session; try again when one is.".into());
-    }
     let mut added = None;
     for n in 1..=expert::ID_TRIES {
         let id = expert::id_for(&title, n);
@@ -512,24 +628,42 @@ async fn start(
         }
     }
     let (id, added) = added.ok_or("Couldn't find a free id for the session.")?;
-    let Some(lane) = pool.claim(&cx.want(&id)) else {
-        let _ = cx.drop_item(&id, &added.token).await;
-        return Err("The lane was taken before the session could start.".into());
-    };
-    let first = (cx.queue.add(&id, request, by, &[], false).await).map_err(|e| format!("{e}"))?;
+    // The added lane (one a computer): with another session in it this one starts parked, its request not sent.
+    let lane = pool.claim_added(cx.holder(&id));
+    let mut queue = Vec::new();
+    if let Some(lane) = lane {
+        match cx.queue.add(&id, request, by, &[], false).await {
+            Ok(first) => queue.push(first),
+            Err(e) => {
+                pool.release(lane, &cx.holder(&id));
+                let _ = cx.drop_item(&id, &added.token).await;
+                return Err(format!("{e}"));
+            }
+        }
+    } else {
+        let why = format!(
+            "{} The session is parked and your request wasn't sent: send it again to try.",
+            expert::ADDED_LANE_TAKEN
+        );
+        cx.note(&id, &added.token, &why).await;
+    }
     let mut session = Session {
         started_by: by.to_string(),
         title: title.clone(),
         branch: expert::branch(&id, &title),
         lease: added.token,
-        lane: Some(lane),
+        lane,
         session_id: None,
         prepared: false,
         from_branch: false,
-        queue: vec![first],
+        queue,
         consumed: BTreeSet::new(),
         turn: None,
-        detail: Detail::Working,
+        detail: if lane.is_some() {
+            Detail::Working
+        } else {
+            Detail::Parked
+        },
         ask: None,
         idle_since: Instant::now(),
         stopped: false,
@@ -539,6 +673,14 @@ async fn start(
         item: added.item.clone(),
         request: request.to_string(),
         talk: Vec::new(),
+        work: None,
+        reading: None,
+        prs_at: None,
+        helpers: 0,
+        helping: Vec::new(),
+        results: Vec::new(),
+        tell_now: false,
+        limit_until: None,
     };
     if let Some(from) = &from {
         carry::carry_on(cx, &mut session, &id, from).await;
@@ -560,6 +702,7 @@ async fn end(
     }
     let s = driven(ex, item, by)?;
     stop_turn(cx, item, s).await;
+    helpers::stop_all(cx, pool, item, s).await;
     if outcome == "ship" && !cx.ships {
         let owed = ship_runs::open(cx, pool, item, s).await?;
         ex.owed.insert(item.to_string(), owed);
@@ -592,6 +735,7 @@ async fn end(
 /// Pushes the branch and frees the lane. The push failing keeps the lane. The lease stays: the session is only
 /// asleep, and its next message takes a lane again.
 async fn park(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut Session) -> Result<(), String> {
+    helpers::stop_all(cx, pool, item, s).await;
     if let Some(lane) = s.lane {
         (cx.host.park(cx.project, lane, &s.branch).await)
             .map_err(|e| format!("Couldn't push the branch, so the session keeps its lane: {e}"))?;
@@ -609,9 +753,12 @@ async fn park(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut Session) -> 
 
 /// Cuts the session's running turn and takes in how it ended.
 async fn stop_turn(cx: &Cx<'_>, item: &str, s: &mut Session) {
-    if let Some(turn) = s.turn.take() {
+    if let Some(mut turn) = s.turn.take() {
         turn.stop.notify_one();
         let end = join(turn.task).await;
+        if let Some(mut st) = turn.steering.take() {
+            steer::take_in(cx, item, s, &mut st).await;
+        }
         finish(cx, item, s, turn.ids, end).await;
     }
 }
@@ -625,6 +772,8 @@ async fn join(task: JoinHandle<TurnEnd>) -> TurnEnd {
 async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end: TurnEnd) {
     cx.queue.done(item, &ids).await;
     s.consumed.extend(ids);
+    work::read_after_turn(cx, s);
+    let limited = matches!(end, TurnEnd::Limited(_));
     s.idle_since = Instant::now();
     s.detail = Detail::Idle;
     s.ask = None;
@@ -643,13 +792,23 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
                 s.detail = Detail::Asking;
             }
             s.ask = reply.ask;
+            // The helpers it asked for, once its summary is in the history; one refused says why there.
+            for h in reply.helpers {
+                if let Err(why) = helpers::start(cx, item, s, &h.task, h.lane).await {
+                    cx.note(item, &s.lease, &format!("A helper wasn't started: {why}"))
+                        .await;
+                }
+            }
         }
         TurnEnd::Stopped => s.mid_step = true,
-        TurnEnd::Failed(why) => {
+        TurnEnd::Failed(why) | TurnEnd::Limited(why) => {
             if s.session_id.is_none() {
                 s.prepared = false;
             }
             cx.note(item, &s.lease, &format!("The turn failed: {why}")).await;
+            if limited {
+                limit::hold(cx, item, s).await;
+            }
         }
     }
 }
@@ -658,9 +817,12 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
 async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
     for (id, s) in ex.sessions.iter_mut() {
         if s.turn.as_ref().is_some_and(|t| t.task.is_finished())
-            && let Some(turn) = s.turn.take()
+            && let Some(mut turn) = s.turn.take()
         {
             let end = join(turn.task).await;
+            if let Some(mut st) = turn.steering.take() {
+                steer::take_in(cx, id, s, &mut st).await;
+            }
             finish(cx, id, s, turn.ids, end).await;
         }
     }
@@ -670,12 +832,20 @@ async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
 /// park). A message another computer took, or the person cancelled, is dropped.
 async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
     for (id, s) in ex.sessions.iter_mut() {
-        if s.turn.is_some() || s.stopped || s.queue.is_empty() || s.detail == Detail::Handed {
+        if s.turn.is_some() || s.detail == Detail::Handed {
+            continue;
+        }
+        if s.queue.is_empty() {
+            // Nothing the person said waits: what helpers found is told to a session that is idle.
+            helpers::tell(cx, id, s);
+            continue;
+        }
+        if s.stopped || limit::held(s) {
             continue;
         }
         let lane = match s.lane {
             Some(lane) => lane,
-            None => match pool.claim(&cx.want(id)) {
+            None => match pool.claim_added(cx.holder(id)) {
                 Some(lane) => {
                     s.lane = Some(lane);
                     lane
@@ -716,30 +886,47 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
         } else {
             text
         };
-        let stop = Arc::new(Notify::new());
-        let job = ExpertJob {
-            project: cx.project.clone(),
-            item: id.clone(),
-            branch: s.branch.clone(),
-            lane,
-            session_id: s.session_id.clone(),
-            message,
-            pictures: saved,
-            prepare: !s.prepared,
-            from_branch: s.from_branch,
-            stop: stop.clone(),
-            sessions: cx.sessions.clone(),
-        };
-        s.prepared = true;
-        s.detail = Detail::Working;
-        s.ask = None;
-        tracing::info!("{}: expert {id}: running a turn on lane {lane}", cx.id);
-        s.turn = Some(Turn {
-            task: tokio::spawn(cx.host.turn(job)),
-            stop,
-            ids: vec![m.id],
-        });
+        let message = helpers::with_results(s, message);
+        begin_turn(cx, id, s, lane, message, saved, vec![m.id]);
     }
+}
+
+/// Runs a turn of `message` in `lane`: the session is working until it ends. `ids` are the queue rows it reads.
+fn begin_turn(
+    cx: &Cx<'_>,
+    id: &str,
+    s: &mut Session,
+    lane: u32,
+    message: String,
+    pictures: Pictures,
+    ids: Vec<String>,
+) {
+    let stop = Arc::new(Notify::new());
+    let (steering, input) = steer::open();
+    let job = ExpertJob {
+        project: cx.project.clone(),
+        item: id.to_string(),
+        branch: s.branch.clone(),
+        lane,
+        session_id: s.session_id.clone(),
+        message,
+        pictures,
+        prepare: !s.prepared,
+        from_branch: s.from_branch,
+        stop: stop.clone(),
+        sessions: cx.sessions.clone(),
+        steer: Some(input),
+    };
+    s.prepared = true;
+    s.detail = Detail::Working;
+    s.ask = None;
+    tracing::info!("{}: expert {id}: running a turn on lane {lane}", cx.id);
+    s.turn = Some(Turn {
+        task: tokio::spawn(cx.host.turn(job)),
+        stop,
+        ids,
+        steering: Some(steering),
+    });
 }
 
 /// Fetches the pictures a queued message carries into a folder of their own, named for the row and made unique by

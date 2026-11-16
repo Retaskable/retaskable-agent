@@ -200,6 +200,18 @@ pub enum ExpertAction {
         item: String,
         outcome: String,
     },
+    /// `expert_helper`: a helper for the session, with a lane of its own when `lane`.
+    Helper {
+        item: String,
+        task: String,
+        lane: bool,
+    },
+    /// `session_history` (read only): the session's past turns, `before` a time in milliseconds, up to `limit` steps.
+    History {
+        item: String,
+        before: Option<i64>,
+        limit: Option<usize>,
+    },
 }
 
 /// An expert command waiting for the loop, which checks that `by` may drive the session, carries it out and answers
@@ -622,6 +634,9 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some(lane) = self.loop_state(project).and_then(|s| s.added_lane) {
+            state["addedLane"] = json!(lane);
+        }
         if let Some((items, milestones)) = self.items_block(project) {
             state["items"] = items;
             state["milestones"] = milestones;
