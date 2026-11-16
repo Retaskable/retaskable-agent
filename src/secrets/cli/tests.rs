@@ -127,3 +127,32 @@ fn the_ci_runner_saves_its_own_name_in_its_own_file() {
     assert!(Owner::CiRunner.file(root.path()).exists());
     assert!(!root.path().join("config.json").exists());
 }
+
+#[test]
+fn set_is_allowed_with_the_environment_set_and_reset_deletes_it_and_lists_the_environment_again() {
+    let root = tempfile::tempdir().unwrap();
+    let os = Arc::new(MemStore::default());
+    let s = Secrets::for_page(
+        Owner::CiRunner,
+        root.path(),
+        &Env::empty(),
+        Some(os.clone() as Arc<dyn crate::link::TokenStore>),
+        &["GH_TOKEN".to_string()],
+    );
+    let listed = run_with(&s, Owner::CiRunner, &args(&["list"]), never_asked).unwrap();
+    assert!(listed.starts_with("GH_TOKEN  env"), "{listed}");
+    run_with(&s, Owner::CiRunner, &args(&["set", "GH_TOKEN"]), |_| {
+        Ok(format!("{TOKEN}\n"))
+    })
+    .unwrap();
+    let listed = run_with(&s, Owner::CiRunner, &args(&["list"]), never_asked).unwrap();
+    assert!(
+        listed.contains(&format!("GH_TOKEN  saved  {}", fingerprint(TOKEN))),
+        "{listed}"
+    );
+    let out = run_with(&s, Owner::CiRunner, &args(&["reset", "GH_TOKEN"]), never_asked).unwrap();
+    assert!(out.contains("Deleted") && !out.contains(TOKEN));
+    let listed = run_with(&s, Owner::CiRunner, &args(&["list"]), never_asked).unwrap();
+    assert!(listed.starts_with("GH_TOKEN  env"), "{listed}");
+    assert!(run_with(&s, Owner::CiRunner, &args(&["reset", "NOPE"]), never_asked).is_err());
+}

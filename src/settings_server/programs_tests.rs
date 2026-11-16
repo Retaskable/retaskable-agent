@@ -418,7 +418,7 @@ async fn a_secret_is_sealed_into_that_programs_file_never_shown_and_never_set_in
 }
 
 #[tokio::test]
-async fn secrets_are_refused_with_no_key_store_or_when_the_programs_environment_sets_them() {
+async fn secrets_are_refused_with_no_key_store_but_not_because_the_programs_environment_sets_them() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_status(&ci_dir(root), program_status::CI_RUNNER, NOW, true, &["GH_TOKEN"], None);
@@ -442,10 +442,27 @@ async fn secrets_are_refused_with_no_key_store_or_when_the_programs_environment_
         json!({"secrets": {"GH_TOKEN": TOKEN}}),
     )
     .await;
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the program's environment doesn't lock it"
+    );
+    let all = get_programs(&app, &cookie).await;
+    assert_eq!(program(&all, "ci-runner")["secrets"][0]["source"], "saved");
+    assert_eq!(program(&all, "ci-runner")["secrets"][0]["envSet"], true);
+    assert!(ci_dir(root).join("settings.json").exists());
+    // Reset: back to the environment's.
+    let res = post_program(
+        &app,
+        &cookie,
+        &csrf,
+        "ci-runner",
+        json!({"secrets": {"GH_TOKEN": null}}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
     let all = get_programs(&app, &cookie).await;
     assert_eq!(program(&all, "ci-runner")["secrets"][0]["source"], "env");
-    assert!(!ci_dir(root).join("settings.json").exists());
 }
 
 #[tokio::test]

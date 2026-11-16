@@ -1,4 +1,4 @@
-//! `retaskable secret set|list` and `retaskable-ci secret set|list` (agent-settings.md section 3.3): saving a secret
+//! `retaskable secret set|reset|list` and `retaskable-ci secret set|reset|list` (agent-settings.md section 3.3): saving a secret
 //! from a terminal, for a computer with no browser to hand (a container). The value is asked for without echo at a
 //! terminal, or read from the first line of stdin when piped, and never taken from an argument (it would sit in the
 //! process list and the shell's history). It is checked against the program's own secret names and sealed under the
@@ -54,8 +54,23 @@ pub(crate) fn run_with(
                 fingerprint(value)
             ))
         }
+        ["reset", name] => {
+            if !names.contains(name) {
+                bail!("{name} isn't a secret this program takes. Names: {}.", names.join(", "));
+            }
+            let mut change = Map::new();
+            change.insert((*name).to_string(), Value::Null);
+            secrets.commit(secrets.plan(&change).map_err(|e| anyhow::anyhow!("{}", e.0))?)?;
+            Ok(format!(
+                "Deleted the saved {name}: the environment's value is used if it sets one."
+            ))
+        }
+        ["reset", _, ..] => bail!("`secret reset` takes only the name."),
         ["set", _, ..] => bail!("`secret set` takes only the name: the value is asked for, never an argument."),
-        _ => bail!("Usage: secret set <NAME> | secret list\nNames: {}.", names.join(", ")),
+        _ => bail!(
+            "Usage: secret set <NAME> | secret reset <NAME> | secret list\nNames: {}.",
+            names.join(", ")
+        ),
     }
 }
 

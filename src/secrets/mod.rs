@@ -1,6 +1,8 @@
 //! The tokens the agent's tools read from the environment (agent-settings.md section 3.3): GitHub's, Claude Code's,
-//! GitLab's and Cloudflare's. An environment variable wins; otherwise one saved on the settings page is put in this
-//! process's environment, which every session, check and script it starts inherits. A saved one lives in
+//! GitLab's and Cloudflare's. One saved on the settings page (or by `secret set`) wins over the same environment
+//! variable and is put in this process's environment, which every session, check and script it starts inherits; the
+//! environment fills only a secret that was never saved, and is what a deleted saved one goes back to (decided
+//! 2026-11-16, agent-settings.md section 3.3). A saved one lives in
 //! `config.json`, under `secrets`, as ciphertext (`cipher.rs`) under a key kept apart from the config (`key.rs`).
 //! The page shows each as set or not and a short fingerprint, never the value; the site gets names and source only.
 //! A value that can't be opened is "unreadable", never plaintext, never a crash.
@@ -153,6 +155,8 @@ pub struct SecretState {
     pub source: Source,
     /// The first 8 hex characters of the value's SHA-256, to tell which one is in use. Never sent to the site.
     pub fingerprint: Option<String>,
+    /// The program's environment set it when it started, so deleting the saved one goes back to that value.
+    pub env_set: bool,
 }
 
 pub fn fingerprint(value: &str) -> String {
@@ -185,8 +189,11 @@ impl Plan {
 
 #[derive(Default)]
 struct Inner {
-    /// The names the environment set when the agent started.
+    /// The names the environment set when the agent started: what a secret that isn't saved comes from.
     from_env: BTreeSet<String>,
+    /// Those names' values as the process started with them (only a process has them), to go back to when a saved one
+    /// is deleted. Never shown.
+    env_values: BTreeMap<String, Zeroizing<String>>,
     /// The names this agent put in the environment from the saved ones.
     saved: BTreeSet<String>,
     /// The file's `secrets` as `apply` or `refresh` last read them, so `refresh` is a file read when nothing changed.
@@ -262,7 +269,8 @@ impl Secrets {
     /// A program's secrets as the settings page edits them when that program runs elsewhere, or as another process:
     /// the saved ones are read and sealed, and saving touches nothing but the program's file. Never this process's
     /// environment (a token saved for the CI runner must not become the code agent's own), so `env_set` says which
-    /// names the program's environment sets, as its status file reported them: those are shown locked.
+    /// names the program's environment sets, as its status file reported them: shown as the environment's when nothing
+    /// is saved.
     pub fn for_page(owner: Owner, root: &Path, env: &Env, os: Option<Arc<dyn TokenStore>>, env_set: &[String]) -> Self {
         let this = Self::build(owner, root, env, Arc::new(host::NoHost), os, None);
         lock(&this.inner).from_env = owner
@@ -274,7 +282,8 @@ impl Secrets {
         this
     }
 
-    /// The names this process's environment set, noted by `apply`: what a program tells its status file.
+    /// The names this process's environment set when it started (saved or not), noted by `apply`: what a program tells
+    /// its status file.
     pub fn env_names(&self) -> Vec<String> {
         lock(&self.inner).from_env.iter().cloned().collect()
     }
@@ -285,7 +294,9 @@ impl Secrets {
     }
 
     /// At start, before anything is spawned: moves the TypeScript agent's saved secrets in, notes which names the
-    /// environment set (an empty value is none), and puts the saved ones in the environment for the rest.
+    /// environment set (an empty value is none) and their values, and puts the saved ones in the environment for the
+    /// rest, over what it had. A saved one that can't be opened is removed from the environment, never left to the
+    /// environment's value: it fails closed, and the page says it's unreadable.
     pub fn apply(&self) {
         // The key must not reach a child: a session could open the config with it. A restart by a supervisor (Docker,
         // systemd) brings its own copy back; `RETASKABLE_SECRETS_KEY_FILE` doesn't depend on that.
@@ -301,6 +312,7 @@ impl Secrets {
         let mut inner = lock(&self.inner);
         inner.seen = stored.clone();
         inner.from_env.clear();
+        inner.env_values.clear();
         inner.saved.clear();
         for def in self.owner.defs() {
             let saved = read_saved(def.name, &stored, &key);
@@ -314,7 +326,9 @@ impl Secrets {
                 && !(before.contains(def.name) && matches!(&saved, Some(Ok(plain)) if **plain == *value))
             {
                 inner.from_env.insert(def.name.to_string());
-                continue;
+                inner
+                    .env_values
+                    .insert(def.name.to_string(), Zeroizing::new(value.clone()));
             }
             match saved {
                 Some(Ok(plain)) => {
@@ -328,7 +342,7 @@ impl Secrets {
                     );
                     self.host.remove(def.name);
                 }
-                None => self.host.remove(def.name),
+                None => self.restore_env(&inner, def.name),
             }
         }
         self.mark_saved(&inner);
@@ -339,7 +353,8 @@ impl Secrets {
 
     /// For a program that runs on while the page (another process) saves its secrets: reads the file again and, if
     /// its `secrets` changed since `apply` or the last `refresh`, brings the environment new children inherit in line
-    /// with it. A name the environment set stays as it is. Sessions already running keep the environment they had.
+    /// with it: a saved one replaces the environment's, and a deleted one goes back to the environment's value from
+    /// start. Sessions already running keep the environment they had.
     pub fn refresh(&self) {
         let stored = self.stored();
         if lock(&self.inner).seen == stored {
@@ -349,9 +364,6 @@ impl Secrets {
         let mut inner = lock(&self.inner);
         let mut gh_changed = false;
         for def in self.owner.defs() {
-            if inner.from_env.contains(def.name) {
-                continue;
-            }
             match read_saved(def.name, &stored, &key) {
                 Some(Ok(plain)) => {
                     gh_changed |= def.name == "GH_TOKEN" && self.host.get(def.name).as_deref() != Some(&**plain);
@@ -367,7 +379,9 @@ impl Secrets {
                     inner.saved.remove(def.name);
                 }
                 None => {
-                    self.host.remove(def.name);
+                    gh_changed |=
+                        def.name == "GH_TOKEN" && inner.saved.contains(def.name) && inner.from_env.contains(def.name);
+                    self.restore_env(&inner, def.name);
                     inner.saved.remove(def.name);
                 }
             }
@@ -387,19 +401,25 @@ impl Secrets {
             .defs()
             .iter()
             .map(|def| {
-                let (source, value) = if inner.from_env.contains(def.name) {
-                    (Source::Env, self.host.get(def.name).map(Zeroizing::new))
-                } else {
-                    match read_saved(def.name, &stored, &key) {
-                        Some(Ok(plain)) => (Source::Saved, Some(plain)),
-                        Some(Err(Unreadable)) => (Source::Unreadable, None),
-                        None => (Source::Unset, None),
-                    }
+                let env_set = inner.from_env.contains(def.name);
+                let (source, value) = match read_saved(def.name, &stored, &key) {
+                    Some(Ok(plain)) => (Source::Saved, Some(plain)),
+                    Some(Err(Unreadable)) => (Source::Unreadable, None),
+                    None if env_set => (
+                        Source::Env,
+                        inner
+                            .env_values
+                            .get(def.name)
+                            .cloned()
+                            .or_else(|| self.host.get(def.name).map(Zeroizing::new)),
+                    ),
+                    None => (Source::Unset, None),
                 };
                 SecretState {
                     def,
                     source,
                     fingerprint: value.map(|v| fingerprint(&v)),
+                    env_set,
                 }
             })
             .collect()
@@ -407,16 +427,12 @@ impl Secrets {
 
     /// Checks every change (a value to save, or `null` to clear) and seals the values, writing nothing.
     pub fn plan(&self, changes: &Map<String, Value>) -> Result<Plan, Refused> {
-        let inner = lock(&self.inner);
         let mut items = Vec::new();
         for (name, raw) in changes {
             let Some(def) = self.owner.defs().iter().find(|d| d.name == name) else {
                 // Not echoed: a request's own text is never put in a reply.
                 return Err(Refused("That isn't a secret this page sets.".to_string()));
             };
-            if inner.from_env.contains(def.name) {
-                return Err(Refused(format!("{name} is set by the environment: change it there.")));
-            }
             let value = match raw {
                 Value::Null => {
                     items.push((def.name, None));
@@ -452,8 +468,8 @@ impl Secrets {
         Ok(Plan { items })
     }
 
-    /// Writes a checked plan: into the config, then the environment new sessions inherit. Sessions already running keep
-    /// the environment they started with.
+    /// Writes a checked plan: into the config, then the environment new sessions inherit (a deleted one goes back to
+    /// the environment's value from start, or none). Sessions already running keep the environment they started with.
     pub fn commit(&self, plan: Plan) -> Result<()> {
         if plan.items.is_empty() {
             return Ok(());
@@ -485,8 +501,9 @@ impl Secrets {
                     gh_changed |= *name == "GH_TOKEN";
                 }
                 None => {
-                    self.host.remove(name);
-                    inner.saved.remove(*name);
+                    self.restore_env(&inner, name);
+                    let was_saved = inner.saved.remove(*name);
+                    gh_changed |= *name == "GH_TOKEN" && was_saved && inner.from_env.contains(*name);
                 }
             }
         }
@@ -503,6 +520,14 @@ impl Secrets {
         match self.owner {
             Owner::CodeAgent => config::save_machine_settings(&self.dir, change),
             _ => crate::program_settings::patch(&self.owner.file(&self.dir), change),
+        }
+    }
+
+    /// With nothing saved for `name`: the environment's value from start, or none.
+    fn restore_env(&self, inner: &Inner, name: &str) {
+        match inner.env_values.get(name) {
+            Some(value) => self.host.set(name, value),
+            None => self.host.remove(name),
         }
     }
 

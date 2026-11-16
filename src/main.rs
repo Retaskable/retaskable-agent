@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
         println!("{}", telemetry::start_stats_text(&stats));
         std::process::exit(0);
     }
-    // agent-settings.md section 3.3: `retaskable secret set <NAME>` / `secret list`, then exit.
+    // agent-settings.md section 3.3: `retaskable secret set <NAME>` / `secret reset <NAME>` / `secret list`, then exit.
     if std::env::args().nth(1).as_deref() == Some("secret") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         match retaskable_agent::secrets::cli::run(retaskable_agent::secrets::Owner::CodeAgent, &dir, env, &args) {
