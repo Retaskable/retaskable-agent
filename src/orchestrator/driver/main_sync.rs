@@ -23,6 +23,14 @@ const LOOK_EVERY: Duration = Duration::from_secs(60);
 /// The sync worktree's folder under the project's `worktrees_dir`.
 const WORKTREE: &str = "sync-main";
 
+/// The store's `sync_main-<base>` lock as a team-branch request holds it (`hold_sync_lock`).
+pub(super) enum SyncLock {
+    /// Taken here: the token to give back (`release_sync_lock`).
+    Mine(String),
+    /// A main sync is running here, or another computer holds the lock.
+    Busy,
+}
+
 /// What the merge attempt came to.
 enum Done {
     Clean { branch: String, url: String },
@@ -100,6 +108,116 @@ impl ProjectLoop {
         }
     }
 
+    /// Whether this loop is running a main sync (merging main into a branch off the base).
+    pub(super) fn sync_running(&self) -> bool {
+        self.run_loop.main_sync.running.is_some()
+    }
+
+    /// Takes the `sync_main-<base>` lock for a request that must not run across a main sync (the merge control and Open
+    /// PR to main): the store's lock also stands for another computer's sync, which the loop's own state can't see.
+    /// Beaten with the runs' locks until `release_sync_lock`. The TS agent reads only the store's items for this
+    /// (`teamBranchActions.ts:88`), which a sync in flight isn't one of yet.
+    pub(super) async fn hold_sync_lock(&mut self, shared: &super::Shared<'_>) -> Result<SyncLock, Why> {
+        if self.sync_running() {
+            return Ok(SyncLock::Busy);
+        }
+        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.keychain.get(&shared.links.backlog_url)) else {
+            return Err(Why::Refused(
+                "The shared backlog isn't reachable from here yet. Try again in a minute.".into(),
+            ));
+        };
+        let name = chore_lock_name(ChoreKind::SyncMain, &self.project.base_branch).unwrap_or_default();
+        let note = format!("merge control on {}", shared.links.machine);
+        match self.client.lock_take(repo, Some(&token), &name, Some(&note)).await {
+            Ok(LockTake::Held(lock)) => {
+                self.run_loop.runs().locks().add(&lock, &name, Instant::now());
+                Ok(SyncLock::Mine(lock))
+            }
+            Ok(LockTake::HeldBy { .. }) => Ok(SyncLock::Busy),
+            Err(e) => {
+                self.store_error("lock_take", &e);
+                Err(Why::Failed(format!(
+                    "Couldn't ask the store whether main is syncing: {e}"
+                )))
+            }
+        }
+    }
+
+    /// Gives back a lock `hold_sync_lock` took.
+    pub(super) async fn release_sync_lock(&mut self, shared: &super::Shared<'_>, lock: &str) {
+        self.run_loop.runs().locks().remove(lock);
+        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.keychain.get(&shared.links.backlog_url)) else {
+            return;
+        };
+        if let Err(e) = self.client.lock_drop(repo, Some(&token), lock).await {
+            self.store_error("lock_drop", &e);
+        }
+    }
+
+    /// Finishes a restart a ship left undone (`team_branch::ship::unfinished_restart`): the pull request into main
+    /// merged but the dev branch still stands at the head it merged, because a stop or a git failure came between the
+    /// merge and `start_again_from_main`. Read only until there is something to do; then under the sync lock, so no
+    /// other ship or sync runs across it, the lease-guarded restart. The TS agent only has the in-memory `restartNote`.
+    async fn finish_restart(&mut self, repo: u64, token: Option<&str>, machine: &str, main: &str) -> bool {
+        let (r, gh) = (
+            PathBuf::from(&self.project.repo_path),
+            self.run_loop.main_sync.gh.clone(),
+        );
+        let (github, base, main) = (
+            self.project.github_repo.clone(),
+            self.project.base_branch.clone(),
+            main.to_string(),
+        );
+        let (r2, base2, main2) = (r.clone(), base.clone(), main.clone());
+        let found = tokio::task::spawn_blocking(move || {
+            crate::team_branch::ship::unfinished_restart(&gh, &r2, &github, &base2, &main2)
+        })
+        .await;
+        let (number, head) = match found {
+            Ok(Ok(Some(found))) => found,
+            Ok(Ok(None)) => return false,
+            Ok(Err(e)) => {
+                tracing::warn!("{}: looking for an unfinished restart: {e:#}", self.id);
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!("{}: looking for an unfinished restart: {e}", self.id);
+                return false;
+            }
+        };
+        let name = chore_lock_name(ChoreKind::SyncMain, &base).unwrap_or_default();
+        let note = format!("restarting {base} on {machine}");
+        let lock = match self.client.lock_take(repo, token, &name, Some(&note)).await {
+            Ok(LockTake::Held(lock)) => lock,
+            Ok(LockTake::HeldBy { .. }) => return false,
+            Err(e) => {
+                self.store_error("lock_take", &e);
+                return false;
+            }
+        };
+        self.run_loop.runs().locks().add(&lock, &name, Instant::now());
+        let (b, m) = (base.clone(), main.clone());
+        let warning =
+            tokio::task::spawn_blocking(move || crate::team_branch::ship::start_again_from_main(&r, &b, &m, &head))
+                .await
+                .unwrap_or_else(|e| Some(e.to_string()));
+        match warning {
+            None => tracing::info!(
+                "{}: PR #{number} into {main} had merged: started {base} again from {main}",
+                self.id
+            ),
+            Some(why) => tracing::warn!(
+                "{}: PR #{number} into {main} had merged; {base} wasn't restarted: {why}",
+                self.id
+            ),
+        }
+        self.run_loop.runs().locks().remove(&lock);
+        if let Err(e) = self.client.lock_drop(repo, token, &lock).await {
+            self.store_error("lock_drop", &e);
+        }
+        true
+    }
+
     async fn start_sync(&mut self, repo: u64, token: Option<&str>, machine: &str, now: Instant) -> Result<()> {
         if self.seen.default_branch.is_none() {
             self.seen.default_branch =
@@ -123,6 +241,10 @@ impl ProjectLoop {
             ))
         })
         .await??;
+        // The counts above are from before a restart moved the base, so a pass that restarted looks again next time.
+        if self.finish_restart(repo, token, machine, &main).await {
+            return Ok(());
+        }
         if self.run_loop.main_sync.handled.as_deref() == Some(sha.as_str()) {
             return Ok(());
         }

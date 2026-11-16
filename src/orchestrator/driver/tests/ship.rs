@@ -1,7 +1,7 @@
 //! The merge control into main from a `merge_requested { ship: true }` row (`driver/merge_item.rs`): the row reaches the
 //! loop, which refuses a project with no team branch and hands the rest to the host. A fake host stands in for git and
 //! `gh` here; `team_branch/ship/tests.rs` runs the real git and a fake `gh`.
-use super::asks::{Listed, finishes, push, quiet_passes, store_failing, until};
+use super::asks::{Listed, finishes, ops_named, push, quiet_passes, store_failing, until};
 use super::*;
 use crate::backlog::Item;
 use crate::config::ProjectConfig;
@@ -17,7 +17,10 @@ impl MergeHost for Host {
     fn open_pr(&self, _: &ProjectConfig, _: &str) -> anyhow::Result<Option<u64>> {
         unreachable!("a ship has no item")
     }
-    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> anyhow::Result<()> {
+    fn head(&self, _: &ProjectConfig, _: u64) -> anyhow::Result<String> {
+        unreachable!("a ship has no item")
+    }
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: &str) -> anyhow::Result<()> {
         unreachable!("a ship has no item")
     }
     fn ship(&self, p: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop> {
@@ -134,4 +137,29 @@ async fn in_runs_mode_a_ship_is_taken_and_ends_done() {
     let sent = rig.runs_until(&asked, 1).await;
     assert_eq!(sent[0], json!({ "id": "in-1", "status": "done" }));
     assert_eq!(*host.calls.lock().unwrap(), ["ship dev main items=0"]);
+}
+
+#[tokio::test]
+async fn a_sync_another_computer_holds_the_lock_for_refuses_the_ship_before_the_host_is_asked() {
+    let (mut rig, asked, listed, host) = rig_shipping(Ok(None), Some("main")).await;
+    *listed.lock_held_by.lock().unwrap() = Some("other-pc".into());
+    rig.go_runs();
+    push(&listed, row(json!({ "ship": true })));
+    let sent = rig.runs_until(&asked, 1).await;
+    assert_eq!(sent[0]["status"], "refused");
+    assert_eq!(sent[0]["why"], "Wait for main to finish coming into dev first.");
+    assert_eq!(ops_named(&asked, "lock_take")[0]["name"], "sync_main-dev");
+    assert!(host.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_ship_holds_the_sync_lock_while_it_runs_and_gives_it_back_after_either_answer() {
+    for answer in [Ok(None), Err(Stop::Refused("It conflicts.".into()))] {
+        let (mut rig, asked, listed, _) = rig_shipping(answer, Some("main")).await;
+        push(&listed, row(json!({ "ship": true })));
+        until(&mut rig, &asked, 1).await;
+        assert_eq!(ops_named(&asked, "lock_take").len(), 1);
+        assert_eq!(ops_named(&asked, "lock_drop"), [json!({ "token": "lock-1" })]);
+        assert_eq!(rig.lp(0).run_loop.runs().locks().count(), 0, "and no longer beaten");
+    }
 }

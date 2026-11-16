@@ -55,6 +55,7 @@ fn claim() -> Claim<'static> {
         title: "",
         author: "me",
         computer: "pc",
+        slots: 0,
     }
 }
 
@@ -68,6 +69,20 @@ fn a_claim_sends_what_it_has_and_a_push_sends_no_pr() {
     );
     let push = claim_args(&Claim { pr: 0, ..claim() });
     assert!(push.get("pr").is_none());
+}
+
+#[test]
+fn the_runners_slots_go_with_a_claim_and_a_heartbeat_and_0_sends_none() {
+    assert_eq!(claim_args(&Claim { slots: 4, ..claim() })["slots"], 4);
+    assert!(claim_args(&claim()).get("slots").is_none());
+    assert_eq!(
+        heartbeat_args("abc", "ci/agent/pr/ci", 4),
+        json!({ "sha": "abc", "context": "ci/agent/pr/ci", "slots": 4 })
+    );
+    assert_eq!(
+        heartbeat_args("abc", "ci/agent/pr/ci", 0),
+        json!({ "sha": "abc", "context": "ci/agent/pr/ci" })
+    );
 }
 
 #[test]
