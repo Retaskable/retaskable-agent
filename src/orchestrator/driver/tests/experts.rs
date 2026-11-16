@@ -234,6 +234,8 @@ struct Host {
     helper_hold: AtomicBool,
     helper_go: Arc<Notify>,
     helper_fails: Mutex<Option<String>>,
+    /// Turns end at the usage limit while set.
+    limited: AtomicBool,
     /// The helpers the next turn asks for.
     asks: Mutex<Vec<crate::expert::helpers::Asked>>,
     /// What the work read answers, and each read asked: (lane, helpers).
@@ -253,12 +255,16 @@ impl ExpertHost for Host {
         let (hold, go) = (self.hold.load(Ordering::SeqCst), self.go.clone());
         let ask = self.question.lock().unwrap().take();
         let helpers = std::mem::take(&mut *self.asks.lock().unwrap());
+        let limited = self.limited.load(Ordering::SeqCst);
         async move {
             if hold {
                 tokio::select! {
                     () = go.notified() => {}
                     () = job.stop.notified() => return TurnEnd::Stopped,
                 }
+            }
+            if limited {
+                return TurnEnd::Limited("You've hit your limit".into());
             }
             TurnEnd::Done {
                 session_id: job.session_id.unwrap_or_else(|| "sess-1".into()),
@@ -514,6 +520,7 @@ mod backlog;
 mod carry;
 mod helpers;
 mod history;
+mod limit;
 mod pictures;
 mod ship;
 mod ship_runs;

@@ -56,6 +56,7 @@ use crate::view::{ExpertAction, ExpertCommand};
 mod backlog;
 mod carry;
 mod helpers;
+mod limit;
 mod ship;
 mod ship_runs;
 mod work;
@@ -116,6 +117,8 @@ pub enum TurnEnd {
     },
     Stopped,
     Failed(String),
+    /// It ended at the usage limit: the queue waits for the limit to lift (`limit.rs`).
+    Limited(String),
 }
 
 /// The parts of an expert session that touch the machine and the engine. Faked in tests.
@@ -209,6 +212,8 @@ struct Session {
     helping: Vec<helpers::Helper>,
     results: Vec<String>,
     tell_now: bool,
+    /// While set and in the future, the queue waits for Claude's usage limit to lift (`limit.rs`).
+    limit_until: Option<Instant>,
 }
 
 /// A project's expert sessions, by item id.
@@ -227,6 +232,8 @@ pub(super) struct Experts {
     pub(super) idle: Duration,
     /// How often the lease and the queue are beaten and read back.
     pub(super) beat_every: Duration,
+    /// The least a queue held at the usage limit waits (`limit.rs`).
+    pub(super) limit_floor: Duration,
 }
 
 impl Experts {
@@ -250,6 +257,7 @@ impl Default for Experts {
             beat_at: None,
             idle: expert::IDLE,
             beat_every: Duration::from_millis(BEAT_MS),
+            limit_floor: limit::AT_LEAST,
         }
     }
 }
@@ -265,6 +273,9 @@ struct Cx<'a> {
     host: &'a Arc<dyn ExpertHost>,
     sessions: Sessions,
     queue: Arc<ExpertQueue<OwnedQueue>>,
+    /// Which engines are at their usage limit, and until when.
+    limits: crate::orchestrator::fresh_start::EngineLimits,
+    limit_floor: Duration,
     /// Whether this project's item loop can take a shipped item over (`claim` mode).
     ships: bool,
     /// The store socket said the queue changed (`facts_changed` naming `expert_queue`): the beat is due now.
@@ -425,6 +436,8 @@ impl ProjectLoop {
             host,
             sessions: self.live.sessions().clone(),
             queue,
+            limits: shared.engine_limits.clone(),
+            limit_floor: ex.limit_floor,
             ships: self.mode == super::OrchestratorMode::Claim,
             woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
@@ -552,6 +565,8 @@ async fn say(
     let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
     s.queue.push(row);
     s.stopped = false;
+    // The person is here, so what waited at the usage limit tries again with their message.
+    s.limit_until = None;
     if now && let Some(t) = &s.turn {
         // The person's word goes first: the turn is cut and their message is the next one.
         t.stop.notify_one();
@@ -654,6 +669,7 @@ async fn start(
         helping: Vec::new(),
         results: Vec::new(),
         tell_now: false,
+        limit_until: None,
     };
     if let Some(from) = &from {
         carry::carry_on(cx, &mut session, &id, from).await;
@@ -743,6 +759,7 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
     cx.queue.done(item, &ids).await;
     s.consumed.extend(ids);
     work::read_after_turn(cx, s);
+    let limited = matches!(end, TurnEnd::Limited(_));
     s.idle_since = Instant::now();
     s.detail = Detail::Idle;
     s.ask = None;
@@ -770,11 +787,14 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
             }
         }
         TurnEnd::Stopped => s.mid_step = true,
-        TurnEnd::Failed(why) => {
+        TurnEnd::Failed(why) | TurnEnd::Limited(why) => {
             if s.session_id.is_none() {
                 s.prepared = false;
             }
             cx.note(item, &s.lease, &format!("The turn failed: {why}")).await;
+            if limited {
+                limit::hold(cx, item, s).await;
+            }
         }
     }
 }
@@ -803,7 +823,7 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             helpers::tell(cx, id, s);
             continue;
         }
-        if s.stopped {
+        if s.stopped || limit::held(s) {
             continue;
         }
         let lane = match s.lane {

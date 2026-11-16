@@ -139,7 +139,11 @@ async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
     }
     if !r.ok {
         let why = r.error.clone().unwrap_or_else(|| r.subtype.clone());
-        return Ok(TurnEnd::Failed(why));
+        return Ok(if r.limit_hit {
+            TurnEnd::Limited(why)
+        } else {
+            TurnEnd::Failed(why)
+        });
     }
     let session_id = if r.session_id.is_empty() {
         id

@@ -209,3 +209,39 @@ async fn a_lane_helper_may_write_and_a_helper_with_no_result_didnt_finish() {
     let (ended, _) = run_stub_helper(false, r#"{"result":"  "}"#).await;
     assert!(matches!(ended, Ended::Failed(_)), "{ended:?}");
 }
+
+#[cfg(unix)]
+async fn run_stub_turn(out: &str) -> TurnEnd {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let project = project_in(root.path(), &repo);
+    let env = crate::test_support::stub_engines(root.path(), out, "", &[]);
+    let host = ClaudeExperts::new(root.path().join("data"), env, Default::default());
+    host.turn(ExpertJob {
+        project,
+        item: "expert-x".into(),
+        branch: "retaskable/expert-x-x".into(),
+        lane: 1,
+        session_id: None,
+        message: "hi".into(),
+        pictures: Default::default(),
+        prepare: true,
+        from_branch: false,
+        stop: Arc::new(tokio::sync::Notify::new()),
+        sessions: Default::default(),
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_turn_that_ends_at_the_usage_limit_is_told_apart_from_one_that_failed() {
+    let limited = r#"{"type":"result","subtype":"success","is_error":true,"result":"You've hit your limit","api_error_status":429,"session_id":"s"}"#;
+    assert_eq!(
+        run_stub_turn(limited).await,
+        TurnEnd::Limited("You've hit your limit".into())
+    );
+    let failed =
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"it broke","session_id":"s"}"#;
+    assert_eq!(run_stub_turn(failed).await, TurnEnd::Failed("it broke".into()));
+}
