@@ -6,10 +6,8 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use super::priority::low_priority_tokio;
-
-/// The label that says a pull request is ready when `ciWhenReady` is on (agent.md section 5).
-pub const READY_LABEL: &str = "ci-ready";
+use crate::ci_label::READY_LABEL;
+use crate::low_priority::low_priority_tokio;
 
 /// One check to run: a pull request at a head merged with a main, or (`pr` 0) a push to main alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -19,8 +19,8 @@ use std::time::Duration;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::orchestrator::live::now_iso8601;
 use crate::release::Build;
+use crate::text::now_iso8601;
 
 /// `shared/agentRelease.ts`'s `RELEASE_TARGETS`: the bundle's four targets, as `<os>-<arch>`.
 const RELEASE_TARGETS: [&str; 4] = ["win-x64", "mac-arm64", "mac-x64", "linux-x64"];
