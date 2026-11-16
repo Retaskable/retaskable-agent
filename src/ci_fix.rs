@@ -70,9 +70,11 @@ pub fn session_spec(pr: u64, title: &str, branch: &str, what: &str, s: &FixSessi
     )
 }
 
-/// `<worktreesDir>/merge-fix-<pr>`, as the TS agent's `mergeDir(cfg, "fix-<id>")`.
-pub fn fix_dir(worktrees: &Path, pr: u64) -> PathBuf {
-    worktree_path(worktrees, &format!("fix-{pr}"))
+/// `<worktreesDir>/merge-fix-<pr>-<first 8 of the head's sha>`. The TS agent's `mergeDir(cfg, "fix-<id>")` has no sha, so
+/// a press and a pass on two heads of one pull request clear each other's worktree; here each head has its own.
+pub fn fix_dir(worktrees: &Path, pr: u64, sha: &str) -> PathBuf {
+    let short: String = sha.chars().take(8).collect();
+    worktree_path(worktrees, &format!("fix-{pr}-{short}"))
 }
 
 /// The branch's pushed head in a throwaway worktree, removed when dropped (pushed, left alone, failed or cut).
@@ -85,14 +87,17 @@ pub struct FixTree {
 
 impl FixTree {
     /// Fetches origin, then adds the worktree detached at `origin/<branch>` (what is left of an earlier one goes first).
+    /// The store judged `sha`: if the branch has moved since (the author pushed), this is an error and the worktree
+    /// goes, since a fix would be for code the store never saw. (The TS agent fixes whatever the branch is now.)
     pub fn open(
         git: &crate::ci_pass::host::GitCommand,
         repo: &Path,
         worktrees: &Path,
         pr: u64,
         branch: &str,
+        sha: &str,
     ) -> Result<Self> {
-        let dir = fix_dir(worktrees, pr);
+        let dir = fix_dir(worktrees, pr, sha);
         clear_worktree(&**git, repo, &dir);
         fetch_is_stale(repo);
         fetch_latest_with(&**git, repo)?;
@@ -115,6 +120,10 @@ impl FixTree {
             before: String::new(),
         };
         tree.before = run(&*tree.git, &tree.dir, &["rev-parse", "HEAD"])?;
+        if tree.before != sha {
+            // Dropping `tree` removes the worktree.
+            anyhow::bail!("the branch moved on from {sha} to {}", tree.before);
+        }
         Ok(tree)
     }
 

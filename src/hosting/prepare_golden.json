@@ -1,0 +1,67 @@
+[
+ {
+  "id": "go-live-github-pages",
+  "title": "Get Trailhead ready for GitHub Pages",
+  "remaining": "Prepare this project to go live on GitHub Pages, which builds it from this GitHub repo itself. Add a GitHub Actions workflow that, on each push to the default branch, builds the site (plain HTML needs no build: publish its folder as it is) and publishes it with actions/upload-pages-artifact and actions/deploy-pages (free on public repos). Make links and asset paths work under the repo's own path (https://<owner>.github.io/<repo>/). So Retaskable can tell when a change is live, make the live site answer /version.json, at the root it is served from, with {\"sha\":\"<commit>\"}: the commit it was built from, written during the build from the GITHUB_SHA variable GitHub Pages sets (else git rev-parse HEAD), and never cached (Cache-Control: no-store where the host allows it). Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-cloudflare-pages",
+  "title": "Get Trailhead ready for Cloudflare Pages",
+  "remaining": "Prepare this project to go live on Cloudflare Pages, which builds it from this GitHub repo itself. Add a wrangler.toml with pages_build_output_dir set to the folder the build writes, and make sure package.json has the build command Cloudflare should run. Write both in the README's deploy section. So Retaskable can tell when a change is live, make the live site answer /version.json, at the root it is served from, with {\"sha\":\"<commit>\"}: the commit it was built from, written during the build from the CF_PAGES_COMMIT_SHA variable Cloudflare Pages sets (else git rev-parse HEAD), and never cached (Cache-Control: no-store where the host allows it). Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-netlify",
+  "title": "Get Trailhead ready for Netlify",
+  "remaining": "Prepare this project to go live on Netlify, which builds it from this GitHub repo itself. Add a netlify.toml with the build command and the publish folder the build writes. So Retaskable can tell when a change is live, make the live site answer /version.json, at the root it is served from, with {\"sha\":\"<commit>\"}: the commit it was built from, written during the build from the COMMIT_REF variable Netlify sets (else git rev-parse HEAD), and never cached (Cache-Control: no-store where the host allows it). Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-cloudflare-workers",
+  "title": "Get Trailhead ready for Cloudflare Workers",
+  "remaining": "Prepare this project to go live on Cloudflare Workers, which builds it from this GitHub repo itself. Add a wrangler.toml (or wrangler.jsonc) naming the Worker's entry and, for a front end, its static assets folder, and a build command in package.json. Bindings (a D1 database, secrets) are listed in it but their values are set on Cloudflare by the person, never committed. So Retaskable can tell when a change is live, make the live site answer /version.json, at the root it is served from, with {\"sha\":\"<commit>\"}: the commit it was built from, written during the build from the WORKERS_CI_COMMIT_SHA variable Cloudflare Workers sets (else git rev-parse HEAD), and never cached (Cache-Control: no-store where the host allows it). Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-render",
+  "title": "Get Trailhead ready for Render",
+  "remaining": "Prepare this project to go live on Render, which builds it from this GitHub repo itself. Add a render.yaml with the service's build and start commands and the free plan, and make the server listen on the PORT environment variable. So Retaskable can tell when a change is live, make the live site answer /version.json, at the root it is served from, with {\"sha\":\"<commit>\"}: the commit it was built from, written during the build from the RENDER_GIT_COMMIT variable Render sets (else git rev-parse HEAD), and never cached (Cache-Control: no-store where the host allows it). Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-cloud-run",
+  "title": "Get Trailhead ready for Google Cloud Run",
+  "remaining": "Prepare this project to go live on Google Cloud Run, which builds it from this GitHub repo itself. Add a Dockerfile that builds the app and starts the server listening on the PORT environment variable. Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-cloudflare-d1",
+  "title": "Get Trailhead ready for Cloudflare D1",
+  "remaining": "Prepare this project to go live on Cloudflare D1, which builds it from this GitHub repo itself. Bind a D1 database in wrangler.toml and add its schema as migrations in the repo. Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-supabase",
+  "title": "Get Trailhead ready for Supabase",
+  "remaining": "Prepare this project to go live on Supabase, which builds it from this GitHub repo itself. Read the database's address from an environment variable and add the schema as migrations in the repo. Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-neon",
+  "title": "Get Trailhead ready for Neon",
+  "remaining": "Prepare this project to go live on Neon, which builds it from this GitHub repo itself. Read the database's address from an environment variable and add the schema as migrations in the repo. Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-turso",
+  "title": "Get Trailhead ready for Turso",
+  "remaining": "Prepare this project to go live on Turso, which builds it from this GitHub repo itself. Read the database's address and token from environment variables and add the schema as migrations in the repo. Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-itch",
+  "title": "Get Trailhead ready for itch.io",
+  "remaining": "Prepare this project to go live on itch.io, which builds it from this GitHub repo itself. Add a script that makes an itch.io-ready web build: a zip with index.html at its top level, using relative paths only. Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-eas",
+  "title": "Get Trailhead ready for Expo (EAS) free tier",
+  "remaining": "Prepare this project to go live on Expo (EAS) free tier, which builds it from this GitHub repo itself. Add an eas.json with a preview build profile for sharing test builds (internal distribution). Never deploy, and never add a token, password or secret to the repo."
+ },
+ {
+  "id": "go-live-github-releases",
+  "title": "Get Trailhead ready for GitHub Releases",
+  "remaining": "Prepare this project to go live on GitHub Releases, which builds it from this GitHub repo itself. Add a GitHub Actions workflow that, when a release is published, builds the app for Windows, macOS and Linux and attaches the files to it. Never deploy, and never add a token, password or secret to the repo."
+ }
+]

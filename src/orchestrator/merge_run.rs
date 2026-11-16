@@ -12,7 +12,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter};
+use super::driver::{RunRequest, RunStarter};
+use super::run_guard::spawn_ended;
 use super::watch_run::{Trees, change_ref};
 
 use crate::backlog::runs::{BeatVerdict, RunKind, RunOutcome};
@@ -88,13 +89,8 @@ impl RunStarter for MergeRuns {
             sync: is_sync(&request),
             request,
         };
-        tokio::spawn(async move {
-            let token = job.request.token.clone();
-            let ends = job.request.ends.clone();
-            if let Some((outcome, result)) = job.run().await {
-                ends.send(RunEnd { token, outcome, result });
-            }
-        });
+        let (token, ends) = (job.request.token.clone(), job.request.ends.clone());
+        spawn_ended(ends, token, "merge", async move { job.run().await });
         Ok(())
     }
 }
@@ -238,7 +234,9 @@ impl Job {
         }
         let seen = {
             let base = base.clone();
-            self.git(move |git, repo| behind(git, repo, &base, &head)).await
+            self.git(move |git, repo| behind(git, repo, &base, &head))
+                .await
+                .unwrap_or(Behind::CantTell)
         };
         if self.stopped() {
             return None;
@@ -325,6 +323,7 @@ impl Job {
             let base = base.clone();
             self.git(move |git, repo| update_from_base(git, repo, &dir, &piece, &branch, &base))
                 .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
         };
         if self.stopped() {
             return None;
@@ -394,7 +393,7 @@ impl Job {
             self.request.context.config.base_branch.clone(),
             format!("origin/{branch}"),
         );
-        let seen = self.git(move |git, repo| behind(git, repo, &base, &head)).await;
+        let seen = (self.git(move |git, repo| behind(git, repo, &base, &head)).await).unwrap_or(Behind::CantTell);
         seen == Behind::Behind
     }
 
@@ -445,7 +444,7 @@ impl Job {
     async fn git<R: Send + 'static>(
         &self,
         f: impl FnOnce(&dyn Fn(&Path) -> Command, &Path) -> R + Send + 'static,
-    ) -> R {
+    ) -> Result<R, String> {
         let (git, repo, handle) = (
             self.git,
             PathBuf::from(&self.request.context.config.repo_path),
@@ -453,7 +452,7 @@ impl Job {
         );
         tokio::task::spawn_blocking(move || with_hook(Box::new(handle), || f(&git, &repo)))
             .await
-            .expect("the git task ended")
+            .map_err(|e| format!("the git task ended: {e}"))
     }
 
     fn handle(&self) -> impl Fn(Arc<ProcessTree>) + Send + 'static {

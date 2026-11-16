@@ -62,5 +62,18 @@ fn the_sandbox_follows_the_projects_setting() {
 
 #[test]
 fn the_worktree_is_merge_fix_and_the_pull_request() {
-    assert_eq!(fix_dir(Path::new("trees"), 9), Path::new("trees").join("merge-fix-9"));
+    assert_eq!(
+        fix_dir(Path::new("trees"), 9, "0123456789abcdef"),
+        Path::new("trees").join("merge-fix-9-01234567")
+    );
+}
+
+#[test]
+fn two_heads_of_one_pull_request_have_their_own_worktrees() {
+    let (a, b) = (
+        fix_dir(Path::new("trees"), 9, "aaaaaaaa11"),
+        fix_dir(Path::new("trees"), 9, "bbbbbbbb22"),
+    );
+    assert_ne!(a, b);
+    assert_ne!(a, fix_dir(Path::new("trees"), 10, "aaaaaaaa11"));
 }

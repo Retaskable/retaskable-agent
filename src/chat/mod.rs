@@ -28,7 +28,7 @@ pub const KEYCHAIN_SERVICE: &str = "retaskable-chat";
 /// The file that overrides where the Chat Agent keeps its link tokens.
 pub const CREDENTIALS_FILE_VAR: &str = "RETASKABLE_CHAT_CREDENTIALS_FILE";
 /// The Chat Agent's own folder inside the data folder, so its credentials file and config never meet the Coding Agent's.
-pub const DATA_SUBDIR: &str = "chat";
+pub const DATA_SUBDIR: &str = crate::paths::CHAT_SUBDIR;
 
 /// The reply to a command the hub sent: `{type:"ack", id}`.
 pub fn ack(id: &str) -> Value {

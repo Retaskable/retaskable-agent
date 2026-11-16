@@ -82,6 +82,8 @@ pub fn run_command_in_tree(
         .with_context(|| format!("starting `{command}`"))?;
     let tree =
         std::sync::Arc::new(ProcessTree::join_sync(&child).context("putting the command in its own process tree")?);
+    // A restart's `cut_all` ends it whole, a check's shell and what it started (07.4's "Process trees die whole").
+    ProcessTree::register(&tree);
     on_tree(tree.clone());
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
@@ -228,6 +230,30 @@ mod tests {
         assert_eq!(
             size_right_after, size_later,
             "the grandchild kept touching its file after the timeout"
+        );
+    }
+
+    #[test]
+    fn a_restarts_cut_all_ends_a_running_commands_whole_tree() {
+        // A check's shell and its grandchild, as `npm run test:changed` starts its tests: a restart (`cut_all`) must
+        // end them, not leave them running past the agent (2026-11-15: eight hung test runs, one per restart).
+        let dir = tempfile::tempdir().unwrap();
+        let (command, ticks) = crate::test_support::grandchild_tick_shell_command(dir.path());
+        let started = Instant::now();
+        // `cut_all` under test reaches only this thread's trees, so it runs here, from `on_tree`, once the grandchild ticks.
+        let (_, _, timed_out) = run_command_in_tree(&command, dir.path(), Duration::from_secs(30), |_| {
+            wait_for_first_tick(&ticks);
+            crate::process_tree::cut_all();
+        })
+        .unwrap();
+        assert!(!timed_out, "the restart ended it, not its timeout");
+        assert!(started.elapsed() < Duration::from_secs(20), "it ran until its timeout");
+        let size_right_after = std::fs::metadata(&ticks).unwrap().len();
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            size_right_after,
+            std::fs::metadata(&ticks).unwrap().len(),
+            "the grandchild kept touching its file after the restart"
         );
     }
 

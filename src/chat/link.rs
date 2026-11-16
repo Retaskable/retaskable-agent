@@ -8,15 +8,26 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::{CREDENTIALS_FILE_VAR, DATA_SUBDIR, KEYCHAIN_SERVICE, ROLE};
+use super::{CREDENTIALS_FILE_VAR, KEYCHAIN_SERVICE, ROLE};
 use crate::backlog;
 use crate::config;
 use crate::env::Env;
 use crate::link::{self, BACKLOG_TARGET, CLOUD_TARGET, DeviceCode, DeviceTokens, Link, LinkTarget, TokenStore};
+use crate::paths;
 
 /// The Chat Agent's own folder inside the data folder.
 pub fn data_dir(env: &Env) -> PathBuf {
-    config::data_dir(env).join(DATA_SUBDIR)
+    paths::chat_dir(&root(env))
+}
+
+/// The data folder all three programs share, found the way the code agent finds it (`paths::data_dir`).
+pub fn root(env: &Env) -> PathBuf {
+    paths::current_data_dir(env)
+}
+
+/// `data_dir` for a given executable, so a test can say where its `build.json` is.
+pub fn data_dir_for(env: &Env, exe: Option<&std::path::Path>) -> PathBuf {
+    paths::chat_dir(&paths::data_dir_for_exe(env, exe))
 }
 
 /// Where its refresh tokens are kept.
@@ -104,5 +115,30 @@ mod tests {
             ("RETASKABLE_DATA_DIR", "no-such-dir"),
         ]);
         assert!(urls(&env).is_err());
+    }
+
+    #[test]
+    fn the_chat_agents_data_folder_agrees_with_the_code_agents_rule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("agent");
+        std::fs::write(
+            tmp.path().join("build.json"),
+            r#"{"os":"linux","version":"1.2.3","commit":"abc","environment":"production"}"#,
+        )
+        .unwrap();
+        for env in [
+            Env::from_pairs([("RETASKABLE_DATA_DIR", "d"), ("HOME", "/h")]),
+            Env::from_pairs([("HOME", "/h"), ("LOCALAPPDATA", "/h/lad")]),
+        ] {
+            let root = crate::paths::data_dir_for_exe(&env, Some(&exe));
+            assert_eq!(data_dir_for(&env, Some(&exe)), root.join("chat"));
+        }
+        // No build.json: a checkout, as the code agent sees it.
+        let none = tmp.path().join("none").join("agent");
+        let env = Env::empty();
+        assert_eq!(
+            data_dir_for(&env, Some(&none)),
+            crate::paths::data_dir(&env, None).join("chat")
+        );
     }
 }

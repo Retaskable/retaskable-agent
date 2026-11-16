@@ -196,6 +196,64 @@ fn push_args(base: &str, main: &str, now: Option<&str>) -> Vec<String> {
     ]
 }
 
+/// A pull request from the base into main that merged, as `gh pr list --state merged` says it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MergedPr {
+    number: u64,
+    #[serde(default)]
+    merged_at: Option<String>,
+    #[serde(default, rename = "headRefOid")]
+    head: String,
+}
+
+/// The newest pull request from the base into main that merged, or none.
+fn last_merged(gh: &Path, dir: &Path, github_repo: &str, base: &str, main: &str) -> Result<Option<MergedPr>> {
+    let args = [
+        "pr",
+        "list",
+        "--repo",
+        github_repo,
+        "--base",
+        main,
+        "--head",
+        base,
+        "--state",
+        "merged",
+        "--limit",
+        "5",
+        "--json",
+        "number,mergedAt,headRefOid",
+    ];
+    crate::host_call::guard("gh", dir, &args)?;
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(args);
+    let out = crate::implementer::publish::run(cmd, None, "gh pr list")?;
+    let merged: Vec<MergedPr> = serde_json::from_str(out.trim()).context("reading gh pr list's answer")?;
+    Ok(merged.into_iter().max_by(|a, b| a.merged_at.cmp(&b.merged_at)))
+}
+
+/// A merge that landed whose restart didn't (read only): the newest pull request from the base into main merged and
+/// origin's base is still at the head it merged, as after a stop or a git failure between `gh pr merge` and
+/// `start_again_from_main`. Answers its number and head. Needs a fetch done just before. A base with nothing main
+/// lacks (already restarted) is nothing to finish and asks `gh` nothing.
+pub fn unfinished_restart(
+    gh: &Path,
+    repo: &Path,
+    github_repo: &str,
+    base: &str,
+    main: &str,
+) -> Result<Option<(u64, String)>> {
+    if super::ahead_behind(repo, base, main)?.0 == 0 {
+        return Ok(None);
+    }
+    let Some(merged) = last_merged(gh, repo, github_repo, base, main)? else {
+        return Ok(None);
+    };
+    let at = git(repo, &["rev-parse", &format!("origin/{base}")]).map_err(anyhow::Error::msg)?;
+    Ok((!merged.head.is_empty() && at.trim() == merged.head).then_some((merged.number, merged.head)))
+}
+
 /// The merge control, after `need_team_branch` said there is a team branch: reads the branch, checks it can go, squashes
 /// the pull request in as read and starts the base branch again. `items` are the store's. Answers the warning to give the
 /// person when it merged but the branch wasn't started again (or was only queued), or none when all went well.
@@ -229,8 +287,12 @@ pub fn ship(
     if let Err(e) = merge(gh, repo, github_repo, number, &head) {
         return Err(refused(format!("GitHub didn't merge PR #{number}: {}", gh_reason(&e))));
     }
-    // A failed look is not a merged pull request: it reads as not merged, as in the TS agent.
-    let state = view(gh, repo, github_repo, number).map_or_else(|_| "UNKNOWN".to_string(), |v| v.state);
+    // A failed look is not a merged pull request, so it is asked twice before it reads as not merged. The TS agent
+    // reads once (`teamBranchActions.ts:101`) and a hiccup there left the dev branch on its old head; the finisher
+    // below (`finish_restart`) also picks that up on a later pass.
+    let state = view(gh, repo, github_repo, number)
+        .or_else(|_| view(gh, repo, github_repo, number))
+        .map_or_else(|_| "UNKNOWN".to_string(), |v| v.state);
     if let Some(note) = not_merged_note(&state, number, base) {
         return Ok(Some(note));
     }

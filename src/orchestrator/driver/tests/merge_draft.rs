@@ -13,7 +13,10 @@ impl MergeHost for NoItems {
     fn open_pr(&self, _: &ProjectConfig, _: &str) -> Result<Option<u64>> {
         anyhow::bail!("a draft isn't found by its branch here")
     }
-    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+    fn head(&self, _: &ProjectConfig, _: u64) -> Result<String> {
+        anyhow::bail!("a draft is merged by the draft path")
+    }
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: &str) -> Result<()> {
         anyhow::bail!("a draft is merged by the draft path")
     }
 

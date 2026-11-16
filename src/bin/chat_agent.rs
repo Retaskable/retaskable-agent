@@ -3,7 +3,8 @@
 //! default) asks the store which projects it serves (`projects_served`), keeps a socket open for each and answers
 //! what the hub sends.
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use retaskable_agent::backlog::Client;
@@ -15,6 +16,7 @@ use retaskable_agent::chat::{link as chat_link, project, served};
 use retaskable_agent::connector::Timing;
 use retaskable_agent::env::Env;
 use retaskable_agent::link::{BACKLOG_TARGET, CLOUD_TARGET};
+use retaskable_agent::program_status::{self, Linked, Report, StatusWriter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -51,6 +53,36 @@ async fn run(env: &Env) -> Result<()> {
     let host = retaskable_agent::link::machine_name(env);
     let log: Arc<dyn Fn(String) + Send + Sync> = Arc::new(|line| tracing::info!("{line}"));
     tracing::info!("{}", backlog_note(&store_url));
+    // programs-status.md: a status file in the chat folder, written every few seconds while this runs.
+    let (started, claude) = (program_status::now_ms(), runner_probe.available());
+    let projects_running = Arc::new(AtomicUsize::new(0));
+    let last_error: Arc<Mutex<Option<String>>> = Arc::default();
+    let (keys, env_set) = (chat_link::token_store(env), program_status::env_set(env, &ENV_VARS));
+    let status = StatusWriter::new(&chat_link::data_dir(env), program_status::CHAT_AGENT, VERSION, started);
+    let linked = {
+        let (store_url, cloud_url) = (store_url.clone(), cloud_url.clone());
+        program_status::LinkedCache::new(program_status::LINKED_TTL, move || {
+            let held = |url: &str| matches!(keys.get(url), Ok(Some(_)));
+            Linked {
+                store: held(&store_url),
+                cloud: Some(held(&cloud_url)),
+            }
+        })
+    };
+    let _status = {
+        let (running_now, error_now) = (projects_running.clone(), last_error.clone());
+        status.spawn(move || {
+            let mut extra = serde_json::Map::new();
+            extra.insert("claudeAvailable".into(), claude.into());
+            extra.insert("projectsServed".into(), running_now.load(Ordering::Relaxed).into());
+            Report {
+                linked: linked.get(program_status::now_ms()),
+                last_error: error_now.lock().ok().and_then(|e| e.clone()),
+                env_set: env_set.clone(),
+                extra,
+            }
+        })
+    };
     // The projects come from the store (chat-agent-process.md section 5.1), asked now and every few minutes: one
     // socket per project, started when it appears and stopped when the store stops naming it.
     let mut hubs = tokio::task::JoinSet::new();
@@ -99,6 +131,10 @@ async fn run(env: &Env) -> Result<()> {
                     running.insert(w.repo_id, (w.clone(), handle));
                 }
                 list = next;
+                projects_running.store(running.len(), Ordering::Relaxed);
+                if let Ok(mut e) = last_error.lock() {
+                    *e = error;
+                }
             }
         }
     }
@@ -146,6 +182,15 @@ fn start(
         log.clone(),
     ))
 }
+
+/// The environment variables that set the Chat Agent (the status file lists which are set, never their values).
+const ENV_VARS: [&str; 5] = [
+    "RETASKABLE_DATA_DIR",
+    "RETASKABLE_BACKLOG_URL",
+    "RETASKABLE_CLOUD_URL",
+    "RETASKABLE_CHAT_REPO_ID",
+    "RETASKABLE_CHAT_CREDENTIALS_FILE",
+];
 
 fn backlog_note(url: &str) -> String {
     format!(
