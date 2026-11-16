@@ -7,6 +7,19 @@ use crate::backlog::ItemStatus;
 use crate::test_support::{git, repo_with_origin, run as run_git, write_executable};
 use std::path::PathBuf;
 
+/// Both halves, as the driver runs them with the merge turn held between: the warning, or none.
+fn ship(
+    gh: &Path,
+    repo: &Path,
+    github_repo: &str,
+    base: &str,
+    main: &str,
+    items: &[Item],
+) -> Result<Option<String>, Stop> {
+    let shipping = read_for_ship(gh, repo, github_repo, base, main, items)?;
+    merge_for_ship(gh, repo, github_repo, base, main, &shipping).map(|s| s.warning)
+}
+
 struct Fx {
     root: tempfile::TempDir,
     repo: PathBuf,
@@ -171,9 +184,9 @@ fn it_squashes_the_pull_request_as_read_then_starts_dev_again_from_main() {
         [
             "pr list --repo o/r --base main --head dev --state open --limit 1 --json number,url,mergeable,headRefOid"
                 .to_string(),
-            "pr view 7 --repo o/r --json state,headRefOid".into(),
+            "pr view 7 --repo o/r --json state,headRefOid,mergeCommit".into(),
             format!("pr merge 7 --repo o/r --squash --match-head-commit {head}"),
-            "pr view 7 --repo o/r --json state,headRefOid".into(),
+            "pr view 7 --repo o/r --json state,headRefOid,mergeCommit".into(),
         ]
     );
     assert!(!fx.log().iter().any(|l| l.contains("--delete-branch")));
@@ -452,4 +465,30 @@ fn the_restart_plan_and_the_not_merged_note() {
     assert_eq!(restart_plan(Some("b"), "a"), Restart::Moved);
     assert_eq!(not_merged_note("MERGED", 7, "dev"), None);
     assert!(not_merged_note("UNKNOWN", 7, "dev").is_some());
+}
+
+#[test]
+fn a_merged_ship_answers_the_squash_commit_github_names_and_a_queued_one_names_none() {
+    let one = fx();
+    one.write(
+        "view2.json",
+        r#"{"state":"MERGED","headRefOid":"x","mergeCommit":{"oid":"abc123"}}"#,
+    );
+    let shipping = read_for_ship(&one.at("gh"), &one.repo, "o/r", "dev", "main", &[]).unwrap();
+    assert_eq!(
+        (shipping.number, shipping.url.as_str(), shipping.head.as_str()),
+        (7, "https://github.com/o/r/pull/7", one.dev.as_str())
+    );
+    let shipped = merge_for_ship(&one.at("gh"), &one.repo, "o/r", "dev", "main", &shipping).unwrap();
+    assert_eq!(
+        (shipped.merged, shipped.merge_commit.as_deref(), shipped.warning),
+        (true, Some("abc123"), None)
+    );
+
+    let fx = self::fx();
+    fx.write("view2.json", r#"{"state":"OPEN","headRefOid":"x"}"#);
+    let shipping = read_for_ship(&fx.at("gh"), &fx.repo, "o/r", "dev", "main", &[]).unwrap();
+    let shipped = merge_for_ship(&fx.at("gh"), &fx.repo, "o/r", "dev", "main", &shipping).unwrap();
+    assert_eq!((shipped.merged, shipped.merge_commit), (false, None));
+    assert!(shipped.warning.unwrap().starts_with("PR #7 didn't go in straight away"));
 }

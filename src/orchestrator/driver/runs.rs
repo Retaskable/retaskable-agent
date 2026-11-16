@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::project::ProjectLoop;
+use super::ship_turn::is_ship;
 use super::{Links, Shared};
 use crate::backlog::Client;
 use crate::backlog::merge::{MergeNext, MergeOutcome, MergeTurn};
@@ -470,7 +471,9 @@ impl ProjectLoop {
     }
 
     /// Starts the merge run for a turn the store handed out (or still holds), with the answer for its `claim` event.
-    /// A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
+    /// A turn with no piece is an item's merge, not this run's: it is given back, keeping its place. A ship's turn
+    /// (`ship-<base>`, `ship_turn.rs`) is withdrawn instead: released it would queue again, and nothing here is still
+    /// shipping it.
     async fn start_turn(
         &mut self,
         (repo, token): (u64, Option<&str>),
@@ -480,6 +483,13 @@ impl ProjectLoop {
         turn: MergeTurn,
     ) -> (Value, bool) {
         let Some(piece) = turn.piece else {
+            let ship = turn.entry.get("item").and_then(Value::as_str).filter(|i| is_ship(i));
+            if let Some(item) = ship {
+                if let Err(e) = self.client.merge_withdraw(repo, token, item).await {
+                    self.store_error("merge_withdraw", &e);
+                }
+                return (json!("withdrawn"), false);
+            }
             if let Err(e) = self
                 .client
                 .merge_result(repo, token, &turn.token, &MergeOutcome::Released)
@@ -538,6 +548,10 @@ impl ProjectLoop {
         starter: &dyn RunStarter,
         (start, now): (&StartRules, Instant),
     ) -> bool {
+        // A ship's turn is held: `merge_next` would answer it as this computer's own, so none is asked for.
+        if self.merging.ship_turn.is_some() {
+            return false;
+        }
         let base = self.project.base_branch.clone();
         let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
             Err(e) => {

@@ -42,7 +42,7 @@ use crate::intents::main_pr::Why;
 use crate::intents::merge_item::{Answer, Merge, MergeHandler, Ship, ShipAnswer};
 use crate::intents::{IntentStore, Puller, StoreLink};
 use crate::item_lifecycle::ItemState;
-use crate::team_branch::ship::{Stop, ship};
+use crate::team_branch::ship::{Shipped, Shipping, Stop, merge_for_ship, read_for_ship};
 use crate::team_branch::{gh_reason, held_refusal};
 use crate::view::{DraftCommand, Reply};
 
@@ -60,9 +60,12 @@ pub trait MergeHost: Send + Sync {
     fn head(&self, project: &ProjectConfig, pr: u64) -> Result<String>;
     /// `gh pr merge <pr> --squash --match-head-commit <head>`, deleting the head branch when `delete_branch`.
     fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool, head: &str) -> Result<()>;
-    /// The merge control into main: squashes the dev branch's pull request into `main` and starts the dev branch
-    /// again from it (`team_branch::ship`); the warning to give, if any. `items` are the store's.
-    fn ship(&self, project: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop>;
+    /// The merge control into main, first half: reads the dev branch's pull request into `main` and refuses what can't
+    /// go (`team_branch::ship::read_for_ship`). Changes nothing. `items` are the store's.
+    fn ship_read(&self, project: &ProjectConfig, main: &str, items: &[Item]) -> Result<Shipping, Stop>;
+    /// Its second half, with the store's merge turn held: squashes the pull request in as read and starts the dev
+    /// branch again from `main` (`team_branch::ship::merge_for_ship`).
+    fn ship_merge(&self, project: &ProjectConfig, main: &str, shipping: &Shipping) -> Result<Shipped, Stop>;
 }
 
 /// The real thing: `gh`, or `RETASKABLE_GH`, run in the project's checkout.
@@ -109,9 +112,14 @@ impl MergeHost for GhMergeHost {
         )
     }
 
-    fn ship(&self, p: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop> {
+    fn ship_read(&self, p: &ProjectConfig, main: &str, items: &[Item]) -> Result<Shipping, Stop> {
         let dir = std::path::Path::new(&p.repo_path);
-        ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, items)
+        read_for_ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, items)
+    }
+
+    fn ship_merge(&self, p: &ProjectConfig, main: &str, shipping: &Shipping) -> Result<Shipped, Stop> {
+        let dir = std::path::Path::new(&p.repo_path);
+        merge_for_ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, shipping)
     }
 }
 
@@ -123,6 +131,10 @@ pub(super) struct Merging {
     ships: mpsc::UnboundedSender<Ship>,
     ship_waiting: mpsc::UnboundedReceiver<Ship>,
     puller: Option<Puller<()>>,
+    /// The token of the store's merge turn a ship holds right now (`ship_turn.rs`): no piece's merge is asked for meanwhile.
+    pub(super) ship_turn: Option<String>,
+    /// A ship's leftover entry was withdrawn after this start (`ship_turn.rs`).
+    pub(super) swept: bool,
     polled: Option<Instant>,
     /// How long after one look at the store the next may be.
     pub(super) poll_every: Duration,
@@ -138,6 +150,8 @@ impl Default for Merging {
             ships,
             ship_waiting,
             puller: None,
+            ship_turn: None,
+            swept: false,
             polled: None,
             poll_every: POLL_EVERY,
         }
@@ -165,6 +179,7 @@ impl ProjectLoop {
         if shared.stopping {
             return;
         }
+        self.sweep_ship_turn(shared).await;
         let Some(repo) = self.repo else { return };
         if self
             .merging
@@ -218,17 +233,16 @@ impl ProjectLoop {
         let SyncLock::Mine(lock) = lock else {
             unreachable!("busy was refused above")
         };
-        let (project, host) = (self.project.clone(), host.clone());
-        let shipped = tokio::task::spawn_blocking(move || host.ship(&project, &main, &items)).await;
+        // The store's merge turn for the dev branch too, so no piece from any computer lands on it meanwhile.
+        let shipped = self.ship_under_turn(host, shared, &main, items).await;
         self.release_sync_lock(shared, &lock).await;
         match shipped {
-            Ok(Ok(warning)) => {
-                tracing::info!("{}: shipped the dev branch into main ({warning:?})", self.id);
-                Ok(warning)
+            Ok(done) => {
+                tracing::info!("{}: shipped the dev branch into main ({done:?})", self.id);
+                Ok(done.warning)
             }
-            Ok(Err(Stop::Refused(why))) => Err(Why::Refused(why)),
-            Ok(Err(Stop::Failed(e))) => Err(Why::Failed(format!("{e:#}"))),
-            Err(e) => Err(Why::Failed(e.to_string())),
+            Err(Stop::Refused(why)) => Err(Why::Refused(why)),
+            Err(Stop::Failed(e)) => Err(Why::Failed(format!("{e:#}"))),
         }
     }
 

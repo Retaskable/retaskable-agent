@@ -129,3 +129,43 @@ async fn a_red_mains_fix_main_chore_merges_through_the_queue_like_any_change() {
     );
     assert_eq!(s.args("merge_result")[0]["outcome"], json!("merged"));
 }
+
+fn ship_turn(token: &str) -> Value {
+    json!({ "token": token, "leaseMs": 300000, "entry": { "item": "ship-dev" } })
+}
+
+#[tokio::test]
+async fn a_ship_turn_found_at_start_or_handed_out_is_withdrawn_not_released() {
+    // Held across a restart (`merge_open`): no piece run takes it, and a release would queue the chore again.
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    script.lock().unwrap().open = ship_turn("s1");
+    pass(&mut rig, &starter, Instant::now()).await;
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(s.args("merge_withdraw"), vec![json!({ "item": "ship-dev" })]);
+        assert!(s.args("merge_result").is_empty(), "never released");
+        assert!(starter.started().is_empty());
+    }
+    // Answered by a piece's `merge_next` (the same agent id holds it).
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    script.lock().unwrap().merges = VecDeque::from([json!({ "turn": ship_turn("s2") })]);
+    pass(&mut rig, &starter, Instant::now()).await;
+    let s = script.lock().unwrap();
+    assert_eq!(s.args("merge_withdraw"), vec![json!({ "item": "ship-dev" })]);
+    assert!(s.args("merge_result").is_empty() && starter.started().is_empty());
+}
+
+#[tokio::test]
+async fn no_piece_merge_is_asked_for_while_this_loop_holds_a_ship_turn() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    rig.lp(0).merging.ship_turn = Some("s1".into());
+    let t0 = Instant::now();
+    pass(&mut rig, &starter, t0).await;
+    assert!(script.lock().unwrap().args("merge_next").is_empty());
+    rig.lp(0).merging.ship_turn = None;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
+    assert_eq!(script.lock().unwrap().args("merge_next").len(), 1);
+}
