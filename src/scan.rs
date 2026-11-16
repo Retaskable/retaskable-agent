@@ -78,7 +78,7 @@ pub fn detect_checks(repo: &Path) -> DetectedChecks {
         checks.push(check("typecheck", "npm run typecheck", true, 600));
     }
     if has_script(&pkg, "test") {
-        checks.push(check("test", "npm test", true, 1200));
+        checks.push(check("test", "npm test", true, 600));
     }
     if has_script(&pkg, "lint") {
         checks.push(check("lint", "npm run lint", false, 600));
@@ -349,7 +349,7 @@ mod tests {
         )]);
         let found = detect_checks(dir.path());
         assert_eq!(found.play_command, "npm run launch");
-        assert_eq!(found.checks, vec![check("test", "npm test", true, 1200)]);
+        assert_eq!(found.checks, vec![check("test", "npm test", true, 600)]);
 
         let dir = repo(&[("package.json", &pkg(r#"{"scripts":{"test":"x"}}"#))]);
         assert_eq!(detect_checks(dir.path()).play_command, "");
@@ -365,7 +365,7 @@ mod tests {
             detect_checks(dir.path()).checks,
             vec![
                 check("typecheck", "npm run typecheck", true, 600),
-                check("test", "npm test", true, 1200),
+                check("test", "npm test", true, 600),
                 check("lint", "npm run lint", false, 600),
             ]
         );
@@ -414,7 +414,7 @@ mod tests {
         // A non-string, non-null, non-false script value is still truthy, like a JS object/number is.
         assert_eq!(
             detect_checks(dir.path()).checks,
-            vec![check("test", "npm test", true, 1200)]
+            vec![check("test", "npm test", true, 600)]
         );
     }
 }
