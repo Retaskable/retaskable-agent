@@ -8,6 +8,10 @@
 //!
 //! Every field is optional. `AGENT_CI_REPO`, `AGENT_CI_SLOTS`, `AGENT_CI_CPUS` and `AGENT_CI_NAME` win over the file,
 //! each on its own.
+//!
+//! The file also holds a `network` key (`{ "enabled": false, "passwordHash": "scrypt$..." }`, off by default) when this
+//! runner hosts the settings page on a computer with no code agent (agent-ci.md section 3.8). It is set by
+//! `retaskable-ci set-password` and `network`, never by the page, and the page's view never carries it.
 use std::path::Path;
 
 use anyhow::{Result, bail};
@@ -15,6 +19,7 @@ use serde_json::{Map, Value, json};
 
 use super::{Field, Refused};
 use crate::env::Env;
+use crate::network::{MIN_PASSWORD_LEN, NetworkAccess};
 
 /// Slots when neither `AGENT_CI_SLOTS` nor the file says.
 pub const DEFAULT_SLOTS: u32 = 2;
@@ -167,6 +172,49 @@ fn name_from(v: &Value) -> Result<String, Refused> {
 /// or has a bad field is an error.
 pub fn read(dir: &Path) -> Result<File> {
     File::parse(&super::read_object(&super::file_in(dir))?)
+}
+
+/// The `network` key: whether another computer may reach the runner's own settings page, and the scrypt hash of the
+/// password it signs in with. Off, with no password, when the key is missing. A key that isn't an object, or a file
+/// that can't be read, is an error (the page then stays shut: fail closed).
+pub fn network(dir: &Path) -> Result<NetworkAccess> {
+    match super::read_object(&super::file_in(dir))?.get("network") {
+        None | Some(Value::Null) => Ok(NetworkAccess::default()),
+        Some(v) => NetworkAccess::from_value(v).ok_or_else(|| anyhow::anyhow!("network must be an object.")),
+    }
+}
+
+/// Sets the sign-in password: at least `MIN_PASSWORD_LEN` characters, kept only as its scrypt hash. Whether network
+/// access is on is left as it was.
+pub fn set_password(dir: &Path, password: &str) -> Result<(), Refused> {
+    if password.encode_utf16().count() < MIN_PASSWORD_LEN {
+        return Err(Refused(format!(
+            "A password needs at least {MIN_PASSWORD_LEN} characters."
+        )));
+    }
+    let hash = crate::password::hash_password(password);
+    write_network(dir, |access| access.password_hash = Some(hash))
+}
+
+/// Turns network access on or off, keeping the hash either way. On needs a password to have been set.
+pub fn set_network(dir: &Path, on: bool) -> Result<(), Refused> {
+    let has_password = network(dir).is_ok_and(|a| a.password_hash.is_some());
+    if on && !has_password {
+        return Err(Refused(
+            "Network access needs a password first: run `retaskable-ci set-password`.".into(),
+        ));
+    }
+    write_network(dir, |access| access.enabled = on)
+}
+
+fn write_network(dir: &Path, change: impl FnOnce(&mut NetworkAccess)) -> Result<(), Refused> {
+    let refused = |e: anyhow::Error| Refused(format!("Couldn't save the CI runner's settings: {e:#}"));
+    let mut access = network(dir).map_err(refused)?;
+    change(&mut access);
+    super::patch(&super::file_in(dir), |obj| {
+        obj.insert("network".into(), access.to_value());
+    })
+    .map_err(refused)
 }
 
 /// What the runner uses: each field from the environment, else the file, else the default.
