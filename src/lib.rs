@@ -76,6 +76,7 @@ pub mod profile;
 #[cfg(test)]
 mod program_boundaries_tests;
 pub mod program_status;
+pub mod promote;
 pub mod prompt;
 pub mod release;
 pub mod release_check;

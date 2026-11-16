@@ -76,6 +76,9 @@ struct Instruction {
     sha: Value,
     percent: Option<Value>,
     timeout_ms: Option<Value>,
+    /// A person's Deploy to production on the website: whoever pressed it, who must be an admin of the repo.
+    #[serde(default)]
+    by: Option<Value>,
 }
 
 impl Instruction {
@@ -112,6 +115,13 @@ fn result(id: &Value, ok: bool, why: Option<String>, line: Option<String>) -> Va
 
 fn failed(id: &Value, why: &str) -> Value {
     result(id, false, Some(why.to_string()), None)
+}
+
+/// What an instruction runs: the project's own command, or the promote.
+enum Job {
+    Command(String, Duration),
+    /// The commit and, for the website's own, who pressed it.
+    Promote(String, Option<String>),
 }
 
 /// One project's rollout loop.
@@ -300,16 +310,27 @@ impl<D: Deps> Rollout<D> {
             }
             // Production only: the merge is the release and its build is uploaded already.
             "promote" if self.staging.is_none() => return self.finish(i, result(&i.id, true, None, None)),
-            "promote" => return self.finish(i, failed(&i.id, "this computer can't promote yet")),
+            "promote" => String::new(),
             other => return self.finish(i, failed(&i.id, &format!("unknown instruction {other}"))),
         };
         if name == "health" {
             self.last_health = Some(Instant::now());
         }
-        let Some(out) = self.run_beating(command, i.timeout()).await else {
+        let by = i.by.as_ref().and_then(Value::as_str).filter(|b| !b.is_empty());
+        let job = match name {
+            "promote" => Job::Promote(i.sha.as_str().unwrap_or_default().to_string(), by.map(String::from)),
+            _ => Job::Command(command, i.timeout()),
+        };
+        let Some(out) = self.run_beating(job).await else {
             return WAIT;
         };
-        let r = if out.timed_out {
+        let r = if name == "promote" {
+            // The refusal's own words, whole (`cut(errorMessage(err), 300)`), not the last line of them.
+            match out.code {
+                0 => result(&i.id, true, None, None),
+                _ => failed(&i.id, &crate::text::truncate(out.out.trim(), WHY_MAX)),
+            }
+        } else if out.timed_out {
             failed(&i.id, "timed out")
         } else if out.code == 0 {
             let line = (name == "health")
@@ -338,10 +359,23 @@ impl<D: Deps> Rollout<D> {
 
     /// Runs the command; while it takes longer than 10 seconds beats every 15. `None` when a beat said this
     /// computer no longer runs the rollout: the result is dropped.
-    async fn run_beating(&mut self, command: String, timeout: Duration) -> Option<Cmd> {
+    async fn run_beating(&mut self, job: Job) -> Option<Cmd> {
         let epoch = self.epoch.clone().unwrap_or(Value::Null);
         let out = {
-            let run = self.deps.run(command, timeout);
+            let run = async {
+                match job {
+                    Job::Command(command, timeout) => self.deps.run(command, timeout).await,
+                    // A promote that stopped is code 1 with its words; the push itself is never cut by this.
+                    Job::Promote(sha, by) => match self.deps.promote(sha, by).await {
+                        Ok(()) => Cmd::default(),
+                        Err(why) => Cmd {
+                            code: 1,
+                            out: why,
+                            timed_out: false,
+                        },
+                    },
+                }
+            };
             tokio::pin!(run);
             let mut next = BEAT_AFTER;
             loop {

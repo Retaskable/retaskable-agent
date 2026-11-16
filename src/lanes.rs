@@ -411,6 +411,12 @@ pub(crate) fn fetch_latest(repo_path: &Path) -> Result<bool> {
     fetch_latest_with(&crate::git_bin::command, repo_path)
 }
 
+/// [`fetch_latest`] without the freshness skip, for a decision that must read origin as it is now (a promote's push).
+pub(crate) fn fetch_now(repo_path: &Path) -> Result<()> {
+    let _guard = lock(&GIT_LOCK);
+    fetch_with(&crate::git_bin::command, repo_path, false).map(|_| ())
+}
+
 /// [`fetch_latest`] starting git with `git` (a test passes plain `git`).
 pub(crate) fn fetch_latest_with(git: &dyn Fn(&Path) -> Command, repo_path: &Path) -> Result<bool> {
     let _guard = lock(&GIT_LOCK);
