@@ -5,6 +5,9 @@
 use crate::text::truncate;
 
 pub mod claude_sessions;
+pub mod helpers;
+pub mod history;
+pub mod work;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -26,6 +29,8 @@ pub const SHIPPED_STATUS: &str = "in_review";
 pub const IDLE: Duration = Duration::from_secs(30 * 60);
 /// How many ids `expert-<slug>`, `expert-<slug>-2`, ... a new session tries before giving up.
 pub const ID_TRIES: u32 = 20;
+/// Why a session can't have a lane: the computer has one added lane (`placeExpert`).
+pub const ADDED_LANE_TAKEN: &str = "Another expert session has this computer's added lane: park or finish it first.";
 /// What a turn's answer is cut to.
 const ANSWER_MAX: usize = 20_000;
 /// The most suggested answers a question shows.
@@ -171,6 +176,19 @@ pub fn schema() -> Value {
                 },
                 "required": ["question", "options"],
                 "additionalProperties": false
+            },
+            "helpers": {
+                "type": "array",
+                "description": "Only for work that can run beside the person's next steps: each a task for a helper Retaskable starts as your turn ends. Its result comes back to you as a message.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string" },
+                        "lane": { "type": "boolean", "description": "True to give it a lane of its own, on a branch from your last commit, where it changes files and commits; you merge its branch in if you want it. Otherwise it only reads, in your lane." }
+                    },
+                    "required": ["task"],
+                    "additionalProperties": false
+                }
             }
         },
         "required": ["summary"],
@@ -202,6 +220,8 @@ impl Question {
 pub struct Reply {
     pub summary: String,
     pub ask: Option<Question>,
+    /// The helpers it asked for, to start as its turn ends.
+    pub helpers: Vec<helpers::Asked>,
 }
 
 /// Reads a turn's structured result (`askOf` and the summary of `settle`): the summary cut to size, and a question
@@ -231,7 +251,11 @@ pub fn parse(structured: &Value) -> Reply {
             options,
         })
     });
-    Reply { summary, ask }
+    Reply {
+        summary,
+        ask,
+        helpers: helpers::asked(structured),
+    }
 }
 
 /// The line the item's history gets for a turn's answer (`settle`): the summary, then what it asks.

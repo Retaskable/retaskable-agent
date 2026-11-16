@@ -649,3 +649,19 @@ fn store_pause_states_compare_by_content() {
     b.set("p", StorePause::NotPaused);
     assert_eq!(a, b);
 }
+
+#[test]
+fn the_snapshot_names_the_added_lane_only_while_a_session_could_take_it() {
+    let v = reporting_view();
+    v.live.register("a");
+    let added = |v: &AgentView| v.snapshot("a", Path::new("."))["state"].get("addedLane").cloned();
+    assert_eq!(
+        added(&v),
+        None,
+        "not known yet, so the sheet says another session has it"
+    );
+    v.live.set_added_lane(Some(4));
+    assert_eq!(added(&v), Some(json!(4)));
+    v.live.set_added_lane(None);
+    assert_eq!(added(&v), None, "a session holds it");
+}

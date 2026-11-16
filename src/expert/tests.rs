@@ -41,7 +41,8 @@ fn a_result_is_a_summary_and_a_question_only_when_it_has_words() {
         r,
         Reply {
             summary: "Done.".into(),
-            ask: None
+            ask: None,
+            helpers: vec![],
         }
     );
     let r = parse(&json!({
@@ -58,7 +59,8 @@ fn a_result_is_a_summary_and_a_question_only_when_it_has_words() {
     assert_eq!(
         answer_line(&Reply {
             summary: "Which?".into(),
-            ask: Some(q)
+            ask: Some(q),
+            helpers: vec![],
         }),
         "Which?\nAsks: Pick"
     );

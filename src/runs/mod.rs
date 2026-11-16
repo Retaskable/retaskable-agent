@@ -8,7 +8,10 @@ mod locks;
 mod outside;
 mod owed;
 mod wind;
-pub use build_end::{Pushed, change_json, end_from_answer, limited_end, needs_push, questions_json};
+pub use build_end::{
+    Pushed, change_json, end_from_answer, limited_end, needs_push, person_steps_end, person_steps_reason,
+    questions_end, questions_json,
+};
 pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING, lock_ceiling};
 pub use outside::is_outside;
 pub use owed::{OWED_KEPT_SECS, OwedEnd};

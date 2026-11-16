@@ -31,7 +31,7 @@ use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
-use crate::runs::{Pushed, end_from_answer, needs_push};
+use crate::runs::{Pushed, end_from_answer, needs_push, person_steps_end};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
@@ -276,7 +276,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         _ => (
             match sync_of(&job).filter(|c| !c.sync_sha.is_empty()) {
                 Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
-                None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
+                None => piece_branch_name(&job.piece),
             },
             format!("origin/{}", job.project.base_branch),
         ),
@@ -284,8 +284,11 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     let cwd = match prepare(&job, &branch, start_point).await {
         Ok(cwd) => cwd,
         Err(e) => {
+            // `failed`, as the TypeScript agent ends a run whose lane threw: the store counts it against the
+            // piece, so it waits for a person after a few. `interrupted` put it back at once, and this computer
+            // took it again every pass.
             tracing::warn!("{}: preparing the lane: {e:#}", job.token);
-            return (RunOutcome::Interrupted, json!({}));
+            return failed(format!("Couldn't prepare the lane: {e:#}"));
         }
     };
     let (outcome, result) = match build(&job, &cwd, &branch).await {
@@ -295,7 +298,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
     let Some(chore) = chore_of(&job.piece) else {
-        return (outcome, result);
+        return person_steps_end(outcome, result);
     };
     let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
     let outcome = chore_end(chore.kind, outcome, &result);
@@ -307,7 +310,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
             tracing::warn!("{}: closing the chore's change: {e:#}", job.token);
         }
     }
-    (outcome, result)
+    person_steps_end(outcome, result)
 }
 
 async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf> {
@@ -400,6 +403,7 @@ async fn session(
         path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&job.piece))
             .join(format!("{id}-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
+        append: false,
     };
     let engine = engine_of(Some(job.engine))?;
     let quiet = watch_for(project, job.engine);

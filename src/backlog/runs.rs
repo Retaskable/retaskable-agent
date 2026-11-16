@@ -220,6 +220,34 @@ impl RunOutcome {
     }
 }
 
+/// The most characters of a `failed` run's `why` the store takes (`str(result, "why", 300)` in `run_done`).
+pub const WHY_MAX: usize = 300;
+
+/// The `run_done` arguments for a run's end: the outcome's wire word, and the result with the fields the store reads
+/// beside what the run made (`why` for `failed`, cut as the TypeScript agent's `failed` does; `engine` and `until`,
+/// in epoch milliseconds, for `limited`).
+pub fn run_done_args(run_token: &str, outcome: &RunOutcome, result: Value) -> Value {
+    let mut result = result;
+    let extra = match outcome {
+        RunOutcome::Failed(why) => Some(json!({ "why": why.chars().take(WHY_MAX).collect::<String>() })),
+        RunOutcome::Limited { engine, until } => {
+            let mut o = json!({ "engine": engine });
+            if let Some(until) = until {
+                o["until"] = json!(until.timestamp_millis().max(0));
+            }
+            Some(o)
+        }
+        _ => None,
+    };
+    if let Some(Value::Object(extra)) = extra {
+        match &mut result {
+            Value::Object(o) => o.extend(extra),
+            _ => result = Value::Object(extra),
+        }
+    }
+    json!({ "token": run_token, "outcome": outcome.wire(), "result": result })
+}
+
 /// What `lock_take` answers: its token, or who else holds the lock.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LockTake {
@@ -269,6 +297,35 @@ fn plan_brief(mut value: Value) -> Value {
     value
 }
 
+/// A piece has no `id` of its own: the store sends its number `n` and the item as `item` (`start` in
+/// `shared/backlogPieceOps.ts`). The agent knows the piece by its record's id, `<item>-piece-<n>`
+/// (`PieceRuns.recordId` in `pieceRuns.ts`), put in as the piece's `id`; the item's title goes in as `itemTitle`, for
+/// the branch's name. A piece that has an `id` already is left as it is.
+fn piece_record(mut value: Value) -> Value {
+    let Some(run) = value.as_object_mut() else {
+        return value;
+    };
+    let item = run.get("item").and_then(Value::as_object);
+    let item_id = item
+        .and_then(|i| i.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let item_title = item.and_then(|i| i.get("title")).cloned();
+    let Some(Value::Object(piece)) = run.get_mut("piece") else {
+        return value;
+    };
+    if piece.contains_key("id") {
+        return value;
+    }
+    if let (Some(item), Some(n)) = (item_id, piece.get("n").and_then(Value::as_u64)) {
+        piece.insert("id".into(), Value::String(format!("{item}-piece-{n}")));
+        if let Some(title) = item_title {
+            piece.insert("itemTitle".into(), title);
+        }
+    }
+    value
+}
+
 impl Client {
     /// `run_take { agent, kinds }` or `{ agent, piece }`. A `null` value is `Nothing`.
     pub async fn run_take(
@@ -299,7 +356,7 @@ impl Client {
                     retry_ms: 60_000,
                 }),
             )),
-            Some(value) => serde_json::from_value(plan_brief(value))
+            Some(value) => serde_json::from_value(piece_record(plan_brief(value)))
                 .map(|run| RunTakeAnswer::Run(Box::new(run)))
                 .map_err(|e| bad(format!("couldn't read the run it sent: {e}"))),
         }
@@ -340,25 +397,7 @@ impl Client {
         outcome: &RunOutcome,
         result: Value,
     ) -> Result<(), RunDoneError> {
-        let mut result = result;
-        let extra = match outcome {
-            RunOutcome::Failed(why) => Some(json!({ "why": why })),
-            RunOutcome::Limited { engine, until } => {
-                let mut o = json!({ "engine": engine });
-                if let Some(until) = until {
-                    o["until"] = json!(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-                }
-                Some(o)
-            }
-            _ => None,
-        };
-        if let Some(Value::Object(extra)) = extra {
-            match &mut result {
-                Value::Object(o) => o.extend(extra),
-                _ => result = Value::Object(extra),
-            }
-        }
-        let args = json!({ "token": run_token, "outcome": outcome.wire(), "result": result });
+        let args = run_done_args(run_token, outcome, result);
         match self.send(repo_id, token, "run_done", args).await {
             Ok(_) => Ok(()),
             Err(e) if e.code() == Some("stale_run") => Err(RunDoneError::Stale),

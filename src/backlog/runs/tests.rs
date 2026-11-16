@@ -274,7 +274,7 @@ async fn run_done_limited_sends_engine_and_until_when_known() {
     assert_eq!(seen[0]["args"]["outcome"], "limited");
     assert_eq!(
         seen[0]["args"]["result"],
-        json!({ "engine": "claude", "until": "2026-01-01T01:00:00.000Z" })
+        json!({ "engine": "claude", "until": until.timestamp_millis() })
     );
     assert_eq!(seen[1]["args"]["result"], json!({ "engine": "claude" }));
 }
@@ -386,4 +386,24 @@ async fn run_take_answers_nothing_for_a_null_value() {
         .await
         .unwrap();
     assert_eq!(a, RunTakeAnswer::Nothing);
+}
+
+#[tokio::test]
+async fn run_take_names_a_piece_by_its_record_id_since_the_store_sends_no_piece_id() {
+    // `start` in `shared/backlogPieceOps.ts`: the piece is `{ n, title, ... }` with no `id`, the item beside it.
+    let (base, _) = store(
+        200,
+        json!({ "value": { "token": "t3", "kind": "build",
+            "item": { "id": "idea-intent-rows", "title": "Intent rows: take rows", "specRefs": [], "branch": null },
+            "piece": { "n": 2, "title": "Take draft_wanted rows", "what": "W", "doneWhen": "D" } } }),
+    )
+    .await;
+    let a = Client::new(base)
+        .run_take(1, Some("tok"), &agent(&[]), RunWant::Kinds(&[RunKind::Build]))
+        .await
+        .unwrap();
+    let RunTakeAnswer::Run(run) = a else { panic!("{a:?}") };
+    assert_eq!(run.piece.other["id"], "idea-intent-rows-piece-2");
+    assert_eq!(run.piece.other["itemTitle"], "Intent rows: take rows");
+    assert_eq!(run.piece.title, "Take draft_wanted rows");
 }

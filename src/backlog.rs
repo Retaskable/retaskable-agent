@@ -28,6 +28,8 @@ pub mod runs;
 pub mod served;
 pub mod settings;
 pub mod shown;
+#[cfg(test)]
+pub mod store_contract;
 pub mod suggestions;
 pub mod take_over;
 pub mod week;
