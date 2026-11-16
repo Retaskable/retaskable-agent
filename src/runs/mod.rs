@@ -304,10 +304,19 @@ impl Runs {
     }
 
     /// What the store said to a `run_done`: accepted or `stale_run` drops it (a stale run's work is thrown away,
-    /// nothing else happens); any other refusal is due again a minute later.
+    /// nothing else happens); so does `bad_request`, which the same result will never get past (the store loses the
+    /// run after its 3 minutes and hands it out again, and the error is logged); any other refusal, an outage or a
+    /// 5xx is due again a minute later.
     pub fn end_sent(&mut self, token: &str, answer: Result<(), RunDoneError>, now: Instant) {
         match answer {
             Ok(()) | Err(RunDoneError::Stale) => self.ends.retain(|e| e.token != token),
+            Err(RunDoneError::Other(why)) if why.code() == Some("bad_request") => {
+                tracing::error!(
+                    "{}: the store refused the end of run {token} as a bad request and it will never be taken, so it is dropped: {why}",
+                    self.project
+                );
+                self.ends.retain(|e| e.token != token);
+            }
             Err(RunDoneError::Other(why)) => {
                 if let Some(e) = self.ends.iter_mut().find(|e| e.token == token) {
                     e.due = now + END_RETRY;
