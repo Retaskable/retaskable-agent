@@ -249,3 +249,84 @@ async fn a_skipped_sync_main_item_for_mains_head_adds_nothing() {
     assert!(adds(&f).is_empty());
     assert_eq!(remote_branches(&f), "");
 }
+
+/// A fake `gh` that says pull request 7 from team into main merged with the given head, and lists nothing else.
+fn gh_with_merged(root: &Path, head: &str) -> PathBuf {
+    let path = root.join("gh");
+    let log = root.join("gh.log");
+    let script = format!(
+        "#!/bin/sh\necho \"$*\" >> \"{}\"\ncase \"$*\" in \"pr list\"*\"--state merged\"*) echo '[{{\"number\":7,\"mergedAt\":\"2026-02-01T00:00:00Z\",\"headRefOid\":\"{head}\"}}]';; \"pr list\"*) echo '[]';; esac\n",
+        log.display()
+    );
+    write_executable(&path, &script);
+    path
+}
+
+fn origin_sha(f: &Fixture, branch: &str) -> String {
+    let out = git(&f.repo)
+        .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_look_finishes_the_restart_of_a_squashed_dev_branch_once_under_the_lock() {
+    let mut f = fixture(false).await;
+    let (team, main) = (origin_sha(&f, "team"), origin_sha(&f, "main"));
+    let lp = &mut f.rig.machine.projects[0];
+    lp.project.github_repo = "o/r".into();
+    lp.run_loop.main_sync =
+        crate::orchestrator::driver::main_sync::State::with_gh(gh_with_merged(f.root.path(), &team));
+    for _ in 0..100 {
+        let m = &mut f.rig.machine;
+        m.projects[0].run_loop.main_sync.look_again();
+        let shared = Shared {
+            links: &m.links,
+            local: &m.local,
+            claim_paused_until: &mut None,
+            claude_signed_out_until: &mut None,
+            engine_limits: &mut Default::default(),
+            stopping: false,
+        };
+        m.projects[0]
+            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if origin_sha(&f, "team") == main && !f.script.lock().unwrap().args("lock_drop").is_empty() {
+            break;
+        }
+    }
+    assert_eq!(origin_sha(&f, "team"), main, "the dev branch starts again from main");
+    assert_eq!(origin_sha(&f, "main"), main, "main is never written");
+    {
+        let s = f.script.lock().unwrap();
+        assert_eq!(s.args("lock_take")[0]["name"], "sync_main-team");
+        assert_eq!(s.args("lock_drop").len(), 1);
+        assert!(s.args("add").is_empty(), "that pass syncs nothing");
+    }
+    // Further looks find it restarted: no more lock, no more push.
+    let takes = f.script.lock().unwrap().args("lock_take").len();
+    for _ in 0..3 {
+        let m = &mut f.rig.machine;
+        m.projects[0].run_loop.main_sync.look_again();
+        let shared = Shared {
+            links: &m.links,
+            local: &m.local,
+            claim_paused_until: &mut None,
+            claude_signed_out_until: &mut None,
+            engine_limits: &mut Default::default(),
+            stopping: false,
+        };
+        m.projects[0]
+            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
+            .await;
+    }
+    assert_eq!(f.script.lock().unwrap().args("lock_take").len(), takes);
+    assert_eq!(origin_sha(&f, "team"), main);
+}

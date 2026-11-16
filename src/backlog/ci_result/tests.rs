@@ -15,6 +15,7 @@ fn facts() -> CiFacts {
             what: String::new(),
             logs: vec![],
             ended_at: None,
+            nothing_reported: false,
         },
         pending_since: None,
         red_now: 0,
@@ -45,6 +46,7 @@ fn a_red_head_sends_its_checks_cut_to_the_limits() {
         what: "w".repeat(5000),
         logs: (0..12).map(|i| (i % 2 == 0).then(|| "l".repeat(4500))).collect(),
         ended_at: Some(99),
+        nothing_reported: false,
     };
     let v = serde_json::to_value(&f).unwrap();
     assert_eq!(v["title"].as_str().unwrap().chars().count(), 200);
@@ -122,7 +124,8 @@ fn next_reads_each_instruction() {
             hung: true
         }
     );
-    assert!(serde_json::from_value::<CiNext>(json!({ "do": "rebase" })).is_err());
+    // A `do` it doesn't know is not an error: a newer store may say one.
+    assert_eq!(next(json!({ "do": "rebase" })), CiNext::Unknown);
 }
 
 #[tokio::test]
