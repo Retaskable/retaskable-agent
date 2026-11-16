@@ -21,6 +21,17 @@ const ALLOWED: [&str; 12] = [
     "GET /api/profile",
 ];
 
+/// What the CI runner's own port (`retaskable-ci`, `agent_ci/serve.rs`) serves, on a computer with no code agent: the
+/// health check, its trimmed page, signing in and the programs panel. None of the code agent's own settings or its
+/// restart.
+const CI_ALLOWED: [&str; 5] = [
+    "GET /api/health",
+    "GET /settings",
+    "POST /api/settings/session",
+    "GET /api/settings/programs",
+    "POST /api/settings/programs/{program}",
+];
+
 /// The one route that makes the code agent itself do something: it exits so its supervisor starts it again, to apply a
 /// saved port. It acts on the process serving the page and on nothing else, and it is not new. No route may do more.
 const SELF_RESTART: &str = "POST /api/settings/restart";
@@ -81,16 +92,32 @@ fn routes_in(text: &str) -> Vec<String> {
     found
 }
 
-fn all_routes() -> Vec<String> {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = vec![src.join("api.rs")];
-    sources(&src.join("settings_server"), &mut files);
+fn routes_of(files: &[PathBuf]) -> Vec<String> {
     let mut routes: Vec<String> = files
         .iter()
         .flat_map(|f| routes_in(&std::fs::read_to_string(f).unwrap()))
         .collect();
     routes.sort();
+    routes.dedup();
     routes
+}
+
+fn all_routes() -> Vec<String> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src.join("api.rs"), src.join("bin").join("ci.rs")];
+    sources(&src.join("settings_server"), &mut files);
+    sources(&src.join("page_host"), &mut files);
+    sources(&src.join("agent_ci"), &mut files);
+    routes_of(&files)
+}
+
+/// The CI runner's routes: its own files and the shared page host's, and nothing of the code agent's.
+fn ci_routes() -> Vec<String> {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src.join("bin").join("ci.rs")];
+    sources(&src.join("page_host"), &mut files);
+    sources(&src.join("agent_ci"), &mut files);
+    routes_of(&files)
 }
 
 #[test]
@@ -106,8 +133,24 @@ fn the_port_serves_only_the_health_check_and_the_settings_page() {
 }
 
 #[test]
+fn the_ci_runners_port_serves_only_its_page_sign_in_the_programs_panel_and_health() {
+    let mut want: Vec<String> = CI_ALLOWED.iter().map(|s| s.to_string()).collect();
+    want.sort();
+    assert_eq!(
+        ci_routes(),
+        want,
+        "a route was added to the CI runner's port: it serves only its settings page and GET /api/health, never a \
+         command (docs/specs/programs.md, agent-ci.md section 3.9)."
+    );
+    assert!(
+        CI_ALLOWED.iter().all(|r| ALLOWED.contains(r)),
+        "the CI runner's routes are a subset of the allowlist"
+    );
+}
+
+#[test]
 fn no_route_is_named_like_a_command() {
-    for route in ALLOWED.iter().filter(|r| **r != SELF_RESTART) {
+    for route in ALLOWED.iter().chain(&CI_ALLOWED).filter(|r| **r != SELF_RESTART) {
         let path = route.split_once(' ').unwrap().1;
         for word in COMMAND_WORDS {
             assert!(

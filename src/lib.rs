@@ -66,6 +66,7 @@ mod no_flags;
 pub mod notify;
 pub mod orchestrator;
 pub mod package;
+pub mod page_host;
 pub mod password;
 pub mod paths;
 pub mod phone;
