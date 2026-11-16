@@ -400,6 +400,7 @@ async fn session(
         path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&job.piece))
             .join(format!("{id}-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
+        append: false,
     };
     let engine = engine_of(Some(job.engine))?;
     let quiet = watch_for(project, job.engine);

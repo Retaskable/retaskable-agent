@@ -45,6 +45,10 @@ pub struct TranscriptSink {
     pub path: PathBuf,
     /// The implementer's lane, when this session has one (`started_on`'s `lane`).
     pub lane: Option<u32>,
+    /// Carry on in the file when the session is resumed (`flags: "a"` in `runner.ts`): each run's meta line starts
+    /// its part, which is how an expert session's earlier turns are read back (`expert::history`). Any other start
+    /// replaces the file, as does a resumed one without this.
+    pub append: bool,
 }
 
 /// The transcript's own header line, following `transcripts.rs`'s `started_on`/`read_transcripts`:
@@ -70,7 +74,12 @@ fn open_sink(sink: &TranscriptSink, spec: &SessionSpec) -> Result<std::fs::File>
     if let Some(parent) = sink.path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut file = std::fs::File::create(&sink.path).with_context(|| format!("creating {}", sink.path.display()))?;
+    let mut file = if sink.append && matches!(spec.start, super::engine::SessionStart::Resume(_)) {
+        std::fs::OpenOptions::new().create(true).append(true).open(&sink.path)
+    } else {
+        std::fs::File::create(&sink.path)
+    }
+    .with_context(|| format!("creating {}", sink.path.display()))?;
     use std::io::Write as _;
     writeln!(file, "{}", meta_line(spec, sink.lane)).context("writing the transcript's meta line")?;
     Ok(file)

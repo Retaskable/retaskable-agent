@@ -67,6 +67,7 @@ impl ClaudeStarter {
         let sink = TranscriptSink {
             path: paths::run_dir(&self.data_dir, project, item).join(format!("{session_id}.jsonl")),
             lane,
+            append: false,
         };
         let running = self.running.clone();
         running.fetch_add(1, Ordering::SeqCst);

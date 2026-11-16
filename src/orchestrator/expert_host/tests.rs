@@ -245,3 +245,36 @@ async fn a_turn_that_ends_at_the_usage_limit_is_told_apart_from_one_that_failed(
         r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"it broke","session_id":"s"}"#;
     assert_eq!(run_stub_turn(failed).await, TurnEnd::Failed("it broke".into()));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn each_resumed_turn_adds_its_meta_line_to_the_sessions_run_file() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let project = project_in(root.path(), &repo);
+    let out = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"summary":"ok"},"session_id":"sess-9"}"#;
+    let env = crate::test_support::stub_engines(root.path(), out, "", &[]);
+    let host = ClaudeExperts::new(root.path().join("data"), env, Default::default());
+    for n in 0..2 {
+        let end = host
+            .turn(ExpertJob {
+                project: project.clone(),
+                item: "expert-x".into(),
+                branch: "retaskable/expert-x-x".into(),
+                lane: 1,
+                session_id: Some("sess-9".into()),
+                message: format!("turn {n}"),
+                pictures: Default::default(),
+                prepare: n == 0,
+                from_branch: false,
+                stop: Arc::new(tokio::sync::Notify::new()),
+                sessions: Default::default(),
+            })
+            .await;
+        assert!(matches!(end, TurnEnd::Done { .. }), "{end:?}");
+    }
+    let file = paths::run_dir(&root.path().join("data"), &project.id_or_derived(), "expert-x").join("sess-9.jsonl");
+    let turns = crate::expert::history::read_turns(&file);
+    assert_eq!(turns.len(), 2, "both turns are there to read back");
+    assert!(turns.iter().all(|t| t.events.len() == 1), "{turns:?}");
+}

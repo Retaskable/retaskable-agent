@@ -467,6 +467,7 @@ async fn attempt(
     let sink = TranscriptSink {
         path: paths::run_dir(data_dir, project_id, &item.id).join(name),
         lane: Some(*lane),
+        append: false,
     };
     let runner = engine_of(Some(placed.engine))?;
     let (runner, bin, id, sink) = (runner.as_ref(), &placed.bin, session_id, &sink);

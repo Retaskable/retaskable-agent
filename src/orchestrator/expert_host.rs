@@ -112,6 +112,7 @@ async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
     let sink = TranscriptSink {
         path: paths::run_dir(&host.data_dir, &project_id, &job.item).join(format!("{id}.jsonl")),
         lane: Some(job.lane),
+        append: true,
     };
     let engine = engine_of(Some(EngineId::Claude))?;
     let quiet = watch_for(project, EngineId::Claude);
@@ -200,6 +201,7 @@ async fn run_helper(host: &ClaudeExperts, job: HelperJob) -> Result<Ended> {
     let sink = TranscriptSink {
         path: paths::run_dir(&host.data_dir, &project_id, &job.item).join(format!("{id}.jsonl")),
         lane: Some(job.lane),
+        append: false,
     };
     let engine = engine_of(Some(EngineId::Claude))?;
     let quiet = watch_for(&project, EngineId::Claude);
