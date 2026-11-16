@@ -9,6 +9,9 @@ mod live;
 mod promote;
 #[cfg(all(test, unix))]
 mod promote_tests;
+mod testflight;
+#[cfg(test)]
+mod testflight_tests;
 #[cfg(test)]
 mod tests;
 

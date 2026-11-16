@@ -53,7 +53,7 @@ pub(super) async fn permissions(program: &Path, dir: &Path, repo: &str) -> Resul
 }
 
 /// Someone's permission on the repo: `admin`, `write`, `read` or `none`.
-pub(super) async fn permission_of(program: &Path, dir: &Path, repo: &str, login: &str) -> Result<String, String> {
+pub(crate) async fn permission_of(program: &Path, dir: &Path, repo: &str, login: &str) -> Result<String, String> {
     let endpoint = format!("repos/{repo}/collaborators/{login}/permission");
     gh(
         program,
@@ -65,7 +65,7 @@ pub(super) async fn permission_of(program: &Path, dir: &Path, repo: &str, login:
 }
 
 /// The login `gh` is signed in as (`gh api user`).
-pub(super) async fn login(program: &Path, dir: &Path) -> Result<String, String> {
+pub(crate) async fn login(program: &Path, dir: &Path) -> Result<String, String> {
     gh(
         program,
         dir,

@@ -197,3 +197,58 @@ async fn every_holder_of_one_file_shares_one_queue() {
     a.add("deploy", row("c1"));
     assert_eq!(b.pending().len(), 1);
 }
+
+fn testflight_row(n: u32) -> Map<String, Value> {
+    json!({ "at": "2023-11-14T22:13:20.000Z", "sha": "abc", "buildNumber": n.to_string(), "login": "ann",
+            "via": "site", "environment": "production", "result": "submitted" })
+    .as_object()
+    .unwrap()
+    .clone()
+}
+
+/// A `testflight.log` of the rows, as the build writes it.
+fn write_testflight_log(dir: &Path, rows: &[Map<String, Value>]) {
+    let text: String = rows.iter().map(|r| serde_json::to_string(r).unwrap() + "\n").collect();
+    std::fs::write(dir.join(crate::testflight::LOG_FILE), text).unwrap();
+}
+
+#[tokio::test]
+async fn a_testflight_row_leaves_testflight_log_once_the_store_has_answered_it_and_not_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(FILE);
+    let (one, two) = (testflight_row(1), testflight_row(2));
+    write_testflight_log(dir.path(), &[one.clone(), two.clone()]);
+    let log = DeployLog::open(&file);
+    log.add("testflight", one);
+    // Down: the line stays in the file, as does the row in the queue.
+    log.flush(&Client::new("http://127.0.0.1:1"), 5, "tok", 0).await;
+    let kept = std::fs::read_to_string(dir.path().join(crate::testflight::LOG_FILE)).unwrap();
+    assert_eq!(kept.lines().count(), 2);
+    let (base, _seen) = store(&file, 200, None).await;
+    log.flush(&Client::new(&base), 5, "tok", 0).await;
+    let left = std::fs::read_to_string(dir.path().join(crate::testflight::LOG_FILE)).unwrap();
+    assert_eq!(
+        left,
+        serde_json::to_string(&two).unwrap() + "\n",
+        "only the answered line went"
+    );
+    // The last line to go takes the file with it; a deploy row never touches it.
+    log.add("deploy", row("c1"));
+    log.add("testflight", two);
+    log.flush(&Client::new(&base), 5, "tok", 0).await;
+    assert!(!dir.path().join(crate::testflight::LOG_FILE).exists());
+}
+
+#[tokio::test]
+async fn a_testflight_row_the_store_refuses_as_a_bad_request_is_pruned_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join(FILE);
+    let one = testflight_row(1);
+    write_testflight_log(dir.path(), std::slice::from_ref(&one));
+    let log = DeployLog::open(&file);
+    log.add("testflight", one);
+    let (base, _seen) = store(&file, 400, Some("bad_request")).await;
+    log.flush(&Client::new(&base), 5, "tok", 0).await;
+    assert!(log.pending().is_empty());
+    assert!(!dir.path().join(crate::testflight::LOG_FILE).exists());
+}

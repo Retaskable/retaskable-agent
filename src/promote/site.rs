@@ -8,7 +8,7 @@ use super::{Promoter, Stop, environments_of, host, short};
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `<url><versionPath>`: the address with its trailing slashes dropped and the path (default `/version.json`) after it.
-pub(super) fn version_url(url: &str, version_path: Option<&str>) -> String {
+pub(crate) fn version_url(url: &str, version_path: Option<&str>) -> String {
     let path = version_path
         .map(str::trim)
         .filter(|p| !p.is_empty())
@@ -19,7 +19,7 @@ pub(super) fn version_url(url: &str, version_path: Option<&str>) -> String {
 
 /// Asks a deploy which commit it serves, at its version address: `{ "sha": "<commit>" }`, seven to forty hex digits.
 /// `None` when it doesn't say, answers badly, or doesn't answer in 15 seconds.
-pub(super) async fn served_sha(url: &str) -> Option<String> {
+pub(crate) async fn served_sha(url: &str) -> Option<String> {
     let res = reqwest::Client::new()
         .get(url)
         .header("cache-control", "no-cache")
@@ -37,7 +37,7 @@ pub(super) async fn served_sha(url: &str) -> Option<String> {
 }
 
 /// `/^[a-z\d][a-z\d-]{0,38}$/i`: a GitHub login, the only thing that goes into the permission address.
-pub(super) fn is_login(s: &str) -> bool {
+pub(crate) fn is_login(s: &str) -> bool {
     let mut bytes = s.bytes();
     bytes.next().is_some_and(|b| b.is_ascii_alphanumeric())
         && s.len() <= 39
