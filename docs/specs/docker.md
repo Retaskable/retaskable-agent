@@ -82,6 +82,8 @@ The agent keeps its secrets (the refresh token of each link, [cloud.md](https://
 
 In this Rust agent, this rule was already built for every machine (`OsStore`, `FileStore`, `os_store_works`, `credential_file_note`, `src/link/credentials.rs`), not added for this container; it probes the same way on Linux and was confirmed to fall back and log the same banner when run in this container, which has neither a Secret Service nor kernel-keyring access.
 
+In this Rust agent the tokens saved on the settings page are not in `credentials.json` but ciphertext in the config ([agent-settings.md](agent-settings.md) section 3.3). A container has no OS store to hold the key for them, so set `RETASKABLE_SECRETS_KEY_FILE` (a file in the `work` volume holding a 32-byte key as base64, mode 0600; the first save makes it if it isn't there) or `RETASKABLE_SECRETS_KEY`; with neither, the page says secrets can't be saved. **The key then sits in the same volume as the config**, so protection there is file permissions, the same reach as the trade above.
+
 ## 5. Switching a machine over
 
 1. Build and start it: `docker compose -f docker/agent/compose.yaml up -d --build`, with the section 3.3 variables set.

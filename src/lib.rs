@@ -99,6 +99,7 @@ pub mod runs;
 pub mod runtime;
 pub mod scan;
 pub mod scouts;
+pub mod secrets;
 pub mod settings_server;
 pub mod setup_check;
 pub mod setup_questions;

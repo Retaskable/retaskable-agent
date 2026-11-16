@@ -547,6 +547,9 @@ impl AgentView {
         if let Some(settings) = self.settings.json().await {
             hello["settings"] = settings;
         }
+        if let Some(computer) = self.settings.computer() {
+            hello["computer"] = computer;
+        }
         if let Some(checks) = self.checks.latest() {
             hello["checks"] = checks.to_json();
         }
