@@ -128,6 +128,16 @@ async fn run_beat_keeps_stop_apart_from_ok() {
 }
 
 #[tokio::test]
+async fn run_beat_reads_the_runs_the_store_wraps_its_verdicts_in() {
+    let (base, _) = store(200, json!({ "value": { "runs": { "a": "ok", "b": "stop" } } })).await;
+    let v = Client::new(base)
+        .run_beat(1, None, &["a".into(), "b".into()])
+        .await
+        .unwrap();
+    assert_eq!((v["a"], v["b"]), (BeatVerdict::Ok, BeatVerdict::Stop));
+}
+
+#[tokio::test]
 async fn run_done_sends_outcome_and_result() {
     let (base, seen) = store(200, json!({ "value": null })).await;
     let c = Client::new(base);
