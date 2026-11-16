@@ -106,6 +106,7 @@ pub(crate) fn lane_free_request(
             token: String::new(),
             locks: RunLocks::default(),
             fall: None,
+            risk_profile: None,
         },
     }
 }
