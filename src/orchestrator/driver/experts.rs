@@ -631,12 +631,16 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
     }
 }
 
-/// Fetches the pictures a queued message carries into a folder of their own, named for the row.
+/// Fetches the pictures a queued message carries into a folder of their own, named for the row and made unique by
+/// this process and a count: the temp folder is shared, so another process (or a run of the same row again) must
+/// never be handed this turn's folder, which is removed when the turn ends.
 async fn fetch_pictures(cx: &Cx<'_>, m: &Queued) -> Result<Pictures, String> {
+    static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name: String = (m.id.chars())
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
-    let dir = pictures::folder().join(format!("expert-{name}"));
+    let n = TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = pictures::folder().join(format!("expert-{}-{n}-{name}", std::process::id()));
     pictures::fetch_own(cx.client, cx.repo, Some(cx.token), &m.picture_ids, &dir).await
 }
 
