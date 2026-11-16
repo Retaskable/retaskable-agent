@@ -969,3 +969,23 @@ async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resum
         assert!(starter.started().contains(&"b".to_string()), "resumed takes: own={own}");
     }
 }
+
+#[tokio::test]
+async fn a_restart_keeps_a_paused_project_paused_so_it_sends_no_run_take() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("paused.json");
+    let id = {
+        let (rig, _) = runs_machine(None).await;
+        rig.machine.projects[0].id.clone()
+    };
+    crate::view::PauseState::persisted(&file).set(&id, Some("Paused at its first start".into()));
+    // The restarted machine reads the pause back before its first pass.
+    let starter = Arc::new(FakeRuns::new(&[RunKind::Build]));
+    let (mut rig, script) = runs_machine(Some(starter.clone())).await;
+    rig.machine.links.paused = crate::view::PauseState::persisted(&file);
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    rig.machine.run_passes().await;
+    rig.machine.run_passes().await;
+    assert!(script.lock().unwrap().args("run_take").is_empty());
+    assert!(starter.started().is_empty());
+}
