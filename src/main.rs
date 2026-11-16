@@ -645,7 +645,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     }
     // docker.md section 7: in a container there is no tray or browser to open the page with, so each start prints a
     // one-time sign-in link (good once, for 5 minutes), as the CI runner's `serve` does. `docker restart` prints a new one.
-    if retaskable_agent::page_host::docker_trust::enabled(&env) {
+    if retaskable_agent::page_host::docker_trust::enabled(env) {
         println!("Settings page, open it once with: {}", settings.settings_link());
     }
     let quit_now = Arc::new(tokio::sync::Notify::new());
