@@ -478,8 +478,9 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     let html = String::from_utf8(body.to_vec()).unwrap();
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
     assert!(html.contains("RT.programs = { load: load }"));
+    assert!(html.contains("window.RT = { csrf: null }") && html.contains("--accent:"));
     assert!(!html.contains("{{"), "every placeholder is filled");
-    assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 2);
+    assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 3);
     // Programs are shown as text, never as markup, and nothing in the script calls a program.
     let js = include_str!("../../assets/settings-programs.js");
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML"));

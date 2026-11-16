@@ -91,6 +91,21 @@ pub fn not_found_response() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "Not found" }))).into_response()
 }
 
+/// The shared look, the helpers (`window.RT`) and the programs panel's script, which every page is built from.
+static BASE_CSS: &str = include_str!("../../assets/settings-base.css");
+static RT_JS: &str = include_str!("../../assets/settings-rt.js");
+static PROGRAMS_JS: &str = include_str!("../../assets/settings-programs.js");
+
+/// A page's template with the shared parts put in: `{{BASE_CSS}}` inside its style, `{{RT_JS}}` and `{{PROGRAMS_JS}}`
+/// each inside a script of its own. `{{NONCE}}` is left for each request.
+pub fn assemble(template: &str) -> Arc<str> {
+    template
+        .replace("{{BASE_CSS}}", BASE_CSS)
+        .replace("{{RT_JS}}", RT_JS)
+        .replace("{{PROGRAMS_JS}}", PROGRAMS_JS)
+        .into()
+}
+
 /// The routes every page has, under the Host/Origin envelope and the body limit: `GET /settings` (`html`, with
 /// `{{NONCE}}` where the page's nonce goes), `POST /api/settings/session`, and the programs panel's two.
 pub fn routes(host: Arc<PageHost>, html: Arc<str>) -> Router {

@@ -50,8 +50,6 @@ pub(crate) const AGENT_ENV_VARS: [&str; 8] = [
 ];
 
 static SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
-/// The programs panel and the other programs' settings (`programs.rs`), a second script of the page.
-static PROGRAMS_JS: &str = include_str!("../../assets/settings-programs.js");
 
 /// The settings page's server-side state: one instance shared (behind an `Arc`) by every request.
 pub struct SettingsServer {
@@ -271,7 +269,7 @@ impl SettingsServer {
 /// The settings page's own routes (agent/08-http-api.md), merged into the agent's router
 /// alongside `/api/health`.
 pub fn router(settings: Arc<SettingsServer>) -> Router {
-    let html: Arc<str> = SETTINGS_HTML.replace("{{PROGRAMS_JS}}", PROGRAMS_JS).into();
+    let html = page_host::assemble(SETTINGS_HTML);
     Router::new()
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/settings/status", get(status::get_status))
