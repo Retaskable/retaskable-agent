@@ -308,7 +308,7 @@ async fn a_finished_run_sends_its_end_and_frees_its_lane_and_refusals_are_handle
     pass(&mut rig, &starter, t0).await;
     assert_eq!(rig.machine.pool.held_lanes().count(), 1);
 
-    script.lock().unwrap().done_refused = Some("bad_request");
+    script.lock().unwrap().done_refused = Some("conflict");
     starter.finish("a", RunOutcome::PrOpened);
     pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
     assert_eq!(rig.machine.pool.held_lanes().count(), 0);

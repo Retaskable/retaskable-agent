@@ -98,6 +98,15 @@ async fn an_owed_end_the_store_says_moved_on_is_dropped_and_not_sent_again() {
 
 #[tokio::test]
 async fn a_store_that_answers_with_a_refusal_has_been_reached_so_runs_drop_goes_and_the_end_stays_owed() {
+    refused_after_a_restart("conflict", 1).await;
+}
+
+#[tokio::test]
+async fn a_bad_request_end_kept_by_an_older_build_is_dropped_from_the_file_on_its_first_resend() {
+    refused_after_a_restart("bad_request", 0).await;
+}
+
+async fn refused_after_a_restart(code: &'static str, kept: usize) {
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
     let (rig, script, base) = finished_in_an_outage(&starter, t0).await;
@@ -106,7 +115,7 @@ async fn a_store_that_answers_with_a_refusal_has_been_reached_so_runs_drop_goes_
     {
         let mut s = script.lock().unwrap();
         s.down = false;
-        s.done_refused = Some("bad_request");
+        s.done_refused = Some(code);
     }
     pass(&mut rig, &after, t0 + Duration::from_secs(2)).await;
     assert_eq!(
@@ -116,8 +125,8 @@ async fn a_store_that_answers_with_a_refusal_has_been_reached_so_runs_drop_goes_
     );
     assert_eq!(
         on_disk(&rig).len(),
-        1,
-        "and the refused end is kept for the usual retry"
+        kept,
+        "a refused end is kept only when the store may take it later"
     );
 }
 
@@ -160,4 +169,19 @@ async fn a_merge_turns_owed_result_is_sent_as_merge_result_after_a_restart() {
     assert_eq!(s.args("merge_result").last().unwrap()["token"], "m1");
     drop(s);
     assert!(on_disk(&rig).is_empty());
+}
+
+#[tokio::test]
+async fn a_bad_request_drops_the_end_at_once() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Build]);
+    let t0 = Instant::now();
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    pass(&mut rig, &starter, t0).await;
+    script.lock().unwrap().done_refused = Some("bad_request");
+    starter.finish("a", RunOutcome::PrOpened);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
+    assert_eq!(script.lock().unwrap().args("run_done").len(), 1);
+    pass(&mut rig, &starter, t0 + Duration::from_secs(62)).await;
+    assert_eq!(script.lock().unwrap().args("run_done").len(), 1, "never sent again");
 }
