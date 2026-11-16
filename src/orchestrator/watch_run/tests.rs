@@ -129,10 +129,12 @@ async fn run(dir: &Path, change: Value, max_minutes: u32) -> RunEnd {
     let (request, mut rx) = request(&repo, change, max_minutes);
     let runner = WatchRuns::with(fake_gh(dir), Duration::from_millis(5), Some(Duration::from_millis(1)));
     runner.start(request).unwrap();
-    tokio::time::timeout(Duration::from_secs(20), rx.recv())
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
         .await
         .expect("the run ended")
-        .unwrap()
+        .unwrap();
+    crate::backlog::store_contract::check(RunKind::Watch, &end);
+    end
 }
 
 #[test]
@@ -174,8 +176,13 @@ async fn a_failing_check_ends_red_with_its_name_link_and_log_tail() {
     let end = run(dir.path(), json!("https://github.com/o/r/pull/7"), 120).await;
     assert_eq!(end.outcome, RunOutcome::Red);
     assert_eq!(
-        end.result,
-        json!({ "checks": [{ "name": "build", "link": link, "log": "one\ntwo" }] })
+        end.result["checks"],
+        json!([{ "name": "build", "link": link, "log": "one\ntwo" }])
+    );
+    let what = end.result["what"].as_str().unwrap();
+    assert!(
+        what.contains("build") && what.contains(link) && what.contains("one\ntwo"),
+        "{what}"
     );
 }
 
