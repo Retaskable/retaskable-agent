@@ -32,6 +32,7 @@ pub(crate) fn item(
         pr_url: pr_url.map(ToString::to_string),
         branch: None,
         kind: None,
+        detail: None,
         milestone: milestone.map(ToString::to_string),
         draft_id: None,
         reopened: None,

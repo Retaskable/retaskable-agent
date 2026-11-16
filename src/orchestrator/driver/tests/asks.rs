@@ -97,6 +97,16 @@ pub(super) struct Rows {
     /// The state file to look in when a `complete` arrives, and for each one whether it already listed the call.
     pub(super) state_file: Mutex<Option<std::path::PathBuf>>,
     pub(super) listed_on_disk: Mutex<Vec<bool>>,
+    /// What `revise` answers each call, in order (status and body); an applied revision once it is empty.
+    pub(super) revise_answers: Mutex<Vec<(u16, Value)>>,
+    /// The drafts `draft_claim_next` hands out, one per ask, each with its lease `lease-d`.
+    pub(super) draft_claims: Mutex<Vec<Value>>,
+    /// The item `list { ids }` answers, for a plan that revises one; an empty list when unset.
+    pub(super) item: Mutex<Option<Value>>,
+    /// Whether `list { ids }` (the one item) is refused with a 500, the backlog read staying whole.
+    pub(super) item_refused: AtomicBool,
+    /// What `reopen` answers (`{ reopened: true }` when unset).
+    pub(super) reopen: Mutex<Option<Value>>,
 }
 
 pub(super) type Listed = Arc<Rows>;
@@ -136,6 +146,16 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                             return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
                         }
                     }
+                    if op == "list" && body["args"]["ids"].is_array() && rows.item_refused.load(Ordering::SeqCst) {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": "boom" })),
+                        );
+                    }
+                    if op == "revise" && !rows.revise_answers.lock().unwrap().is_empty() {
+                        let (status, body) = rows.revise_answers.lock().unwrap().remove(0);
+                        return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
+                    }
                     if op == "claim"
                         && let Some((status, body)) = rows.person_claim.lock().unwrap().clone()
                     {
@@ -158,6 +178,19 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         }
                         "merge_enqueue" => json!({}),
                         "merge_result" => json!({ "held": false }),
+                        "list" if body["args"]["ids"].is_array() && rows.item.lock().unwrap().is_some() => {
+                            json!([rows.item.lock().unwrap().clone().unwrap()])
+                        }
+                        "draft_claim_next" if !rows.draft_claims.lock().unwrap().is_empty() => {
+                            json!({ "draft": rows.draft_claims.lock().unwrap().remove(0), "token": "lease-d" })
+                        }
+                        "revise" => json!({ "revised": "applied", "status": "todo" }),
+                        "reopen" => rows
+                            .reopen
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| json!({ "reopened": true })),
                         "list" | "drafts" | "draft_list" => json!([]),
                         "pause_get" => json!({ "paused": null, "log": [] }),
                         "facts_get" => json!({}),

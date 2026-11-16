@@ -18,9 +18,11 @@ use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
+use crate::backlog::revise::Owed;
 use crate::config::ProjectConfig;
 use crate::drafts::DrafterStatus;
 use crate::drafts::land::{deletes_head, pr_number, workflow};
+use crate::drafts::revision::revises_of;
 use crate::engines::{EngineId, Role};
 use crate::view::{DraftCommand, Reply};
 
@@ -35,6 +37,8 @@ pub(super) struct Landed {
     item_ids: Vec<String>,
     asked_by: Option<String>,
     draft_id: String,
+    /// The plan revised an item: what is left of it, for the store's `revise`.
+    revision: Option<Owed>,
 }
 
 /// The presses being carried out, and what merged drafts have yet to tell the store.
@@ -43,9 +47,18 @@ pub(super) struct Landing {
     tasks: Vec<JoinHandle<Option<Landed>>>,
     approved: Vec<String>,
     asked_by: BTreeMap<String, String>,
+    /// Merged plans' revisions the store hasn't taken yet, by plan id (kept in the state file, `revise.rs`).
+    pub(super) revisions: BTreeMap<String, Owed>,
 }
 
 impl Landing {
+    pub(super) fn with_revisions(revisions: BTreeMap<String, Owed>) -> Self {
+        Self {
+            revisions,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn approved(&self) -> Vec<String> {
         self.approved.clone()
     }
@@ -332,10 +345,26 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    // A plan that revises an item gives it back to the queue with what is left (`storeRevision`): the store's draft
+    // says which item and, once the plan was written, what remains.
+    let revision = revises_of(&draft.other).zip(
+        (draft.other.get("revision").and_then(|r| r.get("remaining")))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|r| !r.is_empty()),
+    );
+    let revision = revision.map(|(item, remaining)| Owed {
+        item,
+        remaining: remaining.to_string(),
+        title: draft.titles.first().cloned().unwrap_or_default(),
+        by: text(&taken, "requestedBy").map(String::from),
+        since: 0,
+    });
     Some(Landed {
         item_ids,
         asked_by: text(&taken, "requestedBy").map(String::from),
         draft_id: id,
+        revision,
     })
 }
 
@@ -361,9 +390,14 @@ impl ProjectLoop {
                     }
                 }
                 self.landing.approved.extend(landed.item_ids);
+                if let Some(owed) = landed.revision {
+                    let since = self.now_secs();
+                    self.owe_revision(&landed.draft_id, Owed { since, ..owed });
+                }
                 merged = true;
             }
         }
+        self.send_revisions(shared).await;
         if merged {
             // The merge is fetched already; the headers go now, not on the minute's fetch.
             self.report(shared.links).await;

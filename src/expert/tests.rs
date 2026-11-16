@@ -64,3 +64,28 @@ fn a_result_is_a_summary_and_a_question_only_when_it_has_words() {
     );
     assert_eq!(parse(&json!(null)), Reply::default());
 }
+
+#[test]
+fn a_handoff_request_names_the_branch_and_keeps_the_talk_oldest_first() {
+    let talk = vec!["The person: add charts".to_string(), "Done: charts added".to_string()];
+    let r = handoff_request("Charts", "ada", "retaskable/expert-charts-charts", &talk);
+    assert!(r.starts_with("Charts\n\nThis comes from an expert session ada drove; plan what's left of it as a change to this item. Its work so far is pushed on `retaskable/expert-charts-charts`: build on that branch rather than start again.\n\nThe conversation, oldest first:\n\n"));
+    assert!(r.ends_with("The person: add charts\n\nDone: charts added"));
+}
+
+#[test]
+fn a_long_conversation_is_cut_from_the_oldest_end_to_fit() {
+    let talk = vec!["old ".repeat(6000), "newest words".to_string()];
+    let r = handoff_request("T", "ada", "b", &talk);
+    assert_eq!(r.chars().count(), DRAFT_REQUEST_MAX);
+    assert!(r.contains("\n\n…") && r.ends_with("newest words"));
+}
+
+#[test]
+fn a_handed_session_refuses_messages_in_the_ts_words() {
+    assert_eq!(
+        handed_refusal("draft-1"),
+        "It's handed to the backlog: plan draft-1 revises it. Park it from Finish to drive it again."
+    );
+    assert_eq!(Detail::Handed.as_str(), "expert_handed");
+}

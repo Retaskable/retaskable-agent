@@ -10,6 +10,7 @@ pub(super) fn open_session(cx: &Cx<'_>, ex: &Experts, by: &str, session: &str) -
     (ex.sessions.iter())
         .find(|(id, s)| {
             s.started_by == by
+                && s.detail != Detail::Handed
                 && cx
                     .queue
                     .continued_from(id)

@@ -98,7 +98,15 @@ impl DraftHost for ClaudeDrafts {
             let placed = place(chosen, Role::Drafter, &env, &cursor_models).map_err(anyhow::Error::msg)?;
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
-            let titles = titles_text(&draft.titles, &themes);
+            // A plan that revises an item is told about it after the pieces (card-revisions.md section 3.3).
+            let titles = [
+                titles_text(&draft.titles, &themes),
+                draft.revising.clone().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
             let up = local.ladder_for(chosen == Engine::Claude);
             // A resumed Claude drafter stays on the backend its transcript's first line names (read before the new
             // session rewrites it): a local one goes back to the model while it's up, else to its Anthropic tier; an

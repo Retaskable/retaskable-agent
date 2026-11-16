@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 
-use super::driver::{ExpertHost, ExpertJob, TurnEnd};
+use super::driver::{ExpertHost, ExpertJob, ShipJob, TurnEnd};
 use super::session::watch_for;
 use crate::config::{CursorModels, Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -18,6 +18,7 @@ use crate::env::Env;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::{self, claude_sessions};
 use crate::git_bin::command;
+use crate::implementer::publish::{Published, publish};
 use crate::implementer::session::new_session_id;
 use crate::merge_update::run as git;
 use crate::tiers::SONNET;
@@ -217,6 +218,53 @@ impl ExpertHost for ClaudeExperts {
         })
     }
 
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>> {
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        Box::pin(async move {
+            let shipped = tokio::task::spawn_blocking(move || -> Result<Published> {
+                let (repo, trees) = (PathBuf::from(&job.project.repo_path), worktrees(&job.project));
+                let dir = lanes::lane_path(&trees, job.lane);
+                // A parked session's lane is set up again from the branch the park pushed.
+                if job.prepare {
+                    lanes::prepare_at(&repo, &trees, &dir, &job.branch, &format!("origin/{}", job.branch))?;
+                }
+                // Whatever the session left uncommitted goes in the change.
+                let _ = git(&command, &dir, &["add", "-A"]);
+                let _ = git(
+                    &command,
+                    &dir,
+                    &["commit", "--quiet", "-m", "Expert session: work in progress"],
+                );
+                // The lane carries the item's own branch from here on, as an implementer's does.
+                git(&command, &dir, &["checkout", "-B", &job.target])?;
+                let base = &job.project.base_branch;
+                let published = publish(
+                    crate::git_bin::program(),
+                    &gh,
+                    &dir,
+                    &job.target,
+                    base,
+                    &job.title,
+                    &job.body,
+                )?;
+                // The session's own copy on the remote is no longer wanted: the change is on the item's branch.
+                if job.branch != job.target {
+                    let _ = git(&command, &dir, &["push", "origin", "--delete", &job.branch]);
+                }
+                Ok(published)
+            })
+            .await;
+            match shipped {
+                Ok(Ok(p)) => Ok(p),
+                Ok(Err(e)) => Err(format!("{e:#}")),
+                Err(e) => Err(format!("{e}")),
+            }
+        })
+    }
+
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()> {
         let (repo, dir, branch) = (
             PathBuf::from(&project.repo_path),
@@ -235,3 +283,6 @@ impl ExpertHost for ClaudeExperts {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;
