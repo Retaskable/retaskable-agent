@@ -10,8 +10,11 @@
 # Once per computer, before it merges or shows on the board, link it to the store (role ci; see README.md here):
 #   docker compose -f docker/ci/compose.yaml run --rm ci retaskable-ci link
 #
-# The project name stays `retaskable-ci` (as when these files lived in Retaskable.com's docker/ci), so the `data`
-# volume, with the link and the mirrors, carries over.
+# Set DOCKER_GID to the Docker socket's group (the runner runs as uid 1000, not root, so it can share the data volume
+# with the agent): `export DOCKER_GID=$(stat -c %g /var/run/docker.sock)`. Both compose files mount the one volume
+# `retaskable-data`, so the agent's settings page (docker/agent) manages this runner too; docs/specs/docker.md
+# section 3.1. An older `retaskable-ci_data` volume is copied in once (docker/ci/README.md, "Moving to the shared
+# volume").
 name: retaskable-ci
 
 services:
@@ -24,6 +27,10 @@ services:
         CI_RUST_COMMIT: ${CI_RUST_COMMIT:-unknown}
     container_name: retaskable-ci
     restart: unless-stopped
+    # uid 1000 is the agent's `node`; the socket's group comes from the host.
+    user: "1000:1000"
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the Docker socket group id, see the top of this file}"
     command: ["retaskable-ci", "run", "--settings-port", "4702"]
     ports:
       # The host's 127.0.0.1 only: never another address (agent-settings.md section 4.4).
@@ -45,3 +52,5 @@ services:
 
 volumes:
   data:
+    # The same volume as docker/agent/compose.yaml's, under the same name, whichever project makes it first.
+    name: retaskable-data

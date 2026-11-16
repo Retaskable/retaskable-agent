@@ -44,6 +44,8 @@ services:
 
 volumes:
   data:
+    # Shared with docker/ci/compose.yaml (the CI runner's part is /data/ci), so this agent's page manages both.
+    name: retaskable-data
   work:
   claude:
   gh:

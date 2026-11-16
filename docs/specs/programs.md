@@ -13,6 +13,7 @@ This repository builds three programs. They run together on one computer today a
 - No program talks to another: no RPC, no new port, no shared process state. They coordinate only through the shared store (and GitHub or GitLab).
 - No program names another program's module. What two programs both need lives in a neutral module (`text`, `repo_id`, `ci_logs`, `docker_probe`, `low_priority`, `ci_label`, and the rest of the shared plumbing: `backlog`, `link`, `env`, `config`, and `page_host`, the settings page's sign-in, checks and programs panel, which the code agent's page and the CI runner's own page both build on).
 - A program that cannot reach the store does nothing and says so. There is no local fallback.
+- The programs on one computer share one data folder, each with its own part of it (the code agent's root, `chat/`, `ci/`), and that is the only thing they share besides the store. The code agent's settings page shows a tab for each program installed in that folder, and edits only that program's own `settings.json` and sealed secrets; it never calls the program (agent-settings.md section 4.6). In Docker the agent and the CI runner mount one volume to share the folder (docker.md section 3.1).
 
 The HTTP port of each program that has one serves only `GET /api/health` and a settings page, never a command: the code agent's, and the CI runner's when it hosts its own page (agent-ci.md section 3.9). `src/settings_server/routes_tests.rs` lists the routes of both ports and fails when one is added.
 

@@ -20,9 +20,16 @@ COPY --from=build /src/target/release/retaskable-ci /usr/local/bin/retaskable-ci
 # The commit it was built from, for `docker inspect` (compose passes `git rev-parse HEAD` when told to).
 ARG CI_RUST_COMMIT=unknown
 LABEL org.retaskable.ci-rust-commit=$CI_RUST_COMMIT
-# The data folder (mirrors, logs, events) and the store link's token file, both in the `data` volume.
+# Runs as uid 1000, the same uid as the agent's `node`, because the two containers share one `retaskable-data` volume
+# and what either makes at mode 0600 (secrets.key, credentials) must stay readable to the other. The socket's group is
+# added at run time (`group_add: [DOCKER_GID]` in compose.yaml), not here: its gid is the host's.
+RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin ci \
+    && mkdir -p /data && chown ci:ci /data
+# The shared data folder (this runner's part is /data/ci: mirrors, logs, events), the store link's token file inside
+# it, and the data key the agent's page also uses.
 ENV RETASKABLE_DATA_DIR=/data \
-    RETASKABLE_CI_CREDENTIALS_FILE=/data/ci-credentials.json \
+    RETASKABLE_CI_CREDENTIALS_FILE=/data/ci/credentials.json \
     RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key
+USER ci
 WORKDIR /data
 CMD ["retaskable-ci", "run"]

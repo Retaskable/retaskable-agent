@@ -512,3 +512,28 @@ fn both_pages_have_the_program_tabs_and_the_panels_for_the_programs_script_to_fi
     );
     assert!(js.contains("localStorage"), "the selected tab is remembered per viewer");
 }
+
+#[test]
+fn both_compose_files_share_one_data_volume_and_both_containers_run_as_uid_1000() {
+    // docs/specs/docker.md section 3.1: the agent's page manages the CI runner through one volume, so what either
+    // makes at 0600 must be readable to the other: the same uid, the socket's group added for the runner only.
+    let agent = include_str!("../../docker/agent/compose.yaml");
+    let ci = include_str!("../../docker/ci/compose.yaml");
+    for (name, file) in [("agent", agent), ("ci", ci)] {
+        assert!(
+            file.contains("  data:\n    # ") && file.contains("    name: retaskable-data\n"),
+            "{name}"
+        );
+        assert!(file.contains("      - data:/data\n"), "{name}");
+    }
+    assert!(ci.contains("user: \"1000:1000\"") && ci.contains("group_add:") && ci.contains("DOCKER_GID:?"));
+    assert!(
+        ci.contains("/var/run/docker.sock") && !agent.contains("docker.sock"),
+        "only the runner has the socket"
+    );
+    let dockerfile = include_str!("../../docker/ci/Dockerfile");
+    assert!(dockerfile.contains("--uid 1000") && dockerfile.contains("USER ci"));
+    assert!(dockerfile.contains("RETASKABLE_CI_CREDENTIALS_FILE=/data/ci/credentials.json"));
+    assert!(dockerfile.contains("RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key"));
+    assert!(include_str!("../../docker/agent/Dockerfile").contains("chown -R node:node /work /data"));
+}

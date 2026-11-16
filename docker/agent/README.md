@@ -5,8 +5,9 @@ checks, Claude Code) is much faster there, since Windows Defender scans each one
 [docs/specs/docker.md](../../docs/specs/docker.md) for why and how this is built.
 
 The container is `retaskable-agent-docker` (compose project `retaskable-agent-docker`), in `runs` mode, and **starts
-paused**: nothing is claimed until you resume it from the site or the settings page. Its data folder is the `data`
-volume at `/data`, with the key for saved secrets in it (`/data/secrets.key`, made on the first save). No token is
+paused**: nothing is claimed until you resume it from the site or the settings page. Its data folder is the `retaskable-data`
+volume at `/data` (shared with the CI runner, `docker/ci/compose.yaml`, so this page manages both: a tab each; never
+`docker compose down -v`), with the key for saved secrets in it (`/data/secrets.key`, made on the first save). No token is
 passed in the environment.
 
 ## Set up
