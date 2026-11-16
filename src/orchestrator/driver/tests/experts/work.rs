@@ -52,8 +52,8 @@ async fn the_snapshot_carries_what_the_branch_has_after_each_turn() {
     assert_eq!(w["prs"][0]["number"], 7);
     assert_eq!(
         x.host.reads.lock().unwrap()[0],
-        (Some(1), 0),
-        "read in the session's lane"
+        (Some(3), 0),
+        "read in the session's lane, the added one"
     );
 
     // The next turn's read replaces it; a host that can't be read keeps the last pull requests.

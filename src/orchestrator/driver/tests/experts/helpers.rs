@@ -45,7 +45,7 @@ async fn a_read_helper_runs_in_the_sessions_lane_and_its_result_is_told_to_an_id
     );
     assert_eq!(
         x.host.helper_runs.lock().unwrap()[0],
-        (1, 1, false, "retaskable/expert-fix-it-fix-it".to_string())
+        (1, 3, false, "retaskable/expert-fix-it-fix-it".to_string())
     );
     let said = notes(&x);
     assert!(
@@ -143,22 +143,31 @@ async fn a_lane_helper_takes_a_free_lane_on_its_own_branch_and_gives_it_back_nam
     x.until("told", |x| x.jobs().len() == 2).await;
     assert_eq!(
         x.host.helper_runs.lock().unwrap()[0],
-        (1, 2, true, "retaskable/expert-fix-it-fix-it".to_string())
+        (1, 1, true, "retaskable/expert-fix-it-fix-it".to_string())
     );
     let branch = "retaskable/expert-fix-it-fix-it-h1";
     let said = notes(&x);
-    assert!(said.contains(&format!("Helper 1 is in lane 2 on {branch}")), "{said:?}");
+    assert!(said.contains(&format!("Helper 1 is in lane 1 on {branch}")), "{said:?}");
     let end = format!(
         "Helper 1 (\"edit it\") finished: found edit it\n\nIts commits are on {branch}, from your last commit: merge it in if you want them."
     );
     assert_eq!(x.jobs()[1].message, end);
-    assert_eq!(x.rig.machine.pool.holder(2), None, "its lane is free again");
+    assert_eq!(x.rig.machine.pool.holder(1), None, "its lane is free again");
 }
 
 #[tokio::test]
 async fn a_lane_helper_waits_for_a_free_lane_and_stops_with_the_session() {
     let mut x = ex_lanes(1).await;
     idle(&mut x).await;
+    // The one lane is busy with other work; the session is in the added lane beside it.
+    let other = crate::lane_pool::Want {
+        project: "p0".into(),
+        item: "other".into(),
+        chore: false,
+        last_lane: None,
+        fix_queued: false,
+    };
+    assert_eq!(x.rig.machine.pool.claim(&other), Some(1));
     helper(&x, "h1", "ada", "edit it", true);
     x.answer("h1").await;
     x.quiet().await;

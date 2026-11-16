@@ -29,6 +29,8 @@ pub const SHIPPED_STATUS: &str = "in_review";
 pub const IDLE: Duration = Duration::from_secs(30 * 60);
 /// How many ids `expert-<slug>`, `expert-<slug>-2`, ... a new session tries before giving up.
 pub const ID_TRIES: u32 = 20;
+/// Why a session can't have a lane: the computer has one added lane (`placeExpert`).
+pub const ADDED_LANE_TAKEN: &str = "Another expert session has this computer's added lane: park or finish it first.";
 /// What a turn's answer is cut to.
 const ANSWER_MAX: usize = 20_000;
 /// The most suggested answers a question shows.

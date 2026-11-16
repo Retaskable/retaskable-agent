@@ -56,6 +56,10 @@ impl Machine {
     /// doesn't hold them back.
     pub(super) async fn expert_passes(&mut self, on: &[bool], stopping: bool, slots: &mut u32) {
         let Some(host) = self.experts.clone() else { return };
+        if let Some(lp) = self.projects.first() {
+            lp.live
+                .set_added_lane(self.pool.added_free().then(|| self.pool.added_lane()));
+        }
         *slots = slots.saturating_sub(self.projects.iter().map(|lp| lp.experting()).sum());
         for (lp, &on) in self.projects.iter_mut().zip(on) {
             if on {

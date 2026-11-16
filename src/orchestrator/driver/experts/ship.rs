@@ -32,9 +32,9 @@ pub(super) async fn ship(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut S
     // A parked session's work is pushed, but its change opens from a lane.
     let (lane, took) = match s.lane {
         Some(lane) => (lane, false),
-        None => match pool.claim(&cx.want(item)) {
+        None => match pool.claim_added(cx.holder(item)) {
             Some(lane) => (lane, true),
-            None => return Err("No lane is free to ship from; try again when one is.".into()),
+            None => return Err(expert::ADDED_LANE_TAKEN.into()),
         },
     };
     let give_lane = |pool: &mut LanePool| {

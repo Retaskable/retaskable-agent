@@ -826,22 +826,84 @@ async fn the_beat_touches_the_lease_and_reads_the_store_queue_back() {
     assert_eq!(x.jobs()[1].message, "from the site");
 }
 
+/// Another project's session holds this computer's added lane.
+fn hold_added(x: &mut Ex) -> crate::lane_pool::Holder {
+    let other = crate::lane_pool::Holder::Item {
+        project: "p1".into(),
+        item: "expert-other".into(),
+    };
+    assert!(x.rig.machine.pool.claim_added(other.clone()).is_some());
+    other
+}
+
 #[tokio::test]
-async fn with_no_lane_free_a_start_is_refused() {
+async fn with_the_added_lane_held_a_start_adds_a_parked_session_and_says_why() {
     let mut x = ex_lanes(1).await;
-    let other = crate::lane_pool::Want {
+    let other = hold_added(&mut x);
+    x.start("s1", "Fix it");
+    let a = x.answer("s1").await;
+    assert_eq!(
+        (a["type"].as_str(), a["answer"]["itemId"].as_str()),
+        (Some("ack"), Some(ID)),
+        "{a}"
+    );
+    assert_eq!(x.st.count("add"), 1);
+    x.quiet().await;
+    assert_eq!((x.detail(ID).as_deref(), x.lane_of(ID)), (Some("expert_parked"), None));
+    assert!(
+        x.jobs().is_empty() && x.st.count("expert_queue_add") == 0,
+        "the request isn't sent"
+    );
+    let said: Vec<String> = (x.st.args("report").iter())
+        .filter_map(|n| n["note"].as_str().map(String::from))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "Another expert session has this computer's added lane: park or finish it first. The session is parked and your request wasn't sent: send it again to try."
+        ]
+    );
+    // A message is refused the same way until the lane is free, then takes it, on a fresh branch from the base.
+    x.say("m1", ID, "again", false);
+    let a = x.answer("m1").await;
+    assert_eq!(
+        a["reason"],
+        "Another expert session has this computer's added lane: park or finish it first."
+    );
+    assert!(x.rig.machine.pool.release(x.rig.machine.pool.added_lane(), &other));
+    x.say("m2", ID, "again", false);
+    x.answer("m2").await;
+    x.until("its turn", |x| x.jobs().len() == 1).await;
+    assert!(x.jobs()[0].prepare && !x.jobs()[0].from_branch);
+    assert_eq!(x.lane_of(ID), Some(2));
+}
+
+#[tokio::test]
+async fn a_session_starts_in_the_added_lane_beside_the_lanes_and_gives_it_back_on_a_park() {
+    let mut x = ex_lanes(1).await;
+    x.quiet().await;
+    assert_eq!(
+        x.rig.live.snapshot().added_lane,
+        Some(2),
+        "the sheet is told it is free"
+    );
+    x.start("s1", "Fix it");
+    x.answer("s1").await;
+    x.until("idle", |x| x.detail(ID).as_deref() == Some("expert_idle"))
+        .await;
+    assert_eq!(x.lane_of(ID), Some(2), "one more than the computer's lanes");
+    assert_eq!(x.rig.live.snapshot().added_lane, None, "and it is held now");
+    let work = crate::lane_pool::Want {
         project: "p0".into(),
         item: "other".into(),
         chore: false,
         last_lane: None,
         fix_queued: false,
     };
-    assert!(x.rig.machine.pool.claim(&other).is_some());
-    x.start("s1", "Fix it");
-    let a = x.answer("s1").await;
-    assert_eq!(a["type"], "nack");
-    assert!(a["reason"].as_str().unwrap().contains("No lane"), "{a}");
-    assert_eq!(x.st.count("add"), 0);
+    assert_eq!(x.rig.machine.pool.claim(&work), Some(1), "no lane sits out for it");
+    x.end("e1", ID, "park");
+    x.answer("e1").await;
+    assert!(x.rig.machine.pool.added_free());
 }
 
 #[tokio::test]
@@ -894,25 +956,27 @@ async fn in_runs_mode_an_expert_session_takes_a_lane_no_run_holds_and_its_turn_r
     let answer = ex.heard.iter().find(|a| a["id"] == "c1").cloned().unwrap();
     assert_eq!(answer["type"], "ack", "{answer}");
     assert_eq!(ex.jobs().len(), 1);
-    assert_eq!(ex.lane_of(ID), Some(2));
+    assert_eq!(ex.lane_of(ID), Some(3), "the added lane, beside the two");
     assert_eq!(ex.rig.machine.pool.holder(1), Some(&run));
 }
 
 #[tokio::test]
-async fn in_runs_mode_an_expert_start_with_every_lane_held_by_runs_is_refused() {
+async fn in_runs_mode_an_expert_start_while_the_added_lane_is_held_starts_parked() {
     let mut ex = ex_lanes(1).await;
     ex.rig.go_runs();
     let run = Holder::Run {
         project: "p0".into(),
         piece: "piece-1".into(),
     };
-    assert!(ex.rig.machine.pool.take(1, run));
+    assert!(ex.rig.machine.pool.take(1, run.clone()), "every lane held by runs");
+    assert!(ex.rig.machine.pool.claim_added(run).is_some(), "and the added one");
     ex.start("c1", "Fix it");
     for _ in 0..5 {
         ex.rig.runs_pass().await;
     }
     ex.drain();
     let answer = ex.heard.iter().find(|a| a["id"] == "c1").cloned().unwrap();
-    assert_eq!(answer["type"], "nack");
+    assert_eq!(answer["type"], "ack", "{answer}");
     assert!(ex.jobs().is_empty());
+    assert_eq!(ex.detail(ID).as_deref(), Some("expert_parked"));
 }

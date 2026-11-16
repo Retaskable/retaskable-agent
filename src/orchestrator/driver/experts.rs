@@ -475,7 +475,7 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             now,
         } => {
             let s = driven(ex, item, &cmd.by)?;
-            say(cx, s, item, text, pictures, *now).await?;
+            say(cx, pool, s, item, text, pictures, *now).await?;
             Ok(Value::Null)
         }
         ExpertAction::Stop { item } => {
@@ -535,6 +535,7 @@ async fn session_history(
 /// Queues the person's message for the session; with `now` the running turn is cut and the message goes next.
 async fn say(
     cx: &Cx<'_>,
+    pool: &LanePool,
     s: &mut Session,
     item: &str,
     text: &str,
@@ -543,6 +544,10 @@ async fn say(
 ) -> Result<(), String> {
     if let Some(plan) = s.plan.as_ref().filter(|_| s.detail == Detail::Handed) {
         return Err(expert::handed_refusal(plan));
+    }
+    // A parked session takes the added lane first: with another session in it the message is refused, as it is there.
+    if s.lane.is_none() && !pool.added_free() {
+        return Err(expert::ADDED_LANE_TAKEN.into());
     }
     let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
     s.queue.push(row);
@@ -570,15 +575,12 @@ async fn start(
         .and_then(|f| carry::open_session(cx, ex, by, &f.session_id))
     {
         let s = driven(ex, &open, by)?;
-        say(cx, s, &open, request, &[], false).await?;
+        say(cx, pool, s, &open, request, &[], false).await?;
         return Ok(json!({ "itemId": open }));
     }
     let title = from
         .as_ref()
         .map_or_else(|| expert::title(request), |f| f.title.clone());
-    if pool.claim_lane(&cx.want("")).is_none() {
-        return Err("No lane is free for a new expert session; try again when one is.".into());
-    }
     let mut added = None;
     for n in 1..=expert::ID_TRIES {
         let id = expert::id_for(&title, n);
@@ -600,24 +602,42 @@ async fn start(
         }
     }
     let (id, added) = added.ok_or("Couldn't find a free id for the session.")?;
-    let Some(lane) = pool.claim(&cx.want(&id)) else {
-        let _ = cx.drop_item(&id, &added.token).await;
-        return Err("The lane was taken before the session could start.".into());
-    };
-    let first = (cx.queue.add(&id, request, by, &[], false).await).map_err(|e| format!("{e}"))?;
+    // The added lane (one a computer): with another session in it this one starts parked, its request not sent.
+    let lane = pool.claim_added(cx.holder(&id));
+    let mut queue = Vec::new();
+    if let Some(lane) = lane {
+        match cx.queue.add(&id, request, by, &[], false).await {
+            Ok(first) => queue.push(first),
+            Err(e) => {
+                pool.release(lane, &cx.holder(&id));
+                let _ = cx.drop_item(&id, &added.token).await;
+                return Err(format!("{e}"));
+            }
+        }
+    } else {
+        let why = format!(
+            "{} The session is parked and your request wasn't sent: send it again to try.",
+            expert::ADDED_LANE_TAKEN
+        );
+        cx.note(&id, &added.token, &why).await;
+    }
     let mut session = Session {
         started_by: by.to_string(),
         title: title.clone(),
         branch: expert::branch(&id, &title),
         lease: added.token,
-        lane: Some(lane),
+        lane,
         session_id: None,
         prepared: false,
         from_branch: false,
-        queue: vec![first],
+        queue,
         consumed: BTreeSet::new(),
         turn: None,
-        detail: Detail::Working,
+        detail: if lane.is_some() {
+            Detail::Working
+        } else {
+            Detail::Parked
+        },
         ask: None,
         idle_since: Instant::now(),
         stopped: false,
@@ -788,7 +808,7 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
         }
         let lane = match s.lane {
             Some(lane) => lane,
-            None => match pool.claim(&cx.want(id)) {
+            None => match pool.claim_added(cx.holder(id)) {
                 Some(lane) => {
                     s.lane = Some(lane);
                     lane

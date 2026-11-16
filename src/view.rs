@@ -624,6 +624,9 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some(lane) = self.loop_state(project).and_then(|s| s.added_lane) {
+            state["addedLane"] = json!(lane);
+        }
         if let Some((items, milestones)) = self.items_block(project) {
             state["items"] = items;
             state["milestones"] = milestones;
