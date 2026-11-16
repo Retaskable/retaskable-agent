@@ -366,6 +366,14 @@ impl Default for LighthouseConfig {
     }
 }
 
+/// The project's `codeHost` (`CodeHostConfig` in shared/configTypes.ts): its `kind` is `github`, `gitlab`, `local`
+/// or `remote`; the rest of the object (`project`, `hostname`, `ref`, ...) is not read here yet.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CodeHostConfig {
+    #[serde(default)]
+    pub kind: String,
+}
+
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -385,6 +393,9 @@ pub struct ProjectConfig {
     /// The GitHub workflow pattern and branch rules (github-workflow.md, not yet ported here): kept as written.
     #[serde(default)]
     pub github: Option<Value>,
+    /// Where the project's code lives (`codeHost` in the TS agent's config); missing reads as GitHub.
+    #[serde(default)]
+    pub code_host: Option<CodeHostConfig>,
     #[serde(default)]
     pub require_ci: bool,
     #[serde(default)]
@@ -461,6 +472,11 @@ fn ci_watch_allow<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>,
 }
 
 impl ProjectConfig {
+    /// Whether the project's code is on GitHub: a config with no `codeHost` reads as GitHub, as in the TS agent's `onGitHub`.
+    pub fn on_github(&self) -> bool {
+        self.code_host.as_ref().is_none_or(|c| c.kind == "github")
+    }
+
     /// This project's id: the one it was given, or, for an old file that predates the field
     /// (version 1), the one derived from its `repoPath` the same way `load` fills it in.
     pub fn id_or_derived(&self) -> String {
@@ -727,6 +743,7 @@ mod tests {
             backlog_path: String::new(),
             base_branch: String::new(),
             github: None,
+            code_host: None,
             require_ci: false,
             ci_covers_checks: false,
             ci_when_ready: false,

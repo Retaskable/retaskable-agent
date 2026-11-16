@@ -289,8 +289,23 @@ fn playtest_is_nacked_for_bad_arguments_and_modes() {
     }
     let off = view();
     let answer = answer_playtest(&off, json!({ "id": "a", "result": "pass" }), &d);
-    assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
+    assert!(answer["reason"].as_str().unwrap().contains("claim or runs mode"));
     assert!(v.item_commands.take("one").is_empty() && off.item_commands.take("one").is_empty());
+}
+
+#[test]
+fn playtest_is_taken_in_runs_mode_too_for_a_try_outs_answer() {
+    let v = view();
+    v.item_commands.set_runs(true);
+    let d = data_dir();
+    assert_eq!(
+        answer_playtest(&v, json!({ "itemId": "7", "result": "pass" }), &d)["type"],
+        "ack"
+    );
+    assert!(matches!(
+        v.item_commands.take_playtests("one").as_slice(),
+        [ItemCommand::Playtest { id, passed: true, .. }] if id == "7"
+    ));
 }
 
 #[test]
