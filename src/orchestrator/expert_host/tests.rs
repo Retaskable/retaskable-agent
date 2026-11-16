@@ -52,8 +52,13 @@ async fn shipping_commits_the_lanes_work_pushes_it_as_the_items_branch_and_opens
         .await
         .unwrap();
     assert_eq!(
-        (published.url.as_str(), published.number),
+        (published.change.url.as_str(), published.change.number),
         ("https://github.com/o/r/pull/9", 9)
+    );
+    // The commit the change is at, for the store's check.
+    assert!(
+        published.head.as_deref().is_some_and(|h| h.len() == 40),
+        "{published:?}"
     );
     let origin = root.path().join("origin.git");
     let shown = |what: &str| {

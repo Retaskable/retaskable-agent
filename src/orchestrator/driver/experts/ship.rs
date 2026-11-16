@@ -7,8 +7,8 @@
 //! The store hears `report { status: "in_review", detail: "expert_shipped", branch, prUrl }` before anything is pushed
 //! (so a restart always finds the item again: `read.rs` lets an item with that detail through), and again with the
 //! change's address once it is open. A change that can't be opened rolls the marker back and leaves the session as it
-//! was. In `runs` mode no loop holds an item, so ship is refused in words rather than leaving the item with no one to
-//! carry it on.
+//! was. This is `claim` mode's ship; in `runs` mode no loop holds an item, and `ship_runs.rs` hands the change to the
+//! store as a piece.
 use super::*;
 use crate::backlog::expert::Shipped as Marker;
 use crate::item_lifecycle::ItemState;
@@ -21,7 +21,7 @@ pub(super) struct Shipped {
 }
 
 /// The change's description (`shipExpert`): the session's request, then who drove it.
-fn body(request: &str, started_by: &str) -> String {
+pub(super) fn body(request: &str, started_by: &str) -> String {
     format!(
         "{}\n\nDriven by {started_by} in a Retaskable expert session.",
         crate::text::truncate(request.trim(), 4000)
@@ -29,9 +29,6 @@ fn body(request: &str, started_by: &str) -> String {
 }
 
 pub(super) async fn ship(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut Session) -> Result<Shipped, String> {
-    if !cx.ships {
-        return Err("This project takes work as pieces, so there is nothing here to carry a shipped change through checks, review and merge: park it, hand it to the backlog or discard it.".into());
-    }
     // A parked session's work is pushed, but its change opens from a lane.
     let (lane, took) = match s.lane {
         Some(lane) => (lane, false),
@@ -67,7 +64,7 @@ pub(super) async fn ship(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut S
         body: body(&s.request, &s.started_by),
     };
     let published = match cx.host.ship(job).await {
-        Ok(p) => p,
+        Ok(opened) => opened.change,
         Err(why) => {
             // The change isn't open: the session is as it was, and the store is told so.
             let undone = marker("claimed", "", None);

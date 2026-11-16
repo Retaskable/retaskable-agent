@@ -125,34 +125,6 @@ async fn a_parked_ship_that_fails_gives_its_lane_back() {
 }
 
 #[tokio::test]
-async fn in_runs_mode_ship_is_refused_in_words_and_pushes_nothing() {
-    let mut x = ex().await;
-    started(&mut x).await;
-    x.rig.go_runs();
-    x.end("e1", ID, "ship");
-    for _ in 0..300 {
-        x.rig.runs_pass().await;
-        x.drain();
-        if x.heard.iter().any(|a| a["id"] == "e1") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let a = x.heard.iter().find(|a| a["id"] == "e1").cloned().unwrap();
-    assert_eq!(a["type"], "nack");
-    assert!(
-        a["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("This project takes work as pieces"),
-        "{a}"
-    );
-    assert!(x.host.shipped.lock().unwrap().is_empty());
-    assert!(reports(&x).is_empty());
-    assert_eq!(x.detail(ID).as_deref(), Some("expert_idle"));
-}
-
-#[tokio::test]
 async fn after_a_restart_the_item_loop_takes_the_shipped_item_back_in_checking() {
     let mut x = ex().await;
     shipped(&mut x).await;

@@ -242,6 +242,21 @@ impl Store {
         self.data.insert("unparked".to_string(), serde_json::json!(unparked));
     }
 
+    /// Expert changes opened in `runs` mode that the store hasn't taken as pieces yet, by item id
+    /// (`state.expert_ship_owed`): sent again on later passes, also after a restart. Empty when missing or unreadable.
+    pub fn ship_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::expert::ShipOwed> {
+        self.data
+            .get("expert_ship_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.expert_ship_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_ship_owed(&mut self, owed: &std::collections::BTreeMap<String, crate::backlog::expert::ShipOwed>) {
+        self.data
+            .insert("expert_ship_owed".to_string(), serde_json::json!(owed));
+    }
+
     /// Completions the store hasn't taken yet, by item id (`state.complete_outbox`): sent again on later passes, also
     /// after a restart. Empty when missing or unreadable.
     pub fn complete_outbox(&self) -> std::collections::BTreeMap<String, crate::backlog::complete::Pending> {
