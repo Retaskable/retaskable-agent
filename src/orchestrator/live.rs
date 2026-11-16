@@ -90,11 +90,15 @@ pub struct LiveState {
     pub projects: BTreeMap<String, ProjectLive>,
     /// How many sessions the shared pool allows at once (auto concurrency's number once it has stepped); 0 before a pass.
     pub concurrency: u32,
+    /// The lane an expert session would take (the added lane, `lanes + 1`) while no project here holds it: the Start
+    /// sheet warns about the cost while it's there, else says another session has it.
+    pub added_lane: Option<u32>,
 }
 
 /// What the snapshot reports of the loops: a change in it is what [`LiveHandle::subscribe`] signals.
 type Reported = (
     u32,
+    Option<u32>,
     BTreeMap<
         String,
         (
@@ -126,7 +130,7 @@ fn reported(state: &LiveState) -> Reported {
             )
         })
         .collect();
-    (state.concurrency, projects)
+    (state.concurrency, state.added_lane, projects)
 }
 
 /// Shared between the loops (writers) and the status handler (reader).
@@ -153,6 +157,7 @@ impl LiveHandle {
                 run_kinds: Vec::new(),
                 projects: BTreeMap::new(),
                 concurrency: 0,
+                added_lane: None,
             })),
             sessions::Sessions::default(),
             Arc::default(),
@@ -198,6 +203,11 @@ impl LiveHandle {
     /// The shared pool's effective concurrency, as of the last pass.
     pub fn set_concurrency(&self, concurrency: u32) {
         self.edit(|s| s.concurrency = concurrency);
+    }
+
+    /// The added lane an expert session would take now, or `None` while a session or a run holds it.
+    pub fn set_added_lane(&self, lane: Option<u32>) {
+        self.edit(|s| s.added_lane = lane);
     }
 
     /// Says when Claude's limit lifts while the project can't start work for it, or nothing.

@@ -166,6 +166,7 @@ impl TrialHost for ClaudeTrial {
                 path: paths::run_dir(&data_dir, &project.id_or_derived(), TRIAL_ID)
                     .join(format!("{}.jsonl", job.session_id)),
                 lane: None,
+                append: false,
             };
             let engine = engine_of(Some(placed.engine))?;
             let quiet = watch_for(project, placed.engine);

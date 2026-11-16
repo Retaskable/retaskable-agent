@@ -177,6 +177,7 @@ fn live(mode: OrchestratorMode, projects: &[(&str, ProjectLive)]) -> LiveState {
     LiveState {
         mode,
         run_kinds: Vec::new(),
+        added_lane: None,
         projects: projects.iter().map(|(id, p)| (id.to_string(), p.clone())).collect(),
         concurrency: 0,
     }
