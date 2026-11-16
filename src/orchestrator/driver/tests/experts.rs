@@ -5,7 +5,7 @@ use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::{Question, Reply};
 use crate::implementer::publish::Published;
-use crate::orchestrator::driver::{ExpertHost, ExpertJob, ShipJob, TurnEnd};
+use crate::orchestrator::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
 use crate::view::{ExpertAction, ExpertCommand};
 use axum::http::StatusCode;
 use std::collections::BTreeSet;
@@ -24,6 +24,10 @@ struct St {
     /// What `draft_queue` and `release` are refused with (a 4xx code), while set.
     queue_refused: AtomicBool,
     release_refused: Mutex<Option<&'static str>>,
+    /// What `expert_ship` is refused with (a store code, or `down` for a 5xx), while set; and whether the next one is
+    /// taken but its reply is lost.
+    ship_op_refused: Mutex<Option<&'static str>>,
+    ship_reply_lost: AtomicBool,
 }
 
 impl St {
@@ -94,6 +98,25 @@ impl St {
                 } else {
                     StatusCode::INTERNAL_SERVER_ERROR
                 };
+                (status, Json(json!({ "error": code, "message": code })))
+            }
+            "expert_ship" => {
+                let refused = *self.ship_op_refused.lock().unwrap();
+                let lost = self.ship_reply_lost.swap(false, Ordering::SeqCst);
+                let status = match refused {
+                    Some("not_found") => StatusCode::NOT_FOUND,
+                    Some("bad_request") => StatusCode::BAD_REQUEST,
+                    Some("forbidden") => StatusCode::FORBIDDEN,
+                    Some("conflict" | "stale_lease") => StatusCode::CONFLICT,
+                    Some(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    None if lost => StatusCode::INTERNAL_SERVER_ERROR,
+                    None => {
+                        return ok(
+                            json!({ "piece": format!("{}#1", args["id"].as_str().unwrap_or("")), "pieces": [] }),
+                        );
+                    }
+                };
+                let code = refused.unwrap_or("down");
                 (status, Json(json!({ "error": code, "message": code })))
             }
             "revise" => ok(json!({ "revised": "applied", "status": "todo" })),
@@ -259,16 +282,19 @@ impl ExpertHost for Host {
         async move { made }.boxed()
     }
 
-    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>> {
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Opened, String>> {
         self.shipped.lock().unwrap().push(job);
         let refused = self.ship_refused.lock().unwrap().clone();
         async move {
             match refused {
                 Some(why) => Err(why),
-                None => Ok(Published {
-                    url: "https://github.com/o/r/pull/9".into(),
-                    number: 9,
-                    created: true,
+                None => Ok(Opened {
+                    change: Published {
+                        url: "https://github.com/o/r/pull/9".into(),
+                        number: 9,
+                        created: true,
+                    },
+                    head: Some("a".repeat(40)),
                 }),
             }
         }
@@ -419,6 +445,7 @@ mod backlog;
 mod carry;
 mod pictures;
 mod ship;
+mod ship_runs;
 mod wake;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.

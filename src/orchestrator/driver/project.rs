@@ -337,6 +337,7 @@ impl ProjectLoop {
         live.register(&id);
         let file_project = project.clone();
         let revisions = store.revise_owed();
+        let ship_owed = store.ship_owed();
         Self {
             run_loop: super::RunLoop::new(&id),
             claim_waiting: false,
@@ -406,7 +407,7 @@ impl ProjectLoop {
             ci_watch: Default::default(),
             fixes: Default::default(),
             syncing: Default::default(),
-            experts: Default::default(),
+            experts: super::experts::Experts::with_owed(ship_owed),
             trial: None,
             backlog_items: None,
             listed_branches: Default::default(),

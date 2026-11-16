@@ -261,6 +261,79 @@ impl Client {
     }
 }
 
+/// The open change of an expert session, as `expert_ship` takes it.
+pub struct ShipChange<'a> {
+    pub id: &'a str,
+    /// The session's lease token.
+    pub lease: &'a str,
+    pub branch: &'a str,
+    pub pr_url: &'a str,
+    pub pr_number: u64,
+    /// The pushed commit, checked by the store and not kept.
+    pub head: Option<&'a str>,
+    pub title: Option<&'a str>,
+}
+
+/// An open change the store hasn't taken as a piece yet, kept in the state file so a restart sends it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipOwed {
+    pub lease: String,
+    pub branch: String,
+    pub pr_url: String,
+    pub pr_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    pub title: String,
+}
+
+impl ShipOwed {
+    pub fn change<'a>(&'a self, id: &'a str) -> ShipChange<'a> {
+        ShipChange {
+            id,
+            lease: &self.lease,
+            branch: &self.branch,
+            pr_url: &self.pr_url,
+            pr_number: self.pr_number,
+            head: self.head.as_deref(),
+            title: Some(&self.title),
+        }
+    }
+}
+
+/// What `expert_ship` answers: the item's piece for the change (`<id>#1`), and the item's pieces now.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ShippedPiece {
+    pub piece: String,
+    #[serde(default)]
+    pub pieces: Vec<Value>,
+}
+
+impl Client {
+    /// `expert_ship { id, token, branch, prUrl, prNumber, head?, title? }`: the store takes the session's open change
+    /// as the item's piece 1, already `in_ci`, so runs on any computer watch, fix and merge it (Retaskable.com's
+    /// expert-chat/14-ship-as-a-piece). The same token and `prUrl` again answers the same, so a lost reply is
+    /// just sent again. Refused with `forbidden`, `conflict`, `stale_lease`, `not_found` or `bad_request`; nothing
+    /// changes then.
+    pub async fn expert_ship(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        change: &ShipChange<'_>,
+    ) -> Result<ShippedPiece, BacklogError> {
+        let mut args = json!({
+            "id": change.id, "token": change.lease, "branch": change.branch,
+            "prUrl": change.pr_url, "prNumber": change.pr_number,
+        });
+        if let Some(head) = change.head {
+            args["head"] = json!(head);
+        }
+        if let Some(title) = change.title {
+            args["title"] = json!(title);
+        }
+        self.op(repo_id, token, "expert_ship", args, "shipped piece").await
+    }
+}
+
 /// An expert session as it is added: its id, title and the request it starts from.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpertItem {

@@ -20,7 +20,8 @@
 //!
 //! `expert_end` with `ship` (`ship.rs`) opens the session's change and hands the item to this project's own item
 //! loop: it keeps the lease and the lane and goes on through checks, review and merge as any item does, in `claim`
-//! mode. In `runs` mode no loop holds an item, so ship is refused in words.
+//! mode. In `runs` mode (`ship_runs.rs`) the store takes the open change as the item's piece (`expert_ship`), so runs
+//! on any computer carry it, and the session and its lane are let go.
 //!
 //! Not built here: engines other than Claude, and the session's work summary (`expert.work`).
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,7 +37,7 @@ use super::Shared;
 use super::drafts::claim_agent;
 use super::project::ProjectLoop;
 use crate::ask::pictures::{self, Pictures};
-use crate::backlog::expert::ExpertItem;
+use crate::backlog::expert::{ExpertItem, ShipOwed};
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
@@ -51,6 +52,7 @@ use crate::view::{ExpertAction, ExpertCommand};
 mod backlog;
 mod carry;
 mod ship;
+mod ship_runs;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -88,6 +90,13 @@ pub struct ShipJob {
     pub body: String,
 }
 
+/// A session's change as the host opened it: the change, and the commit it is at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opened {
+    pub change: Published,
+    pub head: Option<String>,
+}
+
 /// How a turn ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnEnd {
@@ -117,7 +126,7 @@ pub trait ExpertHost: Send + Sync {
     fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>>;
     /// Saves what the lane left uncommitted, pushes its work as `job.target` and opens the change, or finds the one
     /// already open for it. An `Err` says why, and leaves the session as it was.
-    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>>;
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Opened, String>>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -167,11 +176,26 @@ pub(super) struct Experts {
     sessions: BTreeMap<String, Session>,
     /// Sessions whose change was opened this pass: the item loop takes them over (`ship.rs`).
     shipped: Vec<ship::Shipped>,
+    /// `runs` mode: the changes opened that the store hasn't taken as pieces yet, by item (saved in the state file
+    /// before the op is sent, sent again every pass and after a restart: `ship_runs.rs`), and the one opened by the
+    /// command running now.
+    pub(in crate::orchestrator::driver) owed: BTreeMap<String, ShipOwed>,
+    opened: Option<String>,
     beat_at: Option<Instant>,
     /// How long a session idles before it parks.
     pub(super) idle: Duration,
     /// How often the lease and the queue are beaten and read back.
     pub(super) beat_every: Duration,
+}
+
+impl Experts {
+    /// No sessions, and the changes the state file says the store is still owed (`ship_runs.rs`).
+    pub(super) fn with_owed(owed: BTreeMap<String, ShipOwed>) -> Self {
+        Self {
+            owed,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Experts {
@@ -180,6 +204,8 @@ impl Default for Experts {
             queue: None,
             sessions: BTreeMap::new(),
             shipped: Vec::new(),
+            owed: BTreeMap::new(),
+            opened: None,
             beat_at: None,
             idle: expert::IDLE,
             beat_every: Duration::from_millis(BEAT_MS),
@@ -311,7 +337,7 @@ impl ProjectLoop {
     pub(super) async fn expert_pass(&mut self, pool: &mut LanePool, host: &Arc<dyn ExpertHost>, shared: &Shared<'_>) {
         let out = &shared.links.item_commands;
         let cmds = out.take_experts(&self.id);
-        if cmds.is_empty() && self.experts.sessions.is_empty() {
+        if cmds.is_empty() && self.experts.sessions.is_empty() && self.experts.owed.is_empty() {
             return;
         }
         let answer = |cmd: &ExpertCommand, r: Result<Value, String>| {
@@ -358,8 +384,17 @@ impl ProjectLoop {
             ships: self.mode == super::OrchestratorMode::Claim,
             woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
+        let mut saved = ex.owed.clone();
+        ship_runs::retry(&cx, &mut ex, pool).await;
+        ship_runs::save(&mut self.store, &ex, &mut saved);
         for cmd in &cmds {
-            let r = command(&cx, &mut ex, pool, cmd).await;
+            let mut r = command(&cx, &mut ex, pool, cmd).await;
+            if let Some(item) = ex.opened.take() {
+                // The change is open: the record is saved before the store hears of it.
+                ship_runs::save(&mut self.store, &ex, &mut saved);
+                r = ship_runs::settle(&cx, &mut ex, pool, &item).await.map(|()| Value::Null);
+                ship_runs::save(&mut self.store, &ex, &mut saved);
+            }
             answer(cmd, r);
         }
         reap(&cx, &mut ex).await;
@@ -525,6 +560,12 @@ async fn end(
     }
     let s = driven(ex, item, by)?;
     stop_turn(cx, item, s).await;
+    if outcome == "ship" && !cx.ships {
+        let owed = ship_runs::open(cx, pool, item, s).await?;
+        ex.owed.insert(item.to_string(), owed);
+        ex.opened = Some(item.to_string());
+        return Ok(Value::Null);
+    }
     if outcome == "ship" {
         let shipped = ship::ship(cx, pool, item, s).await?;
         ex.sessions.remove(item);

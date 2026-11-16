@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 
-use super::driver::{ExpertHost, ExpertJob, ShipJob, TurnEnd};
+use super::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
 use super::session::watch_for;
 use crate::config::{CursorModels, Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -18,7 +18,7 @@ use crate::env::Env;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::{self, claude_sessions};
 use crate::git_bin::command;
-use crate::implementer::publish::{Published, publish};
+use crate::implementer::publish::publish;
 use crate::implementer::session::new_session_id;
 use crate::merge_update::run as git;
 use crate::tiers::SONNET;
@@ -218,13 +218,13 @@ impl ExpertHost for ClaudeExperts {
         })
     }
 
-    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>> {
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Opened, String>> {
         let gh = self
             .env
             .get("RETASKABLE_GH")
             .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
         Box::pin(async move {
-            let shipped = tokio::task::spawn_blocking(move || -> Result<Published> {
+            let shipped = tokio::task::spawn_blocking(move || -> Result<Opened> {
                 let (repo, trees) = (PathBuf::from(&job.project.repo_path), worktrees(&job.project));
                 let dir = lanes::lane_path(&trees, job.lane);
                 // A parked session's lane is set up again from the branch the park pushed.
@@ -254,7 +254,15 @@ impl ExpertHost for ClaudeExperts {
                 if job.branch != job.target {
                     let _ = git(&command, &dir, &["push", "origin", "--delete", &job.branch]);
                 }
-                Ok(published)
+                // The commit the change is at, for the store's check.
+                let head = git(&command, &dir, &["rev-parse", "HEAD"])
+                    .ok()
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty());
+                Ok(Opened {
+                    change: published,
+                    head,
+                })
             })
             .await;
             match shipped {
