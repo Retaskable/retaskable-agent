@@ -264,7 +264,6 @@
   function load(withCards) {
     return RT.api("/api/settings/programs").then(function (body) {
       programs = body.programs || [];
-      if (withCards) clearing = {};
       renderPanels(withCards);
       renderTabs();
     });
