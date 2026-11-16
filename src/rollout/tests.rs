@@ -565,3 +565,19 @@ fn the_report_summary_copes_with_a_short_or_missing_report() {
 }
 
 mod runner;
+
+#[tokio::test(start_paused = true)]
+async fn the_poll_backs_off_while_the_store_fails_and_resets_after_a_success() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        f.0.lock().unwrap().answers.push_back(Err("down".into()));
+        waits.push(r.step().await.as_secs());
+    }
+    assert_eq!(waits, [5, 10, 20, 40, 60, 60]);
+    tell(&f, json!({ "idle": true }));
+    assert_eq!(r.step().await, WAIT);
+    f.0.lock().unwrap().answers.push_back(Err("down".into()));
+    assert_eq!(r.step().await, WAIT);
+}

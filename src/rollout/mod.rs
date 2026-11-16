@@ -25,6 +25,8 @@ pub use runner::Runners;
 
 /// How long to wait when the store says nothing about it.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
+/// The longest the poll waits while the store keeps failing.
+const WAIT_MAX: Duration = Duration::from_secs(60);
 /// How long an instruction's command may run when it names no (good) `timeoutMs`.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// `health` is never run more often than this, whatever the store asks (it guards Cloudflare's API).
@@ -117,6 +119,11 @@ fn failed(id: &Value, why: &str) -> Value {
     result(id, false, Some(why.to_string()), None)
 }
 
+/// How long to wait after `failures` failed polls in a row: `WAIT`, doubling each time, up to `WAIT_MAX`.
+fn backoff(failures: u32) -> Duration {
+    WAIT.saturating_mul(2u32.saturating_pow(failures.min(16))).min(WAIT_MAX)
+}
+
 /// What an instruction runs: the project's own command, or the promote.
 enum Job {
     Command(String, Duration),
@@ -138,6 +145,8 @@ pub struct Rollout<D: Deps> {
     last_report: Option<Instant>,
     sent_report: Option<Value>,
     logged: HashMap<&'static str, String>,
+    /// Polls that failed in a row; the wait doubles with each, and a good answer clears it.
+    poll_failures: u32,
     sink: Box<dyn Fn(&str) + Send + Sync>,
     /// Whether the store's last answer made this computer the project's runner, for the CI watcher.
     runner: Option<Arc<AtomicBool>>,
@@ -164,6 +173,7 @@ impl<D: Deps> Rollout<D> {
             last_report: None,
             sent_report: None,
             logged: HashMap::new(),
+            poll_failures: 0,
             sink,
             runner: None,
         })
@@ -235,7 +245,10 @@ impl<D: Deps> Rollout<D> {
     pub async fn step(&mut self) -> Duration {
         let kept = self.kept.as_ref().map(|(_, r)| r.clone());
         let answer = match self.deps.poll(kept).await.map(serde_json::from_value::<Answer>) {
-            Ok(Ok(a)) => a,
+            Ok(Ok(a)) => {
+                self.poll_failures = 0;
+                a
+            }
             Ok(Err(e)) => return self.poll_error(format!("couldn't read the answer: {e}")),
             Err(e) => return self.poll_error(e),
         };
@@ -277,7 +290,9 @@ impl<D: Deps> Rollout<D> {
 
     fn poll_error(&mut self, e: String) -> Duration {
         self.log("poll", format!("poll error: {e}"));
-        WAIT
+        let wait = backoff(self.poll_failures);
+        self.poll_failures = self.poll_failures.saturating_add(1);
+        wait
     }
 
     /// Runs one instruction and keeps its result; says how long to wait before the next poll.
