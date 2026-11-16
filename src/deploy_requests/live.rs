@@ -217,9 +217,10 @@ pub fn spawn_all(args: SpawnArgs) {
         if project.github_repo.is_empty() || project.repo_path.is_empty() {
             continue;
         }
+        let project_dir = crate::paths::project_dir(args.dir, &project.id_or_derived());
         let live = Live {
             project: project.clone(),
-            project_dir: crate::paths::project_dir(args.dir, &project.id_or_derived()),
+            project_dir: project_dir.clone(),
             gh: PathBuf::from("gh"),
             machine: args.machine.clone(),
             backlog_url: args.backlog_url.to_string(),
@@ -232,6 +233,6 @@ pub fn spawn_all(args: SpawnArgs) {
         let wake = args
             .wakes
             .signal_for(&project.id_or_derived(), crate::work_signal::Wake::DeployRequests);
-        tokio::spawn(super::run(DeployRequests::new(live), wake));
+        tokio::spawn(super::run(DeployRequests::new(live).keeping(&project_dir), wake));
     }
 }

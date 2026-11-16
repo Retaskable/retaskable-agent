@@ -72,7 +72,8 @@ impl ProjectLoop {
             failures: self.failures.clone(),
         });
         let handler = std::sync::Arc::new(SyncHandler::new(self.syncing.asks.clone()));
-        let puller = (self.syncing.puller).get_or_insert_with(|| Puller::default().register(handler));
+        let puller =
+            (self.syncing.puller).get_or_insert_with(|| Puller::default().keeping(self.store.dir()).register(handler));
         puller.pass(&link, || ()).await;
     }
 }

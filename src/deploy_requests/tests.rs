@@ -614,3 +614,5 @@ async fn a_result_the_store_says_moved_on_is_dropped_and_not_sent_again() {
     fake.state(|s| assert_eq!(s.finish_tries, 2));
     assert_eq!(loop_.running(), 0);
 }
+
+mod keep;

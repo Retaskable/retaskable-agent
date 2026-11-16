@@ -28,6 +28,7 @@ use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
 use crate::runs::chore::{ChoreKind, chore_of};
+mod owed;
 use crate::runs::{NoLane, RunLocks, RunStop, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
@@ -192,6 +193,8 @@ pub trait RunStarter: Send + Sync {
 /// One project's run state: the live runs and what the loop has done so far.
 pub struct RunLoop {
     runs: Runs,
+    /// The ends owed as the state file holds them (`owed.rs`).
+    saved_ends: Vec<crate::runs::OwedEnd>,
     /// `runs_drop` went through, so asking is allowed.
     dropped: bool,
     /// `merge_open` was answered after `runs_drop`.
@@ -220,6 +223,7 @@ impl RunLoop {
         let (processes_tx, processes_rx) = RunProcesses::channel();
         Self {
             runs: Runs::new(project),
+            saved_ends: Vec::new(),
             dropped: false,
             opened: false,
             waiting: false,
@@ -276,7 +280,7 @@ impl ProjectLoop {
     /// One pass of the run loop at `now`: `runs_drop` first (once; if it fails nothing is taken), then the
     /// ends that came back, the ceilings, the minute's beat, the ends to send, and asking for runs.
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
-        let Some((repo, token)) = self.run_access(shared).await else {
+        let Some((repo, token)) = self.run_access(shared, now).await else {
             return;
         };
         let token = Some(token.as_str());
@@ -332,42 +336,7 @@ impl ProjectLoop {
                 self.run_loop.runs.apply_beat(pool, &verdicts, now);
             }
         }
-        let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
-        for mut end in due {
-            if let RunOutcome::Failed(why) = &end.outcome
-                && crate::runs::is_outside(why)
-            {
-                if !end.result.is_object() {
-                    end.result = json!({});
-                }
-                end.result["outside"] = json!(true);
-            }
-            let answer = if end.merge {
-                let outcome = MergeOutcome::of_run(&end.outcome, &end.result);
-                match self.client.merge_result(repo, token, &end.token, &outcome).await {
-                    Ok(answer) => {
-                        if !answer.held && !matches!(outcome, MergeOutcome::Merged { .. }) {
-                            tracing::info!(turn = %end.token, "the store dropped a merge result: the turn was no longer held");
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        self.store_error("merge_result", &e);
-                        Err(RunDoneError::Other(e))
-                    }
-                }
-            } else {
-                let answer = self
-                    .client
-                    .run_done(repo, token, &end.token, &end.outcome, end.result)
-                    .await;
-                if let Err(RunDoneError::Other(e)) = &answer {
-                    self.store_error("run_done", e);
-                }
-                answer
-            };
-            self.run_loop.runs.end_sent(&end.token, answer, now);
-        }
+        self.send_due_ends(repo, token, now).await;
         self.run_loop.idle = false;
         for _ in 0..MAX_ASKS {
             if shared.stopping || self.run_loop.waiting || !self.ask_once(repo, token, pool, starter, shared, now).await
@@ -386,7 +355,7 @@ impl ProjectLoop {
 
     /// The repo and token the store is asked with, after `runs_drop` went through (once; if it fails nothing is
     /// taken). `None` when this project can't ask yet.
-    async fn run_access(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
+    async fn run_access(&mut self, shared: &Shared<'_>, now: Instant) -> Option<(u64, String)> {
         let repo = self.repo?;
         let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
@@ -397,6 +366,12 @@ impl ProjectLoop {
             }
         };
         if !self.run_loop.dropped {
+            // A finished run's result goes first: `runs_drop` ends every run of this computer as `interrupted`, and the
+            // store takes a result only while the run is still its own. A store that can't be reached holds it all.
+            self.send_due_ends(repo, Some(&token), now).await;
+            if self.run_loop.runs.restored_unanswered() {
+                return None;
+            }
             match self.client.runs_drop(repo, Some(&token)).await {
                 Ok(()) => self.run_loop.dropped = true,
                 Err(e) => {
@@ -421,7 +396,7 @@ impl ProjectLoop {
         if shared.stopping {
             return false;
         }
-        let Some((repo, token)) = self.run_access(shared).await else {
+        let Some((repo, token)) = self.run_access(shared, now).await else {
             return false;
         };
         self.ask(repo, Some(&token), pool, starter, shared, RunWant::Piece(piece), now)

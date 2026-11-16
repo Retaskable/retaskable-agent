@@ -1,15 +1,17 @@
 //! This computer's live runs, in memory only (docs/specs/pieces.md section 3.1 "Run", "Beat" and "End"; ceilings in
 //! section 3.3). Pure: time is passed in, and the store calls (`run_take`, `run_beat`, `run_done`) are the caller's;
-//! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
-//! state.json.
+//! it hands them the tokens to beat and the ends to send, and takes their answers back. The live runs are never
+//! written to state.json; only the ends not yet accepted are (`owed.rs`).
 mod build_end;
 pub mod chore;
 mod locks;
 mod outside;
+mod owed;
 mod wind;
 pub use build_end::{Pushed, change_json, end_from_answer, limited_end, needs_push, questions_json};
 pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING, lock_ceiling};
 pub use outside::is_outside;
+pub use owed::{OWED_KEPT_SECS, OwedEnd};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
@@ -79,6 +81,9 @@ pub struct PendingEnd {
     pub due: Instant,
     /// A merge turn's end: sent as `merge_result`, not `run_done`.
     pub merge: bool,
+    /// Read back from the state file after a restart, and the store hasn't answered it yet: `runs_drop` waits for it,
+    /// since the store would end the run as `interrupted` and the result could not be taken any more.
+    pub restored: bool,
 }
 
 /// No lane was free for a run that needs one.
@@ -273,6 +278,7 @@ impl Runs {
             result,
             due: now,
             merge,
+            restored: false,
         });
         true
     }
@@ -282,14 +288,33 @@ impl Runs {
         self.ends.iter().filter(|e| e.due <= now).collect()
     }
 
+    /// The ends not yet accepted, for the state file.
+    pub fn owed(&self) -> &[PendingEnd] {
+        &self.ends
+    }
+
+    /// Takes back ends kept from before a restart, due at once.
+    pub fn restore(&mut self, ends: Vec<PendingEnd>) {
+        self.ends.extend(ends);
+    }
+
+    /// Whether an end kept from before a restart is still waiting for the store's first answer.
+    pub fn restored_unanswered(&self) -> bool {
+        self.ends.iter().any(|e| e.restored)
+    }
+
     /// What the store said to a `run_done`: accepted or `stale_run` drops it (a stale run's work is thrown away,
     /// nothing else happens); any other refusal is due again a minute later.
     pub fn end_sent(&mut self, token: &str, answer: Result<(), RunDoneError>, now: Instant) {
         match answer {
             Ok(()) | Err(RunDoneError::Stale) => self.ends.retain(|e| e.token != token),
-            Err(RunDoneError::Other(_)) => {
+            Err(RunDoneError::Other(why)) => {
                 if let Some(e) = self.ends.iter_mut().find(|e| e.token == token) {
                     e.due = now + END_RETRY;
+                    // A store that answered, even with a refusal, has been reached: it isn't out any more.
+                    if why.is_refusal() {
+                        e.restored = false;
+                    }
                 }
             }
         }

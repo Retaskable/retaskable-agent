@@ -210,7 +210,7 @@ impl ProjectLoop {
         let puller = self
             .merging
             .puller
-            .get_or_insert_with(|| Puller::default().register(handler));
+            .get_or_insert_with(|| Puller::default().keeping(self.store.dir()).register(handler));
         puller.pass(&link, || ()).await;
     }
 

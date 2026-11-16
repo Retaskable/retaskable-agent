@@ -216,10 +216,12 @@ impl ProjectLoop {
             sessions: self.live.sessions().clone(),
         };
         let puller = self.asks.puller.get_or_insert_with(|| {
-            Puller::default().register(Arc::new(AskHandler {
-                host: host.clone(),
-                pictures: pictures::folder(),
-            }))
+            Puller::default()
+                .keeping(self.store.dir())
+                .register(Arc::new(AskHandler {
+                    host: host.clone(),
+                    pictures: pictures::folder(),
+                }))
         });
         let started = puller.pass(&link, || cx).await;
         *slots = slots.saturating_sub(started);

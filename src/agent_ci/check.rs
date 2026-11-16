@@ -18,6 +18,7 @@ use super::{CheckKey, Programs, container};
 use crate::backlog::runs::short_sha;
 use crate::telemetry::EventLog;
 use crate::telemetry::event::{Ci, Event};
+pub use kept::{Kept, Record};
 
 /// Everything one check needs.
 pub struct Job {
@@ -232,10 +233,15 @@ async fn finish(j: &Job, done: &Done) {
         }
     }
     let (store, repo) = (j.merge.store().clone(), j.repo.github_repo.clone());
-    if !try_finish(&store, &repo, &args, j.finish_pause).await {
+    // On disk before the first send, so a restart sends it again.
+    let kept = Kept::of(&j.data_dir, &repo, &args);
+    let record = kept.save(&repo, &args);
+    if try_finish(&store, &repo, &args, j.finish_pause).await {
+        kept.remove();
+    } else {
         // The check's own work is done (and `land` goes on), so the record is kept and sent from the side, not
         // held up in this slot.
-        tokio::spawn(keep_finishing(store, repo, args));
+        tokio::spawn(keep_finishing(store, kept, record, false));
     }
 }
 
@@ -264,18 +270,27 @@ const KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Sends the run record again every [`KEEP_EVERY`] until the store answers or [`KEPT`] passes (the owner's outage rule,
 /// 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next thing till the store is
-/// back."). The store takes a `ci_finish` from the computer whose lease lapsed while nobody else took the check. An
-/// improvement over the TS runner, which tries three times and loses the record. In memory: a restart forgets it, as
-/// the next runner's check would record the commit anyway.
-async fn keep_finishing(store: Arc<dyn CiStore>, repo: String, args: serde_json::Value) {
-    let mut waited = std::time::Duration::ZERO;
-    while waited < KEPT {
-        tokio::time::sleep(KEEP_EVERY).await;
-        waited += KEEP_EVERY;
-        if store.op(&repo, "ci_finish", args.clone()).await.is_ok() {
+/// back."), and then removes it from the file it is kept in. The store takes a `ci_finish` from the computer whose lease
+/// lapsed while nobody else took the check. `at_once` sends the first try without waiting (a record read back after a
+/// restart), and the day counts from when it was first kept. An improvement over the TS runner, which tries three times
+/// and loses the record.
+pub async fn keep_finishing(store: Arc<dyn CiStore>, kept: Kept, record: Record, at_once: bool) {
+    let mut waited = record.age();
+    let mut first = at_once;
+    loop {
+        if !std::mem::take(&mut first) {
+            tokio::time::sleep(KEEP_EVERY).await;
+            waited += KEEP_EVERY;
+        }
+        if store.op(&record.repo, "ci_finish", record.args.clone()).await.is_ok() {
+            kept.remove();
             return;
         }
+        if waited >= KEPT {
+            break;
+        }
     }
+    kept.remove();
     tracing::error!("agent CI: ci_finish never reached the store in 24 hours; giving it up");
 }
 
@@ -454,3 +469,4 @@ mod tests {
 
 #[cfg(test)]
 mod finish_tests;
+mod kept;
