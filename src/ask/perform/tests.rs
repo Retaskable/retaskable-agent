@@ -39,6 +39,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         live: Default::default(),
         checks: Default::default(),
         owner: Default::default(),
+        setup: None,
     };
     v.item_commands.gates().open_unrecorded(project);
     v

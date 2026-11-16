@@ -106,6 +106,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
         "idea_accept" => idea_accept(cmd, project, view),
         "setup_check" => setup_check(cmd, project, view),
+        "install_tool" => setup_tools::install_tool(cmd, project, view),
+        "tool_sign_in" => setup_tools::tool_sign_in(cmd, view),
         "continue" => item_command(cmd, project, view, data_dir, false),
         "retry" => item_command(cmd, project, view, data_dir, true),
         "skip" => skip(cmd, project, view),
@@ -685,5 +687,6 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 }
 
 mod expert;
+mod setup_tools;
 #[cfg(test)]
 mod tests;

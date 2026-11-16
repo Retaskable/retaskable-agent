@@ -437,6 +437,7 @@ mod expert;
 mod more;
 mod runs_mode;
 mod setup_check;
+mod setup_tools;
 use more::run_cmd;
 
 fn logged(name: &str, args: Value) -> (String, Value) {

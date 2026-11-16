@@ -112,6 +112,7 @@ pub mod secrets;
 pub mod settings_server;
 pub mod setup_check;
 pub mod setup_questions;
+pub mod setup_tools;
 pub mod shutdown;
 pub mod sidecars;
 pub mod site_settings;

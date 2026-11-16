@@ -17,6 +17,7 @@ pub fn agent_view(
     local: &local_model::LocalModel,
     checks: Arc<retaskable_agent::setup_check::SetupCheckRunner>,
 ) -> view::AgentView {
+    let settings = hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone(), default_port);
     view::AgentView {
         machine: link::machine_name(env),
         tags,
@@ -31,8 +32,13 @@ pub fn agent_view(
         item_commands: Default::default(),
         work: Default::default(),
         restart: Default::default(),
-        settings: hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone(), default_port),
+        settings: settings.clone(),
         live: Default::default(),
+        setup: Some(retaskable_agent::setup_tools::Setup::new(
+            checks.clone(),
+            settings,
+            dir.to_path_buf(),
+        )),
         checks,
         owner: Default::default(),
     }

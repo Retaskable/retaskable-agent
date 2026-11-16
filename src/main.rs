@@ -204,6 +204,10 @@ async fn main() -> Result<()> {
     // anything below spawns a session, a check or a script.
     let secrets = retaskable_agent::secrets::Secrets::for_process(&dir, env);
     secrets.apply();
+    // A GitHub CLI (or MinGit) fetched by Install, and Claude Code's `~/.local/bin`, are on this process's PATH from the start,
+    // so the checks and sessions find them (setup-in-app.md section 5.0).
+    retaskable_agent::setup_tools::use_own_if_there(&dir);
+    retaskable_agent::setup_tools::use_local_bin_if_home();
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
