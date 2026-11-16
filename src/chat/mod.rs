@@ -2,7 +2,7 @@
 //! `retaskable-chat-agent` binary, that serves one person's chat. It links as `role: "chat"`, takes only `ask`
 //! commands, sorts each message with one Haiku call, files a bug or idea on the shared backlog, hands a code question
 //! to a Coding Agent as an `ask` row, and answers anything else from the board. It has no lanes, worktrees or code
-//! sessions, and it holds no secret and no server logic: the server enforces what it may write ([`board::check_op`]
+//! sessions, and it holds no server logic and no secret of its own beyond the Claude Code sign-in a person may save for it (`crate::secrets`, encrypted in its `settings.json`): the server enforces what it may write ([`board::check_op`]
 //! is only the same list kept here so a bug cannot try more).
 //!
 //! No fallback anywhere: when the classifier cannot run, the person is told why and nothing is filed or guessed.

@@ -12,6 +12,19 @@ pub trait Host: Send + Sync {
     fn git_login(&self);
 }
 
+/// No environment at all, for the settings page when it edits another program's secrets: it reads and writes that
+/// program's file and must change nothing of its own process.
+pub struct NoHost;
+
+impl Host for NoHost {
+    fn get(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn set(&self, _: &str, _: &str) {}
+    fn remove(&self, _: &str) {}
+    fn git_login(&self) {}
+}
+
 /// This process's own environment, which every session, check and script the agent starts inherits.
 pub struct ProcessHost;
 

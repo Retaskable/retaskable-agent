@@ -28,6 +28,7 @@ use crate::tags;
 
 mod auth;
 mod first_run;
+mod programs;
 pub(crate) mod save;
 mod secrets;
 mod status;
@@ -51,6 +52,8 @@ pub(crate) const AGENT_ENV_VARS: [&str; 8] = [
 ];
 
 static SETTINGS_HTML: &str = include_str!("../../assets/settings.html");
+/// The programs panel and the other programs' settings (`programs.rs`), a second script of the page.
+static PROGRAMS_JS: &str = include_str!("../../assets/settings-programs.js");
 
 /// The settings page's server-side state: one instance shared (behind an `Arc`) by every request.
 pub struct SettingsServer {
@@ -86,6 +89,8 @@ pub struct SettingsServer {
     links: OnceLock<link::pending::Links>,
     /// The tokens its tools use, for `secrets` in `GET`/`POST /api/settings` (given once at start).
     secrets: OnceLock<Arc<crate::secrets::Secrets>>,
+    /// The OS credential store for the data key, for the other programs' secrets (`programs.rs`); none until given.
+    program_keys: OnceLock<Option<Arc<dyn TokenStore>>>,
 }
 
 impl SettingsServer {
@@ -121,6 +126,7 @@ impl SettingsServer {
             saved: OnceLock::new(),
             links: OnceLock::new(),
             secrets: OnceLock::new(),
+            program_keys: OnceLock::new(),
         }
     }
 
@@ -259,6 +265,8 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/settings/session", post(post_session))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/settings/status", get(status::get_status))
+        .route("/api/settings/programs", get(programs::get_programs))
+        .route("/api/settings/programs/{program}", post(programs::post_program))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
         .route("/api/backlog/link", get(get_backlog_link))
@@ -270,7 +278,9 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
 
 async fn get_settings_page() -> Response {
     let nonce = random_hex(16);
-    let html = SETTINGS_HTML.replace("{{NONCE}}", &nonce);
+    let html = SETTINGS_HTML
+        .replace("{{PROGRAMS_JS}}", PROGRAMS_JS)
+        .replace("{{NONCE}}", &nonce);
     let csp = format!(
         "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
     );
@@ -485,6 +495,10 @@ pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
 
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod programs_tests;
+#[cfg(test)]
+mod routes_tests;
 #[cfg(test)]
 mod secrets_tests;
 #[cfg(test)]
