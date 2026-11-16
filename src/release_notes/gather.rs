@@ -306,6 +306,7 @@ mod tests {
     // gather_merged_prs / gather_commits (a fake `gh`/`git` binary that ignores its arguments and
     // just prints a fixture file, like session.rs's own fake-session tests do for `claude`)
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn gather_merged_prs_refuses_an_empty_base() {
         use crate::host_call_sites_tests::{fake, on, refused};
