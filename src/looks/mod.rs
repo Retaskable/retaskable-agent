@@ -100,8 +100,9 @@ pub struct SplitPiece {
     pub what: String,
     #[serde(rename = "doneWhen")]
     pub done_when: String,
+    /// The 1-based numbers of earlier pieces of this list (`planInput` in the store's `shared/pieces.ts`).
     #[serde(default)]
-    pub needs: Vec<String>,
+    pub needs: Vec<u32>,
 }
 
 /// `decision` (section 3.5).
@@ -146,6 +147,11 @@ pub struct LookResult {
 }
 
 impl LookResult {
+    /// Whether every split piece's `needs` are numbers of earlier pieces, as the store requires.
+    fn needs_name_earlier_pieces(&self) -> bool {
+        (self.pieces.iter().enumerate()).all(|(i, p)| p.needs.iter().all(|&n| n >= 1 && (n as usize) <= i))
+    }
+
     /// Why the answer can't be used, if it can't.
     fn problem(&self, plan: bool) -> Option<&'static str> {
         let has = |s: &Option<String>| s.as_deref().is_some_and(|s| !is_blank(s));
@@ -157,6 +163,9 @@ impl LookResult {
                 Some("chose to split the plan but gave no instructions")
             }
             LookDecision::Split if !plan && self.pieces.is_empty() => Some("chose to split but gave no pieces"),
+            LookDecision::Split if !plan && !self.needs_name_earlier_pieces() => {
+                Some("chose to split with a piece that needs one that isn't an earlier piece of the list")
+            }
             LookDecision::Again if !has(&self.instructions) => Some("chose to try again but gave no instructions"),
             _ => None,
         }
@@ -208,7 +217,7 @@ pub fn look_result_schema() -> Value {
                         "title": { "type": "string" },
                         "what": { "type": "string" },
                         "doneWhen": { "type": "string" },
-                        "needs": { "type": "array", "items": { "type": "string" } }
+                        "needs": { "type": "array", "items": { "type": "integer" } }
                     },
                     "required": ["title", "what", "doneWhen", "needs"]
                 }
@@ -435,18 +444,29 @@ mod tests {
 
     #[tokio::test]
     async fn each_decision_parses_and_round_trips_through_the_wire() {
-        let piece = json!({ "title": "A", "what": "a", "doneWhen": "d", "needs": ["B"] });
+        let piece = json!({ "title": "A", "what": "a", "doneWhen": "d", "needs": [] });
+        let next = json!({ "title": "B", "what": "b", "doneWhen": "d", "needs": [1] });
         let bug = json!({ "title": "t", "details": "d", "sameAs": "b1" });
         for answer in [
             json!({ "decision": "again", "reason": "r", "instructions": "i", "engine": "claude" }),
             json!({ "decision": "start_over", "reason": "r", "engine": "pi", "retaskableBug": bug }),
-            json!({ "decision": "split", "reason": "r", "pieces": [piece] }),
+            json!({ "decision": "split", "reason": "r", "pieces": [piece, next] }),
             json!({ "decision": "wait", "reason": "service down", "engine": "cursor" }),
             json!({ "decision": "person", "reason": "needs access" }),
         ] {
             let d = decided(Some(answer.clone()), true).await;
             assert!(d.note.is_none(), "{answer}");
             assert_eq!(d.result.unwrap().to_wire(), answer);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_split_whose_needs_do_not_name_earlier_pieces_is_unusable() {
+        for needs in [json!([1]), json!([2]), json!([0]), json!(["A"])] {
+            let piece = json!({ "title": "A", "what": "a", "doneWhen": "d", "needs": needs });
+            let answer = json!({ "decision": "split", "reason": "r", "pieces": [piece] });
+            let d = decided(Some(answer), true).await;
+            assert!(d.result.is_none() && d.note.is_some(), "{needs}");
         }
     }
 

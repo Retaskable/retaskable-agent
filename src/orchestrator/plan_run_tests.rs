@@ -81,7 +81,7 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     r.starter.start(req).unwrap();
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::Planned, "{:?}", end.result);
-    assert_eq!(end.result["pieces"][1]["needs"], json!(["A"]));
+    assert_eq!(end.result["pieces"][1]["needs"], json!([1]));
     assert_ran_read_only_in(&r.root, &base, "opus");
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(prompt.contains("Add the widget"), "{prompt}");
