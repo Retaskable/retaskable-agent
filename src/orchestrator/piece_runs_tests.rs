@@ -116,7 +116,7 @@ fn origin_has(rig: &Rig, branch: &str) -> bool {
     !out.stdout.is_empty()
 }
 
-const BRANCH: &str = "retaskable/pc1-show-the-thing";
+const BRANCH: &str = "retaskable/pc1-show-the-thing-s0";
 
 #[tokio::test]
 async fn a_build_run_is_listed_on_its_lane_while_it_runs_and_not_after() {
@@ -888,3 +888,34 @@ mod approval;
 
 #[path = "piece_runs_held_tests.rs"]
 mod held;
+
+#[tokio::test]
+async fn a_run_whose_lane_cannot_be_prepared_ends_failed_with_why_not_interrupted() {
+    // The piece's pushed branch is not a ref name, so git refuses the lane. `interrupted` put the run back at once
+    // and the same computer took it again every pass; `failed` is counted against the piece.
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let mut p = piece();
+    p["branch"] = json!("not a branch~name");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    let RunOutcome::Failed(why) = &end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.starts_with("Couldn't prepare the lane"), "{why}");
+    assert!(!r.root.join("prompt1.txt").exists());
+}
+
+#[tokio::test]
+async fn a_piece_the_store_numbers_is_built_on_its_records_branch_not_one_named_for_its_title() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let p = json!({ "id": "i1-piece-2", "itemTitle": "Intent rows: take rows", "title": "Take: draft wanted ~ rows",
+        "what": "W", "doneWhen": "D" });
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(origin_has(
+        &r,
+        "retaskable/i1-piece-2-intent-rows-take-rows-take-draft-wanted-s0"
+    ));
+}
