@@ -1,5 +1,5 @@
 //! The expert commands (docs/specs/expert-chat.md section 3, `agent/src/expert/commands.ts`): `expert_start`,
-//! `expert_say`, `expert_stop` and `expert_end`. Each is queued for the project's loop, which checks that the sender
+//! `expert_say`, `expert_stop`, `expert_end` and `session_history`. Each is queued for the project's loop, which checks that the sender
 //! is the person who started the session, carries it out and answers (`orchestrator::driver::experts`), so each
 //! answers `pending` here. Refused outside `claim` mode, where nothing runs.
 use serde_json::{Value, json};
@@ -70,6 +70,15 @@ fn action(cmd: &Command) -> Result<ExpertAction, String> {
             })
         }
         "expert_stop" => Ok(ExpertAction::Stop { item: item_of(cmd)? }),
+        "session_history" => Ok(ExpertAction::History {
+            item: item_of(cmd)?,
+            before: cmd.args.get("before").and_then(Value::as_i64),
+            limit: cmd
+                .args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok()),
+        }),
         _ => {
             let outcome = cmd.args.get("outcome").and_then(Value::as_str).unwrap_or("");
             if !matches!(outcome, "ship" | "backlog" | "park" | "discard") {

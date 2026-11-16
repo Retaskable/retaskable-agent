@@ -196,6 +196,12 @@ pub enum ExpertAction {
         item: String,
         outcome: String,
     },
+    /// `session_history` (read only): the session's past turns, `before` a time in milliseconds, up to `limit` steps.
+    History {
+        item: String,
+        before: Option<i64>,
+        limit: Option<usize>,
+    },
 }
 
 /// An expert command waiting for the loop, which checks that `by` may drive the session, carries it out and answers

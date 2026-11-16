@@ -111,7 +111,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "skip" => skip(cmd, project, view),
         "playtest" => playtest(cmd, project, view, data_dir),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
-        "expert_start" | "expert_say" | "expert_stop" | "expert_end" => expert::expert(cmd, project, view),
+        "expert_start" | "expert_say" | "expert_stop" | "expert_end" | "session_history" => {
+            expert::expert(cmd, project, view)
+        }
         "claude_sessions" => expert::claude_sessions(cmd, view),
         "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),

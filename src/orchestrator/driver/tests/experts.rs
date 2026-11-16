@@ -2,7 +2,9 @@
 //! host whose turns are scripted.
 use super::*;
 use crate::config::ProjectConfig;
+use crate::engines::engine::{EventKind, SessionEvent};
 use crate::expert::claude_sessions::Continued;
+use crate::expert::history::Turn;
 use crate::expert::{Question, Reply};
 use crate::implementer::publish::Published;
 use crate::orchestrator::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
@@ -301,6 +303,27 @@ impl ExpertHost for Host {
         .boxed()
     }
 
+    fn history(
+        &self,
+        _: &ProjectConfig,
+        _: &str,
+        session_id: Option<&str>,
+        from: Option<&str>,
+    ) -> BoxFuture<'static, (Vec<Turn>, Vec<Turn>)> {
+        let said = |at: i64, text: &str, saying: Option<&str>| Turn {
+            at,
+            events: vec![SessionEvent {
+                at,
+                kind: EventKind::Text,
+                text: text.into(),
+            }],
+            said: saying.map(str::to_string),
+        };
+        let earlier = from.map(|f| vec![said(10, &format!("earlier {f}"), Some("Fix it"))]);
+        let own = session_id.map(|id| vec![said(100, &format!("first {id}"), None), said(200, "second", None)]);
+        async move { (earlier.unwrap_or_default(), own.unwrap_or_default()) }.boxed()
+    }
+
     fn discard(&self, _: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()> {
         self.discards.lock().unwrap().push((lane, branch.to_string()));
         async {}.boxed()
@@ -443,6 +466,7 @@ const ID: &str = "expert-fix-it";
 
 mod backlog;
 mod carry;
+mod history;
 mod pictures;
 mod ship;
 mod ship_runs;

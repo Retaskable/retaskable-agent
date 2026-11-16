@@ -41,6 +41,7 @@ use crate::backlog::expert::{ExpertItem, ShipOwed};
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
+use crate::expert::history;
 use crate::expert::{self, Detail, Question, Reply};
 use crate::expert_queue::{BEAT_MS, ExpertQueue, OwnedQueue, Queued, is_local};
 use crate::implementer::publish::Published;
@@ -127,6 +128,15 @@ pub trait ExpertHost: Send + Sync {
     /// Saves what the lane left uncommitted, pushes its work as `job.target` and opens the change, or finds the one
     /// already open for it. An `Err` says why, and leaves the session as it was.
     fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Opened, String>>;
+    /// The turns of the session's own run files (`session_id`'s `.jsonl`) and, for a session that continues one, of the
+    /// Claude Code conversation it carries on: `(earlier, own)`, each oldest first (`session_history`).
+    fn history(
+        &self,
+        project: &ProjectConfig,
+        item: &str,
+        session_id: Option<&str>,
+        from: Option<&str>,
+    ) -> BoxFuture<'static, (Vec<history::Turn>, Vec<history::Turn>)>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -441,7 +451,44 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             Ok(Value::Null)
         }
         ExpertAction::End { item, outcome } => end(cx, ex, pool, &cmd.by, item, outcome).await,
+        ExpertAction::History { item, before, limit } => session_history(cx, ex, &cmd.by, item, *before, *limit).await,
     }
+}
+
+/// `session_history`: any member may ask, but a continued session's Claude Code conversation is its starter's.
+async fn session_history(
+    cx: &Cx<'_>,
+    ex: &Experts,
+    by: &str,
+    item: &str,
+    before: Option<i64>,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let s = (ex.sessions.get(item)).ok_or("That's not an expert session.")?;
+    let from = cx
+        .queue
+        .continued_from(item)
+        .filter(|_| by == s.started_by)
+        .map(|f| f.session_id);
+    let (earlier, own) = cx
+        .host
+        .history(cx.project, item, s.session_id.as_deref(), from.as_deref())
+        .await;
+    // The running turn is `watch`'s: its meta line is the last, so it goes.
+    let own = if s.turn.is_some() {
+        &own[..own.len().saturating_sub(1)]
+    } else {
+        &own[..]
+    };
+    let all: Vec<history::Turn> = earlier.iter().chain(own).cloned().collect();
+    Ok(history::answer(
+        &all,
+        history::Pick {
+            before,
+            limit,
+            running: false,
+        },
+    ))
 }
 
 /// Queues the person's message for the session; with `now` the running turn is cut and the message goes next.

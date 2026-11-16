@@ -16,6 +16,7 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::{EngineId, Role, SessionSpec, SessionStart, TranscriptSink, engine_of, place, run_session};
 use crate::env::Env;
 use crate::expert::claude_sessions::Continued;
+use crate::expert::history::{self, Turn};
 use crate::expert::{self, claude_sessions};
 use crate::git_bin::command;
 use crate::implementer::publish::publish;
@@ -270,6 +271,30 @@ impl ExpertHost for ClaudeExperts {
                 Ok(Err(e)) => Err(format!("{e:#}")),
                 Err(e) => Err(format!("{e}")),
             }
+        })
+    }
+
+    fn history(
+        &self,
+        project: &ProjectConfig,
+        item: &str,
+        session_id: Option<&str>,
+        from: Option<&str>,
+    ) -> BoxFuture<'static, (Vec<Turn>, Vec<Turn>)> {
+        let own = session_id
+            .map(|id| paths::run_dir(&self.data_dir, &project.id_or_derived(), item).join(format!("{id}.jsonl")));
+        let root = from.map(|id| (claude_sessions::projects_root(&self.env), id.to_string()));
+        Box::pin(async move {
+            let read = tokio::task::spawn_blocking(move || {
+                let earlier = root
+                    .and_then(|(root, id)| claude_sessions::session_file(&root, &id))
+                    .map(|f| history::claude_turns(&f))
+                    .unwrap_or_default();
+                let own = own.map(|f| history::read_turns(&f)).unwrap_or_default();
+                (earlier, own)
+            })
+            .await;
+            read.unwrap_or_default()
         })
     }
 

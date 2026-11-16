@@ -20,6 +20,7 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
         ),
         ("expert_stop", json!({ "itemId": "e" })),
         ("expert_end", json!({ "itemId": "e", "outcome": "park" })),
+        ("session_history", json!({ "itemId": "e", "before": 500, "limit": 40 })),
     ] {
         assert_eq!(go(name, args)["type"], "pending", "{name}");
     }
@@ -42,6 +43,11 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
             ExpertAction::End {
                 item: "e".into(),
                 outcome: "park".into()
+            },
+            ExpertAction::History {
+                item: "e".into(),
+                before: Some(500),
+                limit: Some(40)
             },
         ]
     );
