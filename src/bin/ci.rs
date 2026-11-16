@@ -27,7 +27,7 @@ Usage:
   retaskable-ci set-password    Set the password the page signs in with (asked twice, never echoed; or piped on stdin).
   retaskable-ci secret set <NAME>
                                 Save a secret (GH_TOKEN), sealed under the data key: asked for without echo, or piped on
-                                stdin; never an argument. `secret list` shows each name, its source and fingerprint.
+                                stdin; never an argument. `secret reset <NAME>` deletes the saved one (the environment's value is used again); `secret list` shows each name, its source and fingerprint.
   retaskable-ci network on|off  Let other computers reach the page (needs a password; from the next start). Off by default.
   retaskable-ci once <sha>...   Check just the pull requests or main at these commits, then exit.
   retaskable-ci --version

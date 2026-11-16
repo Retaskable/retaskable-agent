@@ -101,39 +101,62 @@ fn all_programs_share_the_one_data_key_of_the_data_folder() {
 }
 
 #[test]
-fn the_environment_wins_over_a_saved_secret_and_is_reported_for_the_status_file() {
-    let rig = Rig::new();
-    save(
-        &rig.program(Owner::CiRunner, Arc::new(FakeHost::default())),
-        &[("GH_TOKEN", json!(TOKEN))],
-    );
-    let host = Arc::new(FakeHost::with(&[("GH_TOKEN", "from-the-environment")]));
-    let ci = rig.program(Owner::CiRunner, host.clone());
-    ci.apply();
-    assert_eq!(host.get("GH_TOKEN").as_deref(), Some("from-the-environment"));
-    assert_eq!(ci.env_names(), ["GH_TOKEN"]);
-    let refused = ci.plan(&json!({"GH_TOKEN": "other"}).as_object().unwrap().clone());
-    assert!(refused.is_err());
+fn a_saved_secret_beats_the_programs_environment_for_each_program_and_is_reported_for_the_status_file() {
+    for (owner, name) in [
+        (Owner::CiRunner, "GH_TOKEN"),
+        (Owner::ChatAgent, "ANTHROPIC_API_KEY"),
+        (Owner::ChatAgent, "CLAUDE_CODE_OAUTH_TOKEN"),
+    ] {
+        let rig = Rig::new();
+        save(
+            &rig.program(owner, Arc::new(FakeHost::default())),
+            &[(name, json!(TOKEN))],
+        );
+        let host = Arc::new(FakeHost::with(&[(name, "from-the-environment")]));
+        let program = rig.program(owner, host.clone());
+        program.apply();
+        assert_eq!(host.get(name).as_deref(), Some(TOKEN), "{owner:?} {name}");
+        assert_eq!(
+            program.env_names(),
+            [name],
+            "the status file still says the environment set it"
+        );
+        assert!(
+            program
+                .plan(&json!({ name: "other" }).as_object().unwrap().clone())
+                .is_ok()
+        );
+        // Deleting the saved one goes back to what the process started with.
+        save(&program, &[(name, Value::Null)]);
+        assert_eq!(host.get(name).as_deref(), Some("from-the-environment"));
+    }
 }
 
 #[test]
-fn the_page_saves_a_programs_secret_without_touching_its_own_environment_and_locks_what_the_status_says() {
+fn the_page_saves_a_programs_secret_without_touching_its_own_environment_and_shows_the_saved_one_first() {
     let rig = Rig::new();
     let page = rig.page(Owner::CiRunner, &["AGENT_CI_SLOTS"]);
     save(&page, &[("GH_TOKEN", json!(TOKEN))]);
     assert!(rig.file(Owner::CiRunner).contains("v1:"));
     let state = page.states().remove(0);
     assert_eq!(
-        (state.source, state.fingerprint),
-        (Source::Saved, Some(fingerprint(TOKEN)))
+        (state.source, state.fingerprint, state.env_set),
+        (Source::Saved, Some(fingerprint(TOKEN)), false)
     );
-    // The program's own environment sets it: the page shows it locked and refuses a change.
-    let locked = rig.page(Owner::CiRunner, &["GH_TOKEN"]);
-    assert_eq!(locked.states()[0].source, Source::Env);
+    // The program's own environment sets it too: still the saved one, and a reset goes back to the environment's.
+    let with_env = rig.page(Owner::CiRunner, &["GH_TOKEN"]);
+    let state = with_env.states().remove(0);
+    assert_eq!((state.source, state.env_set), (Source::Saved, true));
+    save(&with_env, &[("GH_TOKEN", Value::Null)]);
+    let state = with_env.states().remove(0);
+    assert_eq!((state.source, state.env_set), (Source::Env, true));
+    // Nothing saved, nothing from the environment: unset, and saving is open.
+    let unset = rig.page(Owner::ChatAgent, &[]);
+    assert_eq!(unset.states()[0].source, Source::Unset);
     assert!(
-        locked
-            .plan(&json!({"GH_TOKEN": null}).as_object().unwrap().clone())
-            .is_err()
+        unset
+            .plan(&json!({"ANTHROPIC_API_KEY": "k"}).as_object().unwrap().clone())
+            .is_ok()
     );
 }
 
@@ -168,12 +191,15 @@ fn a_running_program_picks_up_a_save_from_the_page_and_a_clear() {
 }
 
 #[test]
-fn a_refresh_leaves_a_name_the_environment_set_alone() {
+fn a_refresh_puts_a_save_over_the_environment_and_a_delete_goes_back_to_it() {
     let rig = Rig::new();
     let host = Arc::new(FakeHost::with(&[("GH_TOKEN", "from-the-environment")]));
     let ci = rig.program(Owner::CiRunner, host.clone());
     ci.apply();
     save(&rig.page(Owner::CiRunner, &[]), &[("GH_TOKEN", json!(TOKEN))]);
+    ci.refresh();
+    assert_eq!(host.get("GH_TOKEN").as_deref(), Some(TOKEN));
+    save(&rig.page(Owner::CiRunner, &[]), &[("GH_TOKEN", Value::Null)]);
     ci.refresh();
     assert_eq!(host.get("GH_TOKEN").as_deref(), Some("from-the-environment"));
 }
