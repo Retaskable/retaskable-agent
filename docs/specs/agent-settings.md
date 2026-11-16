@@ -107,7 +107,7 @@ The TypeScript agent keeps each saved secret as its own OS credential entry (ser
 - **A save** (`secrets` in `POST /api/settings`, `{ <name>: value | null }`, `null` clears) is checked whole, with the rest of the body, before anything is written: a name on the list, not the environment's, 1 to 4096 characters with no spaces, line breaks or control characters, and a key to seal with. It then writes the config and updates the agent's own environment, so it reaches new sessions; **sessions already running keep the environment they started with**. A new `GH_TOKEN` runs `gh auth setup-git`, and so does a saved one at start; a fixed step of the agent's own, not a command from the page.
 - **`GET /api/settings`** adds `secrets: [{ name, label, use, source: "env" | "saved" | "unset" | "unreadable", fingerprint? }]`, `canSaveSecrets` (this request is from this computer, section 4.3) and `secretsNote` (null, or why no save can work here, such as no key).
 - **Only from this computer** (section 4.3).
-- **The site** gets names and where each comes from (`settings.secrets: [{ name, source }]` in the hello) and nothing else: neither a value, a fingerprint nor ciphertext.
+- **The site** gets names and where each comes from (`computer.secrets` in the hello, as the TypeScript agent sends it: `{ key, state: "set", kind: "env" | "key" }` for each one that is set, beside `lanes`) and nothing else: neither a value, a fingerprint nor ciphertext.
 
 ## 4. The settings page
 

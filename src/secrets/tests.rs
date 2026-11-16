@@ -63,7 +63,7 @@ fn state(secrets: &Secrets, name: &str) -> (Source, Option<String>) {
 }
 
 fn key_b64() -> String {
-    DataKey::generate().to_base64()
+    DataKey::generate().to_base64().to_string()
 }
 
 // --- the cipher ---
@@ -110,12 +110,12 @@ fn every_seal_has_its_own_nonce() {
 fn a_key_is_32_bytes_of_base64_and_never_printed() {
     let key = DataKey::generate();
     assert_eq!(
-        DataKey::from_base64(&format!(" {}\n", key.to_base64())),
+        DataKey::from_base64(&format!(" {}\n", key.to_base64().as_str())),
         Some(key.clone())
     );
     assert_eq!(DataKey::from_base64("AAAA"), None);
     assert_eq!(DataKey::from_base64("not base64!"), None);
-    assert!(!format!("{key:?}").contains(&key.to_base64()));
+    assert!(!format!("{key:?}").contains(key.to_base64().as_str()));
 }
 
 #[test]

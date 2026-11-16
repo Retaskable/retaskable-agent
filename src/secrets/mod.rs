@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::config;
 use crate::env::Env;
@@ -119,7 +120,7 @@ pub struct Plan {
 }
 
 struct Applied {
-    value: String,
+    value: Zeroizing<String>,
     sealed: String,
 }
 
@@ -207,7 +208,7 @@ impl Secrets {
                 .filter(|v| !v.is_empty());
             // Put here from the saved one by the agent before a restart (and unchanged since): still the saved one.
             if let Some(value) = &env_value
-                && !(before.contains(def.name) && matches!(&saved, Some(Ok(plain)) if plain == value))
+                && !(before.contains(def.name) && matches!(&saved, Some(Ok(plain)) if **plain == *value))
             {
                 inner.from_env.insert(def.name.to_string());
                 continue;
@@ -241,7 +242,7 @@ impl Secrets {
             .iter()
             .map(|def| {
                 let (source, value) = if inner.from_env.contains(def.name) {
-                    (Source::Env, self.host.get(def.name))
+                    (Source::Env, self.host.get(def.name).map(Zeroizing::new))
                 } else {
                     match read_saved(def.name, &stored, &key) {
                         Some(Ok(plain)) => (Source::Saved, Some(plain)),
@@ -284,7 +285,7 @@ impl Secrets {
             if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
                 return Err(Refused(format!("{name} can't hold spaces or line breaks.")));
             }
-            items.push((def.name, Some(value.to_string())));
+            items.push((def.name, Some(Zeroizing::new(value.to_string()))));
         }
         // The key is made only for a save that has something to seal.
         let key = if items.iter().any(|(_, v)| v.is_some()) {
@@ -429,10 +430,10 @@ fn read_saved(
     name: &str,
     stored: &BTreeMap<String, String>,
     key: &Result<Option<DataKey>, String>,
-) -> Option<Result<String, Unreadable>> {
+) -> Option<Result<Zeroizing<String>, Unreadable>> {
     let text = stored.get(name)?;
     Some(match key {
-        Ok(Some(key)) => open(key, name, text),
+        Ok(Some(key)) => open(key, name, text).map(Zeroizing::new),
         _ => Err(Unreadable),
     })
 }

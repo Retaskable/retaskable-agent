@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::cipher::DataKey;
 use crate::env::Env;
@@ -150,7 +151,7 @@ fn no_key_note() -> String {
 
 fn from_file(file: &Path) -> Source {
     let text = match std::fs::read_to_string(file) {
-        Ok(text) => text,
+        Ok(text) => Zeroizing::new(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Source::FileToMake(file.to_path_buf()),
         Err(_) => return Source::Broken(format!("Couldn't read the key file {}.", file.display())),
     };

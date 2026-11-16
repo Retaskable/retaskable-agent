@@ -7,13 +7,29 @@ use base64::engine::general_purpose::STANDARD;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rand::RngExt;
+use zeroize::{Zeroize, Zeroizing};
 
 const PREFIX: &str = "v1:";
 const NONCE_LEN: usize = 24;
 
-/// The 256-bit key every secret in one data folder is sealed under. Its `Debug` says nothing of the bytes.
-#[derive(Clone, PartialEq, Eq)]
+/// The 256-bit key every secret in one data folder is sealed under. Its `Debug` says nothing of the bytes, it is
+/// compared in constant time, and its memory is wiped when it is dropped.
+#[derive(Clone)]
 pub struct DataKey([u8; 32]);
+
+impl Drop for DataKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl PartialEq for DataKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.iter().zip(&other.0).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    }
+}
+
+impl Eq for DataKey {}
 
 impl DataKey {
     pub fn generate() -> Self {
@@ -24,12 +40,12 @@ impl DataKey {
 
     /// From base64 text (surrounding whitespace ignored), or `None` unless it holds exactly 32 bytes.
     pub fn from_base64(text: &str) -> Option<Self> {
-        let bytes = STANDARD.decode(text.trim()).ok()?;
+        let bytes = Zeroizing::new(STANDARD.decode(text.trim()).ok()?);
         Some(Self(<[u8; 32]>::try_from(bytes.as_slice()).ok()?))
     }
 
-    pub fn to_base64(&self) -> String {
-        STANDARD.encode(self.0)
+    pub fn to_base64(&self) -> Zeroizing<String> {
+        Zeroizing::new(STANDARD.encode(self.0))
     }
 }
 
@@ -80,5 +96,9 @@ pub fn open(key: &DataKey, name: &str, stored: &str) -> Result<String, Unreadabl
     let plain = cipher(key)
         .decrypt(&XNonce::from(nonce), payload)
         .map_err(|_| Unreadable)?;
-    String::from_utf8(plain).map_err(|_| Unreadable)
+    // A value that isn't text is wiped, not dropped as it is.
+    String::from_utf8(plain).map_err(|e| {
+        e.into_bytes().zeroize();
+        Unreadable
+    })
 }
