@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use super::Shared;
 use super::drafts::claim_agent;
 use super::project::ProjectLoop;
+use crate::ask::pictures::{self, Pictures};
 use crate::backlog::expert::ExpertItem;
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
@@ -40,8 +41,10 @@ pub struct ExpertJob {
     pub lane: u32,
     /// The engine session to resume; `None` is a first turn, which starts a session with the opening prompt.
     pub session_id: Option<String>,
-    /// The person's message, the first turn's prompt not included.
+    /// The person's message, the first turn's prompt not included, with its pictures listed after it.
     pub message: String,
+    /// The message's pictures on disk: kept until the turn is over, then removed.
+    pub pictures: Pictures,
     /// Whether the lane is set up first (a new session, or one back from a park).
     pub prepare: bool,
     /// With `prepare`: start from the branch the park pushed rather than from the base.
@@ -519,10 +522,26 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             }
         }
         let Some(m) = got else { continue };
+        let saved = match fetch_pictures(cx, &m).await {
+            Ok(saved) => saved,
+            Err(why) => {
+                // The row was taken: it is read and gone, so say so rather than leave the person waiting.
+                cx.queue.done(id, std::slice::from_ref(&m.id)).await;
+                s.consumed.insert(m.id.clone());
+                cx.note(
+                    id,
+                    &s.lease,
+                    &format!("{why} Your message wasn't sent: send it again to try."),
+                )
+                .await;
+                continue;
+            }
+        };
+        let text = expert::with_images(&m.text, &saved.block());
         let message = if s.mid_step {
-            format!("{}\n\n{}", expert::MID_STEP, m.text)
+            format!("{}\n\n{text}", expert::MID_STEP)
         } else {
-            m.text.clone()
+            text
         };
         let stop = Arc::new(Notify::new());
         let job = ExpertJob {
@@ -532,6 +551,7 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             lane,
             session_id: s.session_id.clone(),
             message,
+            pictures: saved,
             prepare: !s.prepared,
             from_branch: s.from_branch,
             stop: stop.clone(),
@@ -547,6 +567,15 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             ids: vec![m.id],
         });
     }
+}
+
+/// Fetches the pictures a queued message carries into a folder of their own, named for the row.
+async fn fetch_pictures(cx: &Cx<'_>, m: &Queued) -> Result<Pictures, String> {
+    let name: String = (m.id.chars())
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let dir = pictures::folder().join(format!("expert-{name}"));
+    pictures::fetch_own(cx.client, cx.repo, Some(cx.token), &m.picture_ids, &dir).await
 }
 
 /// Parks the sessions that have sat idle for the idle time, with nothing queued.

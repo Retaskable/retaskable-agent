@@ -50,7 +50,8 @@ impl St {
                 let at = crate::telemetry::now_ms() + i64::from(n);
                 let id = format!("q-{n}");
                 rows.push(json!({
-                    "itemId": item, "id": id, "text": args["text"], "at": at, "by": args["by"], "state": "queued"
+                    "itemId": item, "id": id, "text": args["text"], "at": at, "by": args["by"], "state": "queued",
+                    "pictureIds": args.get("pictureIds").cloned().unwrap_or(json!([]))
                 }));
                 ok(json!({ "id": id }))
             }
@@ -122,13 +123,27 @@ impl St {
 async fn store() -> (String, Arc<St>) {
     let st = Arc::new(St::default());
     let s = st.clone();
-    let app = Router::new().route(
-        "/v1/repos/{id}/ops",
-        post(move |Json(body): Json<Value>| {
-            let s = s.clone();
-            async move { s.handle(body) }
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/v1/repos/{id}/ops",
+            post(move |Json(body): Json<Value>| {
+                let s = s.clone();
+                async move { s.handle(body) }
+            }),
+        )
+        // Every picture the store is asked for is its own name, but `0…ff`, which it doesn't have.
+        .route(
+            "/v1/repos/{id}/pictures/{picture}",
+            axum::routing::get(
+                |axum::extract::Path((_, picture)): axum::extract::Path<(u64, String)>| async move {
+                    if picture.contains("-0000-4000-8000-0000000000ff") {
+                        (StatusCode::NOT_FOUND, b"{}".to_vec())
+                    } else {
+                        (StatusCode::OK, picture.into_bytes())
+                    }
+                },
+            ),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -141,6 +156,8 @@ struct Ran {
     session_id: Option<String>,
     prepare: bool,
     from_branch: bool,
+    /// Whether every picture the message lists was on disk while the turn ran.
+    pictures_there: bool,
 }
 
 #[derive(Default)]
@@ -162,6 +179,7 @@ impl ExpertHost for Host {
             session_id: job.session_id.clone(),
             prepare: job.prepare,
             from_branch: job.from_branch,
+            pictures_there: job.pictures.paths().iter().all(|p| p.is_file()),
         });
         let (hold, go) = (self.hold.load(Ordering::SeqCst), self.go.clone());
         let ask = self.question.lock().unwrap().take();
@@ -327,6 +345,8 @@ impl Ex {
 }
 
 const ID: &str = "expert-fix-it";
+
+mod pictures;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.
 async fn started(x: &mut Ex) {

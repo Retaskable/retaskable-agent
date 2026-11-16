@@ -1,6 +1,8 @@
 use super::*;
 use crate::view::{ExpertAction, ExpertCommand};
 
+const PICTURE: &str = "0a1b2c3d-0000-4000-8000-00000000000a.png";
+
 #[test]
 fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
     let v = view();
@@ -13,7 +15,7 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
         ("expert_start", json!({ "request": " Fix it " })),
         (
             "expert_say",
-            json!({ "itemId": "e", "text": "more", "now": true, "pictureIds": ["p1"] }),
+            json!({ "itemId": "e", "text": "more", "now": true, "pictureIds": [PICTURE] }),
         ),
         ("expert_stop", json!({ "itemId": "e" })),
         ("expert_end", json!({ "itemId": "e", "outcome": "park" })),
@@ -31,7 +33,7 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
             ExpertAction::Say {
                 item: "e".into(),
                 text: "more".into(),
-                pictures: vec!["p1".into()],
+                pictures: vec![PICTURE.into()],
                 now: true
             },
             ExpertAction::Stop { item: "e".into() },
@@ -58,6 +60,15 @@ fn bad_expert_commands_are_nacked_and_queue_nothing() {
         ),
         ("expert_say", json!({ "text": "hi" })),
         ("expert_say", json!({ "itemId": "e" })),
+        (
+            "expert_say",
+            json!({ "itemId": "e", "text": "hi", "pictureIds": ["../../etc/passwd"] }),
+        ),
+        ("expert_say", json!({ "itemId": "e", "text": "hi", "pictureIds": "x" })),
+        (
+            "expert_say",
+            json!({ "itemId": "e", "text": "hi", "pictureIds": [PICTURE, PICTURE, PICTURE, PICTURE, PICTURE] }),
+        ),
         ("expert_stop", json!({})),
         ("expert_end", json!({ "itemId": "e", "outcome": "burn" })),
         ("expert_end", json!({ "outcome": "park" })),

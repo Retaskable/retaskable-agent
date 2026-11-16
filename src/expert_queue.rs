@@ -240,6 +240,8 @@ impl<S: QueueOps> ExpertQueue<S> {
                 }
                 rows.iter().find(|r| r.id == q.id).map(|r| Queued {
                     text: r.text.clone(),
+                    // What the store has now: the site may have edited the pictures too.
+                    picture_ids: r.picture_ids.clone(),
                     ..q.clone()
                 })
             })

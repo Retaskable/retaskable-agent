@@ -96,6 +96,15 @@ pub fn first_prompt(branch: &str, base_branch: &str, message: &str) -> Result<St
     Ok(format!("{head}\n\n{message}"))
 }
 
+/// The message with its pictures' block after it (`attachments.withImages`): no block, the message as it is.
+pub fn with_images(text: &str, block: &str) -> String {
+    if block.is_empty() {
+        return text.to_string();
+    }
+    let sep = if text.trim().is_empty() { "" } else { "\n\n" };
+    format!("{}{sep}{block}", text.trim_end())
+}
+
 /// The structured result each turn ends with.
 pub fn schema() -> Value {
     json!({

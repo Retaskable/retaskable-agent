@@ -148,7 +148,7 @@ fn agent_settings(cmd: &Command, view: &AgentView) -> Value {
 }
 
 /// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4).
-const MAX_PICTURES: usize = 4;
+pub(crate) const MAX_PICTURES: usize = 4;
 const MAX_PICTURE_BYTES: usize = 1 << 20;
 const MAX_PICTURES_BYTES: usize = 4 << 20;
 
