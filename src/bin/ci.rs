@@ -25,6 +25,9 @@ Usage:
   retaskable-ci serve-settings [--port N]
                                 Host the settings page alone (default port 4702) and print its one-time sign-in link.
   retaskable-ci set-password    Set the password the page signs in with (asked twice, never echoed; or piped on stdin).
+  retaskable-ci secret set <NAME>
+                                Save a secret (GH_TOKEN), sealed under the data key: asked for without echo, or piped on
+                                stdin; never an argument. `secret list` shows each name, its source and fingerprint.
   retaskable-ci network on|off  Let other computers reach the page (needs a password; from the next start). Off by default.
   retaskable-ci once <sha>...   Check just the pull requests or main at these commits, then exit.
   retaskable-ci --version
@@ -66,6 +69,13 @@ async fn main() -> Result<()> {
             serve::set_password(&env, &new_password()?)?;
             println!(
                 "Saved. It signs in on this computer; `retaskable-ci network on` lets other computers use it too."
+            );
+        }
+        Some("secret") => {
+            let root = agent_ci::settings::data_root(&env);
+            println!(
+                "{}",
+                retaskable_agent::secrets::cli::run(Owner::CiRunner, &root, &env, &args[1..])?
             );
         }
         Some("network") => {

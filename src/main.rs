@@ -139,6 +139,18 @@ async fn main() -> Result<()> {
         println!("{}", telemetry::start_stats_text(&stats));
         std::process::exit(0);
     }
+    // agent-settings.md section 3.3: `retaskable secret set <NAME>` / `secret list`, then exit.
+    if std::env::args().nth(1).as_deref() == Some("secret") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        match retaskable_agent::secrets::cli::run(retaskable_agent::secrets::Owner::CodeAgent, &dir, env, &args) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
     // installers/03-the-bundle-agent-bundle.md section 3.7: a release build has no terminal, so
     // `console.log`/`info`/`debug`/`warn`/`error` go to `retaskable.log` in its log folder
     // instead, rotated at 10 MB with 3 old ones kept; a checkout logs to its terminal as before.
@@ -330,6 +342,11 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         checks.clone(),
     ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
+    // docs/specs/docker.md section 8: a new computer comes up paused, until someone resumes it.
+    let ids: Vec<String> = view.projects.iter().map(|p| p.id.clone()).collect();
+    retaskable_agent::start_paused::apply(dir, env, &ids, |project, why| {
+        view.paused.set(project, Some(why.to_string()));
+    });
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
