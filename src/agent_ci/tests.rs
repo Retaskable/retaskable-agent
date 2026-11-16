@@ -913,3 +913,20 @@ echo '[]'",
         assert_eq!(poll_and_start(&mut r).await.len(), 1);
     }
 }
+
+#[test]
+fn the_status_file_says_docker_the_slots_and_which_settings_came_from_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = StatusWriter::new(dir.path(), program_status::CI_RUNNER, "1.0.0", 5);
+    let ci = CiLoop::new(Default::default()).with_status(writer, Arc::new(|| true), vec!["AGENT_CI_REPO".into()]);
+    ci.write_status(&settings(3));
+    let s = program_status::read(dir.path()).unwrap();
+    assert_eq!(s.program, "ci-runner");
+    assert!(s.linked.store && s.linked.cloud.is_none());
+    assert_eq!(s.env_set, ["AGENT_CI_REPO"]);
+    assert_eq!(s.extra["docker"], "unknown");
+    assert_eq!(
+        (s.extra["slots"].clone(), s.extra["slotsBusy"].clone()),
+        (3.into(), 0.into())
+    );
+}
