@@ -109,14 +109,16 @@ pub fn not_found_response() -> Response {
 /// The shared look, the helpers (`window.RT`) and the programs panel's script, which every page is built from.
 static BASE_CSS: &str = include_str!("../../assets/settings-base.css");
 static RT_JS: &str = include_str!("../../assets/settings-rt.js");
+static SECRETS_JS: &str = include_str!("../../assets/settings-secrets.js");
 static PROGRAMS_JS: &str = include_str!("../../assets/settings-programs.js");
 
-/// A page's template with the shared parts put in: `{{BASE_CSS}}` inside its style, `{{RT_JS}}` and `{{PROGRAMS_JS}}`
-/// each inside a script of its own. `{{NONCE}}` is left for each request.
+/// A page's template with the shared parts put in: `{{BASE_CSS}}` inside its style, `{{RT_JS}}` and `{{SECRETS_JS}}`
+/// (the secrets editor) in one script, and `{{PROGRAMS_JS}}` in a script of its own. `{{NONCE}}` is left for each request.
 pub fn assemble(template: &str) -> Arc<str> {
     template
         .replace("{{BASE_CSS}}", BASE_CSS)
         .replace("{{RT_JS}}", RT_JS)
+        .replace("{{SECRETS_JS}}", SECRETS_JS)
         .replace("{{PROGRAMS_JS}}", PROGRAMS_JS)
         .into()
 }

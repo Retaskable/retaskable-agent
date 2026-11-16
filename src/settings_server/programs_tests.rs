@@ -620,3 +620,51 @@ async fn a_custom_variable_is_sealed_into_that_programs_file_listed_masked_and_r
             .all(|s| s["name"] != "REGISTRY_TOKEN")
     );
 }
+
+#[test]
+fn the_secrets_editor_is_in_both_pages_as_text_only_with_the_rows_and_the_advanced_box() {
+    let js = include_str!("../../assets/settings-secrets.js");
+    // Shown as text, never as markup; no network call of its own (the pages' scripts save).
+    assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML") && !js.contains("fetch("));
+    assert!(!js.contains("eval(") && !js.contains("new Function"));
+    for needle in [
+        "e.g. FOO",
+        "e.g. bar",
+        "+ Add variable",
+        "Advanced mode",
+        "Simple mode",
+        "Environment variable name is required",
+        "Duplicate environment variable name",
+        "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}",
+        " saved\"",
+        "h(\"textarea\"",
+    ] {
+        assert!(js.contains(needle), "{needle}");
+    }
+    for (name, page) in [
+        ("settings.html", include_str!("../../assets/settings.html")),
+        ("settings-ci.html", include_str!("../../assets/settings-ci.html")),
+    ] {
+        assert_eq!(
+            page.matches("{{SECRETS_JS}}").count(),
+            1,
+            "{name}: once, in the helpers' script"
+        );
+        assert!(
+            !page.contains("ps-secret-") && !page.contains("\"secret-\""),
+            "{name}: the old fields are gone"
+        );
+    }
+    assert!(include_str!("../../assets/settings-programs.js").contains("RT.secrets.editor("));
+    assert!(include_str!("../../assets/settings.html").contains("RT.secrets.editor("));
+    // The look: a red bin and the labelled input groups, in the shared stylesheet both pages use.
+    let css = include_str!("../../assets/settings-base.css");
+    assert!(css.contains(".bin {") && css.contains(".ig-l {") && css.contains(".envrow {"));
+    assert!(
+        css.contains(".envrow { grid-template-columns: 1fr 44px; }"),
+        "rows stack at phone width"
+    );
+    for file in [js, css] {
+        assert!(file.lines().count() < 1000);
+    }
+}
