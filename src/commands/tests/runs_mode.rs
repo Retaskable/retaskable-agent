@@ -1,4 +1,4 @@
-//! In `runs` mode the commands that aren't about an item are taken, and the item commands and lane play are not.
+//! In `runs` mode the commands that aren't about an item, and lane play, stop and restart, are taken; the item commands are not.
 use super::*;
 
 fn runs_view() -> AgentView {
@@ -29,7 +29,7 @@ fn experts_ideas_and_drafts_are_queued_in_runs_mode() {
 }
 
 #[test]
-fn item_commands_and_lane_play_are_refused_in_runs_mode() {
+fn item_commands_are_refused_in_runs_mode() {
     let v = runs_view();
     let refused = |answer: Value| {
         assert_eq!(answer["type"], "nack", "{answer}");
@@ -38,13 +38,50 @@ fn item_commands_and_lane_play_are_refused_in_runs_mode() {
             "{answer}"
         );
     };
-    refused(go(&v, "play", json!({ "lane": 1 })));
-    refused(go(&v, "stop", json!({ "lane": 1 })));
-    refused(go(&v, "restart_play", json!({ "lane": 1 })));
     refused(go(&v, "continue", json!({ "id": "a" })));
     refused(go(&v, "retry", json!({ "id": "a" })));
     refused(go(&v, "skip", json!({ "id": "a" })));
     assert!(v.item_commands.take_lane("one").is_empty());
+}
+
+#[test]
+fn lane_play_stop_and_restart_are_queued_in_runs_mode() {
+    let v = runs_view();
+    for name in ["play", "stop", "stop_play", "restart_play"] {
+        assert_eq!(go(&v, name, json!({ "lane": 1 }))["type"], "ack", "{name}");
+    }
+    let queued = v.item_commands.take_lane("one");
+    assert!(matches!(
+        queued.as_slice(),
+        [
+            ItemCommand::Play { lane: 1, .. },
+            ItemCommand::Stop { lane: 1, .. },
+            ItemCommand::Stop { lane: 1, .. },
+            ItemCommand::RestartPlay { lane: 1, .. },
+        ]
+    ));
+}
+
+#[test]
+fn lane_play_is_checked_in_runs_mode_as_in_claim_mode() {
+    let mut v = runs_view();
+    v.projects[0].play_command = " ".into();
+    for name in ["play", "restart_play"] {
+        let answer = go(&v, name, json!({ "lane": 1 }));
+        assert_eq!(answer["reason"], "No play command set for this project.", "{name}");
+    }
+    v.projects[0].play_command = "game".into();
+    let answer = go(&v, "play", json!({ "lane": 99 }));
+    assert_eq!(answer["reason"], "This computer has no lane 99.");
+    assert!(v.item_commands.take_lane("one").is_empty());
+}
+
+#[test]
+fn lane_play_is_refused_when_nothing_runs_work() {
+    let v = view();
+    let answer = go(&v, "play", json!({ "lane": 1 }));
+    assert_eq!(answer["type"], "nack");
+    assert!(answer["reason"].as_str().unwrap().contains("isn't running work"));
 }
 
 #[test]

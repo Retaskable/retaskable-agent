@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::project::ProjectLoop;
 use super::ship_turn::is_ship;
-use super::{Links, Shared};
+use super::{LanePlay, Links, Shared};
 use crate::backlog::Client;
 use crate::backlog::merge::{MergeNext, MergeOutcome, MergeTurn};
 use crate::backlog::runs::{
@@ -188,6 +188,11 @@ pub trait RunStarter: Send + Sync {
     fn kinds(&self) -> Vec<RunKind>;
     /// Starts the run and returns at once; it reports its end through `request.ends`. An `Err` gives the run back.
     fn start(&self, request: RunRequest) -> Result<(), String>;
+    /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`): the same
+    /// game a claim-mode Play starts.
+    fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
+        crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
+    }
 }
 
 /// One project's run state: the live runs and what the loop has done so far.
@@ -280,6 +285,9 @@ impl ProjectLoop {
     /// One pass of the run loop at `now`: `runs_drop` first (once; if it fails nothing is taken), then the
     /// ends that came back, the ceilings, the minute's beat, the ends to send, and asking for runs.
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
+        // A lane's Play, Stop and Restart need no store, so they are carried out first: through an outage, a
+        // pause (a Play is dropped, a Stop works) and a stopping computer.
+        self.carry_out_run_lane_commands(pool, starter, shared.links, shared.stopping);
         let Some((repo, token)) = self.run_access(shared, now).await else {
             return;
         };

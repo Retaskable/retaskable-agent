@@ -331,7 +331,7 @@ fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
     json!({ "type": PENDING, "id": cmd.id })
 }
 
-/// Item commands and lane play/stop only run where the orchestrator claims work.
+/// Item commands only run where the orchestrator claims work. (Lane play, stop and restart also run on `runs`: [`acts_check`].)
 fn claim_check(view: &AgentView) -> Result<(), String> {
     if view.item_commands.claim() {
         Ok(())
@@ -423,7 +423,7 @@ pub(crate) fn play_lane(view: &AgentView, project: &str, play: bool, lane: Optio
     match lane {
         Some(0) => {}
         Some(k) if k > 0 && k <= i64::from(view.lanes) => {
-            claim_check(view)?;
+            acts_check(view)?;
             let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
@@ -457,7 +457,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
         Some(0) => {}
         Some(k) if k > i64::from(view.lanes) => return Err(format!("This computer has no lane {k}.")),
         Some(k) if k > 0 => {
-            claim_check(view)?;
+            acts_check(view)?;
             let Some(p) = allowed_project(view, project) else {
                 return Err("Finish setup first.".to_string());
             };
