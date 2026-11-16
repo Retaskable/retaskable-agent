@@ -28,8 +28,10 @@ mod auth;
 pub mod docker_trust;
 mod programs;
 mod secrets;
+#[cfg(test)]
+pub(crate) use auth::COOKIE_NAME;
 use auth::InnerState;
-pub(crate) use auth::{COOKIE_NAME, SESSION_TTL_SECS, csrf_ok, security_envelope};
+pub(crate) use auth::{SESSION_TTL_SECS, csrf_ok, security_envelope};
 pub use auth::{TOKEN_TTL_SECS, random_hex};
 #[cfg(test)]
 pub(crate) use programs::ProgramUpdate;
