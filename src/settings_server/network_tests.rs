@@ -61,6 +61,8 @@ async fn with_network_access_off_another_computer_gets_the_404_on_every_path() {
         ("GET", "/api/settings"),
         ("POST", "/api/settings/session"),
         ("GET", "/api/settings/status"),
+        ("GET", "/api/settings/programs"),
+        ("POST", "/api/settings/programs/ci-runner"),
     ] {
         assert_eq!(status_of(&remote, m, p, HOST).await, StatusCode::NOT_FOUND, "{p}");
     }

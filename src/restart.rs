@@ -69,7 +69,14 @@ impl Default for RestartState {
             inner: Mutex::default(),
             next: AtomicU64::new(0),
             started: AtomicBool::new(false),
-            build_running: crate::testflight::testflight_running,
+            // A test's own state never reads the process-wide TestFlight builds: another test's build would
+            // otherwise count as held here and stall its restart or quit when idle. A test that needs a build
+            // running sets `build_running` itself.
+            build_running: if cfg!(test) {
+                || false
+            } else {
+                crate::testflight::testflight_running
+            },
             changed: watch::Sender::new(0),
         }
     }

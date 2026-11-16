@@ -13,6 +13,26 @@ use crate::secrets::{Plan, Secrets};
 
 use axum::http::StatusCode;
 
+/// Each secret's state as the page shows it: name, label, use, source and fingerprint; never the value.
+pub(super) fn secret_rows(secrets: &Secrets) -> Vec<Value> {
+    secrets
+        .states()
+        .into_iter()
+        .map(|s| {
+            let mut row = json!({
+                "name": s.def.name,
+                "label": s.def.label,
+                "use": s.def.usage,
+                "source": s.source.as_str(),
+            });
+            if let Some(print) = s.fingerprint {
+                row["fingerprint"] = json!(print);
+            }
+            row
+        })
+        .collect()
+}
+
 impl SettingsServer {
     /// Gives the page the running agent's secrets; with none, `GET /api/settings` has no `secrets` and a save of any is refused.
     pub fn set_secrets(&self, secrets: Arc<Secrets>) {
@@ -49,23 +69,7 @@ impl SettingsServer {
         let Some(secrets) = self.secrets.get() else {
             return;
         };
-        let states: Vec<Value> = secrets
-            .states()
-            .into_iter()
-            .map(|s| {
-                let mut row = json!({
-                    "name": s.def.name,
-                    "label": s.def.label,
-                    "use": s.def.usage,
-                    "source": s.source.as_str(),
-                });
-                if let Some(print) = s.fingerprint {
-                    row["fingerprint"] = json!(print);
-                }
-                row
-            })
-            .collect();
-        view["secrets"] = Value::Array(states);
+        view["secrets"] = Value::Array(secret_rows(secrets));
         view["canSaveSecrets"] = json!(self.is_this_computer(peer, headers));
         view["secretsNote"] = json!(secrets.save_problem());
     }
