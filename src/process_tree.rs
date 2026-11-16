@@ -184,11 +184,22 @@ impl ProcessTree {
             group,
             pid,
         });
+        Self::register(&tree);
+        Ok(tree)
+    }
+
+    /// Adds `tree` to the trees [`cut_all`] reaches. [`join`] does it itself; a tree from [`join_sync`] isn't in it
+    /// until this is called, so a restart left a check's shell and everything under it running on Linux and macOS,
+    /// where a process group outlives the agent (Windows' Job object dies with it). Retaskable.com saw eight runs
+    /// of one hung test pile up that way, one per restart (2026-11-15).
+    ///
+    /// [`join`]: ProcessTree::join
+    /// [`join_sync`]: ProcessTree::join_sync
+    pub fn register(tree: &Arc<Self>) {
         registry()
             .lock()
             .unwrap()
-            .push((std::thread::current().id(), Arc::downgrade(&tree)));
-        Ok(tree)
+            .push((std::thread::current().id(), Arc::downgrade(tree)));
     }
 
     /// The same as [`prepare`], for a plain `std::process::Command` spawned synchronously —
