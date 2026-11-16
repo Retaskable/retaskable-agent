@@ -5,7 +5,6 @@
 //! only, so a re-review reads what changed since.
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -180,7 +179,7 @@ fn requests(result: &ReviewerResult) -> String {
 
 fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
     let number = number.to_string();
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(cwd)
         .args(["pr", "comment", &number, "--body-file", "-"]);
     run_command(cmd, Some(comment), "gh pr comment").map(|_| ())

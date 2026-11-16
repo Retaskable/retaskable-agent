@@ -2,7 +2,6 @@
 //! starts clean. With a PR, `gh pr close` (the branch stays, with its history); with none, the old branch is dropped,
 //! from `origin` when it was pushed and from the repo here. A PR that was merged is never touched.
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::Result;
 
@@ -13,29 +12,29 @@ pub fn abandon(git: &Path, gh: &Path, repo: &Path, branch: Option<&str>, pr_url:
     if let Some(pr) = pr_url {
         let args = ["pr", "view", pr, "--json", "state", "--jq", ".state"];
         crate::host_call::guard("gh", repo, &args)?;
-        let mut view = Command::new(gh);
+        let mut view = crate::spawn::command(gh);
         view.current_dir(repo).args(args);
         // Only an open PR is closed: a merged slice stays as it is, and a closed one needs nothing.
         if run(view, None, "gh pr view")?.trim() == "OPEN" {
             crate::host_call::guard("gh", repo, &["pr", "close", pr])?;
-            let mut close = Command::new(gh);
+            let mut close = crate::spawn::command(gh);
             close.current_dir(repo).args(["pr", "close", pr]);
             run(close, None, "gh pr close")?;
         }
         return Ok(());
     }
     let Some(branch) = branch else { return Ok(()) };
-    let mut listed = Command::new(git);
+    let mut listed = crate::spawn::command(git);
     listed
         .current_dir(repo)
         .args(["ls-remote", "--heads", "origin", &format!("refs/heads/{branch}")]);
     if !crate::text::is_blank(&run(listed, None, "git ls-remote")?) {
-        let mut delete = Command::new(git);
+        let mut delete = crate::spawn::command(git);
         delete.current_dir(repo).args(["push", "origin", "--delete", branch]);
         run(delete, None, "git push --delete")?;
     }
     // A lane still on the branch keeps it; the new attempt has its own name, so that only leaves a stale ref.
-    let mut local = Command::new(git);
+    let mut local = crate::spawn::command(git);
     local.current_dir(repo).args(["branch", "-D", branch]);
     let _ = run(local, None, "git branch -D");
     Ok(())

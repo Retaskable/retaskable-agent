@@ -101,14 +101,14 @@ pub fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = std::process::Command::new("rundll32");
+        let mut c = crate::spawn::command("rundll32");
         c.arg("url.dll,FileProtocolHandler");
         c
     };
     #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
+    let mut cmd = crate::spawn::command("open");
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = std::process::Command::new("xdg-open");
+    let mut cmd = crate::spawn::command("xdg-open");
     cmd.arg(url);
     cmd.spawn().with_context(|| format!("opening {url}"))?;
     Ok(())

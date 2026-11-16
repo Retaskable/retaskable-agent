@@ -10,7 +10,7 @@
 //! the strip. Nothing here ever pushes to main: the only push names the base branch, and leases on exactly what
 //! origin showed.
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -73,7 +73,7 @@ fn view(gh: &Path, dir: &Path, github_repo: &str, pr: u64) -> Result<View> {
         "state,headRefOid,mergeCommit",
     ];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(args);
     let out = crate::implementer::publish::run(cmd, None, "gh pr view")?;
     serde_json::from_str(out.trim()).context("reading gh pr view's answer")
@@ -94,7 +94,7 @@ fn merge(gh: &Path, dir: &Path, github_repo: &str, pr: u64, head: &str) -> Resul
         head,
     ];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(args);
     crate::implementer::publish::run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ())
 }
@@ -236,7 +236,7 @@ fn last_merged(gh: &Path, dir: &Path, github_repo: &str, base: &str, main: &str)
         "number,mergedAt,headRefOid",
     ];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(args);
     let out = crate::implementer::publish::run(cmd, None, "gh pr list")?;
     let merged: Vec<MergedPr> = serde_json::from_str(out.trim()).context("reading gh pr list's answer")?;

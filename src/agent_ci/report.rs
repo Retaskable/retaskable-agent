@@ -2,7 +2,7 @@
 //! back, and the failure's log comment, all through `gh api` or `glab api`. The program is a parameter so tests use a
 //! fake.
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
@@ -108,7 +108,7 @@ impl Host {
         let fields: Vec<(&str, String)> = fields.iter().map(|(k, v)| (*k, format!("{k}={v}"))).collect();
         guarded.extend(fields.iter().map(|(_, f)| f.as_str()));
         crate::host_call::guard_program(&self.program, Some(&self.dir), &guarded)?;
-        let mut command = Command::new(&self.program);
+        let mut command = crate::spawn::command(&self.program);
         command
             .current_dir(&self.dir)
             .arg("api")

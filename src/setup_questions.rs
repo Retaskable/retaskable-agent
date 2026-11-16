@@ -342,7 +342,7 @@ struct EchoOff(#[cfg(windows)] Option<u32>);
 #[cfg(not(windows))]
 impl EchoOff {
     fn new() -> Self {
-        let _ = std::process::Command::new("stty").arg("-echo").status();
+        let _ = crate::spawn::command("stty").arg("-echo").status();
         EchoOff()
     }
 }
@@ -350,7 +350,7 @@ impl EchoOff {
 #[cfg(not(windows))]
 impl Drop for EchoOff {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("stty").arg("echo").status();
+        let _ = crate::spawn::command("stty").arg("echo").status();
     }
 }
 

@@ -384,7 +384,7 @@ pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<Stri
     }
     let args = ["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"];
     crate::host_call::guard("gh", dir, &args).ok()?;
-    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
+    let out = crate::spawn::tokio_command("gh").args(args).output().await.ok()?;
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !branch.is_empty()).then_some(branch)
 }

@@ -10,14 +10,14 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 #[cfg(not(windows))]
 const NICE: &str = "10";
 
-/// A command for `program` that starts at below-normal priority: the creation flag on Windows, `nice -n 10`
+/// A command for `program` that starts at below-normal priority (and, on Windows, opens no window): the creation flag on Windows, `nice -n 10`
 /// elsewhere (so `get_program` is `nice` and the program is its first real argument).
 pub fn low_priority(program: impl AsRef<OsStr>) -> Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         let mut cmd = Command::new(program);
-        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | crate::spawn::CREATE_NO_WINDOW);
         cmd
     }
     #[cfg(not(windows))]

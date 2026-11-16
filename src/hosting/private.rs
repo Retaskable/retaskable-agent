@@ -16,7 +16,7 @@ pub fn private_from(stdout: &[u8]) -> Option<bool> {
 pub async fn repo_private(github_repo: &str) -> Option<bool> {
     let args = ["repo", "view", github_repo, "--json", "visibility"];
     crate::host_call::guard_program("gh", None, &args).ok()?;
-    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
+    let out = crate::spawn::tokio_command("gh").args(args).output().await.ok()?;
     if !out.status.success() {
         return None;
     }

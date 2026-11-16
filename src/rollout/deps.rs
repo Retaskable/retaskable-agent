@@ -236,7 +236,7 @@ impl Deps for Live {
         tokio::task::spawn_blocking(move || {
             let args = ["api", endpoint.as_str()];
             crate::host_call::guard_program("gh", Some(&repo), &args).map_err(|e| e.to_string())?;
-            let out = std::process::Command::new("gh")
+            let out = crate::spawn::command("gh")
                 .current_dir(&repo)
                 .args(args)
                 .output()

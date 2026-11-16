@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 /// "adb devices -l" every 5 seconds (section 3), outside any sandbox.
@@ -213,7 +212,7 @@ fn default_sdk_dir(env: &Env, windows: bool) -> Option<PathBuf> {
 
 /// Runs `adb devices -l` once, never through a shell, killed if it outlasts `POLL_TIMEOUT`.
 async fn run_devices_l(adb: &Path) -> Result<String, String> {
-    let mut cmd = Command::new(adb);
+    let mut cmd = crate::spawn::tokio_command(adb);
     cmd.args(["devices", "-l"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

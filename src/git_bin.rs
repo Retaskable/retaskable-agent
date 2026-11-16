@@ -73,8 +73,8 @@ pub fn program() -> &'static Path {
 /// code should build a git `Command` from.
 pub fn command(dir: &Path) -> Command {
     let mut cmd = match &*LAUNCHER {
-        GitLauncher::Plain => Command::new("git"),
-        GitLauncher::Real { exe, .. } => Command::new(exe),
+        GitLauncher::Plain => crate::spawn::command("git"),
+        GitLauncher::Real { exe, .. } => crate::spawn::command(exe),
     };
     apply_launcher_env(&mut cmd);
     cmd.current_dir(dir);

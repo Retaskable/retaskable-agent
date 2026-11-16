@@ -116,6 +116,7 @@ pub mod shutdown;
 pub mod sidecars;
 pub mod site_settings;
 pub mod smoke;
+pub mod spawn;
 pub mod spec_items;
 pub mod spec_parts;
 pub mod spec_split;

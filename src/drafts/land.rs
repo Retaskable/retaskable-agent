@@ -1,7 +1,6 @@
 //! Landing an approved draft (docs/specs/agent/06.5-spec-drafts.md step 3, github-workflow.md section 9):
 //! who merges under the project's GitHub workflow, and the `gh` merge and `git` rebase it takes.
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -65,7 +64,7 @@ pub fn pr_head(gh: &Path, dir: &Path, pr: u64) -> Result<String> {
     let number = pr.to_string();
     let args = ["pr", "view", &number, "--json", "headRefOid"];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(args);
     let out = run(cmd, None, &format!("gh pr view {pr}"))?;
     #[derive(serde::Deserialize)]
@@ -93,7 +92,7 @@ pub fn pr_state(gh: &Path, dir: &Path, pr: u64) -> Result<PrState> {
     let number = pr.to_string();
     let args = ["pr", "view", &number, "--json", "state"];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(args);
     let out = run(cmd, None, &format!("gh pr view {pr}"))?;
     #[derive(serde::Deserialize)]
@@ -122,7 +121,7 @@ pub fn merge_pr(
 ) -> Result<()> {
     let number = pr.to_string();
     crate::host_call::guard("gh", dir, &["pr", "merge", &number, method_flag])?;
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(["pr", "merge", &number, method_flag]);
     if delete_branch {
         cmd.arg("--delete-branch");
@@ -142,7 +141,7 @@ pub fn merge_pr(
 
 /// Force-pushes (with lease) the branch checked out in `dir`, after a rebase rewrote it.
 pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
-    let mut cmd = Command::new(git);
+    let mut cmd = crate::spawn::command(git);
     cmd.current_dir(dir).args([
         "push",
         "--force-with-lease",
@@ -155,7 +154,7 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
 /// `gh pr close <pr> --delete-branch`, run in the project's checkout.
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
     let number = pr.to_string();
-    let mut cmd = Command::new(gh);
+    let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(["pr", "close", &number, "--delete-branch"]);
     run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
 }
@@ -164,7 +163,7 @@ pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
 /// False, with nothing changed, when the rebase conflicts.
 pub fn rebase(git: &Path, dir: &Path, branch: &str, base: &str) -> Result<bool> {
     let git_in = |args: &[&str]| {
-        let mut cmd = Command::new(git);
+        let mut cmd = crate::spawn::command(git);
         cmd.current_dir(dir).args(args);
         cmd
     };
