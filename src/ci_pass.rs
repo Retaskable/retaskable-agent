@@ -26,7 +26,7 @@ use crate::backlog::Client;
 use crate::backlog::ci_result::{CiAnswer, CiChecks, CiDid, CiFacts, CiNext, CiState, CiVerdict};
 use crate::ci_judge;
 use crate::ci_pulls::{LoginCache, OpenPull, may_push_to};
-pub use host::{CiHost, GhCiHost, host_for};
+pub use host::{CiHost, GhCiHost, NoCommitChecks, host_for};
 
 /// How often the pull requests are looked at again.
 pub const EVERY: Duration = Duration::from_secs(2 * 60);
@@ -163,6 +163,10 @@ impl Pass<'_> {
     /// Answers how many new findings. A store that can't be reached ends the pass (fail closed); one pull
     /// request whose checks can't be read is skipped.
     pub async fn run(&self, since: &mut HashMap<String, u64>) -> Result<u32> {
+        // Like TS's `!d.host.commitChecks`: a host that reads no checks (GitLab) is not watched.
+        if !self.host.reads_commit_checks() {
+            return Ok(0);
+        }
         let host = self.host.clone();
         let pulls = tokio::task::spawn_blocking(move || host.open_pulls())
             .await?
