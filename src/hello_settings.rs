@@ -134,7 +134,10 @@ impl HelloSettings {
                     SecretSource::Saved => "key",
                     SecretSource::Unset | SecretSource::Unreadable => continue,
                 };
-                secrets.push(json!({ "key": t.def.name, "state": "set", "kind": kind }));
+                // The site learns the known secrets only, never the names of variables a person added.
+                if t.def.is_some() {
+                    secrets.push(json!({ "key": t.name, "state": "set", "kind": kind }));
+                }
             }
         }
         Some(json!({ "lanes": config::lanes(&cfg, &s.env), "secrets": secrets }))

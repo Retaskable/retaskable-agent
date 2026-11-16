@@ -28,6 +28,7 @@ impl SettingsServer {
         view["secrets"] = Value::Array(secret_rows(secrets));
         view["canSaveSecrets"] = json!(self.is_this_computer(peer, headers));
         view["secretsNote"] = json!(secrets.save_problem());
+        view["secretRules"] = crate::secrets::names::rules_json();
     }
 
     /// Checks the body's `secrets` (None when it has none) and seals it, writing nothing, so the rest of the body can be

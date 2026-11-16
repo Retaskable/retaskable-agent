@@ -68,15 +68,14 @@ fn each_program_keeps_its_secrets_in_its_own_file_and_takes_only_its_own_names()
         "",
         "the code agent's config.json is not touched"
     );
+    // Another program's secret name is only a custom variable here: allowed, but under the custom rules.
     assert!(
         ci.plan(&json!({"CLAUDE_CODE_OAUTH_TOKEN": "x"}).as_object().unwrap().clone())
-            .is_err()
+            .is_ok()
     );
+    assert!(ci.plan(&json!({"PATH": "x"}).as_object().unwrap().clone()).is_err());
     let chat = rig.program(Owner::ChatAgent, Arc::new(FakeHost::default()));
-    assert!(
-        chat.plan(&json!({"GH_TOKEN": "x"}).as_object().unwrap().clone())
-            .is_err()
-    );
+    assert!(chat.plan(&json!({"HOME": "x"}).as_object().unwrap().clone()).is_err());
     save(&chat, &[("ANTHROPIC_API_KEY", json!("sk-ant-planted-key"))]);
     assert!(rig.file(Owner::ChatAgent).contains("v1:"));
     assert!(!rig.file(Owner::ChatAgent).contains("planted"));

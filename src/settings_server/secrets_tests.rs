@@ -170,7 +170,13 @@ async fn a_saved_secret_shows_saved_with_its_fingerprint_and_never_the_value_any
         json!({ "secrets": { "GH_TOKEN": format!("{PLANTED} spaced") } }),
     )
     .await;
-    let (_, nonsense) = post(&app, &cookie, &csrf, json!({ "secrets": { PLANTED: PLANTED } })).await;
+    let (_, nonsense) = post(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "secrets": { format!("bad name {PLANTED}"): PLANTED } }),
+    )
+    .await;
     let (_, wrong_type) = post(&app, &cookie, &csrf, json!({ "secrets": [PLANTED] })).await;
     let status_poll = text_of(
         app.clone()
@@ -407,4 +413,89 @@ async fn without_secrets_given_the_page_has_none_and_refuses_a_save() {
     let (cookie, csrf) = sign_in(&app, &settings).await;
     let (status, _) = post(&app, &cookie, &csrf, json!({ "secrets": { "GH_TOKEN": "x" } })).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_custom_variable_is_saved_listed_with_a_fingerprint_applied_and_deleted_over_the_page() {
+    let r = rig(true, None, &[], &[("FOO", "from-env")], false);
+    let app = app(r.settings.clone());
+    let (cookie, csrf) = sign_in(&app, &r.settings).await;
+    let (status, body) = post(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "secrets": { "FOO": PLANTED, "MY_API_KEY": "two words" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(r.host.get("FOO").as_deref(), Some(PLANTED));
+    assert_eq!(r.host.get("MY_API_KEY").as_deref(), Some("two words"));
+    let (_, got) = get(&app, &cookie).await;
+    let view: Value = serde_json::from_str(&got).unwrap();
+    let foo = secret(&view, "FOO");
+    assert_eq!((&foo["custom"], &foo["source"]), (&json!(true), &json!("saved")));
+    assert_eq!(foo["fingerprint"], crate::secrets::fingerprint(PLANTED));
+    assert_eq!(secret(&view, "GH_TOKEN")["custom"], false);
+    assert!(
+        view["secretRules"]["refused"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["name"] == "PATH")
+    );
+    let on_disk = std::fs::read_to_string(r.dir.path().join("config.json")).unwrap();
+    assert!(on_disk.contains("\"FOO\": \"v1:") && !on_disk.contains(PLANTED) && !got.contains(PLANTED));
+    // Deleting is Reset: the environment's value from start comes back.
+    let (status, _) = post(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "secrets": { "FOO": null, "MY_API_KEY": null } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(r.host.get("FOO").as_deref(), Some("from-env"));
+    assert_eq!(r.host.get("MY_API_KEY"), None);
+    let view: Value = serde_json::from_str(&get(&app, &cookie).await.1).unwrap();
+    assert!(view["secrets"].as_array().unwrap().iter().all(|s| s["custom"] == false));
+}
+
+#[tokio::test]
+async fn refused_custom_names_and_values_are_a_400_that_writes_and_echoes_nothing() {
+    let r = rig(true, None, &[], &[], false);
+    let app = app(r.settings.clone());
+    let (cookie, csrf) = sign_in(&app, &r.settings).await;
+    for (secrets, says) in [
+        (json!({ "PATH": "x" }), "system variable"),
+        (json!({ "LD_PRELOAD": "x" }), "load or run"),
+        (json!({ "NODE_OPTIONS": "x" }), "load or run"),
+        (json!({ "RETASKABLE_LANE": "x" }), "namespace"),
+        (json!({ "1BAD": PLANTED }), "letters, digits"),
+        (json!({ "": PLANTED }), "required"),
+        (json!({ "A".repeat(129): PLANTED }), "128"),
+        (json!({ "OK_NAME": "a\u{0}b" }), "NUL"),
+        (json!({ "OK_NAME": "" }), "needs a value"),
+        (json!({ "Dup": "x", "DUP": "y" }), "twice"),
+    ] {
+        let (status, body) = post(&app, &cookie, &csrf, json!({ "secrets": secrets })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{secrets}: {body}");
+        assert!(body.contains(says) && !body.contains(PLANTED), "{secrets}: {body}");
+    }
+    assert!(
+        !r.dir.path().join("config.json").exists()
+            || !std::fs::read_to_string(r.dir.path().join("config.json"))
+                .unwrap()
+                .contains("secrets")
+    );
+    assert_eq!(r.host.get("OK_NAME"), None);
+}
+
+#[tokio::test]
+async fn a_custom_variable_is_saved_only_from_this_computer() {
+    let r = rig(true, None, &[], &[], true);
+    let remote = app_from(r.settings.clone(), PEER.parse().unwrap());
+    let (cookie, csrf) = sign_in_remote(&remote).await;
+    let (status, body) = post(&remote, &cookie, &csrf, json!({ "secrets": { "FOO": PLANTED } })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(r.host.get("FOO"), None);
 }

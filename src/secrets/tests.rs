@@ -58,7 +58,7 @@ fn save(secrets: &Secrets, pairs: &[(&str, Value)]) {
 }
 
 fn state(secrets: &Secrets, name: &str) -> (Source, Option<String>) {
-    let s = secrets.states().into_iter().find(|s| s.def.name == name).unwrap();
+    let s = secrets.states().into_iter().find(|s| s.name == name).unwrap();
     (s.source, s.fingerprint)
 }
 
@@ -249,7 +249,7 @@ fn a_saved_secret_replaces_the_environments_value_in_the_process() {
     let (rig, secrets) = saved_and_env();
     assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some(TOKEN));
     assert_eq!(state(&secrets, "GH_TOKEN"), (Source::Saved, Some(fingerprint(TOKEN))));
-    let row = secrets.states().into_iter().find(|s| s.def.name == "GH_TOKEN").unwrap();
+    let row = secrets.states().into_iter().find(|s| s.name == "GH_TOKEN").unwrap();
     assert!(row.env_set, "the page can say what a reset goes back to");
     assert_eq!(secrets.env_names(), ["GH_TOKEN"]);
     assert_eq!(rig.host.get("RETASKABLE_SAVED_SECRETS").as_deref(), Some("GH_TOKEN"));
