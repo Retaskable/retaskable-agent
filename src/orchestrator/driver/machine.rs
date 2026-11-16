@@ -114,6 +114,8 @@ pub struct Machine {
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
     /// Whether a person's take-over requests are pulled. Off unless a session starter is wired.
     pub(super) take_overs: bool,
+    /// Whether the site's Add spec and Build this rows (`draft_wanted`) are pulled. Off unless wired.
+    pub(super) wanted: bool,
     /// Finishes items a person marks Done. With none, `finish_requested` rows are left alone.
     pub(super) finish_host: Option<Arc<dyn super::finish_steps::FinishHost>>,
     /// Merges items a person presses Merge into main on. With none, `merge_requested` rows are left alone.
@@ -189,6 +191,7 @@ impl Machine {
             trial: None,
             asks: None,
             take_overs: false,
+            wanted: false,
             finish_host: None,
             merge_host: None,
             main_pr_host: None,
@@ -464,7 +467,7 @@ impl Machine {
             .map(|(lp, &on)| on && (self.claims(lp) || lp.backlog_items.is_some()))
             .collect();
         self.ci_passes(&watching, &paused, stopping).await;
-        self.idea_passes(&on, stopping).await;
+        self.wanted_passes(&on, &paused, stopping).await;
         self.draft_passes(&on, &paused, stopping, &mut slots).await;
         self.trial_passes(&on, &paused, stopping, &mut slots).await;
     }
@@ -516,6 +519,12 @@ impl Machine {
     /// Lets `claim` and `runs` mode answer the chat's asks.
     pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
         self.asks = Some(host);
+        self
+    }
+
+    /// Lets `claim` and `runs` mode take the site's Add spec and Build this rows, queueing each as a draft in the store.
+    pub fn with_draft_wanted(mut self) -> Self {
+        self.wanted = true;
         self
     }
 
@@ -727,8 +736,8 @@ impl Machine {
         self.main_pr_passes(&live, stopping).await;
         self.ci_passes(&live, paused, stopping).await;
         self.expert_passes(&live, stopping, &mut slots).await;
-        // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
-        self.idea_passes(&live, stopping).await;
+        // A person's Add spec or Build this: a `draft_wanted` row, queued as a draft in the store ahead of any new work.
+        self.wanted_passes(&live, paused, stopping).await;
         self.draft_passes(&live, paused, stopping, &mut slots).await;
         self.trial_passes(&live, paused, stopping, &mut slots).await;
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))

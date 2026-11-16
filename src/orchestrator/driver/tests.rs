@@ -933,6 +933,7 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
 
 mod approve;
 mod asks;
+mod attached;
 mod caps_and_fetch;
 mod ci_events;
 mod ci_pass;
@@ -942,13 +943,13 @@ mod commands;
 mod cursor_limit;
 mod deprecations;
 mod draft_owed;
+mod draft_wanted;
 mod drafts;
 mod experts;
 mod finish_steps;
 mod fix_main;
 mod fix_requests;
 mod host_call_undefined;
-mod idea_accept;
 mod landed;
 mod lane_play;
 mod local_limit_fallback;
