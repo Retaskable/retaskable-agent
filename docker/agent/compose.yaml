@@ -1,41 +1,46 @@
-# docs/specs/docker.md: `docker compose -f docker/agent/compose.yaml up -d --build`, with the
-# section 3.3 variables set in the shell or a `.env` file beside this one (never committed).
+# docs/specs/docker.md: `docker compose -f docker/agent/compose.yaml up -d --build`, run from the repo root. No
+# secret is read from the environment: set them once with `retaskable secret set <NAME>` (README.md here).
+name: retaskable-agent-docker
+
 services:
   agent:
     build:
       context: ../..
       dockerfile: docker/agent/Dockerfile
-    container_name: retaskable-agent
-    hostname: ${RETASKABLE_MACHINE:-retaskable-agent}
+    container_name: retaskable-agent-docker
+    hostname: ${RETASKABLE_MACHINE:-retaskable-agent-docker}
     restart: unless-stopped
     environment:
-      # Section 3.3: required.
-      - GH_TOKEN
-      # Section 3.3: optional.
-      - CLAUDE_CODE_OAUTH_TOKEN
-      - RETASKABLE_WOODPECKER_TOKEN
-      - GITLAB_TOKEN
-      # Section 3.3: the computer that runs retaskable.com's rollouts (empty when unset).
-      - CLOUDFLARE_ACCOUNT_ID=${CLOUDFLARE_ACCOUNT_ID:-}
-      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
-      # Section 3.4: this container's name wherever the agent says it, instead of its random
-      # container hostname.
-      - RETASKABLE_MACHINE
+      # Section 3.4: this computer's name wherever the agent says it, instead of the container's random hostname.
+      - RETASKABLE_MACHINE=${RETASKABLE_MACHINE:-retaskable-agent-docker}
+      # Production: `runs` takes work from the shared backlog (`claim` is the staging mode).
+      - RETASKABLE_ORCHESTRATOR=runs
+      # Section 8: a new computer comes up paused until someone resumes it from the site or the page.
+      - RETASKABLE_START_PAUSED=1
+      # Section 7: the page listens on 0.0.0.0 inside the container and the container's gateway (the host, through
+      # the 127.0.0.1-only publish below) counts as this computer.
+      - RETASKABLE_TRUST_DOCKER_HOST=1
       # Section 3.2: git's identity for commits the agent makes.
       - GIT_USER_NAME
       - GIT_USER_EMAIL
-      # agent.md section 8: the port the health check below also uses; 4700 unset.
-      - RETASKABLE_PORT
+      # Section 3.3: optional, not a secret this port can save.
+      - RETASKABLE_WOODPECKER_TOKEN
+      # RETASKABLE_DATA_DIR=/data and RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key are the image's own.
+    ports:
+      # The host's 127.0.0.1 only: never another address (agent-settings.md section 4.4).
+      - "127.0.0.1:4700:4700"
     volumes:
+      - data:/data
       - work:/work
       - claude:/home/node/.claude
       - gh:/home/node/.config/gh
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:${RETASKABLE_PORT:-4700}/api/health"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:4700/api/health"]
       interval: 30s
       start_period: 30s
 
 volumes:
+  data:
   work:
   claude:
   gh:

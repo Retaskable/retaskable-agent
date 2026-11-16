@@ -3,8 +3,9 @@
 # container has the Docker socket: the agent's sessions never reach it.
 #
 # Build and start, from a checkout of the commit to approve:
-#   GH_TOKEN=$(gh auth token) AGENT_CI_NAME=<this computer> CI_RUST_COMMIT=$(git rev-parse HEAD) docker compose -f docker/ci/compose.yaml up -d --build
+#   AGENT_CI_NAME=<this computer> CI_RUST_COMMIT=$(git rev-parse HEAD) docker compose -f docker/ci/compose.yaml up -d --build
 #   docker compose -f docker/ci/compose.yaml logs -f
+# The GitHub token is saved once, not passed: `docker compose -f docker/ci/compose.yaml run --rm ci retaskable-ci secret set GH_TOKEN`.
 #
 # Once per computer, before it merges or shows on the board, link it to the store (role ci; see README.md here):
 #   docker compose -f docker/ci/compose.yaml run --rm ci retaskable-ci link
@@ -23,11 +24,19 @@ services:
         CI_RUST_COMMIT: ${CI_RUST_COMMIT:-unknown}
     container_name: retaskable-ci
     restart: unless-stopped
+    command: ["retaskable-ci", "run", "--settings-port", "4702"]
+    ports:
+      # The host's 127.0.0.1 only: never another address (agent-settings.md section 4.4).
+      - "127.0.0.1:4702:4702"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - data:/data
     environment:
-      GH_TOKEN: ${GH_TOKEN:?set GH_TOKEN (gh auth token)}
+      # Optional: save it instead with `retaskable-ci secret set GH_TOKEN` (README.md here), sealed in the data volume.
+      GH_TOKEN: ${GH_TOKEN:-}
+      # docs/specs/docker.md section 7: the page listens on 0.0.0.0 inside the container, and the container's gateway
+      # (the host, through the 127.0.0.1-only publish above) counts as this computer.
+      RETASKABLE_TRUST_DOCKER_HOST: "1"
       # The name its statuses and containers carry: the computer's.
       AGENT_CI_NAME: ${AGENT_CI_NAME:?set AGENT_CI_NAME (this computer's name, e.g. its hostname)}
       AGENT_CI_SLOTS: ${AGENT_CI_SLOTS:-4}
