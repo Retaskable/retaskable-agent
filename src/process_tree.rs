@@ -392,7 +392,6 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use std::process::Command;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
@@ -413,17 +412,19 @@ mod platform {
 
         pub(super) fn kill_and_wait(&self, limit: Duration) -> bool {
             let start = Instant::now();
-            signal(self.0, "-TERM");
+            signal(self.0, libc::SIGTERM);
             if wait_until_gone(self.0, start, limit / 2) {
                 return true;
             }
-            signal(self.0, "-KILL");
+            signal(self.0, libc::SIGKILL);
             wait_until_gone(self.0, start, limit)
         }
     }
 
-    fn signal(pgid: u32, flag: &str) {
-        let _ = Command::new("kill").args([flag, "--", &format!("-{pgid}")]).output();
+    fn signal(pgid: u32, signal: i32) {
+        if let Ok(pgid) = i32::try_from(pgid) {
+            let _ = crate::proc_table::signal(-pgid, signal);
+        }
     }
 
     /// Whether anything in `pgid` is still actually running. A killed process whose parent never
@@ -433,17 +434,8 @@ mod platform {
     /// every process in it is dead. A zombie can't run anything, so it's excluded here by
     /// checking each process's state instead of just whether the group still resolves to one.
     fn group_alive(pgid: u32) -> bool {
-        let pgid = pgid.to_string();
-        Command::new("ps")
-            .args(["-axo", "pid=,pgid=,state="])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout).lines().any(|line| {
-                    let mut columns = line.split_whitespace();
-                    let _pid = columns.next();
-                    columns.next() == Some(pgid.as_str()) && columns.next().is_some_and(|state| !state.starts_with('Z'))
-                })
-            })
+        crate::proc_table::all()
+            .map(|all| all.iter().any(|p| p.pgid == pgid && p.state != 'Z'))
             .unwrap_or(false)
     }
 
