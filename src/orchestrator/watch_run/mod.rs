@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
+use super::driver::{RunRequest, RunStarter, piece_id};
+use super::run_guard::spawn_ended;
 use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_coverage::{ci_coverage, read_workflows};
 use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
@@ -59,14 +60,13 @@ impl RunStarter for WatchRuns {
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
         let (gh, poll, retry) = (self.gh.clone(), self.poll, self.retry);
-        tokio::spawn(async move {
-            let token = request.token.clone();
-            let (outcome, result) = match watch(&request, gh, poll, retry).await {
-                Some(end) => end,
-                None => return,
-            };
-            request.ends.send(RunEnd { token, outcome, result });
-        });
+        let (token, ends) = (request.token.clone(), request.ends.clone());
+        spawn_ended(
+            ends,
+            token,
+            "watch",
+            async move { watch(&request, gh, poll, retry).await },
+        );
         Ok(())
     }
 }

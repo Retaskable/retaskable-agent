@@ -18,7 +18,7 @@ use futures_util::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 
 use super::main_pr::Why;
-use super::{Handler, Outcome};
+use super::{Handler, Outcome, dropped};
 use crate::backlog::intents::IntentRow;
 
 /// What the loop answers: `Ok` once the pull request merged and the item was completed, or why it wasn't.
@@ -98,15 +98,15 @@ impl<C: Send + Sync> Handler<C> for MergeHandler {
             return async move {
                 let (reply, answer) = oneshot::channel();
                 if ships.send(Ship { reply }).is_err() {
-                    return Outcome::Abandoned;
+                    return dropped();
                 }
                 match answer.await {
                     Ok(Ok(None)) => Outcome::Done(serde_json::Value::Null),
                     Ok(Ok(Some(says))) => Outcome::Done(serde_json::json!({ "says": says })),
                     Ok(Err(Why::Refused(why))) => Outcome::Refused(why),
                     Ok(Err(Why::Failed(why))) => Outcome::Failed(why),
-                    // The loop went away before it answered (a restart): the row, held and not twice, is failed then.
-                    Err(_) => Outcome::Abandoned,
+                    // The loop dropped the reply (a restart, or a panic in its pass).
+                    Err(_) => dropped(),
                 }
             }
             .boxed();
@@ -117,13 +117,13 @@ impl<C: Send + Sync> Handler<C> for MergeHandler {
         async move {
             let (reply, answer) = oneshot::channel();
             if asks.send(Merge { id, draft, reply }).is_err() {
-                return Outcome::Abandoned;
+                return dropped();
             }
             match answer.await {
                 Ok(Ok(())) => Outcome::Done(serde_json::Value::Null),
                 Ok(Err(why)) => Outcome::Refused(why),
-                // The loop went away before it answered (a restart): the row, held and not twice, is failed then.
-                Err(_) => Outcome::Abandoned,
+                // The loop dropped the reply (a restart, or a panic in its pass).
+                Err(_) => dropped(),
             }
         }
         .boxed()
