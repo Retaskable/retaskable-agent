@@ -217,9 +217,9 @@ pub struct Reopened {
     pub by: Option<String>,
 }
 
-/// A spec draft as `drafts` answers it (backlog/06.2-operations.md): only what release notes match a
-/// merged PR by.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// A spec draft as `drafts` answers it (backlog/06.2-operations.md): what release notes match a merged PR by, and
+/// what the loop needs to see a plan merged by hand while it waited (`driver::land`, `status`, `detail`, `heldBy`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Draft {
     pub id: String,
@@ -227,6 +227,13 @@ pub struct Draft {
     pub titles: Vec<String>,
     #[serde(default)]
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// The computer holding the draft (a lease on it); `None` for one no computer holds.
+    #[serde(default)]
+    pub held_by: Option<Value>,
 }
 
 /// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its

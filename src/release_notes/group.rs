@@ -783,6 +783,7 @@ mod tests {
             id: "draft-1".to_string(),
             titles: vec!["Charts".to_string(), "Legends".to_string()],
             pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+            ..Default::default()
         }];
         group(&GroupInput {
             prs,

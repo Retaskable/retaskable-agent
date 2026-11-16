@@ -18,6 +18,18 @@ struct State {
     quiet_until: u64,
 }
 
+/// Clears `pending` when an ask ends, however it ends: a future dropped mid-await (a timeout, a shutdown) would
+/// otherwise leave the asker saying "an ask is pending" for good.
+struct Pending<'a>(&'a Mutex<State>);
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut st) = self.0.lock() {
+            st.pending = false;
+        }
+    }
+}
+
 /// Asks about one job on one project.
 pub struct DueAsker {
     client: Arc<Client>,
@@ -57,6 +69,7 @@ impl DueAsker {
             }
             st.pending = true;
         }
+        let _pending = Pending(&self.state);
         let answer = self
             .client
             .jobs_due(self.repo_id, self.token.as_deref(), &[self.job.as_str()])
@@ -111,6 +124,7 @@ impl DayAsker {
             }
             st.pending = true;
         }
+        let _pending = Pending(&self.state);
         let answer = self.client.jobs_due(self.repo_id, self.token.as_deref(), &[]).await;
         let (day, wait) = match answer {
             Ok(a) => (Some(a.day), DUE_MS),
@@ -224,6 +238,32 @@ mod tests {
         a.state.lock().unwrap().pending = true;
         assert_eq!(a.ask().await, None);
         assert!(seen.lock().unwrap().is_empty(), "nothing was sent");
+    }
+
+    /// A server that takes connections and never answers.
+    async fn silent_store() -> String {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                held.push(s);
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn an_ask_dropped_mid_flight_does_not_leave_one_pending() {
+        let a = asker(silent_store().await, Arc::default());
+        let cut = tokio::time::timeout(std::time::Duration::from_millis(100), a.ask()).await;
+        assert!(cut.is_err(), "the ask was cut off");
+        assert!(!a.state.lock().unwrap().pending, "the due asker can ask again");
+
+        let d = DayAsker::new(Arc::new(Client::new(silent_store().await)), 7, None, || 0);
+        let cut = tokio::time::timeout(std::time::Duration::from_millis(100), d.ask()).await;
+        assert!(cut.is_err());
+        assert!(!d.state.lock().unwrap().pending, "the day asker can ask again");
     }
 
     #[tokio::test]

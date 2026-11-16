@@ -225,9 +225,7 @@ impl Deps for Live {
         };
         // The row is on disk by now; the deploy request loop sends it at the latest on its next pass.
         if let Ok((repo, token)) = self.ready().await {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
+            let now = crate::program_status::now_ms();
             promoter.log.flush(&self.client, repo, &token, now).await;
         }
         pushed.map(|_| ()).map_err(|stop| stop.why().to_string())

@@ -78,6 +78,38 @@ pub fn pr_head(gh: &Path, dir: &Path, pr: u64) -> Result<String> {
     Ok(view.head)
 }
 
+/// Where a pull request stands on the code host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    /// Closed without merging.
+    Closed,
+}
+
+/// The state of `pr` now (`gh pr view --json state`): a plan's pull request merged or closed by a person on the code
+/// host while the plan waited for approval (`driver::land`, the TS agent's `draftsLanded`).
+pub fn pr_state(gh: &Path, dir: &Path, pr: u64) -> Result<PrState> {
+    let number = pr.to_string();
+    let args = ["pr", "view", &number, "--json", "state"];
+    crate::host_call::guard("gh", dir, &args)?;
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(args);
+    let out = run(cmd, None, &format!("gh pr view {pr}"))?;
+    #[derive(serde::Deserialize)]
+    struct View {
+        #[serde(default)]
+        state: String,
+    }
+    let view: View = serde_json::from_str(out.trim()).context("reading gh pr view's answer")?;
+    match view.state.to_ascii_uppercase().as_str() {
+        "OPEN" => Ok(PrState::Open),
+        "MERGED" => Ok(PrState::Merged),
+        "CLOSED" => Ok(PrState::Closed),
+        other => bail!("gh pr view named no state for #{pr} (it said {other:?})"),
+    }
+}
+
 /// `gh pr merge <pr> --squash [--delete-branch] [--match-head-commit <head>]`, run in the project's checkout. With a
 /// `head`, a push since it was read fails the merge ([`HEAD_MOVED`]) rather than landing commits nobody looked at.
 pub fn merge_pr(
@@ -240,6 +272,26 @@ mod tests {
     fn gh_log(dir: &Path) -> Vec<String> {
         let text = std::fs::read_to_string(dir.join("gh.log")).unwrap_or_default();
         text.lines().map(str::to_string).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pull_requests_state_is_read_from_gh_view() {
+        let dir = tempfile::tempdir().unwrap();
+        for (said, want) in [
+            ("OPEN", PrState::Open),
+            ("MERGED", PrState::Merged),
+            ("CLOSED", PrState::Closed),
+        ] {
+            let gh = logging_gh(dir.path(), &format!(r#"{{"state":"{said}"}}"#), "");
+            assert_eq!(pr_state(&gh, dir.path(), 9).unwrap(), want);
+        }
+        assert_eq!(gh_log(dir.path()), ["pr view 9 --json state"]);
+        let gh = logging_gh(dir.path(), "{}", "");
+        assert!(
+            pr_state(&gh, dir.path(), 9).is_err(),
+            "no state is an error, not an open pull request"
+        );
     }
 
     #[cfg(unix)]

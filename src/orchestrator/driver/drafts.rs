@@ -75,6 +75,11 @@ pub trait DraftHost: Send + Sync {
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool>;
     /// Force-pushes with lease the branch the drafter rebased in the draft's worktree.
     fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
+    /// Where the pull request stands on the code host (`gh pr view --json state`), for a plan a person merged or closed
+    /// there while it waited for approval. A host that can't tell says so, and the plan stays as it is.
+    fn pr_state(&self, _project: &ProjectConfig, _pr: u64) -> Result<crate::drafts::land::PrState> {
+        anyhow::bail!("this host can't read a pull request's state")
+    }
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
     /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
@@ -282,7 +287,7 @@ impl Ctx {
             kept: &self.kept,
             wait: FINAL_RETRY,
         };
-        sender.send(id, &self.lease, &report).await
+        sender.send(id, &self.lease, &report, None).await
     }
 
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that

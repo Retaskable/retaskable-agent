@@ -87,6 +87,8 @@ pub(super) struct Rows {
     pub(super) person_claim: Mutex<Option<(u16, Value)>>,
     /// What the store answers a `draft_take`; nothing when unset.
     pub(super) draft_take: Mutex<Option<Value>>,
+    /// What `drafts` lists; a draft taken (`draft_take`) is no longer listed.
+    pub(super) drafts: Mutex<Vec<Value>>,
     /// Who holds a lock the loop asks for (`lock_take` answers `held: false, by`); every lock is free when unset.
     pub(super) lock_held_by: Mutex<Option<String>>,
     /// What `merge_next` answers a ship (a turn when unset), and the `merge_beat` phase after which it says the turn is lost.
@@ -176,7 +178,11 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                     }
                     let value = match op.as_str() {
                         "draft_take" if rows.draft_take.lock().unwrap().is_some() => {
+                            (rows.drafts.lock().unwrap()).retain(|d| d["id"] != body["args"]["id"]);
                             rows.draft_take.lock().unwrap().clone().unwrap()
+                        }
+                        "drafts" if !rows.drafts.lock().unwrap().is_empty() => {
+                            Value::Array(rows.drafts.lock().unwrap().clone())
                         }
                         "lock_take" => match rows.lock_held_by.lock().unwrap().clone() {
                             Some(by) => json!({ "held": false, "by": by }),
