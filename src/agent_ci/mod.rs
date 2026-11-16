@@ -395,6 +395,18 @@ impl CiLoop {
         }
     }
 
+    /// Sends again, at once and then every half minute, each `ci_finish` kept in the data folder from before this start,
+    /// from a task of its own: the store takes a check's record from the computer whose lease lapsed, and a restart in
+    /// an outage must not lose it. Nothing is read or sent without a store.
+    pub fn resend_kept(&self, cfg: &Settings) {
+        let Some(merge) = &self.merge else {
+            return;
+        };
+        for (kept, record) in check::Kept::all(&cfg.data_dir) {
+            tokio::spawn(check::keep_finishing(merge.store().clone(), kept, record, true));
+        }
+    }
+
     /// Says a repo's reason in the log unless it was the last thing said about it. Whether it did.
     fn say_once(&mut self, id: &str, why: &str) -> bool {
         if self.logged.get(id).is_some_and(|w| w == why) {
@@ -457,6 +469,7 @@ impl CiLoop {
 pub async fn run(mut ci: CiLoop, mut cfg: Settings, mut read: impl FnMut() -> anyhow::Result<Settings>) {
     ci.write_status(&cfg);
     ci.recover(&cfg).await;
+    ci.resend_kept(&cfg);
     loop {
         ci.reload(&mut cfg, &mut read);
         let keys = ci.poll(&cfg).await;
