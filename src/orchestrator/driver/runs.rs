@@ -116,6 +116,8 @@ pub struct RunContext {
     /// The engines out and the ones this computer uses, so a run's own sessions (a
     /// piece's `engine`, the review roles) go to the engine that takes over. `None` (no run context) places them as chosen.
     pub fall: Option<FallOver>,
+    /// The project's risk profile from the latest read of the store's settings; `None` when none is set.
+    pub risk_profile: Option<crate::change_tier::RiskProfile>,
 }
 
 /// The engines out now and the ones this computer runs (docs/specs/engines/03-choosing-the-engine.md section 3.5).
@@ -155,6 +157,7 @@ impl RunContext {
             token: "tok".into(),
             locks: Default::default(),
             fall: None,
+            risk_profile: None,
         }
     }
 }
@@ -733,6 +736,7 @@ impl ProjectLoop {
                     out: start.out.clone(),
                     used: start.used.clone(),
                 }),
+                risk_profile: self.risk_profile.clone(),
             },
         };
         if let Err(why) = starter.start(request) {

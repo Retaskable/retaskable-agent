@@ -328,6 +328,9 @@ pub struct ProjectLoop {
     pub(super) listed_branches: std::collections::HashSet<String>,
     /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
     pub(super) file_project: ProjectConfig,
+    /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
+    /// fails keeps it. Each piece run is handed it.
+    pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
 }
 
 impl ProjectLoop {
@@ -424,6 +427,7 @@ impl ProjectLoop {
             backlog_items: None,
             listed_branches: Default::default(),
             file_project,
+            risk_profile: None,
         }
     }
 
@@ -467,6 +471,9 @@ impl ProjectLoop {
         }
         match settings {
             Some(Ok(settings)) => {
+                self.risk_profile = settings
+                    .as_ref()
+                    .and_then(|s| crate::change_tier::RiskProfile::from_values(&s.values));
                 if let Err(e) = gates.consider(&self.id, settings.as_ref(), &self.file_project) {
                     tracing::warn!("{}: saving the allowed commands: {e:#}", self.id);
                 }

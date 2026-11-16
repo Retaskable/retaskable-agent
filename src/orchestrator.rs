@@ -28,6 +28,7 @@ pub mod merge_run;
 mod piece_approval;
 mod piece_review;
 pub mod piece_runs;
+mod piece_tier;
 pub mod plan_run;
 pub mod round_robin;
 mod run_guard;
