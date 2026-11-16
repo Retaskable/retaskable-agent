@@ -4,7 +4,7 @@
 //! while a turn runs waits in the store's queue (`expert_queue`, FIFO) and is run as the next turn. A stopped turn
 //! keeps the queue. A session left idle for [`expert::IDLE`] parks: its branch is pushed and its lane freed, and the
 //! next message takes a lane again, on the pushed branch. Every minute the loop beats the session's lease and the
-//! queue's claims and reads the store's queue back (this agent hears no `facts_changed` yet), so a message the site
+//! queue's claims and reads the store's queue back (at once on the store socket's `facts_changed` naming `expert_queue`), so a message the site
 //! wrote, edited or cancelled is seen. A turn counts toward `concurrency` while it runs, and is not held back by a
 //! pause. The loop never plans an expert item (`read.rs` leaves them out).
 //!
@@ -160,6 +160,8 @@ struct Cx<'a> {
     host: &'a Arc<dyn ExpertHost>,
     sessions: Sessions,
     queue: Arc<ExpertQueue<OwnedQueue>>,
+    /// The store socket said the queue changed (`facts_changed` naming `expert_queue`): the beat is due now.
+    woke: bool,
 }
 
 impl Cx<'_> {
@@ -310,6 +312,7 @@ impl ProjectLoop {
             host,
             sessions: self.live.sessions().clone(),
             queue,
+            woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
         for cmd in &cmds {
             let r = command(&cx, &mut ex, pool, cmd).await;
@@ -661,9 +664,10 @@ async fn park_idle(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
 
 /// Every [`Experts::beat_every`]: beats the queue's claims and each lease, and reads the store's queue back. A row the
 /// store no longer lists was cancelled; one it lists with other text was edited; one this session doesn't know was
-/// written elsewhere (the site) and joins the queue in the order it was written.
+/// written elsewhere (the site) and joins the queue in the order it was written. A push from the store socket makes it
+/// due now (`woke`); with the socket down it is the minute's beat alone.
 async fn beat(cx: &Cx<'_>, ex: &mut Experts) {
-    if ex.beat_at.is_some_and(|t| t.elapsed() < ex.beat_every) {
+    if !cx.woke && ex.beat_at.is_some_and(|t| t.elapsed() < ex.beat_every) {
         return;
     }
     ex.beat_at = Some(Instant::now());
