@@ -39,6 +39,8 @@ Named Docker volumes, never a Windows folder mounted in (a bind mount is slow an
 
 Rebuilding the image or recreating the container keeps all three.
 
+**One data volume for the agent and the CI runner** (**[Decided 2026-11-16]**, the owner: "Shared data folder"). `docker/agent/compose.yaml` and `docker/ci/compose.yaml` both declare `volumes: { data: { name: retaskable-data } }` and mount it at `/data`, so the code agent (`RETASKABLE_DATA_DIR=/data`) and the CI runner (its part, `/data/ci`) share the one data folder, and the agent's settings page manages both programs' settings and secrets under a tab each (agent-settings.md section 4.6). The folder holds `/data/secrets.key` (the one data key), `/data/ci/credentials.json` (the runner's link's token file) and the rest of each program's files. Two compose projects name one volume, and whichever is started first creates it (checked with two throwaway projects on a scratch volume: no warning, and both saw each other's files). `docker compose down -v` in either project deletes it for both, so never use `-v` here.
+
 In this Rust agent, the volumes are four: a `data` volume at `/data` is the data folder (`RETASKABLE_DATA_DIR=/data`: `config.json` with the saved secrets, `secrets.key`, `start-paused.json`, link credentials, events), and `work` holds only each linked project's checkout and lane worktrees — there's no Retaskable.com checkout to keep beside them, since the agent itself is the image's baked-in binary, not something cloned into `/work`. The image makes `/data` and gives it to `node`, so a fresh volume is writable.
 
 ### 3.2 First run
@@ -100,6 +102,12 @@ In this Rust agent the container is `retaskable-agent-docker`, secrets are saved
 
 On the operator's machine (2026-10-16), the full `npm test` (lint, 3,318 agent, cloud, backlog, shared and scripts tests, then 898 app tests) in a container with the checkout in a volume: **19 s**; on Windows, the same commit: **126 s**. `npm ci` 18 s against 21 s; `npm run typecheck` 12 s in the container. The image is 1.74 GB: 1 GB of it is Chromium and its libraries, 270 MB Claude Code.
 
+**Ownership of the shared volume** (**[Decided 2026-11-16]**). The agent runs as `node` (uid 1000) and the runner used to run as root; files either makes at 0600 (`secrets.key`, the credentials) would be unreadable to the other. The runner now runs as uid 1000 too (`user: "1000:1000"`, an `ci` user made in `docker/ci/Dockerfile`, `/data` and its git config working for that uid: git's credential helper is `--system`, and `gh` and git need no per-user config), and its container gets the Docker socket's group with `group_add: ["${DOCKER_GID}"]`. `DOCKER_GID` is required (the compose file refuses to start without it) and comes from the socket on the host: `export DOCKER_GID=$(stat -c %g /var/run/docker.sock)`. Verified by building the image and running `docker version` as uid 1000 with the socket and that group, then `git` and `gh` as that user. Either image makes `/data` owned by uid 1000, so a fresh volume is writable whichever container creates it first.
+
+**The trade-off.** The agent's container, where Claude sessions run, can now read the runner's files in `/data/ci`, including the runner's store link's token (`credentials.json`) and the runner's sealed secrets (and the key that opens them is the agent's own). Before, a session in the agent could not reach any of that. The Docker socket does not move: only the runner's container has it, and the agent still never gets it, so a session still can't start containers or reach the host through Docker. What the owner accepted is the shared reach inside one computer's data folder, as on a native install where one user owns all three programs' files.
+
+**Moving to the shared volume.** The old `retaskable-ci_data` volume (the link token, mirrors, logs, the key) is copied into `retaskable-data` once, ownership fixed (`docker/ci/README.md`, "Moving to the shared volume", the commands in order). The agent's old `retaskable-agent-docker_data` volume held only a saved `GH_TOKEN` and its own key and no link: don't copy it. The runner's key becomes the shared key, so a `GH_TOKEN` the agent had sealed under its old key could not be opened; save it again (`docker exec -it retaskable-agent-docker retaskable secret set GH_TOKEN`) or on the page's Code agent tab.
+
 ## 7. Reaching the pages from the host
 
 **[Decided 2026-11-16]** The code agent's settings page (4700) and the CI runner's (4702) are reachable from the host's browser, Windows included, and from nowhere else.
@@ -112,3 +120,9 @@ On the operator's machine (2026-10-16), the full `npm test` (lint, 3,318 agent, 
 ## 8. Starting paused
 
 A new computer must not take work before its owner says so. The agent compose file sets `RETASKABLE_START_PAUSED=1` (agent-settings.md section 3.4): each project this computer has not paused this way before starts with this computer's own pause on, recorded in `/data/start-paused.json`, until someone resumes it from the site or the page; a restart after that doesn't pause it again, and a project linked later starts paused too. Starting before the first start with no project yet is fine: nothing is recorded until there is one.
+
+## 9. Other ways to run it
+
+- **A native install** already shares one data folder (the three programs' parts of `paths::data_dir`: the root, `chat/`, `ci/`), so the tabs work as they are, with nothing to set up.
+- **Kubernetes** is the same model, the shared data folder. The simplest is the agent and the CI runner as two containers in one pod sharing one volume; if the pods may land on different nodes, use a PersistentVolumeClaim with `ReadWriteMany`. Use one uid for both containers, or a shared `fsGroup` in the pod's `securityContext`, so each can read what the other makes at 0600 (as section 3.1 does with uid 1000). The CI runner needs a Docker socket (agent-ci.md section 3.6), which a cluster may not offer; without one it can't run checks. There are no manifests in this repo.
+- **A CI runner on another computer** has its own page there and shows here as "not installed on this computer": programs have no channel between computers (programs.md), and the page edits only files in its own data folder. A read-only status taken from the store could come later.

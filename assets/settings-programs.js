@@ -1,4 +1,5 @@
-// The programs panel and the Chat Agent's and CI runner's settings (agent-settings.md section 4.6). Part of
+// The program tabs (Code agent | Chat agent | CI runner) and the Chat Agent's and CI runner's status, settings and
+// secrets under them (agent-settings.md sections 4.6 and 4.7). Part of
 // settings.html (the server puts it inside that page's second nonce'd script), sharing the helpers the first script
 // publishes as window.RT. It reads GET /api/settings/programs and saves with POST /api/settings/programs/<id>; there
 // is no call to a program, no start, stop or link button. An unlinked program shows the command to run in a terminal.
@@ -8,6 +9,7 @@
   var programs = [];
   var STATE_WORDS = { running: "Running", stopped: "Stopped", unlinked: "Not linked", notInstalled: "Not installed on this computer" };
   var STATE_TONE = { running: "chip ok", stopped: "chip", unlinked: "chip warn", notInstalled: "chip" };
+  var STATE_SHORT = { running: "Running", stopped: "Stopped", unlinked: "Not linked", notInstalled: "Not installed" };
   var SECRET_WORDS = { env: "From the environment", saved: "Saved on this computer", unset: "Not set", unreadable: "Unreadable: save it again" };
 
   function seen(ms) {
@@ -41,11 +43,6 @@
     }
     if (p.lastError) row.append(h("span", "prog-error", p.lastError));
     return row;
-  }
-
-  function renderStatus() {
-    var box = $("programsList");
-    box.replaceChildren.apply(box, programs.map(statusRow));
   }
 
   // One field of a program's settings file: the value the file has, or, when the environment sets it, the value in
@@ -162,19 +159,122 @@
     "chat-agent": [["onlyRepoId", "Serve only this repository id (empty serves every project the store names)", "text"]],
   };
 
-  function renderCards() {
-    var box = $("programCards");
-    box.replaceChildren.apply(box, programs.filter(function (p) { return p.settings && FIELDS[p.id]; }).map(function (p) { return card(p, FIELDS[p.id]); }));
+  // ---- Tabs ----
+  var CODE = "code-agent";
+  var opts = { own: CODE, tabs: "progTabs", ownView: null, view: "programView", key: "retaskable-program-tab" };
+  var selected = null, tabsSig = null;
+
+  // A tab for the program this page belongs to, and for each other one installed on this computer. The CI runner's
+  // trimmed page has no view for the code agent, so none for it there.
+  function shown(p) {
+    return p.id === opts.own || (p.state !== "notInstalled" && (p.id !== CODE || !!opts.ownView));
   }
 
-  // The status rows are cheap to repaint on every poll; the forms only when asked, so a poll never wipes what is typed.
-  function load(withCards) {
-    return RT.api("/api/settings/programs").then(function (body) {
-      programs = body.programs || [];
-      renderStatus();
-      if (withCards) renderCards();
+  function remembered() {
+    try { return window.localStorage.getItem(opts.key); } catch (e) { return null; }
+  }
+
+  function remember(id) {
+    try { window.localStorage.setItem(opts.key, id); } catch (e) { /* a private window: the tab is just not remembered */ }
+  }
+
+  function select(id, focus) {
+    selected = id;
+    remember(id);
+    paintSelection();
+    if (focus && $("ptab-" + id)) $("ptab-" + id).focus();
+  }
+
+  function paintSelection() {
+    var tabs = programs.filter(shown);
+    if (!tabs.some(function (p) { return p.id === selected; })) {
+      var back = remembered();
+      selected = tabs.some(function (p) { return p.id === back; }) ? back : opts.own;
+    }
+    tabs.forEach(function (p) {
+      var t = $("ptab-" + p.id);
+      if (t) {
+        t.setAttribute("aria-selected", String(p.id === selected));
+        t.tabIndex = p.id === selected ? 0 : -1;
+      }
+      var panel = $("pp-" + p.id);
+      if (panel) panel.hidden = p.id !== selected;
+    });
+    if (opts.ownView) $(opts.ownView).hidden = selected !== CODE;
+    $(opts.view).hidden = selected === CODE;
+  }
+
+  function renderTabs() {
+    var tabs = programs.filter(shown);
+    var bar = $(opts.tabs);
+    var sig = tabs.map(function (p) { return p.id + ":" + p.state; }).join(",");
+    bar.hidden = tabs.length < 2;
+    if (sig !== tabsSig) {
+      tabsSig = sig;
+      bar.replaceChildren.apply(bar, tabs.map(function (p) {
+        var t = h("button", "tab", p.label, h("span", STATE_TONE[p.state] || "chip", STATE_SHORT[p.state] || p.state));
+        t.type = "button";
+        t.id = "ptab-" + p.id;
+        t.setAttribute("role", "tab");
+        t.setAttribute("aria-controls", "pp-" + p.id);
+        t.addEventListener("click", function () { select(p.id); });
+        return t;
+      }));
+    }
+    paintSelection();
+  }
+
+  function onKey(e) {
+    var tabs = programs.filter(shown);
+    var at = tabs.findIndex(function (p) { return p.id === selected; });
+    if (e.key === "ArrowRight") select(tabs[(at + 1) % tabs.length].id, true);
+    else if (e.key === "ArrowLeft") select(tabs[(at + tabs.length - 1) % tabs.length].id, true);
+  }
+
+  // ---- Panels: one per other program, its status (repainted on every poll) and its settings and secrets cards ----
+  function panelFor(p) {
+    var panel = $("pp-" + p.id);
+    if (!panel) {
+      panel = h("div", "stack", h("div", ""), h("div", "stack"));
+      panel.id = "pp-" + p.id;
+      panel.setAttribute("role", "tabpanel");
+      panel.setAttribute("aria-labelledby", "ptab-" + p.id);
+      panel.hidden = true;
+      $(opts.view).append(panel);
+    }
+    return panel;
+  }
+
+  function renderPanels(withCards) {
+    var view = $(opts.view);
+    var live = programs.filter(function (p) { return shown(p) && p.id !== CODE; });
+    Array.prototype.slice.call(view.children).forEach(function (el) {
+      if (el.id.indexOf("pp-") === 0 && !live.some(function (p) { return "pp-" + p.id === el.id; })) el.remove();
+    });
+    live.forEach(function (p) {
+      var fresh = !$("pp-" + p.id);
+      var panel = panelFor(p);
+      panel.firstChild.replaceChildren(statusRow(p));
+      if ((withCards || fresh) && p.settings && FIELDS[p.id]) panel.lastChild.replaceChildren(card(p, FIELDS[p.id]));
     });
   }
 
-  RT.programs = { load: load };
+  // The status rows are cheap to repaint on every poll; the forms only when asked (or when a program first shows), so
+  // a poll never wipes what is typed.
+  function load(withCards) {
+    return RT.api("/api/settings/programs").then(function (body) {
+      programs = body.programs || [];
+      renderPanels(withCards);
+      renderTabs();
+    });
+  }
+
+  // `own` is the program this page is of; `ownView` the id of the element holding the code agent's own page (none on
+  // the CI runner's trimmed page); `tabs` and `view` the ids of the tab bar and of the other programs' panels.
+  function init(o) {
+    for (var k in o) opts[k] = o[k];
+    $(opts.tabs).addEventListener("keydown", onKey);
+  }
+
+  RT.programs = { init: init, load: load };
 })();

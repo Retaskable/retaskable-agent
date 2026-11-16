@@ -1,14 +1,18 @@
 // The helpers both settings pages and settings-programs.js use, published as window.RT: $ (by id), h (build an
 // element; text goes in as text, never as markup), api (fetch JSON with the session's CSRF token on RT.csrf) and
-// setStatus (the line at the top of the page).
+// setStatus (the status line, in each place the page has one).
 (function () {
   "use strict";
   var RT = window.RT = { csrf: null };
   var $ = function (id) { return document.getElementById(id); };
 
   function setStatus(message, isError) {
-    $("status").textContent = message || "";
-    $("status").className = isError ? "error" : "";
+    ["status", "pstatus"].forEach(function (id) {
+      var el = $(id);
+      if (!el) return;
+      el.textContent = message || "";
+      el.className = isError ? "error" : "";
+    });
   }
 
   function api(path, options) {

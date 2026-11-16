@@ -494,7 +494,7 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
-    assert!(html.contains("RT.programs = { load: load }"));
+    assert!(html.contains("RT.programs = { init: init, load: load }"));
     assert!(html.contains("window.RT = { csrf: null }") && html.contains("--accent:"));
     assert!(!html.contains("{{"), "every placeholder is filled");
     assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 3);
@@ -502,4 +502,55 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     let js = include_str!("../../assets/settings-programs.js");
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML"));
     assert!(!js.contains("fetch(") && js.matches("RT.api(").count() == 2);
+}
+
+#[test]
+fn both_pages_have_the_program_tabs_and_the_panels_for_the_programs_script_to_fill() {
+    // A tab shows for the page's own program and for each other one whose state is not `notInstalled` (the rows
+    // `each_program_shows_its_state...` checks); the script's tab bar and panel host are in both pages, once each.
+    for (name, page) in [
+        ("settings.html", include_str!("../../assets/settings.html")),
+        ("settings-ci.html", include_str!("../../assets/settings-ci.html")),
+    ] {
+        assert_eq!(page.matches("id=\"progTabs\"").count(), 1, "{name}");
+        assert_eq!(page.matches("id=\"programView\"").count(), 1, "{name}");
+        assert!(page.contains("RT.programs.init("), "{name}");
+        assert!(
+            !page.contains("programsList") && !page.contains("programCards"),
+            "{name}"
+        );
+    }
+    // The code agent's own sections move under a tab of their own, hidden while another program's is open.
+    assert!(include_str!("../../assets/settings.html").contains("id=\"codeView\""));
+    let js = include_str!("../../assets/settings-programs.js");
+    assert!(
+        js.contains("p.state !== \"notInstalled\""),
+        "a program not on this computer gets no tab"
+    );
+    assert!(js.contains("localStorage"), "the selected tab is remembered per viewer");
+}
+
+#[test]
+fn both_compose_files_share_one_data_volume_and_both_containers_run_as_uid_1000() {
+    // docs/specs/docker.md section 3.1: the agent's page manages the CI runner through one volume, so what either
+    // makes at 0600 must be readable to the other: the same uid, the socket's group added for the runner only.
+    let agent = include_str!("../../docker/agent/compose.yaml");
+    let ci = include_str!("../../docker/ci/compose.yaml");
+    for (name, file) in [("agent", agent), ("ci", ci)] {
+        assert!(
+            file.contains("  data:\n    # ") && file.contains("    name: retaskable-data\n"),
+            "{name}"
+        );
+        assert!(file.contains("      - data:/data\n"), "{name}");
+    }
+    assert!(ci.contains("user: \"1000:1000\"") && ci.contains("group_add:") && ci.contains("DOCKER_GID:?"));
+    assert!(
+        ci.contains("/var/run/docker.sock") && !agent.contains("docker.sock"),
+        "only the runner has the socket"
+    );
+    let dockerfile = include_str!("../../docker/ci/Dockerfile");
+    assert!(dockerfile.contains("--uid 1000") && dockerfile.contains("USER ci"));
+    assert!(dockerfile.contains("RETASKABLE_CI_CREDENTIALS_FILE=/data/ci/credentials.json"));
+    assert!(dockerfile.contains("RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key"));
+    assert!(include_str!("../../docker/agent/Dockerfile").contains("chown -R node:node /work /data"));
 }
