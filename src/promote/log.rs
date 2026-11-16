@@ -90,9 +90,7 @@ impl DeployLog {
     /// Queues a row and writes it to disk. Nothing is sent. A write that fails is logged and the row is still held
     /// here and sent as usual: only a restart before it is sent would lose it.
     pub fn add(&self, kind: &str, entry: Map<String, Value>) {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+        let at = crate::program_status::now_ms();
         let mut queue = self.queue.lock().unwrap();
         queue.push(Queued {
             kind: kind.into(),
