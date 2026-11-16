@@ -20,6 +20,7 @@ use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, Star
 use super::fresh_start::{MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
+use crate::backlog::runs::RunPiece;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
@@ -340,10 +341,28 @@ fn title_slug(title: &str) -> String {
     slug.trim_end_matches('-').to_string()
 }
 
-/// A piece's branch: `retaskable/<piece id>-<slug of the title>` (pieces.md: one branch per piece, kept for its
-/// `fix` runs).
-pub(super) fn piece_branch_name(piece_id: &str, title: &str) -> String {
-    format!("retaskable/{piece_id}-{}", title_slug(title))
+/// A piece's branch, as the TypeScript agent names it (`branchName` over the run's record, `adopt` in
+/// `pieceRuns.ts`): `retaskable/<item>-piece-<n>-<slug of "<item title>: <piece title>">-s0`. Every part is
+/// slugged to ASCII letters, digits and `-`, so whatever the store sent, the name passes `git check-ref-format`.
+pub(super) fn piece_branch_name(piece: &RunPiece) -> String {
+    let title = match piece.other.get("itemTitle").and_then(Value::as_str) {
+        Some(item) => format!("{item}: {}", piece.title),
+        None => piece.title.clone(),
+    };
+    let id = ref_word(super::driver::piece_id(piece));
+    let id = if id.is_empty() { "piece".to_string() } else { id };
+    match title_slug(&title).as_str() {
+        "" => format!("retaskable/{id}-s0"),
+        slug => format!("retaskable/{id}-{slug}-s0"),
+    }
+}
+
+/// A name as one safe part of a ref: ASCII letters and digits in words joined by `-`, case kept.
+fn ref_word(name: &str) -> String {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
@@ -818,6 +837,10 @@ mod gates;
 #[cfg(test)]
 #[path = "session_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "session_branch_tests.rs"]
+mod branch_tests;
 
 #[cfg(test)]
 #[path = "session_local_tests.rs"]
