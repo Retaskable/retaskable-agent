@@ -255,6 +255,15 @@ impl LanePool {
         true
     }
 
+    /// `take`, first dropping a claim `stale` calls dead: the holder's record is gone or its run was stopped
+    /// (TS #3923), so it no longer blocks taking the lane back. A live holder still blocks.
+    pub fn take_over(&mut self, k: u32, holder: Holder, stale: impl Fn(&Holder) -> bool) -> bool {
+        if self.held.get(&k).is_some_and(&stale) {
+            self.held.remove(&k);
+        }
+        self.take(k, holder)
+    }
+
     /// Gives lane `k` back, only if `holder` holds it. Whether it did.
     pub fn release(&mut self, k: u32, holder: &Holder) -> bool {
         if self.held.get(&k) == Some(holder) {

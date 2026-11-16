@@ -344,3 +344,17 @@ fn every_kind_of_holder_names_its_project_but_only_an_item_is_found_by_lane_of()
     );
     assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2, 3]);
 }
+
+#[test]
+fn a_claim_by_a_gone_record_is_stale_but_a_live_one_blocks() {
+    let mut pool = LanePool::new(rules(2));
+    assert!(pool.take(1, item("p", "gone")));
+    assert!(pool.take(2, item("p", "live")));
+    let stale = |h: &Holder| matches!(h, Holder::Item { item, .. } if item == "gone");
+    assert!(
+        pool.take_over(1, item("p", "me"), stale),
+        "the missing record's claim goes"
+    );
+    assert!(!pool.take_over(2, item("p", "me"), stale), "a live claim still blocks");
+    assert_eq!(pool.holder(2), Some(&item("p", "live")));
+}

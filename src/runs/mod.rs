@@ -154,6 +154,7 @@ impl Runs {
         may: impl Fn(u32) -> bool,
     ) -> Result<(), NoLane> {
         let lane = if needs_lane(kind) {
+            self.free_stale_claims(pool);
             Some(pool.claim_run_where(&self.project, piece, may).ok_or(NoLane)?)
         } else {
             None
@@ -168,6 +169,28 @@ impl Runs {
             started: now,
         });
         Ok(())
+    }
+
+    /// Gives back every lane this project's runs hold by a stale claim.
+    fn free_stale_claims(&self, pool: &mut LanePool) {
+        let stale: Vec<(u32, Holder)> = pool
+            .held_lanes()
+            .filter_map(|k| match pool.holder(k) {
+                Some(h @ Holder::Run { project, piece }) if *project == self.project && self.claim_is_stale(piece) => {
+                    Some((k, h.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (k, h) in stale {
+            pool.release(k, &h);
+        }
+    }
+
+    /// Whether a lane claim by a run on `piece` is stale: no run on it is live here, or the one that is was stopped
+    /// (a lost run). Such a claim no longer blocks the lane.
+    pub fn claim_is_stale(&self, piece: &str) -> bool {
+        !self.live.iter().any(|r| r.piece == piece && !r.stop.stopped())
     }
 
     /// Adds a process tree to a run. False when the run is gone.

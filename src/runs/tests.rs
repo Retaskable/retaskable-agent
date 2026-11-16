@@ -265,3 +265,29 @@ fn a_finished_tree_is_dropped_from_the_run_when_the_next_is_added() {
     }
     assert_eq!(runs.live()[0].processes.len(), 1);
 }
+
+#[test]
+fn a_claim_by_a_missing_or_stopped_run_is_stale_and_a_live_run_blocks() {
+    let mut pool = LanePool::new(PoolRules {
+        lanes: 3,
+        ..PoolRules::default()
+    });
+    let (mut runs, t0) = (Runs::new("p"), Instant::now());
+    runs.start(&mut pool, "a", RunKind::Build, "live", t0).unwrap();
+    runs.start(&mut pool, "b", RunKind::Build, "stopped", t0).unwrap();
+    runs.live()[1].stop.set();
+    let missing = Holder::Run {
+        project: "p".into(),
+        piece: "missing".into(),
+    };
+    assert!(pool.take(3, missing), "a claim whose run record is gone");
+    runs.start(&mut pool, "c", RunKind::Build, "c", t0).unwrap();
+    runs.start(&mut pool, "d", RunKind::Build, "d", t0).unwrap();
+    assert_eq!(runs.live()[2].lane, Some(2), "the stopped run's lane was taken back");
+    assert_eq!(runs.live()[3].lane, Some(3), "the missing run's lane was taken back");
+    assert!(
+        runs.start(&mut pool, "e", RunKind::Build, "e", t0).is_err(),
+        "the live run's claim still blocks"
+    );
+    assert_eq!(runs.live()[0].lane, Some(1));
+}

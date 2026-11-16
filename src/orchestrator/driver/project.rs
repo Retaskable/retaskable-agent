@@ -735,7 +735,13 @@ impl ProjectLoop {
             project: self.id.clone(),
             item: item_id.to_string(),
         };
-        let taken = pool.take(lane, holder);
+        // A lane claimed by an item whose record is gone is stale and doesn't block taking it back.
+        let items = &self.items;
+        let taken = pool.take_over(
+            lane,
+            holder,
+            |h| matches!(h, Holder::Item { item, .. } if !items.contains_key(item)),
+        );
         if taken {
             self.events.add_in(
                 &self.id,
