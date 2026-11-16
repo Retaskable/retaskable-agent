@@ -116,6 +116,23 @@ pub fn apply(dir: &Path, env: &Env, update: &Map<String, Value>) -> Result<(), R
     .map_err(|e| Refused(format!("Couldn't save the Chat Agent's settings: {e}")))
 }
 
+/// What the page shows of the file in `dir`, shaped as the CI runner's (`ci::view`).
+pub fn view(env: &Env, dir: &Path) -> Value {
+    let (file, error) = match read(dir) {
+        Ok(file) => (file, None),
+        Err(e) => (File::default(), Some(format!("{e:#}"))),
+    };
+    let r = resolve(env, &file);
+    json!({
+        "file": { "onlyRepoId": file.only_repo_id },
+        "effective": { "onlyRepoId": r.only_repo_id },
+        "defaults": {},
+        "locked": r.locked,
+        "env": { ONLY_REPO.name: ONLY_REPO.env },
+        "error": error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

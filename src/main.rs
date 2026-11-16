@@ -583,6 +583,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     ));
     settings.set_saved_signal(view.settings.clone());
     settings.set_secrets(secrets.clone());
+    // The Chat Agent's and CI runner's secrets, sealed under the same data key (agent-settings.md section 4.6).
+    settings.set_program_keys(link::os_store(retaskable_agent::secrets::KEY_SERVICE));
     view.settings.set_secrets(secrets);
     settings.set_links(links.clone());
     // A save on the settings page changes the list the next ask carries.

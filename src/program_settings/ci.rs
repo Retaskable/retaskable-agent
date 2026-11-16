@@ -267,5 +267,39 @@ pub fn apply(dir: &Path, env: &Env, update: &Map<String, Value>) -> Result<(), R
     .map_err(|e| Refused(format!("Couldn't save the CI runner's settings: {e}")))
 }
 
+/// What the page shows of the file in `dir`: each field as the file has it (what a form edits), as the runner will use
+/// it (the environment over the file over the default), which fields the environment sets, and why the file can't be
+/// read, if it can't. No secret is here (`crate::secrets` has those).
+pub fn view(env: &Env, dir: &Path) -> Value {
+    let (file, error) = match read(dir) {
+        Ok(file) => (file, None),
+        Err(e) => (File::default(), Some(format!("{e:#}"))),
+    };
+    let specs = |repos: &[Repo]| repos.iter().map(Repo::spec).collect::<Vec<_>>();
+    let from_env = |field: &Field| env.get(field.env).filter(|v| !v.trim().is_empty());
+    let repos = from_env(&REPOS)
+        .and_then(|list| parse_repos(&list).ok())
+        .map_or_else(|| specs(&file.repos), |r| specs(&r));
+    let num = |field: &Field, own: Option<u32>, default: u32| {
+        from_env(field)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .or(own)
+            .unwrap_or(default)
+    };
+    json!({
+        "file": { "repos": specs(&file.repos), "slots": file.slots, "cpus": file.cpus, "name": file.name },
+        "effective": {
+            "repos": repos,
+            "slots": num(&SLOTS, file.slots, DEFAULT_SLOTS),
+            "cpus": num(&CPUS, file.cpus, DEFAULT_CPUS),
+            "name": from_env(&NAME).map(|n| n.trim().to_string()).or(file.name),
+        },
+        "defaults": { "slots": DEFAULT_SLOTS, "cpus": DEFAULT_CPUS },
+        "locked": super::locked(env, &FIELDS),
+        "env": FIELDS.iter().map(|f| (f.name, f.env)).collect::<std::collections::BTreeMap<_, _>>(),
+        "error": error,
+    })
+}
+
 #[cfg(test)]
 mod tests;
