@@ -13,6 +13,7 @@
 //! 3.5, whose socket is renewed with `{ type: "grant" }` and ends with 4408), since this agent names a backlog only by
 //! its repo's id; and `reconnect()`, which the TypeScript agent calls after linking from its UI: here an agent that
 //! isn't linked looks again once a minute, which takes the link up the same way.
+pub mod live;
 #[cfg(test)]
 mod tests;
 mod transport;

@@ -382,6 +382,7 @@ const ID: &str = "expert-fix-it";
 
 mod carry;
 mod pictures;
+mod wake;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.
 async fn started(x: &mut Ex) {

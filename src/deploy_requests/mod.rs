@@ -25,7 +25,8 @@ use crate::backlog::deploy::{DeployRequest, DeployStatus, Finish, checked_result
 pub use deps::{Deps, Outcome, RunError};
 pub use live::{Live, PORTED, SpawnArgs, spawn_all, waits_while_paused};
 
-/// How long to wait before listing again: the store has no push to this computer, so the list is read on a timer.
+/// How long to wait before listing again when nothing woke the loop: the list is read on a timer, and a push from the
+/// store socket (`run`) only reads it earlier.
 pub const WAIT: Duration = Duration::from_secs(5);
 /// How often a running request tells the store it is alive (the store lets a claim go after 10 minutes without).
 pub const BEAT_EVERY: Duration = Duration::from_secs(60);
@@ -111,6 +112,18 @@ impl<D: Deps + 'static> DeployRequests<D> {
             }
         }
         WAIT
+    }
+}
+
+/// The loop: a round, then [`WAIT`] or until `wake` (the store socket's `facts_changed` naming `deploy_requests`,
+/// backlog_socket/wake.rs), whichever is first. With the socket down it is the 5-second read alone.
+pub async fn run<D: Deps + 'static>(mut requests: DeployRequests<D>, wake: Arc<tokio::sync::Notify>) {
+    loop {
+        let wait = requests.cycle().await;
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = wake.notified() => {}
+        }
     }
 }
 
