@@ -339,7 +339,7 @@ impl ProjectLoop {
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
         Self {
-            run_loop: super::RunLoop::new(&id),
+            run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             claim_waiting: false,
             tags_seen: 0,
             claim_logged: None,

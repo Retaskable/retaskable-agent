@@ -152,6 +152,45 @@ pub enum RunOutcome {
 }
 
 impl RunOutcome {
+    /// The outcome as the state file keeps it, for an end the store hasn't taken ([`crate::runs::OwedEnd`]).
+    pub fn to_json(&self) -> Value {
+        match self {
+            Self::Failed(why) => json!({ "outcome": "failed", "why": why }),
+            Self::Limited { engine, until } => {
+                json!({ "outcome": "limited", "engine": engine, "until": until.map(|t| t.to_rfc3339()) })
+            }
+            other => json!({ "outcome": other.wire() }),
+        }
+    }
+
+    /// Reads [`Self::to_json`] back; `None` for an outcome this version doesn't know.
+    pub fn from_json(v: &Value) -> Option<Self> {
+        Some(match v.get("outcome")?.as_str()? {
+            "interrupted" => Self::Interrupted,
+            "failed" => Self::Failed(v.get("why")?.as_str()?.to_string()),
+            "planned" => Self::Planned,
+            "pr_opened" => Self::PrOpened,
+            "questions" => Self::Questions,
+            "person_steps" => Self::PersonSteps,
+            "nothing_left" => Self::NothingLeft,
+            "green" => Self::Green,
+            "red" => Self::Red,
+            "merged" => Self::Merged,
+            "updated" => Self::Updated,
+            "conflict" => Self::Conflict,
+            "looked" => Self::Looked,
+            "limited" => Self::Limited {
+                engine: v.get("engine")?.as_str()?.to_string(),
+                until: v
+                    .get("until")
+                    .and_then(Value::as_str)
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc)),
+            },
+            _ => return None,
+        })
+    }
+
     fn wire(&self) -> &'static str {
         match self {
             Self::Interrupted => "interrupted",

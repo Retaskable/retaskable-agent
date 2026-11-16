@@ -275,6 +275,20 @@ impl Store {
             .insert("complete_outbox".to_string(), serde_json::json!(outbox));
     }
 
+    /// Finished runs' ends the store hasn't taken yet (`state.run_ends_owed`): sent again at once after a restart, before
+    /// `runs_drop`. Empty when missing or unreadable.
+    pub fn run_ends_owed(&self) -> Vec<crate::runs::OwedEnd> {
+        self.data
+            .get("run_ends_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.run_ends_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_run_ends_owed(&mut self, owed: &[crate::runs::OwedEnd]) {
+        self.data.insert("run_ends_owed".to_string(), serde_json::json!(owed));
+    }
+
     /// Revisions of merged plans the store hasn't taken yet, by plan id (`state.revise_owed`): sent again on later
     /// passes, also after a restart. Empty when missing or unreadable.
     pub fn revise_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::revise::Owed> {
